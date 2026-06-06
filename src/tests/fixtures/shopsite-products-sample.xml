@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE ShopSiteProducts PUBLIC "-//shopsite.com//ShopSiteProduct DTD//EN" "http://www.shopsite.com/XML/2.9/shopsiteproducts.dtd">
+<ShopSiteProducts version="15.0">
+<Products>
+  <Product>
+    <SKU>ABC-123</SKU>
+    <Name>Premium Dog Food</Name>
+    <Price>49.99</Price>
+    <SaleAmount></SaleAmount>
+    <ProductDescription><![CDATA[High-quality premium dog food for all breeds.]]></ProductDescription>
+    <ProductDisabled>uncheck</ProductDisabled>
+    <Taxable>checked</Taxable>
+    <Weight>30</Weight>
+    <Graphic>media/dog-food.jpg</Graphic>
+    <MoreInformationGraphic>media/dog-food.jpg</MoreInformationGraphic>
+    <QuantityOnHand>150</QuantityOnHand>
+    <Availability>in_stock</Availability>
+    <ProductField1>new060624</ProductField1>
+    <ProductField16>Premium Brands</ProductField16>
+    <ProductField24>Dog Food</ProductField24>
+    <ProductField25>Dry Food</ProductField25>
+    <SearchKeywords><![CDATA[dog food, premium, dry food]]></SearchKeywords>
+    <GoogleGTIN>1234567890123</GoogleGTIN>
+  </Product>
+  <Product>
+    <SKU>XYZ-789</SKU>
+    <Name>Cat Toy Deluxe</Name>
+    <Price>12.99</Price>
+    <SaleAmount>9.99</SaleAmount>
+    <ProductDescription><![CDATA[A fun toy for your feline friend.]]></ProductDescription>
+    <ProductDisabled>uncheck</ProductDisabled>
+    <Taxable>checked</Taxable>
+    <Graphic>media/cat-toy.jpg</Graphic>
+    <MoreInformationGraphic>media/cat-toy.jpg</MoreInformationGraphic>
+    <MoreInfoImage1>media/cat-toy-2.jpg</MoreInfoImage1>
+    <MoreInfoImage2>media/cat-toy-3.jpg</MoreInfoImage2>
+    <QuantityOnHand>42</QuantityOnHand>
+    <ProductField1>new060624</ProductField1>
+    <ProductField16>Fun Pet Co</ProductField16>
+    <ProductField19>Small</ProductField19>
+    <ProductField24>Cat Toys</ProductField24>
+    <Subproducts>
+      <Subproduct>
+        <SKU>XYZ-789-RED</SKU>
+        <Name>Cat Toy Deluxe Red</Name>
+        <Price>12.99</Price>
+      </Subproduct>
+      <Subproduct>
+        <SKU>XYZ-789-BLUE</SKU>
+        <Name>Cat Toy Deluxe Blue</Name>
+        <Price>12.99</Price>
+      </Subproduct>
+    </Subproducts>
+  </Product>
+</Products>
+</ShopSiteProducts>

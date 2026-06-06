@@ -1,0 +1,8 @@
+dist/
+node_modules/
+coverage/
+*.tsbuildinfo
+.DS_Store
+.shopsite-cms/
+exports/*.zip
+exports/*.xml
