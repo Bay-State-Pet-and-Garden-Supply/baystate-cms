@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { initDb } from '../../db/connection';
+import { initDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace, findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
@@ -147,4 +147,8 @@ export function getCurrentWorkspace(): Workspace | null {
   } catch {
     return null;
   }
+}
+
+export function closeWorkspace(): void {
+  closeDb();
 }

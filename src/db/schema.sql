@@ -47,8 +47,48 @@ CREATE TABLE IF NOT EXISTS product_index (
   sync_status TEXT NOT NULL DEFAULT 'not_synced',
   has_advanced_blocks INTEGER NOT NULL DEFAULT 0,
   has_warnings INTEGER NOT NULL DEFAULT 0,
+  parent_sku TEXT REFERENCES product_index(sku),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS product_types (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS product_type_fields (
+  id TEXT PRIMARY KEY,
+  product_type_id TEXT NOT NULL REFERENCES product_types(id),
+  xml_field TEXT NOT NULL,
+  label TEXT NOT NULL,
+  data_type TEXT NOT NULL,
+  required INTEGER NOT NULL DEFAULT 0,
+  validation_rules_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(product_type_id, xml_field)
+);
+
+CREATE TABLE IF NOT EXISTS page_index (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  file_name TEXT,
+  parent_id TEXT REFERENCES page_index(id),
+  page_hash TEXT NOT NULL,
+  last_synced_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS product_pages (
+  product_sku TEXT NOT NULL,
+  page_name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (product_sku, page_name)
 );
 
 CREATE TABLE IF NOT EXISTS field_registry (

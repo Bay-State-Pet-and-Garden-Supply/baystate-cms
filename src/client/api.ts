@@ -114,6 +114,7 @@ export function getWorkspace() { return request<{ workspace: Workspace | null }>
 export function initWorkspace(name: string, path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/init', { method: 'POST', body: JSON.stringify({ name, path }) }); }
 export function openWorkspace(path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/open', { method: 'POST', body: JSON.stringify({ path }) }); }
 export function pickDirectory() { return request<{ success: boolean; path?: string; error?: string; message?: string }>('/workspace/pick-directory', { method: 'POST' }); }
+export function closeWorkspace() { return request<{ success: boolean; message: string }>('/workspace/close', { method: 'POST' }); }
 
 // Connection
 export function getConnection() { return request<{ connection: ConnectionSettings | null }>('/connection'); }
@@ -239,3 +240,156 @@ export function fullReconcile() {
     { method: 'POST' },
   );
 }
+
+// --- Product Types ---
+export interface ProductType {
+  id: string;
+  workspaceId: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductTypeField {
+  id: string;
+  productTypeId: string;
+  xmlField: string;
+  label: string;
+  dataType: string;
+  required: boolean;
+  validationRulesJson: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductTypeDetail extends ProductType {
+  fields: ProductTypeField[];
+}
+
+export function listProductTypes() {
+  return request<{ types: ProductType[] }>('/product-types');
+}
+
+export function getProductType(id: string) {
+  return request<{ productType: ProductTypeDetail }>(`/product-types/${id}`);
+}
+
+export function createProductType(name: string) {
+  return request<{ success: boolean; productType: ProductType }>('/product-types', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function deleteProductType(id: string) {
+  return request<{ success: boolean }>(`/product-types/${id}`, { method: 'DELETE' });
+}
+
+export function upsertProductTypeField(
+  productTypeId: string,
+  xmlField: string,
+  label: string,
+  dataType: string,
+  required: boolean,
+  validationRules?: any
+) {
+  return request<{ success: boolean; field: ProductTypeField }>(`/product-types/${productTypeId}/fields`, {
+    method: 'POST',
+    body: JSON.stringify({ xmlField, label, dataType, required, validationRulesJson: validationRules }),
+  });
+}
+
+export function deleteProductTypeField(productTypeId: string, xmlField: string) {
+  return request<{ success: boolean }>(`/product-types/${productTypeId}/fields/${encodeURIComponent(xmlField)}`, {
+    method: 'DELETE',
+  });
+}
+
+// --- Pages & Categories ---
+export interface Page {
+  id: string;
+  name: string;
+  fileName: string | null;
+  parentId: string | null;
+  pageHash: string;
+  lastSyncedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function listPages() {
+  return request<{ pages: Page[] }>('/pages');
+}
+
+export function upsertPage(name: string, fileName?: string | null, parentId?: string | null) {
+  return request<{ success: boolean; page: Page }>('/pages', {
+    method: 'POST',
+    body: JSON.stringify({ name, fileName, parentId }),
+  });
+}
+
+export function deletePage(id: string) {
+  return request<{ success: boolean }>(`/pages/${id}`, { method: 'DELETE' });
+}
+
+export function getProductPages(sku: string) {
+  return request<{ pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`);
+}
+
+export function saveProductPages(sku: string, pages: string[]) {
+  return request<{ success: boolean; pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`, {
+    method: 'POST',
+    body: JSON.stringify({ pages }),
+  });
+}
+
+// --- Dashboard ---
+export interface DashboardMetrics {
+  totalProducts: number;
+  syncedProducts: number;
+  notSyncedProducts: number;
+  driftedProducts: number;
+  draftChangeSets: number;
+  openDrifts: number;
+  productsWithWarnings: number;
+  customFieldsCount: number;
+}
+
+export interface RecentSyncJob {
+  id: string;
+  changeSetId: string | null;
+  kind: string;
+  status: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  productCount: number;
+  errorSummary: string | null;
+}
+
+export interface RecentActivity {
+  id: string;
+  entityType: string;
+  entityId: string;
+  action: string;
+  message: string;
+  detailsJson: string | null;
+  createdAt: string;
+}
+
+export interface DashboardStats {
+  metrics: DashboardMetrics;
+  connection: {
+    cgiBaseUrl: string;
+    merchantId: string | null;
+    lastTestedAt: string | null;
+    lastTestStatus: string | null;
+    lastTestError: string | null;
+  } | null;
+  recentSyncJobs: RecentSyncJob[];
+  recentActivities: RecentActivity[];
+}
+
+export function getDashboardStats() {
+  return request<DashboardStats>('/dashboard/stats');
+}
+

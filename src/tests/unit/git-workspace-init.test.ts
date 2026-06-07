@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { GitClient } from '../../git/git-client';
 import { createWorkspaceDirs, writeGitignore, writeProductFile } from '../../git/workspace-files';
 import { skuToProductFilePath } from '../../git/product-file-path';

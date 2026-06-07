@@ -9,6 +9,16 @@ export function runMigrations(): void {
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf-8');
   db.exec(sql);
 
+  // Ensure product_index has parent_sku column (migration support for existing databases)
+  try {
+    const columns = db.query('PRAGMA table_info(product_index)').all() as Array<{ name: string }>;
+    if (!columns.some(col => col.name === 'parent_sku')) {
+      db.exec('ALTER TABLE product_index ADD COLUMN parent_sku TEXT REFERENCES product_index(sku);');
+    }
+  } catch (e) {
+    console.error('Failed to add parent_sku to product_index:', e);
+  }
+
   // Verify migration ran
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }

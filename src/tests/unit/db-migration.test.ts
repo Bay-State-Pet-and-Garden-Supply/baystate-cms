@@ -73,9 +73,12 @@ describe('SQLite Migration', () => {
   it('should create all core tables', () => {
     const db3 = getDb();
 
-    const tables = ['app_meta', 'workspace', 'shopsite_connection', 'product_index',
+    const tables = [
+      'app_meta', 'workspace', 'shopsite_connection', 'product_index',
       'field_registry', 'change_sets', 'change_set_items', 'validation_results',
-      'sync_jobs', 'sync_job_events', 'remote_drift', 'audit_log'];
+      'sync_jobs', 'sync_job_events', 'remote_drift', 'audit_log',
+      'product_types', 'product_type_fields', 'page_index', 'product_pages'
+    ];
 
     for (const table of tables) {
       const row = db3.query(

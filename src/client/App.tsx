@@ -1,13 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { getWorkspace, type Workspace } from './api';
+import { getWorkspace, closeWorkspace, type Workspace } from './api';
 import { SetupWizard } from './components/SetupWizard';
 import { Catalog } from './components/Catalog';
 import { ProductDetail } from './components/ProductDetail';
 import { ChangeSetReview } from './components/ChangeSetReview';
 import { DriftView } from './components/DriftView';
 import { SyncJobsView } from './components/SyncJobsView';
+import { Dashboard } from './components/Dashboard';
 
-type View = 'setup' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs';
+type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs';
 
 function App() {
   const [view, setView] = useState<View>('setup');
@@ -21,7 +22,7 @@ function App() {
         setWorkspace(res.workspace);
         const needsSetup = res.workspace.bootstrapStatus !== 'complete'
           || !res.workspace.baselineCommit;
-        setView(needsSetup ? 'setup' : 'catalog');
+        setView(needsSetup ? 'setup' : 'dashboard');
       }
       setReady(true);
     }).catch(() => {
@@ -33,7 +34,7 @@ function App() {
     getWorkspace().then(res => {
       if (res.workspace) setWorkspace(res.workspace);
     });
-    setView('catalog');
+    setView('dashboard');
   };
 
   const handleSetupUpdated = () => {
@@ -42,9 +43,22 @@ function App() {
         setWorkspace(res.workspace);
         const needsSetup = res.workspace.bootstrapStatus !== 'complete'
           || !res.workspace.baselineCommit;
-        setView(needsSetup ? 'setup' : 'catalog');
+        setView(needsSetup ? 'setup' : 'dashboard');
       }
     });
+  };
+
+  const handleSwitchWorkspace = async () => {
+    if (confirm('Are you sure you want to switch to a different workspace? This will close the current workspace.')) {
+      try {
+        await closeWorkspace();
+        setWorkspace(null);
+        setView('setup');
+      } catch (err) {
+        console.error('Failed to close workspace:', err);
+        alert('Failed to close workspace: ' + (err instanceof Error ? err.message : String(err)));
+      }
+    }
   };
 
   const styles: Record<string, React.CSSProperties> = {
@@ -67,43 +81,61 @@ function App() {
     <div style={styles.app}>
       <nav style={styles.nav}>
         <span style={styles.navBrand}>ShopSite CMS</span>
-        <button
-          style={view === 'setup' ? styles.navLinkActive : styles.navLink}
-          onClick={() => setView('setup')}
-        >
-          Setup
-        </button>
-        <button
-          style={view === 'catalog' ? styles.navLinkActive : styles.navLink}
-          onClick={() => setView('catalog')}
-          disabled={!workspace}
-        >
-          Catalog
-        </button>
-        <button
-          style={view === 'changesets' ? styles.navLinkActive : styles.navLink}
-          onClick={() => setView('changesets')}
-          disabled={!workspace}
-        >
-          Change Sets
-        </button>
-        <button
-          style={view === 'drift' ? styles.navLinkActive : styles.navLink}
-          onClick={() => setView('drift')}
-          disabled={!workspace}
-        >
-          Drift
-        </button>
-        <button
-          style={view === 'syncjobs' ? styles.navLinkActive : styles.navLink}
-          onClick={() => setView('syncjobs')}
-          disabled={!workspace}
-        >
-          Sync Jobs
-        </button>
+        {workspace && workspace.bootstrapStatus === 'complete' && workspace.baselineCommit && (
+          <>
+            <button
+              style={view === 'dashboard' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('dashboard')}
+            >
+              Overview
+            </button>
+            <button
+              style={view === 'catalog' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('catalog')}
+            >
+              Catalog
+            </button>
+            <button
+              style={view === 'changesets' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('changesets')}
+            >
+              Change Sets
+            </button>
+            <button
+              style={view === 'drift' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('drift')}
+            >
+              Drift
+            </button>
+            <button
+              style={view === 'syncjobs' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('syncjobs')}
+            >
+              Sync Jobs
+            </button>
+          </>
+        )}
         <div style={styles.navSpacer} />
         <span style={styles.navStatus}>
-          {workspace ? `📁 ${workspace.name}` : '⚙️ No workspace'}
+          {workspace ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              📁 {workspace.name}
+              <button
+                style={{
+                  background: 'none',
+                  border: '1px solid #d1d5db',
+                  borderRadius: 4,
+                  padding: '2px 8px',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                  color: '#4b5563',
+                }}
+                onClick={handleSwitchWorkspace}
+              >
+                Switch
+              </button>
+            </span>
+          ) : '⚙️ No workspace'}
         </span>
       </nav>
 
@@ -113,6 +145,10 @@ function App() {
             onComplete={handleSetupComplete}
             onUpdated={handleSetupUpdated}
           />
+        )}
+
+        {view === 'dashboard' && workspace && (
+          <Dashboard onNavigate={(targetView) => setView(targetView)} />
         )}
 
         {view === 'catalog' && workspace && (

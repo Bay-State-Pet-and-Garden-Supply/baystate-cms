@@ -3,7 +3,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import os from 'os';
 import {
-  getCurrentWorkspace, createWorkspace, loadWorkspace,
+  getCurrentWorkspace, createWorkspace, loadWorkspace, closeWorkspace,
 } from '../services/workspace-service';
 
 const execPromise = promisify(exec);
@@ -98,6 +98,20 @@ route.post('/workspace/pick-directory', async (c) => {
       success: false,
       error: 'failed',
       message: `Failed to open folder selector: ${message}`,
+    }, 500);
+  }
+});
+
+/**
+ * POST /api/workspace/close - Close the current workspace.
+ */
+route.post('/workspace/close', (c) => {
+  try {
+    closeWorkspace();
+    return c.json({ success: true, message: 'Workspace closed' });
+  } catch (err) {
+    return c.json({
+      error: `Failed to close workspace: ${err instanceof Error ? err.message : String(err)}`,
     }, 500);
   }
 });

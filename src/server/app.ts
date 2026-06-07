@@ -11,6 +11,9 @@ import connectionRoutes from './routes/connection-routes';
 import exportRoutes from './routes/export-routes';
 import syncRoutes from './routes/sync-routes';
 import driftRoutes from './routes/drift-routes';
+import productTypeRoutes from './routes/product-type-routes';
+import pageRoutes from './routes/page-routes';
+import dashboardRoutes from './routes/dashboard-routes';
 
 const app = new Hono();
 
@@ -56,6 +59,9 @@ app.route('/api', connectionRoutes);
 app.route('/api', exportRoutes);
 app.route('/api', syncRoutes);
 app.route('/api', driftRoutes);
+app.route('/api', productTypeRoutes);
+app.route('/api', pageRoutes);
+app.route('/api', dashboardRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));
