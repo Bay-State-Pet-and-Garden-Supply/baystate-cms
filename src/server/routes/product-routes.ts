@@ -17,13 +17,17 @@ route.get('/products', (c) => {
 
   const status = c.req.query('status');
   const search = c.req.query('search');
+  const limit = c.req.query('limit');
+  const offset = c.req.query('offset');
 
-  const products = listProductIndex({
+  const { products, total } = listProductIndex({
     status: status || undefined,
     search: search || undefined,
+    limit: limit !== undefined ? Number(limit) : undefined,
+    offset: offset !== undefined ? Number(offset) : undefined,
   });
 
-  return c.json({ products, total: products.length });
+  return c.json({ products, total });
 });
 
 /**

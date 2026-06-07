@@ -72,20 +72,22 @@ export class ShopSiteHttpClient {
   async fetchProductsXml(
     options?: { version?: string; fields?: string[] },
   ): Promise<Result<string>> {
-    const params: Record<string, string> = {
-      clientApp: '1',
-      dbname: 'products',
-    };
-    if (options?.version) params.version = options.version;
+    const params = new URLSearchParams();
+    params.set('clientApp', '1');
+    params.set('dbname', 'products');
+    if (options?.version) params.set('version', options.version);
     if (options?.fields && options.fields.length > 0) {
-      params.fields = '|' + options.fields.join('|') + '|';
+      params.set('fields', '|' + options.fields.join('|') + '|');
     }
 
     try {
-      const url = this.buildUrl('db_xml.cgi', params);
+      const url = this.buildUrl('db_xml.cgi');
       const response = await fetch(url, {
         method: 'POST',
-        headers: this.buildHeaders(),
+        headers: this.buildHeaders({
+          'Content-Type': 'application/x-www-form-urlencoded',
+        }),
+        body: params.toString(),
         signal: AbortSignal.timeout(120_000),
       });
 

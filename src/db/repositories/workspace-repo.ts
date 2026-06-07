@@ -32,6 +32,14 @@ export function updateBootstrapStatus(id: string, status: string, baselineCommit
   );
 }
 
+export function updateWorkspacePaths(id: string, workspacePath: string, gitPath: string): void {
+  const db = getDb();
+  db.run(
+    `UPDATE workspace SET workspace_path = ?, git_path = ?, updated_at = ? WHERE id = ?`,
+    [workspacePath, gitPath, new Date().toISOString(), id],
+  );
+}
+
 function mapRowToWorkspace(row: Record<string, unknown>): Workspace {
   return {
     id: String(row.id),

@@ -11,6 +11,7 @@ import { clearRegistry, upsertRegistryEntry } from '../../db/repositories/field-
 import { updateBootstrapStatus } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
+import { getDb } from '../../db/connection';
 import type { Product } from '../../shared/types';
 import type { FieldRegistryEntry } from '../../shared/types';
 import type { Workspace } from '../../shared/types';
@@ -68,6 +69,7 @@ export function bootstrapFromXml(
     // Normalize products and build registry
     const products: Product[] = [];
     const allRegistryEntries: Omit<FieldRegistryEntry, 'id'>[] = [];
+    const seenSkus = new Set<string>();
 
     for (const parsedProduct of parsed.products) {
       const { product, registryObserved } = normalizeProduct(parsedProduct, workspaceId);
@@ -75,6 +77,12 @@ export function bootstrapFromXml(
         warnings.push(`Product "${product.core.name || '(unnamed)'}" has no SKU and will be skipped.`);
         continue;
       }
+      const skuTrimmed = product.sku.trim();
+      if (seenSkus.has(skuTrimmed)) {
+        warnings.push(`Product "${product.core.name || '(unnamed)'}" skipped because SKU "${skuTrimmed}" is a duplicate.`);
+        continue;
+      }
+      seenSkus.add(skuTrimmed);
       products.push(product);
       allRegistryEntries.push(...registryObserved);
     }
@@ -122,6 +130,7 @@ export function bootstrapFromXml(
 
     // Seed product index and field registry in SQLite
     clearRegistry(workspaceId);
+    getDb().run('DELETE FROM product_index');
 
     for (const entry of uniqueRegistry) {
       if (entry.workspaceId === workspaceId) {

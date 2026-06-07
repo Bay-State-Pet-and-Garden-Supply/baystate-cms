@@ -28,9 +28,14 @@ export function findProductBySku(sku: string): ProductIndexRow | null {
   return mapRow(row);
 }
 
-export function listProducts(filter?: { status?: string; search?: string }): ProductIndexRow[] {
+export function listProducts(filter?: {
+  status?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): { products: ProductIndexRow[]; total: number } {
   const db = getDb();
-  let sql = 'SELECT * FROM product_index';
+  let whereSql = '';
   const conditions: string[] = [];
   const p: (string | number | null)[] = [];
 
@@ -44,13 +49,31 @@ export function listProducts(filter?: { status?: string; search?: string }): Pro
   }
 
   if (conditions.length > 0) {
-    sql += ' WHERE ' + conditions.join(' AND ');
+    whereSql = ' WHERE ' + conditions.join(' AND ');
   }
 
-  sql += ' ORDER BY title ASC';
+  // Get total count matching the criteria
+  const countSql = `SELECT COUNT(*) as count FROM product_index${whereSql}`;
+  const countRow = db.query(countSql).get(...p) as { count: number } | undefined;
+  const total = countRow?.count ?? 0;
 
-  const rows = db.query(sql).all(...p) as Record<string, unknown>[];
-  return rows.map(mapRow);
+  // Get matching products with pagination
+  let sql = `SELECT * FROM product_index${whereSql} ORDER BY title ASC`;
+  const params = [...p];
+  if (filter?.limit !== undefined) {
+    sql += ' LIMIT ?';
+    params.push(filter.limit);
+  }
+  if (filter?.offset !== undefined) {
+    sql += ' OFFSET ?';
+    params.push(filter.offset);
+  }
+
+  const rows = db.query(sql).all(...params) as Record<string, unknown>[];
+  return {
+    products: rows.map(mapRow),
+    total,
+  };
 }
 
 export function insertProductIndex(row: ProductIndexRow): void {

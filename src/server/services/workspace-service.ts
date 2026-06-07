@@ -4,7 +4,7 @@ import path from 'path';
 import os from 'os';
 import { initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { insertWorkspace, findWorkspace } from '../../db/repositories/workspace-repo';
+import { insertWorkspace, findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
 import { createWorkspaceDirs, writeGitignore, writeStoreConfig } from '../../git/workspace-files';
 
@@ -128,7 +128,17 @@ export function loadWorkspace(workspacePath: string): Workspace | null {
 
   initDb(dbPath);
   runMigrations();
-  return findWorkspace();
+
+  const ws = findWorkspace();
+  if (ws) {
+    const resolvedGit = path.join(resolved, '.git');
+    if (ws.workspacePath !== resolved || ws.gitPath !== resolvedGit) {
+      updateWorkspacePaths(ws.id, resolved, resolvedGit);
+      ws.workspacePath = resolved;
+      ws.gitPath = resolvedGit;
+    }
+  }
+  return ws;
 }
 
 export function getCurrentWorkspace(): Workspace | null {

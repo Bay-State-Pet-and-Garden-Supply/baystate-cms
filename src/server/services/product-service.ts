@@ -52,7 +52,12 @@ export function getProductWithDraft(workspaceId: string, workspacePath: string, 
 /**
  * List products from index with optional filters.
  */
-export function listProductIndex(filter?: { status?: string; search?: string }): ProductIndexRow[] {
+export function listProductIndex(filter?: {
+  status?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): { products: ProductIndexRow[]; total: number } {
   return listProducts(filter);
 }
 

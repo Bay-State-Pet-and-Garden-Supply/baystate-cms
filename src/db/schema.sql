@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_product_index_sku ON product_index(sku);
 CREATE INDEX IF NOT EXISTS idx_product_index_status ON product_index(status);
+CREATE INDEX IF NOT EXISTS idx_product_index_title ON product_index(title);
 CREATE INDEX IF NOT EXISTS idx_change_set_items_change_set ON change_set_items(change_set_id);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_workspace ON sync_jobs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_remote_drift_workspace ON remote_drift(workspace_id);

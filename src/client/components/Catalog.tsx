@@ -9,16 +9,24 @@ interface Props {
 export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
   const [products, setProducts] = useState<ProductIndexItem[]>([]);
   const [search, setSearch] = useState('');
+  const [activeSearch, setActiveSearch] = useState('');
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const fetchProducts = async () => {
+  // Pagination states
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [total, setTotal] = useState(0);
+
+  const fetchProducts = async (currentPage: number, currentStatus: string, currentSearch: string, limit: number) => {
     setLoading(true);
     setError('');
     try {
-      const res = await listProducts(status || undefined, search || undefined);
+      const offset = (currentPage - 1) * limit;
+      const res = await listProducts(currentStatus || undefined, currentSearch || undefined, limit, offset);
       setProducts(res.products);
+      setTotal(res.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -26,11 +34,36 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
     }
   };
 
-  useEffect(() => { fetchProducts(); }, [status]);
+  useEffect(() => {
+    fetchProducts(page, status, activeSearch, pageSize);
+  }, [page, status, activeSearch, pageSize]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    fetchProducts();
+    setActiveSearch(search);
+    setPage(1);
+  };
+
+  const handleStatusChange = (newStatus: string) => {
+    setStatus(newStatus);
+    setPage(1);
+  };
+
+  const handlePageSizeChange = (newSize: number) => {
+    setPageSize(newSize);
+    setPage(1);
+  };
+
+  const handlePrevPage = () => {
+    if (page > 1) {
+      setPage(p => p - 1);
+    }
+  };
+
+  const handleNextPage = () => {
+    if (page < Math.ceil(total / pageSize)) {
+      setPage(p => p + 1);
+    }
   };
 
   const styles: Record<string, React.CSSProperties> = {
@@ -50,7 +83,14 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
     error: { color: '#dc2626', padding: 12, background: '#fef2f2', borderRadius: 4, marginBottom: 16 },
     empty: { textAlign: 'center' as any, padding: 40, color: '#9ca3af' },
     navBtn: { padding: '6px 16px', fontSize: 14, cursor: 'pointer', background: '#6b7280', color: '#fff', border: 'none', borderRadius: 4 },
+    pagination: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 20, paddingTop: 16, borderTop: '1px solid #e5e7eb', flexWrap: 'wrap', gap: 12 },
+    paginationInfo: { fontSize: 14, color: '#6b7280' },
+    paginationControls: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
+    pageBtn: { padding: '6px 12px', fontSize: 14, background: '#fff', border: '1px solid #d1d5db', borderRadius: 4, color: '#374151', minWidth: 80, textAlign: 'center' },
+    pageIndicator: { fontSize: 14, color: '#374151', margin: '0 8px' },
   };
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
     <div style={styles.container}>
@@ -68,7 +108,7 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
           value={search}
           onChange={e => setSearch(e.target.value)}
         />
-        <select style={styles.select} value={status} onChange={e => setStatus(e.target.value)}>
+        <select style={styles.select} value={status} onChange={e => handleStatusChange(e.target.value)}>
           <option value="">All Status</option>
           <option value="active">Active</option>
           <option value="draft">Draft</option>
@@ -85,42 +125,80 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
           <p>Use the Setup link at the top to import products from ShopSite XML.</p>
         </div>
       ) : (
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>SKU</th>
-              <th style={styles.th}>Name</th>
-              <th style={styles.th}>Price</th>
-              <th style={styles.th}>Status</th>
-              <th style={styles.th}>Sync</th>
-            </tr>
-          </thead>
-          <tbody>
-            {products.map(p => (
-              <tr key={p.sku} style={styles.row} onClick={() => onSelectProduct(p.sku)}>
-                <td style={styles.td}><strong>{p.sku}</strong></td>
-                <td style={styles.td}>{p.title}</td>
-                <td style={styles.td}>{p.price ? `$${p.price}` : '-'}</td>
-                <td style={styles.td}>
-                  <span style={{
-                    ...styles.badge,
-                    background: p.status === 'active' ? '#16a34a' : p.status === 'draft' ? '#f59e0b' : '#6b7280',
-                  }}>
-                    {p.status}
-                  </span>
-                </td>
-                <td style={styles.td}>
-                  <span style={{
-                    ...styles.badge,
-                    background: p.syncStatus === 'synced' ? '#16a34a' : p.syncStatus === 'pending' ? '#f59e0b' : p.syncStatus === 'failed' ? '#dc2626' : '#9ca3af',
-                  }}>
-                    {p.syncStatus}
-                  </span>
-                </td>
+        <>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>SKU</th>
+                <th style={styles.th}>Name</th>
+                <th style={styles.th}>Price</th>
+                <th style={styles.th}>Status</th>
+                <th style={styles.th}>Sync</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {products.map(p => (
+                <tr key={p.sku} style={styles.row} onClick={() => onSelectProduct(p.sku)}>
+                  <td style={styles.td}><strong>{p.sku}</strong></td>
+                  <td style={styles.td}>{p.title}</td>
+                  <td style={styles.td}>{p.price ? `$${p.price}` : '-'}</td>
+                  <td style={styles.td}>
+                    <span style={{
+                      ...styles.badge,
+                      background: p.status === 'active' ? '#16a34a' : p.status === 'draft' ? '#f59e0b' : '#6b7280',
+                    }}>
+                      {p.status}
+                    </span>
+                  </td>
+                  <td style={styles.td}>
+                    <span style={{
+                      ...styles.badge,
+                      background: p.syncStatus === 'synced' ? '#16a34a' : p.syncStatus === 'pending' ? '#f59e0b' : p.syncStatus === 'failed' ? '#dc2626' : '#9ca3af',
+                    }}>
+                      {p.syncStatus}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div style={styles.pagination}>
+            <div style={styles.paginationInfo}>
+              Showing {Math.min((page - 1) * pageSize + 1, total)} to {Math.min(page * pageSize, total)} of {total} products
+            </div>
+            <div style={styles.paginationControls}>
+              <button 
+                type="button"
+                style={{ ...styles.pageBtn, opacity: page === 1 ? 0.5 : 1, cursor: page === 1 ? 'not-allowed' : 'pointer' }}
+                onClick={handlePrevPage}
+                disabled={page === 1}
+              >
+                Previous
+              </button>
+              <span style={styles.pageIndicator}>Page {page} of {totalPages}</span>
+              <button 
+                type="button"
+                style={{ ...styles.pageBtn, opacity: page >= totalPages ? 0.5 : 1, cursor: page >= totalPages ? 'not-allowed' : 'pointer' }}
+                onClick={handleNextPage}
+                disabled={page >= totalPages}
+              >
+                Next
+              </button>
+              
+              <select 
+                style={styles.select} 
+                value={pageSize} 
+                onChange={e => handlePageSizeChange(Number(e.target.value))}
+              >
+                <option value={25}>25 per page</option>
+                <option value={50}>50 per page</option>
+                <option value={100}>100 per page</option>
+                <option value={200}>200 per page</option>
+              </select>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

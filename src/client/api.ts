@@ -113,6 +113,7 @@ export interface ExportResult {
 export function getWorkspace() { return request<{ workspace: Workspace | null }>('/workspace'); }
 export function initWorkspace(name: string, path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/init', { method: 'POST', body: JSON.stringify({ name, path }) }); }
 export function openWorkspace(path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/open', { method: 'POST', body: JSON.stringify({ path }) }); }
+export function pickDirectory() { return request<{ success: boolean; path?: string; error?: string; message?: string }>('/workspace/pick-directory', { method: 'POST' }); }
 
 // Connection
 export function getConnection() { return request<{ connection: ConnectionSettings | null }>('/connection'); }
@@ -127,13 +128,16 @@ export function testConnection() { return request<{ success: boolean; message: s
 // Bootstrap
 export function bootstrapFromXml(xml: string) { return request<BootstrapResult>('/bootstrap/xml', { method: 'POST', body: JSON.stringify({ xml }) }); }
 export function bootstrapFromFile(filePath: string) { return request<BootstrapResult>('/bootstrap/file', { method: 'POST', body: JSON.stringify({ filePath }) }); }
-export function getBootstrapStatus() { return request<{ bootstrapStatus: string; baselineCommit: string | null }>('/bootstrap/status'); }
+export function bootstrapFromPull() { return request<BootstrapResult>('/bootstrap/pull', { method: 'POST' }); }
+export function getBootstrapStatus() { return request<{ bootstrapStatus: string; baselineCommit: string | null; error?: string | null }>('/bootstrap/status'); }
 
 // Products
-export function listProducts(status?: string, search?: string) {
+export function listProducts(status?: string, search?: string, limit?: number, offset?: number) {
   const params = new URLSearchParams();
   if (status) params.set('status', status);
   if (search) params.set('search', search);
+  if (limit !== undefined) params.set('limit', String(limit));
+  if (offset !== undefined) params.set('offset', String(offset));
   const qs = params.toString();
   return request<{ products: ProductIndexItem[]; total: number }>(`/products${qs ? '?' + qs : ''}`);
 }

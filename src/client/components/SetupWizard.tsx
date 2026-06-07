@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { initWorkspace, openWorkspace, bootstrapFromXml, bootstrapFromFile, saveConnection, testConnection } from '../api';
+import React, { useState, useEffect } from 'react';
+import { initWorkspace, openWorkspace, pickDirectory, bootstrapFromXml, bootstrapFromFile, bootstrapFromPull, getBootstrapStatus, getConnection, saveConnection, testConnection } from '../api';
 
 interface Props {
   onComplete: () => void;
@@ -18,6 +18,72 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState('');
+  const [polling, setPolling] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [passwordConfigured, setPasswordConfigured] = useState(false);
+
+  useEffect(() => {
+    if (step === 1) {
+      const loadConnectionSettings = async () => {
+        try {
+          const res = await getConnection();
+          if (res.connection) {
+            setCgiBaseUrl(res.connection.cgiBaseUrl || '');
+            setMerchantId(res.connection.merchantId || '');
+            setPasswordConfigured(res.connection.passwordConfigured);
+          }
+        } catch (err) {
+          console.error('Failed to load saved connection settings:', err);
+        }
+      };
+      loadConnectionSettings();
+    }
+  }, [step]);
+
+  const startPollingStatus = (successPrefix: string) => {
+    setPolling(true);
+    setLoading(true);
+    setStatusMessage('Initializing catalog import in the background...');
+    
+    const interval = setInterval(async () => {
+      try {
+        const res = await getBootstrapStatus();
+        if (res.bootstrapStatus === 'complete') {
+          clearInterval(interval);
+          setPolling(false);
+          setLoading(false);
+          setResult(`${successPrefix} Baseline commit: ${res.baselineCommit || 'N/A'}`);
+          setStep(2);
+        } else if (res.bootstrapStatus === 'failed') {
+          clearInterval(interval);
+          setPolling(false);
+          setLoading(false);
+          setError(res.error || 'Bootstrap failed in the background. Check server logs.');
+        } else if (res.bootstrapStatus === 'running') {
+          setStatusMessage('Importing products from ShopSite, parsing XML, and writing Git catalog files...');
+        }
+      } catch (err) {
+        clearInterval(interval);
+        setPolling(false);
+        setLoading(false);
+        setError(`Status check failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }, 2000);
+  };
+
+  const handlePickDirectory = async () => {
+    setError('');
+    try {
+      const res = await pickDirectory();
+      if (res.success && res.path) {
+        setWorkspacePath(res.path);
+      } else if (res.error !== 'cancelled') {
+        setError(res.message || 'Failed to select directory');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const handleInit = async () => {
     if (!name.trim() || !workspacePath.trim()) {
@@ -61,7 +127,7 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
   };
 
   const handleSaveConnection = async () => {
-    if (!cgiBaseUrl.trim() || !merchantId.trim() || !password) {
+    if (!cgiBaseUrl.trim() || !merchantId.trim() || (!password && !passwordConfigured)) {
       setError('CGI URL, merchant/user ID, and password are required to enable direct sync. You can skip this and use XML import/export fallback.');
       return;
     }
@@ -71,9 +137,24 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
       await saveConnection(cgiBaseUrl.trim(), merchantId.trim(), password);
       const test = await testConnection();
       setResult(`Connection saved. ${test.message}`);
+      setPasswordConfigured(true);
+      setPassword(''); // Clear password field after save
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBootstrapFromPull = async () => {
+    setLoading(true);
+    setError('');
+    setResult('');
+    try {
+      await bootstrapFromPull();
+      startPollingStatus('Bootstrap complete! Products successfully imported from ShopSite.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       setLoading(false);
     }
   };
@@ -85,20 +166,12 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
     }
     setLoading(true);
     setError('');
+    setResult('');
     try {
-      const res = await bootstrapFromXml(xmlInput.trim());
-      if (res.success) {
-        setResult(`Bootstrap complete! ${res.productCount} product(s) imported. Commit: ${res.commitHash}`);
-        if (res.warnings.length > 0) {
-          setResult(prev => prev + `\nWarnings: ${res.warnings.join(', ')}`);
-        }
-        setStep(2);
-      } else {
-        setError(`Bootstrap failed: ${res.errors.join('; ')}`);
-      }
+      await bootstrapFromXml(xmlInput.trim());
+      startPollingStatus('Bootstrap complete! Products successfully imported from pasted XML.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
       setLoading(false);
     }
   };
@@ -110,17 +183,12 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
     }
     setLoading(true);
     setError('');
+    setResult('');
     try {
-      const res = await bootstrapFromFile(filePath.trim());
-      if (res.success) {
-        setResult(`Bootstrap complete! ${res.productCount} product(s) imported. Commit: ${res.commitHash}`);
-        setStep(2);
-      } else {
-        setError(`Bootstrap failed: ${res.errors.join('; ')}`);
-      }
+      await bootstrapFromFile(filePath.trim());
+      startPollingStatus('Bootstrap complete! Products successfully imported from XML file.');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
       setLoading(false);
     }
   };
@@ -136,6 +204,9 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
     result: { color: '#16a34a', padding: '8px 12px', background: '#f0fdf4', borderRadius: 4, margin: '8px 0', whiteSpace: 'pre-wrap' as any },
     section: { marginTop: 16, padding: 16, border: '1px solid #e5e7eb', borderRadius: 8 },
     heading: { fontSize: 18, fontWeight: 500, marginBottom: 8 },
+    inputContainer: { display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' },
+    inputWithButton: { flex: 1, padding: 8, fontSize: 14, border: '1px solid #ccc', borderRadius: 4, margin: 0 },
+    pickerButton: { padding: '8px 16px', fontSize: 14, cursor: 'pointer', background: '#f3f4f6', color: '#374151', border: '1px solid #d1d5db', borderRadius: 4, whiteSpace: 'nowrap' },
   };
 
   return (
@@ -144,6 +215,11 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
 
       {error && <div style={styles.error}>{error}</div>}
       {result && <div style={styles.result}>{result}</div>}
+      {polling && (
+        <div style={{ color: '#2563eb', padding: '12px', background: '#eff6ff', borderRadius: 4, margin: '8px 0', fontWeight: 500 }}>
+          ⏳ {statusMessage}
+        </div>
+      )}
 
       {step === 0 && (
         <div>
@@ -155,12 +231,17 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
               value={name}
               onChange={e => setName(e.target.value)}
             />
-            <input
-              style={styles.input}
-              placeholder="Workspace folder path (e.g., /home/user/my-store)"
-              value={workspacePath}
-              onChange={e => setWorkspacePath(e.target.value)}
-            />
+            <div style={styles.inputContainer}>
+              <input
+                style={styles.inputWithButton}
+                placeholder="Workspace folder path (e.g., /home/user/my-store)"
+                value={workspacePath}
+                onChange={e => setWorkspacePath(e.target.value)}
+              />
+              <button style={styles.pickerButton} onClick={handlePickDirectory} type="button">
+                Choose Folder...
+              </button>
+            </div>
             <button style={styles.button} onClick={handleInit} disabled={loading}>
               {loading ? 'Creating...' : 'Create Workspace'}
             </button>
@@ -168,12 +249,17 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
 
           <div style={styles.section}>
             <h2 style={styles.heading}>Open Existing Workspace</h2>
-            <input
-              style={styles.input}
-              placeholder="Workspace folder path"
-              value={workspacePath}
-              onChange={e => setWorkspacePath(e.target.value)}
-            />
+            <div style={styles.inputContainer}>
+              <input
+                style={styles.inputWithButton}
+                placeholder="Workspace folder path"
+                value={workspacePath}
+                onChange={e => setWorkspacePath(e.target.value)}
+              />
+              <button style={styles.pickerButton} onClick={handlePickDirectory} type="button">
+                Choose Folder...
+              </button>
+            </div>
             <button style={styles.secondary} onClick={handleOpen} disabled={loading}>
               {loading ? 'Opening...' : 'Open Workspace'}
             </button>
@@ -204,13 +290,16 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
             />
             <input
               style={styles.input}
-              placeholder="Password"
+              placeholder={passwordConfigured ? "Password (configured - leave blank to keep, or enter new one)" : "Password"}
               type="password"
               value={password}
               onChange={e => setPassword(e.target.value)}
             />
             <button style={styles.secondary} onClick={handleSaveConnection} disabled={loading}>
               {loading ? 'Testing...' : 'Save & Test Connection'}
+            </button>
+            <button style={styles.button} onClick={handleBootstrapFromPull} disabled={loading}>
+              {loading ? 'Bootstrapping...' : 'Bootstrap Catalog from ShopSite'}
             </button>
           </div>
 

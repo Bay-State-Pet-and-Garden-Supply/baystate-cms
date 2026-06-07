@@ -1,8 +1,12 @@
 import { Hono } from 'hono';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import os from 'os';
 import {
   getCurrentWorkspace, createWorkspace, loadWorkspace,
 } from '../services/workspace-service';
 
+const execPromise = promisify(exec);
 const route = new Hono();
 
 /**
@@ -60,6 +64,40 @@ route.post('/workspace/open', async (c) => {
   } catch (err) {
     return c.json({
       error: `Failed to open workspace: ${err instanceof Error ? err.message : String(err)}`,
+    }, 500);
+  }
+});
+
+/**
+ * POST /api/workspace/pick-directory - Open macOS native folder selector.
+ */
+route.post('/workspace/pick-directory', async (c) => {
+  if (os.platform() !== 'darwin') {
+    return c.json({
+      success: false,
+      error: 'unsupported',
+      message: 'Directory picker is only supported on macOS.',
+    }, 400);
+  }
+
+  try {
+    const script = 'POSIX path of (choose folder with prompt "Select Workspace Folder")';
+    const { stdout } = await execPromise(`osascript -e '${script}'`);
+    const selectedPath = stdout.trim();
+    return c.json({ success: true, path: selectedPath });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('User canceled')) {
+      return c.json({
+        success: false,
+        error: 'cancelled',
+        message: 'Folder selection was cancelled.',
+      });
+    }
+    return c.json({
+      success: false,
+      error: 'failed',
+      message: `Failed to open folder selector: ${message}`,
     }, 500);
   }
 });
