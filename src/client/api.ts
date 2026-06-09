@@ -393,3 +393,10 @@ export function getDashboardStats() {
   return request<DashboardStats>('/dashboard/stats');
 }
 
+export function bulkResolveDrift(action: 'accept_remote') {
+  return request<{ success: boolean; resolvedCount: number; commitHash: string | null; message: string }>('/drift/bulk-resolve', {
+    method: 'POST',
+    body: JSON.stringify({ action }),
+  });
+}
+

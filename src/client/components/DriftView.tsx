@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { checkDrift, listDrift, resolveDrift, fullReconcile, type DriftItem } from '../api';
+import { checkDrift, listDrift, resolveDrift, fullReconcile, bulkResolveDrift, type DriftItem } from '../api';
 
 export function DriftView() {
   const [drifts, setDrifts] = useState<DriftItem[]>([]);
@@ -46,6 +46,24 @@ export function DriftView() {
     try {
       const res = await resolveDrift(id, action);
       setResult(`Resolved: ${res.action} for SKU "${res.sku}"`);
+      await fetchDrift();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBulkAccept = async () => {
+    if (!confirm("Are you sure you want to accept all remote changes for products you haven't changed locally? This will write the remote versions to your local Git catalog and commit them in a single batch.")) {
+      return;
+    }
+    setLoading(true);
+    setError('');
+    setResult('');
+    try {
+      const res = await bulkResolveDrift('accept_remote');
+      setResult(res.message);
       await fetchDrift();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -118,9 +136,16 @@ export function DriftView() {
       <div style={styles.section}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div style={styles.label}>Drift Items ({drifts.length})</div>
-          <button style={{ ...styles.btn, background: '#6b7280', color: '#fff', fontSize: 11 }} onClick={handleReconcile} disabled={loading}>
-            Full Reindex
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {drifts.length > 0 && (
+              <button style={{ ...styles.btn, background: '#10b981', color: '#fff', fontSize: 11 }} onClick={handleBulkAccept} disabled={loading}>
+                Bulk Accept Remote
+              </button>
+            )}
+            <button style={{ ...styles.btn, background: '#6b7280', color: '#fff', fontSize: 11 }} onClick={handleReconcile} disabled={loading}>
+              Full Reindex
+            </button>
+          </div>
         </div>
 
         {drifts.length === 0 ? (

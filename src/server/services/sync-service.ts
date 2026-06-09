@@ -167,10 +167,10 @@ export function bootstrapFromXml(
         primaryImage: product.core.media.primary,
         productHash,
         lastApprovedCommit: null,
-        lastPulledRemoteHash: null,
-        lastSyncedRemoteHash: null,
-        lastSyncedAt: null,
-        syncStatus: 'not_synced',
+        lastPulledRemoteHash: productHash,
+        lastSyncedRemoteHash: productHash,
+        lastSyncedAt: now,
+        syncStatus: 'synced',
         hasAdvancedBlocks: hasAdvanced ? 1 : 0,
         hasWarnings: warnings.length > 0 ? 1 : 0,
         createdAt: product.metadata.createdAt,
@@ -187,6 +187,10 @@ export function bootstrapFromXml(
       const commitHash = git.getHeadHash();
 
       updateBootstrapStatus(workspaceId, 'complete', commitHash);
+
+      // Set lastApprovedCommit on all indexed products to the initial baseline commit
+      const db = getDb();
+      db.run('UPDATE product_index SET last_approved_commit = ?', [commitHash]);
 
       completeSyncJob(job.id, 'succeeded', {
         productCount: products.length,

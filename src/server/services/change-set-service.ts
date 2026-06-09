@@ -90,7 +90,7 @@ export function approveChangeSet(
           productHash,
           hasAdvancedBlocks: hasAdvanced ? 1 : 0,
           hasWarnings,
-          syncStatus: existing.syncStatus,
+          syncStatus: 'not_synced',
           lastApprovedCommit: undefined, // Will be set after commit
         });
       } else {

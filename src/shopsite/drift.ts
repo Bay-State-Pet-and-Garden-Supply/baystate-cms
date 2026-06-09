@@ -45,9 +45,13 @@ export function detectDrift(
       const localHash = localProduct ? computeContentHash(localProduct) : null;
       const remoteHash = computeContentHash(remoteProduct);
       const indexRow = findProductBySku(sku);
-      const lastPulledHash = indexRow?.lastPulledRemoteHash ?? null;
+      const lastSyncedHash = indexRow?.lastSyncedRemoteHash ?? null;
 
-      if (localHash !== remoteHash && lastPulledHash !== remoteHash) {
+      // Remote has changed if its hash differs from the last synced version we had.
+      // If we don't have a last synced hash yet, compare against the remote version directly.
+      const remoteChanged = lastSyncedHash === null || lastSyncedHash !== remoteHash;
+
+      if (localHash !== remoteHash && remoteChanged) {
         const drift = createDrift({
           workspaceId,
           sku,
@@ -66,9 +70,23 @@ export function detectDrift(
       }
 
       if (indexRow) {
+        const isSynced = localHash === remoteHash;
+        let nextSyncStatus = indexRow.syncStatus;
+        if (isSynced) {
+          nextSyncStatus = 'synced';
+        } else if (remoteChanged) {
+          nextSyncStatus = 'drifted';
+        } else {
+          // Local changes exist, but remote didn't change: keep as not_synced (staged)
+          nextSyncStatus = 'not_synced';
+        }
+
         updateProductIndex({
           sku,
           lastPulledRemoteHash: remoteHash,
+          syncStatus: nextSyncStatus,
+          lastSyncedRemoteHash: isSynced ? remoteHash : indexRow.lastSyncedRemoteHash,
+          lastSyncedAt: isSynced ? new Date().toISOString() : indexRow.lastSyncedAt,
         });
       }
     }
@@ -127,6 +145,9 @@ export function acceptRemoteForDrift(workspacePath: string, drift: DriftRow): Ac
       primaryImage: remoteProduct.core.media.primary,
       productHash,
       lastPulledRemoteHash: drift.remoteHash,
+      lastSyncedRemoteHash: drift.remoteHash,
+      lastSyncedAt: new Date().toISOString(),
+      syncStatus: 'synced',
       hasAdvancedBlocks: Object.keys(remoteProduct.shopsite.preserved.advancedBlocks).length > 0 ? 1 : 0,
     });
   } else {
@@ -142,9 +163,9 @@ export function acceptRemoteForDrift(workspacePath: string, drift: DriftRow): Ac
       productHash,
       lastApprovedCommit: null,
       lastPulledRemoteHash: drift.remoteHash,
-      lastSyncedRemoteHash: null,
-      lastSyncedAt: null,
-      syncStatus: 'not_synced',
+      lastSyncedRemoteHash: drift.remoteHash,
+      lastSyncedAt: new Date().toISOString(),
+      syncStatus: 'synced',
       hasAdvancedBlocks: Object.keys(remoteProduct.shopsite.preserved.advancedBlocks).length > 0 ? 1 : 0,
       hasWarnings: 0,
       createdAt: remoteProduct.metadata.createdAt,

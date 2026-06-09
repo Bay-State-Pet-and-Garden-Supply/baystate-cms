@@ -275,6 +275,7 @@ async function runDirectSync(options: {
         syncStatus: 'synced',
         lastSyncedAt: syncedAt,
         lastSyncedRemoteHash: hashJson(product),
+        lastPulledRemoteHash: hashJson(product),
       });
     }
     addSyncJobEvent({ syncJobId: job.id, level: 'info', message: `Marked ${products.length} product(s) as synced.` });

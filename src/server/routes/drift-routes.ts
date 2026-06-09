@@ -199,4 +199,132 @@ route.post('/drift/:id/resolve', async (c) => {
   }
 });
 
+/**
+ * POST /api/drift/bulk-resolve - Accept remote changes in bulk for products with no local unpushed modifications.
+ */
+route.post('/drift/bulk-resolve', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+
+  const body = await c.req.json().catch(() => ({})) as { action?: string };
+  const action = body.action || 'accept_remote';
+
+  if (action !== 'accept_remote') {
+    return c.json({ error: 'Only accept_remote action is supported for bulk resolution.' }, 400);
+  }
+
+  // 1. Get all open drifts
+  const openDrifts = listDrift(workspace.id, 'open');
+  if (openDrifts.length === 0) {
+    return c.json({ success: true, message: 'No open drifts found.', resolvedCount: 0 });
+  }
+
+  // Dynamic imports
+  const { writeProductFile } = await import('../../git/workspace-files');
+  const { skuToProductFilePath } = await import('../../git/product-file-path');
+  const { findProductBySku, updateProductIndex } = await import('../../db/repositories/product-index-repo');
+  const { GitClient } = await import('../../git/git-client');
+  const { getDb } = await import('../../db/connection');
+  const { findWorkspace } = await import('../../db/repositories/workspace-repo');
+  const type_shared = await import('../../shared/types');
+
+  // 2. Identify SKUs with active drafts in change sets
+  const db = getDb();
+  const draftedSkusRows = db.query(
+    `SELECT sku FROM change_set_items 
+     WHERE change_set_id IN (SELECT id FROM change_sets WHERE workspace_id = ? AND status = 'draft')`
+  ).all(workspace.id) as { sku: string }[];
+  const draftedSkus = new Set(draftedSkusRows.map(r => r.sku));
+
+  // 3. Filter drifts that have no local modifications
+  const cleanDrifts = openDrifts.filter(d => {
+    if (draftedSkus.has(d.sku)) return false;
+
+    const indexRow = findProductBySku(d.sku);
+    if (indexRow && indexRow.syncStatus === 'not_synced') {
+      return false; // Local has unpushed changes
+    }
+
+    return true;
+  });
+
+  if (cleanDrifts.length === 0) {
+    return c.json({ success: true, message: 'No clean drifts available for bulk auto-resolution.', resolvedCount: 0 });
+  }
+
+  // 4. Batch write product files and update indices
+  const resolvedSkus: string[] = [];
+  const filesToCommit: string[] = [];
+  const now = new Date().toISOString();
+
+  for (const drift of cleanDrifts) {
+    try {
+      const remoteProduct = JSON.parse(drift.remoteJson) as any;
+      if (!remoteProduct.sku) continue;
+
+      writeProductFile(workspace.workspacePath, remoteProduct);
+      filesToCommit.push(skuToProductFilePath(remoteProduct.sku));
+
+      const productHash = hashJson(remoteProduct);
+      const existing = findProductBySku(remoteProduct.sku);
+      if (existing) {
+        updateProductIndex({
+          sku: remoteProduct.sku,
+          title: remoteProduct.core.name,
+          status: remoteProduct.status,
+          price: remoteProduct.core.price,
+          inventoryQuantity: remoteProduct.core.inventory.quantityOnHand,
+          primaryImage: remoteProduct.core.media.primary,
+          productHash,
+          lastPulledRemoteHash: drift.remoteHash,
+          lastSyncedRemoteHash: drift.remoteHash,
+          lastSyncedAt: now,
+          syncStatus: 'synced',
+          hasAdvancedBlocks: Object.keys(remoteProduct.shopsite.preserved.advancedBlocks).length > 0 ? 1 : 0,
+        });
+      }
+
+      resolveDrift(drift.id, 'accepted_remote');
+      resolvedSkus.push(drift.sku);
+    } catch (err) {
+      console.error(`Failed to bulk resolve drift for SKU ${drift.sku}:`, err);
+    }
+  }
+
+  // 5. Commit all resolved changes in a single Git commit
+  let commitHash: string | null = null;
+  if (filesToCommit.length > 0) {
+    const git = new GitClient(workspace.workspacePath);
+    if (git.isRepo()) {
+      git.add(filesToCommit);
+      const gitStatus = git.status();
+      if (gitStatus) {
+        git.commit(`Accept remote ShopSite drifts [bulk]: ${resolvedSkus.length} products`);
+        commitHash = git.getHeadHash();
+
+        // Update lastApprovedCommit with the new commit hash
+        for (const sku of resolvedSkus) {
+          updateProductIndex({ sku, lastApprovedCommit: commitHash });
+        }
+      }
+    }
+  }
+
+  addAuditLog({
+    workspaceId: workspace.id,
+    entityType: 'drift',
+    entityId: workspace.id,
+    action: 'bulk_accepted_remote',
+    message: `Accepted remote versions for ${resolvedSkus.length} products (bulk)`,
+    detailsJson: JSON.stringify({ resolvedSkus, commitHash }),
+  });
+
+  return c.json({
+    success: true,
+    resolvedCount: resolvedSkus.length,
+    commitHash,
+    message: `Accepted remote versions for ${resolvedSkus.length} product(s) successfully.`,
+  });
+});
+
 export default route;
