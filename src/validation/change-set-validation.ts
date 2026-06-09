@@ -1,6 +1,8 @@
 import { clearValidationResults, listValidationResults, addValidationResult } from '../db/repositories/validation-repo';
 import { findChangeSetById, listChangeSetItems, setItemValidationStatus } from '../db/repositories/change-set-repo';
 import { validateProduct, type ValidationContext, type ValidationOptions } from './product-validation';
+import { readStoreConfig } from '../git/workspace-files';
+import { findWorkspace } from '../db/repositories/workspace-repo';
 import type { Product } from '../shared/types';
 
 export interface ChangeSetValidationResult {
@@ -29,11 +31,25 @@ export function validateChangeSet(changeSetId: string, options?: ValidationOptio
   const items = listChangeSetItems(changeSetId);
   const allSkus = items.map(i => JSON.parse(i.draftJson)?.sku || i.sku).filter(Boolean);
   const effectiveOptions: ValidationOptions = { checkDrift: true, ...options };
+
+  // Load health config to respect manager settings
+  const ws = findWorkspace();
+  const rulesConfig: Record<string, any> = {};
+  if (ws?.workspacePath) {
+    const config = readStoreConfig<{ rules: Array<{ code: string; severity: any }> }>(ws.workspacePath, 'health-config.json');
+    if (config?.rules) {
+      for (const r of config.rules) {
+        rulesConfig[r.code] = r.severity;
+      }
+    }
+  }
+
   const context: ValidationContext = {
     workspaceId: changeSet?.workspaceId ?? '',
     scopeType: 'change_set',
     scopeId: changeSetId,
     allSkus,
+    rulesConfig,
   };
 
   // Clear previous validation results for this change set

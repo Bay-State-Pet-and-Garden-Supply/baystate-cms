@@ -7,8 +7,9 @@ import { ChangeSetReview } from './components/ChangeSetReview';
 import { DriftView } from './components/DriftView';
 import { SyncJobsView } from './components/SyncJobsView';
 import { Dashboard } from './components/Dashboard';
+import { CatalogHealth } from './components/CatalogHealth';
 
-type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs';
+type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health';
 
 function App() {
   const [view, setView] = useState<View>('setup');
@@ -102,6 +103,12 @@ function App() {
               Change Sets
             </button>
             <button
+              style={view === 'health' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('health')}
+            >
+              Catalog Health
+            </button>
+            <button
               style={view === 'drift' ? styles.navLinkActive : styles.navLink}
               onClick={() => setView('drift')}
             >
@@ -163,6 +170,10 @@ function App() {
         )}
 
         {view === 'changesets' && <ChangeSetReview />}
+
+        {view === 'health' && workspace && (
+          <CatalogHealth onSelectProduct={(sku) => { setSelectedSku(sku); setView('product'); }} />
+        )}
 
         {view === 'drift' && <DriftView />}
 

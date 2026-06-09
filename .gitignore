@@ -6,3 +6,5 @@ coverage/
 .shopsite-cms/
 exports/*.zip
 exports/*.xml
+workspaces/
+workspaces/Bay State

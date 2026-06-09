@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { listProducts, getConnection, type ProductIndexItem } from '../api';
+import { listProducts, getConnection, bulkImportProducts, type ProductIndexItem } from '../api';
 
 const STYLE_RULES = `
   .catalog-grid {
@@ -185,6 +185,137 @@ const STYLE_RULES = `
     border-color: #94a3b8;
     color: #0f172a;
   }
+  .modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(15, 23, 42, 0.6);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-container {
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    width: 90%;
+    max-width: 650px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: modalAppear 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes modalAppear {
+    from { transform: scale(0.95); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+  }
+  .modal-header {
+    padding: 20px 24px;
+    border-bottom: 1px solid #f1f5f9;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .modal-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: #0f172a;
+  }
+  .modal-close-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    border-radius: 6px;
+    transition: background 0.15s;
+  }
+  .modal-close-btn:hover {
+    background: #f1f5f9;
+    color: #0f172a;
+  }
+  .modal-body {
+    padding: 24px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .modal-footer {
+    padding: 16px 24px;
+    border-top: 1px solid #f1f5f9;
+    background: #f8fafc;
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+  .textarea-import {
+    width: 100%;
+    height: 120px;
+    padding: 12px;
+    font-family: monospace;
+    font-size: 13px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .textarea-import:focus {
+    border-color: #2563eb;
+  }
+  .preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-top: 8px;
+  }
+  .preview-table th {
+    background: #f8fafc;
+    color: #64748b;
+    font-weight: 600;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .preview-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    color: #334155;
+  }
+  .preview-container {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .import-file-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: #475569;
+    transition: all 0.15s;
+  }
+  .import-file-label:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+  }
 `;
 
 function decodeHtmlEntities(text: string | null | undefined): string {
@@ -225,6 +356,70 @@ function ProductImage({ src, alt, title }: { src: string; alt: string; title: st
   );
 }
 
+function parseCsvOrTsv(text: string): { sku: string; name: string; price: string | null }[] {
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+  if (lines.length === 0) return [];
+  
+  const firstLine = lines[0];
+  const tabCount = (firstLine.match(/\t/g) || []).length;
+  const commaCount = (firstLine.match(/,/g) || []).length;
+  const separator = tabCount > commaCount ? '\t' : ',';
+  
+  const parseRow = (rowText: string): string[] => {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < rowText.length; i++) {
+      const char = rowText[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === separator && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const headers = parseRow(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  
+  let skuIdx = headers.findIndex(h => h.includes('sku'));
+  let nameIdx = headers.findIndex(h => h.includes('name') || h.includes('title') || h.includes('register') || h.includes('system'));
+  let priceIdx = headers.findIndex(h => h.includes('price') || h.includes('cost') || h.includes('amount'));
+  
+  const startLineIdx = (skuIdx !== -1 || nameIdx !== -1) ? 1 : 0;
+  if (skuIdx === -1) skuIdx = 0;
+  if (nameIdx === -1) nameIdx = 1;
+  if (priceIdx === -1) priceIdx = 2;
+
+  const products: { sku: string; name: string; price: string | null }[] = [];
+  
+  for (let i = startLineIdx; i < lines.length; i++) {
+    const cols = parseRow(lines[i]);
+    if (cols.length <= Math.max(skuIdx, nameIdx)) continue;
+    
+    const sku = cols[skuIdx];
+    const name = cols[nameIdx];
+    
+    let price: string | null = null;
+    if (priceIdx !== -1 && cols.length > priceIdx) {
+      const cleaned = cols[priceIdx].replace(/[$\s,]/g, '');
+      if (cleaned && !isNaN(Number(cleaned))) {
+        price = cleaned;
+      }
+    }
+    
+    if (sku && name) {
+      products.push({ sku, name, price });
+    }
+  }
+  
+  return products;
+}
+
 interface Props {
   onSelectProduct: (sku: string) => void;
   onShowChangeSets: () => void;
@@ -233,6 +428,66 @@ interface Props {
 export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
   const [products, setProducts] = useState<ProductIndexItem[]>([]);
   const [search, setSearch] = useState('');
+  
+  // Bulk import states
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [importPreview, setImportPreview] = useState<Array<{ sku: string; name: string; price: string | null }>>([]);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<any | null>(null);
+
+  // Parse CSV/TSV data
+  useEffect(() => {
+    if (!importText) {
+      setImportPreview([]);
+      return;
+    }
+    try {
+      const parsed = parseCsvOrTsv(importText);
+      setImportPreview(parsed);
+    } catch (e) {
+      console.error(e);
+      setImportPreview([]);
+    }
+  }, [importText]);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      if (text) {
+        setImportText(text);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleExecuteImport = async () => {
+    if (importPreview.length === 0) return;
+    setImporting(true);
+    setError('');
+    try {
+      const res = await bulkImportProducts(importPreview);
+      setImportResult(res);
+      fetchProducts(1, status, activeSearch, pageSize);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const resetImport = () => {
+    setImportText('');
+    setImportPreview([]);
+    setImportResult(null);
+    setShowImportModal(false);
+    setError('');
+  };
+
   const [activeSearch, setActiveSearch] = useState('');
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
@@ -361,7 +616,10 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
       <style>{STYLE_RULES}</style>
       <div style={styles.header}>
         <h1 style={styles.title}>Products</h1>
-        <button style={styles.navBtn} onClick={onShowChangeSets}>Change Sets</button>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button style={{ ...styles.navBtn, background: '#2563eb' }} onClick={() => setShowImportModal(true)}>Bulk Import</button>
+          <button style={styles.navBtn} onClick={onShowChangeSets}>Change Sets</button>
+        </div>
       </div>
 
       <div style={styles.controlsRow}>
@@ -572,6 +830,157 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
             </div>
           </div>
         </>
+      )}
+
+      {showImportModal && (
+        <div className="modal-backdrop" onClick={resetImport}>
+          <div className="modal-container" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Bulk Import Products</h3>
+              <button className="modal-close-btn" onClick={resetImport}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            
+            <div className="modal-body">
+              {!importResult ? (
+                <>
+                  <p style={{ margin: 0, fontSize: 13, color: '#4b5563', lineHeight: 1.5 }}>
+                    Copy and paste tab-separated rows from Excel/Google Sheets, or paste comma-separated CSV rows. 
+                    Columns must include <strong>SKU</strong>, <strong>Name</strong>, and optionally <strong>Price</strong>.
+                  </p>
+                  
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <label className="import-file-label">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="17 8 12 3 7 8" />
+                        <line x1="12" y1="3" x2="12" y2="15" />
+                      </svg>
+                      Upload CSV File
+                      <input 
+                        type="file" 
+                        accept=".csv,.txt,.tsv" 
+                        onChange={handleFileUpload} 
+                        style={{ display: 'none' }} 
+                      />
+                    </label>
+                    {importPreview.length > 0 && (
+                      <span style={{ fontSize: 12, fontWeight: 600, color: '#16a34a' }}>
+                        ✓ {importPreview.length} products parsed
+                      </span>
+                    )}
+                  </div>
+
+                  <textarea
+                    className="textarea-import"
+                    placeholder="SKU,Name,Price&#10;NEW-SKU-1,My Product Name,29.99&#10;NEW-SKU-2,Another Product,14.50"
+                    value={importText}
+                    onChange={e => setImportText(e.target.value)}
+                  />
+
+                  {importPreview.length > 0 && (
+                    <div>
+                      <h4 style={{ margin: '0 0 8px 0', fontSize: 13, fontWeight: 600, color: '#1e293b' }}>Import Preview (First 5 items)</h4>
+                      <div className="preview-container">
+                        <table className="preview-table">
+                          <thead>
+                            <tr>
+                              <th>SKU</th>
+                              <th>Name</th>
+                              <th>Price</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importPreview.slice(0, 5).map((item, idx) => (
+                              <tr key={idx}>
+                                <td style={{ fontFamily: 'monospace' }}>{item.sku}</td>
+                                <td>{item.name}</td>
+                                <td>{item.price ? `$${item.price}` : '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {error && <div style={{ color: '#dc2626', fontSize: 13, background: '#fef2f2', padding: 10, borderRadius: 6 }}>{error}</div>}
+                </>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: '#16a34a' }}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                      <polyline points="22 4 12 14.01 9 11.01" />
+                    </svg>
+                    <h3 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>Bulk Import Completed!</h3>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, background: '#f8fafc', padding: 16, borderRadius: 8 }}>
+                    <div>
+                      <span style={{ fontSize: 12, color: '#64748b', display: 'block' }}>Imported Successfully</span>
+                      <strong style={{ fontSize: 20, color: '#16a34a' }}>{importResult.imported.length} products</strong>
+                    </div>
+                    <div>
+                      <span style={{ fontSize: 12, color: '#64748b', display: 'block' }}>Skipped (Existing / Invalid)</span>
+                      <strong style={{ fontSize: 20, color: importResult.skipped.length > 0 ? '#f59e0b' : '#64748b' }}>{importResult.skipped.length} skipped</strong>
+                    </div>
+                  </div>
+
+                  {importResult.skipped.length > 0 && (
+                    <div>
+                      <h4 style={{ margin: '0 0 8px 0', fontSize: 13, fontWeight: 600, color: '#e11d48' }}>Skipped Items</h4>
+                      <div className="preview-container" style={{ maxHeight: 150 }}>
+                        <table className="preview-table">
+                          <thead>
+                            <tr>
+                              <th>SKU</th>
+                              <th>Reason</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importResult.skipped.map((skip: any, idx: number) => (
+                              <tr key={idx}>
+                                <td style={{ fontFamily: 'monospace', color: '#e11d48' }}>{skip.sku}</td>
+                                <td style={{ color: '#64748b' }}>{skip.reason}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  <p style={{ margin: 0, fontSize: 12, color: '#64748b', lineHeight: 1.4 }}>
+                    Drafts have been created in Change Set: <strong>{importResult.changeSetId.slice(0, 8)}</strong>. 
+                    Remember to approve and merge this Change Set to write files, then sync/publish to upload changes to ShopSite.
+                  </p>
+                </div>
+              )}
+            </div>
+            
+            <div className="modal-footer">
+              {!importResult ? (
+                <>
+                  <button style={{ ...styles.navBtn, margin: 0 }} onClick={resetImport} disabled={importing}>Cancel</button>
+                  <button 
+                    style={{ ...styles.button, margin: 0, opacity: importPreview.length === 0 || importing ? 0.6 : 1, cursor: importPreview.length === 0 || importing ? 'not-allowed' : 'pointer' }} 
+                    onClick={handleExecuteImport}
+                    disabled={importPreview.length === 0 || importing}
+                  >
+                    {importing ? 'Importing...' : `Import ${importPreview.length} Products`}
+                  </button>
+                </>
+              ) : (
+                <button style={{ ...styles.button, margin: 0 }} onClick={resetImport}>Done</button>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

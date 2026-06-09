@@ -45,6 +45,19 @@ export function hasBlockers(scopeType: string, scopeId: string): boolean {
   return row.cnt > 0;
 }
 
+export function listValidationResultsByScope(scopeType: string): ValidationResultRow[] {
+  const db = getDb();
+  const rows = db.query(
+    'SELECT * FROM validation_results WHERE scope_type = ? ORDER BY created_at ASC',
+  ).all(scopeType) as Record<string, unknown>[];
+  return rows.map(mapRow);
+}
+
+export function clearValidationResultsForScope(scopeType: string): void {
+  const db = getDb();
+  db.run('DELETE FROM validation_results WHERE scope_type = ?', [scopeType]);
+}
+
 function mapRow(row: Record<string, unknown>): ValidationResultRow {
   return {
     id: String(row.id),
@@ -57,3 +70,4 @@ function mapRow(row: Record<string, unknown>): ValidationResultRow {
     createdAt: String(row.created_at),
   };
 }
+

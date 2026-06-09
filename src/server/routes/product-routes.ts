@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import {
-  getProductWithDraft, listProductIndex, autosaveDraft,
+  getProductWithDraft, listProductIndex, autosaveDraft, bulkImportDrafts,
+  validateCatalogHealth, getCatalogHealthReport,
+  getHealthConfig, saveHealthConfig,
 } from '../services/product-service';
 
 const route = new Hono();
@@ -118,6 +120,110 @@ route.post('/products/:sku/archive', async (c) => {
     return c.json({
       error: `Failed to archive product: ${err instanceof Error ? err.message : String(err)}`,
     }, 500);
+  }
+});
+
+/**
+ * POST /api/products/bulk-import - Bulk import products into the active change set.
+ */
+route.post('/products/bulk-import', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const { products } = body as { products?: any[] };
+
+  if (!products || !Array.isArray(products)) {
+    return c.json({ error: 'Products array is required.' }, 400);
+  }
+
+  try {
+    const result = bulkImportDrafts(
+      workspace.id,
+      workspace.workspacePath,
+      products,
+    );
+    return c.json({
+      success: true,
+      changeSetId: result.changeSetId,
+      imported: result.imported,
+      skipped: result.skipped,
+    });
+  } catch (err) {
+    return c.json({
+      error: `Failed to import products: ${err instanceof Error ? err.message : String(err)}`,
+    }, 500);
+  }
+});
+
+/**
+ * POST /api/catalog/health - Run catalog-wide health check validation.
+ */
+route.post('/catalog/health', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+  try {
+    const report = validateCatalogHealth(workspace.id, workspace.workspacePath);
+    return c.json(report);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * GET /api/catalog/health - Get the current catalog health report.
+ */
+route.get('/catalog/health', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+  try {
+    const report = getCatalogHealthReport();
+    return c.json(report);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * GET /api/catalog/health/config - Retrieve catalog health configuration.
+ */
+route.get('/catalog/health/config', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+  try {
+    const config = getHealthConfig(workspace.workspacePath);
+    return c.json(config);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * POST /api/catalog/health/config - Save catalog health configuration.
+ */
+route.post('/catalog/health/config', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const { rules } = body as { rules?: any[] };
+    if (!rules || !Array.isArray(rules)) {
+      return c.json({ error: 'Rules array is required.' }, 400);
+    }
+    const result = saveHealthConfig(workspace.workspacePath, rules);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
 

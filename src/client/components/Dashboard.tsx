@@ -384,7 +384,7 @@ const STYLE_RULES = `
 `;
 
 interface DashboardProps {
-  onNavigate: (view: 'setup' | 'catalog' | 'changesets' | 'drift' | 'syncjobs') => void;
+  onNavigate: (view: 'setup' | 'catalog' | 'changesets' | 'drift' | 'syncjobs' | 'health') => void;
 }
 
 export function Dashboard({ onNavigate }: DashboardProps) {
@@ -616,6 +616,23 @@ export function Dashboard({ onNavigate }: DashboardProps) {
             <span>{synced} In-Sync</span>
             <span style={{ color: '#d1d5db' }}>•</span>
             <span>{notSynced} Staged</span>
+          </div>
+        </div>
+
+        {/* Catalog Health */}
+        <div className="kpi-card" onClick={() => onNavigate('health')} style={metrics.productsWithWarnings > 0 ? { borderColor: '#fca5a5', background: '#fff5f5' } : {}}>
+          <div className="kpi-icon-container" style={metrics.productsWithWarnings > 0 ? { background: '#fee2e2', color: '#dc2626' } : { background: '#ecfdf5', color: '#10b981' }}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <circle cx="12" cy="12" r="10" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4" />
+            </svg>
+          </div>
+          <div className="kpi-label">Catalog Health</div>
+          <div className="kpi-value" style={metrics.productsWithWarnings > 0 ? { color: '#b91c1c' } : { color: '#047857' }}>
+            {total > 0 ? Math.round(((total - metrics.productsWithWarnings) / total) * 100) : 100}%
+          </div>
+          <div className="kpi-subtext">
+            <span>{metrics.productsWithWarnings} SKU(s) with issues</span>
           </div>
         </div>
 

@@ -11,6 +11,12 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['src/tests/**/*.test.ts', 'src/tests/**/*.test.tsx'],
-    exclude: ['node_modules', 'src/tests/unit/db-migration.test.ts', 'src/tests/integration/phase2-change-set.test.ts', 'src/tests/integration/phase3-sync-drift.test.ts'],
+    exclude: [
+      'node_modules',
+      'src/tests/unit/db-migration.test.ts',
+      'src/tests/unit/catalog-health.test.ts',
+      'src/tests/integration/phase2-change-set.test.ts',
+      'src/tests/integration/phase3-sync-drift.test.ts'
+    ],
   },
 });

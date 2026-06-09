@@ -149,6 +149,19 @@ export function saveDraft(sku: string, changes: Record<string, unknown>, operati
     { method: 'PUT', body: JSON.stringify({ changes, operation }) },
   );
 }
+export interface BulkImportResponse {
+  success: boolean;
+  changeSetId: string;
+  imported: string[];
+  skipped: Array<{ sku: string; reason: string }>;
+}
+export function bulkImportProducts(products: Array<{ sku: string; name: string; price: string | null }>) {
+  return request<BulkImportResponse>('/products/bulk-import', {
+    method: 'POST',
+    body: JSON.stringify({ products }),
+  });
+}
+
 
 // Change Sets
 export function listChangeSets() { return request<{ changeSets: ChangeSet[] }>('/change-sets'); }
@@ -399,4 +412,56 @@ export function bulkResolveDrift(action: 'accept_remote') {
     body: JSON.stringify({ action }),
   });
 }
+
+export interface CatalogHealthIssue {
+  sku: string;
+  title: string;
+  severity: string;
+  code: string;
+  message: string;
+  fieldPath: string | null;
+}
+
+export interface CatalogHealthReport {
+  totalProducts: number;
+  healthyProducts: number;
+  unhealthyProducts: number;
+  totalErrors: number;
+  totalWarnings: number;
+  issues: CatalogHealthIssue[];
+}
+
+export function runCatalogHealthCheck() {
+  return request<CatalogHealthReport>('/catalog/health', { method: 'POST' });
+}
+
+export function getCatalogHealthReport() {
+  return request<CatalogHealthReport>('/catalog/health');
+}
+
+export interface HealthRuleConfig {
+  code: string;
+  name: string;
+  description: string;
+  defaultSeverity: 'blocker' | 'warning' | 'info';
+  severity: 'blocker' | 'warning' | 'info' | 'disabled';
+}
+
+export interface HealthConfig {
+  schemaVersion: number;
+  rules: HealthRuleConfig[];
+}
+
+export function getHealthConfig() {
+  return request<HealthConfig>('/catalog/health/config');
+}
+
+export function saveHealthConfig(rules: HealthRuleConfig[]) {
+  return request<{ success: boolean }>('/catalog/health/config', {
+    method: 'POST',
+    body: JSON.stringify({ rules }),
+  });
+}
+
+
 

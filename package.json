@@ -8,7 +8,7 @@
     "dev": "bun run scripts/dev.ts",
     "build": "vite build && tsc --noEmit",
     "start": "bun run src/server/index.ts",
-    "test": "vitest run && bun test src/tests/unit/db-migration.test.ts src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts",
+    "test": "vitest run && bun test src/tests/unit/db-migration.test.ts src/tests/unit/catalog-health.test.ts src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts",
     "test:watch": "vitest",
     "test:unit": "vitest run",
     "test:db": "bun test src/tests/unit/db-migration.test.ts",
