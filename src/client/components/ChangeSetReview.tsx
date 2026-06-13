@@ -5,10 +5,12 @@ export function ChangeSetReview() {
   const [changeSets, setChangeSets] = useState<ChangeSet[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [items, setItems] = useState<ChangeSetItem[]>([]);
+  const [selectedItemSku, setSelectedItemSku] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [activeAction, setActiveAction] = useState<string | null>(null);
 
   const fetch = async () => {
     try {
@@ -25,6 +27,7 @@ export function ChangeSetReview() {
     setSelected(id);
     setValidation(null);
     setResult('');
+    setSelectedItemSku(null);
     try {
       const res = await getChangeSet(id);
       setItems(res.items);
@@ -37,9 +40,45 @@ export function ChangeSetReview() {
   const isDraft = selectedChangeSet?.status === 'draft';
   const isApproved = selectedChangeSet?.status === 'approved';
 
+  const selectedItem = items.find(i => i.sku === selectedItemSku);
+
+  const flattenObject = (obj: any, prefix = ''): Record<string, any> => {
+    let res: Record<string, any> = {};
+    for (const key in obj) {
+      const propName = prefix ? `${prefix}.${key}` : key;
+      if (typeof obj[key] === 'object' && obj[key] !== null && !Array.isArray(obj[key])) {
+        Object.assign(res, flattenObject(obj[key], propName));
+      } else {
+        res[propName] = obj[key];
+      }
+    }
+    return res;
+  };
+
+  const computeDiff = (base: string | null, draft: string) => {
+    try {
+      const b = base ? JSON.parse(base) : {};
+      const d = JSON.parse(draft);
+      const fb = flattenObject(b);
+      const fd = flattenObject(d);
+      const allKeys = Array.from(new Set([...Object.keys(fb), ...Object.keys(fd)])).sort();
+      return allKeys.map(key => {
+        const bv = fb[key];
+        const dv = fd[key];
+        if (!(key in fb)) return { key, status: 'added', baseVal: undefined, draftVal: dv };
+        if (!(key in fd)) return { key, status: 'removed', baseVal: bv, draftVal: undefined };
+        if (JSON.stringify(bv) !== JSON.stringify(dv)) return { key, status: 'changed', baseVal: bv, draftVal: dv };
+        return null;
+      }).filter(Boolean) as Array<{ key: string; status: 'added' | 'removed' | 'changed'; baseVal: any; draftVal: any }>;
+    } catch (e) {
+      return [];
+    }
+  };
+
   const handleValidate = async () => {
     if (!selected) return;
     setLoading(true);
+    setActiveAction('validate');
     setError('');
     try {
       const res = await validateChangeSet(selected);
@@ -48,12 +87,14 @@ export function ChangeSetReview() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleApprove = async () => {
     if (!selected) return;
     setLoading(true);
+    setActiveAction('approve');
     setError('');
     try {
       const res = await approveChangeSet(selected);
@@ -67,12 +108,14 @@ export function ChangeSetReview() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleExport = async () => {
     if (!selected) return;
     setLoading(true);
+    setActiveAction('export');
     setError('');
     try {
       const res = await exportChangeSet(selected);
@@ -85,12 +128,14 @@ export function ChangeSetReview() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handlePushPublish = async () => {
     if (!selected) return;
     setLoading(true);
+    setActiveAction('pushPublish');
     setError('');
     setResult('');
     try {
@@ -108,12 +153,14 @@ export function ChangeSetReview() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleUploadOnly = async () => {
     if (!selected) return;
     setLoading(true);
+    setActiveAction('uploadOnly');
     setError('');
     setResult('');
     try {
@@ -126,24 +173,28 @@ export function ChangeSetReview() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleDiscard = async () => {
     if (!selected) return;
     setLoading(true);
+    setActiveAction('discard');
     setError('');
     try {
       await discardChangeSet(selected);
       setResult('Change set discarded.');
       setSelected(null);
       setItems([]);
+      setSelectedItemSku(null);
       setValidation(null);
       await fetch();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      setActiveAction(null);
     }
   };
 
@@ -165,6 +216,11 @@ export function ChangeSetReview() {
     error: { color: '#dc2626', padding: 8, background: '#fef2f2', borderRadius: 4, margin: '8px 0', fontSize: 13 },
     result: { color: '#16a34a', padding: 8, background: '#f0fdf4', borderRadius: 4, margin: '8px 0', fontSize: 13, whiteSpace: 'pre-wrap' as any },
     validationBox: { background: '#f9fafb', borderRadius: 4, padding: 12, marginTop: 8, fontSize: 13 },
+    diffContainer: { marginTop: 16, border: '1px solid #e5e7eb', borderRadius: 4, overflow: 'hidden', background: '#fff' },
+    diffLine: { padding: '4px 8px', borderBottom: '1px solid #f3f4f6', fontSize: 12, display: 'flex', gap: 8, fontFamily: 'monospace' },
+    diffAdded: { background: '#f0fdf4', color: '#166534' },
+    diffRemoved: { background: '#fef2f2', color: '#991b1b' },
+    diffChanged: { background: '#fffbeb', color: '#92400e' },
   };
 
   return (
@@ -192,22 +248,43 @@ export function ChangeSetReview() {
           </div>
         </div>
 
-        <div style={{ flex: 2 }}>
+        <div style={{ flex: 3 }}>
           {selected && (
             <div style={styles.detailCard}>
-              <h3 style={{ margin: '0 0 8px' }}>Items ({items.length})</h3>
-              <ul style={{ margin: '0 0 16px', padding: '0 0 0 20px', fontSize: 14 }}>
-                {items.map(i => (
-                  <li key={i.sku}>
-                    <strong>{i.sku}</strong> — {i.operation}
-                    {i.validationStatus !== 'unknown' && (
-                      <span style={{ marginLeft: 8, color: i.validationStatus === 'blocked' ? '#dc2626' : i.validationStatus === 'valid' ? '#16a34a' : '#f59e0b' }}>
-                        [{i.validationStatus}]
-                      </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <h3 style={{ margin: '0 0 4px' }}>{selectedChangeSet?.title}</h3>
+                  <div style={{ fontSize: 12, color: '#6b7280' }}>
+                    Status: <span style={{ fontWeight: 600 }}>{selectedChangeSet?.status}</span> |
+                    Base: <code>{selectedChangeSet?.baseCommit.slice(0, 8)}</code>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {isDraft && (
+                    <>
+                      <button style={{ ...styles.btn, background: '#2563eb', color: '#fff' }} onClick={handleValidate} disabled={loading}>
+                        {activeAction === 'validate' ? 'Validating...' : 'Validate'}
+                      </button>
+                      <button style={{ ...styles.btn, background: '#16a34a', color: '#fff' }} onClick={handleApprove} disabled={loading}>
+                        {activeAction === 'approve' ? 'Approving...' : 'Approve & Commit'}
+                      </button>
+                      <button style={{ ...styles.btn, background: '#dc2626', color: '#fff' }} onClick={handleDiscard} disabled={loading}>
+                        {activeAction === 'discard' ? 'Discarding...' : 'Discard'}
+                      </button>
+                    </>
+                  )}
+                  {isApproved && (
+                    <>
+                      <button style={{ ...styles.btn, background: '#7c3aed', color: '#fff' }} onClick={handleExport} disabled={loading}>
+                        {activeAction === 'export' ? 'Exporting...' : 'Export Package'}
+                      </button>
+                      <button style={{ ...styles.btn, background: '#059669', color: '#fff' }} onClick={handlePushPublish} disabled={loading}>
+                        {activeAction === 'pushPublish' ? 'Publishing...' : 'Push & Publish'}
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
 
               {validation && (
                 <div style={styles.validationBox}>
@@ -226,36 +303,79 @@ export function ChangeSetReview() {
                 </div>
               )}
 
-              <div style={{ marginTop: 12, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                {isDraft && (
-                  <>
-                    <button style={{ ...styles.btn, background: '#2563eb', color: '#fff' }} onClick={handleValidate} disabled={loading}>
-                      {loading ? '...' : 'Validate'}
-                    </button>
-                    <button style={{ ...styles.btn, background: '#16a34a', color: '#fff' }} onClick={handleApprove} disabled={loading}>
-                      Approve & Commit
-                    </button>
-                    <button style={{ ...styles.btn, background: '#dc2626', color: '#fff' }} onClick={handleDiscard} disabled={loading}>
-                      Discard
-                    </button>
-                  </>
-                )}
-                {isApproved && (
-                  <>
-                    <button style={{ ...styles.btn, background: '#7c3aed', color: '#fff' }} onClick={handleExport} disabled={loading}>
-                      Export Package
-                    </button>
-                    <div style={{ marginTop: 8, padding: '8px 0', borderTop: '1px solid #e5e7eb' }}>
-                      <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>ShopSite Sync (Direct)</div>
-                      <button style={{ ...styles.btn, background: '#059669', color: '#fff' }} onClick={handlePushPublish} disabled={loading}>
-                        Push & Publish
-                      </button>
-                      <button style={{ ...styles.btn, background: '#0284c7', color: '#fff' }} onClick={handleUploadOnly} disabled={loading}>
-                        Upload Only
-                      </button>
+              <div style={{ display: 'flex', gap: 16, marginTop: 16, borderTop: '1px solid #e5e7eb', paddingTop: 16 }}>
+                <div style={{ width: 240, borderRight: '1px solid #e5e7eb', paddingRight: 16 }}>
+                  <h4 style={{ margin: '0 0 8px', fontSize: 13 }}>Modified Items ({items.length})</h4>
+                  <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                    {items.map(i => (
+                      <div
+                        key={i.sku}
+                        onClick={() => setSelectedItemSku(i.sku)}
+                        style={{
+                          padding: '8px 12px',
+                          cursor: 'pointer',
+                          borderRadius: 4,
+                          fontSize: 13,
+                          marginBottom: 2,
+                          background: selectedItemSku === i.sku ? '#eff6ff' : 'transparent',
+                          border: selectedItemSku === i.sku ? '1px solid #bfdbfe' : '1px solid transparent'
+                        }}
+                      >
+                        <div style={{ fontWeight: 600 }}>{i.sku}</div>
+                        <div style={{ fontSize: 11, color: '#6b7280' }}>
+                          {i.operation}
+                          {i.validationStatus !== 'unknown' && (
+                            <span style={{ marginLeft: 4, color: i.validationStatus === 'blocked' ? '#dc2626' : i.validationStatus === 'valid' ? '#16a34a' : '#f59e0b' }}>
+                              [{i.validationStatus}]
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ flex: 1 }}>
+                  {selectedItem ? (
+                    <div>
+                      <h4 style={{ margin: '0 0 8px', fontSize: 13 }}>Changes for <strong>{selectedItem.sku}</strong></h4>
+                      <div style={styles.diffContainer}>
+                        {selectedItem.operation === 'create' && <div style={{...styles.diffLine, ...styles.diffAdded}}>+ (New Product)</div>}
+                        {selectedItem.operation === 'archive' && <div style={{...styles.diffLine, ...styles.diffRemoved}}>- (Archived Product)</div>}
+                        
+                        {computeDiff(selectedItem.baseJson, selectedItem.draftJson).map(diff => (
+                          <div key={diff.key} style={{
+                            ...styles.diffLine,
+                            ...(diff.status === 'added' ? styles.diffAdded : diff.status === 'removed' ? styles.diffRemoved : styles.diffChanged)
+                          }}>
+                            <span style={{ minWidth: 20, textAlign: 'center' }}>
+                              {diff.status === 'added' ? '+' : diff.status === 'removed' ? '-' : '~'}
+                            </span>
+                            <span style={{ fontWeight: 600, color: '#4b5563' }}>{diff.key}:</span>
+                            {diff.status === 'added' && <span>{String(diff.draftVal)}</span>}
+                            {diff.status === 'removed' && <span style={{ textDecoration: 'line-through' }}>{String(diff.baseVal)}</span>}
+                            {diff.status === 'changed' && (
+                              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                <span style={{ textDecoration: 'line-through', opacity: 0.6 }}>{String(diff.baseVal)}</span>
+                                <span>→</span>
+                                <span>{String(diff.draftVal)}</span>
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                        {computeDiff(selectedItem.baseJson, selectedItem.draftJson).length === 0 && (
+                          <div style={{ padding: 16, textAlign: 'center', color: '#9ca3af', fontSize: 12 }}>
+                            No field-level changes detected in JSON.
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </>
-                )}
+                  ) : (
+                    <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#9ca3af', fontSize: 13, border: '1px dashed #e5e7eb', borderRadius: 4 }}>
+                      Select an item to view changes
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

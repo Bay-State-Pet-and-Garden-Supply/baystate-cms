@@ -85,6 +85,7 @@ export interface ChangeSetItem {
   sku: string;
   operation: string;
   draftJson: string;
+  baseJson: string | null;
   validationStatus: string;
 }
 

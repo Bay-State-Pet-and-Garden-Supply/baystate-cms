@@ -131,11 +131,11 @@ export function isDbmakeSuccessful(responseText: string): boolean {
   const body = responseText.trim().toLowerCase();
 
   const hasErrorLike = body.includes('error') || body.includes('failed') || body.includes('fail') || body.includes('exception');
-  const harmlessly = body.includes('no errors') || body.includes('without error') || body.includes('0 errors') || body.includes('0 failures');
+  const harmlessly = body.includes('no errors') || body.includes('without error') || body.includes('0 errors') || body.includes('0 failures') || body.includes('0 failed') || body.includes('0 records failed') || body.includes('0 record failed');
 
   if (hasErrorLike && !harmlessly) {
     // Double-check for strong success signal overriding error
-    const successSignals = ['operation complete', 'successful', 'completed successfully', 'accepted'];
+    const successSignals = ['operation complete', 'successful', 'completed successfully', 'accepted', 'updated database record'];
     if (successSignals.some(s => body.includes(s))) {
       return true;
     }
