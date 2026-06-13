@@ -57,6 +57,7 @@ export interface ProductIndexItem {
   hasWarnings: number;
   createdAt: string;
   updatedAt: string;
+  customFields: Record<string, string>;
 }
 
 export interface ProductDetail {
@@ -133,14 +134,37 @@ export function bootstrapFromPull() { return request<BootstrapResult>('/bootstra
 export function getBootstrapStatus() { return request<{ bootstrapStatus: string; baselineCommit: string | null; error?: string | null }>('/bootstrap/status'); }
 
 // Products
-export function listProducts(status?: string, search?: string, limit?: number, offset?: number) {
+export function listProducts(
+  status?: string,
+  search?: string,
+  limit?: number,
+  offset?: number,
+  minPrice?: string,
+  maxPrice?: string,
+  inventoryStatus?: string,
+  customFilters?: Record<string, string>,
+) {
   const params = new URLSearchParams();
   if (status) params.set('status', status);
   if (search) params.set('search', search);
   if (limit !== undefined) params.set('limit', String(limit));
   if (offset !== undefined) params.set('offset', String(offset));
+  if (minPrice) params.set('minPrice', minPrice);
+  if (maxPrice) params.set('maxPrice', maxPrice);
+  if (inventoryStatus) params.set('inventoryStatus', inventoryStatus);
+  if (customFilters) {
+    for (const [key, val] of Object.entries(customFilters)) {
+      if (val) {
+        params.set(`cf_${key}`, val);
+      }
+    }
+  }
   const qs = params.toString();
   return request<{ products: ProductIndexItem[]; total: number }>(`/products${qs ? '?' + qs : ''}`);
+}
+
+export function getProductFacets() {
+  return request<{ facets: Record<string, { label: string; values: string[] }> }>('/products/facets');
 }
 export function getProduct(sku: string) { return request<ProductDetail>(`/products/${encodeURIComponent(sku)}`); }
 export function saveDraft(sku: string, changes: Record<string, unknown>, operation?: string) {

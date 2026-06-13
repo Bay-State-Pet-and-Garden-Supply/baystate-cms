@@ -9,14 +9,23 @@ export function runMigrations(): void {
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf-8');
   db.exec(sql);
 
-  // Ensure product_index has parent_sku column (migration support for existing databases)
+  // Ensure product_index has parent_sku and search columns (migration support for existing databases)
   try {
     const columns = db.query('PRAGMA table_info(product_index)').all() as Array<{ name: string }>;
     if (!columns.some(col => col.name === 'parent_sku')) {
       db.exec('ALTER TABLE product_index ADD COLUMN parent_sku TEXT REFERENCES product_index(sku);');
     }
+    if (!columns.some(col => col.name === 'description')) {
+      db.exec('ALTER TABLE product_index ADD COLUMN description TEXT;');
+    }
+    if (!columns.some(col => col.name === 'search_keywords')) {
+      db.exec('ALTER TABLE product_index ADD COLUMN search_keywords TEXT;');
+    }
+    if (!columns.some(col => col.name === 'custom_fields')) {
+      db.exec('ALTER TABLE product_index ADD COLUMN custom_fields TEXT;');
+    }
   } catch (e) {
-    console.error('Failed to add parent_sku to product_index:', e);
+    console.error('Failed to update product_index columns:', e);
   }
 
   // Verify migration ran

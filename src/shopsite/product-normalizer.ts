@@ -102,12 +102,30 @@ export function normalizeProduct(
     }
   }
 
-  // Collect unknown preserved elements not already in customFields
+  // Collect additional images (MoreInfoImage1 to MoreInfoImage20)
+  const additionalImages: string[] = [];
+  for (let i = 1; i <= 20; i++) {
+    const key = `MoreInfoImage${i}`;
+    const val = fields[key];
+    if (val && val !== 'none') {
+      additionalImages.push(val);
+    }
+  }
+
+  // Collect unknown preserved elements not already in customFields or MoreInfoImages
   const unknownElements: Record<string, unknown> = {};
   for (const [tag, value] of Object.entries(parsed.unknownElements)) {
-    if (!knownFieldLabels[tag] && !tag.startsWith('ProductField')) {
+    if (
+      !knownFieldLabels[tag] &&
+      !tag.startsWith('ProductField') &&
+      !/^MoreInfoImage\d+$/.test(tag)
+    ) {
       unknownElements[tag] = value;
     }
+  }
+
+  if (moreInfoGraphic && moreInfoGraphic !== 'none' && moreInfoGraphic !== graphic) {
+    unknownElements['MoreInformationGraphic'] = moreInfoGraphic;
   }
 
   const product: Product = {
@@ -130,7 +148,7 @@ export function normalizeProduct(
       taxable,
       media: {
         primary: graphic ?? moreInfoGraphic,
-        additional: [],
+        additional: additionalImages,
       },
       seo: {
         fileName: null,

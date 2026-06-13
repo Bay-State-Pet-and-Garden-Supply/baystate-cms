@@ -61,6 +61,10 @@ export function listProductIndex(filter?: {
   search?: string;
   limit?: number;
   offset?: number;
+  minPrice?: string;
+  maxPrice?: string;
+  inventoryStatus?: string;
+  customFilters?: Record<string, string>;
 }): { products: ProductIndexRow[]; total: number } {
   return listProducts(filter);
 }

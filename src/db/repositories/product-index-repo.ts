@@ -19,6 +19,9 @@ export interface ProductIndexRow {
   hasWarnings: number;
   createdAt: string;
   updatedAt: string;
+  description?: string | null;
+  searchKeywords?: string | null;
+  customFields?: Record<string, string>;
 }
 
 export function findProductBySku(sku: string): ProductIndexRow | null {
@@ -33,19 +36,64 @@ export function listProducts(filter?: {
   search?: string;
   limit?: number;
   offset?: number;
+  minPrice?: string;
+  maxPrice?: string;
+  inventoryStatus?: string;
+  customFilters?: Record<string, string>;
 }): { products: ProductIndexRow[]; total: number } {
   const db = getDb();
   let whereSql = '';
   const conditions: string[] = [];
   const p: (string | number | null)[] = [];
 
+  // Enabled / Disabled / Custom Status
   if (filter?.status) {
-    conditions.push('status = ?');
-    p.push(filter.status);
+    if (filter.status === 'enabled') {
+      conditions.push("status = 'active'");
+    } else if (filter.status === 'disabled') {
+      conditions.push("status IN ('draft', 'archived')");
+    } else {
+      conditions.push('status = ?');
+      p.push(filter.status);
+    }
   }
+
+  // Advanced Search (SKU, Title, Description, Keywords, Custom Fields JSON)
   if (filter?.search) {
-    conditions.push('(sku LIKE ? OR title LIKE ?)');
-    p.push(`%${filter.search}%`, `%${filter.search}%`);
+    conditions.push('(sku LIKE ? OR title LIKE ? OR description LIKE ? OR search_keywords LIKE ? OR custom_fields LIKE ?)');
+    const term = `%${filter.search}%`;
+    p.push(term, term, term, term, term);
+  }
+
+  // Price Range
+  if (filter?.minPrice) {
+    conditions.push('CAST(price AS REAL) >= ?');
+    p.push(Number(filter.minPrice));
+  }
+  if (filter?.maxPrice) {
+    conditions.push('CAST(price AS REAL) <= ?');
+    p.push(Number(filter.maxPrice));
+  }
+
+  // Inventory Status
+  if (filter?.inventoryStatus) {
+    if (filter.inventoryStatus === 'in_stock') {
+      conditions.push('inventory_quantity > 0');
+    } else if (filter.inventoryStatus === 'out_of_stock') {
+      conditions.push('(inventory_quantity IS NULL OR inventory_quantity <= 0)');
+    } else if (filter.inventoryStatus === 'low_stock') {
+      conditions.push('inventory_quantity > 0 AND inventory_quantity <= 5');
+    }
+  }
+
+  // Custom Field Filters (e.g. Brand)
+  if (filter?.customFilters) {
+    for (const [field, val] of Object.entries(filter.customFilters)) {
+      if (val && /^[a-zA-Z0-9_]+$/.test(field)) {
+        conditions.push(`json_extract(custom_fields, '$.${field}') LIKE ?`);
+        p.push(`%${val}%`);
+      }
+    }
   }
 
   if (conditions.length > 0) {
@@ -81,14 +129,17 @@ export function insertProductIndex(row: ProductIndexRow): void {
   db.run(
     `INSERT INTO product_index (id, sku, file_path, title, status, price, inventory_quantity, primary_image,
        product_hash, last_approved_commit, last_pulled_remote_hash, last_synced_remote_hash,
-       last_synced_at, sync_status, has_advanced_blocks, has_warnings, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       last_synced_at, sync_status, has_advanced_blocks, has_warnings, created_at, updated_at,
+       description, search_keywords, custom_fields)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       row.id, row.sku, row.filePath, row.title, row.status, row.price,
       row.inventoryQuantity, row.primaryImage, row.productHash,
       row.lastApprovedCommit, row.lastPulledRemoteHash, row.lastSyncedRemoteHash,
       row.lastSyncedAt, row.syncStatus, row.hasAdvancedBlocks, row.hasWarnings,
       row.createdAt, row.updatedAt,
+      row.description ?? null, row.searchKeywords ?? null,
+      row.customFields ? JSON.stringify(row.customFields) : null,
     ],
   );
 }
@@ -119,6 +170,9 @@ export function updateProductIndex(row: Partial<ProductIndexRow> & { sku: string
   if (row.syncStatus !== undefined) { sets.push('sync_status = ?'); params.push(row.syncStatus); }
   if (row.hasAdvancedBlocks !== undefined) { sets.push('has_advanced_blocks = ?'); params.push(row.hasAdvancedBlocks); }
   if (row.hasWarnings !== undefined) { sets.push('has_warnings = ?'); params.push(row.hasWarnings); }
+  if (row.description !== undefined) { sets.push('description = ?'); params.push(row.description); }
+  if (row.searchKeywords !== undefined) { sets.push('search_keywords = ?'); params.push(row.searchKeywords); }
+  if (row.customFields !== undefined) { sets.push('custom_fields = ?'); params.push(row.customFields ? JSON.stringify(row.customFields) : null); }
 
   params.push(row.sku);
   db.run(`UPDATE product_index SET ${sets.join(', ')} WHERE sku = ?`, params);
@@ -130,6 +184,15 @@ export function deleteProductIndex(sku: string): void {
 }
 
 function mapRow(row: Record<string, unknown>): ProductIndexRow {
+  let customFieldsObj: Record<string, string> = {};
+  if (row.custom_fields) {
+    try {
+      customFieldsObj = JSON.parse(String(row.custom_fields));
+    } catch {
+      // fallback
+    }
+  }
+
   return {
     id: String(row.id),
     sku: String(row.sku),
@@ -149,5 +212,8 @@ function mapRow(row: Record<string, unknown>): ProductIndexRow {
     hasWarnings: Number(row.has_warnings),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+    description: row.description ? String(row.description) : null,
+    searchKeywords: row.search_keywords ? String(row.search_keywords) : null,
+    customFields: customFieldsObj,
   };
 }

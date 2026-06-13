@@ -149,6 +149,9 @@ export function acceptRemoteForDrift(workspacePath: string, drift: DriftRow): Ac
       lastSyncedAt: new Date().toISOString(),
       syncStatus: 'synced',
       hasAdvancedBlocks: Object.keys(remoteProduct.shopsite.preserved.advancedBlocks).length > 0 ? 1 : 0,
+      description: remoteProduct.core.description,
+      searchKeywords: remoteProduct.core.seo.searchKeywords,
+      customFields: remoteProduct.customFields,
     });
   } else {
     insertProductIndex({
@@ -170,6 +173,9 @@ export function acceptRemoteForDrift(workspacePath: string, drift: DriftRow): Ac
       hasWarnings: 0,
       createdAt: remoteProduct.metadata.createdAt,
       updatedAt: remoteProduct.metadata.updatedAt,
+      description: remoteProduct.core.description,
+      searchKeywords: remoteProduct.core.seo.searchKeywords,
+      customFields: remoteProduct.customFields,
     });
   }
 

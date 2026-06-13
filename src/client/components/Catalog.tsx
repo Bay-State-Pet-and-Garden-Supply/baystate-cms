@@ -1,7 +1,147 @@
 import React, { useState, useEffect } from 'react';
-import { listProducts, getConnection, bulkImportProducts, type ProductIndexItem } from '../api';
+import { listProducts, getConnection, bulkImportProducts, getProductFacets, type ProductIndexItem } from '../api';
 
 const STYLE_RULES = `
+  .catalog-layout {
+    display: flex;
+    gap: 28px;
+    align-items: flex-start;
+    margin-top: 24px;
+  }
+  .catalog-sidebar {
+    width: 280px;
+    flex-shrink: 0;
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    position: sticky;
+    top: 24px;
+  }
+  .catalog-main {
+    flex-grow: 1;
+    min-width: 0;
+  }
+  .filter-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .filter-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #475569;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0;
+  }
+  .price-range-inputs {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .price-input {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 13px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    outline: none;
+    transition: all 0.15s ease;
+  }
+  .price-input:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  }
+  .active-filters-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+    align-items: center;
+    background: #f8fafc;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid #e2e8f0;
+  }
+  .filter-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid #bfdbfe;
+    padding: 4px 10px;
+    border-radius: 9999px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .filter-badge:hover {
+    background: #dbeafe;
+    border-color: #93c5fd;
+  }
+  .filter-badge-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: rgba(29, 78, 216, 0.1);
+    color: #1d4ed8;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .filter-badge:hover .filter-badge-close {
+    background: rgba(29, 78, 216, 0.2);
+  }
+  .clear-all-btn {
+    background: none;
+    border: none;
+    color: #ef4444;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: background 0.15s;
+  }
+  .clear-all-btn:hover {
+    background: #fef2f2;
+  }
+  .sidebar-input {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 13px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    outline: none;
+    transition: all 0.15s ease;
+  }
+  .sidebar-input:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  }
+  .sidebar-select {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 13px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    outline: none;
+    background-color: #ffffff;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .sidebar-select:focus {
+    border-color: #2563eb;
+  }
   .catalog-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -429,6 +569,16 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
   const [products, setProducts] = useState<ProductIndexItem[]>([]);
   const [search, setSearch] = useState('');
   
+  // Advanced Filter States
+  const [activeSearch, setActiveSearch] = useState('');
+  const [status, setStatus] = useState('');
+  const [minPrice, setMinPrice] = useState('');
+  const [maxPrice, setMaxPrice] = useState('');
+  const [inventoryStatus, setInventoryStatus] = useState('');
+  const [customFilters, setCustomFilters] = useState<Record<string, string>>({});
+  const [facets, setFacets] = useState<Record<string, { label: string; values: string[] }>>({});
+  const [facetsLoading, setFacetsLoading] = useState(false);
+
   // Bulk import states
   const [showImportModal, setShowImportModal] = useState(false);
   const [importText, setImportText] = useState('');
@@ -472,7 +622,7 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
     try {
       const res = await bulkImportProducts(importPreview);
       setImportResult(res);
-      fetchProducts(1, status, activeSearch, pageSize);
+      fetchProducts(1, status, activeSearch, pageSize, minPrice, maxPrice, inventoryStatus, customFilters);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -488,8 +638,6 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
     setError('');
   };
 
-  const [activeSearch, setActiveSearch] = useState('');
-  const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -507,12 +655,45 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
   const [pageSize, setPageSize] = useState(50);
   const [total, setTotal] = useState(0);
 
-  const fetchProducts = async (currentPage: number, currentStatus: string, currentSearch: string, limit: number) => {
+  // Load Facets on Mount
+  useEffect(() => {
+    setFacetsLoading(true);
+    getProductFacets()
+      .then(res => {
+        setFacets(res.facets);
+      })
+      .catch(err => {
+        console.error('Failed to load facets:', err);
+      })
+      .finally(() => {
+        setFacetsLoading(false);
+      });
+  }, []);
+
+  const fetchProducts = async (
+    currentPage: number,
+    currentStatus: string,
+    currentSearch: string,
+    limit: number,
+    minP: string,
+    maxP: string,
+    invStatus: string,
+    cFilters: Record<string, string>
+  ) => {
     setLoading(true);
     setError('');
     try {
       const offset = (currentPage - 1) * limit;
-      const res = await listProducts(currentStatus || undefined, currentSearch || undefined, limit, offset);
+      const res = await listProducts(
+        currentStatus || undefined,
+        currentSearch || undefined,
+        limit,
+        offset,
+        minP || undefined,
+        maxP || undefined,
+        invStatus || undefined,
+        cFilters
+      );
       setProducts(res.products);
       setTotal(res.total);
     } catch (err) {
@@ -542,8 +723,8 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
   }, []);
 
   useEffect(() => {
-    fetchProducts(page, status, activeSearch, pageSize);
-  }, [page, status, activeSearch, pageSize]);
+    fetchProducts(page, status, activeSearch, pageSize, minPrice, maxPrice, inventoryStatus, customFilters);
+  }, [page, status, activeSearch, pageSize, minPrice, maxPrice, inventoryStatus, customFilters]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -583,14 +764,96 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
     localStorage.setItem('shopsite_media_url', url);
   };
 
+  const handleResetAll = () => {
+    setSearch('');
+    setActiveSearch('');
+    setStatus('');
+    setMinPrice('');
+    setMaxPrice('');
+    setInventoryStatus('');
+    setCustomFilters({});
+    setPage(1);
+  };
+
+  const renderActiveFilterBadges = () => {
+    const badges: React.ReactNode[] = [];
+
+    if (activeSearch) {
+      badges.push(
+        <div key="search" className="filter-badge" onClick={() => { setSearch(''); setActiveSearch(''); setPage(1); }}>
+          Search: "{activeSearch}"
+          <span className="filter-badge-close">×</span>
+        </div>
+      );
+    }
+    if (status) {
+      let label = status;
+      if (status === 'enabled') label = 'Enabled';
+      if (status === 'disabled') label = 'Disabled';
+      if (status === 'active') label = 'Active';
+      if (status === 'draft') label = 'Draft';
+      if (status === 'archived') label = 'Archived';
+      badges.push(
+        <div key="status" className="filter-badge" onClick={() => { setStatus(''); setPage(1); }}>
+          Status: {label}
+          <span className="filter-badge-close">×</span>
+        </div>
+      );
+    }
+    if (minPrice || maxPrice) {
+      badges.push(
+        <div key="price" className="filter-badge" onClick={() => { setMinPrice(''); setMaxPrice(''); setPage(1); }}>
+          Price: ${minPrice || '0'} – ${maxPrice || '∞'}
+          <span className="filter-badge-close">×</span>
+        </div>
+      );
+    }
+    if (inventoryStatus) {
+      let label = 'All';
+      if (inventoryStatus === 'in_stock') label = 'In Stock';
+      if (inventoryStatus === 'out_of_stock') label = 'Out of Stock';
+      if (inventoryStatus === 'low_stock') label = 'Low Stock';
+      badges.push(
+        <div key="inventory" className="filter-badge" onClick={() => { setInventoryStatus(''); setPage(1); }}>
+          Stock: {label}
+          <span className="filter-badge-close">×</span>
+        </div>
+      );
+    }
+    Object.entries(customFilters).forEach(([field, val]) => {
+      const fieldLabel = facets[field]?.label || field;
+      badges.push(
+        <div key={field} className="filter-badge" onClick={() => {
+          setCustomFilters(prev => {
+            const next = { ...prev };
+            delete next[field];
+            return next;
+          });
+          setPage(1);
+        }}>
+          {fieldLabel}: {val}
+          <span className="filter-badge-close">×</span>
+        </div>
+      );
+    });
+
+    if (badges.length === 0) return null;
+
+    return (
+      <div className="active-filters-bar">
+        <span style={{ fontSize: 13, color: '#64748b', fontWeight: 600, marginRight: 8 }}>Active Filters:</span>
+        {badges}
+        <button type="button" className="clear-all-btn" onClick={handleResetAll}>Clear All</button>
+      </div>
+    );
+  };
+
   const styles: Record<string, React.CSSProperties> = {
     container: { padding: 24 },
     header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
     title: { fontSize: 24, fontWeight: 600 },
-    controlsRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, marginBottom: 20, flexWrap: 'wrap' as any },
-    searchForm: { display: 'flex', gap: 8, flex: 1, minWidth: 280 },
+    controlsRow: { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 16, marginBottom: 16 },
     rightControls: { display: 'flex', gap: 12, alignItems: 'center' },
-    input: { padding: '6px 12px', fontSize: 14, border: '1px solid #ccc', borderRadius: 4, flex: 1 },
     select: { padding: '6px 12px', fontSize: 14, border: '1px solid #ccc', borderRadius: 4 },
     button: { padding: '6px 16px', fontSize: 14, cursor: 'pointer', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 4 },
     table: { width: '100%', borderCollapse: 'collapse' as any },
@@ -622,215 +885,334 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
         </div>
       </div>
 
-      <div style={styles.controlsRow}>
-        <form style={styles.searchForm} onSubmit={handleSearch}>
-          <input
-            style={styles.input}
-            placeholder="Search by SKU or name..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
-          <select style={styles.select} value={status} onChange={e => handleStatusChange(e.target.value)}>
-            <option value="">All Status</option>
-            <option value="active">Active</option>
-            <option value="draft">Draft</option>
-            <option value="archived">Archived</option>
-          </select>
-          <button style={styles.button} type="submit">Search</button>
-        </form>
-
-        <div style={styles.rightControls}>
-          <div className="view-toggle-container">
-            <button
-              type="button"
-              className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
-              onClick={() => handleViewModeChange('grid')}
-              title="Storefront Grid"
-              style={{ padding: '6px 10px' }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="7" height="7" />
-                <rect x="14" y="3" width="7" height="7" />
-                <rect x="14" y="14" width="7" height="7" />
-                <rect x="3" y="14" width="7" height="7" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className={`view-toggle-btn ${viewMode === 'list' ? 'active' : ''}`}
-              onClick={() => handleViewModeChange('list')}
-              title="Table List"
-              style={{ padding: '6px 10px' }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="8" y1="6" x2="21" y2="6" />
-                <line x1="8" y1="12" x2="21" y2="12" />
-                <line x1="8" y1="18" x2="21" y2="18" />
-                <line x1="3" y1="6" x2="3.01" y2="6" />
-                <line x1="3" y1="12" x2="3.01" y2="12" />
-                <line x1="3" y1="18" x2="3.01" y2="18" />
-              </svg>
-            </button>
-          </div>
-
-          <div style={{ position: 'relative' }}>
-            <button
-              type="button"
-              onClick={() => setShowSettings(!showSettings)}
-              className="cog-btn"
-              title="Media Settings"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
-
-            {showSettings && (
-              <div className="settings-popover">
-                <h4 style={{ margin: '0 0 8px 0', fontSize: 13, fontWeight: 600, color: '#1e293b' }}>Media Settings</h4>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <label style={{ fontSize: 11, fontWeight: 500, color: '#64748b' }}>Media Base URL</label>
-                  <input
-                    className="media-url-input"
-                    type="text"
-                    placeholder="e.g. https://store.example.com/media/"
-                    value={mediaUrl}
-                    onChange={e => handleMediaUrlChange(e.target.value)}
-                    style={{ fontSize: 12, padding: '6px 8px' }}
-                  />
-                  {!mediaUrl && (
-                    <span style={{ fontSize: 10, color: '#f59e0b' }}>⚠️ Set URL to load product images</span>
-                  )}
-                </div>
-              </div>
+      <div className="catalog-layout">
+        {/* Left-hand Sidebar for Filters */}
+        <aside className="catalog-sidebar">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>
+            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: '#0f172a' }}>Filters</h3>
+            {(activeSearch || status || minPrice || maxPrice || inventoryStatus || Object.keys(customFilters).length > 0) && (
+              <button type="button" className="clear-all-btn" style={{ padding: 0 }} onClick={handleResetAll}>Clear all</button>
             )}
           </div>
-        </div>
-      </div>
 
-      {error && <div style={styles.error}>{error}</div>}
+          {/* Text Search */}
+          <div className="filter-section">
+            <label className="filter-title">Search</label>
+            <form onSubmit={handleSearch} style={{ display: 'flex', gap: 6 }}>
+              <input
+                className="sidebar-input"
+                placeholder="Search name, SKU, desc..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+              <button style={{ ...styles.button, padding: '8px 12px', borderRadius: 8 }} type="submit">Search</button>
+            </form>
+          </div>
 
-      {loading ? (
-        <div style={styles.loading}>Loading products...</div>
-      ) : products.length === 0 ? (
-        <div style={styles.empty}>
-          <p>No products found.</p>
-          <p>Use the Setup link at the top to import products from ShopSite XML.</p>
-        </div>
-      ) : (
-        <>
-          {viewMode === 'grid' ? (
-            <div className="catalog-grid">
-              {products.map(p => (
-                <div key={p.sku} className="product-card" onClick={() => onSelectProduct(p.sku)}>
-                  <div className="card-badge-container">
-                    <span className="card-badge" style={{
-                      background: p.status === 'active' ? '#16a34a' : p.status === 'draft' ? '#f59e0b' : '#6b7280',
-                    }}>
-                      {p.status}
-                    </span>
-                  </div>
-                  <div className="card-badge-right-container">
-                    <span className="card-badge" style={{
-                      background: p.syncStatus === 'synced' ? '#16a34a' : p.syncStatus === 'pending' ? '#f59e0b' : p.syncStatus === 'failed' ? '#dc2626' : '#9ca3af',
-                    }}>
-                      {p.syncStatus}
-                    </span>
-                  </div>
-                  <div className="card-image-container">
-                    <ProductImage
-                      src={p.primaryImage ? (mediaUrl ? (mediaUrl.endsWith('/') ? mediaUrl : mediaUrl + '/') + p.primaryImage : '') : ''}
-                      alt={decodeHtmlEntities(p.title)}
-                      title={decodeHtmlEntities(p.title)}
-                    />
-                  </div>
-                  <div className="card-content">
-                    <div className="card-sku">{p.sku}</div>
-                    <h3 className="card-title" title={decodeHtmlEntities(p.title)}>{decodeHtmlEntities(p.title)}</h3>
-                    <div className="card-footer">
-                      <span className="card-price">{p.price ? `$${p.price}` : '—'}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>SKU</th>
-                  <th style={styles.th}>Name</th>
-                  <th style={styles.th}>Price</th>
-                  <th style={styles.th}>Status</th>
-                  <th style={styles.th}>Sync</th>
-                </tr>
-              </thead>
-              <tbody>
-                {products.map(p => (
-                  <tr key={p.sku} style={styles.row} onClick={() => onSelectProduct(p.sku)}>
-                    <td style={styles.td}><strong>{p.sku}</strong></td>
-                    <td style={styles.td}>{decodeHtmlEntities(p.title)}</td>
-                    <td style={styles.td}>{p.price ? `$${p.price}` : '-'}</td>
-                    <td style={styles.td}>
-                      <span style={{
-                        ...styles.badge,
-                        background: p.status === 'active' ? '#16a34a' : p.status === 'draft' ? '#f59e0b' : '#6b7280',
-                      }}>
-                        {p.status}
-                      </span>
-                    </td>
-                    <td style={styles.td}>
-                      <span style={{
-                        ...styles.badge,
-                        background: p.syncStatus === 'synced' ? '#16a34a' : p.syncStatus === 'pending' ? '#f59e0b' : p.syncStatus === 'failed' ? '#dc2626' : '#9ca3af',
-                      }}>
-                        {p.syncStatus}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          {/* Status filter */}
+          <div className="filter-section">
+            <label className="filter-title">Status</label>
+            <select className="sidebar-select" value={status} onChange={e => handleStatusChange(e.target.value)}>
+              <option value="">All Statuses</option>
+              <option value="enabled">Enabled Only</option>
+              <option value="disabled">Disabled Only</option>
+              <option value="active">Active (Enabled)</option>
+              <option value="draft">Draft (Disabled)</option>
+              <option value="archived">Archived (Disabled)</option>
+            </select>
+          </div>
 
-          <div style={styles.pagination}>
-            <div style={styles.paginationInfo}>
-              Showing {Math.min((page - 1) * pageSize + 1, total)} to {Math.min(page * pageSize, total)} of {total} products
-            </div>
-            <div style={styles.paginationControls}>
-              <button 
-                type="button"
-                style={{ ...styles.pageBtn, opacity: page === 1 ? 0.5 : 1, cursor: page === 1 ? 'not-allowed' : 'pointer' }}
-                onClick={handlePrevPage}
-                disabled={page === 1}
-              >
-                Previous
-              </button>
-              <span style={styles.pageIndicator}>Page {page} of {totalPages}</span>
-              <button 
-                type="button"
-                style={{ ...styles.pageBtn, opacity: page >= totalPages ? 0.5 : 1, cursor: page >= totalPages ? 'not-allowed' : 'pointer' }}
-                onClick={handleNextPage}
-                disabled={page >= totalPages}
-              >
-                Next
-              </button>
-              
-              <select 
-                style={styles.select} 
-                value={pageSize} 
-                onChange={e => handlePageSizeChange(Number(e.target.value))}
-              >
-                <option value={25}>25 per page</option>
-                <option value={50}>50 per page</option>
-                <option value={100}>100 per page</option>
-                <option value={200}>200 per page</option>
-              </select>
+          {/* Price Range */}
+          <div className="filter-section">
+            <label className="filter-title">Price Range</label>
+            <div className="price-range-inputs">
+              <input
+                type="number"
+                className="price-input"
+                placeholder="Min"
+                value={minPrice}
+                onChange={e => { setMinPrice(e.target.value); setPage(1); }}
+              />
+              <span style={{ color: '#94a3b8' }}>–</span>
+              <input
+                type="number"
+                className="price-input"
+                placeholder="Max"
+                value={maxPrice}
+                onChange={e => { setMaxPrice(e.target.value); setPage(1); }}
+              />
             </div>
           </div>
-        </>
-      )}
+
+          {/* Stock Status */}
+          <div className="filter-section">
+            <label className="filter-title">Stock Status</label>
+            <select className="sidebar-select" value={inventoryStatus} onChange={e => { setInventoryStatus(e.target.value); setPage(1); }}>
+              <option value="">All Inventory</option>
+              <option value="in_stock">In Stock Only</option>
+              <option value="out_of_stock">Out of Stock</option>
+              <option value="low_stock">Low Stock (≤ 5)</option>
+            </select>
+          </div>
+
+          {/* Dynamic Facets (Custom Fields) */}
+          {!facetsLoading && Object.entries(facets).map(([xmlField, facet]) => (
+            <div className="filter-section" key={xmlField}>
+              <label className="filter-title">{facet.label}</label>
+              <input
+                className="sidebar-input"
+                placeholder={`Search ${facet.label}...`}
+                value={customFilters[xmlField] || ''}
+                onChange={e => {
+                  const val = e.target.value;
+                  setCustomFilters(prev => {
+                    const next = { ...prev };
+                    if (val) {
+                      next[xmlField] = val;
+                    } else {
+                      delete next[xmlField];
+                    }
+                    return next;
+                  });
+                  setPage(1);
+                }}
+              />
+            </div>
+          ))}
+          {facetsLoading && <div style={{ fontSize: 12, color: '#94a3b8', textAlign: 'center' }}>Loading fields...</div>}
+        </aside>
+
+        {/* Right-hand side main content area */}
+        <main className="catalog-main">
+          {/* Header Controls (Grid/List Toggle & Media Settings) */}
+          <div style={styles.controlsRow}>
+            <div style={styles.rightControls}>
+              <div className="view-toggle-container">
+                <button
+                  type="button"
+                  className={`view-toggle-btn ${viewMode === 'grid' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('grid')}
+                  title="Storefront Grid"
+                  style={{ padding: '6px 10px' }}
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="7" height="7" />
+                    <rect x="14" y="3" width="7" height="7" />
+                    <rect x="14" y="14" width="7" height="7" />
+                    <rect x="3" y="14" width="7" height="7" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className={`view-toggle-btn ${viewMode === 'list' ? 'active' : ''}`}
+                  onClick={() => handleViewModeChange('list')}
+                  title="Table List"
+                  style={{ padding: '6px 10px' }}
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="8" y1="6" x2="21" y2="6" />
+                    <line x1="8" y1="12" x2="21" y2="12" />
+                    <line x1="8" y1="18" x2="21" y2="18" />
+                    <line x1="3" y1="6" x2="3.01" y2="6" />
+                    <line x1="3" y1="12" x2="3.01" y2="12" />
+                    <line x1="3" y1="18" x2="3.01" y2="18" />
+                  </svg>
+                </button>
+              </div>
+
+              <div style={{ position: 'relative' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="cog-btn"
+                  title="Media Settings"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </button>
+
+                {showSettings && (
+                  <div className="settings-popover">
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: 13, fontWeight: 600, color: '#1e293b' }}>Media Settings</h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <label style={{ fontSize: 11, fontWeight: 500, color: '#64748b' }}>Media Base URL</label>
+                      <input
+                        className="media-url-input"
+                        type="text"
+                        placeholder="e.g. https://store.example.com/media/"
+                        value={mediaUrl}
+                        onChange={e => handleMediaUrlChange(e.target.value)}
+                        style={{ fontSize: 12, padding: '6px 8px' }}
+                      />
+                      {!mediaUrl && (
+                        <span style={{ fontSize: 10, color: '#f59e0b' }}>⚠️ Set URL to load product images</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Active Filter Badges */}
+          {renderActiveFilterBadges()}
+
+          {error && <div style={styles.error}>{error}</div>}
+
+          {loading ? (
+            <div style={styles.loading}>Loading products...</div>
+          ) : products.length === 0 ? (
+            <div style={styles.empty}>
+              <p>No products found matching filters.</p>
+            </div>
+          ) : (
+            <>
+              {viewMode === 'grid' ? (
+                <div className="catalog-grid">
+                  {products.map(p => (
+                    <div key={p.sku} className="product-card" onClick={() => onSelectProduct(p.sku)}>
+                      <div className="card-badge-container">
+                        <span className="card-badge" style={{
+                          background: p.status === 'active' ? '#16a34a' : p.status === 'draft' ? '#f59e0b' : '#6b7280',
+                        }}>
+                          {p.status}
+                        </span>
+                      </div>
+                      <div className="card-badge-right-container">
+                        <span className="card-badge" style={{
+                          background: p.syncStatus === 'synced' ? '#16a34a' : p.syncStatus === 'pending' ? '#f59e0b' : p.syncStatus === 'failed' ? '#dc2626' : '#9ca3af',
+                        }}>
+                          {p.syncStatus}
+                        </span>
+                      </div>
+                      <div className="card-image-container">
+                        <ProductImage
+                          src={p.primaryImage ? (mediaUrl ? (mediaUrl.endsWith('/') ? mediaUrl : mediaUrl + '/') + p.primaryImage : '') : ''}
+                          alt={decodeHtmlEntities(p.title)}
+                          title={decodeHtmlEntities(p.title)}
+                        />
+                      </div>
+                      <div className="card-content">
+                        <div className="card-sku">{p.sku}</div>
+                        <h3 className="card-title" title={decodeHtmlEntities(p.title)}>{decodeHtmlEntities(p.title)}</h3>
+                        {p.customFields && Object.keys(p.customFields).length > 0 && (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+                            {Object.entries(p.customFields)
+                              .filter(([_, val]) => val && val.trim() !== '')
+                              .slice(0, 2)
+                              .map(([field, val]) => {
+                                const fieldLabel = facets[field]?.label || field;
+                                return (
+                                  <span key={field} style={{ fontSize: 10, background: '#f1f5f9', color: '#475569', padding: '2px 6px', borderRadius: 4 }}>
+                                    {fieldLabel}: {val}
+                                  </span>
+                                );
+                              })}
+                          </div>
+                        )}
+                        <div className="card-footer">
+                          <span className="card-price">{p.price ? `$${p.price}` : '—'}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={styles.th}>SKU</th>
+                      <th style={styles.th}>Name</th>
+                      <th style={styles.th}>Price</th>
+                      <th style={styles.th}>Status</th>
+                      <th style={styles.th}>Sync</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {products.map(p => (
+                      <tr key={p.sku} style={styles.row} onClick={() => onSelectProduct(p.sku)}>
+                        <td style={styles.td}><strong>{p.sku}</strong></td>
+                        <td style={styles.td}>
+                          <div>{decodeHtmlEntities(p.title)}</div>
+                          {p.customFields && Object.keys(p.customFields).length > 0 && (
+                            <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                              {Object.entries(p.customFields)
+                                .filter(([_, val]) => val && val.trim() !== '')
+                                .map(([field, val]) => {
+                                  const fieldLabel = facets[field]?.label || field;
+                                  return (
+                                    <span key={field} style={{ fontSize: 10, color: '#64748b' }}>
+                                      <strong>{fieldLabel}:</strong> {val}
+                                    </span>
+                                  );
+                                })}
+                            </div>
+                          )}
+                        </td>
+                        <td style={styles.td}>{p.price ? `$${p.price}` : '-'}</td>
+                        <td style={styles.td}>
+                          <span style={{
+                            ...styles.badge,
+                            background: p.status === 'active' ? '#16a34a' : p.status === 'draft' ? '#f59e0b' : '#6b7280',
+                          }}>
+                            {p.status}
+                          </span>
+                        </td>
+                        <td style={styles.td}>
+                          <span style={{
+                            ...styles.badge,
+                            background: p.syncStatus === 'synced' ? '#16a34a' : p.syncStatus === 'pending' ? '#f59e0b' : p.syncStatus === 'failed' ? '#dc2626' : '#9ca3af',
+                          }}>
+                            {p.syncStatus}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              <div style={styles.pagination}>
+                <div style={styles.paginationInfo}>
+                  Showing {Math.min((page - 1) * pageSize + 1, total)} to {Math.min(page * pageSize, total)} of {total} products
+                </div>
+                <div style={styles.paginationControls}>
+                  <button 
+                    type="button"
+                    style={{ ...styles.pageBtn, opacity: page === 1 ? 0.5 : 1, cursor: page === 1 ? 'not-allowed' : 'pointer' }}
+                    onClick={handlePrevPage}
+                    disabled={page === 1}
+                  >
+                    Previous
+                  </button>
+                  <span style={styles.pageIndicator}>Page {page} of {totalPages}</span>
+                  <button 
+                    type="button"
+                    style={{ ...styles.pageBtn, opacity: page >= totalPages ? 0.5 : 1, cursor: page >= totalPages ? 'not-allowed' : 'pointer' }}
+                    onClick={handleNextPage}
+                    disabled={page >= totalPages}
+                  >
+                    Next
+                  </button>
+                  
+                  <select 
+                    style={styles.select} 
+                    value={pageSize} 
+                    onChange={e => handlePageSizeChange(Number(e.target.value))}
+                  >
+                    <option value={25}>25 per page</option>
+                    <option value={50}>50 per page</option>
+                    <option value={100}>100 per page</option>
+                    <option value={200}>200 per page</option>
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
+        </main>
+      </div>
 
       {showImportModal && (
         <div className="modal-backdrop" onClick={resetImport}>

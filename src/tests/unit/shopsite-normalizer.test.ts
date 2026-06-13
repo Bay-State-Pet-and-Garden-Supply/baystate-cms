@@ -62,6 +62,17 @@ describe('ShopSite Normalization Preservation', () => {
     expect(product.customFields['ProductField1']).toBe('new060624');
     expect(product.customFields['ProductField16']).toBe('Fun Pet Co');
 
+    // Media fields normalized
+    expect(product.core.media.primary).toBe('media/cat-toy.jpg');
+    expect(product.core.media.additional).toEqual([
+      'media/cat-toy-2.jpg',
+      'media/cat-toy-3.jpg',
+    ]);
+
+    // Additional images should be filtered out of unknownElements
+    expect(product.shopsite.preserved.unknownElements['MoreInfoImage1']).toBeUndefined();
+    expect(product.shopsite.preserved.unknownElements['MoreInfoImage2']).toBeUndefined();
+
     // Advanced blocks preserved
     expect(product.shopsite.preserved.advancedBlocks['Subproducts']).toBeTruthy();
     expect(product.shopsite.preserved.advancedBlocks['Subproducts']).toContain('XYZ-789-RED');
@@ -82,6 +93,20 @@ describe('ShopSite Normalization Preservation', () => {
   it('should round-trip product through normalize and denormalize', () => {
     const result = parseProductsXml(fixtureXml);
     const workspaceId = 'test-workspace';
+
+    // Verify first product (no additional images)
+    const { product: dogFood } = normalizeProduct(result.products[0], workspaceId);
+    const denorm1 = denormalizeProduct(dogFood);
+    expect(denorm1.xml).toContain('<MoreInfoImage1>none</MoreInfoImage1>');
+    expect(denorm1.xml).toContain('<MoreInfoImage20>none</MoreInfoImage20>');
+
+    // Verify second product (with additional images)
+    const { product: catToy } = normalizeProduct(result.products[1], workspaceId);
+    const denorm2 = denormalizeProduct(catToy);
+    expect(denorm2.xml).toContain('<MoreInfoImage1>media/cat-toy-2.jpg</MoreInfoImage1>');
+    expect(denorm2.xml).toContain('<MoreInfoImage2>media/cat-toy-3.jpg</MoreInfoImage2>');
+    expect(denorm2.xml).toContain('<MoreInfoImage3>none</MoreInfoImage3>');
+    expect(denorm2.xml).toContain('<MoreInfoImage20>none</MoreInfoImage20>');
 
     for (const parsed of result.products) {
       const { product } = normalizeProduct(parsed, workspaceId);
@@ -129,6 +154,22 @@ describe('ShopSite Normalization Preservation', () => {
     expect(pf16).toBeTruthy();
     expect(pf16!.kind).toBe('custom');
     expect(pf16!.editable).toBe(true);
+  });
+
+  it('should preserve MoreInformationGraphic when it is different from Graphic', () => {
+    const customXml = `<Product>
+      <SKU>TEST-123</SKU>
+      <Graphic>media/cat-toy.jpg</Graphic>
+      <MoreInformationGraphic>media/cat-toy-detail.jpg</MoreInformationGraphic>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    expect(product.core.media.primary).toBe('media/cat-toy.jpg');
+    expect(product.shopsite.preserved.unknownElements['MoreInformationGraphic']).toBe('media/cat-toy-detail.jpg');
+    
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).toContain('<Graphic>media/cat-toy.jpg</Graphic>');
+    expect(denorm.xml).toContain('<MoreInformationGraphic>media/cat-toy-detail.jpg</MoreInformationGraphic>');
   });
 });
 

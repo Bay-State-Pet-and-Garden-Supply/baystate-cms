@@ -53,6 +53,15 @@ export function ProductDetail({ sku, onBack }: Props) {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const [fieldValues, setFieldValues] = useState<Record<string, any>>({});
+  
+  // Custom workspace and media states
+  const [images, setImages] = useState<string[]>([]);
+  const [workspaceId, setWorkspaceId] = useState<string>('');
+  const [pinnedFields, setPinnedFields] = useState<string[]>([]);
+  const [customizingFields, setCustomizingFields] = useState(false);
+  const [showAllFields, setShowAllFields] = useState(false);
+  const [newImageName, setNewImageName] = useState('');
+  const [showAddImageInput, setShowAddImageInput] = useState(false);
 
   const [mediaUrl, setMediaUrl] = useState(() => {
     return localStorage.getItem('shopsite_media_url') || '';
@@ -83,6 +92,9 @@ export function ProductDetail({ sku, onBack }: Props) {
       // Filter out non-editable fields and 'SKU' from editable fields list
       const editableFields = res.entries.filter((e: any) => e.editable && e.xmlField !== 'SKU');
       setRegistry(editableFields);
+      if (res.entries.length > 0) {
+        setWorkspaceId((res.entries[0] as any).workspaceId);
+      }
       setLoadingRegistry(false);
     }).catch(err => {
       console.error('Failed to load field registry:', err);
@@ -117,6 +129,21 @@ export function ProductDetail({ sku, onBack }: Props) {
       }
       
       setFieldValues(values);
+
+      // Initialize images state from product media
+      const primary = product?.core?.media?.primary ?? '';
+      const additional = product?.core?.media?.additional ?? [];
+      const moreInfoGraphic = product?.shopsite?.preserved?.unknownElements?.['MoreInformationGraphic'] as string ?? '';
+      
+      const allImages = [primary];
+      if (moreInfoGraphic && moreInfoGraphic !== 'none' && moreInfoGraphic !== primary) {
+        allImages.push(moreInfoGraphic);
+      }
+      allImages.push(...additional);
+      
+      const filteredImages = allImages.filter(img => img && img !== 'none' && img !== '');
+      setImages(filteredImages);
+
       setLoading(false);
     }).catch(err => {
       setError(err instanceof Error ? err.message : String(err));
@@ -156,10 +183,31 @@ export function ProductDetail({ sku, onBack }: Props) {
           customFields[field] = val || '';
         }
       });
+
+      // Override media using our managed images list state
+      core.media = {
+        primary: images[0] || null,
+        additional: images.slice(1),
+      };
+
+      const preserved = {
+        unknownElements: {
+          ...(data?.product as any)?.shopsite?.preserved?.unknownElements,
+        },
+        advancedBlocks: (data?.product as any)?.shopsite?.preserved?.advancedBlocks ?? {},
+        rawAttributes: (data?.product as any)?.shopsite?.preserved?.rawAttributes ?? {},
+      };
+      delete (preserved.unknownElements as any)['MoreInformationGraphic'];
+
+      const shopsite = {
+        ...(data?.product as any)?.shopsite,
+        preserved
+      };
       
       const result = await saveDraft(sku, {
         core,
         customFields,
+        shopsite,
       });
       setMessage(`Draft saved to change set ${result.changeSetId}`);
     } catch (err) {
@@ -186,20 +234,116 @@ export function ProductDetail({ sku, onBack }: Props) {
     grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 16 },
   };
 
+  // Helper for pinned fields retrieval
+  const DEFAULT_PINNED_FIELDS = ['Name', 'Price', 'SaleAmount', 'ProductDescription', 'QuantityOnHand', 'Availability'];
+
+  const getPinnedFields = (wsId: string): string[] => {
+    if (!wsId) return DEFAULT_PINNED_FIELDS;
+    try {
+      const stored = localStorage.getItem(`shopsite_cms_pinned_fields_${wsId}`);
+      if (stored) return JSON.parse(stored);
+    } catch (e) {
+      console.error(e);
+    }
+    return DEFAULT_PINNED_FIELDS;
+  };
+
+  const toggleFieldPinned = (xmlField: string) => {
+    if (xmlField === 'Name' || xmlField === 'ProductDescription') return;
+    const currentPinned = getPinnedFields(workspaceId);
+    let newPinned: string[];
+    if (currentPinned.includes(xmlField)) {
+      newPinned = currentPinned.filter(f => f !== xmlField);
+    } else {
+      newPinned = [...currentPinned, xmlField];
+    }
+    if (workspaceId) {
+      localStorage.setItem(`shopsite_cms_pinned_fields_${workspaceId}`, JSON.stringify(newPinned));
+    }
+    setPinnedFields(newPinned);
+  };
+
+  // Image manipulation helper functions
+  const moveImage = (index: number, direction: 'left' | 'right') => {
+    const targetIndex = direction === 'left' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= images.length) return;
+    const newImages = [...images];
+    const temp = newImages[index];
+    newImages[index] = newImages[targetIndex];
+    newImages[targetIndex] = temp;
+    setImages(newImages);
+  };
+
+  const removeImage = (index: number) => {
+    const newImages = images.filter((_, i) => i !== index);
+    setImages(newImages);
+  };
+
+  const setAsPrimary = (index: number) => {
+    if (index <= 0 || index >= images.length) return;
+    const newImages = [...images];
+    const target = newImages[index];
+    newImages.splice(index, 1);
+    newImages.unshift(target);
+    setImages(newImages);
+  };
+
+  const addImage = () => {
+    const name = newImageName.trim();
+    if (!name) return;
+    if (images.includes(name)) {
+      alert('This image filename is already in the list.');
+      return;
+    }
+    if (images.length >= 21) {
+      alert('Maximum of 21 images (1 primary and 20 additional) allowed.');
+      return;
+    }
+    setImages([...images, name]);
+    setNewImageName('');
+    setShowAddImageInput(false);
+  };
+
+  // Load pinned fields when workspaceId becomes available
+  useEffect(() => {
+    if (workspaceId) {
+      setPinnedFields(getPinnedFields(workspaceId));
+    }
+  }, [workspaceId]);
+
+  const { pinnedFieldsList, additionalFieldsList } = React.useMemo(() => {
+    const currentPinned = workspaceId ? getPinnedFields(workspaceId) : DEFAULT_PINNED_FIELDS;
+    
+    // Filter out Graphic and MoreInformationGraphic
+    const editableFields = registry.filter(
+      (e: any) => e.xmlField !== 'Graphic' && e.xmlField !== 'MoreInformationGraphic'
+    );
+
+    const pinned: any[] = [];
+    const additional: any[] = [];
+
+    editableFields.forEach((field) => {
+      const isForced = field.xmlField === 'Name' || field.xmlField === 'ProductDescription';
+      if (isForced || currentPinned.includes(field.xmlField)) {
+        pinned.push(field);
+      } else {
+        additional.push(field);
+      }
+    });
+
+    return { pinnedFieldsList: pinned, additionalFieldsList: additional };
+  }, [registry, workspaceId, pinnedFields]);
+
   if (loading || loadingRegistry) return <div style={{ padding: 24, color: '#6b7280' }}>Loading product details...</div>;
   if (error) return <div style={{ padding: 24 }}><div style={styles.error}>{error}</div><button style={styles.back} onClick={onBack}>Back</button></div>;
 
-  const primaryImage = (data?.product as any)?.core?.media?.primary;
+  const primaryImage = images[0] || '';
   const imageUrl = primaryImage ? (mediaUrl ? (mediaUrl.endsWith('/') ? mediaUrl : mediaUrl + '/') + primaryImage : '') : '';
 
-  // Split registry into core and custom
-  const coreFields = registry.filter(e => e.kind === 'core');
-  const customFieldsList = registry.filter(e => e.kind === 'custom');
-
   // Find Name and Description
-  const nameField = coreFields.find(e => e.xmlField === 'Name');
-  const descField = coreFields.find(e => e.xmlField === 'ProductDescription');
-  const otherCoreFields = coreFields.filter(e => e.xmlField !== 'Name' && e.xmlField !== 'ProductDescription');
+  const nameField = pinnedFieldsList.find(e => e.xmlField === 'Name');
+  const descField = pinnedFieldsList.find(e => e.xmlField === 'ProductDescription');
+  const otherPinnedFields = pinnedFieldsList.filter(e => e.xmlField !== 'Name' && e.xmlField !== 'ProductDescription');
 
   const renderFieldInput = (entry: any) => {
     const value = fieldValues[entry.xmlField] ?? '';
@@ -254,10 +398,186 @@ export function ProductDetail({ sku, onBack }: Props) {
 
   const nameVal = fieldValues['Name'] ?? '';
 
+  const styleTagContent = `
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .image-card {
+      position: relative;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 8px;
+      background: #ffffff;
+      width: 130px;
+      height: 160px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .image-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      border-color: #cbd5e1;
+    }
+    .image-card-primary {
+      border-color: #2563eb;
+      box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+    }
+    .image-action-overlay {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      left: 4px;
+      display: flex;
+      justify-content: space-between;
+      gap: 2px;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+    .image-card:hover .image-action-overlay {
+      opacity: 1;
+    }
+    .image-action-btn {
+      background: rgba(15, 23, 42, 0.85);
+      color: #ffffff;
+      border: none;
+      border-radius: 4px;
+      width: 24px;
+      height: 24px;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s ease;
+    }
+    .image-action-btn:hover {
+      background: rgba(15, 23, 42, 1);
+    }
+    .image-action-btn-danger:hover {
+      background: #ef4444;
+    }
+    .custom-checklist-container {
+      position: relative;
+    }
+    .custom-checklist-dropdown {
+      position: absolute;
+      top: 100%;
+      right: 0;
+      z-index: 50;
+      width: 280px;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+      padding: 16px;
+      margin-top: 8px;
+      animation: slideDown 0.15s ease-out;
+    }
+    .add-image-card {
+      border: 2px dashed #cbd5e1;
+      background: #f8fafc;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s ease;
+    }
+    .add-image-card:hover {
+      background: #f1f5f9;
+      border-color: #94a3b8;
+    }
+  `;
+
   return (
     <div style={styles.container}>
+      <style dangerouslySetInnerHTML={{ __html: styleTagContent }} />
       <button style={styles.back} onClick={onBack}>← Back to Catalog</button>
-      <h1 style={styles.title}>{sku}</h1>
+      
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <h1 style={{ ...styles.title, marginBottom: 0 }}>{sku}</h1>
+        <div className="custom-checklist-container">
+          <button
+            onClick={() => setCustomizingFields(prev => !prev)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '6px 12px',
+              fontSize: 13,
+              fontWeight: 500,
+              color: '#475569',
+              background: '#f1f5f9',
+              border: '1px solid #cbd5e1',
+              borderRadius: 6,
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+            }}
+          >
+            ⚙️ Customize Fields
+          </button>
+          {customizingFields && (
+            <div className="custom-checklist-dropdown">
+              <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', marginBottom: 12, borderBottom: '1px solid #f1f5f9', paddingBottom: 6 }}>
+                Visible Fields Setup
+              </div>
+              <div style={{ maxHeight: 240, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {registry
+                  .filter((e: any) => e.xmlField !== 'Graphic' && e.xmlField !== 'MoreInformationGraphic')
+                  .map((field: any) => {
+                    const isForced = field.xmlField === 'Name' || field.xmlField === 'ProductDescription';
+                    const isPinned = isForced || pinnedFields.includes(field.xmlField);
+                    return (
+                      <label
+                        key={field.xmlField}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          fontSize: 13,
+                          color: isForced ? '#94a3b8' : '#334155',
+                          cursor: isForced ? 'not-allowed' : 'pointer',
+                          userSelect: 'none',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isPinned}
+                          disabled={isForced}
+                          onChange={() => toggleFieldPinned(field.xmlField)}
+                          style={{ cursor: isForced ? 'not-allowed' : 'pointer' }}
+                        />
+                        {field.label || field.xmlField} {isForced && <span style={{ fontSize: 10, color: '#94a3b8' }}>(Always)</span>}
+                      </label>
+                    );
+                  })}
+              </div>
+              <button
+                onClick={() => setCustomizingFields(false)}
+                style={{
+                  width: '100%',
+                  marginTop: 12,
+                  padding: '6px 0',
+                  fontSize: 12,
+                  fontWeight: 500,
+                  color: '#ffffff',
+                  background: '#2563eb',
+                  border: 'none',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                }}
+              >
+                Done
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
       <p style={styles.subtitle}>
         {data?.hasDraft ? '🖊️ Has unsaved draft' : '✓ Approved version'}
         {data?.changeSetId ? ` — Change Set: ${data.changeSetId.slice(0, 8)}` : ''}
@@ -292,21 +612,54 @@ export function ProductDetail({ sku, onBack }: Props) {
         <div style={{ flex: '2 2 300px' }}>
           {nameField && renderFieldInput(nameField)}
           
-          {otherCoreFields.length > 0 && (
+          {otherPinnedFields.length > 0 && (
             <div style={styles.grid}>
-              {otherCoreFields.map(e => renderFieldInput(e))}
+              {otherPinnedFields.map(e => renderFieldInput(e))}
             </div>
           )}
           
           {descField && renderFieldInput(descField)}
           
-          {customFieldsList.length > 0 && (
-            <>
-              <h3 style={styles.sectionTitle}>Custom Fields</h3>
-              <div style={styles.grid}>
-                {customFieldsList.map(e => renderFieldInput(e))}
-              </div>
-            </>
+          {/* Collapsable Remaining Fields */}
+          {additionalFieldsList.length > 0 && (
+            <div style={{ marginTop: 24, marginBottom: 16 }}>
+              <button
+                onClick={() => setShowAllFields(prev => !prev)}
+                type="button"
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '12px 16px',
+                  fontSize: 14,
+                  fontWeight: 600,
+                  color: '#475569',
+                  background: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                <span>📦 {showAllFields ? 'Hide' : 'Show'} Remaining Fields ({additionalFieldsList.length})</span>
+                <span style={{ transform: showAllFields ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▼</span>
+              </button>
+              {showAllFields && (
+                <div style={{
+                  marginTop: 12,
+                  padding: 16,
+                  background: '#ffffff',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 8,
+                  animation: 'slideDown 0.25s ease-out',
+                }}>
+                  <div style={styles.grid}>
+                    {additionalFieldsList.map(e => renderFieldInput(e))}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           {error && <div style={styles.error}>{error}</div>}
@@ -321,6 +674,206 @@ export function ProductDetail({ sku, onBack }: Props) {
           <p style={styles.info}>
             Changes are saved to a SQLite draft change set. Git and product files are not modified until approval.
           </p>
+        </div>
+      </div>
+
+      {/* Product Media Gallery */}
+      <div style={{
+        marginTop: 32,
+        padding: 24,
+        background: '#f8fafc',
+        border: '1px solid #e2e8f0',
+        borderRadius: 16,
+      }}>
+        <h3 style={{ fontSize: 16, fontWeight: 600, color: '#0f172a', marginBottom: 4 }}>📸 Product Media Gallery</h3>
+        <p style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
+          Rearrange images using the arrows. The first image is the <strong>Primary Image</strong>, and the others are additional images (up to 20).
+        </p>
+
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+          {images.map((img, idx) => {
+            const isPrimary = idx === 0;
+            const itemImgUrl = img ? (mediaUrl ? (mediaUrl.endsWith('/') ? mediaUrl : mediaUrl + '/') + img : '') : '';
+            return (
+              <div key={`${img}-${idx}`} className={`image-card ${isPrimary ? 'image-card-primary' : ''}`}>
+                {isPrimary && (
+                  <span style={{
+                    position: 'absolute',
+                    top: 8,
+                    left: 8,
+                    zIndex: 10,
+                    background: '#2563eb',
+                    color: '#ffffff',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    boxShadow: '0 2px 4px rgba(37,99,235,0.2)',
+                  }}>
+                    Primary
+                  </span>
+                )}
+                
+                <div className="image-action-overlay">
+                  {idx > 0 ? (
+                    <button
+                      title="Move Left"
+                      onClick={() => moveImage(idx, 'left')}
+                      className="image-action-btn"
+                    >
+                      ←
+                    </button>
+                  ) : <div />}
+                  
+                  {idx > 0 && (
+                    <button
+                      title="Make Primary"
+                      onClick={() => setAsPrimary(idx)}
+                      className="image-action-btn"
+                      style={{ fontSize: 10 }}
+                    >
+                      ⭐
+                    </button>
+                  )}
+
+                  {idx < images.length - 1 ? (
+                    <button
+                      title="Move Right"
+                      onClick={() => moveImage(idx, 'right')}
+                      className="image-action-btn"
+                    >
+                      →
+                    </button>
+                  ) : <div />}
+
+                  <button
+                    title="Remove"
+                    onClick={() => removeImage(idx)}
+                    className="image-action-btn image-action-btn-danger"
+                  >
+                    🗑️
+                  </button>
+                </div>
+
+                <div style={{
+                  width: '100%',
+                  height: 100,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: '#f1f5f9',
+                  borderRadius: 6,
+                  overflow: 'hidden',
+                  marginTop: isPrimary ? 24 : 8,
+                }}>
+                  <ProductImage src={itemImgUrl} alt={img} title={img} />
+                </div>
+
+                <div style={{
+                  fontSize: 10,
+                  color: '#475569',
+                  fontWeight: 500,
+                  width: '100%',
+                  textAlign: 'center',
+                  fontFamily: 'monospace',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  paddingTop: 8,
+                }} title={img}>
+                  {img}
+                </div>
+              </div>
+            );
+          })}
+
+          {images.length < 21 && (
+            <div className="image-card add-image-card" style={{ justifyContent: 'center' }}>
+              {!showAddImageInput ? (
+                <div
+                  onClick={() => setShowAddImageInput(true)}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#64748b',
+                    width: '100%',
+                    height: '100%',
+                  }}
+                >
+                  <span style={{ fontSize: 24, fontWeight: 300, marginBottom: 4 }}>+</span>
+                  <span style={{ fontSize: 11, fontWeight: 500 }}>Add Image</span>
+                </div>
+              ) : (
+                <div style={{
+                  padding: 8,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                  width: '100%',
+                  height: '100%',
+                  justifyContent: 'center',
+                }}>
+                  <input
+                    type="text"
+                    placeholder="image.jpg"
+                    value={newImageName}
+                    onChange={e => setNewImageName(e.target.value)}
+                    style={{
+                      width: '100%',
+                      padding: '4px 8px',
+                      fontSize: 11,
+                      border: '1px solid #cbd5e1',
+                      borderRadius: 4,
+                      boxSizing: 'border-box',
+                    }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') addImage();
+                    }}
+                    autoFocus
+                  />
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      onClick={addImage}
+                      style={{
+                        flex: 1,
+                        padding: '4px 0',
+                        background: '#2563eb',
+                        color: '#ffffff',
+                        border: 'none',
+                        borderRadius: 4,
+                        fontSize: 10,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Add
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowAddImageInput(false);
+                        setNewImageName('');
+                      }}
+                      style={{
+                        flex: 1,
+                        padding: '4px 0',
+                        background: '#e2e8f0',
+                        color: '#475569',
+                        border: 'none',
+                        borderRadius: 4,
+                        fontSize: 10,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

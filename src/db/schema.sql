@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS product_index (
   has_advanced_blocks INTEGER NOT NULL DEFAULT 0,
   has_warnings INTEGER NOT NULL DEFAULT 0,
   parent_sku TEXT REFERENCES product_index(sku),
+  description TEXT,
+  search_keywords TEXT,
+  custom_fields TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

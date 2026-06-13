@@ -92,6 +92,9 @@ export function approveChangeSet(
           hasWarnings,
           syncStatus: 'not_synced',
           lastApprovedCommit: undefined, // Will be set after commit
+          description: product.core.description,
+          searchKeywords: product.core.seo.searchKeywords,
+          customFields: product.customFields,
         });
       } else {
         insertProductIndex({
@@ -113,6 +116,9 @@ export function approveChangeSet(
           hasWarnings,
           createdAt: product.metadata.createdAt,
           updatedAt: product.metadata.updatedAt,
+          description: product.core.description,
+          searchKeywords: product.core.seo.searchKeywords,
+          customFields: product.customFields,
         });
       }
 

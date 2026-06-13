@@ -5,8 +5,50 @@ import {
   validateCatalogHealth, getCatalogHealthReport,
   getHealthConfig, saveHealthConfig,
 } from '../services/product-service';
+import { listRegistry } from '../../db/repositories/field-registry-repo';
+import { getDb } from '../../db/connection';
 
 const route = new Hono();
+
+/**
+ * GET /api/products/facets - Get unique values for custom field facets.
+ */
+route.get('/products/facets', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+
+  const registry = listRegistry(workspace.id);
+  const customFields = registry.filter(r => r.kind === 'custom' || r.xmlField.startsWith('ProductField'));
+  const db = getDb();
+  
+  const facets: Record<string, { label: string; values: string[] }> = {};
+
+  for (const field of customFields) {
+    if (!/^[a-zA-Z0-9_]+$/.test(field.xmlField)) continue;
+    try {
+      const rows = db.query(`
+        SELECT DISTINCT json_extract(custom_fields, '$.${field.xmlField}') as value 
+        FROM product_index 
+        WHERE value IS NOT NULL AND value != ''
+        ORDER BY value ASC
+      `).all() as Array<{ value: string | null }>;
+      
+      const values = rows.map(r => r.value).filter((v): v is string => v !== null && v.trim() !== '');
+      if (values.length > 0) {
+        facets[field.xmlField] = {
+          label: field.label || field.xmlField,
+          values,
+        };
+      }
+    } catch (e) {
+      console.error(`Failed to fetch facets for field ${field.xmlField}:`, e);
+    }
+  }
+
+  return c.json({ facets });
+});
 
 /**
  * GET /api/products - List products from index with optional filters.
@@ -21,12 +63,27 @@ route.get('/products', (c) => {
   const search = c.req.query('search');
   const limit = c.req.query('limit');
   const offset = c.req.query('offset');
+  const minPrice = c.req.query('minPrice');
+  const maxPrice = c.req.query('maxPrice');
+  const inventoryStatus = c.req.query('inventoryStatus');
+
+  const customFilters: Record<string, string> = {};
+  for (const [key, value] of Object.entries(c.req.query())) {
+    if (key.startsWith('cf_') && value) {
+      const fieldName = key.substring(3);
+      customFilters[fieldName] = value;
+    }
+  }
 
   const { products, total } = listProductIndex({
     status: status || undefined,
     search: search || undefined,
     limit: limit !== undefined ? Number(limit) : undefined,
     offset: offset !== undefined ? Number(offset) : undefined,
+    minPrice: minPrice || undefined,
+    maxPrice: maxPrice || undefined,
+    inventoryStatus: inventoryStatus || undefined,
+    customFilters: Object.keys(customFilters).length > 0 ? customFilters : undefined,
   });
 
   return c.json({ products, total });

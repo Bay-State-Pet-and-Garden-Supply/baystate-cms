@@ -413,6 +413,9 @@ route.post('/sync/full-reconcile', (c) => {
             hasAdvancedBlocks: Object.keys(product.shopsite.preserved.advancedBlocks).length > 0 ? 1 : 0,
             hasWarnings: 0,
             syncStatus: 'not_synced',
+            description: product.core.description,
+            searchKeywords: product.core.seo.searchKeywords,
+            customFields: product.customFields,
           };
           if (existing) {
             updateProductIndex(fields);

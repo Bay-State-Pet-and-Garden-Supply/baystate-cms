@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { getWorkspace, closeWorkspace, type Workspace } from './api';
 import { SetupWizard } from './components/SetupWizard';
 import { Catalog } from './components/Catalog';
@@ -16,6 +16,7 @@ function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [selectedSku, setSelectedSku] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const hasPushedHistory = useRef(false);
 
   useEffect(() => {
     getWorkspace().then(res => {
@@ -23,13 +24,81 @@ function App() {
         setWorkspace(res.workspace);
         const needsSetup = res.workspace.bootstrapStatus !== 'complete'
           || !res.workspace.baselineCommit;
-        setView(needsSetup ? 'setup' : 'dashboard');
+        
+        if (needsSetup) {
+          setView('setup');
+        } else {
+          // Parse product SKU from query param on initial load
+          const params = new URLSearchParams(window.location.search);
+          const sku = params.get('product');
+          if (sku) {
+            setSelectedSku(sku);
+            setView('catalog'); // default background view to catalog
+          } else {
+            setView('dashboard');
+          }
+        }
       }
       setReady(true);
     }).catch(() => {
       setReady(true);
     });
   }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const sku = params.get('product');
+      setSelectedSku(sku);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (selectedSku) {
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = '';
+    }
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [selectedSku]);
+
+  const handleOpenProduct = (sku: string) => {
+    setSelectedSku(sku);
+    hasPushedHistory.current = true;
+    const url = new URL(window.location.href);
+    url.searchParams.set('product', sku);
+    window.history.pushState({ sku }, '', url.toString());
+  };
+
+  const handleCloseProduct = () => {
+    if (hasPushedHistory.current) {
+      window.history.back();
+    } else {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('product');
+      window.history.replaceState(null, '', url.toString());
+      setSelectedSku(null);
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        handleCloseProduct();
+      }
+    };
+    if (selectedSku) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [selectedSku]);
 
   const handleSetupComplete = () => {
     getWorkspace().then(res => {
@@ -160,25 +229,126 @@ function App() {
 
         {view === 'catalog' && workspace && (
           <Catalog
-            onSelectProduct={(sku) => { setSelectedSku(sku); setView('product'); }}
+            onSelectProduct={handleOpenProduct}
             onShowChangeSets={() => setView('changesets')}
           />
-        )}
-
-        {view === 'product' && selectedSku && (
-          <ProductDetail sku={selectedSku} onBack={() => setView('catalog')} />
         )}
 
         {view === 'changesets' && <ChangeSetReview />}
 
         {view === 'health' && workspace && (
-          <CatalogHealth onSelectProduct={(sku) => { setSelectedSku(sku); setView('product'); }} />
+          <CatalogHealth onSelectProduct={handleOpenProduct} />
         )}
 
         {view === 'drift' && <DriftView />}
 
         {view === 'syncjobs' && <SyncJobsView />}
       </main>
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes slideIn {
+          from { transform: translateX(100%); }
+          to { transform: translateX(0); }
+        }
+        .drawer-backdrop {
+          position: fixed;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: rgba(15, 23, 42, 0.45);
+          backdrop-filter: blur(8px);
+          z-index: 1000;
+          animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+        .drawer-container {
+          position: fixed;
+          top: 0;
+          right: 0;
+          bottom: 0;
+          width: 100%;
+          max-width: 850px;
+          background: #ffffff;
+          z-index: 1001;
+          box-shadow: -10px 0 30px -5px rgba(15, 23, 42, 0.15);
+          animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          display: flex;
+          flex-direction: column;
+          height: 100vh;
+        }
+        .drawer-close-btn {
+          position: absolute;
+          top: 20px;
+          left: -54px;
+          width: 38px;
+          height: 38px;
+          border-radius: 50%;
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          box-shadow: -4px 4px 12px rgba(15, 23, 42, 0.08);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+          z-index: 1002;
+          color: #64748b;
+          font-size: 14px;
+          font-weight: bold;
+        }
+        .drawer-close-btn:hover {
+          transform: scale(1.08) rotate(90deg);
+          color: #0f172a;
+          border-color: #cbd5e1;
+          box-shadow: -4px 4px 16px rgba(15, 23, 42, 0.12);
+        }
+        .drawer-body {
+          flex: 1;
+          overflow-y: auto;
+          height: 100%;
+        }
+        @media (max-width: 950px) {
+          .drawer-container {
+            max-width: 100%;
+          }
+          .drawer-close-btn {
+            left: auto;
+            right: 24px;
+            top: 24px;
+            background: rgba(255, 255, 255, 0.95);
+            border-color: #cbd5e1;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+          }
+          .drawer-close-btn:hover {
+            transform: scale(1.08) rotate(90deg);
+          }
+        }
+      ` }} />
+
+      {selectedSku && (
+        <>
+          <div 
+            className="drawer-backdrop" 
+            onClick={handleCloseProduct}
+          />
+          <div className="drawer-container">
+            <button 
+              className="drawer-close-btn" 
+              onClick={handleCloseProduct}
+              title="Close Panel"
+            >
+              ✕
+            </button>
+            <div className="drawer-body">
+              <ProductDetail sku={selectedSku} onBack={handleCloseProduct} />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

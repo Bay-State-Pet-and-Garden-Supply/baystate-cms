@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { initDb, closeDb } from '../../db/connection';
+import { initDb, closeDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace, findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
@@ -63,6 +63,7 @@ export function createWorkspace(name: string, workspacePath: string): { workspac
   const dbPath = path.join(dirs.dotShopsite, 'app.db');
   initDb(dbPath);
   runMigrations();
+  backfillProductIndex(workspacePath);
 
   // Create workspace record
   const now = new Date().toISOString();
@@ -128,6 +129,7 @@ export function loadWorkspace(workspacePath: string): Workspace | null {
 
   initDb(dbPath);
   runMigrations();
+  backfillProductIndex(workspacePath);
 
   const ws = findWorkspace();
   if (ws) {
@@ -151,4 +153,40 @@ export function getCurrentWorkspace(): Workspace | null {
 
 export function closeWorkspace(): void {
   closeDb();
+}
+
+export function backfillProductIndex(workspacePath: string): void {
+  const db = getDb();
+  const needsBackfill = db.query("SELECT COUNT(*) as count FROM product_index WHERE custom_fields IS NULL").get() as { count: number } | undefined;
+  const count = needsBackfill?.count ?? 0;
+  if (count > 0) {
+    const productsDir = path.join(workspacePath, 'products');
+    if (fs.existsSync(productsDir)) {
+      const files = fs.readdirSync(productsDir);
+      const stmt = db.prepare(`
+        UPDATE product_index 
+        SET description = ?, search_keywords = ?, custom_fields = ?
+        WHERE sku = ?
+      `);
+      
+      const trans = db.transaction(() => {
+        for (const file of files) {
+          if (!file.endsWith('.json')) continue;
+          try {
+            const content = fs.readFileSync(path.join(productsDir, file), 'utf-8');
+            const product = JSON.parse(content);
+            stmt.run(
+              product.core.description || null,
+              product.core.seo.searchKeywords || null,
+              JSON.stringify(product.customFields || {}),
+              product.sku
+            );
+          } catch (e) {
+            console.error(`Failed to backfill product file ${file}:`, e);
+          }
+        }
+      });
+      trans();
+    }
+  }
 }

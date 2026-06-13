@@ -58,15 +58,24 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
   // Image
   if (product.core.media.primary) {
     lines.push(`  <Graphic>${escapeXml(product.core.media.primary)}</Graphic>`);
-    lines.push(`  <MoreInformationGraphic>${escapeXml(product.core.media.primary)}</MoreInformationGraphic>`);
+    if (!product.shopsite.preserved.unknownElements['MoreInformationGraphic']) {
+      lines.push(`  <MoreInformationGraphic>${escapeXml(product.core.media.primary)}</MoreInformationGraphic>`);
+    }
   } else {
     lines.push('  <Graphic>none</Graphic>');
-    lines.push('  <MoreInformationGraphic>none</MoreInformationGraphic>');
+    if (!product.shopsite.preserved.unknownElements['MoreInformationGraphic']) {
+      lines.push('  <MoreInformationGraphic>none</MoreInformationGraphic>');
+    }
   }
 
-  // Additional images
-  for (let i = 0; i < product.core.media.additional.length && i < 20; i++) {
-    lines.push(`  <MoreInfoImage${i + 1}>${escapeXml(product.core.media.additional[i])}</MoreInfoImage${i + 1}>`);
+  // Additional images (up to 20 slots)
+  for (let i = 0; i < 20; i++) {
+    const img = product.core.media.additional?.[i];
+    if (img) {
+      lines.push(`  <MoreInfoImage${i + 1}>${escapeXml(img)}</MoreInfoImage${i + 1}>`);
+    } else {
+      lines.push(`  <MoreInfoImage${i + 1}>none</MoreInfoImage${i + 1}>`);
+    }
   }
 
   // SEO - escape CDATA terminators
