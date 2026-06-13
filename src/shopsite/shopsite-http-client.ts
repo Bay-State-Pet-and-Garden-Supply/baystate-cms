@@ -75,7 +75,7 @@ export class ShopSiteHttpClient {
     const params = new URLSearchParams();
     params.set('clientApp', '1');
     params.set('dbname', 'products');
-    if (options?.version) params.set('version', options.version);
+    params.set('version', options?.version ?? '15.0');
     if (options?.fields && options.fields.length > 0) {
       params.set('fields', '|' + options.fields.join('|') + '|');
     }

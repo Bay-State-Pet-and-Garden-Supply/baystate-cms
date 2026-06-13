@@ -45,6 +45,7 @@ async function runMigration() {
   const params = new URLSearchParams();
   params.set('clientApp', '1');
   params.set('dbname', 'products');
+  params.set('version', '15.0');
 
   const response = await fetch(cgiUrl, {
     method: 'POST',
