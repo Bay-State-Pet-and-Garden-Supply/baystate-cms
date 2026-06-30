@@ -14,6 +14,7 @@ import driftRoutes from './routes/drift-routes';
 import productTypeRoutes from './routes/product-type-routes';
 import pageRoutes from './routes/page-routes';
 import dashboardRoutes from './routes/dashboard-routes';
+import onboardingRoutes from './routes/onboarding-routes';
 
 const app = new Hono();
 
@@ -62,6 +63,7 @@ app.route('/api', driftRoutes);
 app.route('/api', productTypeRoutes);
 app.route('/api', pageRoutes);
 app.route('/api', dashboardRoutes);
+app.route('/api', onboardingRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

@@ -16,7 +16,12 @@ export default defineConfig({
       'src/tests/unit/db-migration.test.ts',
       'src/tests/unit/catalog-health.test.ts',
       'src/tests/integration/phase2-change-set.test.ts',
-      'src/tests/integration/phase3-sync-drift.test.ts'
+      'src/tests/integration/phase3-sync-drift.test.ts',
+      'src/tests/unit/onboarding-repos.test.ts',
+      'src/tests/unit/draft-promoter.test.ts',
+      'src/tests/unit/onboarding-duplicate-skip.test.ts',
+      'src/tests/unit/extractor-profiles.test.ts',
+      'src/tests/unit/extraction-remedies.test.ts'
     ],
   },
 });

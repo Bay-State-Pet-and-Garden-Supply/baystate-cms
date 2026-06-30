@@ -8,9 +8,13 @@ exports/*.zip
 exports/*.xml
 workspaces/
 workspaces/Bay State
+storage/
 
 # Local development tokens and environment files
 .shopsite-cms-dev-token
 .shopsite-cms-dev-token-dir/
 .env
 .env.*
+*.db
+*.db-shm
+*.db-wal

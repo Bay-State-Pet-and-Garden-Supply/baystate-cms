@@ -34,3 +34,22 @@ ShopSite's XML schema is complex and often undocumented. When adding support for
 2. Update the Zod schemas in `src/shared/schemas/product.ts`.
 3. Update `src/shopsite/product-normalizer.ts` and `src/shopsite/product-denormalizer.ts`.
 4. Add unit tests in `src/tests/unit/shopsite-normalizer.test.ts`.
+
+## Onboarding Pipeline & Curation Stage
+The onboarding pipeline processes bulk spreadsheet uploads through five key stages:
+1. **Discovery:** Finds the official product page URL on brand sites.
+2. **Extraction:** Scrapes raw product details (titles, descriptions, images, prices) from confirmed URLs.
+3. **Curation:** Synthesizes final clean store-ready titles (integrating spreadsheet hints, web scraped details, and local packaging OCR), and classifies products into internal product types and existing category pages.
+4. **Review:** Surfaces curated drafts in a user review drawer for approval.
+5. **Promotion:** Creates CMS product drafts and links them to page directories.
+
+### Vision-Language Models (VLM OCR)
+- Local VLMs (e.g. `qwen2.5vl:latest`) are used to run text OCR on the product's primary package image.
+- Configure local VLM settings in the `api_keys` table under the service name `'ollama_vlm'`.
+- The native Ollama `/api/chat` API is invoked via `src/onboarding/vlm-client.ts`.
+
+### Curation Architecture
+- **Curator Orchestrator:** `src/onboarding/product-curator.ts` coordinates OCR title extraction, text name consolidation, and category classification.
+- **Worker Queue:** `src/onboarding/job-queue.ts` automatically polls items in status `needs_review` and transitions batches into the `curating` phase.
+- **Draft Promoter:** `src/onboarding/draft-promoter.ts` reads the item's curation data to set product draft names and assign `product_pages` db rows.
+

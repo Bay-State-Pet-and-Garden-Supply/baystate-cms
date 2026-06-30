@@ -4,6 +4,11 @@ import type { Workspace, ShopSiteConnection } from './schemas/workspace';
 import type { ChangeSet, ChangeSetItem } from './schemas/change-set';
 import type { SyncJob, SyncJobEvent } from './schemas/sync';
 import type { ValidationResult } from './schemas/validation';
+import type {
+  OnboardingBatch, OnboardingItem, OnboardingSource,
+  ExtractionData, CurationData, ColumnMapping, SpreadsheetRow,
+  BrandSite, ApiKeyConfig, BatchStatus, ItemStatus,
+} from './schemas/onboarding';
 
 export type {
   Product,
@@ -19,7 +24,19 @@ export type {
   SyncJob,
   SyncJobEvent,
   ValidationResult,
+  OnboardingBatch,
+  OnboardingItem,
+  OnboardingSource,
+  ExtractionData,
+  CurationData,
+  ColumnMapping,
+  SpreadsheetRow,
+  BrandSite,
+  ApiKeyConfig,
+  BatchStatus,
+  ItemStatus,
 };
 
 /** Syncable product status for a change set item */
 export type ProductOperation = 'create' | 'update' | 'archive';
+

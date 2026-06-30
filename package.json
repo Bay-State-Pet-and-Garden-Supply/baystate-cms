@@ -8,7 +8,7 @@
     "dev": "bun run scripts/dev.ts",
     "build": "vite build && tsc --noEmit",
     "start": "bun run src/server/index.ts",
-    "test": "vitest run && bun test src/tests/unit/db-migration.test.ts src/tests/unit/catalog-health.test.ts src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts",
+    "test": "vitest run && bun test src/tests/unit/db-migration.test.ts src/tests/unit/catalog-health.test.ts src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts src/tests/unit/onboarding-repos.test.ts src/tests/unit/draft-promoter.test.ts src/tests/unit/onboarding-duplicate-skip.test.ts src/tests/unit/extractor-profiles.test.ts src/tests/unit/extraction-remedies.test.ts",
     "test:watch": "vitest",
     "test:unit": "vitest run",
     "test:db": "bun test src/tests/unit/db-migration.test.ts",
@@ -16,11 +16,15 @@
     "typecheck": "tsc --noEmit --skipLibCheck"
   },
   "dependencies": {
+    "crawlee": "^3.17.0",
+    "fast-xml-parser": "^5.0.0",
+    "hono": "^4.7.0",
+    "openai": "^6.45.0",
+    "playwright": "^1.61.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "zod": "^4.2.1",
-    "hono": "^4.7.0",
-    "fast-xml-parser": "^5.0.0"
+    "xlsx": "^0.18.5",
+    "zod": "^4.2.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

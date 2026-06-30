@@ -57,6 +57,12 @@ bun run lint        # ESLint
 - Direct Push & Publish to ShopSite (Basic auth)
 - Export package fallback for manual upload
 - Drift detection and explicit reconciliation
+- **Spreadsheet-style Bulk Onboarding Pipeline:**
+  - Fast, multi-pass brand source page discovery.
+  - Multi-threaded playwright/crawlee product scraper (price, description, images, weights).
+  - **Local VLM OCR Packaging Alignment:** Uses local vision models (e.g. Qwen2.5-VL) to extract package titles from product photos and synthesize clean customer-facing store names.
+  - **Automated Taxonomy Classification:** Assigns store page category links and classifies items into store product types.
+  - Interactive approval queue and change-set draft promoter.
 
 ## ShopSite Integration Notes
 
@@ -67,8 +73,6 @@ bun run lint        # ESLint
 
 ## Roadmap
 
-- Spreadsheet-style bulk editing
-- Product page assignments
 - Full page CMS (requires store-provided page XML sample)
 - Multi-store workspace switcher
 - Git remote backup and PR-style review

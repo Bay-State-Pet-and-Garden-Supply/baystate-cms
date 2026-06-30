@@ -28,8 +28,8 @@ const env = {
   HOST: '127.0.0.1',
 };
 
-// Start API server
-const server = spawn('bun', ['run', 'src/server/index.ts'], {
+// Start API server with watch mode so it reloads on code changes
+const server = spawn('bun', ['--watch', 'src/server/index.ts'], {
   cwd: root,
   stdio: 'inherit',
   env,

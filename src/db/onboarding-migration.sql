@@ -1,0 +1,106 @@
+-- Onboarding Pipeline Migration
+-- Adds tables for the product onboarding pipeline: spreadsheet import,
+-- source discovery, page extraction, and draft promotion.
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  service TEXT NOT NULL UNIQUE,
+  api_key TEXT NOT NULL,
+  base_url TEXT,
+  model TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_batches (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  name TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'imported',
+  total_items INTEGER NOT NULL DEFAULT 0,
+  completed_items INTEGER NOT NULL DEFAULT 0,
+  failed_items INTEGER NOT NULL DEFAULT 0,
+  column_mapping_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_items (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+  upc TEXT NOT NULL,
+  name TEXT NOT NULL,
+  price TEXT,
+  quantity INTEGER,
+  brand_hint TEXT,
+  department_hint TEXT,
+  source_url TEXT,
+  status TEXT NOT NULL DEFAULT 'imported',
+  error_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  is_duplicate INTEGER NOT NULL DEFAULT 0,
+  existing_sku TEXT,
+  extraction_data_json TEXT,
+  curation_data_json TEXT,
+  row_number INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_sources (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  title TEXT,
+  snippet TEXT,
+  domain TEXT,
+  confidence REAL NOT NULL DEFAULT 0.0,
+  is_selected INTEGER NOT NULL DEFAULT 0,
+  source_method TEXT NOT NULL DEFAULT 'serper',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS onboarding_extractions (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+  source_url TEXT NOT NULL,
+  extraction_data_json TEXT NOT NULL,
+  extraction_method TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0.0,
+  images_json TEXT,
+  raw_structured_data_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS brand_sites (
+  id TEXT PRIMARY KEY,
+  brand_name TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  url_pattern TEXT,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(brand_name, domain)
+);
+
+CREATE TABLE IF NOT EXISTS extractor_profiles (
+  id TEXT PRIMARY KEY,
+  domain TEXT NOT NULL UNIQUE,
+  title_selector TEXT,
+  price_selector TEXT,
+  description_selector TEXT,
+  brand_selector TEXT,
+  images_selector TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_onboarding_batches_workspace ON onboarding_batches(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_onboarding_items_batch ON onboarding_items(batch_id);
+CREATE INDEX IF NOT EXISTS idx_onboarding_items_status ON onboarding_items(status);
+CREATE INDEX IF NOT EXISTS idx_onboarding_items_upc ON onboarding_items(upc);
+CREATE INDEX IF NOT EXISTS idx_onboarding_sources_item ON onboarding_sources(item_id);
+CREATE INDEX IF NOT EXISTS idx_onboarding_extractions_item ON onboarding_extractions(item_id);
+CREATE INDEX IF NOT EXISTS idx_brand_sites_brand ON brand_sites(brand_name);
+CREATE INDEX IF NOT EXISTS idx_extractor_profiles_domain ON extractor_profiles(domain);

@@ -8,8 +8,9 @@ import { DriftView } from './components/DriftView';
 import { SyncJobsView } from './components/SyncJobsView';
 import { Dashboard } from './components/Dashboard';
 import { CatalogHealth } from './components/CatalogHealth';
+import { Onboarding } from './components/Onboarding';
 
-type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health';
+type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding';
 
 function App() {
   const [view, setView] = useState<View>('setup');
@@ -166,6 +167,12 @@ function App() {
               Catalog
             </button>
             <button
+              style={view === 'onboarding' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('onboarding')}
+            >
+              Onboarding
+            </button>
+            <button
               style={view === 'changesets' ? styles.navLinkActive : styles.navLink}
               onClick={() => setView('changesets')}
             >
@@ -235,6 +242,8 @@ function App() {
         )}
 
         {view === 'changesets' && <ChangeSetReview />}
+
+        {view === 'onboarding' && <Onboarding />}
 
         {view === 'health' && workspace && (
           <CatalogHealth onSelectProduct={handleOpenProduct} />
