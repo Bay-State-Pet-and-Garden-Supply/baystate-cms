@@ -78,6 +78,7 @@ export function createWorkspace(name: string, workspacePath: string): { workspac
     baselineCommit: null,
   };
   insertWorkspace(workspace);
+  addRecentWorkspace(name, workspacePath);
 
   // Write store manifest
   writeStoreConfig(workspacePath, 'manifest.json', {
@@ -139,20 +140,89 @@ export function loadWorkspace(workspacePath: string): Workspace | null {
       ws.workspacePath = resolved;
       ws.gitPath = resolvedGit;
     }
+    addRecentWorkspace(ws.name, workspacePath);
   }
   return ws;
 }
 
 export function getCurrentWorkspace(): Workspace | null {
   try {
-    return findWorkspace();
+    const ws = findWorkspace();
+    if (ws) return ws;
   } catch {
-    return null;
+    // DB not initialized
   }
+  return autoLoadLastWorkspace();
 }
 
 export function closeWorkspace(): void {
   closeDb();
+}
+
+export interface RecentWorkspace {
+  name: string;
+  path: string;
+  lastOpened: string;
+}
+
+const RECENT_WORKSPACES_FILE = path.join(process.cwd(), '.recent-workspaces.json');
+
+export function getRecentWorkspaces(): RecentWorkspace[] {
+  try {
+    if (fs.existsSync(RECENT_WORKSPACES_FILE)) {
+      const data = fs.readFileSync(RECENT_WORKSPACES_FILE, 'utf-8');
+      return JSON.parse(data) as RecentWorkspace[];
+    }
+  } catch (err) {
+    console.error('Failed to read recent workspaces:', err);
+  }
+  return [];
+}
+
+export function saveRecentWorkspaces(list: RecentWorkspace[]): void {
+  try {
+    fs.writeFileSync(RECENT_WORKSPACES_FILE, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to save recent workspaces:', err);
+  }
+}
+
+export function addRecentWorkspace(name: string, workspacePath: string): void {
+  const resolved = path.resolve(workspacePath.trim());
+  let list = getRecentWorkspaces();
+  list = list.filter(item => path.resolve(item.path) !== resolved);
+  list.unshift({
+    name,
+    path: resolved,
+    lastOpened: new Date().toISOString()
+  });
+  if (list.length > 5) {
+    list = list.slice(0, 5);
+  }
+  saveRecentWorkspaces(list);
+}
+
+export function removeRecentWorkspace(workspacePath: string): void {
+  const resolved = path.resolve(workspacePath.trim());
+  let list = getRecentWorkspaces();
+  list = list.filter(item => path.resolve(item.path) !== resolved);
+  saveRecentWorkspaces(list);
+}
+
+export function autoLoadLastWorkspace(): Workspace | null {
+  const list = getRecentWorkspaces();
+  if (list.length === 0) return null;
+  const last = list[0];
+  try {
+    if (!fs.existsSync(last.path)) {
+      removeRecentWorkspace(last.path);
+      return null;
+    }
+    return loadWorkspace(last.path);
+  } catch (err) {
+    console.error(`Failed to auto-load workspace at ${last.path}:`, err);
+    return null;
+  }
 }
 
 export function backfillProductIndex(workspacePath: string): void {

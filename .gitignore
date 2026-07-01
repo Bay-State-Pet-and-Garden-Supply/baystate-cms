@@ -18,3 +18,5 @@ storage/
 *.db
 *.db-shm
 *.db-wal
+.recent-workspaces.json
+

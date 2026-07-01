@@ -19,10 +19,12 @@ import {
   resolveBrandDomains,
   getExtractorProfiles,
   saveExtractorProfile,
-  testExtractorProfile
+  testExtractorProfile,
+  getBrandSites
 } from '../onboarding-api';
 import { OnboardingSettings } from './OnboardingSettings';
 import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping } from '../../shared/schemas/onboarding';
+import { matchExistingBrand } from '../../shared/brand-matcher';
 
 export function Onboarding() {
   const [showSettings, setShowSettings] = useState(false);
@@ -228,6 +230,10 @@ export function Onboarding() {
 
     setLoadingBrands(true);
     try {
+      // Fetch existing brands in the system
+      const brandSitesRes = await getBrandSites();
+      const existingBrands = brandSitesRes.brandSites.map(b => b.brandName);
+
       const brandCol = uploadMapping.brand;
       const nameCol = uploadMapping.name;
 
@@ -237,10 +243,10 @@ export function Onboarding() {
         if (brandCol && row[brandCol]) {
           brandVal = row[brandCol].trim();
         } else if (nameCol && row[nameCol]) {
-          // Fallback to first word of name
-          const firstWord = row[nameCol].trim().split(/\s+/)[0];
-          if (firstWord) {
-            brandVal = firstWord;
+          // Check if first word(s) matches an existing brand exactly
+          const matched = matchExistingBrand(row[nameCol], existingBrands);
+          if (matched) {
+            brandVal = matched;
           }
         }
         

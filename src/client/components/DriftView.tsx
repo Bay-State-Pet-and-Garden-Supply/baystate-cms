@@ -135,7 +135,14 @@ export function DriftView() {
 
       <div style={styles.section}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <div style={styles.label}>Drift Items ({drifts.length})</div>
+          <div style={styles.label}>
+            Drift Items ({drifts.length})
+            {openCount > drifts.length && (
+              <span style={{ fontSize: 12, fontWeight: 'normal', color: '#b45309', marginLeft: 8 }}>
+                (Showing first {drifts.length} of {openCount})
+              </span>
+            )}
+          </div>
           <div style={{ display: 'flex', gap: 8 }}>
             {drifts.length > 0 && (
               <button style={{ ...styles.btn, background: '#10b981', color: '#fff', fontSize: 11 }} onClick={handleBulkAccept} disabled={loading}>

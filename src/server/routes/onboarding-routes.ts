@@ -41,6 +41,7 @@ import {
   findProfileByDomain
 } from '../../db/repositories/extractor-profile-repo';
 import { parseSpreadsheet, detectColumnMapping, applyColumnMapping } from '../../onboarding/spreadsheet-parser';
+import { matchExistingBrand } from '../../shared/brand-matcher';
 import { OnboardingWorker } from '../../onboarding/job-queue';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
@@ -118,6 +119,9 @@ route.post('/onboarding/batches', async (c) => {
       return c.json({ error: 'No valid rows to import. Please check your mapping.', validationErrors: errors }, 400);
     }
 
+    // Fetch all existing brand names to match against register names
+    const existingBrands = listAllBrandSites().map(b => b.brandName);
+
     // Check duplicate UPCs against existing catalog and skip already existing ones
     const finalItems = [];
     for (const item of valid) {
@@ -125,8 +129,18 @@ route.post('/onboarding/batches', async (c) => {
       if (existingProduct) {
         continue;
       }
+
+      let assignedBrandHint = item.brandHint;
+      if (!assignedBrandHint) {
+        const matched = matchExistingBrand(item.name, existingBrands);
+        if (matched) {
+          assignedBrandHint = matched;
+        }
+      }
+
       finalItems.push({
         ...item,
+        brandHint: assignedBrandHint,
         isDuplicate: false,
         existingSku: null,
       });

@@ -112,11 +112,20 @@ export interface ExportResult {
 }
 
 // Workspace
+export interface RecentWorkspace {
+  name: string;
+  path: string;
+  lastOpened: string;
+}
+
 export function getWorkspace() { return request<{ workspace: Workspace | null }>('/workspace'); }
 export function initWorkspace(name: string, path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/init', { method: 'POST', body: JSON.stringify({ name, path }) }); }
 export function openWorkspace(path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/open', { method: 'POST', body: JSON.stringify({ path }) }); }
 export function pickDirectory() { return request<{ success: boolean; path?: string; error?: string; message?: string }>('/workspace/pick-directory', { method: 'POST' }); }
 export function closeWorkspace() { return request<{ success: boolean; message: string }>('/workspace/close', { method: 'POST' }); }
+export function getRecentWorkspaces() { return request<{ success: boolean; workspaces: RecentWorkspace[] }>('/workspace/recent'); }
+export function removeRecentWorkspace(path: string) { return request<{ success: boolean }>('/workspace/recent/remove', { method: 'POST', body: JSON.stringify({ path }) }); }
+
 
 // Connection
 export function getConnection() { return request<{ connection: ConnectionSettings | null }>('/connection'); }

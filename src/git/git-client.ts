@@ -34,10 +34,14 @@ export class GitClient {
   }
 
   add(paths: string[]): void {
-    execFileSync('git', ['add', '--', ...paths], {
-      cwd: this.repoPath,
-      stdio: 'pipe',
-    });
+    const chunkSize = 500;
+    for (let i = 0; i < paths.length; i += chunkSize) {
+      const chunk = paths.slice(i, i + chunkSize);
+      execFileSync('git', ['add', '--', ...chunk], {
+        cwd: this.repoPath,
+        stdio: 'pipe',
+      });
+    }
   }
 
   commit(message: string): string {

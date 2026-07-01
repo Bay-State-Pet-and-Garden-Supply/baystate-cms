@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import os from 'os';
 import {
   getCurrentWorkspace, createWorkspace, loadWorkspace, closeWorkspace,
+  getRecentWorkspaces, removeRecentWorkspace,
 } from '../services/workspace-service';
 
 const execPromise = promisify(exec);
@@ -112,6 +113,41 @@ route.post('/workspace/close', (c) => {
   } catch (err) {
     return c.json({
       error: `Failed to close workspace: ${err instanceof Error ? err.message : String(err)}`,
+    }, 500);
+  }
+});
+
+/**
+ * GET /api/workspace/recent - Get list of recent workspaces.
+ */
+route.get('/workspace/recent', (c) => {
+  try {
+    const list = getRecentWorkspaces();
+    return c.json({ success: true, workspaces: list });
+  } catch (err) {
+    return c.json({
+      error: `Failed to get recent workspaces: ${err instanceof Error ? err.message : String(err)}`,
+    }, 500);
+  }
+});
+
+/**
+ * POST /api/workspace/recent/remove - Remove a workspace path from the recent list.
+ */
+route.post('/workspace/recent/remove', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { path: workspacePath } = body as { path?: string };
+
+  if (!workspacePath) {
+    return c.json({ error: '"path" is required.' }, 400);
+  }
+
+  try {
+    removeRecentWorkspace(workspacePath);
+    return c.json({ success: true });
+  } catch (err) {
+    return c.json({
+      error: `Failed to remove workspace: ${err instanceof Error ? err.message : String(err)}`,
     }, 500);
   }
 });

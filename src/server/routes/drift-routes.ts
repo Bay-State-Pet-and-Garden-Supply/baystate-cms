@@ -95,7 +95,18 @@ route.get('/drift', (c) => {
   if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
 
   const status = c.req.query('status') || undefined;
-  const drifts = listDrift(workspace.id, status);
+  const limitVal = c.req.query('limit');
+  const offsetVal = c.req.query('offset');
+  
+  const limit = limitVal ? parseInt(limitVal, 10) : 100;
+  const offset = offsetVal ? parseInt(offsetVal, 10) : undefined;
+
+  const drifts = listDrift(
+    workspace.id,
+    status,
+    isNaN(limit) ? 100 : limit,
+    offset !== undefined && !isNaN(offset) ? offset : undefined
+  );
   const _blockingCount = countBlockingDrift(workspace.id);
   const openCount = countOpenDrift(workspace.id);
 

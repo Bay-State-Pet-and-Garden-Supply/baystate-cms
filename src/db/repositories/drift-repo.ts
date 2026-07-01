@@ -46,7 +46,7 @@ export function findDriftById(id: string): DriftRow | null {
   return mapRow(row);
 }
 
-export function listDrift(workspaceId: string, status?: string): DriftRow[] {
+export function listDrift(workspaceId: string, status?: string, limit?: number, offset?: number): DriftRow[] {
   const db = getDb();
   let sql = 'SELECT * FROM remote_drift WHERE workspace_id = ?';
   const params: (string | number | null)[] = [workspaceId];
@@ -60,6 +60,14 @@ export function listDrift(workspaceId: string, status?: string): DriftRow[] {
     }
   }
   sql += ' ORDER BY detected_at DESC';
+  if (limit !== undefined) {
+    sql += ' LIMIT ?';
+    params.push(limit);
+    if (offset !== undefined) {
+      sql += ' OFFSET ?';
+      params.push(offset);
+    }
+  }
   const rows = db.query(sql).all(...params) as Record<string, unknown>[];
   return rows.map(mapRow);
 }

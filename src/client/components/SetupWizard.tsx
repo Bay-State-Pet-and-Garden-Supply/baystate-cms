@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { initWorkspace, openWorkspace, pickDirectory, bootstrapFromXml, bootstrapFromFile, bootstrapFromPull, getBootstrapStatus, getConnection, saveConnection, testConnection } from '../api';
+import { initWorkspace, openWorkspace, pickDirectory, bootstrapFromXml, bootstrapFromFile, bootstrapFromPull, getBootstrapStatus, getConnection, saveConnection, testConnection, getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspace } from '../api';
 
 interface Props {
   onComplete: () => void;
@@ -21,6 +21,55 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
   const [polling, setPolling] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [passwordConfigured, setPasswordConfigured] = useState(false);
+  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
+
+  useEffect(() => {
+    if (step === 0) {
+      loadRecents();
+    }
+  }, [step]);
+
+  const loadRecents = async () => {
+    try {
+      const res = await getRecentWorkspaces();
+      if (res.success && res.workspaces) {
+        setRecentWorkspaces(res.workspaces);
+      }
+    } catch (err) {
+      console.error('Failed to load recent workspaces:', err);
+    }
+  };
+
+  const handleOpenRecent = async (path: string) => {
+    setLoading(true);
+    setError('');
+    setResult('');
+    try {
+      const res = await openWorkspace(path);
+      setResult(`Workspace "${res.workspace.name}" opened.`);
+      if (res.workspace.bootstrapStatus === 'complete' && res.workspace.baselineCommit) {
+        onComplete();
+        return;
+      }
+      setStep(1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRemoveRecent = async (e: React.MouseEvent, path: string) => {
+    e.stopPropagation();
+    if (confirm('Are you sure you want to remove this workspace from your recent list?')) {
+      try {
+        await removeRecentWorkspace(path);
+        loadRecents();
+      } catch (err) {
+        setError(`Failed to remove workspace: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  };
 
   useEffect(() => {
     if (step === 1) {
@@ -223,6 +272,61 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
 
       {step === 0 && (
         <div>
+          {recentWorkspaces.length > 0 && (
+            <div style={styles.section}>
+              <h2 style={styles.heading}>Recent Workspaces</h2>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {recentWorkspaces.map(ws => (
+                  <div
+                    key={ws.path}
+                    onClick={() => handleOpenRecent(ws.path)}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      padding: '12px 16px',
+                      border: '1px solid #e5e7eb',
+                      borderRadius: 6,
+                      background: '#fff',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={e => {
+                      e.currentTarget.style.borderColor = '#2563eb';
+                      e.currentTarget.style.background = '#f8fafc';
+                    }}
+                    onMouseLeave={e => {
+                      e.currentTarget.style.borderColor = '#e5e7eb';
+                      e.currentTarget.style.background = '#fff';
+                    }}
+                  >
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <span style={{ fontWeight: 600, color: '#1f2937', fontSize: 14 }}>📁 {ws.name}</span>
+                      <span style={{ fontSize: 12, color: '#6b7280', wordBreak: 'break-all' }}>{ws.path}</span>
+                    </div>
+                    <button
+                      onClick={(e) => handleRemoveRecent(e, ws.path)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#9ca3af',
+                        fontSize: 18,
+                        cursor: 'pointer',
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.background = '#fee2e2'; }}
+                      onMouseLeave={e => { e.currentTarget.style.color = '#9ca3af'; e.currentTarget.style.background = 'none'; }}
+                      title="Remove from recent list"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div style={styles.section}>
             <h2 style={styles.heading}>Create New Workspace</h2>
             <input
