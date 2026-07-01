@@ -8,6 +8,7 @@ import type {
   BrandSite,
   ExtractorProfile
 } from '../shared/schemas/onboarding';
+import type { ClassificationProposal, ClassificationEvidence } from '../shared/schemas/classification';
 
 const API_BASE = '/api/onboarding';
 
@@ -269,4 +270,39 @@ export async function getOllamaModels(baseUrl?: string): Promise<{ models: strin
   if (baseUrl) params.set('baseUrl', baseUrl);
   const qs = params.toString() ? `?${params.toString()}` : '';
   return request<{ models: string[] }>(`/settings/ollama/models${qs}`);
+}
+
+// ─── Classification API ──────────────────────────────────────────────────────
+
+export interface ClassificationConfigResponse {
+  config: any;
+}
+
+export async function getClassificationConfig(): Promise<ClassificationConfigResponse> {
+  return request<ClassificationConfigResponse>('/classification/config');
+}
+
+export async function migrateLegacyClassification(): Promise<{ success: boolean; summary: any }> {
+  return request<{ success: boolean; summary: any }>('/classification/migrate-legacy', {
+    method: 'POST',
+  });
+}
+
+export interface DecisionInput {
+  id?: string;
+  proposalId: string;
+  decision: 'accepted' | 'rejected' | 'deferred';
+  revisedFromId?: string | null;
+  reviewerId?: string | null;
+  reviewerNote?: string | null;
+}
+
+export async function submitDecisions(
+  itemId: string,
+  decisions: DecisionInput[],
+): Promise<{ success: boolean; count: number }> {
+  return request<{ success: boolean; count: number }>(`/items/${itemId}/decisions`, {
+    method: 'POST',
+    body: JSON.stringify({ decisions }),
+  });
 }

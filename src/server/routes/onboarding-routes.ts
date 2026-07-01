@@ -46,6 +46,7 @@ import { OnboardingWorker } from '../../onboarding/job-queue';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
+import { recordDecision, recordHistoryEvent } from '../../db/repositories/classification-run-repo';
 import { getDb } from '../../db/connection';
 
 const route = new Hono();
@@ -460,6 +461,86 @@ route.put('/onboarding/items/:id', async (c) => {
   })();
 
   return c.json({ success: true });
+});
+
+/**
+ * POST /api/onboarding/items/:id/decisions
+ * Record classification proposal decisions for an onboarding item.
+ */
+route.post('/onboarding/items/:id/decisions', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const itemId = c.req.param('id');
+  const body = await c.req.json();
+
+  const { decisions } = body;
+  if (!decisions || !Array.isArray(decisions)) {
+    return c.json({ error: 'decisions array is required' }, 400);
+  }
+
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Item not found' }, 404);
+  }
+
+  try {
+    const db = getDb();
+
+    // Bulk validation: if submitting multiple decisions, verify bulk acceptability
+    if (decisions.length > 1) {
+      const proposalIds = decisions.map((d: any) => d.proposalId);
+      const existing = db.query(
+        'SELECT id, is_bulk_acceptable FROM classification_proposals WHERE id IN (' +
+        proposalIds.map(() => '?').join(',') + ')'
+      ).all(...proposalIds) as Record<string, any>[];
+
+      for (const row of existing) {
+        if (!Number(row.is_bulk_acceptable)) {
+          return c.json({
+            error: `Proposal ${row.id} is not eligible for bulk acceptance. Use individual review instead.`,
+          }, 400);
+        }
+      }
+    }
+
+    db.transaction(() => {
+      for (const d of decisions) {
+        recordDecision({
+          id: d.id || '',
+          proposalId: d.proposalId,
+          decision: d.decision,
+          revisedFromId: d.revisedFromId ?? null,
+          reviewerId: d.reviewerId ?? null,
+          reviewerNote: d.reviewerNote ?? null,
+          createdAt: new Date().toISOString(),
+        });
+        recordHistoryEvent(
+          workspace.id,
+          item.upc,
+          'proposal_decision',
+          { proposalId: d.proposalId, decision: d.decision },
+          undefined,
+          d.proposalId,
+          d.id,
+        );
+      }
+    })();
+
+    // Update item status to ready if not already
+    db.query('UPDATE onboarding_items SET status = ?, updated_at = ? WHERE id = ?').run(
+      'ready',
+      new Date().toISOString(),
+      itemId,
+    );
+
+    return c.json({ success: true, count: decisions.length });
+  } catch (err) {
+    console.error('[OnboardingRoutes] Record decisions failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
 });
 
 /**

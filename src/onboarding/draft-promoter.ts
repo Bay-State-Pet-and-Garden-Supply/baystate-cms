@@ -8,6 +8,8 @@ import { findProductBySku } from '../db/repositories/product-index-repo';
 import { clearProductPages, assignProductToPage } from '../db/repositories/page-repo';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
+import { getAcceptedProposals, recordHistoryEvent } from '../db/repositories/classification-run-repo';
+import { getCachedAttributeMappings } from '../db/repositories/classification-config-repo';
 import type { Product } from '../shared/types';
 import type { ExtractionData } from '../shared/schemas/onboarding';
 
@@ -88,6 +90,46 @@ export async function promoteItems(
         },
       };
 
+      // --- Apply accepted classification proposals ---
+      // Build custom fields from accepted field assignment proposals
+      const classificationCustomFields: Record<string, string> = {};
+      const classificationPageNames: string[] = [];
+      let acceptedProductType: string | null = null;
+
+      try {
+        const acceptedProposals = getAcceptedProposals(item.upc);
+        if (acceptedProposals.length > 0) {
+          const mappings = getCachedAttributeMappings(workspaceId);
+
+          for (const proposal of acceptedProposals) {
+            if (proposal.proposalType === 'field_assignment' && proposal.targetId) {
+              const mapping = mappings.find(m => m.attributeId === proposal.targetId);
+              if (mapping && !mapping.isStale && mapping.catalogField) {
+                const value = proposal.proposedValue;
+                const str = typeof value === 'string' ? value :
+                  Array.isArray(value) ? value.join(', ') :
+                  value !== null && value !== undefined ? String(value) : '';
+                if (str) {
+                  classificationCustomFields[mapping.catalogField] = str;
+                }
+              }
+            } else if (proposal.proposalType === 'category_page' && proposal.targetId) {
+              classificationPageNames.push(proposal.targetId);
+            } else if (proposal.proposalType === 'primary_product_type' && proposal.targetId) {
+              acceptedProductType = String(proposal.targetId);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[DraftPromoter] Failed to read classification proposals:', err);
+      }
+
+      // Merge classification custom fields with any existing custom fields
+      const mergedCustomFields: Record<string, string> = {
+        ...(existingApproved?.customFields ?? {}),
+        ...classificationCustomFields,
+      };
+
       // Construct final Product schema representation
       const product: Product = {
         schemaVersion: 1,
@@ -95,7 +137,7 @@ export async function promoteItems(
         sku: item.upc,
         status: 'draft',
         core: coreProduct,
-        customFields: {},
+        customFields: mergedCustomFields,
         shopsite: {
           productId: existingApproved?.shopsite?.productId || null,
           productGuid: existingApproved?.shopsite?.productGuid || null,
@@ -132,12 +174,27 @@ export async function promoteItems(
         draftHash,
       });
 
-      // Assign product to pages if curated suggested pages exist
-      if (item.curationData?.suggestedPages && item.curationData.suggestedPages.length > 0) {
+      // Assign product to pages from classification proposals (preferred) or curated suggested pages
+      const finalPages = classificationPageNames.length > 0
+        ? classificationPageNames
+        : (item.curationData?.suggestedPages ?? []);
+      if (finalPages.length > 0) {
         clearProductPages(item.upc);
-        for (const pageName of item.curationData.suggestedPages) {
+        for (const pageName of finalPages) {
           assignProductToPage(item.upc, pageName);
         }
+      }
+
+      // Record classification history for the promotion action
+      try {
+        recordHistoryEvent(workspaceId, item.upc, 'promotion', {
+          acceptedProposalCount: classificationPageNames.length + Object.keys(classificationCustomFields).length,
+          acceptedProductType,
+          appliedFields: Object.keys(classificationCustomFields),
+          appliedPages: classificationPageNames,
+        });
+      } catch {
+        // Non-blocking
       }
 
       // Update item status in onboarding tables

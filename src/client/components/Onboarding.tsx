@@ -20,8 +20,10 @@ import {
   getExtractorProfiles,
   saveExtractorProfile,
   testExtractorProfile,
-  getBrandSites
+  getBrandSites,
+  submitDecisions
 } from '../onboarding-api';
+import type { ClassificationProposal, ClassificationEvidence } from '../../shared/schemas/classification';
 import { OnboardingSettings } from './OnboardingSettings';
 import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping } from '../../shared/schemas/onboarding';
 import { matchExistingBrand } from '../../shared/brand-matcher';
@@ -57,6 +59,8 @@ export function Onboarding() {
   const [editFields, setEditFields] = useState<Partial<ExtractionData>>({});
   const [curationFields, setCurationFields] = useState<Partial<CurationData>>({});
   const [storePages, setStorePages] = useState<string[]>([]);
+  const [classificationProposals, setClassificationProposals] = useState<ClassificationProposal[]>([]);
+  const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
 
   // Custom Selector Editor state
   const [titleSelector, setTitleSelector] = useState('');
@@ -384,7 +388,13 @@ export function Onboarding() {
 
     setSelectorTestResults(null);
     setSelectorTestError('');
-
+    if (item.curationData?.classificationProposals) {
+      setClassificationProposals(item.curationData.classificationProposals);
+      setClassificationEvidence(item.curationData.classificationEvidence || []);
+    } else {
+      setClassificationProposals([]);
+      setClassificationEvidence([]);
+    }
     if (item.sourceUrl) {
       loadSelectorProfileForUrl(item.sourceUrl);
     }
@@ -421,7 +431,8 @@ export function Onboarding() {
     setReviewExtraction(null);
     setEditFields({});
     setCurationFields({});
-    
+    setClassificationProposals([]);
+    setClassificationEvidence([]);
     // Reset selectors
     setTitleSelector('');
     setPriceSelector('');
@@ -522,8 +533,12 @@ export function Onboarding() {
       await updateItem(reviewItemId, {
         status: 'ready', // mark ready on save/approve
         extraction_data: editFields,
-        curation_data: curationFields
+        curation_data: { ...curationFields, classificationProposals, classificationEvidence }
       });
+      if (classificationProposals.length > 0) {
+        const decs = classificationProposals.filter(p => p.status === 'accepted' || p.status === 'rejected' || p.status === 'deferred').map(p => ({ proposalId: p.id, decision: p.status as 'accepted' | 'rejected' | 'deferred' }));
+        if (decs.length > 0) { try { await submitDecisions(reviewItemId, decs); } catch (e) { console.warn(e); } }
+      }
       alert('Item approved and saved to queue.');
       
       // Auto-select this item for promotion
@@ -1418,7 +1433,52 @@ export function Onboarding() {
                     </div>
                   )}
 
-                  <div style={{ ...styles.btnRow, marginTop: 24, justifyContent: 'flex-end' }}>
+                                    {classificationProposals.length > 0 && (
+                    <div style={{ marginTop: 16, padding: '12px 16px', background: '#f5f3ff', borderRadius: 8, border: '1px solid #ddd6fe' }}>
+                      <h4 style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 600, color: '#7c3aed' }}>🤖 AI Classification Proposals</h4>
+                      {classificationProposals.map((p) => {
+                        const sc = { pending: '#f59e0b', accepted: '#16a34a', rejected: '#dc2626', deferred: '#6b7280', stale: '#9ca3af' };
+                        const tl = { primary_product_type: 'Product Type', category_page: 'Category Page', field_assignment: 'Field', configuration_gap: 'Config Gap', reviewable_abstention: 'Abstention' };
+                        return (
+                          <div key={p.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #ede9fe', fontSize: 12 }}>
+                            <div style={{ flex: 1 }}>
+                              <span style={{ fontWeight: 600, color: '#5b21b6' }}>{(tl as any)[p.proposalType] || p.proposalType}</span>
+                              {p.targetId && <span style={{ color: '#374151', marginLeft: 4 }}>{p.targetId}</span>}
+                              <span style={{ color: (sc as any)[p.status], marginLeft: 8, fontWeight: 600 }}>● {p.status}</span>
+                              {p.confidence > 0 && <span style={{ color: '#6b7280', marginLeft: 4, fontSize: 10 }}>{(p.confidence * 100).toFixed(0)}%</span>}
+                              {p.isBulkAcceptable && <span style={{ background: '#dcfce7', color: '#16a34a', padding: '0 4px', borderRadius: 2, fontSize: 9, marginLeft: 4 }}>bulk</span>}
+                            </div>
+                            <div style={{ display: 'flex', gap: 3 }}>
+                              <button type="button" style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #16a34a', background: p.status === 'accepted' ? '#dcfce7' : '#fff', color: '#16a34a', cursor: 'pointer' }} onClick={() => setClassificationProposals(prev => prev.map(x => x.id === p.id ? { ...x as any, status: 'accepted' } : x))}>Accept</button>
+                              <button type="button" style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #dc2626', background: p.status === 'rejected' ? '#fee2e2' : '#fff', color: '#dc2626', cursor: 'pointer' }} onClick={() => setClassificationProposals(prev => prev.map(x => x.id === p.id ? { ...x as any, status: 'rejected' } : x))}>Reject</button>
+                              <button type="button" style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #d1d5db', background: '#fff', color: '#374151', cursor: 'pointer' }} onClick={() => setClassificationProposals(prev => prev.map(x => x.id === p.id ? { ...x as any, status: 'deferred' } : x))}>Defer</button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {(() => { const safe = classificationProposals.filter(p => p.isBulkAcceptable && p.status === 'pending'); return safe.length > 0 ? (
+                        <button type="button" style={{ marginTop: 8, padding: '4px 12px', fontSize: 11, borderRadius: 4, border: '1px solid #16a34a', background: '#dcfce7', color: '#16a34a', cursor: 'pointer', fontWeight: 600 }}
+                          onClick={() => setClassificationProposals(prev => prev.map(x => x.isBulkAcceptable && x.status === 'pending' ? { ...x as any, status: 'accepted' } : x))}>
+                          ✅ Bulk Accept {safe.length} Safe Proposal{safe.length > 1 ? 's' : ''}
+                        </button>
+                      ) : null; })()}
+                      {classificationEvidence.length > 0 && (
+                        <details style={{ marginTop: 6 }}>
+                          <summary style={{ fontSize: 11, color: '#6b7280', cursor: 'pointer' }}>Evidence ({classificationEvidence.length} items)</summary>
+                          <div style={{ marginTop: 2, maxHeight: 150, overflowY: 'auto', fontSize: 10 }}>
+                            {classificationEvidence.slice(0, 20).map((e: any) => (
+                              <div key={e.id} style={{ padding: '2px 4px', color: '#4b5563', borderBottom: '1px solid #f3f4f6' }}>
+                                <strong>{e.source}</strong>: {(e.snippet || '').slice(0, 80)}
+                                {e.reliability && <span style={{ color: '#9ca3af', marginLeft: 4 }}>({e.reliability})</span>}
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  )}
+
+<div style={{ ...styles.btnRow, marginTop: 24, justifyContent: 'flex-end' }}>
                     <button style={styles.secondaryBtn} onClick={handleCloseReview}>Cancel</button>
                     <button
                       style={{ ...styles.primaryBtn, background: '#16a34a' }}

@@ -1,4 +1,11 @@
 import { z } from 'zod';
+import {
+  ClassificationConfigSnapshotRefSchema,
+  ClassificationEvidenceSchema,
+  ClassificationProposalSchema,
+  ClassificationProposalDecisionSchema,
+  ClassificationHistoryEventSchema,
+} from './classification';
 
 // ─── Column Mapping ────────────────────────────────────────────────────────────
 
@@ -64,6 +71,14 @@ export const CurationDataSchema = z.object({
   suggestedProductType: z.string().nullable().default(null),
   curatedAt: z.string().nullable().default(null),
   curationMethod: z.enum(['auto', 'manual']).default('auto'),
+
+  // Phase 1 classification containers
+  classificationRunId: z.string().nullable().default(null),
+  classificationConfigSnapshot: ClassificationConfigSnapshotRefSchema.nullable().default(null),
+  classificationEvidence: z.array(ClassificationEvidenceSchema).default(() => []),
+  classificationProposals: z.array(ClassificationProposalSchema).default(() => []),
+  classificationDecisions: z.array(ClassificationProposalDecisionSchema).default(() => []),
+  classificationHistory: z.array(ClassificationHistoryEventSchema).default(() => []),
 });
 
 export type CurationData = z.infer<typeof CurationDataSchema>;

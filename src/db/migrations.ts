@@ -4,6 +4,7 @@ import path from 'path';
 
 const SCHEMA_PATH = path.resolve(import.meta.dirname, 'schema.sql');
 const ONBOARDING_MIGRATION_PATH = path.resolve(import.meta.dirname, 'onboarding-migration.sql');
+const CLASSIFICATION_MIGRATION_PATH = path.resolve(import.meta.dirname, 'classification-migration.sql');
 
 export function runMigrations(): void {
   const db = getDb();
@@ -86,6 +87,16 @@ export function runMigrations(): void {
     `);
   } catch (e) {
     console.error('Failed to create domain_status table:', e);
+  }
+
+  // Run classification migration if not already applied
+  const classificationVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('classification_schema_version') as
+    | { value: string }
+    | undefined;
+  if (!classificationVersion) {
+    const classificationSql = fs.readFileSync(CLASSIFICATION_MIGRATION_PATH, 'utf-8');
+    db.exec(classificationSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('classification_schema_version', '1');");
   }
 
   // Verify migration ran

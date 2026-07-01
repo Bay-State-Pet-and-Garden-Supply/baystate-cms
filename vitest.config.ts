@@ -21,7 +21,8 @@ export default defineConfig({
       'src/tests/unit/draft-promoter.test.ts',
       'src/tests/unit/onboarding-duplicate-skip.test.ts',
       'src/tests/unit/extractor-profiles.test.ts',
-      'src/tests/unit/extraction-remedies.test.ts'
+      'src/tests/unit/extraction-remedies.test.ts',
+      'src/tests/unit/classification-pipeline.test.ts'
     ],
   },
 });

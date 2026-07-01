@@ -4,7 +4,27 @@ import { getDb } from '../db/connection';
 import { listPages } from '../db/repositories/page-repo';
 import { getLlmConfig, callLlm } from './llm-client';
 import { getVlmConfig, callVlm } from './vlm-client';
+import { loadClassificationConfig } from '../classification/config-loader';
+import { createConfigSnapshot } from '../db/repositories/classification-config-repo';
+import {
+  createRun,
+  completeRun,
+  getEvidenceByRun,
+  getProposalsByRun,
+  getStageResults,
+} from '../db/repositories/classification-run-repo';
+import { runPipeline } from '../classification/pipeline-runner';
+import {
+  evidenceExtractionStage,
+  primaryProductTypeStage,
+  attributeApplicabilityStage,
+  productAttributeProposalsStage,
+  categoryPageProposalsStage,
+  productDraftProjectionStage,
+} from '../classification';
+import type { StageDefinition } from '../classification/types';
 import type { OnboardingItem, ExtractionData, CurationData } from '../shared/schemas/onboarding';
+import type { ClassificationEvidence } from '../shared/schemas/classification';
 
 /**
  * Downloads/reads the local primary image and performs VLM OCR to find the packaging title.
@@ -199,5 +219,188 @@ export async function curateItem(
     suggestedProductType: classification.suggestedProductType,
     curatedAt: new Date().toISOString(),
     curationMethod: 'auto',
+    // Phase 1 classification containers (defaulted)
+    classificationRunId: null,
+    classificationConfigSnapshot: null,
+    classificationEvidence: [],
+    classificationProposals: [],
+    classificationDecisions: [],
+    classificationHistory: [],
   };
+}
+
+/**
+ * Runs the modular classification pipeline for a curated item.
+ * Uses the Classification Configuration from store/classification/
+ * to produce structured proposals, evidence, and history records.
+ *
+ * Falls back to classic curation if no classification config exists.
+ */
+export async function curateItemWithPipeline(
+  item: OnboardingItem,
+  workspacePath: string,
+  workspaceId: string,
+): Promise<CurationData> {
+  const ext = item.extractionData;
+  if (!ext) {
+    throw new Error('Cannot curate item without extraction data.');
+  }
+
+  console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
+
+  // Step 0: Run classic curation for base fields (title, OCR)
+  const baseCuration = await curateItem(item, workspacePath);
+
+  // Check if classification config exists
+  const classConfig = loadClassificationConfig(workspacePath);
+  const hasConfig = classConfig.manifest != null &&
+    (classConfig.productTypes.length > 0 || classConfig.attributes.length > 0);
+
+  if (!hasConfig) {
+    console.log('[ProductCurator] No classification config — returning classic curation only.');
+    return baseCuration;
+  }
+
+  // Step 1: Create a config snapshot for reproducibility
+  const snapshotId = createConfigSnapshot(workspaceId, classConfig);
+  const snapshotHash = snapshotId;
+
+  // Step 2: Create a classification run
+  const run = createRun(workspaceId, item.upc, snapshotId, snapshotHash, item.id);
+
+  // Step 3: Build the pipeline context
+  const context = {
+    workspacePath,
+    workspaceId,
+    runId: run.id,
+    configSnapshotRef: {
+      id: snapshotId,
+      hash: snapshotHash,
+      sourceCommit: null,
+      createdAt: new Date().toISOString(),
+    },
+  };
+
+  // Step 4: Build initial evidence from extraction data
+  const initialEvidence: ClassificationEvidence[] = [];
+  if (ext.title) {
+    initialEvidence.push({
+      id: '',
+      runId: run.id,
+      stageName: 'evidence_extraction',
+      productSku: item.upc,
+      attributeId: null,
+      source: 'official_product_page',
+      reliability: 'medium',
+      sourceUrl: ext.sourceUrl ?? null,
+      sourceField: 'title',
+      snippet: ext.title,
+      value: ext.title,
+      metadata: { provenance: 'web_scrape' },
+      capturedAt: new Date().toISOString(),
+    });
+  }
+  if (ext.description) {
+    initialEvidence.push({
+      id: '',
+      runId: run.id,
+      stageName: 'evidence_extraction',
+      productSku: item.upc,
+      attributeId: null,
+      source: 'official_product_page',
+      reliability: 'medium',
+      sourceUrl: ext.sourceUrl ?? null,
+      sourceField: 'description',
+      snippet: ext.description.slice(0, 500),
+      value: ext.description,
+      metadata: { provenance: 'web_scrape' },
+      capturedAt: new Date().toISOString(),
+    });
+  }
+  if (ext.primaryImage) {
+    initialEvidence.push({
+      id: '',
+      runId: run.id,
+      stageName: 'evidence_extraction',
+      productSku: item.upc,
+      attributeId: null,
+      source: 'visual_product_evidence',
+      reliability: 'medium',
+      sourceUrl: null,
+      sourceField: 'primary_image',
+      snippet: ext.primaryImage,
+      value: ext.primaryImage,
+      metadata: { provenance: 'local_image' },
+      capturedAt: new Date().toISOString(),
+    });
+  }
+  if (item.name) {
+    initialEvidence.push({
+      id: '',
+      runId: run.id,
+      stageName: 'evidence_extraction',
+      productSku: item.upc,
+      attributeId: null,
+      source: 'spreadsheet',
+      reliability: 'medium',
+      sourceUrl: null,
+      sourceField: 'name',
+      snippet: item.name,
+      value: item.name,
+      metadata: { provenance: 'spreadsheet_import' },
+      capturedAt: new Date().toISOString(),
+    });
+  }
+
+  // Step 5: Run the pipeline
+  const stages: StageDefinition[] = [
+    evidenceExtractionStage,
+    primaryProductTypeStage,
+    attributeApplicabilityStage,
+    productAttributeProposalsStage,
+    categoryPageProposalsStage,
+    productDraftProjectionStage,
+  ];
+
+  try {
+    const result = await runPipeline(stages, context, {
+      sku: item.upc,
+      onboardingItemId: item.id,
+      evidence: initialEvidence,
+      acceptedProposals: [],
+      allProposals: [],
+    });
+
+    // Determine final status
+    const hasAbstentions = result.proposals.some(p => p.proposalType === 'reviewable_abstention');
+    const finalStatus = hasAbstentions ? 'completed_with_abstentions' : 'completed';
+    completeRun(run.id, finalStatus);
+
+    // Collect persisted evidence and proposals
+    const allEvidence = getEvidenceByRun(run.id);
+    const allProposals = getProposalsByRun(run.id);
+    const stageResults = getStageResults(run.id);
+
+    return {
+      ...baseCuration,
+      classificationRunId: run.id,
+      classificationConfigSnapshot: context.configSnapshotRef,
+      classificationEvidence: allEvidence,
+      classificationProposals: allProposals,
+      classificationDecisions: [],
+      classificationHistory: stageResults.map(sr => ({
+        id: String(sr.id),
+        runId: run.id,
+        proposalId: null,
+        decisionId: null,
+        eventType: `stage_${sr.stage_name}`,
+        eventJson: { status: sr.status, output: sr.output_json },
+        createdAt: String(sr.started_at),
+      })),
+    };
+  } catch (err) {
+    console.error(`[ProductCurator] Classification pipeline failed:`, err);
+    completeRun(run.id, 'failed', err instanceof Error ? err.message : String(err));
+    return baseCuration;
+  }
 }

@@ -7,6 +7,9 @@ import { runMigrations } from '../../db/migrations';
 import { insertWorkspace, findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
 import { createWorkspaceDirs, writeGitignore, writeStoreConfig } from '../../git/workspace-files';
+import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
+import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
+import type { ClassificationConfig } from '../../shared/types';
 
 import type { Workspace } from '../../shared/types';
 
@@ -97,6 +100,21 @@ export function createWorkspace(name: string, workspacePath: string): { workspac
     entries: [],
   });
 
+  // Write default classification config (empty, seed files)
+  const nowStr = new Date().toISOString();
+  const defaultClassConfig: ClassificationConfig = {
+    manifest: { schemaVersion: 1, compatibilityVersion: 1, createdAt: nowStr, updatedAt: nowStr, fileVersions: {} },
+    productTypes: [],
+    attributes: [],
+    attributeProfiles: [],
+    attributeMappings: [],
+    guidance: [],
+    modelPolicy: { defaultProvider: 'ollama', defaultModel: '', stageOverrides: {}, imageDataSharing: 'local_only', textDataSharing: 'local_only' },
+    dataSharing: { imagePolicy: 'local_only', textPolicy: 'local_only', sensitiveDataFiltering: true, retentionDays: 90 },
+  };
+  saveClassificationConfig(workspacePath, defaultClassConfig);
+  syncConfigToCache(workspace.id, defaultClassConfig);
+
   // Write adapter settings
   writeStoreConfig(workspacePath, 'adapter-settings.json', {
     xmlVersion: '15.0',
@@ -134,6 +152,14 @@ export function loadWorkspace(workspacePath: string): Workspace | null {
 
   const ws = findWorkspace();
   if (ws) {
+    // Load classification config into SQLite cache
+    try {
+      const classConfig = loadClassificationConfig(resolved);
+      syncConfigToCache(ws.id, classConfig);
+    } catch (err) {
+      console.warn('[WorkspaceService] Failed to load classification config:', err);
+    }
+
     const resolvedGit = path.join(resolved, '.git');
     if (ws.workspacePath !== resolved || ws.gitPath !== resolvedGit) {
       updateWorkspacePaths(ws.id, resolved, resolvedGit);

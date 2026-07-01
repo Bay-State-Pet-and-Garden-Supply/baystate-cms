@@ -13,7 +13,8 @@ import {
 import { discoverSources } from './source-discovery';
 import { insertSources, deleteSourcesByItem } from '../db/repositories/onboarding-source-repo';
 import { extractProductData } from './page-extractor';
-import { curateItem } from './product-curator';
+import { curateItem, curateItemWithPipeline } from './product-curator';
+import { hasClassificationConfig } from '../classification/config-loader';
 import { downloadImages } from './image-downloader';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { onboardingEvents } from './sse-emitter';

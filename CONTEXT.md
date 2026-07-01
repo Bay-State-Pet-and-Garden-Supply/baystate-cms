@@ -29,12 +29,20 @@ A reusable classification for products that share the same merchandising expecta
 _Avoid_: Category, template, department
 
 **Primary Product Type**:
-The single Product Type that selects a product's Attribute Profile.
+The Product Type that selects a product's Attribute Profile when known.
 _Avoid_: Secondary type, category, facet
 
+**Unknown Primary Product Type**:
+The reviewed absence of a Primary Product Type for a product.
+_Avoid_: Product failure, forced type
+
 **Product SKU**:
-A single product identity that is classified independently during onboarding.
-_Avoid_: Product family, variant group
+A store-facing product identifier used as the onboarding key.
+_Avoid_: Product identity, product family, variant group
+
+**Product Identity**:
+The stable local CMS identity for a product after it becomes a product draft or approved product.
+_Avoid_: SKU, onboarding row
 
 **Unmapped Product Type**:
 A plausible Product Type that is not yet configured for the store.
@@ -43,6 +51,14 @@ _Avoid_: New category, auto-created type
 **Product Attribute**:
 A store-configured merchandisable fact about a product, such as flavor, color, size, material, or life stage.
 _Avoid_: Field, custom field, classifier result
+
+**Attribute Group**:
+An optional manager-facing grouping for Product Attributes.
+_Avoid_: Product Type, classification rule, inheritance
+
+**Attribute Group Layout**:
+A Product Type-specific display ordering or override for Attribute Groups.
+_Avoid_: Classification rule, attribute applicability
 
 **Unmapped Product Attribute**:
 A Product Attribute without a live Catalog Field target.
@@ -75,6 +91,22 @@ _Avoid_: Field set, schema, template
 **Attribute Constraint**:
 A Product Type-specific limit on how a Product Attribute may be assigned.
 _Avoid_: Validation rule, configuration option
+
+**Attribute Applicability Condition**:
+A deterministic Attribute Profile rule that decides whether a Product Attribute applies to a product.
+_Avoid_: Free-form guidance, hidden classifier rule
+
+**Applicability Preview**:
+A non-final indication that a Product Attribute may apply based on unreviewed proposals.
+_Avoid_: Required field, final assignment
+
+**Non-Applicable Product Attribute**:
+A Product Attribute whose Attribute Applicability Conditions are not satisfied for a product.
+_Avoid_: Deleted attribute, hidden field
+
+**Applicability Override**:
+A reviewer decision that treats a Non-Applicable Product Attribute as applicable for one product.
+_Avoid_: Attribute Profile change, silent applicability change
 
 **Attribute Cardinality**:
 Whether a Product Attribute accepts one value or multiple values for a Product Type.
@@ -165,8 +197,8 @@ An accepted proposal that is not written during product draft creation because i
 _Avoid_: Product blocker, silent omission
 
 **Classification History**:
-The retained local CMS record of Classification Proposals, Classification Evidence, and Proposal Decisions for a product.
-_Avoid_: Final field values, model log, ShopSite export data
+The retained local CMS operational record of Classification Proposals, Classification Evidence, and Proposal Decisions for a product.
+_Avoid_: Canonical catalog state, final field values, model log, ShopSite export data
 
 **Classification Run**:
 A reproducible attempt to create Classification Proposals for one Product SKU.
@@ -183,6 +215,22 @@ _Avoid_: Silent reinterpretation, old mapping reuse
 **Classification Refresh**:
 A Classification Run triggered by changed product evidence or changed Classification Configuration.
 _Avoid_: Silent overwrite, automatic approval
+
+**Configuration-Driven Classification Refresh**:
+A visible Classification Refresh queued after Configuration Review changes active Classification Configuration.
+_Avoid_: Hidden rerun, inline configuration application
+
+**Refresh Scope**:
+The set of Classification Stages rerun during a Classification Refresh.
+_Avoid_: Always-full rerun, hidden partial rerun
+
+**Refresh Preview**:
+A configuration-review summary of affected products and Classification Stages before a Classification Refresh is queued.
+_Avoid_: Hidden queue, surprise rerun
+
+**Refresh Deferral**:
+A manager choice to exclude a Product SKU from a queued Classification Refresh.
+_Avoid_: Invalid partial refresh, skipped required stage
 
 **Stale Classification Proposal**:
 A Classification Proposal that should be reconsidered because a dependent proposal changed.
@@ -219,6 +267,10 @@ _Avoid_: Training data, global example
 **Configuration Suggestion**:
 A reviewable proposed Product Type, Product Attribute, Attribute Constraint, or allowed value derived from store-local evidence.
 _Avoid_: Auto-generated configuration, inferred schema
+
+**Configuration Review**:
+A workspace-level review of Configuration Suggestions and Configuration Changes.
+_Avoid_: Product review, inline product decision
 
 **Starter Preset**:
 An optional predefined set of Product Types, Product Attributes, Attribute Constraints, and allowed values that a store may adapt.
@@ -263,6 +315,14 @@ _Avoid_: Manager guidance, model instruction
 **Structured Product Evidence**:
 A bounded product fact, snippet, or observation extracted from Untrusted Product Evidence with provenance.
 _Avoid_: Raw page text, prompt content
+
+**Evidence Snapshot**:
+A bounded retained copy of Structured Product Evidence as it existed when it supported a proposal or decision.
+_Avoid_: Raw page archive, full image copy
+
+**Evidence Retention Policy**:
+The workspace default and type-specific override rules that control how long Evidence Snapshots are retained.
+_Avoid_: Immediate purge, raw archive policy
 
 **Visual Product Evidence**:
 Structured Product Evidence extracted from a product image.
@@ -351,19 +411,35 @@ _Avoid_: Hidden ordering, implicit prerequisite
 ## Relationships
 
 - A **Product Type** defines which **Product Attributes** are relevant for a product.
-- A **Product SKU** has exactly one **Primary Product Type** for classification.
+- A **Product SKU** may have one **Primary Product Type** or an **Unknown Primary Product Type** during review.
 - A **Primary Product Type** gates Product Attribute classification except for **Universal Product Attributes**.
+- An **Unknown Primary Product Type** pauses type-gated Product Attribute proposals and Category Page proposals but does not block product draft creation.
 - A **Product Type** remains local CMS classification unless represented by a mapped **Product Attribute**.
 - Changing a **Product Type** may make type-specific **Classification Proposals** stale.
+- Changing the **Primary Product Type** is a **Proposal Decision Revision** with downstream effects.
+- Changing the **Primary Product Type** triggers a **Classification Refresh** for dependent Attribute Applicability, Attribute Proposal, Category Page Proposal, and Product Draft Projection stages.
 - An **Unmapped Product Type** requires review before it can become a **Product Type**.
 - An **Attribute Profile** belongs to exactly one **Product Type**.
 - An **Attribute Profile** may define **Attribute Constraints** for each included **Product Attribute**.
+- An **Attribute Profile** may define **Attribute Applicability Conditions** for each included **Product Attribute**.
+- An **Attribute Applicability Condition** may use unreviewed proposals only for **Applicability Previews**.
+- Accepted or reviewed values are required before an **Attribute Applicability Condition** can affect final Field Assignments or required-field validation.
+- Required-field validation applies only to Product Attributes whose **Attribute Applicability Conditions** are satisfied by accepted or reviewed values.
+- A **Non-Applicable Product Attribute** does not affect final Field Assignments or required-field validation.
+- Product review focuses on applicable Product Attributes while allowing Non-Applicable Product Attributes to be inspected for configuration debugging.
+- An **Applicability Override** may allow a Non-Applicable Product Attribute to receive a Proposal Decision for one product.
+- An **Applicability Override** is not eligible for bulk actions.
+- An **Applicability Override** may produce a **Configuration Suggestion** when it indicates the Attribute Profile may be wrong.
 - An **Attribute Profile** may define **Attribute Cardinality** for each included **Product Attribute**.
 - An **Attribute Profile** may define Product Type-specific **Attribute Value Aliases**.
 - An **Attribute Profile** may define confidence thresholds for its **Classification Proposals**.
 - An **Unmapped Attribute Value** requires review before it can become a **Field Assignment**.
 - An **Unmapped Category Page** requires review before it can become a **Category Page**.
 - A **Product Attribute** may appear in many **Attribute Profiles**.
+- A **Product Attribute** may belong to one **Attribute Group** for review and configuration organization.
+- **Classification Configuration** may define workspace-global **Attribute Groups**.
+- A **Product Type** may define an **Attribute Group Layout** for manager-facing display.
+- An **Attribute Group** does not determine whether a Product Attribute applies to a product.
 - A **Product Attribute** may have one **Attribute Mapping**.
 - An **Unmapped Product Attribute** cannot produce a final **Field Assignment**.
 - An **Attribute Mapping** points to one primary **Catalog Field**.
@@ -380,6 +456,7 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - A **Field Assignment** applies to the **Catalog Field** identified by its **Attribute Mapping**.
 - A **Field Assignment** uses **Catalog Field Serialization** when writing values into a **Catalog Field**.
 - A product may belong to zero or more **Category Pages**.
+- **Category Page** assignment requires a known **Primary Product Type**.
 - **Category Page** assignment may depend on **Product Type**, **Product Attributes**, and direct product evidence.
 - **Category Page** assignment follows the configured **Category Page Assignment Scope**.
 - **Category Page Assignment Scope** may be defined by Product Type with a workspace default fallback.
@@ -433,6 +510,8 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - A **Starter Preset** may produce **Configuration Suggestions**.
 - A **Legacy Field Map** may produce **Configuration Suggestions**.
 - A **Configuration Suggestion** may propose merging multiple legacy entries into one **Product Attribute**.
+- A **Configuration Suggestion** is resolved through **Configuration Review**.
+- Product review may link to **Configuration Review** but does not apply workspace-level configuration changes inline.
 - A **Batch Classification Hint** may inform **Classification Proposals** for one onboarding batch.
 - **Baseline Classification** may run without active **Classification Configuration**.
 - **Configured Classification** requires active **Classification Configuration**.
@@ -450,7 +529,14 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - A **Classification Run** uses exactly one **Classification Configuration Snapshot**.
 - A **Classification Run** produces **Classification Proposals** for one **Product SKU**.
 - A **Classification Refresh** may make dependent **Classification Proposals** stale.
+- A **Classification Refresh** has a **Refresh Scope**.
+- Primary Product Type changes determine Refresh Scope through dependent stages.
+- A **Classification Refresh** may have a **Refresh Preview** before it is queued.
+- A **Refresh Preview** may allow **Refresh Deferrals** for Product SKUs.
+- A **Refresh Deferral** cannot alter required stages for included Product SKUs.
 - A **Classification Refresh** must preserve prior **Proposal Decisions** in **Classification History**.
+- **Configuration Review** may queue **Configuration-Driven Classification Refreshes** for affected products.
+- A **Configuration-Driven Classification Refresh** reruns affected stages when dependencies are known and falls back to a full Classification Run when impact is unclear.
 - A **Configuration Suggestion** becomes active only through a **Configuration Change**.
 - A **Configuration Change** is reviewed before it updates **Classification Configuration**.
 - A **Configuration Gap** blocks affected **Field Assignments** but does not block product draft creation.
@@ -462,7 +548,13 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - **Batch Bulk Proposal Acceptance** requires a preview summary before applying decisions across Product SKUs.
 - Product Claims, Product Composition Attributes, Evidence Conflicts, Unmapped values, Configuration Gaps, Stale Classification Proposals, and Manual Review Requirements require individual Proposal Decisions.
 - A product may have one **Classification History**.
+- Before product draft creation, **Classification History** is associated with a **Product SKU**.
+- After product draft creation, **Classification History** is associated with a **Product Identity** while retaining Product SKU references.
 - A **Classification History** preserves proposals, evidence, and decisions separately from final product values.
+- A **Classification History** retains **Evidence Snapshots** sufficient to explain past decisions.
+- **Evidence Retention Policy** controls how long **Evidence Snapshots** are retained.
+- **Evidence Retention Policy** may vary by evidence type or Product Attribute type.
+- **Classification History** is local operational/audit state, not canonical catalog state.
 - **Classification History** stays in the local CMS and is not exported to ShopSite.
 - A **Stale Classification Proposal** requires a new **Proposal Decision** before becoming a **Field Assignment** or **Category Page** assignment.
 - A **Product Draft Projection** previews accepted **Proposal Decisions** before product draft creation.
@@ -482,7 +574,9 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - Customer-facing page names or hierarchy could be treated as direct product facts — resolved: they are **Page Context Evidence** and low-reliability.
 - "new product type" can mean either a configured **Product Type** or a suggested **Unmapped Product Type** — resolved: classifiers may suggest but not create Product Types.
 - **Product Type** could be confused with an exported ShopSite field — resolved: keep it local unless represented by a mapped **Product Attribute**.
+- Unknown Primary Product Type could still lead to page assignment proposals — resolved: pause Category Page proposals until Primary Product Type is known.
 - Product Type structure could depend on each store's merchandising preferences — resolved: capture manager preferences as **Catalog Manager Guidance** and Classification Configuration rather than assuming one universal hierarchy.
+- Product Type-specific attribute grouping could be mistaken for classification behavior — resolved: use **Attribute Group Layout** only for manager-facing display.
 - Manager instructions could become unbounded prompts — resolved: prefer **Structured Catalog Manager Guidance** and limit **Free-Form Catalog Manager Guidance** with Classification Safety Rules.
 - Manager guidance can make review stricter but not looser — resolved: use **Manual Review Requirements** to require individual review without weakening safety rules.
 - Free-form guidance could be mixed with product evidence or safety rules — resolved: maintain **Guidance Boundaries** for Model-Backed Classification Stages.
@@ -497,9 +591,19 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - Image sharing could be treated the same as text sharing — resolved: use a stricter **Image Data Sharing Policy** and keep raw product images local unless explicitly enabled.
 - Overlapping manager guidance could be silently merged — resolved: use **Guidance Precedence**, with safety rules first and the narrowest applicable scope winning.
 - Deterministically resolved guidance conflicts could still surprise managers — resolved: surface them as **Guidance Override Warnings** rather than blocking configuration review.
-- Products could appear to have multiple types — resolved: use exactly one **Primary Product Type** for classification and use Category Pages or Product Attributes for secondary merchandising facets.
+- Products could appear to have multiple types — resolved: use at most one **Primary Product Type** for classification and use Category Pages or Product Attributes for secondary merchandising facets.
+- Product review could force a Product Type when evidence is ambiguous — resolved: allow **Unknown Primary Product Type** and pause type-gated proposals including Category Page proposals without blocking product draft creation.
+- Correcting Primary Product Type could look like a special decision type — resolved: treat it as a **Proposal Decision Revision** that triggers a Classification Refresh for dependent stages while preserving prior decisions.
 - Product families or variants could imply inherited classification — resolved: classify each **Product SKU** independently until the domain has an explicit product-family concept.
+- SKU could be confused with the stable local product identity — resolved: use **Product SKU** for the store-facing onboarding key and **Product Identity** after product draft creation.
 - "field" was used to mean store-specific merchandising facts — resolved: call these **Product Attributes** in the domain language.
+- Attribute grouping could be mistaken for classification semantics — resolved: use **Attribute Groups** only for manager-facing organization and duplicate-label context.
+- Product Attribute applicability could be hidden in free-form guidance — resolved: express it as structured **Attribute Applicability Conditions** in Attribute Profiles.
+- Unreviewed proposals could make irrelevant attributes appear required — resolved: use them only for **Applicability Previews** until values are accepted or reviewed.
+- Required attributes could be interpreted as every attribute in a Product Type profile — resolved: required-field validation only applies when **Attribute Applicability Conditions** are satisfied.
+- Non-applicable attributes could clutter product review — resolved: treat them as **Non-Applicable Product Attributes** that are hidden from the main review but available for configuration debugging.
+- Manual review could silently override applicability rules — resolved: record an **Applicability Override** for the product and offer a Configuration Suggestion if the profile may be wrong.
+- Applicability Overrides could be applied too broadly — resolved: keep them per-product and route broad corrections through Configuration Review or Product Type correction.
 - Product marketing claims could be treated as creative inference — resolved: call them **Product Claims** and require **Direct Claim Evidence**.
 - Free-from or allergen claims could be inferred from absence — resolved: call these **Absence-Based Claims** and do not propose them.
 - Ingredients and nutrients could be treated as generic merchandisable fields — resolved: call them **Product Composition Attributes** and require strict evidence and provenance.
@@ -510,6 +614,11 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - "attribute value" can mean a controlled choice, free text, a structured measurement, a canonical unit, a synonym, or a plausible value outside the controlled list — resolved: model this distinction as **Attribute Value Mode**, **Measured Attribute Value**, **Canonical Measurement Unit**, **Attribute Value Alias**, **Ambiguous Attribute Value Alias**, and **Unmapped Attribute Value**.
 - "classification" was used to imply both suggested and final values — resolved: call AI-generated suggestions **Classification Proposals** until reviewed.
 - Automatic classification could imply all Product Type and Product Attribute proposals always run — resolved: **Baseline Classification** runs automatically, while **Configured Classification** requires active Classification Configuration.
+- Configuration Suggestions could be handled as inline product decisions — resolved: route them through **Configuration Review** because they affect workspace behavior.
+- Applying Configuration Review could leave affected product proposals stale — resolved: queue visible **Configuration-Driven Classification Refreshes** for affected products.
+- Configuration-driven refreshes could wastefully rerun everything or silently rerun too little — resolved: use **Refresh Scope** to rerun known affected stages and fall back to a full run when impact is unclear.
+- Configuration-driven refreshes could surprise managers with downstream product work — resolved: show a **Refresh Preview** before queuing affected refreshes.
+- Refresh previews could imply managers can create dependency-invalid partial reruns — resolved: allow **Refresh Deferrals** for products, not arbitrary required-stage removal.
 - Bulk review could be confused with auto-approval — resolved: call it **Bulk Proposal Acceptance** and limit it to safe, unambiguous proposals.
 - Batch-wide bulk review could apply too many wrong decisions at once — resolved: call it **Batch Bulk Proposal Acceptance** and require a preview summary.
 - Reversing a proposal decision could imply deleting history — resolved: use **Proposal Decision Revisions** and preserve earlier decisions.
@@ -526,7 +635,9 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - Classification setup edits could be confused with instant settings — resolved: durable setup changes are reviewed **Configuration Changes**.
 - Incomplete classification setup could be confused with a product-level blocker — resolved: call it a **Configuration Gap** and block only affected Field Assignments.
 - Final product values do not explain why classification happened — resolved: preserve the **Classification History** separately from final values.
-- **Classification History** could be confused with ShopSite product data — resolved: it is local CMS history only and is not exported to ShopSite.
+- Source pages, images, or import files can change after review — resolved: retain bounded **Evidence Snapshots** rather than huge raw pages or full images by default.
+- Evidence snapshots may need storage or privacy limits — resolved: control them with an **Evidence Retention Policy**, defaulting to retention unless configured otherwise and allowing type-specific overrides.
+- **Classification History** could be confused with canonical catalog or ShopSite product data — resolved: it is local CMS operational/audit state only and is not exported to ShopSite.
 - "VLM classification" was used to imply the vision model decides final values — resolved: visual models produce **Visual Product Evidence** as an **Evidence Extraction Stage**, while proposals remain reviewable.
 - Visual observations could be applied to every attribute — resolved: each Product Attribute controls this with **Visual Evidence Eligibility**.
 - "classifier" was used broadly enough to hide multiple responsibilities — resolved: classification is composed of focused **Classification Stages** rather than one all-in-one prompt.
