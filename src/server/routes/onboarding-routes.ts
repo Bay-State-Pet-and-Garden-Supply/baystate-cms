@@ -1552,7 +1552,7 @@ route.post('/onboarding/settings/domain-diagnostics/:domain/generate-profile', a
 route.post('/onboarding/extractor-profiles/test', async (c) => {
   let browser;
   try {
-    const { url, titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector, shopifyJSONPath, variantSelectionStrategy } = await c.req.json();
+    const { url, titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector, shopifyJSONPath, variantSelectionStrategy, customSelectors } = await c.req.json();
     if (!url) {
       return c.json({ error: 'url is required' }, 400);
     }
@@ -1566,6 +1566,7 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
     // Wait for JS content
     await page.waitForTimeout(1500);
 
+    const customSelectorsJson = JSON.stringify(customSelectors || {});
     const extracted = await page.evaluate((sel: any) => {
       const res: Record<string, string | string[]> = {};
       
@@ -1624,6 +1625,20 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
       }
       return res;
     }, { titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector });
+
+    // Custom selectors — extracted separately to avoid Playwright evaluate type issues
+    if (customSelectors) {
+      for (const [fieldName, selector] of Object.entries(customSelectors)) {
+        if (!selector) continue;
+        try {
+          const val = await page.evaluate((sel: string) => {
+            const el = document.querySelector(sel);
+            return el?.textContent?.trim() || '';
+          }, selector);
+          if (val) extracted[fieldName] = val;
+        } catch { /* skip bad selectors */ }
+      }
+    }
 
     // Shopify productJSON extraction (when flagged)
     let shopifyImages: string[] = [];

@@ -421,6 +421,7 @@ export async function testExtractorProfile(data: {
   imagesSelector?: string | null;
   shopifyJSONPath?: boolean;
   variantSelectionStrategy?: any;
+  customSelectors?: Record<string, string>;
 }): Promise<{ success: boolean; extracted: Record<string, any> }> {
   return request<{ success: boolean; extracted: ExtractorTestResult }>('/extractor-profiles/test', {
     method: 'POST',
