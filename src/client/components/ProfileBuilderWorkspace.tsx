@@ -939,6 +939,17 @@ export function ProfileBuilderWorkspace(
                           {fieldName}
                         </div>
 
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                          <input
+                            type="text"
+                            value={value.selector || ''}
+                            onChange={(e) => {
+                              setCustomPickedFields((prev) => ({ ...prev, [fieldName]: { ...prev[fieldName], selector: e.target.value } }));
+                            }}
+                            placeholder="e.g. .variant-selector, [data-size]"
+                            style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
+                          />
+                        </div>
                         <ElementPickerButton
                           field={fieldName}
                           url={snapshotResult.finalUrl || snapshotResult.url}
