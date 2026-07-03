@@ -57,6 +57,8 @@ export interface GeneratedSelectorProfile {
   descriptionSelector: string | null;
   imagesSelector: string | null;
   shopifyJSONPath: boolean;
+  /** Custom field selectors (user-defined via visual picker), keyed by field name. */
+  customSelectors?: Record<string, string>;
   /** Proposed variant/option selection strategy. The LLM suggests how to
    *  select the correct source-page variant for the product SKU. */
   variantSelectionStrategy?: {
