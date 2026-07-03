@@ -1553,11 +1553,26 @@ export function PipelineBoard({
                       )}
 
                       {/* Suggested Product Type */}
-                      {curationFields.suggestedProductType && (
+                      {curationFields.suggestedProductType && reviewItem?.stage === 'curation' && (
                         <div>
                           <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Suggested Product Type</label>
                           <div style={{ display: 'inline-block', fontSize: 12, fontWeight: 600, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 6, padding: '4px 10px', marginTop: 4 }}>
                             {curationFields.suggestedProductType}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Custom fields from extraction */}
+                      {reviewExtraction?.customFields && Object.keys(reviewExtraction.customFields).length > 0 && (
+                        <div>
+                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563', marginTop: 8, display: 'block' }}>Additional Fields</label>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 4 }}>
+                            {Object.entries(reviewExtraction.customFields).map(([fieldName, value]) => (
+                              <div key={fieldName}>
+                                <label style={{ fontSize: 10, fontWeight: 600, color: '#6b7280', textTransform: 'capitalize' }}>{fieldName}</label>
+                                <div style={{ fontSize: 13, color: '#374151', padding: '2px 0' }}>{String(value)}</div>
+                              </div>
+                            ))}
                           </div>
                         </div>
                       )}

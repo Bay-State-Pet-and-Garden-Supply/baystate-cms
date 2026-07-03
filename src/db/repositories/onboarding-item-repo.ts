@@ -369,7 +369,7 @@ export function resetItemsToPending(itemIds: string[]): void {
   const placeholders = itemIds.map(() => '?').join(', ');
   db.query(
     `UPDATE onboarding_items
-     SET stage_status = 'pending', error_message = NULL, retry_count = 0, updated_at = ?
+     SET stage_status = 'pending', error_message = NULL, retry_count = 0, curation_data_json = NULL, updated_at = ?
      WHERE id IN (${placeholders})`,
   ).run(now, ...itemIds);
 }
