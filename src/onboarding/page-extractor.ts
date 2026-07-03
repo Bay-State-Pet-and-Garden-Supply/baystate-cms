@@ -267,9 +267,7 @@ export async function extractProductData(
         } catch (err) {
           console.error('[PageExtractor] Custom selector extraction failed:', err);
         }
-        try {
-          productJSON = await page.evaluate(() => (window as any).productJSON || null).catch(() => null);
-        } catch { /* skip */ }
+        // No productJSON extraction — profile extraction is selector-only
       } else {
         // No profile — try all extraction layers
         try { custom = profile ? await extractCustomSelectors(page, profile) : null; } catch {}
