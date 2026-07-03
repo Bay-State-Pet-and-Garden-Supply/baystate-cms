@@ -377,47 +377,6 @@ export class OnboardingWorker {
         price: item.price,
       });
 
-      // Download images — filter primary so it's not re-added as additional
-      const imageUrlsToDownload = [];
-      const originalPrimaryUrl = extractedData.primaryImage;
-      if (originalPrimaryUrl) {
-        imageUrlsToDownload.push(originalPrimaryUrl);
-      }
-      if (extractedData.additionalImages && extractedData.additionalImages.length > 0) {
-        // Don't include the primary URL in additional images list
-        const additionalFiltered = extractedData.additionalImages.filter(
-          (url: string) => url !== originalPrimaryUrl,
-        );
-        imageUrlsToDownload.push(...additionalFiltered.slice(0, 5));
-      }
-
-      let downloadedImages: any[] = [];
-      if (imageUrlsToDownload.length > 0) {
-        try {
-          downloadedImages = await downloadImages(
-            this.workspacePath,
-            item.upc,
-            imageUrlsToDownload,
-            extractedData.brand || item.brandHint || undefined,
-          );
-
-          const primaryDownloaded = downloadedImages.find(
-            (img: any) => img.originalUrl === originalPrimaryUrl,
-          );
-          if (primaryDownloaded) {
-            extractedData.primaryImage = primaryDownloaded.localPath;
-            extractedData.fieldProvenance.primaryImage = 'local-download';
-          }
-
-          // Map remaining downloaded images (excluding primary) to local paths
-          extractedData.additionalImages = downloadedImages
-            .filter((img: any) => img.originalUrl !== originalPrimaryUrl)
-            .map((img: any) => img.localPath);
-        } catch (imgErr) {
-          console.error(`[OnboardingWorker] Image download error for ${item.id}:`, imgErr);
-        }
-      }
-
       insertExtraction({
         itemId: item.id,
         sourceUrl: item.sourceUrl,
