@@ -1088,7 +1088,7 @@ route.get('/onboarding/settings/extractor-profiles', (c) => {
 
 route.post('/onboarding/settings/extractor-profiles', async (c) => {
   try {
-    const { domain, titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector, sitemapProductUrlPattern } = await c.req.json();
+    const { domain, titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector, sitemapProductUrlPattern, customSelectors } = await c.req.json();
     if (!domain) {
       return c.json({ error: 'domain is required' }, 400);
     }
@@ -1099,6 +1099,7 @@ route.post('/onboarding/settings/extractor-profiles', async (c) => {
       brandSelector,
       imagesSelector,
       sitemapProductUrlPattern,
+      customSelectors,
     });
     return c.json({ success: true, profile });
   } catch (err) {
