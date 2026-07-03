@@ -483,7 +483,6 @@ async function doStaticSnapshot(
   const warnings: string[] = [];
   const artifactDir = resolveArtifactDir(domain, jobId);
 
-  process.stderr.write(`[snapshot] static fetch: ${url}\n`);
 
   // Fetch
   let response: Response;
@@ -519,7 +518,6 @@ async function doStaticSnapshot(
 
   // Write raw HTML artifact
   const htmlRef = writeArtifact(artifactDir, 'page.html', html);
-  process.stderr.write(`[snapshot] wrote ${htmlRef}\n`);
 
   // Extraction phases
   const jsonLd = extractJsonLdFromHtml(html);
@@ -577,7 +575,6 @@ async function doRenderedSnapshot(
   const warnings: string[] = [];
   const artifactDir = resolveArtifactDir(domain, jobId);
 
-  process.stderr.write(`[snapshot] rendered fetch: ${url}\n`);
 
   let browser;
   try {
@@ -660,7 +657,6 @@ async function doRenderedSnapshot(
     try {
       const html = await page.content();
       htmlRef = writeArtifact(artifactDir, 'page.html', html);
-      process.stderr.write(`[snapshot] wrote ${htmlRef}\n`);
 
       // Write minified HTML
       const minified = stripNonContentTags(html);
@@ -675,7 +671,6 @@ async function doRenderedSnapshot(
       try {
         const screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png' });
         screenshotRef = writeArtifact(artifactDir, 'screenshot.png', screenshotBuffer);
-        process.stderr.write(`[snapshot] wrote ${screenshotRef}\n`);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         warnings.push(`Screenshot capture failed: ${msg}`);
@@ -846,8 +841,7 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
       res.end(JSON.stringify(result));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`[snapshot] Uncaught error: ${msg}\n`);
-
+    
       // Build a minimal valid response
       const fallback = SnapshotResponseSchema.parse({
         url: '',
@@ -868,7 +862,6 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
   });
 
   req.on('error', (err: Error) => {
-    process.stderr.write(`[snapshot] Request error: ${err.message}\n`);
     const fallback = SnapshotResponseSchema.parse({
       url: '',
       finalUrl: '',
