@@ -36,12 +36,20 @@ ShopSite's XML schema is complex and often undocumented. When adding support for
 4. Add unit tests in `src/tests/unit/shopsite-normalizer.test.ts`.
 
 ## Onboarding Pipeline & Curation Stage
-The onboarding pipeline processes bulk spreadsheet uploads through five key stages:
+The onboarding pipeline processes bulk spreadsheet uploads through five key stages. See `CONTEXT.md` for the authoritative domain model with precise terminology.
+
 1. **Discovery:** Finds the official product page URL on brand sites.
-2. **Extraction:** Scrapes raw product details (titles, descriptions, images, prices) from confirmed URLs.
+2. **Extraction:** Scrapes raw product details from confirmed URLs. Domains require an **extractor profile** (CSS selectors) for extraction to proceed. The **Profile Builder** (see below) provides a visual click-to-select workflow for building profiles.
 3. **Curation:** Synthesizes final clean store-ready titles (integrating spreadsheet hints, web scraped details, and local packaging OCR), and classifies products into internal product types and existing category pages.
 4. **Review:** Surfaces curated drafts in a user review drawer for approval.
 5. **Promotion:** Creates CMS product drafts and links them to page directories.
+
+### Extractor Profiles (Profile Builder)
+- Extraction requires an **extractor profile** per domain (CSS selectors for title, description, images).
+- **Build tab** (default): Enter a product URL, load the page, then use 🖱️ **Visually Select** buttons to click on elements in a live browser — the system generates stable CSS selectors automatically.
+- **Review tab**: See proposed selectors, preview extraction results, approve/reject per field.
+- **Advanced tab**: Contains the deprecated AI-generated proposal feature (unreliable for complex pages).
+- Access from: **Settings → Profiles tab → Domain Configuration → "Open Profile Builder"**, or via the **"⚠ Profile required" badge** on items in the Pipeline Board extraction stage.
 
 ### Vision-Language Models (VLM OCR)
 - Local VLMs (e.g. `qwen2.5vl:latest`) are used to run text OCR on the product's primary package image.
@@ -49,7 +57,11 @@ The onboarding pipeline processes bulk spreadsheet uploads through five key stag
 - The native Ollama `/api/chat` API is invoked via `src/onboarding/vlm-client.ts`.
 
 ### Curation Architecture
-- **Curator Orchestrator:** `src/onboarding/product-curator.ts` coordinates OCR title extraction, text name consolidation, and category classification.
+- **Curator Orchestrator:** `src/onboarding/product-curator.ts` coordinates OCR title extraction, text name consolidation, and category classification. This is the current implementation; per ADR 0004, modular classification stages (`src/classification/stages/`) are being phased in to replace the monolithic curator.
 - **Worker Queue:** `src/onboarding/job-queue.ts` automatically polls items in status `needs_review` and transitions batches into the `curating` phase.
 - **Draft Promoter:** `src/onboarding/draft-promoter.ts` reads the item's curation data to set product draft names and assign `product_pages` db rows.
+
+### Reference
+- See `CONTEXT.md` for the authoritative domain model and precise terminology for all pipeline stages, entities, and classification concepts.
+- See `docs/adr/` for architectural decision records that document design decisions for the classification system and extraction worker.
 
