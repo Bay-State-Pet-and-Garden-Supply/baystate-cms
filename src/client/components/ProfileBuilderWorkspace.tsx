@@ -307,6 +307,7 @@ export function ProfileBuilderWorkspace(
   const [snapshotError, setSnapshotError] = useState('');
 
   // Visually picked selectors state
+  const [manualSelectors, setManualSelectors] = useState<Record<string, string>>({});
   const [pickedSelectors, setPickedSelectors] = useState<
     Record<string, { selector: string; stability: string }>
   >({});
@@ -421,6 +422,13 @@ export function ProfileBuilderWorkspace(
   };
 
   // ── Paste-element generate ──────────────────────────────────────────────
+
+  const handleManualSelector = (field: string, selector: string) => {
+    setManualSelectors((prev) => ({ ...prev, [field]: selector }));
+    if (selector.trim()) {
+      setPickedSelectors((prev) => ({ ...prev, [field]: { selector: selector.trim(), stability: 'medium' as const } }));
+    }
+  };
 
   const handleTestExtraction = async () => {
     if (!snapshotUrl.trim()) return;
@@ -732,8 +740,17 @@ export function ProfileBuilderWorkspace(
                   1. Title
                 </div>
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
-                  Click the product name on the page
+                  Or paste a CSS selector directly
                 </p>
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                          <input
+                            type="text"
+                            value={manualSelectors.title || ''}
+                            onChange={(e) => handleManualSelector('title', e.target.value)}
+                            placeholder="e.g. h1.product-title"
+                            style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
+                          />
+                        </div>
                 <ElementPickerButton
                   field="title"
                   url={snapshotResult.finalUrl || snapshotResult.url}
@@ -774,8 +791,17 @@ export function ProfileBuilderWorkspace(
                   2. Description
                 </div>
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
-                  Click the product description on the page
+                  Or paste a CSS selector directly
                 </p>
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                          <input
+                            type="text"
+                            value={manualSelectors['description'] || ''}
+                            onChange={(e) => handleManualSelector('description', e.target.value)}
+                            placeholder="e.g. .product-description"
+                            style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
+                          />
+                        </div>
                 <ElementPickerButton
                   field="description"
                   url={snapshotResult.finalUrl || snapshotResult.url}
@@ -816,8 +842,17 @@ export function ProfileBuilderWorkspace(
                   3. Images
                 </div>
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
-                  Click a product image (gallery) on the page
+                  Or paste a CSS selector directly
                 </p>
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                          <input
+                            type="text"
+                            value={manualSelectors['images'] || ''}
+                            onChange={(e) => handleManualSelector('images', e.target.value)}
+                            placeholder="e.g. .product-images"
+                            style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
+                          />
+                        </div>
                 <ElementPickerButton
                   field="images"
                   url={snapshotResult.finalUrl || snapshotResult.url}
