@@ -311,6 +311,8 @@ export function ProfileBuilderWorkspace(
     Record<string, { selector: string; stability: string }>
   >({});
   const [customFieldName, setCustomFieldName] = useState('');
+  const [customPasteFields, setCustomPasteFields] = useState<Record<string, string>>({});
+  const [customPasteGenerating, setCustomPasteGenerating] = useState<string | null>(null);
   const [customPickedFields, setCustomPickedFields] = useState<
     Record<string, { selector: string; stability: string }>
   >({});
@@ -449,6 +451,21 @@ export function ProfileBuilderWorkspace(
     } finally {
       setPasteGenBusy(null);
     }
+  };
+
+  const handleCustomPasteGenerate = async (fieldName: string, outerHTML: string) => {
+    if (!outerHTML.trim() || !snapshotUrl.trim()) return;
+    setCustomPasteGenerating(fieldName);
+    try {
+      const htmlRes = await fetchPageHtml(snapshotUrl.trim());
+      if (!htmlRes.ok || !htmlRes.html) return;
+      const res = await generateSelectorFromElement({ html: htmlRes.html, outerHTML });
+      const data = res.data;
+      if (data && data.selector) {
+        setCustomPickedFields((prev) => ({ ...prev, [fieldName]: { selector: data.selector, stability: data.stability } }));
+      }
+    } catch { /* skip */ }
+    finally { setCustomPasteGenerating(null); }
   };
 
   // ── Test extraction ─────────────────────────────────────────────────────
@@ -986,6 +1003,23 @@ export function ProfileBuilderWorkspace(
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 4, textTransform: 'capitalize' }}>
                           {fieldName}
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                          <textarea
+                            value={customPasteFields[fieldName] || ''}
+                            onChange={(e) => setCustomPasteFields((prev) => ({ ...prev, [fieldName]: e.target.value }))}
+                            rows={1}
+                            placeholder="Or paste outerHTML here..."
+                            style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 11, fontFamily: 'monospace', resize: 'vertical' }}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleCustomPasteGenerate(fieldName, customPasteFields[fieldName] || '')}
+                            disabled={customPasteGenerating !== null || !customPasteFields[fieldName]?.trim()}
+                            style={{ padding: '4px 10px', fontSize: 11, background: customPasteGenerating === fieldName ? '#9ca3af' : '#16a34a', color: '#fff', border: 'none', borderRadius: 4, cursor: customPasteGenerating !== null ? 'not-allowed' : 'pointer', fontWeight: 600, whiteSpace: 'nowrap' }}
+                          >
+                            {customPasteGenerating === fieldName ? '...' : 'Generate'}
+                          </button>
                         </div>
                         <ElementPickerButton
                           field={fieldName}
