@@ -218,6 +218,12 @@ function extractMicrodataFromCheerio($: cheerio.CheerioAPI): Record<string, stri
 
 // ─── Helper: collect images from a cheerio selector string ────────────────────
 
+
+/** Strip query params from an image URL for deduplication. */
+function canonicalImageUrl(url: string): string {
+  try { return url.split('?')[0].split('#')[0]; } catch { return url; }
+}
+
 function collectImagesFromSelector(
   $: cheerio.CheerioAPI,
   imagesSelector: string,
@@ -228,12 +234,16 @@ function collectImagesFromSelector(
   $(imagesSelector).each((_, el) => {
     for (const src of collectImageSourcesFromElement($, el)) {
       const absolute = resolveUrl(src, baseUrl);
-      if (absolute && !seen.has(absolute)) {
-        seen.add(absolute);
+      if (!absolute) continue;
+      const canonical = canonicalImageUrl(absolute);
+      if (!seen.has(canonical)) {
+        seen.add(canonical);
         images.push(absolute);
       }
     }
   });
+  // Cap at 30 images to prevent gallery explosions
+  if (images.length > 30) images.length = 30;
   return images;
 }
 

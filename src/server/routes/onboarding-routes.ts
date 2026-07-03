@@ -1567,6 +1567,7 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
     await page.waitForTimeout(1500);
 
     const customSelectorsJson = JSON.stringify(customSelectors || {});
+    const canonicalImageUrl = (u: string) => { try { return u.split('?')[0]; } catch { return u; } };
     const extracted = await page.evaluate((sel: any) => {
       const res: Record<string, string | string[]> = {};
       
@@ -1619,10 +1620,12 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
         res.images = Array.from(document.querySelectorAll(sel.imagesSelector))
           .flatMap(imageSourcesForElement)
           .filter(src => {
-            if (seen.has(src)) return false;
-            seen.add(src);
+            const key = canonicalImageUrl(src);
+            if (seen.has(key)) return false;
+            seen.add(key);
             return true;
-          });
+          })
+          .slice(0, 30);
       }
       return res;
     }, { titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector });
