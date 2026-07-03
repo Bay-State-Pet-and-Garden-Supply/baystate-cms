@@ -325,6 +325,15 @@ export function ProfileBuilderWorkspace(
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState('');
 
+  
+  
+  // ── Auto-load snapshot when a seed URL is provided ─────────────────
+  useEffect(() => {
+    if (seedSampleUrl && !snapshotResult && !snapshotBusy) {
+      handleSnapshot();
+    }
+  }, []);
+
   // ── Proposals state ────────────────────────────────────────────────────
   const [selectedGenerationId, setSelectedGenerationId] = useState<string | null>(null);
   const [proposalGenerating, setProposalGenerating] = useState(false);
@@ -357,6 +366,26 @@ export function ProfileBuilderWorkspace(
   // ── Derived data ───────────────────────────────────────────────────────
 
   const activeProfile = governance?.activeProfile ?? null;
+  // ── Pre-fill selector inputs from active profile on mount ─────────
+  useEffect(() => {
+    if (activeProfile) {
+      const prefill: Record<string, string> = {};
+      const picks: Record<string, { selector: string; stability: string }> = {};
+      if (activeProfile.titleSelector) { prefill.title = activeProfile.titleSelector; picks.title = { selector: activeProfile.titleSelector, stability: 'medium' }; }
+      if (activeProfile.descriptionSelector) { prefill.description = activeProfile.descriptionSelector; picks.description = { selector: activeProfile.descriptionSelector, stability: 'medium' }; }
+      if (activeProfile.imagesSelector) { prefill.images = activeProfile.imagesSelector; picks.images = { selector: activeProfile.imagesSelector, stability: 'medium' }; }
+      setManualSelectors(prefill);
+      setPickedSelectors(picks);
+      if (activeProfile.customSelectors) {
+        const cfs: Record<string, { selector: string; stability: string }> = {};
+        for (const [k, v] of Object.entries(activeProfile.customSelectors)) {
+          if (v) cfs[k] = { selector: v as string, stability: 'medium' };
+        }
+        if (Object.keys(cfs).length > 0) setCustomPickedFields(cfs);
+      }
+    }
+  }, [activeProfile]);
+
   const generations = governance?.generations ?? [];
 
   const activeSelectors: Record<string, string | null> = activeProfile
@@ -681,7 +710,31 @@ export function ProfileBuilderWorkspace(
     const renderBuild = () => (
     <div>
       {/* ─── Hero: URL Input ─── */}
-      <div style={{
+      
+      {/* ─── Current Active Profile ─── */}
+      {activeProfile && (
+        <div style={{ ...s.section, marginBottom: 16, padding: 16, background: '#f8f9fa', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+          <h3 style={{ ...s.sectionTitle, margin: '0 0 8px', fontSize: 14 }}>Current Profile for {domain}</h3>
+          <div style={{ fontSize: 12, color: '#4b5563' }}>
+            {activeProfile.titleSelector && <div style={{ marginBottom: 4 }}><strong>Title:</strong> <code style={s.code}>{activeProfile.titleSelector}</code></div>}
+            {activeProfile.descriptionSelector && <div style={{ marginBottom: 4 }}><strong>Description:</strong> <code style={s.code}>{activeProfile.descriptionSelector}</code></div>}
+            {activeProfile.imagesSelector && <div style={{ marginBottom: 4 }}><strong>Images:</strong> <code style={s.code}>{activeProfile.imagesSelector}</code></div>}
+            {activeProfile.customSelectors && Object.keys(activeProfile.customSelectors).length > 0 && (
+              <div style={{ marginTop: 4 }}>
+                <strong>Custom fields:</strong>
+                {Object.entries(activeProfile.customSelectors).map(([k, v]) => (
+                  <div key={k} style={{ marginLeft: 8, marginTop: 2 }}>{k}: <code style={s.code}>{v as string}</code></div>
+                ))}
+              </div>
+            )}
+            {!activeProfile.titleSelector && !activeProfile.descriptionSelector && !activeProfile.imagesSelector && (
+              <p style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic', margin: 0 }}>No selectors configured yet.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+<div style={{
         ...s.section,
         background: '#faf5ff',
         borderRadius: 12,
