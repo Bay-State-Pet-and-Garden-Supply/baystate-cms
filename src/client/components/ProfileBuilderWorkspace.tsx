@@ -307,6 +307,10 @@ export function ProfileBuilderWorkspace(
   const [pickedSelectors, setPickedSelectors] = useState<
     Record<string, { selector: string; stability: string }>
   >({});
+  const [customFieldName, setCustomFieldName] = useState('');
+  const [customPickedFields, setCustomPickedFields] = useState<
+    Record<string, { selector: string; stability: string }>
+  >({});
 
   // ── Proposals state ────────────────────────────────────────────────────
   const [selectedGenerationId, setSelectedGenerationId] = useState<string | null>(null);
@@ -765,6 +769,112 @@ export function ProfileBuilderWorkspace(
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* ─── Custom Fields ─── */}
+            <div style={{ marginTop: 32, borderTop: '1px solid #e5e7eb', paddingTop: 24 }}>
+              <h3 style={s.sectionTitle}>Custom Fields</h3>
+              <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px' }}>
+                Add additional fields like Size, Flavor, Variant, Weight, etc.
+              </p>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+                <input
+                  type="text"
+                  value={customFieldName}
+                  onChange={(e) => setCustomFieldName(e.target.value)}
+                  placeholder="e.g. Size, Flavor, Weight"
+                  style={{ ...s.input, flex: 1 }}
+                />
+                <button
+                  type="button"
+                  style={{
+                    background: customFieldName.trim() ? '#7c3aed' : '#d1d5db',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 6,
+                    padding: '8px 16px',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: customFieldName.trim() ? 'pointer' : 'not-allowed',
+                    whiteSpace: 'nowrap',
+                  }}
+                  disabled={!customFieldName.trim()}
+                  onClick={() => {
+                    const name = customFieldName.trim();
+                    if (name && !customPickedFields[name] && !pickedSelectors[name]) {
+                      setCustomPickedFields((prev) => ({ ...prev, [name]: { selector: '', stability: 'low' } }));
+                      setCustomFieldName('');
+                    }
+                  }}
+                >
+                  + Add Field
+                </button>
+              </div>
+              {Object.keys(customPickedFields).length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {Object.entries(customPickedFields).map(([fieldName, value]) => (
+                    <div key={fieldName} style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      padding: 12,
+                      background: '#fff',
+                      border: value.selector ? '2px solid #16a34a' : '2px solid #e5e7eb',
+                      borderRadius: 8,
+                    }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 4, textTransform: 'capitalize' }}>
+                          {fieldName}
+                        </div>
+                        <ElementPickerButton
+                          field={fieldName}
+                          url={snapshotResult.finalUrl || snapshotResult.url}
+                          onPicked={(result) => {
+                            setCustomPickedFields((prev) => ({ ...prev, [fieldName]: { selector: result.selector, stability: result.stability } }));
+                          }}
+                          onCancel={() => {}}
+                        />
+                        {value.selector && (
+                          <div style={{ marginTop: 6, padding: 6, background: '#f0fdf4', borderRadius: 4, border: '1px solid #bbf7d0', fontSize: 12 }}>
+                            <code style={{ fontSize: 11 }}>{value.selector}</code>
+                            <span style={{
+                              marginLeft: 6,
+                              fontSize: 10,
+                              fontWeight: 700,
+                              padding: '1px 6px',
+                              borderRadius: 999,
+                              textTransform: 'uppercase',
+                              background: value.stability === 'high' ? '#dcfce7' : value.stability === 'medium' ? '#fef3c7' : '#fee2e2',
+                              color: value.stability === 'high' ? '#16a34a' : value.stability === 'medium' ? '#d97706' : '#dc2626',
+                            }}>
+                              {value.stability}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = { ...customPickedFields };
+                          delete next[fieldName];
+                          setCustomPickedFields(next);
+                        }}
+                        style={{
+                          background: 'none',
+                          border: '1px solid #dc2626',
+                          color: '#dc2626',
+                          borderRadius: 4,
+                          padding: '4px 8px',
+                          fontSize: 12,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ✕ Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Progress */}

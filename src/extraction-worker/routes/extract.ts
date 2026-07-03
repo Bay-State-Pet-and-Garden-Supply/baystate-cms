@@ -330,6 +330,7 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
   const selectors = profile.selectors || {};
+  const renderedCustomFields: Record<string, string> = {};
 
   // ── Fetch page ─────────────────────────────────────────────────────────
   let response: Response;
@@ -531,6 +532,24 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   if (sourceUrl) provenance.sourceUrl = 'request';
   provenance.profileRuntime = 'static';
 
+  // Extract custom selectors
+  const customFields: Record<string, string> = {};
+  if (selectors.customSelectors) {
+    for (const [fieldName, selector] of Object.entries(selectors.customSelectors)) {
+      if (!selector) continue;
+      try {
+        const val = $(selector).first().text().trim();
+        if (val) {
+          customFields[fieldName] = val;
+          provenance[`custom.${fieldName}`] = 'profile-selector';
+        }
+      } catch { /* skip bad selectors */ }
+    }
+    if (Object.keys(customFields).length > 0) {
+      provenance.customFields = 'profile-selector';
+    }
+  }
+
   // ── Build ExtractionData ─────────────────────────────────────────────
   const data = buildExtractionData({
     title,
@@ -541,6 +560,11 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
     additionalImages,
     provenance,
   }, sourceUrl, expected.name);
+
+  // Merge custom fields into result
+  if (Object.keys(renderedCustomFields).length > 0) {
+    data.customFields = renderedCustomFields;
+  }
 
   return { data, warnings };
 }
@@ -557,6 +581,7 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
   const selectors = profile.selectors || {};
+  const renderedCustomFields: Record<string, string> = {};
 
   const titleSelector = selectors['titleSelector'] || selectors['title'] || null;
   const brandSelector = selectors['brandSelector'] || selectors['brand'] || null;
@@ -873,18 +898,23 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         imageProvenance = 'meta';
       }
     }
+
+    // Extract custom selectors while browser is still open
+    if (selectors.customSelectors) {
+      for (const [fieldName, selector] of Object.entries(selectors.customSelectors)) {
+        if (!selector) continue;
+        try {
+          const val: string = (await page.evaluate(makeTextSelectorEvaluator(), selector)) as string;
+          if (val) {
+            renderedCustomFields[fieldName] = val;
+          }
+        } catch { /* skip bad selectors */ }
+      }
+    }
+
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     warnings.push(`Rendered extraction error: ${msg}`);
-  } finally {
-    try {
-      await Promise.race([
-        browser.close(),
-        new Promise((resolve) => setTimeout(resolve, 2000)),
-      ]);
-    } catch {
-      // ignore close errors
-    }
   }
 
   // ── Build provenance record ──────────────────────────────────────────
@@ -897,6 +927,15 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   if (additionalImages.length > 0) provenance.additionalImages = imageProvenance;
   if (sourceUrl) provenance.sourceUrl = 'request';
   provenance.profileRuntime = 'rendered';
+
+  try {
+    await Promise.race([
+      browser.close(),
+      new Promise((resolve) => setTimeout(resolve, 2000)),
+    ]);
+  } catch {
+    // ignore close errors
+  }
 
   const data = buildExtractionData(
     {
@@ -911,6 +950,11 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
     sourceUrl,
     expected.name,
   );
+
+  // Merge custom fields into result
+  if (Object.keys(renderedCustomFields).length > 0) {
+    (data as ExtractionData).customFields = renderedCustomFields;
+  }
 
   return { data, warnings };
 }

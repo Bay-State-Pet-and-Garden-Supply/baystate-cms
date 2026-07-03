@@ -1,107 +1,198 @@
-# Implementation Plan
+# Implementation Plan: Element Picker UX Fix + Custom Field Support
 
 ## Goal
-Add Phase 1 classification data schemas and idempotent SQLite migrations for classification runs, evidence, proposals, decisions, history, config snapshots, and refresh queue state.
+Fix the visual element picker's broken UX (no confirmation before browser closes) AND extend it to support arbitrary custom fields beyond just Title/Description/Images.
 
-## Tasks
-1. **Add shared classification schemas**: Extend onboarding-side Zod types while preserving legacy `CurationData` compatibility.
-   - File: `src/shared/schemas/onboarding.ts`
-   - Changes: Add enums/schemas for `ClassificationStage`, `ClassificationEvidence`, `ClassificationProposal`, `ClassificationProposalDecision`, `ClassificationHistoryEvent`, and `ClassificationConfigSnapshotRef`; extend `CurationDataSchema` with defaulted `classificationRunId`, `classificationEvidence`, `classificationProposals`, `classificationDecisions`, and `classificationHistory` fields without removing existing title/page/type fields.
-   - Acceptance: Legacy curation JSON still parses with defaults; sample Phase 1 classification payload parses successfully.
+---
 
-2. **Create the classification migration SQL**: Add durable operational tables without changing ShopSite export behavior.
-   - File: `src/db/classification-migration.sql`
-   - Changes: Create `classification_config_snapshots`, `classification_runs`, `classification_evidence`, `classification_proposals`, `classification_proposal_evidence`, `classification_proposal_decisions`, `classification_history_events`, `classification_refresh_queue`, and optionally `classification_refresh_deferrals` if refresh deferral needs a separate audit record. Include foreign keys to `workspace`, `onboarding_items`, and run/proposal/evidence tables where safe; keep `product_sku` as text because onboarding rows may not yet exist in `product_index`.
-   - Acceptance: SQL runs on an empty database after current core/onboarding migrations and can be run repeatedly with `CREATE TABLE IF NOT EXISTS`/`CREATE INDEX IF NOT EXISTS` semantics.
+## Part A: Picker UX Fix — Confirmation Flow & Hover Tooltip
 
-3. **Add practical indexes and version metadata**: Make the new schema queryable for review and refresh flows.
-   - File: `src/db/classification-migration.sql`
-   - Changes: Add indexes for run lookup by workspace/product/status, proposal lookup by product/status/kind/config snapshot, evidence lookup by run/stage/product, decisions by proposal, history by product/run, and refresh queue by workspace/status. Insert `app_meta('classification_schema_version', '1')` or leave it to the runner after successful execution.
-   - Acceptance: Migration test can confirm table/index existence and `classification_schema_version = '1'`.
+### Tasks
 
-4. **Wire the migration runner**: Execute the classification migration once after onboarding tables exist.
-   - File: `src/db/migrations.ts`
-   - Changes: Add `CLASSIFICATION_MIGRATION_PATH`; after the onboarding migration block, read `app_meta.classification_schema_version`; if missing, execute `classification-migration.sql` in a transaction and set version `1`. Keep existing ad-hoc compatibility blocks unchanged.
-   - Acceptance: `runMigrations()` creates classification tables on fresh databases and does not fail when called a second time.
+#### A1. Rewrite `buildOverlayScript()` in `pick-element.ts`
+Replace the current click-immediately-closes behavior with a state machine:
 
-5. **Update database migration tests**: Cover fresh install, idempotence, and a minimal classification workflow.
-   - File: `src/tests/unit/db-migration.test.ts`
-   - Changes: Add classification tables to existence checks; add assertions for `classification_schema_version`; call `runMigrations()` twice; insert a workspace, onboarding batch/item, config snapshot, run, evidence, proposal, proposal/evidence link, decision, and history event to validate foreign keys and JSON text columns.
-   - Acceptance: `bun test src/tests/unit/db-migration.test.ts` passes.
+```
+States: hovering → candidate-selected → confirm/retry/cancel
+```
 
-6. **Add schema compatibility tests**: Validate TypeScript/Zod defaults independently from SQLite.
-   - File: `src/tests/unit/classification-schema.test.ts`
-   - Changes: Add tests that parse old `CurationData` objects and new sample classification objects; assert arrays default to `[]` and decision/proposal status enums reject unknown values.
-   - Acceptance: `bun test src/tests/unit/classification-schema.test.ts` passes and `bun run typecheck` succeeds.
+- **Hovering state**: Blue outline on hover. Bottom info bar showing: `"Hovering: h1.product-title — 'Vintage Denim...'"`
+- **Candidate-selected state**: Green outline (2px solid #22c55e) with checkmark badge on clicked element. Bottom bar switches to: `"✓ Selected: h1.product-title — [Confirm ✓] [Retry] [Cancel]"`
+- **Confirm**: Calls `window.__elementPicked(candidateData)` → closes browser
+- **Retry**: Clears selection, re-enters hovering mode
+- **Cancel**: Calls `window.__elementPicked(null)`
+- **Keyboard**: Enter = Confirm, Escape = Cancel (back to hover if selection exists, full cancel if none)
 
-7. **Keep Phase 1 scope narrow**: Avoid pipeline, UI, repository, and draft promotion behavior changes in this pass.
-   - File: `src/onboarding/product-curator.ts`, `src/onboarding/draft-promoter.ts`, server route files
-   - Changes: No changes in Phase 1 unless type imports require harmless compile fixes.
-   - Acceptance: Existing onboarding curation and draft promotion tests still pass; no new runtime classification behavior is introduced before later phases.
+File: `src/extraction-worker/routes/pick-element.ts`
+Changes: Rewrite the `buildOverlayScript` function (~150 lines replaced with ~250 lines)
 
-## Files to Modify
-- `src/shared/schemas/onboarding.ts` - add classification Zod/domain schemas and backward-compatible `CurationDataSchema` extensions.
-- `src/db/migrations.ts` - register and gate the new classification migration with `classification_schema_version`.
-- `src/tests/unit/db-migration.test.ts` - assert new tables, metadata, idempotence, and minimal insert flow.
+#### A2. Update `ElementPickerButton.tsx` — show inline confirmation card
+After a successful pick, show an inline card with:
+- The generated selector (monospace code)
+- A text preview snippet
+- A stability badge
+- The screenshot thumbnail (if available)
 
-## New Files
-- `src/db/classification-migration.sql` - Phase 1 SQLite tables, indexes, and metadata for classification operational state.
-- `src/tests/unit/classification-schema.test.ts` - Zod compatibility tests for legacy and new classification curation data.
+File: `src/client/components/ElementPickerButton.tsx`
+Changes: Add `pickedResult` state + conditional confirmation card rendering
 
-## Dependencies
-- Task 2 depends on the current onboarding migration because classification rows may reference `onboarding_items`.
-- Task 4 depends on Tasks 2 and 3.
-- Tasks 5 and 6 depend on Tasks 1 through 4.
-- Later implementation phases should depend on this schema but should not be bundled into Phase 1.
+#### A3. Update `ProfileBuilderWorkspace.tsx` — show screenshot in Build tab
+When a picked selector has a `screenshotRef`, show a small thumbnail image in the Build tab's visual select card.
 
-## Risks
-- Classification Configuration files under `store/classification/` are versioned in workspace Git; Phase 1 should store only SQLite snapshot metadata/content needed for reproducible runs, not implement full configuration authoring.
-- SQLite JSON columns cannot enforce payload shape; Zod schemas and repository-level validation will be needed in later phases.
-- Overly strict `CHECK` constraints on stages/kinds may slow future stage additions; prefer shared enums plus limited database constraints for status fields.
-- Product identity is not always available during onboarding, so schema should use nullable `product_id` and stable `product_sku` text rather than requiring `product_index` rows.
-- `product_types` and `product_type_fields` are legacy field-map tables; do not repurpose them as the new Product Attribute model in Phase 1.
+File: `src/client/components/ProfileBuilderWorkspace.tsx`
+Changes: In each `pickedSelectors` display block, add `{picked.screenshotRef && <img src={...} />}`
 
-```acceptance-report
-{
-  "criteriaSatisfied": [
-    {
-      "id": "criterion-1",
-      "status": "satisfied",
-      "evidence": "Created only the requested Phase 1 implementation plan at /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md after reading classification-design.md and relevant schema/migration files; no source implementation changes were made."
+#### A4. Update `PickElementResponseSchema` — ensure screenshotRef flows through
+The screenshot is already captured in `pick-element.ts` but verify it's returned in the response.
+
+File: `src/shared/schemas/extraction-worker.ts`
+Changes: Verify `PickElementResponseSchema` has `screenshotRef`
+
+---
+
+## Part B: Custom Field Support
+
+### Tasks
+
+#### B1. DB Migration — add `custom_selectors_json` to `extractor_profiles`
+Add a new TEXT column to store arbitrary field→selector mappings.
+
+```sql
+ALTER TABLE extractor_profiles ADD COLUMN custom_selectors_json TEXT DEFAULT '{}';
+```
+
+File: `src/db/migrations.ts`
+
+#### B2. Update `ExtractorProfileSchema` — add `customSelectors`
+Add a `customSelectors` field to the Zod schema.
+
+```typescript
+export const ExtractorProfileSchema = z.object({
+  id: z.string(),
+  domain: z.string(),
+  titleSelector: z.string().nullable().default(null),
+  priceSelector: z.string().nullable().default(null),
+  descriptionSelector: z.string().nullable().default(null),
+  brandSelector: z.string().nullable().default(null),
+  imagesSelector: z.string().nullable().default(null),
+  customSelectors: z.record(z.string()).default(() => ({})),
+  // ... existing fields
+});
+```
+
+File: `src/shared/schemas/onboarding.ts`
+
+#### B3. Update `PickElementRequest` — accept arbitrary field names
+Change `field` from a fixed enum to a string that accepts any value.
+
+```typescript
+export const PickElementRequestSchema = z.object({
+  url: z.string().url(),
+  field: z.string(), // was: z.enum(['title', 'description', 'images'])
+  allowParentContainer: z.boolean().default(true),
+});
+```
+
+File: `src/shared/schemas/extraction-worker.ts`
+
+#### B4. Update `ElementPickerButton` — accept custom field names
+The `field` prop currently takes `'title' | 'description' | 'images'`. Change to `string`.
+
+File: `src/client/components/ElementPickerButton.tsx`
+Changes: Update prop type from `'title' | 'description' | 'images'` to `string`
+
+#### B5. Add "Custom Field" mode to the Build tab
+In the Build tab, add a section below the 3 fixed cards:
+- An "Add Custom Field" button
+- When clicked, shows an inline form: text input for field name + "Pick Element 🖱️" button
+- After picking, shows the selector with a remove button
+
+File: `src/client/components/ProfileBuilderWorkspace.tsx`
+Changes: Add new state `customPickedSelectors: Record<string, { selector: string; stability: string }>` + render section
+
+#### B6. Update extraction to apply custom selectors
+In `page-extractor.ts`, the `extractCustomSelectorsCheerio` function currently reads only the 5 fixed fields. Add a loop over `profile.customSelectors` to extract custom fields too.
+
+```typescript
+// In extractCustomSelectorsCheerio or equivalent:
+if (profile.customSelectors) {
+  for (const [fieldName, selector] of Object.entries(profile.customSelectors)) {
+    const val = $(selector).first().text().trim();
+    if (val) {
+      data.customFields = data.customFields ?? {};
+      data.customFields[fieldName] = val;
     }
-  ],
-  "changedFiles": [
-    "/Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md"
-  ],
-  "testsAddedOrUpdated": [],
-  "commandsRun": [
-    {
-      "command": "functions.read /Users/nickborrello/Desktop/Projects/shopsite-cms/classification-design.md",
-      "result": "passed",
-      "summary": "Read the classification design summary."
-    },
-    {
-      "command": "functions.read/find project schema and migration files",
-      "result": "passed",
-      "summary": "Reviewed existing SQLite schema, migration runner, onboarding migration, migration tests, and onboarding schemas."
-    },
-    {
-      "command": "functions.write /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md",
-      "result": "passed",
-      "summary": "Wrote the requested implementation plan."
-    }
-  ],
-  "validationOutput": [
-    "Plan file was written to the authoritative output path."
-  ],
-  "residualRisks": [
-    "Git staging state could not be independently checked because no shell/git status tool is available in this subagent; no staging operations were performed."
-  ],
-  "noStagedFiles": true,
-  "diffSummary": "Added/overwrote plan.md with a concrete Phase 1 schema and migration implementation plan only.",
-  "reviewFindings": [
-    "no blockers"
-  ],
-  "manualNotes": "This was a planning-only task; implementation, tests, and migrations remain pending for execution agents."
+  }
 }
 ```
+
+File: `src/onboarding/page-extractor.ts`
+
+#### B7. Update `ExtractionDataSchema` — add `customFields`
+Add a key-value map to the extraction data schema.
+
+```typescript
+export const ExtractionDataSchema = z.object({
+  // ...existing fields...
+  customFields: z.record(z.string()).default(() => ({})),
+});
+```
+
+File: `src/shared/schemas/onboarding.ts`
+
+#### B8. Update trusted profile runner (`extract.ts`) to handle custom selectors
+The worker's extract route needs to apply custom selectors the same way.
+
+File: `src/extraction-worker/routes/extract.ts`
+Changes: After the 5 fixed fields are processed, loop over `selectors.customSelectors` (or similar) and extract each.
+
+#### B9. Update `ExtractorProfile` DB repo — read/write custom selectors
+The repo functions (`findProfileByDomain`, `upsertProfile`) need to read/write the new `custom_selectors_json` column.
+
+File: `src/db/repositories/extractor-profile-repo.ts`
+Changes: Add `custom_selectors_json` to the SQL queries and map it to/from the `customSelectors` field.
+
+#### B10. Update Profile Proposal Drawer — show custom fields for approval
+The review drawer (`ProfileProposalDrawer`) shows per-field approval for Title/Description/Images. Add a section for custom fields with the same approve/reject flow.
+
+File: `src/client/components/ProfileProposalDrawer.tsx`
+
+#### B11. Update profile promoter — handle custom fields
+The promoter (`profile-promoter.ts`) writes approved selectors to `extractor_profiles`. Add logic to write custom fields into `custom_selectors_json`.
+
+File: `src/onboarding/profile-promoter.ts`
+
+---
+
+## Files to Modify
+
+| File | Part | Change |
+|---|---|---|
+| `src/extraction-worker/routes/pick-element.ts` | A | Rewrite overlay script with state machine + tooltip + confirmation |
+| `src/client/components/ElementPickerButton.tsx` | A, B | Add confirmation card; accept string field type |
+| `src/client/components/ProfileBuilderWorkspace.tsx` | A, B | Show screenshot; add custom field section |
+| `src/shared/schemas/extraction-worker.ts` | B | Change `field` to string |
+| `src/shared/schemas/onboarding.ts` | B | Add `customSelectors`, `customFields` to schemas |
+| `src/db/migrations.ts` | B | Add `custom_selectors_json` column |
+| `src/db/repositories/extractor-profile-repo.ts` | B | Read/write custom selectors column |
+| `src/onboarding/page-extractor.ts` | B | Loop over custom selectors during extraction |
+| `src/extraction-worker/routes/extract.ts` | B | Same for trusted profile runner |
+| `src/client/components/ProfileProposalDrawer.tsx` | B | Custom field approval |
+| `src/onboarding/profile-promoter.ts` | B | Write custom fields on promotion |
+
+## Dependencies
+
+- **A1** is independent (just the overlay script)
+- **A2, A3** depend on A1
+- **B1** must come before B2, B9
+- **B2** must come before B3-B11
+- **B3** must come before B4, B5
+- **B6, B8** depend on B2
+- **B10, B11** depend on B2, B9
+
+## Risks
+
+1. **Part A (confirmation flow)**: The state machine adds complexity to the injected script. Must handle edge cases: double-click, clicking the overlay bar itself, page navigation during pick, browser crash during pick.
+2. **Part B (custom fields)**: DB migration for existing installations. The `Record<string, string>` type loses type safety compared to fixed fields. Custom field names could collide with fixed field names — need validation.
+3. **Extraction integration**: The extraction pipeline (`page-extractor.ts`) has layered fallbacks (JSON-LD → meta → microdata → heuristics). Custom field extraction via CSS selectors should only fire when a custom selector exists — never fall back.
+4. **Review UI**: The per-field approval UI in `ProfileProposalDrawer` is designed for 3 fixed fields. Adding dynamic custom fields requires UI changes to render them generically.

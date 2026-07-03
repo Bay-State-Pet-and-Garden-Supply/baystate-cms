@@ -436,7 +436,22 @@ function extractCustomSelectorsCheerio(
     });
     data.images = images;
   }
-  
+
+  // Extract custom selectors
+  if (profile.customSelectors) {
+    for (const [fieldName, selector] of Object.entries(profile.customSelectors)) {
+      if (!selector) continue;
+      try {
+        const val = $(selector).first().text().trim();
+        if (val) {
+          const cf = ((data as Record<string, unknown>).customFields as Record<string, string>) ?? {};
+          cf[fieldName] = val;
+          (data as Record<string, unknown>).customFields = cf;
+        }
+      } catch { /* skip bad selectors */ }
+    }
+  }
+
   return data;
 }
 

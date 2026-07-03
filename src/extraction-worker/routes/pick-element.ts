@@ -53,115 +53,41 @@ function collectImageSourcesFromHtml(html: string): string[] {
 // ─── Injected overlay JavaScript ───────────────────────────────────────────────
 
 function buildOverlayScript(fieldLabel: string): string {
-  return `
-(function() {
-  // Avoid double-injection
+  const label = JSON.stringify(fieldLabel);
+  return `(function() {
   if (window.__elementPickerInjected) return;
   window.__elementPickerInjected = true;
 
-  let highlightedEl = null;
-  const highlightStyle = document.createElement('style');
-  highlightStyle.textContent = \`
-    .__ep-highlight {
-      outline: 3px solid #2563eb !important;
-      outline-offset: 2px !important;
-      background: rgba(37, 99, 235, 0.08) !important;
-      cursor: crosshair !important;
-    }
-    .__ep-bar {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      z-index: 2147483647;
-      background: #1e293b;
-      color: #fff;
-      padding: 10px 16px;
-      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-      font-size: 14px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-    }
-    .__ep-bar button {
-      background: #ef4444;
-      color: #fff;
-      border: none;
-      border-radius: 4px;
-      padding: 4px 12px;
-      font-size: 12px;
-      cursor: pointer;
-      font-weight: 600;
-    }
-    .__ep-bar button:hover { background: #dc2626; }
-  \`;
-  document.head.appendChild(highlightStyle);
+  var S = { HOVERING: 0, SELECTED: 1 };
+  var state = S.HOVERING;
+  var hl = null, sel = null, data = null;
 
-  // Overlay bar
-  const bar = document.createElement('div');
-  bar.className = '__ep-bar';
-  bar.innerHTML = '<span><strong>Click on the ' + ${JSON.stringify(fieldLabel)} + ' element</strong> — hover to highlight, click to select. Cancel to abort.</span><button id="__ep-cancel">Cancel</button>';
-  document.body.prepend(bar);
+  var st = document.createElement("style");
+  st.textContent = ".__eph{outline:3px solid #2563eb!important;outline-offset:2px!important;background:rgba(37,99,235,0.08)!important;cursor:crosshair!important}.__eps{outline:3px solid #22c55e!important;outline-offset:2px!important;background:rgba(34,197,94,0.06)!important}.__epc{position:fixed;z-index:2147483647;pointer-events:none;top:-10px;right:-10px;width:24px;height:24px;border-radius:50%;background:#22c55e;color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.3)}.__epb{position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:#1e293b;color:#fff;padding:12px 20px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:14px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 -2px 12px rgba(0,0,0,0.3);gap:12px}.__epb .__epl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.__epb .__epl code{background:rgba(255,255,255,0.15);padding:1px 6px;border-radius:3px;font-size:12px}.__epbtn{border:none;border-radius:4px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer}.__epbtn:hover{opacity:0.85}.__epcf{background:#22c55e;color:#fff}.__eprt{background:#f59e0b;color:#fff}.__epcl{background:#6b7280;color:#fff}";
+  document.head.appendChild(st);
 
-  document.addEventListener('mouseover', function(e) {
-    const el = e.target;
-    if (el.closest('.__ep-bar')) return;
-    if (highlightedEl) highlightedEl.classList.remove('__ep-highlight');
-    highlightedEl = el;
-    highlightedEl.classList.add('__ep-highlight');
-  }, true);
+  var bar = document.createElement("div");
+  bar.className = "__epb";
+  document.body.appendChild(bar);
 
-  document.addEventListener('mouseout', function(e) {
-    const el = e.target;
-    if (el.closest('.__ep-bar')) return;
-    if (highlightedEl) {
-      highlightedEl.classList.remove('__ep-highlight');
-      highlightedEl = null;
-    }
-  }, true);
+  function esc(s){return s?s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"):""}
+  function hoverInfo(el){var t=el.tagName.toLowerCase(),c=(el.className||"").slice(0,80),x=(el.textContent||"").trim().replace(/\\s+/g," ").slice(0,50);return t+(c?"."+c.split(/\\s+/).filter(Boolean).join("."):"")+" \u2014 \""+esc(x)+"\""}
+  function showHover(el){if(state===S.SELECTED)return;bar.innerHTML="<span class=\"__epl\">Hovering: <code>"+esc(hoverInfo(el))+"</code></span><button class=\"__epbtn __epcl\" id=\"_c\">Cancel</button>";document.getElementById("_c").onclick=cancel}
+  function showSelected(d){state=S.SELECTED;var t=d.tag+(d.className?"."+d.className.split(/\\s+/).filter(Boolean).join("."):""),x=(d.text||"").slice(0,50);bar.innerHTML="<span class=\"__epl\">\\u2713 Selected: <code>"+esc(t)+"</code> \u2014 \""+esc(x)+"\"</span><button class=\"__epbtn __epcf\" id=\"_cf\">Confirm \u2713</button><button class=\"__epbtn __eprt\" id=\"_rt\">Retry</button><button class=\"__epbtn __epcl\" id=\"_c\">Cancel</button>";document.getElementById("_cf").onclick=confirm;document.getElementById("_rt").onclick=retry;document.getElementById("_c").onclick=cancel}
+  function reset(){state=S.HOVERING;if(sel){sel.classList.remove("__eps");var b=sel.querySelector(".__epc");if(b)b.remove();sel=null}data=null;bar.innerHTML="<span class=\"__epl\">Click on "+esc(${label})+" element</span><button class=\"__epbtn __epcl\" id=\"_c\">Cancel</button>";document.getElementById("_c").onclick=cancel}
+  function confirmSel(){if(!data)return;cleanup();window.__elementPicked(data)}
+  function retrySel(){reset()}
+  function cancelSel(){cleanup();window.__elementPicked(null)}
+  function cleanup(){if(hl){hl.classList.remove("__eph");hl=null}if(sel){sel.classList.remove("__eps");var b=sel.querySelector(".__epc");if(b)b.remove()}bar.remove();st.remove()}
 
-  document.addEventListener('click', function(e) {
-    if (e.target.closest('.__ep-bar')) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
+  document.addEventListener("mouseover",function(e){if(state===S.SELECTED)return;var el=e.target;if(el.closest(".__epb"))return;if(hl&&hl!==el)hl.classList.remove("__eph");hl=el;hl.classList.add("__eph");showHover(el)},true);
+  document.addEventListener("mouseout",function(e){if(state===S.SELECTED)return;var el=e.target;if(el.closest(".__epb"))return;if(hl){hl.classList.remove("__eph");hl=null}bar.innerHTML="<span class=\"__epl\">"+esc(${label})+"</span><button class=\"__epbtn __epcl\" id=\"_c\">Cancel</button>";document.getElementById("_c").onclick=cancel},true);
+  document.addEventListener("click",function(e){if(e.target.closest(".__epb"))return;if(state===S.SELECTED)return;e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();var el=e.target,r=el.getBoundingClientRect(),a={};for(var i=0;i<el.attributes.length;i++){var at=el.attributes[i];a[at.name]=at.value}data={outerHTML:el.outerHTML,tag:el.tagName.toLowerCase(),text:(el.textContent||"").trim().slice(0,500),className:(el.className||"").trim(),attributes:a,boundingRect:{top:r.top,left:r.left,width:r.width,height:r.height}};if(hl){hl.classList.remove("__eph");hl=null}sel=el;sel.classList.add("__eps");var b=document.createElement("div");b.className="__epc";b.textContent="\\u2713";var p=el.getBoundingClientRect();b.style.left=(p.right-10)+"px";b.style.top=(p.top-10)+"px";document.body.appendChild(b);showSelected(data)},true);
+  document.addEventListener("keydown",function(e){if(e.key==="Enter"&&state===S.SELECTED)confirmSel();if(e.key==="Escape"){if(state===S.SELECTED)retrySel();else cancelSel()}});
 
-    const el = e.target;
-    const outerHTML = el.outerHTML;
-    const tag = el.tagName.toLowerCase();
-    const text = (el.textContent || '').trim();
-    const attributes = {};
-    for (const attr of el.attributes) {
-      attributes[attr.name] = attr.value;
-    }
-    const rect = el.getBoundingClientRect();
-
-    // Clean up
-    if (highlightedEl) highlightedEl.classList.remove('__ep-highlight');
-    document.querySelectorAll('.__ep-bar, .__ep-highlight').forEach(function(n) { n.remove(); });
-    highlightStyle.remove();
-
-    // Send result via window callback
-    window.__elementPicked({
-      outerHTML: outerHTML,
-      tag: tag,
-      text: text.slice(0, 500),
-      attributes: attributes,
-      boundingRect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
-    });
-  }, true);
-
-  document.getElementById('__ep-cancel').addEventListener('click', function() {
-    if (highlightedEl) highlightedEl.classList.remove('__ep-highlight');
-    document.querySelectorAll('.__ep-bar, .__ep-highlight').forEach(function(n) { n.remove(); });
-    highlightStyle.remove();
-    window.__elementPicked(null);
-  });
-})();
-`;
+  reset();
+})()`;
 }
-
 // ─── Core logic ────────────────────────────────────────────────────────────────
 
 async function pickElement(
