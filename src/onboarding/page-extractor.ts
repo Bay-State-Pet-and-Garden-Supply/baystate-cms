@@ -221,7 +221,6 @@ export async function extractProductData(
   console.log(`[PageExtractor] ${profile ? 'Using profile —' : 'Falling back to'} Playwright extraction for: ${url}`);
 
   // 2. Fallback to Playwright stealth mode
-  console.log(`[PageExtractor] Falling back to Playwright stealth extraction for: ${url}`);
   let rawExtraction: RawExtraction | null = null;
   // Captured by task 15 — only populated when extraction succeeds and
   // validation passes. Used as input to the optional Playwright path of
@@ -254,61 +253,35 @@ export async function extractProductData(
 
     const page = await context.newPage();
 
-    // Enable request routing to block images, styles, and analytical pixels
-    await page.route('**/*', (route) => {
-      const req = route.request();
-      const type = req.resourceType();
-      const reqUrl = req.url();
-      const isTracker = /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i.test(reqUrl);
-
-      if (type === 'image' || type === 'font' || type === 'media' || type === 'stylesheet' || isTracker) {
-        route.abort();
-      } else {
-        route.continue();
-      }
-    });
-
+    // No route blocking — load all resources for accurate extraction
     const extractTask = async () => {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs - 5000 });
       await page.waitForTimeout(2000);
 
-      // Layer 0: Custom CSS Selectors
+      // When profile exists, extract via profile selectors only (no fallback layers)
       let custom: Record<string, string | string[]> | null = null;
+      let productJSON: Record<string, any> | null = null;
       if (profile) {
         try {
           custom = await extractCustomSelectors(page, profile);
         } catch (err) {
           console.error('[PageExtractor] Custom selector extraction failed:', err);
         }
+        try {
+          productJSON = await page.evaluate(() => (window as any).productJSON || null).catch(() => null);
+        } catch { /* skip */ }
+      } else {
+        // No profile — try all extraction layers
+        try { custom = profile ? await extractCustomSelectors(page, profile) : null; } catch {}
+        try { productJSON = await page.evaluate(() => (window as any).productJSON || null).catch(() => null); } catch {}
       }
-
-      // Layer 1: JSON-LD
-      const jsonLd = await extractJsonLd(page);
-
-      // Layer 2: Meta Tags
-      const metaTags = await extractMetaTags(page);
-
-      // Layer 3: Microdata
-      const microdata = await extractMicrodata(page);
-
-      // Layer 4: HTML Heuristics
-      const htmlHeuristics = await extractHtmlHeuristics(page);
-
-      // Layer 5: Image Gallery (img tags are still in DOM even if blocked)
-      const images = await extractImages(page, url);
-
-      // Layer 6: Shopify productJSON from page context
-      const productJSON = await page.evaluate(() => {
-        return (window as any).productJSON || null;
-      }).catch(() => null);
-
       rawExtraction = {
         custom,
-        jsonLd,
-        metaTags,
-        microdata,
-        htmlHeuristics,
-        images,
+        jsonLd: null,
+        metaTags: {},
+        microdata: {},
+        htmlHeuristics: {},
+        images: [],
         networkProducts: [],
         productJSON,
       };
@@ -352,8 +325,8 @@ export async function extractProductData(
 
   const result = mergeExtractionLayers(rawExtraction, url, expected);
 
-  // 3. Post-extraction validation gate for Playwright result
-  if (expected) {
+  // 3. Post-extraction — skip validation when profile exists (curation handles it)
+  if (expected && !profile) {
     const validation = validateExtraction(result, {
       name: expected.name,
       brandHint: expected.brandHint,
@@ -374,16 +347,16 @@ export async function extractProductData(
     } else {
       delete result.fieldProvenance.price;
     }
+  }
 
-    // Task 15: secondary profile generation path. Fires when the HTTP
-    // path did NOT pass validation (e.g. page needs JS rendering) but
-    // the Playwright render did, and the feature flag is on.
-    //
-    // This path is proposal-only: the generated selector set is audited
-    // Auto profile generation is disabled (operator must explicitly
-    // click "Generate Profile" in the Domain Configuration UI).
-    // See decision: profiles are domain-scoped; one proposal per
-    // domain created on demand, never during extraction.
+  // Price assignment for profile-based extractions (validation skipped)
+  if (expected && profile) {
+    result.price = expected?.price || null;
+    if (expected?.price) {
+      result.fieldProvenance.price = 'spreadsheet-import';
+    } else {
+      delete result.fieldProvenance.price;
+    }
   }
 
   return result;
