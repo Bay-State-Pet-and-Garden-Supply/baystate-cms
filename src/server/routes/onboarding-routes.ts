@@ -23,8 +23,10 @@ import {
   completeReviewStage,
   completePromotionStage,
   resetItemsToPending,
+  resetItemsToStage,
   skipItems,
 } from '../../db/repositories/onboarding-item-repo';
+import type { PipelineStage } from '../../shared/schemas/onboarding';
 import {
   listSourcesByItem,
   selectSource
@@ -415,6 +417,29 @@ route.post('/onboarding/items/reset', async (c) => {
   worker.poll();
 
   return c.json({ success: true });
+});
+
+/**
+ * POST /api/onboarding/items/reset-to-stage
+ * Moves items to a specific pipeline stage with 'completed' status,
+ * preserving extraction/curation data. The worker won't re-process them.
+ * Body: { itemIds: string[], targetStage: string }
+ */
+route.post('/onboarding/items/reset-to-stage', async (c) => {
+  const { itemIds, targetStage } = await c.req.json();
+  if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+    return c.json({ error: 'itemIds array is required' }, 400);
+  }
+  if (!targetStage || typeof targetStage !== 'string') {
+    return c.json({ error: 'targetStage string is required' }, 400);
+  }
+  const validStages = ['discovery', 'extraction', 'curation', 'review', 'promotion'];
+  if (!validStages.includes(targetStage)) {
+    return c.json({ error: `Invalid stage: ${targetStage}` }, 400);
+  }
+
+  const result = resetItemsToStage(itemIds, targetStage as PipelineStage);
+  return c.json({ success: true, reset: result.reset });
 });
 
 /**

@@ -137,6 +137,16 @@ export async function skipStageItems(itemIds: string[]): Promise<{ success: bool
   });
 }
 
+export async function resetItemsToStage(
+  itemIds: string[],
+  targetStage: string,
+): Promise<{ success: boolean; reset: number }> {
+  return request<{ success: boolean; reset: number }>('/items/reset-to-stage', {
+    method: 'POST',
+    body: JSON.stringify({ itemIds, targetStage }),
+  });
+}
+
 async function completeReviewStage(itemIds: string[]): Promise<{ success: boolean; count: number }> {
   return request<{ success: boolean; count: number }>('/items/review-complete', {
     method: 'POST',

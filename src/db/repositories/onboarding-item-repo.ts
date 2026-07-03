@@ -391,6 +391,28 @@ export function skipItems(itemIds: string[]): void {
 
 // ─── DEPRECATED — kept for backward compat during migration ────────────────────
 
+/**
+ * Reset items to a specific pipeline stage with 'completed' status.
+ * Preserves all existing extraction/curation data and source URLs.
+ * The item will show in the target stage in the PipelineBoard but
+ * the worker will not re-process it (since stage_status is 'completed').
+ */
+export function resetItemsToStage(
+  itemIds: string[],
+  targetStage: PipelineStage,
+): { reset: number } {
+  if (itemIds.length === 0) return { reset: 0 };
+  const db = getDb();
+  const now = new Date().toISOString();
+  const placeholders = itemIds.map(() => '?').join(', ');
+  db.query(
+    `UPDATE onboarding_items
+     SET stage = ?, stage_status = 'completed', updated_at = ?
+     WHERE id IN (${placeholders})`,
+  ).run(targetStage, now, ...itemIds);
+  return { reset: itemIds.length };
+}
+
 /** @deprecated Use updateItemStageStatus instead */
 function updateItemStatus(
   id: string,
