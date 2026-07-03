@@ -14,6 +14,7 @@ import {
 } from '../db/repositories/onboarding-source-repo';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
+import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItem } from './product-curator';
 import { downloadImages } from './image-downloader';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
@@ -349,6 +350,25 @@ export class OnboardingWorker {
     }
 
     console.log(`[OnboardingWorker] Extraction for ${item.name} from ${item.sourceUrl}`);
+
+    // Fail-fast: check if the domain has an extractor profile.
+    // If not, fail with a "profile required" error so the PipelineBoard
+    // shows the "⚠ Profile required" badge and "Open Profile Builder →" link.
+    let domain = '';
+    try {
+      domain = new URL(item.sourceUrl).hostname.replace(/^www\./, '');
+    } catch { /* skip */ }
+    const profile = domain ? findProfileByDomain(domain) : null;
+    if (!profile) {
+      const errorMsg = `No extractor profile for ${domain} — profile required`;
+      updateItemStageStatus(item.id, 'failed', errorMsg);
+      onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
+        stage: 'extraction',
+        error: errorMsg,
+      });
+      return;
+    }
+
 
     try {
       const extractedData = await extractProductData(item.sourceUrl, {
