@@ -86,7 +86,7 @@ export const PickElementRequestSchema = z.object({
   /** The URL of the product page to open in the headful browser. */
   url: z.string().url(),
   /** Which field the user is selecting: title, description, or images. */
-  field: z.enum(['title', 'description', 'images']),
+  field: z.string(),
   /** Whether to allow selecting a parent container (for image galleries). */
   allowParentContainer: z.boolean().default(true),
 });

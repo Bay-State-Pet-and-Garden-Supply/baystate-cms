@@ -1515,5 +1515,6 @@ function mergeExtractionLayers(
     confidence,
     fieldProvenance: provenance,
     packagingTitle: null,
+      customFields: {},
   };
 }

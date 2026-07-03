@@ -59,6 +59,7 @@ export const ExtractionDataSchema = z.object({
   fieldProvenance: z.record(z.string(), z.string()).default(() => ({})),
   // Tracks where each field came from: 'json-ld', 'meta', 'html', 'ai', 'user'
   packagingTitle: z.string().nullable().default(null),
+  customFields: z.record(z.string(), z.string()).default(() => ({})),
 });
 
 export type ExtractionData = z.infer<typeof ExtractionDataSchema>;
@@ -168,6 +169,7 @@ export const ExtractorProfileSchema = z.object({
   descriptionSelector: z.string().nullable().default(null),
   brandSelector: z.string().nullable().default(null),
   imagesSelector: z.string().nullable().default(null),
+  customSelectors: z.record(z.string(), z.string()).default(() => ({})),
   sitemapProductUrlPattern: z.string().nullable().default(null),
   shopifyJSONPath: z.boolean().default(false),
   createdAt: z.string(),
