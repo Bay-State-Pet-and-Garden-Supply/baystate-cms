@@ -311,18 +311,11 @@ export function ProfileBuilderWorkspace(
     Record<string, { selector: string; stability: string }>
   >({});
   const [customFieldName, setCustomFieldName] = useState('');
-  const [customPasteFields, setCustomPasteFields] = useState<Record<string, string>>({});
-  const [customPasteGenerating, setCustomPasteGenerating] = useState<string | null>(null);
   const [customPickedFields, setCustomPickedFields] = useState<
     Record<string, { selector: string; stability: string }>
   >({});
 
   // Paste-element state
-  const [pastedTitle, setPastedTitle] = useState('');
-  const [pastedDescription, setPastedDescription] = useState('');
-  const [pastedImages, setPastedImages] = useState('');
-  const [pasteGenBusy, setPasteGenBusy] = useState<string | null>(null);
-  const [pasteError, setPasteError] = useState('');
 
   // Test/save state
   const [testResult, setTestResult] = useState<any>(null);
@@ -428,52 +421,12 @@ export function ProfileBuilderWorkspace(
   };
 
   // ── Paste-element generate ──────────────────────────────────────────────
-  const handlePasteGenerate = async (field: string, outerHTML: string) => {
-    if (!outerHTML.trim() || !snapshotUrl.trim()) return;
-    setPasteGenBusy(field);
-    setPasteError('');
-    try {
-      const htmlRes = await fetchPageHtml(snapshotUrl.trim());
-      if (!htmlRes.ok || !htmlRes.html) {
-        setPasteError(htmlRes.error || 'Failed to fetch page HTML');
-        return;
-      }
-      const res = await generateSelectorFromElement({ html: htmlRes.html, outerHTML });
-      if (!res.ok || !res.data) {
-        setPasteError(res.error || 'Failed to generate selector');
-        return;
-      }
-      const data = res.data;
-      const key = field === 'title' ? 'title' : field === 'description' ? 'description' : 'images';
-      setPickedSelectors((prev) => ({ ...prev, [key]: { selector: data.selector, stability: data.stability } }));
-    } catch (err) {
-      setPasteError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPasteGenBusy(null);
-    }
-  };
 
-  const handleCustomPasteGenerate = async (fieldName: string, outerHTML: string) => {
-    if (!outerHTML.trim() || !snapshotUrl.trim()) return;
-    setCustomPasteGenerating(fieldName);
-    try {
-      const htmlRes = await fetchPageHtml(snapshotUrl.trim());
-      if (!htmlRes.ok || !htmlRes.html) return;
-      const res = await generateSelectorFromElement({ html: htmlRes.html, outerHTML });
-      const data = res.data;
-      if (data && data.selector) {
-        setCustomPickedFields((prev) => ({ ...prev, [fieldName]: { selector: data.selector, stability: data.stability } }));
-      }
-    } catch { /* skip */ }
-    finally { setCustomPasteGenerating(null); }
-  };
-
-  // ── Test extraction ─────────────────────────────────────────────────────
   const handleTestExtraction = async () => {
     if (!snapshotUrl.trim()) return;
     setTestBusy(true);
     setTestResult(null);
-    setPasteError('');
+    setSaveError('');
     try {
       const sel = (key: string) => pickedSelectors[key]?.selector || null;
       const res = await testExtractorProfile({
@@ -485,10 +438,10 @@ export function ProfileBuilderWorkspace(
       if (res.success) {
         setTestResult(res.extracted);
       } else {
-        setPasteError('Test extraction failed');
+        setSaveError('Test extraction failed');
       }
     } catch (err) {
-      setPasteError(err instanceof Error ? err.message : String(err));
+      setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
       setTestBusy(false);
     }
@@ -758,61 +711,7 @@ export function ProfileBuilderWorkspace(
         {snapshotError && <div style={s.errorBox}>{snapshotError}</div>}
       </div>
 
-            {/* ─── Paste Element HTML — Primary Method ─── */}
-      {snapshotResult && (
-        <div style={{ ...s.section, marginBottom: 16 }}>
-          <details style={{ marginBottom: 12 }} open>
-            <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, color: '#166534' }}>
-              📋 Paste Element HTML — No browser needed
-            </summary>
-            <div style={{ marginTop: 8, padding: 12, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0' }}>
-              <p style={{ fontSize: 12, color: '#4b5563', margin: '0 0 8px', lineHeight: 1.5 }}>
-                Open DevTools (<strong>F12</strong>), find the element, right-click it in the Elements panel,
-                select <strong>Copy → Copy outerHTML</strong>, paste below, and click <strong>Generate</strong>.
-              </p>
-              {['title', 'description', 'images'].map((field) => {
-                const label = field === 'title' ? 'Title' : field === 'description' ? 'Description' : 'Images';
-                const key = field as 'title' | 'description' | 'images';
-                const val = field === 'title' ? pastedTitle : field === 'description' ? pastedDescription : pastedImages;
-                const setVal = field === 'title' ? setPastedTitle : field === 'description' ? setPastedDescription : setPastedImages;
-                return (
-                  <div key={field} style={{ marginBottom: 8 }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>{label}</div>
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <textarea
-                        value={val}
-                        onChange={(e) => setVal(e.target.value)}
-                        rows={2}
-                        placeholder={'Paste ' + label + ' outerHTML here...'}
-                        style={{ flex: 1, padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 11, fontFamily: 'monospace', resize: 'vertical' }}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => handlePasteGenerate(field, val)}
-                        disabled={pasteGenBusy !== null || !val.trim()}
-                        style={{ padding: '4px 12px', fontSize: 12, background: pasteGenBusy === field ? '#9ca3af' : '#16a34a', color: '#fff', border: 'none', borderRadius: 4, cursor: pasteGenBusy !== null ? 'not-allowed' : 'pointer', fontWeight: 600, whiteSpace: 'nowrap', alignSelf: 'flex-start' }}
-                      >
-                        {pasteGenBusy === field ? 'Generating...' : 'Generate'}
-                      </button>
-                    </div>
-                    {pickedSelectors[key] && (
-                      <div style={{ marginTop: 4, padding: '4px 8px', background: '#f0fdf4', borderRadius: 4, border: '1px solid #bbf7d0', fontSize: 11 }}>
-                        <code>{pickedSelectors[key].selector}</code>
-                        <span style={{ marginLeft: 4, fontSize: 10, fontWeight: 700, color: pickedSelectors[key].stability === 'high' ? '#16a34a' : pickedSelectors[key].stability === 'medium' ? '#d97706' : '#dc2626' }}>
-                          {pickedSelectors[key].stability}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {pasteError && <p style={{ fontSize: 11, color: '#dc2626', marginTop: 4 }}>{pasteError}</p>}
-            </div>
-          </details>
-        </div>
-      )}
-
-      {/* ─── Visual Select — Hero Section ─── */}{/* ─── Visual Select — Hero Section ─── */}
+            {/* ─── Visual Select — Hero Section ─── */}{/* ─── Visual Select — Hero Section ─── */}
       {snapshotResult && (
         <>
           <div style={{ ...s.section, marginBottom: 32 }}>
@@ -1004,23 +903,7 @@ export function ProfileBuilderWorkspace(
                         <div style={{ fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 4, textTransform: 'capitalize' }}>
                           {fieldName}
                         </div>
-                        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-                          <textarea
-                            value={customPasteFields[fieldName] || ''}
-                            onChange={(e) => setCustomPasteFields((prev) => ({ ...prev, [fieldName]: e.target.value }))}
-                            rows={1}
-                            placeholder="Or paste outerHTML here..."
-                            style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 11, fontFamily: 'monospace', resize: 'vertical' }}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleCustomPasteGenerate(fieldName, customPasteFields[fieldName] || '')}
-                            disabled={customPasteGenerating !== null || !customPasteFields[fieldName]?.trim()}
-                            style={{ padding: '4px 10px', fontSize: 11, background: customPasteGenerating === fieldName ? '#9ca3af' : '#16a34a', color: '#fff', border: 'none', borderRadius: 4, cursor: customPasteGenerating !== null ? 'not-allowed' : 'pointer', fontWeight: 600, whiteSpace: 'nowrap' }}
-                          >
-                            {customPasteGenerating === fieldName ? '...' : 'Generate'}
-                          </button>
-                        </div>
+
                         <ElementPickerButton
                           field={fieldName}
                           url={snapshotResult.finalUrl || snapshotResult.url}
