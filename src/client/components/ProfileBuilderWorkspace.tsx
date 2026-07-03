@@ -44,7 +44,7 @@ interface ProfileBuilderWorkspaceProps {
   diagnostics?: DomainDiagnosticsEntry | null;
 }
 
-type TabId = 'overview' | 'snapshot' | 'review';
+type TabId = 'build' | 'review' | 'advanced';
 
 type RuntimeMode = 'static' | 'rendered';
 
@@ -284,7 +284,7 @@ export function ProfileBuilderWorkspace(
   const { domain, onClose, seedSampleUrl, diagnostics } = props;
 
   // ── Tab state ──────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [activeTab, setActiveTab] = useState<TabId>('build');
 
   // ── Governance & worker health (loaded on mount) ───────────────────────
   const [governance, setGovernance] = useState<DomainProfileGovernance | null>(null);
@@ -414,9 +414,9 @@ export function ProfileBuilderWorkspace(
     <div style={s.tabs}>
       {(
         [
-          ['overview', 'Overview'],
-          ['snapshot', 'Snapshot'],
+          ['build', 'Build'],
           ['review', 'Review'],
+          ['advanced', 'Advanced'],
         ] as [TabId, string][]
       ).map(([id, label]) => (
         <button
@@ -436,7 +436,7 @@ export function ProfileBuilderWorkspace(
 
   // ── Overview tab ───────────────────────────────────────────────────────
 
-  const renderOverview = () => {
+  const renderAdvanced = () => {
     if (governanceLoading) {
       return <p style={{ color: '#6b7280' }}>Loading domain governance…</p>;
     }
@@ -531,466 +531,290 @@ export function ProfileBuilderWorkspace(
 
         <hr style={s.divider} />
 
-        {/* Quick actions */}
+        {/* Get Started — primary action */}
         <div style={s.section}>
-          <h3 style={s.sectionTitle}>Quick Actions</h3>
+          <h3 style={s.sectionTitle}>Get Started</h3>
+          <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 12px' }}>
+            Use the <strong>Build</strong> tab to visually select elements on a product page.
+          </p>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             <button
               type="button"
               style={s.primaryBtn}
-              onClick={handleGenerateProposal}
-              disabled={proposalGenerating}
+              onClick={() => setActiveTab('build')}
             >
-              {proposalGenerating
-                ? 'Generating…'
-                : 'Generate Profile Proposal'}
-            </button>
-            <button
-              type="button"
-              style={s.secondaryBtn}
-              onClick={() => setActiveTab('snapshot')}
-            >
-              Snapshot Page
-            </button>
-            <button
-              type="button"
-              style={s.secondaryBtn}
-              onClick={() => setActiveTab('review')}
-            >
-              Validate Across Samples
+              Go to Build Tab
             </button>
           </div>
-
-          {generationResult && (
-            <div
-              style={
-                generationResult.success
-                  ? s.successBox
-                  : s.errorBox
-              }
-            >
-              {generationResult.success
-                ? generationResult.existing
-                  ? `Existing open proposal found for ${domain}.`
-                  : `Profile proposal generated for ${domain}${generationResult.anchorUrl ? ` from ${generationResult.anchorUrl}` : ''}.`
-                : 'Profile generation returned no proposal.'}
-            </div>
-          )}
         </div>
+
+        {/* AI Proposal — deprecated, tucked at bottom */}
+        <details style={{ marginTop: 24, fontSize: 13, color: '#6b7280' }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#9ca3af' }}>Advanced: AI-Generated Proposal (deprecated)</summary>
+          <div style={{ marginTop: 12, padding: 16, background: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+            <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px' }}>
+              The AI proposal generator is unreliable for complex page structures.
+              Use the <strong>Build</strong> tab to visually select elements instead.
+            </p>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                style={{ ...s.secondaryBtn, fontSize: 12, padding: '4px 10px' }}
+                onClick={handleGenerateProposal}
+                disabled={proposalGenerating}
+              >
+                {proposalGenerating ? 'Generating…' : 'Generate AI Proposal'}
+              </button>
+            </div>
+            {generationResult && (
+              <div style={generationResult.success ? s.successBox : s.errorBox}>
+                {generationResult.success
+                  ? generationResult.existing
+                    ? 'Existing open proposal found.'
+                    : `Proposal generated${generationResult.anchorUrl ? ` from ${generationResult.anchorUrl}` : ''}.`
+                  : 'Generation returned no proposal.'}
+              </div>
+            )}
+          </div>
+        </details>
       </div>
     );
   };
 
   // ── Snapshot tab ────────────────────────────────────────────────────────
 
-  const renderSnapshot = () => (
+    const renderBuild = () => (
     <div>
-      <div style={s.section}>
-        <h3 style={s.sectionTitle}>Snapshot Page</h3>
-        <p style={s.hint}>
-          Fetch a live product page and analyse its structure for profile
-          building.
+      {/* ─── Hero: URL Input ─── */}
+      <div style={{
+        ...s.section,
+        background: '#faf5ff',
+        borderRadius: 12,
+        padding: 24,
+        border: '2px solid #e9d5ff',
+        marginBottom: 24,
+      }}>
+        <h3 style={{ ...s.sectionTitle, fontSize: 18, color: '#6b21a8', marginTop: 0 }}>
+          🖱️ Build Profile by Clicking Elements
+        </h3>
+        <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 12px', lineHeight: 1.5 }}>
+          Enter a product page URL, load it, then click on the title, description, and images
+          in the browser window. The system generates stable CSS selectors from your clicks.
         </p>
-
-        {/* URL input */}
-        <div style={{ marginBottom: 12 }}>
-          <label style={s.label}>Page URL</label>
+        <div style={{ display: 'flex', gap: 8 }}>
           <input
             type="text"
-            style={s.input}
+            style={{ ...s.input, flex: 1 }}
             value={snapshotUrl}
             onChange={(e) => setSnapshotUrl(e.target.value)}
             placeholder="https://example.com/product/123"
           />
+          <button
+            type="button"
+            style={{
+              background: snapshotBusy ? '#9ca3af' : '#7c3aed',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              padding: '8px 24px',
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: snapshotBusy ? 'not-allowed' : 'pointer',
+            }}
+            onClick={handleSnapshot}
+            disabled={snapshotBusy || !snapshotUrl.trim()}
+          >
+            {snapshotBusy ? 'Loading…' : 'Load Page'}
+          </button>
         </div>
-
-        {/* Runtime toggle */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 16,
-            alignItems: 'center',
-            marginBottom: 12,
-          }}
-        >
-          <label style={s.label}>Runtime</label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              type="button"
-              style={{
-                ...(snapshotRuntime === 'static'
-                  ? s.primaryBtn
-                  : s.secondaryBtn),
-                padding: '4px 12px',
-                fontSize: 12,
-              }}
-              onClick={() => setSnapshotRuntime('static')}
-            >
-              Static
-            </button>
-            <button
-              type="button"
-              style={{
-                ...(snapshotRuntime === 'rendered'
-                  ? s.primaryBtn
-                  : s.secondaryBtn),
-                padding: '4px 12px',
-                fontSize: 12,
-              }}
-              onClick={() => setSnapshotRuntime('rendered')}
-            >
-              Rendered
-            </button>
-          </div>
-        </div>
-
-        {/* Checkboxes */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 16,
-            marginBottom: 12,
-          }}
-        >
-          <label style={s.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={snapshotCaptureScreenshot}
-              onChange={(e) =>
-                setSnapshotCaptureScreenshot(e.target.checked)
-              }
-            />
-            Capture screenshot
-          </label>
-          <label style={s.checkboxLabel}>
-            <input
-              type="checkbox"
-              checked={snapshotCaptureNetwork}
-              onChange={(e) =>
-                setSnapshotCaptureNetwork(e.target.checked)
-              }
-            />
-            Capture network
-          </label>
-        </div>
-
-        {/* Take Snapshot button */}
-        <button
-          type="button"
-          style={s.primaryBtn}
-          onClick={handleSnapshot}
-          disabled={snapshotBusy || !snapshotUrl.trim()}
-        >
-          {snapshotBusy ? 'Snapshotting…' : 'Take Snapshot'}
-        </button>
-
         {snapshotError && <div style={s.errorBox}>{snapshotError}</div>}
       </div>
 
-      {/* Snapshot results */}
+      {/* ─── Visual Select — Hero Section ─── */}
       {snapshotResult && (
-        <div style={s.section}>
-          <h3 style={s.sectionTitle}>Snapshot Results</h3>
-
-          <div
-            style={{
+        <>
+          <div style={{ ...s.section, marginBottom: 32 }}>
+            <h3 style={s.sectionTitle}>Select Elements</h3>
+            <div style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: 16,
-            }}
-          >
-            {/* JSON-LD */}
-            <div style={s.card}>
-              <h4 style={s.subsectionTitle}>
-                JSON-LD ({snapshotResult.jsonLd.length})
-              </h4>
-              {snapshotResult.jsonLd.length > 0 ? (
-                <ul style={{ margin: 0, padding: '0 0 0 16px', fontSize: 12 }}>
-                  {snapshotResult.jsonLd.map((item, i) => {
-                    const type =
-                      (item as Record<string, unknown>)['@type'] ?? 'Item';
-                    return (
-                      <li key={i} style={{ marginBottom: 4 }}>
-                        <strong>{String(type)}</strong>
-                        {Object.entries(item as Record<string, unknown>)
-                          .filter(
-                            ([k]) => k !== '@type' && k !== '@context',
-                          )
-                          .slice(0, 4)
-                          .map(([k, v]) => (
-                            <div
-                              key={k}
-                              style={{
-                                fontSize: 11,
-                                color: '#6b7280',
-                                marginLeft: 8,
-                              }}
-                            >
-                              {k}: {String(v).slice(0, 80)}
-                            </div>
-                          ))}
-                        {Object.keys(item).length > 6 && (
-                          <div style={{ fontSize: 11, color: '#9ca3af', marginLeft: 8 }}>
-                            +{Object.keys(item).length - 6} more fields
-                          </div>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p style={s.empty}>No JSON-LD found</p>
-              )}
+              gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: 20,
+            }}>
+              {/* Title */}
+              <div style={{
+                background: '#fff',
+                border: pickedSelectors.title ? '2px solid #16a34a' : '2px solid #e5e7eb',
+                borderRadius: 8,
+                padding: 16,
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  1. Title
+                </div>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
+                  Click the product name on the page
+                </p>
+                <ElementPickerButton
+                  field="title"
+                  url={snapshotResult.finalUrl || snapshotResult.url}
+                  onPicked={(result) => {
+                    setPickedSelectors((prev) => ({ ...prev, title: { selector: result.selector, stability: result.stability } }));
+                  }}
+                  onCancel={() => {}}
+                />
+                {pickedSelectors.title && (
+                  <div style={{ marginTop: 8, padding: 8, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0' }}>
+                    <code style={{ fontSize: 11, background: '#fff', padding: '1px 4px', borderRadius: 3 }}>
+                      {pickedSelectors.title.selector}
+                    </code>
+                    <span style={{
+                      marginLeft: 6,
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: '1px 6px',
+                      borderRadius: 999,
+                      textTransform: 'uppercase',
+                      background: pickedSelectors.title.stability === 'high' ? '#dcfce7' : pickedSelectors.title.stability === 'medium' ? '#fef3c7' : '#fee2e2',
+                      color: pickedSelectors.title.stability === 'high' ? '#16a34a' : pickedSelectors.title.stability === 'medium' ? '#d97706' : '#dc2626',
+                    }}>
+                      {pickedSelectors.title.stability}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Description */}
+              <div style={{
+                background: '#fff',
+                border: pickedSelectors.description ? '2px solid #16a34a' : '2px solid #e5e7eb',
+                borderRadius: 8,
+                padding: 16,
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  2. Description
+                </div>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
+                  Click the product description on the page
+                </p>
+                <ElementPickerButton
+                  field="description"
+                  url={snapshotResult.finalUrl || snapshotResult.url}
+                  onPicked={(result) => {
+                    setPickedSelectors((prev) => ({ ...prev, description: { selector: result.selector, stability: result.stability } }));
+                  }}
+                  onCancel={() => {}}
+                />
+                {pickedSelectors.description && (
+                  <div style={{ marginTop: 8, padding: 8, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0' }}>
+                    <code style={{ fontSize: 11, background: '#fff', padding: '1px 4px', borderRadius: 3 }}>
+                      {pickedSelectors.description.selector}
+                    </code>
+                    <span style={{
+                      marginLeft: 6,
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: '1px 6px',
+                      borderRadius: 999,
+                      textTransform: 'uppercase',
+                      background: pickedSelectors.description.stability === 'high' ? '#dcfce7' : pickedSelectors.description.stability === 'medium' ? '#fef3c7' : '#fee2e2',
+                      color: pickedSelectors.description.stability === 'high' ? '#16a34a' : pickedSelectors.description.stability === 'medium' ? '#d97706' : '#dc2626',
+                    }}>
+                      {pickedSelectors.description.stability}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Images */}
+              <div style={{
+                background: '#fff',
+                border: pickedSelectors.images ? '2px solid #16a34a' : '2px solid #e5e7eb',
+                borderRadius: 8,
+                padding: 16,
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  3. Images
+                </div>
+                <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
+                  Click a product image (gallery) on the page
+                </p>
+                <ElementPickerButton
+                  field="images"
+                  url={snapshotResult.finalUrl || snapshotResult.url}
+                  onPicked={(result) => {
+                    setPickedSelectors((prev) => ({ ...prev, images: { selector: result.selector, stability: result.stability } }));
+                  }}
+                  onCancel={() => {}}
+                />
+                {pickedSelectors.images && (
+                  <div style={{ marginTop: 8, padding: 8, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0' }}>
+                    <code style={{ fontSize: 11, background: '#fff', padding: '1px 4px', borderRadius: 3 }}>
+                      {pickedSelectors.images.selector}
+                    </code>
+                    <span style={{
+                      marginLeft: 6,
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: '1px 6px',
+                      borderRadius: 999,
+                      textTransform: 'uppercase',
+                      background: pickedSelectors.images.stability === 'high' ? '#dcfce7' : pickedSelectors.images.stability === 'medium' ? '#fef3c7' : '#fee2e2',
+                      color: pickedSelectors.images.stability === 'high' ? '#16a34a' : pickedSelectors.images.stability === 'medium' ? '#d97706' : '#dc2626',
+                    }}>
+                      {pickedSelectors.images.stability}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
 
-            {/* Embedded product data */}
-            <div style={s.card}>
-              <h4 style={s.subsectionTitle}>
-                Embedded Product Data (
-                {snapshotResult.embeddedProductData.length})
-              </h4>
-              {snapshotResult.embeddedProductData.length > 0 ? (
-                <ul style={{ margin: 0, padding: '0 0 0 16px', fontSize: 12 }}>
-                  {snapshotResult.embeddedProductData.map((item, i) => (
-                    <li key={i} style={{ marginBottom: 4 }}>
-                      {Object.entries(item as Record<string, unknown>)
-                        .slice(0, 6)
-                        .map(([k, v]) => (
-                          <div key={k} style={{ fontSize: 11, color: '#6b7280' }}>
-                            {k}: {String(v).slice(0, 60)}
-                          </div>
-                        ))}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p style={s.empty}>No embedded data found</p>
-              )}
-            </div>
-          </div>
-
-          {/* Image candidates */}
-          <div style={{ ...s.card, marginTop: 16 }}>
-            <h4 style={s.subsectionTitle}>
-              Image Candidates ({snapshotResult.imageCandidates.length})
-            </h4>
-            {snapshotResult.imageCandidates.length > 0 ? (
-              <ImagePreviewGrid
-                previews={snapshotResult.imageCandidates.map((url) => ({
-                  url,
-                  sampleUrl: snapshotResult.url,
-                  expectedName: null,
-                  brandHint: null,
-                  warnings: [],
-                  verdict: 'pending' as const,
-                }))}
-                readOnly
-                compact
-              />
-            ) : (
-              <p style={s.empty}>No image candidates found</p>
+            {/* Progress */}
+            {Object.keys(pickedSelectors).length > 0 && (
+              <div style={{ marginTop: 20, padding: 16, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0', textAlign: 'center' }}>
+                <p style={{ fontSize: 14, fontWeight: 600, color: '#166534', margin: '0 0 8px' }}>
+                  {'✓'} {Object.keys(pickedSelectors).length >= 3 ? 'All elements selected!' : Object.keys(pickedSelectors).length + '/3 elements selected'}
+                </p>
+                <p style={{ fontSize: 12, color: '#4b5563', margin: 0 }}>
+                  Go to the <strong>Review</strong> tab to save and approve your selections.
+                </p>
+              </div>
             )}
           </div>
 
-          {/* Page structure signals */}
-          <div style={{ ...s.card, marginTop: 16 }}>
-            <h4 style={s.subsectionTitle}>Page Structure Signals</h4>
-            {snapshotResult.pageStructureSignals.length > 0 ? (
-              <div>
-                {snapshotResult.pageStructureSignals.map((signal, i) => (
-                  <span key={i} style={s.pill}>
-                    {signal}
-                  </span>
-                ))}
+          {/* ─── Technical Details — collapsed ─── */}
+          <details style={{ marginTop: 16, fontSize: 13, color: '#6b7280' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Page Technical Details (JSON-LD, images, signals)</summary>
+            <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <div style={s.card}>
+                <h4 style={s.subsectionTitle}>JSON-LD ({snapshotResult.jsonLd.length})</h4>
+                {snapshotResult.jsonLd.length > 0 ? (
+                  <ul style={{ margin: 0, padding: '0 0 0 16px', fontSize: 12 }}>
+                    {snapshotResult.jsonLd.map((item, i) => (
+                      <li key={i}>{String((item as Record<string, unknown>)['@type'] ?? 'Item')}</li>
+                    ))}
+                  </ul>
+                ) : <p style={s.empty}>None</p>}
               </div>
-            ) : (
-              <p style={s.empty}>No structure signals detected</p>
+              <div style={s.card}>
+                <h4 style={s.subsectionTitle}>Image Candidates ({snapshotResult.imageCandidates.length})</h4>
+                {snapshotResult.imageCandidates.length > 0 ? (
+                  <ImagePreviewGrid previews={snapshotResult.imageCandidates.map(url => ({ url, sampleUrl: snapshotResult.url, expectedName: null, brandHint: null, warnings: [], verdict: 'pending' as const }))} readOnly compact />
+                ) : <p style={s.empty}>None</p>}
+              </div>
+              <div style={s.card}>
+                <h4 style={s.subsectionTitle}>Page Structure Signals</h4>
+                {snapshotResult.pageStructureSignals.length > 0 ? (
+                  <div>{snapshotResult.pageStructureSignals.map((signal, i) => <span key={i} style={s.pill}>{signal}</span>)}</div>
+                ) : <p style={s.empty}>None</p>}
+              </div>
+            </div>
+            {snapshotResult.warnings.length > 0 && (
+              <div style={s.errorBox}>
+                <strong>Warnings:</strong>
+                <ul style={{ margin: '4px 0 0', padding: '0 0 0 16px' }}>{snapshotResult.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>
+              </div>
             )}
-          </div>
-
-          {/* Screenshot */}
-          <div style={{ ...s.card, marginTop: 16 }}>
-            <h4 style={s.subsectionTitle}>Screenshot</h4>
-            {snapshotResult.screenshotRef ? (
-              <div
-                style={{
-                  padding: 12,
-                  background: '#f9fafb',
-                  borderRadius: 6,
-                  fontSize: 12,
-                  color: '#6b7280',
-                  fontFamily: 'monospace',
-                }}
-              >
-                {snapshotResult.screenshotRef}
-              </div>
-            ) : (
-              <p style={s.empty}>No screenshot captured</p>
-            )}
-          </div>
-
-          {/* Warnings */}
-          {snapshotResult.warnings.length > 0 && (
-            <div style={s.errorBox}>
-              <strong>Warnings:</strong>
-              <ul style={{ margin: '4px 0 0', padding: '0 0 0 16px' }}>
-                {snapshotResult.warnings.map((w, i) => (
-                  <li key={i}>{w}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Visual Selector Section ── */}
-      {snapshotResult && snapshotResult.url && (
-        <div style={{ ...s.section, marginTop: 24, borderTop: '1px solid #e5e7eb', paddingTop: 20 }}>
-          <h3 style={s.sectionTitle}>Visually Select Elements</h3>
-          <p style={s.hint}>
-            Click a button below, then click on the corresponding element in the browser
-            window to generate a stable CSS selector.
-          </p>
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                Title
-              </div>
-              <ElementPickerButton
-                field="title"
-                url={snapshotResult.finalUrl || snapshotResult.url}
-                onPicked={(result) => {
-                  setPickedSelectors((prev) => ({
-                    ...prev,
-                    title: { selector: result.selector, stability: result.stability },
-                  }));
-                }}
-                onCancel={() => {}}
-              />
-              {pickedSelectors.title && (
-                <div
-                  style={{
-                    marginTop: 4,
-                    padding: '2px 6px',
-                    background: '#f3f4f6',
-                    borderRadius: 3,
-                    fontSize: 11,
-                  }}
-                >
-                  <code>{pickedSelectors.title.selector}</code>
-                  <span
-                    style={{
-                      marginLeft: 4,
-                      fontSize: 10,
-                      color:
-                        pickedSelectors.title.stability === 'high'
-                          ? '#16a34a'
-                          : pickedSelectors.title.stability === 'medium'
-                            ? '#d97706'
-                            : '#dc2626',
-                    }}
-                  >
-                    {pickedSelectors.title.stability}
-                  </span>
-                </div>
-              )}
-            </div>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                Description
-              </div>
-              <ElementPickerButton
-                field="description"
-                url={snapshotResult.finalUrl || snapshotResult.url}
-                onPicked={(result) => {
-                  setPickedSelectors((prev) => ({
-                    ...prev,
-                    description: { selector: result.selector, stability: result.stability },
-                  }));
-                }}
-                onCancel={() => {}}
-              />
-              {pickedSelectors.description && (
-                <div
-                  style={{
-                    marginTop: 4,
-                    padding: '2px 6px',
-                    background: '#f3f4f6',
-                    borderRadius: 3,
-                    fontSize: 11,
-                  }}
-                >
-                  <code>{pickedSelectors.description.selector}</code>
-                  <span
-                    style={{
-                      marginLeft: 4,
-                      fontSize: 10,
-                      color:
-                        pickedSelectors.description.stability === 'high'
-                          ? '#16a34a'
-                          : pickedSelectors.description.stability === 'medium'
-                            ? '#d97706'
-                            : '#dc2626',
-                    }}
-                  >
-                    {pickedSelectors.description.stability}
-                  </span>
-                </div>
-              )}
-            </div>
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                Images
-              </div>
-              <ElementPickerButton
-                field="images"
-                url={snapshotResult.finalUrl || snapshotResult.url}
-                onPicked={(result) => {
-                  setPickedSelectors((prev) => ({
-                    ...prev,
-                    images: { selector: result.selector, stability: result.stability },
-                  }));
-                }}
-                onCancel={() => {}}
-              />
-              {pickedSelectors.images && (
-                <div
-                  style={{
-                    marginTop: 4,
-                    padding: '2px 6px',
-                    background: '#f3f4f6',
-                    borderRadius: 3,
-                    fontSize: 11,
-                  }}
-                >
-                  <code>{pickedSelectors.images.selector}</code>
-                  <span
-                    style={{
-                      marginLeft: 4,
-                      fontSize: 10,
-                      color:
-                        pickedSelectors.images.stability === 'high'
-                          ? '#16a34a'
-                          : pickedSelectors.images.stability === 'medium'
-                            ? '#d97706'
-                            : '#dc2626',
-                    }}
-                  >
-                    {pickedSelectors.images.stability}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Worker unavailable */}
-      {snapshotError && !snapshotResult && (
-        <p style={{ fontSize: 13, color: '#dc2626' }}>
-          The extraction worker is not available. Start the worker service
-          (e.g. via the worker Docker container) and try again.
-        </p>
+          </details>
+        </>
       )}
     </div>
   );
@@ -1194,9 +1018,9 @@ export function ProfileBuilderWorkspace(
 
         {/* Body */}
         <div style={s.body}>
-          {activeTab === 'overview' && renderOverview()}
-          {activeTab === 'snapshot' && renderSnapshot()}
+          {activeTab === 'build' && renderBuild()}
           {activeTab === 'review' && renderReview()}
+          {activeTab === 'advanced' && renderAdvanced()}
         </div>
       </div>
     </>
