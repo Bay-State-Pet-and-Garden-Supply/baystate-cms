@@ -16,7 +16,6 @@ import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItem } from './product-curator';
-import { downloadImages } from './image-downloader';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
@@ -383,7 +382,7 @@ export class OnboardingWorker {
         extractionDataJson: JSON.stringify(extractedData),
         extractionMethod: 'crawlee_playwright',
         confidence: extractedData.confidence,
-        imagesJson: JSON.stringify(downloadedImages),
+        imagesJson: null,
         rawStructuredDataJson: JSON.stringify(extractedData.fieldProvenance),
       });
 
@@ -404,7 +403,7 @@ export class OnboardingWorker {
         `[OnboardingWorker] ✓ Extraction complete for "${item.name}" (${item.upc}): ` +
         `title="${extractedData.title || 'N/A'}", brand="${extractedData.brand || 'N/A'}", ` +
         `price="${extractedData.price || 'N/A'}", confidence=${(extractedData.confidence * 100).toFixed(0)}%, ` +
-        `images=${downloadedImages.length}`
+        `images=${extractedData.additionalImages ? extractedData.additionalImages.length : 0}`
       );
     } catch (err) {
       console.error(`[OnboardingWorker] Extraction error for ${item.id}:`, err);
