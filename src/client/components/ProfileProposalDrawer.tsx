@@ -114,6 +114,7 @@ export function ProfileProposalDrawer(
           titleSelector: activeProfile.titleSelector ?? null,
           descriptionSelector: activeProfile.descriptionSelector ?? null,
           imagesSelector: activeProfile.imagesSelector ?? null,
+          customSelectors: activeProfile.customSelectors,
         });
         if (res.success) activeRes = res.extracted as unknown as Record<string, unknown>;
       } catch (err) {
@@ -124,11 +125,18 @@ export function ProfileProposalDrawer(
     // Run proposed selectors.
     let proposalRes: Record<string, unknown> | null = null;
     try {
+      // Extract custom selectors from proposed selectors (non-fixed fields)
+      const knownFields = new Set(['titleSelector', 'priceSelector', 'descriptionSelector', 'brandSelector', 'imagesSelector', 'shopifyJSONPath', 'variantSelectionStrategy']);
+      const customSel: Record<string, string> = {};
+      for (const [k, v] of Object.entries(proposedSelectors)) {
+        if (!knownFields.has(k) && v) customSel[k] = v;
+      }
       const res = await testExtractorProfile({
         url: previewUrl.trim(),
         titleSelector: proposedSelectors.titleSelector ?? null,
         descriptionSelector: proposedSelectors.descriptionSelector ?? null,
         imagesSelector: proposedSelectors.imagesSelector ?? null,
+        customSelectors: Object.keys(customSel).length > 0 ? customSel : undefined,
       });
       if (res.success) proposalRes = res.extracted as unknown as Record<string, unknown>;
     } catch (err) {
