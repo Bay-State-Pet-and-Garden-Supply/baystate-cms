@@ -740,7 +740,7 @@ export function ProfileBuilderWorkspace(
                   1. Title
                 </div>
                 <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
-                  Or paste a CSS selector directly
+                  Paste a CSS selector (DevTools → Copy → Copy selector)
                 </p>
                         <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
                           <input
@@ -849,7 +849,7 @@ export function ProfileBuilderWorkspace(
                             type="text"
                             value={manualSelectors['images'] || ''}
                             onChange={(e) => handleManualSelector('images', e.target.value)}
-                            placeholder="e.g. .product-images"
+                            placeholder="e.g. .product__gallery, .swiper-wrapper"
                             style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
                           />
                         </div>
