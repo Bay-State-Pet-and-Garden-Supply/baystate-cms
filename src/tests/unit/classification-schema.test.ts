@@ -7,10 +7,7 @@ import {
   ClassificationEvidenceSchema,
   ClassificationProposalSchema,
   ClassificationProposalDecisionSchema,
-  ProductTypeConfigSchema,
   ProductAttributeConfigSchema,
-  AttributeProfileConfigSchema,
-  AttributeMappingConfigSchema,
   GuidanceConfigSchema,
   ModelPolicyConfigSchema,
   DataSharingConfigSchema,
@@ -124,6 +121,7 @@ describe('Classification Schema – Config payload', () => {
     expect(result.attributes).toHaveLength(1);
     expect(result.attributeProfiles).toHaveLength(1);
     expect(result.attributeMappings).toHaveLength(1);
+    expect(result.curationTargets).toEqual([]);
     expect(result.guidance).toHaveLength(1);
     expect(result.modelPolicy.imageDataSharing).toBe('local_only');
     expect(result.dataSharing.imagePolicy).toBe('local_only');
@@ -165,6 +163,39 @@ describe('Classification Schema – Config payload', () => {
     expect(result.attributeProfiles[0].attributes).toEqual([]);
     expect(result.modelPolicy.imageDataSharing).toBe('local_only');
     expect(result.dataSharing.retentionDays).toBe(90);
+  });
+
+  it('parses manager-selected curation targets', () => {
+    const result = ClassificationConfigSchema.parse({
+      manifest: {
+        schemaVersion: 1,
+        compatibilityVersion: 1,
+        createdAt: '2026-06-15T00:00:00Z',
+        updatedAt: '2026-06-15T00:00:00Z',
+      },
+      curationTargets: [
+        {
+          id: 'target-productfield24',
+          kind: 'product_field',
+          label: 'Product Field 24',
+          catalogField: 'ProductField24',
+          attributeId: 'field-productfield24',
+          optionSource: 'live_store',
+          selectionMode: 'multiple',
+        },
+        {
+          id: 'category-pages',
+          kind: 'page',
+          label: 'Category Pages',
+          selectionMode: 'multiple',
+        },
+      ],
+    });
+
+    expect(result.curationTargets).toHaveLength(2);
+    expect(result.curationTargets[0].enabled).toBe(true);
+    expect(result.curationTargets[0].catalogField).toBe('ProductField24');
+    expect(result.curationTargets[1].kind).toBe('page');
   });
 
   it('rejects unknown valueMode', () => {

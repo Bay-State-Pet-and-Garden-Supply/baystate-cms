@@ -1,0 +1,29 @@
+{
+  "runId": "5e5ea1c1-5ac6-4bca-908c-39b28ea8fe0c",
+  "agent": "reviewer",
+  "task": "## Review the overhaul plan for extraction profile proposal generation and review\n\nRead the plan at: `/Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/f0f613e7-185d-4313-b723-3ae79bd32470/plan.md`\n\nAlso read these files to verify the plan's correctness and feasibility:\n- `src/onboarding/profile-generator.ts` — the proposal generator being overhauled\n- `src/onboarding/page-extractor.ts` — lines 1005-1145 where the productJSON extraction currently lives (being moved to shopify-json.ts)\n- `src/onboarding/profile-promoter.ts` — SELECTOR_KEYS and promotion logic\n- `src/onboarding/profile-governance-service.ts` — tally() and validation logic\n- `src/client/components/ProfileGenerationReview.tsx` — the review component being rewritten\n- `src/client/components/ProfileBuilderWorkspace.tsx` — tabs being merged\n- `src/db/repositories/extractor-profile-repo.ts` — upsertProfile SQL\n- `src/shared/schemas/onboarding.ts` — SELECTOR_FIELDS, ExtractorProfileSchema\n- `src/extraction-worker/routes/extract.ts` — trusted extractor (for A6)\n\n## Review angles\n\n1. **Completeness** — Does the plan cover all three phases from the oracle analysis? Are all tasks specified with enough detail for a worker to implement?\n\n2. **Correctness** — \n   - A0: Is `extractProductJsonFromHtml` truly pure? Does it use `node:vm`? Verify the actual function in page-extractor.ts.\n   - A1: Is 60KB a reasonable MAX_LLM_DOM_BYTES? Is the prompt change safe (no regression on existing sites)?\n   - A2: Is `shopifyJSONPath` as boolean correct, or should it be a string path? Will the migration break existing DBs?\n   - A4: Does dropping price/brand from SELECTOR_FIELDS break any downstream consumers? Check every file that imports SELECTOR_FIELDS.\n\n3. **Safety** — \n   - A1: Passing minimized DOM to LLM increases token cost and injection surface. Are the mitigations sufficient?\n   - A4: The enum stays at 5 but the iterating arrays change to 3. Are there any code paths that assume `SELECTOR_FIELDS.length === 5` or iterate the enum directly?\n   - A3: `buildSeedPreview` must stay pure. Does the plan guarantee this?\n\n4. **Feasibility** — Is the implementation order realistic? Are there any hidden dependencies?\n\n5. **Consistency** — Does the plan align with the oracle's recommendations? Are there contradictions?\n\nReturn findings with file/line references where applicable. Identify any blockers that would prevent implementation. Do NOT modify any files.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 134595,
+        "output": 20705,
+        "cacheRead": 1518720,
+        "cacheWrite": 0,
+        "cost": 0.6744022,
+        "turns": 21
+      }
+    }
+  ],
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783074380045
+}

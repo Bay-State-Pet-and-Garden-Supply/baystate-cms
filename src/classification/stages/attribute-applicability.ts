@@ -1,5 +1,7 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
+import { loadClassificationConfig } from '../config-loader';
+import { getExplicitCurationTargets, hasExplicitCurationTargets } from '../curation-targets';
 
 /**
  * Attribute Applicability Stage
@@ -15,6 +17,19 @@ export const attributeApplicabilityStage: StageDefinition = {
   requires: ['primary_product_type_proposal'],
   evidenceFrom: [],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
+    const config = loadClassificationConfig(context.workspacePath);
+    if (hasExplicitCurationTargets(config) && !getExplicitCurationTargets(config).some(target => target.kind === 'product_type')) {
+      return {
+        status: 'succeeded',
+        output: {
+          evidence: [],
+          proposals: [],
+          abstained: false,
+          message: 'Skipped Product Type-gated applicability because Product Type is not an enabled curation target.',
+        },
+      };
+    }
+
     // Find the accepted Primary Product Type proposal
     const acceptedType = input.acceptedProposals.find(
       p => p.proposalType === 'primary_product_type' && p.status === 'accepted',

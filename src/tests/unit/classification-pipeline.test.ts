@@ -7,12 +7,14 @@ import { initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
-import { syncConfigToCache, getCachedProductTypes, getCachedAttributes, getCachedAttributeProfiles, getCachedAttributeMappings, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
+import { syncConfigToCache, getCachedProductTypes, getCachedAttributes, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
 import { createRun, getProposalsByRun, recordDecision, getAcceptedProposals } from '../../db/repositories/classification-run-repo';
 import { runPipeline } from '../../classification/pipeline-runner';
 import { evidenceExtractionStage, categoryPageProposalsStage, productAttributeProposalsStage, attributeApplicabilityStage, primaryProductTypeStage } from '../../classification';
 import { upsertPage } from '../../db/repositories/page-repo';
+import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
+import { listCurationTargetCandidates } from '../../classification/curation-targets';
 import { getDb } from '../../db/connection';
 
 describe('Classification Pipeline Integration', () => {
@@ -44,6 +46,7 @@ describe('Classification Pipeline Integration', () => {
       attributeMappings: [
         { id: 'flavor-mapping', attributeId: 'flavor', catalogField: 'ProductField1', serialization: { format: 'direct', separator: ', ', prefix: '', suffix: '' }, isStale: false },
       ],
+      curationTargets: [],
       guidance: [],
       modelPolicy: { defaultProvider: 'ollama', defaultModel: '', stageOverrides: {}, imageDataSharing: 'local_only' as const, textDataSharing: 'local_only' as const },
       dataSharing: { imagePolicy: 'local_only' as const, textPolicy: 'local_only' as const, sensitiveDataFiltering: true, retentionDays: 90 },
@@ -87,6 +90,99 @@ describe('Classification Pipeline Integration', () => {
     expect(fieldProposals.length).toBeGreaterThan(0);
     recordDecision({ id: randomUUID(), proposalId: fieldProposals[0].id, decision: 'accepted', revisedFromId: null, reviewerId: null, reviewerNote: null, createdAt: new Date().toISOString() });
     expect(getAcceptedProposals('TEST-SKU-2').length).toBeGreaterThan(0);
+  });
+
+  it('uses live-store curation target options for a selected ProductField', async () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+    upsertRegistryEntry({
+      id: randomUUID(),
+      workspaceId,
+      xmlField: 'ProductField24',
+      label: 'Product Field 24',
+      kind: 'custom',
+      dataType: 'string',
+      editable: true,
+      required: false,
+      uiGroup: 'Curation',
+      sampleValuesJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    db.run(
+      `INSERT OR REPLACE INTO product_index
+       (id, sku, file_path, title, status, product_hash, custom_fields, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [randomUUID(), 'LIVE-OPT-1', 'products/live-opt-1.json', 'Existing Cat Toy', 'active', 'hash-live-1', JSON.stringify({ ProductField24: 'Cat Toys' }), now, now],
+    );
+    db.run(
+      `INSERT OR REPLACE INTO product_index
+       (id, sku, file_path, title, status, product_hash, custom_fields, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [randomUUID(), 'LIVE-OPT-2', 'products/live-opt-2.json', 'Existing Dog Food', 'active', 'hash-live-2', JSON.stringify({ ProductField24: 'Dog Food' }), now, now],
+    );
+
+    const current = loadClassificationConfig(workspacePath);
+    saveClassificationConfig(workspacePath, {
+      ...current,
+      productTypes: [],
+      attributeProfiles: [],
+      attributes: [
+        ...current.attributes.filter(a => a.id !== 'field-productfield24'),
+        { id: 'field-productfield24', name: 'Product Field 24', description: null, valueMode: 'controlled' as const, canonicalUnit: null, allowedValues: [], valueAliases: [], visualEvidenceEligibility: 'eligible' as const, isClaim: false, isCompositionAttribute: false, group: 'Curation' },
+      ],
+      attributeMappings: [
+        ...current.attributeMappings.filter(m => m.attributeId !== 'field-productfield24'),
+        { id: 'field-productfield24-mapping', attributeId: 'field-productfield24', catalogField: 'ProductField24', serialization: { format: 'direct', separator: ', ', prefix: '', suffix: '' }, isStale: false },
+      ],
+      curationTargets: [
+        { id: 'target-productfield24', kind: 'product_field' as const, label: 'Product Field 24', enabled: true, selectionMode: 'single' as const, attributeId: 'field-productfield24', catalogField: 'ProductField24', optionSource: 'live_store' as const, required: false, sortOrder: 0 },
+      ],
+    });
+    syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
+
+    const config = loadClassificationConfig(workspacePath);
+    const snapId = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-24', snapId, snapId);
+    const evidence = [
+      { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-24', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Premium Cat Toys assortment', value: 'Premium Cat Toys assortment', metadata: {}, capturedAt: now },
+    ];
+
+    const result = await runPipeline(
+      [productAttributeProposalsStage],
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: now } },
+      { sku: 'TEST-SKU-24', evidence, acceptedProposals: [], allProposals: [] },
+    );
+
+    const proposal = result.proposals.find(p => p.proposalType === 'field_assignment' && p.targetId === 'field-productfield24');
+    expect(proposal?.proposedValue).toBe('Cat Toys');
+  });
+
+  it('discovers ProductField candidates from product_index even when field_registry is incomplete', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Insert a product with ProductField24 (which is NOT in field_registry)
+    db.run(
+      `INSERT OR REPLACE INTO product_index
+       (id, sku, file_path, title, status, product_hash, custom_fields, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [randomUUID(), 'DISCOVER-24', 'products/discover-24.json', 'Field 24 Product', 'active', 'hash-disc-24', JSON.stringify({ ProductField24: 'Cat Toys', ProductField16: 'Pet Brands' }), now, now],
+    );
+
+    const config = loadClassificationConfig(workspacePath);
+    const candidates = listCurationTargetCandidates(workspaceId, config);
+
+    // ProductField24 should appear as a candidate even beyond the initial
+    // registry set (it was upserted in the previous test, but the point is
+    // that fields discovered from product_index.custom_fields are included).
+    const pf24 = candidates.productFields.find(f => f.catalogField === 'ProductField24');
+    expect(pf24).toBeDefined();
+    expect(pf24!.values).toContain('Cat Toys');
+
+    // Fields discovered from catalog data that were never in the registry
+    // (ProductField16 came only from the product we inserted, not from registry).
+    expect(candidates.productFields.length).toBeGreaterThanOrEqual(2);
   });
 
   it('migrates legacy product types to classification config', () => {

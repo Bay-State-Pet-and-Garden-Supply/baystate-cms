@@ -1,0 +1,39 @@
+{
+  "runId": "c687aeb3",
+  "agent": "planner",
+  "task": "You are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\nCreate a detailed implementation plan for an LLM-assisted CSS selector profile generation system for the ShopSite CMS onboarding pipeline.\n\n## Background\n\nWe have a product page extraction pipeline in `src/onboarding/page-extractor.ts` that uses a layered architecture:\n1. Custom CSS selectors (from `extractor_profiles` SQLite table)\n2. JSON-LD structured data\n3. Meta tags\n4. Microdata\n5. HTML heuristics (hardcoded fallback selectors)\n6. Image gallery extraction\n7. Shopify productJSON parsing\n\nExtraction failures happen when a new brand domain has no profile, or existing selectors go stale. Currently, the code falls back to heuristics which are fragile.\n\n## What We Want\n\nAn LLM-assisted selector profile generation system (NOT fully automatic \"self-healing\") with these constraints:\n\n### Core Components\n1. `src/onboarding/profile-generator.ts` — new file with:\n   - `getMinimizedDom(html)`: strip scripts, styles, svg, iframe, nav, footer but preserve scripts containing product JSON\n   - `buildSelectorCandidates(html)`: derive compact element candidate list (selector + tag + class/id/data + text snippet + nearby labels) instead of sending raw DOM to the LLM\n   - `generateExtractorProfile(url, html, expected)`: send candidates to LLM via existing `src/onboarding/llm-client.ts`, get back JSON with title/price/description/brand/images selectors\n   - `validateGeneratedProfile(html, selectors, expected)`: run proposed selectors against live HTML via Cheerio, verify they extract non-empty title\n\n2. Schema: the LLM should return `{ titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector }` — all optional, at least titleSelector required\n\n### Guardrails (Critical)\n- Do NOT auto-update `extractor_profiles` during live extraction. Store as pending/proposed, or only auto-promote when confidence is very high and multi-sample validated.\n- Only trigger on right failures: missing title, empty custom selectors, missing description/images despite product page existing. Do NOT trigger on Cloudflare blocks, 404s, catalog mismatches, or price-missing (brand sites often omit prices; we have `supplementPrice` for that).\n- Fix `upsertProfile` so it doesn't null out unspecified selectors when updating. Either merge-style update or always pass full profile.\n- Add a `profile_generation_enabled` feature flag / env toggle.\n\n### Audit Trail\n- Store generated output with metadata: source URL, expected product name, extracted title/price, confidence, validation result, generated-by model, timestamp.\n- Could extend `extractor_profiles` table or add a new `profile_generations` table.\n\n### Integration\n- In `page-extractor.ts`, when custom selectors return empty but page is valid, optionally invoke profile generation (gated by feature flag), re-run extraction once with generated selectors, and record results.\n- Validate on 2-3 product URLs from the same domain before trusting a profile, if available.\n\n### Testing\n- Unit tests for: HTML minimization, selector candidate building, validator behavior, profile generation with mock LLM responses, database upsert behavior.\n\n## Existing Infrastructure\n- LLM client: `src/onboarding/llm-client.ts` (provider-agnostic: DeepSeek, OpenAI, Ollama, with fallback to LCS)\n- Profile CRUD: `src/db/repositories/extractor-profile-repo.ts` with `findProfileByDomain`, `upsertProfile`, `listAllProfiles`, `deleteProfile`\n- Extractor profiles table: `domain TEXT UNIQUE, title_selector, price_selector, description_selector, brand_selector, images_selector`\n- API keys: `src/db/repositories/api-key-repo.ts` (stores provider keys)\n- Extraction validator: `src/onboarding/extraction-validator.ts` (validates results, categorizes failures)\n- Domain status: `src/db/repositories/domain-status-repo.ts` (tracks domain health)\n- Tests exist for `extractor-profiles.test.ts` and `extraction-remedies.test.ts`\n\n## Request\nPlease produce a plan with concrete implementation phases (1-3), specific file changes, and estimated complexity. Prioritize safety — the system should never silently degrade extraction quality.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/c687aeb3/plans/self-healing-selectors-plan.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 71029,
+    "output": 10395,
+    "cacheRead": 431104,
+    "cacheWrite": 0,
+    "cost": 0.882547,
+    "turns": 10
+  },
+  "model": "openai-codex/gpt-5.5:xhigh",
+  "attemptedModels": [
+    "openai-codex/gpt-5.5:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.5:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 71029,
+        "output": 10395,
+        "cacheRead": 431104,
+        "cacheWrite": 0,
+        "cost": 0.882547,
+        "turns": 10
+      }
+    }
+  ],
+  "durationMs": 208327,
+  "toolCount": 22,
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1782960954900
+}

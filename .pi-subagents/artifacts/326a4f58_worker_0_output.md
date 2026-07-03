@@ -1,0 +1,1 @@
+The current typecheck errors are from other parallel workers' tasks (B6/B8 modifying `extract.ts` and `page-extractor.ts`), not from ElementPickerButton. Let me check if those workers have completed:

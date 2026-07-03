@@ -142,8 +142,14 @@ export function validateExtraction(
     };
   }
 
-  // Count how many expected words are present in the extracted title
-  const matchingWords = expectedWords.filter(w => cleanTitle.includes(w));
+  // Count how many expected words are present in the extracted title.
+  // Allow partial containment (e.g. expected "flyballyellow" matching title "flyball")
+  // to handle concatenated catalog codes or variations gracefully.
+  const titleWords = getWords(cleanTitle);
+  const matchingWords = expectedWords.filter(w => {
+    if (cleanTitle.includes(w)) return true;
+    return titleWords.some(tw => w.includes(tw) || tw.includes(w));
+  });
   const overlapRatio = matchingWords.length / expectedWords.length;
 
   // Check if the brand name is present

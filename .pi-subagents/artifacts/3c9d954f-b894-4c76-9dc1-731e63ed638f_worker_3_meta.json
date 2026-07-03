@@ -1,0 +1,30 @@
+{
+  "runId": "3c9d954f-b894-4c76-9dc1-731e63ed638f",
+  "agent": "worker",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/context.md, /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md]\n\nIntegrate the sitemap pass into `src/onboarding/source-discovery.ts`.\n\nReference files (read these before editing):\n- /Users/nickborrello/Desktop/Projects/shopsite-cms/handoff/sitemap_fetcher_result.md\n- /Users/nickborrello/Desktop/Projects/shopsite-cms/handoff/sitemap_matcher_result.md\n- /Users/nickborrello/Desktop/Projects/shopsite-cms/handoff/db_layer_result.md\n- src/onboarding/sitemap-fetcher.ts\n- src/onboarding/sitemap-matcher.ts\n- src/db/repositories/sitemap-cache-repo.ts\n- src/db/repositories/extractor-profile-repo.ts\n- src/db/repositories/brand-site-repo.ts\n\nChanges to source-discovery.ts:\n\n1. Add imports for:\n   - getCachedSitemapUrls, insertSitemapCache from ../db/repositories/sitemap-cache-repo\n   - fetchAndParseSitemap from ./sitemap-fetcher\n   - matchSitemapUrls from ./sitemap-matcher\n   - findProfileByDomain from ../db/repositories/extractor-profile-repo (check if already imported)\n\n2. Add new function `async function discoverFromSitemap(domain: string, itemName: string, consolidatedName: string | null, upc: string): Promise<InsertSourceData[]>`:\n   - Get cached sitemap URLs for domain via getCachedSitemapUrls\n   - If cache miss, call fetchAndParseSitemap(domain, profile?.sitemapProductUrlPattern), cache result via insertSitemapCache\n   - If sitemap has URLs, call matchSitemapUrls\n   - Convert SitemapMatchResult[] to InsertSourceData[] with sourceMethod matching, confidence matching, domain from URL, snippet based on matchType\n   - Return empty array on any error (log, don't throw)\n\n3. In discoverSources():\n   - After getting brandDomains, run sitemap discovery in PARALLEL with Pass 1 UPC search\n   - Use Promise.allSettled so sitemap failure never blocks Serper\n   - Collect sitemap candidates separately initially\n   - After Pass 1 completes and consolidatedName is computed, run sitemap matching with consolidatedName\n   - NOTE: because sitemap fetch and Serper Pass 1 happen in parallel, by the time consolidatedName is available, sitemap URLs are already fetched. Run matching (matchSitemapUrls with consolidatedName) right after consolidation completes.\n\n4. After all candidates collected (Serper + sitemap), merge:\n   a. Build a Set<string> of all sitemap URLs (normalized)\n   b. For each sitemap candidate, if its URL already in Serper pool, BOOST that candidate's confidence by 0.15\n   c. If URL not in Serper pool, add as new candidate\n   d. For each Serper candidate on official brand domain whose URL NOT in sitemap set, penalize confidence by -0.2\n\n5. In selectTopCandidates, extend existing logic to also guarantee at least one 'sitemap_name' or 'sitemap_upc' candidate survives when available.\n\n6. IMPORTANT: Sitemap errors NEVER throw. Log warnings and continue with Serper-only results.\n7. IMPORTANT: The function must remain backwards compatible. All existing behavior preserved.\n\n---\nUpdate progress at: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/progress/3c9d954f-b894-4c76-9dc1-731e63ed638f/progress.md\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/3c9d954f-b894-4c76-9dc1-731e63ed638f/handoff/discovery_integration_result.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/minimax-m3:medium",
+  "attemptedModels": [
+    "opencode-go/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/minimax-m3:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 128935,
+        "output": 45911,
+        "cacheRead": 7929460,
+        "cacheWrite": 0,
+        "cost": 0.5695413,
+        "turns": 103
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783022484656
+}

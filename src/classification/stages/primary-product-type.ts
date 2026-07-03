@@ -1,7 +1,9 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { randomUUID } from 'node:crypto';
 import { getCachedProductTypes } from '../../db/repositories/classification-config-repo';
-import { getLlmConfig, callLlm } from '../../onboarding/llm-client';
+import { getLlmConfigForTask, callLlmForTask } from '../../onboarding/llm-client';
+import { loadClassificationConfig } from '../config-loader';
+import { hasExplicitCurationTargets, getExplicitCurationTargets } from '../curation-targets';
 
 const now = () => new Date().toISOString();
 
@@ -20,6 +22,11 @@ export const primaryProductTypeStage: StageDefinition = {
   requires: ['evidence_extraction'],
   evidenceFrom: ['evidence_extraction'],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
+    const config = loadClassificationConfig(context.workspacePath);
+    if (hasExplicitCurationTargets(config) && !getExplicitCurationTargets(config).some(target => target.kind === 'product_type')) {
+      return { status: 'abstained', reason: 'Product Type is not enabled as a curation target.' };
+    }
+
     const productTypes = getCachedProductTypes(context.workspaceId);
     if (productTypes.length === 0) {
       return { status: 'abstained', reason: 'No product types configured in store/classification/product-types.json.' };
@@ -61,12 +68,15 @@ export const primaryProductTypeStage: StageDefinition = {
       confidence = Math.min(0.9, best.score / (best.type.name.split(/[-\s]+/).length + 2));
     } else if (scores[0] && scores[0].score >= 1) {
       // Try LLM fallback for moderate matches
-      const llmConfig = getLlmConfig();
+      const llmConfig = getLlmConfigForTask('category_classification', { allowFallback: true });
       if (llmConfig) {
         try {
           const typeNames = productTypes.map(pt => `"${pt.name}" (id: ${pt.id})`).join(', ');
           const prompt = `Classify this product into ONE of these product types: [${typeNames}]. Return ONLY the type ID (the part in parentheses) or "none" if nothing fits.\n\nProduct text: ${allText.slice(0, 1500)}`;
-          const response = await callLlm(prompt, 'You are a precise product classification assistant. Return only the type ID or "none".');
+          const response = await callLlmForTask('category_classification', prompt, 'You are a precise product classification assistant. Return only the type ID or "none".', { allowFallback: true });
+          if (response == null) {
+            throw new Error('LLM call returned null');
+          }
           const clean = response.trim().replace(/["']/g, '');
           const match = productTypes.find(pt => pt.id === clean);
           if (match) {

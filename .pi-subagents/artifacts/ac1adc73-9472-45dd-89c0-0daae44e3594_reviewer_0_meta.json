@@ -1,0 +1,29 @@
+{
+  "runId": "ac1adc73-9472-45dd-89c0-0daae44e3594",
+  "agent": "reviewer",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md, /Users/nickborrello/Desktop/Projects/shopsite-cms/progress.md]\n\nReview the Domain Diagnostics MVP for correctness and regressions.\n\nNew/changed files to inspect:\n- src/onboarding/domain-diagnostics-service.ts (new)\n- src/shared/schemas/onboarding.ts (look for DomainDiagnostics schemas)\n- src/db/repositories/domain-status-repo.ts (look for listAllDomainStatuses)\n- src/db/repositories/sitemap-cache-repo.ts (look for listAllSitemapCaches)\n- src/db/repositories/profile-generation-repo.ts (look for listProfileGenerationDomainSummaries)\n- src/server/routes/onboarding-routes.ts (look for domain-diagnostics GET route)\n- src/client/onboarding-api.ts (look for getDomainDiagnostics)\n- src/client/components/OnboardingSettings.tsx (look for Domain Diagnostics section)\n\nVerify these invariants:\n1. listAllDomainStatuses does NOT call getDomainStatus (no 7-day eviction)\n2. listAllSitemapCaches does NOT call getCachedSitemapUrls (no expiry deletion)\n3. domain-diagnostics-service.ts reads ONLY through repo functions, never calls network fetchers, discovery, extraction, or write functions\n4. The GET route returns getDomainDiagnosticsResponse() with no side effects\n5. The domain union includes domains from all 5 source tables\n6. Stale flags are derived correctly (sitemapStale from expiresAt, healthStale from 7-day window)\n7. Typecheck passes and targeted tests pass\n\nReport file:line references for any issues. Do not modify files.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/ac1adc73-9472-45dd-89c0-0daae44e3594/validation-diag-correctness.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.5:xhigh",
+  "attemptedModels": [
+    "openai-codex/gpt-5.5:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.5:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 114398,
+        "output": 11511,
+        "cacheRead": 1456640,
+        "cacheWrite": 0,
+        "cost": 1.6456400000000002,
+        "turns": 25
+      }
+    }
+  ],
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783030832255
+}

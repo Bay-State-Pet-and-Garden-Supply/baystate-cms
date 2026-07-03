@@ -1,0 +1,46 @@
+{
+  "runId": "be922042-35f9-4843-bb74-65a8cf09949a",
+  "agent": "scout",
+  "task": "Goal: inspect the ShopSite CMS repo for recent Woof product onboarding/extraction outcomes. Locate the local SQLite database/storage/logs that contain onboarding extraction results, query only non-secret data, and determine whether image arrays for Woof items contain identical non-primary images. Report exact tables/fields, example item ids/names/URLs, image URLs/keys (redact credentials/secrets), and any clues about source domains/profiles. Do not modify files.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/be922042-35f9-4843-bb74-65a8cf09949a/scouts/woof-outcomes.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "deepseek/deepseek-v4-flash:low",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:low",
+    "deepseek/deepseek-v4-flash:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:low",
+      "success": false,
+      "exitCode": 1,
+      "error": "429: {\"message\":\"Error from provider (Console Go): Provider rate limit exceeded\",\"type\":\"rate_limit_error\",\"param\":null,\"code\":\"provider_rate_limit_exceeded\"}",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 4
+      }
+    },
+    {
+      "model": "deepseek/deepseek-v4-flash:low",
+      "success": false,
+      "exitCode": 1,
+      "error": "No API key found for deepseek.\n\nUse /login to log into a provider via OAuth or API key. See:\n  /Users/nickborrello/.nvm/versions/node/v24.12.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/providers.md\n  /Users/nickborrello/.nvm/versions/node/v24.12.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/models.md\n\u001b[?2026h\u001b[r\u001b[?1006l\u001b[?1002l\u001b[?1000l\u001b[?1007h\u001b[?1049l\u001b[<999u\u001b[>4;0m\u001b[?2026l",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 0
+      }
+    }
+  ],
+  "skills": [
+    "fallow",
+    "context-mode"
+  ],
+  "timestamp": 1782982169361
+}

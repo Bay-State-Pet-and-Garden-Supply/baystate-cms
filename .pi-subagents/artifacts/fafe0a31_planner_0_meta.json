@@ -1,0 +1,39 @@
+{
+  "runId": "fafe0a31",
+  "agent": "planner",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/chain-runs/fafe0a31/context.md]\n[Write to: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/chain-runs/fafe0a31/plan.md]\n\nYou are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\nCreate an implementation plan for changing the discovery auto-selection policy in the ShopSite CMS onboarding worker.\n\n**Current behavior** (in src/onboarding/job-queue.ts, processDiscovery method):\n- After discovery, if confidence > 0.6 (essentially always), it auto-selects the top candidate by calling setDiscoverySourceUrl() and marking the source as selected\n- This means every product gets a URL auto-selected, even if it's a random retailer page\n\n**Desired behavior**:\n- Only auto-select when:\n  1. The product has a brand hint (brandHint is non-null)\n  2. That brand has a mapped official domain in brand_sites table\n  3. The top candidate's domain matches that official domain (exact or suffix, e.g. 'mywoof.com' or 'us.mywoof.com' matching 'mywoof.com')\n- When conditions aren't met: insert candidates into the DB but do NOT auto-select — leave sourceUrl null and mark the stage as completed with a 'needs_review' warning\n- The operator must then manually review and select from the drawer\n\n**Key files**:\n- src/onboarding/job-queue.ts: processDiscovery method (lines ~120-195)\n- src/db/repositories/brand-site-repo.ts: findBrandSites function\n- src/db/repositories/onboarding-item-repo.ts: setDiscoverySourceUrl function\n\n**Implementation details**:\n- Use findBrandSites(item.brandHint) to get mapped domains\n- Match the top candidate's domain against those domains using exact/suffix comparison (not broad includes)\n- When auto-selecting, keep existing behavior (setDiscoverySourceUrl + mark source as selected)\n- When NOT auto-selecting, still insert all sources but don't call setDiscoverySourceUrl — instead call updateItemStageStatus(item.id, 'completed')\n- Log clearly whether auto-selection happened or not\n- The SSE event should include a flag like 'needsManualReview: true' when no auto-selection occurred\n\nCreate a precise, step-by-step plan with exact code changes.",
+  "exitCode": 0,
+  "usage": {
+    "input": 168722,
+    "output": 7555,
+    "cacheRead": 670208,
+    "cacheWrite": 0,
+    "cost": 1.405364,
+    "turns": 10
+  },
+  "model": "openai-codex/gpt-5.5:xhigh",
+  "attemptedModels": [
+    "openai-codex/gpt-5.5:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.5:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 168722,
+        "output": 7555,
+        "cacheRead": 670208,
+        "cacheWrite": 0,
+        "cost": 1.405364,
+        "turns": 10
+      }
+    }
+  ],
+  "durationMs": 158560,
+  "toolCount": 13,
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783017153394
+}

@@ -21,10 +21,12 @@ export async function downloadImages(
   workspacePath: string,
   sku: string,
   imageUrls: string[],
+  brand?: string,
 ): Promise<DownloadedImage[]> {
   if (imageUrls.length === 0) return [];
 
-  const imagesDir = path.join(workspacePath, 'products', sku, 'images');
+  const brandDir = brand ? brand.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_') : 'unknown';
+  const imagesDir = path.join(workspacePath, 'products', 'images', brandDir, sku);
   fs.mkdirSync(imagesDir, { recursive: true });
 
   const downloaded: DownloadedImage[] = [];
@@ -37,7 +39,7 @@ export async function downloadImages(
       if (result) {
         downloaded.push({
           ...result,
-          localPath: path.join('products', sku, 'images', result.fileName),
+          localPath: path.join('products', 'images', brandDir, sku, result.fileName),
         });
       }
     } catch (err) {

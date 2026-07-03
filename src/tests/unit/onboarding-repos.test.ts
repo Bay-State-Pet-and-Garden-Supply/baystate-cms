@@ -6,21 +6,29 @@ import { runMigrations } from '../../db/migrations';
 import {
   createBatch,
   findBatchById,
-  listBatches,
-  updateBatchStatus,
-  deleteBatch
+  setBatchArchived,
 } from '../../db/repositories/onboarding-batch-repo';
 import {
   insertItems,
   listItemsByBatch,
+  listItemsByBatchStaged,
   findItemById,
-  updateItemStatus
+  updateItemStageStatus,
+  advanceItemsToNextStage,
+  getPendingItemsByStage,
+  getStageCounts,
+  skipItems,
+  resetItemsToPending,
+  completeReviewStage,
+  completePromotionStage,
+  setDiscoverySourceUrl,
 } from '../../db/repositories/onboarding-item-repo';
 import {
   insertSources,
   listSourcesByItem,
   selectSource,
-  getSelectedSource
+  getSelectedSource,
+  listValidationSamplesByDomain,
 } from '../../db/repositories/onboarding-source-repo';
 import {
   insertExtraction,
@@ -33,7 +41,8 @@ import {
 } from '../../db/repositories/api-key-repo';
 import {
   upsertBrandSite,
-  findBrandSites
+  findBrandSites,
+  updateBrandSiteDomain
 } from '../../db/repositories/brand-site-repo';
 
 describe('Onboarding Repositories CRUD', () => {
@@ -70,7 +79,7 @@ describe('Onboarding Repositories CRUD', () => {
 
     expect(batch.id).toBeDefined();
     expect(batch.name).toBe('Weekly Import A');
-    expect(batch.status).toBe('imported');
+    expect(batch.status).toBe('active');
 
     const items = insertItems(batch.id, [
       { upc: '111111111111', name: 'Product 1', price: '9.99', rowNumber: 2 },
@@ -79,20 +88,26 @@ describe('Onboarding Repositories CRUD', () => {
 
     expect(items.length).toBe(2);
     expect(items[0].upc).toBe('111111111111');
+    // New items start in discovery stage with pending status
+    expect(items[0].stage).toBe('discovery');
+    expect(items[0].stageStatus).toBe('pending');
 
     const batchItems = listItemsByBatch(batch.id);
     expect(batchItems.length).toBe(2);
 
-    updateItemStatus(items[0].id, 'discovering');
+    // Use new stage-based status updates
+    updateItemStageStatus(items[0].id, 'in_progress');
     const updatedItem = findItemById(items[0].id);
-    expect(updatedItem?.status).toBe('discovering');
+    expect(updatedItem?.stageStatus).toBe('in_progress');
+    expect(updatedItem?.stage).toBe('discovery');
 
     const batchDetails = findBatchById(batch.id);
     expect(batchDetails).toBeDefined();
 
-    updateBatchStatus(batch.id, 'discovering');
-    const updatedBatch = findBatchById(batch.id);
-    expect(updatedBatch?.status).toBe('discovering');
+    // Batch lifecycle is now active/archived only
+    setBatchArchived(batch.id, true);
+    const archivedBatch = findBatchById(batch.id);
+    expect(archivedBatch?.status).toBe('archived');
   });
 
   it('should support source discovery candidate CRUD operations', () => {
@@ -152,6 +167,166 @@ describe('Onboarding Repositories CRUD', () => {
     expect(JSON.parse(latest!.extraction_data_json).title).toBe('Scraped Product 4');
   });
 
+  it('should implement stage-based listing (listItemsByBatchStaged)', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Stage Batch', fileName: 'stage.xlsx', totalItems: 3 });
+    const items = insertItems(batch.id, [
+      { upc: '555555555555', name: 'Stage A', rowNumber: 1 },
+      { upc: '666666666666', name: 'Stage B', rowNumber: 2 },
+      { upc: '777777777777', name: 'Stage C', rowNumber: 3 },
+    ]);
+
+    // Try to advance item B to extraction — should be skipped (not completed yet)
+    const r1 = advanceItemsToNextStage([items[1].id]);
+    expect(r1.advanced).toBe(0);
+    expect(r1.skipped).toBe(1);
+
+    const staged = listItemsByBatchStaged(batch.id);
+    expect(staged.discovery.length).toBe(3); // All still in discovery since none advanced
+    expect(staged.extraction.length).toBe(0);
+
+    // Now mark item A as completed and advance it
+    updateItemStageStatus(items[0].id, 'completed');
+    const r2 = advanceItemsToNextStage([items[0].id]);
+    expect(r2.advanced).toBe(1);
+    const staged2 = listItemsByBatchStaged(batch.id);
+    expect(staged2.discovery.length).toBe(2); // B and C still in discovery
+    expect(staged2.extraction.length).toBe(1); // A advanced to extraction with pending
+    expect(staged2.extraction[0].id).toBe(items[0].id);
+    expect(staged2.extraction[0].stageStatus).toBe('pending');
+    expect(staged2.curation.length).toBe(0);
+    expect(staged2.review.length).toBe(0);
+    expect(staged2.promotion.length).toBe(0);
+  });
+
+  it('should enforce advancement eligibility (only completed items advance)', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Advance Test', fileName: 'advance.xlsx', totalItems: 2 });
+    const items = insertItems(batch.id, [
+      { upc: '888888888888', name: 'Advance A', rowNumber: 1 },
+      { upc: '999999999999', name: 'Advance B', rowNumber: 2 },
+    ]);
+
+    // Both start at discovery/pending — neither is completed, so advance should skip both
+    const result = advanceItemsToNextStage(items.map(i => i.id));
+    expect(result.advanced).toBe(0);
+    expect(result.skipped).toBe(2);
+
+    // Complete item A, then advance should move only it
+    updateItemStageStatus(items[0].id, 'completed');
+    const result2 = advanceItemsToNextStage(items.map(i => i.id));
+    expect(result2.advanced).toBe(1);
+    expect(result2.skipped).toBe(1);
+
+    const a = findItemById(items[0].id);
+    expect(a?.stage).toBe('extraction');
+    expect(a?.stageStatus).toBe('pending');
+
+    const b = findItemById(items[1].id);
+    expect(b?.stage).toBe('discovery');
+    expect(b?.stageStatus).toBe('pending');
+  });
+
+  it('should implement skip and reset operations', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Skip Test', fileName: 'skip.xlsx', totalItems: 2 });
+    const items = insertItems(batch.id, [
+      { upc: '111111111112', name: 'Skip A', rowNumber: 1 },
+      { upc: '222222222223', name: 'Skip B', rowNumber: 2 },
+    ]);
+
+    skipItems([items[0].id]);
+    const a = findItemById(items[0].id);
+    expect(a?.stageStatus).toBe('skipped');
+
+    // Reset the skipped item
+    resetItemsToPending([items[0].id]);
+    const a2 = findItemById(items[0].id);
+    expect(a2?.stageStatus).toBe('pending');
+    expect(a2?.errorMessage).toBeNull();
+  });
+
+  it('should report correct stage counts', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Counts Test', fileName: 'counts.xlsx', totalItems: 4 });
+    insertItems(batch.id, [
+      { upc: '111111111113', name: 'Count A', rowNumber: 1 },
+      { upc: '222222222224', name: 'Count B', rowNumber: 2 },
+      { upc: '333333333335', name: 'Count C', rowNumber: 3 },
+      { upc: '444444444446', name: 'Count D', rowNumber: 4 },
+    ]);
+
+    const counts = getStageCounts(batch.id);
+    expect(counts.discovery).toBe(4);
+    expect(counts.extraction).toBe(0);
+    expect(counts.curation).toBe(0);
+    expect(counts.review).toBe(0);
+    expect(counts.promotion).toBe(0);
+  });
+
+  it('should support getPendingItemsByStage with workspace filtering', () => {
+    const pendingWsId = 'ws-pending-test-' + Date.now();
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at, bootstrap_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [pendingWsId, 'Pending Test WS', '/tmp/pending-ws', '/tmp/pending-ws/.git', now, now, 'complete']
+    );
+
+    const batch = createBatch({ workspaceId: pendingWsId, name: 'Pending Test', fileName: 'pending.xlsx', totalItems: 2 });
+    insertItems(batch.id, [
+      { upc: '555555555556', name: 'Pending A', rowNumber: 1 },
+      { upc: '666666666667', name: 'Pending B', rowNumber: 2 },
+    ]);
+
+    // Items are discovery/pending by default
+    const pending = getPendingItemsByStage('discovery', 10, pendingWsId);
+    expect(pending.length).toBe(2);
+    expect(pending[0].stage).toBe('discovery');
+    expect(pending[0].stageStatus).toBe('pending');
+
+    db.run('DELETE FROM onboarding_items WHERE batch_id = ?', [batch.id]);
+    db.run('DELETE FROM onboarding_batches WHERE id = ?', [batch.id]);
+    db.run('DELETE FROM workspace WHERE id = ?', [pendingWsId]);
+  });
+
+  it('should support completeReviewStage and completePromotionStage', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Completion Test', fileName: 'complete.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [
+      { upc: '777777777778', name: 'Complete A', rowNumber: 1 },
+    ]);
+    const item = items[0];
+
+    // Manually advance through stages (bypass eligibility for test simplicity)
+    const db = getDb();
+    db.query("UPDATE onboarding_items SET stage = 'review', stage_status = 'pending', status = 'ready' WHERE id = ?").run(item.id);
+
+    // Complete review
+    completeReviewStage(item.id);
+    const reviewed = findItemById(item.id);
+    expect(reviewed?.stage).toBe('review');
+    expect(reviewed?.stageStatus).toBe('completed');
+
+    // Advance to promotion
+    advanceItemsToNextStage([item.id]);
+
+    // Complete promotion
+    completePromotionStage(item.id, true);
+    const promoted = findItemById(item.id);
+    expect(promoted?.stage).toBe('promotion');
+    expect(promoted?.stageStatus).toBe('completed');
+  });
+
+  it('should support setDiscoverySourceUrl', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Source URL Test', fileName: 'source.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [
+      { upc: '888888888889', name: 'Source A', rowNumber: 1 },
+    ]);
+    const item = items[0];
+
+    setDiscoverySourceUrl(item.id, 'https://example.com/product');
+    const updated = findItemById(item.id);
+    expect(updated?.sourceUrl).toBe('https://example.com/product');
+    expect(updated?.stageStatus).toBe('completed');
+  });
+
   it('should support api keys and brand sites CRUD operations', () => {
     // API Keys
     upsertApiKey('serper', 'test-serper-key');
@@ -165,8 +340,162 @@ describe('Onboarding Repositories CRUD', () => {
     upsertBrandSite('Nike', 'nike.com');
     upsertBrandSite('Nike', 'nike.com'); // Upsert should increment/succeed
     
-    const brandMatches = findBrandSites('Nike');
+    let brandMatches = findBrandSites('Nike');
     expect(brandMatches.length).toBe(1);
     expect(brandMatches[0].domain).toBe('nike.com');
+
+    // Test updating brand domain
+    updateBrandSiteDomain('Nike', 'nike-new.com');
+    brandMatches = findBrandSites('Nike');
+    expect(brandMatches.length).toBe(1);
+    expect(brandMatches[0].domain).toBe('nike-new.com');
+  });
+});
+
+describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
+  const testDbPath = path.resolve(import.meta.dirname, 'onboarding-validation-samples-test.db');
+  const wsId = 'workspace-validation-samples-test-id';
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+    // Create a dummy workspace in DB to satisfy foreign keys
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at, bootstrap_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [wsId, 'Test Workspace', '/tmp/ws-validation', '/tmp/ws-validation/.git', now, now, 'complete']
+    );
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
+
+  it('returns no rows for an unknown domain', () => {
+    const samples = listValidationSamplesByDomain('nonexistent-domain-xyz.com');
+    expect(samples).toEqual([]);
+  });
+
+  it('returns URL + expected name + brand hint for matching items', () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Sample Test Batch',
+      fileName: 'sample.xlsx',
+      totalItems: 2,
+    });
+    const items = insertItems(batch.id, [
+      { upc: '111', name: 'Test Product A', rowNumber: 1 },
+      { upc: '222', name: 'Test Product B', rowNumber: 2 },
+    ]);
+    const sourcesA = insertSources(items[0].id, [
+      { url: 'https://acmepet.com/a', domain: 'acmepet.com', title: 'A title', confidence: 0.9 },
+    ]);
+    const sourcesB = insertSources(items[1].id, [
+      { url: 'https://acmepet.com/b', domain: 'acmepet.com', title: 'B title', confidence: 0.8 },
+    ]);
+    // Policy: only selected/confirmed sources. Both must be selected for this test.
+    selectSource(sourcesA[0].id);
+    selectSource(sourcesB[0].id);
+    const samples = listValidationSamplesByDomain('acmepet.com', 10);
+    expect(samples.length).toBe(2);
+    const urls = samples.map((s) => s.url).sort();
+    expect(urls).toEqual(['https://acmepet.com/a', 'https://acmepet.com/b']);
+    // expectedName falls back to the parent item's name when no
+    // expected_name column is set (Phase 3 task 14 policy).
+    expect(samples.find((s) => s.url === 'https://acmepet.com/a')?.expectedName).toBe('Test Product A');
+    expect(samples.find((s) => s.url === 'https://acmepet.com/b')?.expectedName).toBe('Test Product B');
+  });
+
+  it('prefers is_selected sources first, then by confidence', () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Sort Test Batch',
+      fileName: 'sort.xlsx',
+      totalItems: 1,
+    });
+    const item = insertItems(batch.id, [
+      { upc: '333', name: 'Sort Test', rowNumber: 1 },
+    ])[0];
+    const sources = insertSources(item.id, [
+      { url: 'https://sort-test.com/low', domain: 'sort-test.com', title: 'low', confidence: 0.3 },
+      { url: 'https://sort-test.com/high', domain: 'sort-test.com', title: 'high', confidence: 0.9 },
+    ]);
+    // Select the high-confidence one; it should be returned first.
+    selectSource(sources[1].id);
+    const samples = listValidationSamplesByDomain('sort-test.com', 10);
+    expect(samples.length).toBe(1);
+    expect(samples[0].url).toBe('https://sort-test.com/high');
+  });
+
+  it('respects the limit parameter', () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Limit Test Batch',
+      fileName: 'limit.xlsx',
+      totalItems: 3,
+    });
+    const items = insertItems(batch.id, [
+      { upc: '444-a', name: 'Limit A', rowNumber: 1 },
+      { upc: '444-b', name: 'Limit B', rowNumber: 2 },
+      { upc: '444-c', name: 'Limit C', rowNumber: 3 },
+    ]);
+    // Each source belongs to a different item so that selectSource
+    // can mark each one as is_selected independently. A single item
+    // only has one is_selected source at a time.
+    const sourcesA = insertSources(items[0].id, [
+      { url: 'https://limit-test.com/a', domain: 'limit-test.com', confidence: 0.1 },
+    ]);
+    const sourcesB = insertSources(items[1].id, [
+      { url: 'https://limit-test.com/b', domain: 'limit-test.com', confidence: 0.2 },
+    ]);
+    const sourcesC = insertSources(items[2].id, [
+      { url: 'https://limit-test.com/c', domain: 'limit-test.com', confidence: 0.3 },
+    ]);
+    selectSource(sourcesA[0].id);
+    selectSource(sourcesB[0].id);
+    selectSource(sourcesC[0].id);
+    const samples = listValidationSamplesByDomain('limit-test.com', 2);
+    expect(samples.length).toBe(2);
+  });
+
+  it('matches subdomains of the requested domain', () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Subdomain Batch',
+      fileName: 'sub.xlsx',
+      totalItems: 1,
+    });
+    const item = insertItems(batch.id, [
+      { upc: '555', name: 'Sub Test', rowNumber: 1 },
+    ])[0];
+    const sources = insertSources(item.id, [
+      { url: 'https://shop.subbrand.com/x', domain: 'shop.subbrand.com', confidence: 0.5 },
+    ]);
+    selectSource(sources[0].id);
+    const samples = listValidationSamplesByDomain('subbrand.com');
+    expect(samples.length).toBe(1);
+    expect(samples[0].url).toBe('https://shop.subbrand.com/x');
+  });
+
+  it('excludes sources from unrelated domains (notmywoof.com vs mywoof.com)', () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Negative Match Batch',
+      fileName: 'neg.xlsx',
+      totalItems: 1,
+    });
+    const item = insertItems(batch.id, [
+      { upc: '666', name: 'Negative Test', rowNumber: 1 },
+    ])[0];
+    const sources = insertSources(item.id, [
+      { url: 'https://notmywoof.com/x', domain: 'notmywoof.com', confidence: 0.9 },
+    ]);
+    selectSource(sources[0].id);
+    const samples = listValidationSamplesByDomain('mywoof.com');
+    expect(samples.length).toBe(0);
   });
 });

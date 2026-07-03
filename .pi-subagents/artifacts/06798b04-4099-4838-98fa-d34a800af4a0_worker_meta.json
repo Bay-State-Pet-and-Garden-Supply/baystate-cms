@@ -1,0 +1,30 @@
+{
+  "runId": "06798b04-4099-4838-98fa-d34a800af4a0",
+  "agent": "worker",
+  "task": "You are implementing a Domain Diagnostics read-only panel for ShopSite CMS. Read the full plan at .pi-subagents/artifacts/outputs/c28d82b9-b534-4ef1-a6d6-803fe1b7c253/plan.md BEFORE starting.\n\nThe plan has 10 explicit steps. Execute them in order. Here is a summary of every file you need to change or create:\n\nFILES TO CREATE:\n1. src/onboarding/domain-diagnostics-service.ts — new file, aggregation service\n2. src/tests/unit/domain-diagnostics-service.test.ts — new file, tests\n\nFILES TO EDIT (add new functions/types, do NOT remove anything):\n3. src/shared/schemas/onboarding.ts — add DomainDiagnostics schemas/types at the bottom\n4. src/db/repositories/domain-status-repo.ts — add listAllDomainStatuses() function\n5. src/db/repositories/sitemap-cache-repo.ts — add listAllSitemapCaches() function  \n6. src/db/repositories/profile-generation-repo.ts — add listProfileGenerationDomainSummaries() function\n7. src/server/routes/onboarding-routes.ts — add GET /onboarding/settings/domain-diagnostics route\n8. src/client/onboarding-api.ts — add getDomainDiagnostics() function\n9. src/client/components/OnboardingSettings.tsx — add Domain Diagnostics section\n10. src/tests/unit/extraction-remedies.test.ts — add listAllDomainStatuses tests\n11. src/tests/unit/sitemap-cache-repo.test.ts — add listAllSitemapCaches tests\n12. src/tests/unit/profile-generation-repo.test.ts — add summary function tests\n\nCRITICAL RULES:\n- Read the FULL plan at .pi-subagents/artifacts/outputs/c28d82b9-b534-4ef1-a6d6-803fe1b7c253/plan.md first\n- Make EVERY edit yourself using edit/write tools\n- Run bun run typecheck after all changes\n- Run targeted tests: bun run test src/tests/unit/domain-diagnostics-service.test.ts src/tests/unit/sitemap-cache-repo.test.ts src/tests/unit/extraction-remedies.test.ts\n- Report a summary of every file modified and test results\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/minimax-m3:medium",
+  "attemptedModels": [
+    "opencode-go/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/minimax-m3:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 210023,
+        "output": 54081,
+        "cacheRead": 24773689,
+        "cacheWrite": 0,
+        "cost": 1.61432544,
+        "turns": 235
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783030494153
+}

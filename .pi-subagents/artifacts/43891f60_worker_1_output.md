@@ -1,0 +1,1 @@
+My change is present in the working tree and nothing is staged. Let me produce the final acceptance report.

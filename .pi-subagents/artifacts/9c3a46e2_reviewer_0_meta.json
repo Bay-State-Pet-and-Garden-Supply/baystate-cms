@@ -1,0 +1,39 @@
+{
+  "runId": "9c3a46e2",
+  "agent": "reviewer",
+  "task": "Review the implementation of the paste-element-to-selector flow (Phase 2 of the Visual Element Picker plan).\n\n## What was implemented\n\n### Phase 1: Shared module extraction\n- Created `src/shared/selector-utils.ts` — extracted `buildStableSelector`, `isLikelyGeneratedId`, `isSupportedSelectorSyntax`, `classSet`, `attrSelector`, `snippetOf`, `STABLE_DATA_ATTRS`, `SEMANTIC_HINT_SUBSTRINGS` from `profile-generator.ts` with zero Bun dependencies\n- Updated `src/onboarding/profile-generator.ts` — removed moved functions, imports from shared module\n- Created `src/tests/unit/selector-utils.test.ts` — 32 tests covering all functions\n\n### Phase 2: Paste-element-to-selector\n- Added `GenerateSelectorRequestSchema`/`GenerateSelectorResponseSchema` to `src/shared/schemas/extraction-worker.ts`\n- Created `src/extraction-worker/routes/generate-selector.ts` — worker route POST /profile-tooling/generate-selector\n- Registered route in `src/extraction-worker/server.ts`\n- Added `generateSelectorFromElement` to `src/server/extraction-worker-client.ts`\n- Added Bun proxy routes in `src/server/routes/onboarding-routes.ts`:\n  - POST /api/onboarding/settings/profile-tooling/generate-selector\n  - POST /api/onboarding/settings/profile-tooling/fetch-html\n- Added client API functions in `src/client/onboarding-api.ts`: `generateSelectorFromElement`, `fetchPageHtml`\n- Updated `src/client/components/ProfileRevisionFeedbackForm.tsx`:\n  - Added `sourcePageUrl` prop\n  - Added paste-element section with textarea, Generate button, selector preview with stability badge\n  - Pre-fills `manualSelectorHint` with generated selector\n- Updated `src/onboarding/profile-governance-service.ts`:\n  - Imports `isSupportedSelectorSyntax` from shared module\n  - Detects `Advanced selector hint:` in notes and applies the selector to the revision's `selectors_json`\n  - Sets `source` to `manual_css` when a manual selector is present\n\n### Invariants preserved\n1. Never auto-promote — generated selector goes into a revision via feedback, still needs per-field approval\n2. Per-field approval — paste-element operates on one field at a time\n3. Image approval needs 2+ samples + attestation — unchanged\n4. Revisions are versioned — paste-element creates a new revision via the existing `createRevisionFromFeedback` flow\n5. Worker is Node.js-only — `selector-utils.ts` only imports `cheerio`, worker routes import it directly\n\n## What to review\n\nPlease check all the modified files for:\n\n1. **Correctness**: Does the paste-element flow work end-to-end? Client calls fetch-html → Bun proxy → worker fetch, then generate-selector → Bun proxy → worker → returns selector to client.\n\n2. **Pattern consistency**: Do the new routes follow the existing patterns (snapshot route, route registration, proxy pattern, client API)?\n\n3. **Edge cases**: What happens when:\n   - The pasted HTML doesn't match any element in the full page DOM?\n   - The pasted HTML is invalid?\n   - The source page URL is not provided?\n   - The worker is unavailable?\n   - The generated selector uses unsupported syntax?\n\n4. **Selector generation**: Is `buildStableSelector` being used correctly? Is the fallback case (when element not found in full DOM) handled properly?\n\n5. **Governance wiring**: Is the `Advanced selector hint:` parsing robust? What if the notes field has multiple `Advanced selector hint:` tags?\n\n6. **Invariant compliance**: Does the flow respect the \"never auto-promote\" invariant? Does the generated selector flow through the existing revision → per-field approval → promotion path?\n\n## Files to read\n\n- `src/shared/selector-utils.ts`\n- `src/onboarding/profile-generator.ts` (check imports)\n- `src/tests/unit/selector-utils.test.ts`\n- `src/shared/schemas/extraction-worker.ts` (check new schemas)\n- `src/extraction-worker/routes/generate-selector.ts`\n- `src/extraction-worker/server.ts` (check route registration)\n- `src/server/extraction-worker-client.ts` (check new function)\n- `src/server/routes/onboarding-routes.ts` (check proxy routes)\n- `src/client/onboarding-api.ts` (check client API functions)\n- `src/client/components/ProfileRevisionFeedbackForm.tsx` (check paste-element section)\n- `src/onboarding/profile-governance-service.ts` (check manual selector parsing)\n\nReport findings with file paths and line numbers. Call out any issues clearly.",
+  "exitCode": 0,
+  "usage": {
+    "input": 72988,
+    "output": 19642,
+    "cacheRead": 1458496,
+    "cacheWrite": 0,
+    "cost": 0.56781696,
+    "turns": 25
+  },
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 72988,
+        "output": 19642,
+        "cacheRead": 1458496,
+        "cacheWrite": 0,
+        "cost": 0.56781696,
+        "turns": 25
+      }
+    }
+  ],
+  "durationMs": 392246,
+  "toolCount": 50,
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783078715143
+}

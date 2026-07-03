@@ -16,6 +16,7 @@ import type {
   ProductAttributeConfig,
   AttributeProfileConfig,
   AttributeMappingConfig,
+  CurationTargetConfig,
   GuidanceConfig,
   ModelPolicyConfig,
   DataSharingConfig,
@@ -33,6 +34,8 @@ import type {
   ProposalStatus,
   ValueMode,
   Cardinality,
+  CurationTargetKind,
+  CurationTargetOptionSource,
 } from './schemas/classification';
 
 export type {
@@ -66,6 +69,7 @@ export type {
   ProductAttributeConfig,
   AttributeProfileConfig,
   AttributeMappingConfig,
+  CurationTargetConfig,
   GuidanceConfig,
   ModelPolicyConfig,
   DataSharingConfig,
@@ -83,8 +87,9 @@ export type {
   ProposalStatus,
   ValueMode,
   Cardinality,
+  CurationTargetKind,
+  CurationTargetOptionSource,
 };
 
 /** Syncable product status for a change set item */
 export type ProductOperation = 'create' | 'update' | 'archive';
-

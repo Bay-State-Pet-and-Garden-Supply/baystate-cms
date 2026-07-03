@@ -1,0 +1,30 @@
+{
+  "runId": "536af9b1-0a76-4b74-afc1-0cd6d4b1a064",
+  "agent": "worker",
+  "task": "## Task A0: Extract Shopify productJSON parsing into shared pure module\n\nRead these files first:\n- `src/onboarding/page-extractor.ts` — lines 9, 1015-1165 contain the code to extract\n- `src/onboarding/profile-generator.ts` — will import from the new module\n\n### What to do\n\nCreate `src/onboarding/shopify-json.ts` — a pure module (no bun:sqlite, no DB dependencies) that exports Shopify productJSON extraction.\n\n**Copy these functions verbatim** from `src/onboarding/page-extractor.ts` (lines 1015-1165):\n\n1. `PRODUCT_JSON_ASSIGNMENT_PATTERNS` constant\n2. `findObjectEnd(html, startIdx, maxChars?)` function\n3. `ProductJsonCandidate` interface  \n4. `collectProductJsonCandidates(html)` function\n5. `extractProductJsonFromHtml(html)` function\n\nThe `extractProductJsonFromHtml` function in page-extractor.ts is NOT exported (no `export` keyword at line 1147). In the new module, **export all functions and interfaces**.\n\nThe module imports `* as vm from 'node:vm'` — this is pure Node and available in both Bun and vitest.\n\n```typescript\nimport * as vm from 'node:vm';\n```\n\n**Then update `src/onboarding/page-extractor.ts`:**\n- Remove lines 1015-1165 (the functions being moved)\n- Add `import { extractProductJsonFromHtml } from './shopify-json';` at the top\n- The call site at line 127 (`const productJSON = extractProductJsonFromHtml(html)`) stays exactly the same\n\n### Constraints\n- The new module must NOT import anything from the rest of the project (no `../shared/`, no `../db/`, no `./image-utils`)\n- Only depend on `node:vm` and TypeScript types\n- Export everything needed\n\n### Validation\n- `bun run typecheck` passes with zero errors\n- The moved functions produce identical output for the same input\n\n### Handoff\nReport file created, file modified, typecheck result.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 39080,
+        "output": 15276,
+        "cacheRead": 793984,
+        "cacheWrite": 0,
+        "cost": 0.011971635199999997,
+        "turns": 35
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783074740212
+}

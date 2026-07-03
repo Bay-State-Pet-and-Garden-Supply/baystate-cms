@@ -1,0 +1,29 @@
+{
+  "runId": "ba969c3c-7a3a-4b82-b020-d1f2bbd50117",
+  "agent": "reviewer",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md, /Users/nickborrello/Desktop/Projects/shopsite-cms/progress.md]\n\nReview the domain extractor profile refactor changes. Focus on correctness and regressions:\n\nCheck these 5 files (use git diff to see changes):\n1. src/shared/schemas/onboarding.ts — was sitemapProductUrlPattern added correctly to ExtractorProfileSchema?\n2. src/client/onboarding-api.ts — was sitemapProductUrlPattern added to saveExtractorProfile param type?\n3. src/server/routes/onboarding-routes.ts — is sitemapProductUrlPattern destructured and passed to upsertProfile?\n4. src/client/components/OnboardingSettings.tsx — does the new create/edit form work correctly? Check: inline form shows on \"+ New Profile\", edit button transforms row, domain is immutable on edit, sitemap pattern field exists, test button calls testExtractorProfile, save calls saveExtractorProfile, cancel resets form\n5. src/client/components/Onboarding.tsx — were all dead selector states/handlers/imports/calls removed without breaking anything else?\n\nVerify typecheck passes and existing tests pass. Report any issues with file:line references. Do not modify files.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/ba969c3c-7a3a-4b82-b020-d1f2bbd50117/validation-correctness.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.5:xhigh",
+  "attemptedModels": [
+    "openai-codex/gpt-5.5:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.5:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 167756,
+        "output": 10694,
+        "cacheRead": 1606144,
+        "cacheWrite": 0,
+        "cost": 1.9626720000000002,
+        "turns": 36
+      }
+    }
+  ],
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783028331240
+}

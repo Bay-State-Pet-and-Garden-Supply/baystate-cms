@@ -1,0 +1,40 @@
+{
+  "runId": "f7deeaed",
+  "agent": "worker",
+  "task": "You are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\nFix two bugs in the LLM routing code that causes DeepSeek tasks to silently fall back to Ollama.\n\n## Root Cause (already diagnosed)\n\nThe DeepSeek API key in the `api_keys` table is stored redacted (`••••••••7f10` instead of the real key). When `resolveProviderCredential()` or `getLlmConfig()` encounter a key containing `•`, they skip that provider silently and fall through to the next one (Ollama). The key gets corrupted because:\n\n1. The GET API redacts keys: `'••••••••' + k.api_key.slice(-4)` (in `onboarding-routes.ts:788`)\n2. The frontend stores this redacted key in state\n3. When saving, the redacted key can be written to DB on INSERT (no guard on the INSERT path in `upsertApiKey`)\n4. Once redacted in DB, the UPDATE guard preserves it because `existing.api_key` itself is redacted\n\n## Changes Needed\n\n### Fix 1: Add redacted-key guard to the INSERT path\n**File:** `src/db/repositories/api-key-repo.ts`\nIn `upsertApiKey()`, the INSERT branch (line ~35-37) uses `apiKey` directly without checking if it starts with `•`. Add the same guard:\n\n```typescript\n// INSERT branch - add validation to reject redacted keys\nif (apiKey.startsWith('•')) {\n  throw new Error('Cannot save a redacted API key. Please enter the full key.');\n}\n```\n\n### Fix 2: Add warning logging when redacted keys are skipped\n**File:** `src/onboarding/llm-client.ts`\nIn `resolveProviderCredential()`, when a provider is skipped because its key contains `•`, log a console.warn so the operator can see it in server logs:\n\n```typescript\nfunction resolveProviderCredential(\n  provider: LlmProvider,\n): { apiKey: string; baseUrl: string | null; model: string | null } | null {\n  const row = getApiKey(provider);\n  if (!row || !row.api_key) {\n    console.warn(`[LLMClient] No API key found for provider \"${provider}\"`);\n    return null;\n  }\n  if (row.api_key.includes('•')) {\n    console.warn(`[LLMClient] Provider \"${provider}\" has a redacted/masked API key — skipping. Re-enter the full key in Settings → LLM Providers.`);\n    return null;\n  }\n  return { apiKey: row.api_key, baseUrl: row.base_url, model: row.model };\n}\n```\n\nAlso in `getLlmConfig()`, add a similar warning when DeepSeek or OpenAI are skipped due to redacted keys:\n```typescript\n// After checking deepseek.api_key.includes('•')\nif (deepseek.api_key.includes('•')) {\n  console.warn('[LLMClient] DeepSeek key is redacted — skipping to next provider');\n}\n// Same for openai\n```\n\n### Fix 3: Frontend validation in handleSaveApiKey\n**File:** `src/client/components/OnboardingSettings.tsx`\nIn `handleSaveApiKey()`, add a check to reject redacted keys:\n```typescript\nif (!keyVal || keyVal.startsWith('••••')) {\n  alert('Please enter a valid API key (the current value appears to be masked).');\n  return;\n}\n```\n\n## Verification\nAfter making changes, run `bun run typecheck` to verify compilation. Do NOT run the full test suite — just typecheck.",
+  "exitCode": 0,
+  "usage": {
+    "input": 80436,
+    "output": 5537,
+    "cacheRead": 1335608,
+    "cacheWrite": 0,
+    "cost": 0.11091167999999998,
+    "turns": 20
+  },
+  "model": "opencode-go/minimax-m3:medium",
+  "attemptedModels": [
+    "opencode-go/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/minimax-m3:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 80436,
+        "output": 5537,
+        "cacheRead": 1335608,
+        "cacheWrite": 0,
+        "cost": 0.11091167999999998,
+        "turns": 20
+      }
+    }
+  ],
+  "durationMs": 86375,
+  "toolCount": 19,
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783013623163
+}

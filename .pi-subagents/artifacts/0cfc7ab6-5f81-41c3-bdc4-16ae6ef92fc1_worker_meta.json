@@ -1,0 +1,30 @@
+{
+  "runId": "0cfc7ab6-5f81-41c3-bdc4-16ae6ef92fc1",
+  "agent": "worker",
+  "task": "## Task 2: Pipeline Board extraction status badges + Onboarding wiring\n\nRead these files:\n- `src/client/components/PipelineBoard.tsx` — the Kanban board\n- `src/client/components/Onboarding.tsx` — the parent onboarding page\n- `src/client/components/ProfileBuilderWorkspace.tsx` — the new workspace component (created in Task 1)\n- `src/client/onboarding-api.ts` — API functions\n\n## Changes needed\n\n### 1. `src/client/components/PipelineBoard.tsx`\n\n**a) Add a new prop to PipelineBoardProps:**\n```tsx\nonOpenProfileBuilder?: (domain: string, item: OnboardingItem) => void;\n```\n\n**b) Add a helper function at the top of the file:**\n```tsx\nfunction deriveProfileFailReason(errorMessage: string | null): 'no_profile' | 'ambiguous_match' | 'structure_mismatch' | null {\n  if (!errorMessage) return null;\n  if (/no (healthy )?profile/i.test(errorMessage) || /profile.*required/i.test(errorMessage)) return 'no_profile';\n  if (/ambiguous/i.test(errorMessage)) return 'ambiguous_match';\n  if (/structure.*mismatch|page.*structure.*signal/i.test(errorMessage)) return 'structure_mismatch';\n  return null;\n}\n```\n\n**c) In the card rendering (find where errorMessage is displayed), add badge rendering:**\n- When `item.stage === 'extraction'` and `item.stageStatus === 'failed'`, derive the profile fail reason\n- For `no_profile`: show an amber pill \"⚠ Profile required\" next to the error, plus a clickable \"Open Profile Builder →\" link\n- For `ambiguous_match`: show an orange pill \"⚠ Ambiguous match\"\n- For `structure_mismatch`: show a red pill \"⚠ Structure mismatch\"\n- Keep existing `errorMessage` display for unmatched cases\n\n**d) Extract domain from the item:**\n```tsx\nconst itemDomain = item.sourceUrl ? new URL(item.sourceUrl).hostname.replace(/^www\\./, '') : item.brandHint || '';\n```\n\n**e) Pass the callback when clicking \"Open Profile Builder →\":**\n```tsx\n{onOpenProfileBuilder && (\n  <a href=\"#\" onClick={(e) => { e.preventDefault(); onOpenProfileBuilder(itemDomain, item); }}>Open Profile Builder →</a>\n)}\n```\n\n### 2. `src/client/components/Onboarding.tsx`\n\nRead this file fully to understand how it renders PipelineBoard and other components.\n\n**Changes:**\n- Add import for ProfileBuilderWorkspace\n- Add state: `const [profileBuilderDomain, setProfileBuilderDomain] = useState<string | null>(null)`\n- Add state: `const [profileBuilderSeed, setProfileBuilderSeed] = useState<{ url?: string; item?: any } | null>(null)`\n- When rendering PipelineBoard, pass `onOpenProfileBuilder={(domain, item) => { setProfileBuilderDomain(domain); setProfileBuilderSeed({ item }); }}`\n- When `profileBuilderDomain` is set, render `<ProfileBuilderWorkspace>` as an overlay:\n```tsx\n{profileBuilderDomain && (\n  <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>\n    <div style={{ background: '#fff', borderRadius: 12, width: '90vw', height: '90vh', overflow: 'auto', padding: 24 }}>\n      <ProfileBuilderWorkspace\n        domain={profileBuilderDomain}\n        onClose={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}\n        seedSampleUrl={profileBuilderSeed?.url}\n        seedItem={profileBuilderSeed?.item}\n      />\n    </div>\n  </div>\n)}\n```\n\n## Constraints\n- Do NOT modify the card layout structure — only add the badge near the error message\n- Find the exact rendering location by looking for errorMessage display in PipelineBoard.tsx renderCard\n- Keep existing errorMessage text visible; the badge is an addition, not a replacement\n- Follow existing code style\n\n## Validation\n1. `bun run typecheck` passes with zero errors\n2. No other existing files are modified\n\n## Handoff\nReport all changes, typecheck result, and any issues.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 59956,
+        "output": 9068,
+        "cacheRead": 992640,
+        "cacheWrite": 0,
+        "cost": 0.013712272000000001,
+        "turns": 20
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783066856523
+}

@@ -1,0 +1,1 @@
+All three changes are implemented and typecheck passes cleanly. Here is the structured acceptance report.

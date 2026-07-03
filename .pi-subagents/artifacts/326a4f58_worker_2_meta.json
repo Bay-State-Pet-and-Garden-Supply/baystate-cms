@@ -1,0 +1,40 @@
+{
+  "runId": "326a4f58",
+  "agent": "worker",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/context.md, /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md]\n\nYou are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\n## Task: Update extraction to apply custom selectors (B6, B8)\n\n### B6: page-extractor.ts\nFile: `src/onboarding/page-extractor.ts`\n\nFind the `extractCustomSelectorsCheerio` function (or equivalent where profile selectors are applied via Cheerio). After the 5 fixed fields are extracted, add a loop over `profile.customSelectors`:\n\n```typescript\n// Extract custom selectors\nif (profile.customSelectors) {\n  for (const [fieldName, selector] of Object.entries(profile.customSelectors)) {\n    if (!selector) continue;\n    try {\n      const val = profile.titleSelector ? $(selector).first().text().trim() || null : null;  // <-- need to use $ directly\n      if (val) {\n        data.customFields = data.customFields ?? {};\n        data.customFields[fieldName] = val;\n      }\n    } catch { /* skip bad selectors */ }\n  }\n}\n```\n\nRead the file to find the exact location where profile selectors are applied.\n\n### B8: Worker extract route\nFile: `src/extraction-worker/routes/extract.ts`\n\nFind where the 5 fixed selectors are applied (around lines 360-530 for static path, 550-800 for rendered path). After each set of fixed field extractions, add custom selector extraction from `profile.customSelectors` or `selectors.customSelectors` (depending on how the worker receives the profile).\n\nThe worker receives the profile as `request.profile` which has a `selectors` object. If custom selectors are in there, loop over them:\n\n```typescript\n// For static path (around line 464-532)\nif (selectors.customSelectors) {\n  for (const [fieldName, selector] of Object.entries(selectors.customSelectors)) {\n    if (!selector) continue;\n    try {\n      const val = $(selector).first().text().trim();\n      if (val) {\n        result.extractionData.customFields = result.extractionData.customFields ?? {};\n        result.extractionData.customFields[fieldName] = val;\n      }\n    } catch { /* skip */ }\n  }\n}\n```\n\nApply the same pattern for the rendered path (where Playwright extracts data).\n\nRead both files, make targeted edits.\n\nVerify with `bun run typecheck`.\n\n---\nUpdate progress at: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/progress/326a4f58/progress.md",
+  "exitCode": 0,
+  "usage": {
+    "input": 335448,
+    "output": 16940,
+    "cacheRead": 22903296,
+    "cacheWrite": 0,
+    "cost": 0.11583514879999997,
+    "turns": 71
+  },
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 335448,
+        "output": 16940,
+        "cacheRead": 22903296,
+        "cacheWrite": 0,
+        "cost": 0.11583514879999997,
+        "turns": 71
+      }
+    }
+  ],
+  "durationMs": 410139,
+  "toolCount": 73,
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783111590788
+}

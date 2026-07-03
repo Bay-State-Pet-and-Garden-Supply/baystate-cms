@@ -19,6 +19,18 @@ export function upsertApiKey(
 ): ApiKeyRow {
   const db = getDb();
   const now = new Date().toISOString();
+
+  // Guard: reject redacted/masked keys on BOTH paths. The UI displays keys
+  // as '••••••••' + last 4 chars, so anything starting with '•' arriving
+  // here means the client is sending back the masked value rather than
+  // a real key. Writing that would silently break every LLM call.
+  if (apiKey.startsWith('•')) {
+    throw new Error(
+      `Cannot save a redacted API key for service "${service}". ` +
+        'Please enter the full, unredacted key in Settings.',
+    );
+  }
+
   const existing = db.query('SELECT * FROM api_keys WHERE service = ?').get(service) as ApiKeyRow | undefined;
 
   if (existing) {

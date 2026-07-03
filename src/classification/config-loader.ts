@@ -81,6 +81,7 @@ export function loadClassificationConfig(workspacePath: string): ClassificationC
   const attributes = readJsonFile<ClassificationConfig['attributes']>(path.join(dir, 'attributes.json')) ?? [];
   const attributeProfiles = readJsonFile<ClassificationConfig['attributeProfiles']>(path.join(dir, 'attribute-profiles.json')) ?? [];
   const attributeMappings = readJsonFile<ClassificationConfig['attributeMappings']>(path.join(dir, 'mappings.json')) ?? [];
+  const curationTargets = readJsonFile<ClassificationConfig['curationTargets']>(path.join(dir, 'curation-targets.json')) ?? [];
   const guidance = readJsonFile<ClassificationConfig['guidance']>(path.join(dir, 'guidance.json')) ?? [];
   const modelPolicy = readJsonFile<ClassificationConfig['modelPolicy']>(path.join(dir, 'model-policies.json'));
   const dataSharing = readJsonFile<ClassificationConfig['dataSharing']>(path.join(dir, 'data-sharing.json'));
@@ -96,6 +97,7 @@ export function loadClassificationConfig(workspacePath: string): ClassificationC
     attributes: attributes as ClassificationConfig['attributes'],
     attributeProfiles: attributeProfiles as ClassificationConfig['attributeProfiles'],
     attributeMappings: attributeMappings as ClassificationConfig['attributeMappings'],
+    curationTargets: curationTargets as ClassificationConfig['curationTargets'],
     guidance: guidance as ClassificationConfig['guidance'],
     modelPolicy: (modelPolicy ?? DEFAULT_MODEL_POLICY) as ClassificationConfig['modelPolicy'],
     dataSharing: (dataSharing ?? DEFAULT_DATA_SHARING) as ClassificationConfig['dataSharing'],
@@ -119,6 +121,7 @@ export function saveClassificationConfig(workspacePath: string, config: Classifi
   writeJsonFile(path.join(dir, 'attributes.json'), config.attributes);
   writeJsonFile(path.join(dir, 'attribute-profiles.json'), config.attributeProfiles);
   writeJsonFile(path.join(dir, 'mappings.json'), config.attributeMappings);
+  writeJsonFile(path.join(dir, 'curation-targets.json'), config.curationTargets);
   writeJsonFile(path.join(dir, 'guidance.json'), config.guidance);
   writeJsonFile(path.join(dir, 'model-policies.json'), config.modelPolicy);
   writeJsonFile(path.join(dir, 'data-sharing.json'), config.dataSharing);

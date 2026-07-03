@@ -1,0 +1,39 @@
+{
+  "runId": "647ae143",
+  "agent": "reviewer",
+  "task": "Review all code changes from this session's commits.\n\n## Commits to review\n\nRecent commits on main:\n- `5dfb312` — redesign: make visual selection the primary profile builder experience\n- `1aeafcd` — fix: prevent ProfileProposalDrawer and ProfileBuilderWorkspace from rendering simultaneously\n- `4520941` — fix: fail extraction with 'profile required' when no domain profile exists (job-queue.ts)\n- `07e1efb` — fix: remove broken modal wrapper around ProfileBuilderWorkspace in Settings\n- `ab9c495` — feat: add resetItemsToStage API\n- `04c98c9` — chore: suppress remaining fallow false positives\n- `6431ca5`, `44fd140`, `4842e38` — fallow cleanups\n\n## Key files changed\n\n### src/client/components/ProfileBuilderWorkspace.tsx (major redesign)\nThe entire profile builder was redesigned:\n- TabId type changed from `'overview' | 'snapshot' | 'review'` to `'build' | 'review' | 'advanced'`\n- Default tab changed from `'overview'` to `'build'`\n- The old `renderSnapshot` function was replaced with `renderBuild` — a new hero-driven layout with:\n  - Purple CTA section with URL input + \"Load Page\" button\n  - 3 visual select cards in a grid (Title, Description, Images) with ElementPickerButton\n  - Progress indicator showing selection status\n  - Technical details collapsed in a `<details>` element (JSON-LD, images, signals)\n- The old `renderOverview` renamed to `renderAdvanced` — \"Quick Actions\" section replaced with \"Get Started\" redirect + deprecated AI proposal tucked in a collapsed `<details>`\n- All string references to old tab names updated\n\n### src/onboarding/job-queue.ts (profile-required fail-fast fix)\n- Added `import { findProfileByDomain }` from extractor-profile-repo\n- In `processExtraction()`, before running extraction: derive domain from sourceUrl, look up extractor profile, fail with `\"No extractor profile for {domain} — profile required\"` if none exists\n- This makes the PipelineBoard's `deriveProfileFailReason` function trigger, which renders the \"⚠ Profile required\" badge and \"Open Profile Builder →\" link\n\n### src/client/components/OnboardingSettings.tsx (overlay fixes)\n- ProfileBuilderWorkspace wrapper: removed nested fixed-position scrollable div, now renders ProfileBuilderWorkspace directly (same pattern as Onboarding.tsx)\n- Mutual exclusion: clicking \"Open Profile Builder\" clears drawerState first; opening a proposal drawer clears workspaceDomain; both guards added to all three overlay triggers (drawer, workspace, retry preview)\n- Fixed arrow function syntax error in `onReviewProposal` prop\n\n### src/db/repositories/onboarding-item-repo.ts (new function)\n- Added `resetItemsToStage(itemIds, targetStage)` — resets items to a specific pipeline stage with `stage_status = 'completed'`, preserving all existing extraction/curation data\n\n### src/server/routes/onboarding-routes.ts (new route)\n- Added `POST /api/onboarding/items/reset-to-stage` route with validation for targetStage\n\n### src/client/onboarding-api.ts (new API function)\n- Added `resetItemsToStage(itemIds, targetStage)` client function\n\n## What to review\n\n1. **ProfileBuilderWorkspace redesign** — Does the new JSX compile correctly? Are all state variables properly referenced? Are the imports correct? Does the tab switching work? Is the `pickedSelectors` state properly managed?\n\n2. **job-queue.ts profile check** — Is `findProfileByDomain` imported from the right path? Does the error message format match what `deriveProfileFailReason` checks for? Is the domain extraction from URL correct? Is the early return properly structured?\n\n3. **OnboardingSettings overlay fixes** — Are the three overlays now mutually exclusive? Are there any remaining cases where both could render? Is the function syntax correct?\n\n4. **resetItemsToStage** — Does the SQL update query look correct? Does the route validation properly check targetStage? Are the types correct?\n\nFocus on:\n- TypeScript correctness\n- Logic errors or edge cases\n- Consistency with existing patterns\n- Whether the profile-required badge will actually render when extraction fails with the new error message",
+  "exitCode": 0,
+  "usage": {
+    "input": 110951,
+    "output": 42047,
+    "cacheRead": 2158208,
+    "cacheWrite": 0,
+    "cost": 0.90147228,
+    "turns": 54
+  },
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 110951,
+        "output": 42047,
+        "cacheRead": 2158208,
+        "cacheWrite": 0,
+        "cost": 0.90147228,
+        "turns": 54
+      }
+    }
+  ],
+  "durationMs": 972715,
+  "toolCount": 71,
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783109232893
+}

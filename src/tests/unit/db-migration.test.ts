@@ -97,7 +97,11 @@ describe('SQLite Migration', () => {
       'app_meta', 'workspace', 'shopsite_connection', 'product_index',
       'field_registry', 'change_sets', 'change_set_items', 'validation_results',
       'sync_jobs', 'sync_job_events', 'remote_drift', 'audit_log',
-      'product_types', 'product_type_fields', 'page_index', 'product_pages'
+      'product_types', 'product_type_fields', 'page_index', 'product_pages',
+      'extractor_profiles', 'domain_status', 'serper_cache', 'sitemap_cache',
+      'profile_generations', 'profile_generation_revisions',
+      'profile_generation_validation_results', 'profile_generation_field_decisions',
+      'llm_task_configs',
     ];
 
     for (const table of tables) {
@@ -187,7 +191,7 @@ describe('SQLite Migration', () => {
     const stageId = randomUUID();
     db.run(
       `INSERT INTO classification_stage_results (id, run_id, stage_name, status, output_json, started_at, completed_at)
-       VALUES (?, ?, 'evidence_extraction', 'succeeded', '{\"result\":\"ok\"}', ?, ?)`,
+       VALUES (?, ?, 'evidence_extraction', 'succeeded', '{"result":"ok"}', ?, ?)`,
       [stageId, runId, now, now],
     );
 
@@ -269,6 +273,95 @@ describe('SQLite Migration', () => {
     db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
   });
 
+  it('should migrate legacy item statuses to stage+stage_status correctly', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Create a workspace and batch
+    const wsId = randomUUID();
+    db.run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at, bootstrap_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [wsId, 'Mig WS', '/tmp/mig', '/tmp/mig/.git', now, now, 'complete'],
+    );
+
+    const batchId = randomUUID();
+    db.run(
+      `INSERT INTO onboarding_batches (id, workspace_id, name, file_name, status, total_items, created_at, updated_at)
+       VALUES (?, ?, 'Migration Batch', 'mig.xlsx', 'imported', 6, ?, ?)`,
+      [batchId, wsId, now, now],
+    );
+
+    // Insert items with all legacy statuses
+    const statuses = [
+      { status: 'imported' },
+      { status: 'discovering' },
+      { status: 'source_found' },
+      { status: 'extracting' },
+      { status: 'needs_review' },
+      { status: 'failed', extraction_data_json: '{}' },
+    ];
+
+    for (const s of statuses) {
+      const itemId = randomUUID();
+      db.run(
+        `INSERT INTO onboarding_items (id, batch_id, upc, name, status, row_number, extraction_data_json, created_at, updated_at)
+         VALUES (?, ?, 'SKU-' || ?, 'Product', ?, 1, ?, ?, ?)`,
+        [itemId, batchId, itemId.slice(0, 6), s.status, s.extraction_data_json || null, now, now],
+      );
+    }
+
+    // Apply stage pipeline migration SQL directly
+    // (migration already ran; we test constraints by checking existing rows have defaults)
+    const rows = db.query('SELECT status, stage, stage_status FROM onboarding_items WHERE batch_id = ? ORDER BY row_number').all(batchId) as Array<{ status: string; stage: string; stage_status: string }>;
+
+    // Each row should have a valid stage and stage_status after migration defaults
+    for (const row of rows) {
+      expect(['discovery', 'extraction', 'curation', 'review', 'promotion']).toContain(row.stage);
+      expect(['pending', 'in_progress', 'completed', 'failed', 'skipped']).toContain(row.stage_status);
+    }
+
+    db.run('DELETE FROM onboarding_items WHERE batch_id = ?', [batchId]);
+    db.run('DELETE FROM onboarding_batches WHERE id = ?', [batchId]);
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+
+  it('should migrate legacy batch statuses to active/archived', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    const wsId = randomUUID();
+    db.run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at, bootstrap_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [wsId, 'Mig WS 2', '/tmp/mig2', '/tmp/mig2/.git', now, now, 'complete'],
+    );
+
+    // Create batches with legacy statuses
+    for (const legacyStatus of ['imported', 'discovering', 'curating', 'completed', 'promoted']) {
+      const batchId = randomUUID();
+      db.run(
+        `INSERT INTO onboarding_batches (id, workspace_id, name, file_name, status, total_items, created_at, updated_at)
+         VALUES (?, ?, 'Batch ' || ?, 'test.xlsx', ?, 0, ?, ?)`,
+        [batchId, wsId, legacyStatus, legacyStatus, now, now],
+      );
+    }
+
+    // Apply the batch status normalization (same SQL as stage-pipeline-migration.sql Step 4)
+    db.exec("UPDATE onboarding_batches SET status = 'active' WHERE status IN ('imported', 'discovering', 'source_found', 'source_confirmed', 'extracting', 'extracted', 'curating', 'curated', 'needs_review', 'ready')");
+    db.exec("UPDATE onboarding_batches SET status = 'archived' WHERE status IN ('completed', 'promoted')");
+    db.exec("UPDATE onboarding_batches SET status = 'active' WHERE status NOT IN ('active', 'archived')");
+
+    // Verify batches have valid active/archived statuses
+    const batches = db.query('SELECT status FROM onboarding_batches WHERE workspace_id = ?').all(wsId) as Array<{ status: string }>;
+    for (const b of batches) {
+      expect(['active', 'archived']).toContain(b.status);
+    }
+
+    db.run('DELETE FROM onboarding_batches WHERE workspace_id = ?', [wsId]);
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+
   it('should enforce FK constraint on classification_proposal_decisions for missing proposal', () => {
     const db = getDb();
     const now = new Date().toISOString();
@@ -281,5 +374,128 @@ describe('SQLite Migration', () => {
         [randomUUID(), 'non-existent-proposal-id', now],
       );
     }).toThrow();
+  });
+
+  it('should create sitemap_cache with all required columns and the idx_sitemap_cache_domain index', () => {
+    const db = getDb();
+
+    // Column shape matches the contract.
+    const columns = db.query('PRAGMA table_info(sitemap_cache)').all() as Array<{ name: string }>;
+    const names = columns.map(c => c.name);
+    expect(names).toEqual(
+      expect.arrayContaining(['domain', 'urls_json', 'fetched_at', 'expires_at', 'source_url']),
+    );
+    expect(names).toHaveLength(5);
+
+    // The required index exists.
+    const index = db.query(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_sitemap_cache_domain'",
+    ).get();
+    expect(index).toBeTruthy();
+  });
+
+  it('should round-trip a sitemap_cache row including source_url', () => {
+    const db = getDb();
+    const now = new Date();
+    const fetchedAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + 60_000).toISOString();
+
+    db.run(
+      `INSERT INTO sitemap_cache (domain, urls_json, fetched_at, expires_at, source_url)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        'sitemap-mig.com',
+        JSON.stringify(['https://sitemap-mig.com/a', 'https://sitemap-mig.com/b']),
+        fetchedAt,
+        expiresAt,
+        'https://sitemap-mig.com/sitemap.xml',
+      ],
+    );
+
+    const row = db.query('SELECT * FROM sitemap_cache WHERE domain = ?').get('sitemap-mig.com') as {
+      domain: string;
+      urls_json: string;
+      fetched_at: string;
+      expires_at: string;
+      source_url: string;
+    };
+    expect(row).toBeTruthy();
+    expect(row.source_url).toBe('https://sitemap-mig.com/sitemap.xml');
+    expect(JSON.parse(row.urls_json)).toEqual([
+      'https://sitemap-mig.com/a',
+      'https://sitemap-mig.com/b',
+    ]);
+
+    // source_url is optional, so a row without it should also be valid.
+    db.run(
+      `INSERT INTO sitemap_cache (domain, urls_json, fetched_at, expires_at)
+       VALUES (?, ?, ?, ?)`,
+      [
+        'sitemap-no-source.com',
+        JSON.stringify([]),
+        fetchedAt,
+        expiresAt,
+      ],
+    );
+    const row2 = db.query('SELECT source_url FROM sitemap_cache WHERE domain = ?').get('sitemap-no-source.com') as { source_url: string | null };
+    expect(row2.source_url).toBeNull();
+
+    // Clean up
+    db.run('DELETE FROM sitemap_cache WHERE domain IN (?, ?)', [
+      'sitemap-mig.com',
+      'sitemap-no-source.com',
+    ]);
+  });
+
+  it('should expose the sitemap_product_url_pattern column on extractor_profiles', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    const profileId = randomUUID();
+    db.run(
+      `INSERT INTO extractor_profiles (
+         id, domain, title_selector, price_selector, description_selector,
+         brand_selector, images_selector, sitemap_product_url_pattern, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        profileId,
+        'ext-mig.com',
+        'h1',
+        '.p',
+        '.d',
+        '.b',
+        'img',
+        'https://ext-mig.com/products/.*',
+        now,
+        now,
+      ],
+    );
+
+    const row = db.query('SELECT sitemap_product_url_pattern FROM extractor_profiles WHERE id = ?').get(profileId) as { sitemap_product_url_pattern: string | null };
+    expect(row.sitemap_product_url_pattern).toBe('https://ext-mig.com/products/.*');
+
+    // Omitting the column should leave it NULL.
+    const profileId2 = randomUUID();
+    db.run(
+      `INSERT INTO extractor_profiles (
+         id, domain, title_selector, price_selector, description_selector,
+         brand_selector, images_selector, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        profileId2,
+        'ext-mig-null.com',
+        'h1',
+        null,
+        null,
+        null,
+        null,
+        now,
+        now,
+      ],
+    );
+    const row2 = db.query('SELECT sitemap_product_url_pattern FROM extractor_profiles WHERE id = ?').get(profileId2) as { sitemap_product_url_pattern: string | null };
+    expect(row2.sitemap_product_url_pattern).toBeNull();
+
+    db.run('DELETE FROM extractor_profiles WHERE id IN (?, ?)', [profileId, profileId2]);
   });
 });

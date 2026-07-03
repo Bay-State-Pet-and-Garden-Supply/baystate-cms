@@ -104,6 +104,7 @@ export function selectSource(sourceId: string): void {
   })();
 }
 
+// fallow-ignore-next-line unused-export
 export function getSelectedSource(itemId: string): OnboardingSource | undefined {
   const db = getDb();
   const row = db.query(
@@ -115,4 +116,94 @@ export function getSelectedSource(itemId: string): OnboardingSource | undefined 
 export function deleteSourcesByItem(itemId: string): void {
   const db = getDb();
   db.query('DELETE FROM onboarding_sources WHERE item_id = ?').run(itemId);
+}
+
+/** Lightweight sample used by the profile governance service's
+ *  cross-sample validation. Joins `onboarding_sources` to
+ *  `onboarding_items` so the caller has the expected product name,
+ *  brand hint, and item id for the URL. Used to verify that a
+ *  generated selector set generalizes across multiple product pages
+ *  on the same domain before a human operator is allowed to approve
+ *  it. Promotion still requires explicit per-field approval
+ *  regardless of multi-sample results (profile-governance invariant,
+ *  Phase 3 task 13). */
+export interface ValidationSampleRow {
+  url: string;
+  expectedName: string;
+  brandHint: string | null;
+  itemId: string;
+  isSelected: number;
+  confidence: number;
+}
+
+/**
+ * List URLs from a domain that are good candidates for cross-page
+ * profile validation.
+ *
+ * Policy (Phase 3 task 14, decision 8):
+ *   - Only sources the operator has confirmed (`is_selected = 1`).
+ *     Random high-confidence-but-unselected URLs are excluded.
+ *   - Exact-match or suffix-match domain comparison: `domain = ?`
+ *     or `domain LIKE '%.domain'`. The previous broad `%domain%`
+ *     match is removed because it was allowing unrelated domains
+ *     (e.g. `notmywoof.com` matching `mywoof.com`) to bleed into
+ *     validation samples.
+ *   - URL deduplication within the result.
+ *   - `expectedName` prefers `expected_name` when present, otherwise
+ *     falls back to the raw `name` column.
+ *   - `brandHint` is `brand_hint` and may be null.
+ *
+ * The function does not fetch HTML. The caller is expected to do a
+ * separate HTTP fetch (using the same headers as the page extractor)
+ * and pair the URL with the fetched HTML before running
+ * `validateRevisionAcrossConfirmedSamples`.
+ */
+export function listValidationSamplesByDomain(
+  domain: string,
+  limit = 5,
+): ValidationSampleRow[] {
+  const db = getDb();
+  const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
+  const safeLimit = Math.max(1, Math.min(50, Math.floor(limit)));
+
+  // Selected sources for the exact domain, plus subdomain suffix
+  // (e.g. `us.mywoof.com` should still match `mywoof.com`). The
+  // previous `LIKE '%mywoof%'` implementation matched `notmywoof.com`
+  // too, which produced cross-brand pollution; the explicit suffix
+  // match closes that gap.
+  const rows = db
+    .query(
+      `SELECT s.url AS url,
+              COALESCE(i.expected_name, i.name) AS expectedName,
+              i.brand_hint AS brandHint,
+              i.id AS itemId,
+              s.is_selected AS isSelected,
+              s.confidence AS confidence
+         FROM onboarding_sources s
+         JOIN onboarding_items i ON s.item_id = i.id
+        WHERE s.is_selected = 1
+          AND s.domain IS NOT NULL
+          AND (LOWER(s.domain) = ? OR LOWER(s.domain) LIKE ?)
+        ORDER BY s.confidence DESC, s.created_at DESC
+        LIMIT ?`,
+    )
+    .all(
+      normalizedDomain,
+      `%.${normalizedDomain}`,
+      safeLimit * 2, // over-fetch a little; we will dedupe and trim below
+    ) as ValidationSampleRow[];
+
+  // Deduplicate by URL and cap to the requested limit. Confirmed
+  // sources for the same product can appear multiple times if the
+  // same URL was inserted on different scans.
+  const seen = new Set<string>();
+  const deduped: ValidationSampleRow[] = [];
+  for (const row of rows) {
+    if (!row.url) continue;
+    if (seen.has(row.url)) continue;
+    seen.add(row.url);
+    deduped.push(row);
+    if (deduped.length >= safeLimit) break;
+  }
+  return deduped;
 }

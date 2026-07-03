@@ -93,3 +93,38 @@ export function deleteBrandSite(id: string): boolean {
   const result = db.query('DELETE FROM brand_sites WHERE id = ?').run(id);
   return result.changes > 0;
 }
+
+export function updateBrandSiteDomain(brandName: string, domain: string): BrandSite {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const normalizedBrand = brandName.toLowerCase().trim();
+  const normalizedDomain = domain.toLowerCase().replace(/^www\./, '').trim();
+
+  // Find all existing brand site rows for this brand
+  const existingRows = db.query('SELECT * FROM brand_sites WHERE brand_name = ?').all(normalizedBrand) as BrandSiteRow[];
+  
+  if (existingRows.length > 0) {
+    // Update the first one, delete the rest to avoid duplicates/confusion
+    const mainRow = existingRows[0];
+    db.query('UPDATE brand_sites SET domain = ?, success_count = success_count + 1, last_used_at = ? WHERE id = ?')
+      .run(normalizedDomain, now, mainRow.id);
+      
+    for (let i = 1; i < existingRows.length; i++) {
+      db.query('DELETE FROM brand_sites WHERE id = ?').run(existingRows[i].id);
+    }
+    
+    return {
+      id: mainRow.id,
+      brandName: normalizedBrand,
+      domain: normalizedDomain,
+      urlPattern: mainRow.url_pattern,
+      successCount: mainRow.success_count + 1,
+      lastUsedAt: now,
+      createdAt: mainRow.created_at,
+    };
+  } else {
+    // Create new
+    return upsertBrandSite(brandName, domain);
+  }
+}
+

@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../db/connection';
 import { findWorkspace } from '../db/repositories/workspace-repo';
-import { findBatchById } from '../db/repositories/onboarding-batch-repo';
-import { listItemsByBatch, updateItemStatus } from '../db/repositories/onboarding-item-repo';
+import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
+import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { findProductBySku } from '../db/repositories/product-index-repo';
 import { clearProductPages, assignProductToPage } from '../db/repositories/page-repo';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
@@ -68,7 +67,7 @@ export async function promoteItems(
       // Construct core product details
       const coreProduct = {
         name: finalTitle,
-        price: extractionData.price || item.price || null,
+        price: item.price || null,
         salePrice: null,
         description: extractionData.description || null,
         inventory: {
@@ -197,22 +196,15 @@ export async function promoteItems(
         // Non-blocking
       }
 
-      // Update item status in onboarding tables
-      updateItemStatus(item.id, 'promoted');
+      // Update item stage status to completed in promotion stage
+      completePromotionStage(item.id, true);
       
       promotedCount++;
     }
 
-    // Update batch status if all items are promoted/skipped
-    const remainingItems = db.query(
-      `SELECT COUNT(*) as count FROM onboarding_items WHERE batch_id = ? AND status NOT IN ('promoted', 'skipped')`
-    ).get(batchId) as { count: number };
-
-    if (remainingItems.count === 0) {
-      db.query("UPDATE onboarding_batches SET status = 'completed', updated_at = ? WHERE id = ?").run(
-        new Date().toISOString(),
-        batchId
-      );
+    // Archive batch if all items are done (stage-based)
+    if (isBatchComplete(batchId)) {
+      setBatchArchived(batchId, true);
     }
   })();
 

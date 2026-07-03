@@ -1,0 +1,1 @@
+Here is the structured acceptance report:

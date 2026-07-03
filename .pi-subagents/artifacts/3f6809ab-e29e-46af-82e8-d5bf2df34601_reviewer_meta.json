@@ -1,0 +1,29 @@
+{
+  "runId": "3f6809ab-e29e-46af-82e8-d5bf2df34601",
+  "agent": "reviewer",
+  "task": "Review all UI and backend changes made to build the extraction profile system UI. This is the final review check.\n\nRead ALL these files:\n- `src/client/components/ProfileBuilderWorkspace.tsx` — NEW, domain-first profile builder (4 tabs)\n- `src/client/components/ProfileRetryPreview.tsx` — NEW, profile blocked items retry\n- `src/client/components/OnboardingSettings.tsx` — MODIFIED, tab restructure + worker health + profile health + open builder button\n- `src/client/components/PipelineBoard.tsx` — MODIFIED, extraction status badges + onOpenProfileBuilder callback\n- `src/client/components/Onboarding.tsx` — MODIFIED, wires ProfileBuilderWorkspace overlay\n- `src/client/onboarding-api.ts` — MODIFIED, new client functions\n- `src/server/routes/onboarding-routes.ts` — MODIFIED, proxy routes + single-domain diagnostics + retry-preview endpoints\n- `src/shared/schemas/onboarding.ts` — MODIFIED, ProfileBlockedItem schema\n- `src/shared/schemas/extraction-worker.ts` — existing, referenced by UI\n- `docs/plans/domain-extractor-profile-worker-plan.md` — the plan\n\n## Review angles\n\n1. **Architecture consistency** — Do the UI changes follow the domain model in CONTEXT.md? ProfileBuilderWorkspace is domain-first, not item-attached? Pipeline Board badges distinguish fail reasons? OnboardingSettings has the Profiles tab with health indicators?\n\n2. **Code quality** — Are there any obvious React issues (missing keys, stale closures, infinite loops in useEffects)? Any imports that are missing? Any broken JSX?\n\n3. **Backend safety** — The new backend routes (proxy snapshot/validate, retry-preview query/retry): do they expose any sensitive data? Do they handle errors gracefully? Are they properly auth-gated by the existing API token middleware (Bun routes use GET-exempt convention)?\n\n4. **Type safety** — Run `npx tsc --noEmit --skipLibCheck` and report any issues.\n\n5. **Backward compatibility** — Does the OnboardingSettings tab restructure break any existing flows (profile proposal drawer, domain detail accordion, generation review)? Are existing handlers still wired?\n\n6. **Missing imports or patterns** — Check that the new components import from the correct paths and use consistent patterns with existing onboarding code.\n\nReturn concise evidence-backed findings. Do NOT modify any files.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 102828,
+        "output": 13139,
+        "cacheRead": 1016205,
+        "cacheWrite": 0,
+        "cost": 0.46598409999999996,
+        "turns": 15
+      }
+    }
+  ],
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783067464421
+}

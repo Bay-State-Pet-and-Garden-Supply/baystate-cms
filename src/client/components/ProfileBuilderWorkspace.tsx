@@ -634,11 +634,39 @@ export function ProfileBuilderWorkspace(
         {snapshotError && <div style={s.errorBox}>{snapshotError}</div>}
       </div>
 
+      {/* ─── Paste Element HTML — Primary Method ─── */}
+      <div style={{ ...s.section, marginBottom: 16 }}>
+        <details style={{ marginBottom: 12 }} open>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, color: '#166534' }}>
+            📋 Paste Element HTML (reliable)
+          </summary>
+          <div style={{ marginTop: 8, padding: 12, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0' }}>
+            <p style={{ fontSize: 12, color: '#4b5563', margin: '0 0 8px', lineHeight: 1.5 }}>
+              Open your browser's DevTools (<strong>F12</strong>), find the element, right-click it in the Elements panel,
+              select <strong>Copy → Copy outerHTML</strong>, and paste below.
+            </p>
+            <details style={{ fontSize: 12, color: '#6b7280' }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>Step-by-step instructions</summary>
+              <ol style={{ margin: '8px 0 0', paddingLeft: 20, lineHeight: 1.6 }}>
+                <li>Right-click the product title on the page → <strong>Inspect</strong></li>
+                <li>The DevTools Elements panel opens with the element highlighted</li>
+                <li>Right-click the highlighted element in the panel → <strong>Copy → Copy outerHTML</strong></li>
+                <li>Paste into one of the fields below and click <strong>Generate Selector</strong></li>
+              </ol>
+            </details>
+            <p style={{ fontSize: 11, color: '#6b7280', margin: '8px 0 0', fontStyle: 'italic' }}>
+              Need to select an element that isn't listed here? Use the <strong>Custom Fields</strong> section below.
+              Or try the visual picker (below, experimental).
+            </p>
+          </div>
+        </details>
+      </div>
+
       {/* ─── Visual Select — Hero Section ─── */}
       {snapshotResult && (
         <>
           <div style={{ ...s.section, marginBottom: 32 }}>
-            <h3 style={s.sectionTitle}>Select Elements</h3>
+            <h3 style={s.sectionTitle}>Select Elements <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: '#fef3c7', color: '#d97706', verticalAlign: 'middle', marginLeft: 6 }}>EXPERIMENTAL</span></h3>
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',

@@ -1,8 +1,13 @@
 import { Hono } from 'hono';
 import { getCurrentWorkspace } from '../services/workspace-service';
-import { loadClassificationConfig } from '../../classification/config-loader';
+import { loadClassificationConfig, saveClassificationConfig } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
 import { processRefreshQueue } from '../../classification/refresh-queue-processor';
+import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
+import {
+  applyCurationTargetsToConfig,
+  listCurationTargetCandidates,
+} from '../../classification/curation-targets';
 
 const router = new Hono();
 
@@ -20,6 +25,53 @@ router.get('/classification/config', (c) => {
     const config = loadClassificationConfig(ws.workspacePath);
     return c.json({ config });
   } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * GET /api/classification/curation-targets
+ * Returns manager-selected curation targets plus live-store candidates.
+ */
+router.get('/classification/curation-targets', (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  try {
+    const config = loadClassificationConfig(ws.workspacePath);
+    const candidates = listCurationTargetCandidates(ws.id, config);
+    return c.json({ targets: config.curationTargets ?? [], candidates });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * PUT /api/classification/curation-targets
+ * Saves which classification targets the curation stage should fill.
+ */
+router.put('/classification/curation-targets', async (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  try {
+    const body = await c.req.json();
+    const targets = Array.isArray(body?.targets) ? body.targets : [];
+    const currentConfig = loadClassificationConfig(ws.workspacePath);
+    const nextConfig = applyCurationTargetsToConfig(currentConfig, targets, ws.id);
+    saveClassificationConfig(ws.workspacePath, nextConfig);
+    syncConfigToCache(ws.id, nextConfig);
+    return c.json({
+      success: true,
+      targets: nextConfig.curationTargets,
+      candidates: listCurationTargetCandidates(ws.id, nextConfig),
+    });
+  } catch (err) {
+    console.error('[ClassificationRoutes] Save curation targets failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });

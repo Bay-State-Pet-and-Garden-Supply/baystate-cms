@@ -1,0 +1,39 @@
+{
+  "runId": "450aa3af",
+  "agent": "oracle",
+  "task": "You are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\n## Context\n\nThe project is ShopSite CMS, a local CMS for ShopSite 15 stores. The onboarding pipeline includes an extraction system that scrapes product data from brand/manufacturer websites using CSS selector profiles.\n\n## Current Architecture\n\nThe system uses an LLM to generate CSS selector profiles for extracting product data (title, description, images) from product pages. Here's how it works:\n\n1. **Snapshot**: A page URL is fetched (static HTTP or rendered Playwright)\n2. **DOM Minimization**: Non-product noise is stripped (scripts, nav, footer, etc.), leaving a compressed HTML structure\n3. **Candidate Extraction**: `buildSelectorCandidates()` extracts ~80 candidate elements with their selectors, stability ratings, and semantic hints\n4. **LLM Profile Generation**: The minimized DOM + candidates are sent to an LLM which produces a `GeneratedSelectorProfile` with CSS selectors for title, description, images, plus a Shopify JSON path flag and variant selection strategy\n5. **Validation**: Selectors are validated against the source HTML — title is required, empty selectors are rejected, stability flags (`:nth-of-type`) lower confidence\n6. **Human Review**: A UI shows proposed selectors vs active selectors, with side-by-side extraction previews. The operator approves/rejects individual fields, or gives structured feedback which triggers an AI revision\n7. **Promotion**: Never auto-promotes. Every field requires explicit human approval. Image selectors need 2+ validated samples + attestation.\n\n## The Problem\n\nThe AI is generating CSS selectors from a **textual DOM dump** — it never sees the rendered page. It doesn't know which `h1` is the product title vs. a section heading. It guesses based on class names and data attributes, which are often non-semantic or auto-generated. The result is fragile selectors that break across different product pages on the same domain.\n\n## The Question\n\nWe're debating three approaches:\n\n**A) AI guesswork (current)**: LLM proposes selectors from minimized DOM text. Low effort, medium reliability, requires technical reviewer to approve/reject CSS strings they may not fully understand.\n\n**B) User pastes selectors/elements**: User inspects the target page via DevTools and pastes CSS selectors or relevant HTML. High reliability, requires CSS expertise. Partially exists as a \"manual selector hint\" in the `ProfileRevisionFeedbackForm`.\n\n**C) User clicks on elements**: Fire up a Playwright browser, overlay a click-to-select tool on the live page, user clicks on the title/description/images, system generates stable selectors from the click target. Highest reliability, lower skill required, higher implementation cost.\n\n## Key Files Already Reviewed\n\n- `src/onboarding/profile-generator.ts` — LLM profile generation, DOM minimization, candidate building, selector validation\n- `src/onboarding/page-extractor.ts` — Playwright/HTTP extraction with layered approach (custom selectors → JSON-LD → meta → microdata → heuristics)\n- `src/onboarding/profile-promoter.ts` — Per-field approval, never auto-promote invariant\n- `src/onboarding/profile-governance-service.ts` — Business rules: per-field approval, multi-sample validation, revision versioning\n- `src/extraction-worker/routes/snapshot.ts` — Snapshot route, static and rendered runtimes\n- `src/extraction-worker/routes/extract.ts` — Trusted profile runner, deterministic extraction\n- `src/client/components/ProfileBuilderWorkspace.tsx` — Profile builder UI (Overview/Snapshot/Review tabs)\n- `src/client/components/ProfileProposalDrawer.tsx` — Slide-out drawer with preview, approve/reject, feedback\n- `src/client/components/ProfileGenerationReview.tsx` — State machine review flow\n- `src/client/components/ProfileRevisionFeedbackForm.tsx` — Structured feedback form with manual CSS hint input\n- `src/extraction-worker/artifacts.ts` — Artifact storage for snapshots\n- `src/shared/schemas/onboarding.ts` — Zod schemas for profiles, selectors, revisions\n\n## My Analysis\n\nI see a clear pattern: the system is designed around AI proposals + human approval, but the human is approving CSS selectors they can't visually verify. The extraction preview helps (shows side-by-side results), but when results look wrong, the user's only recourse is to give \"structured feedback\" (text corrections) or type a manual CSS hint.\n\nThe existing infrastructure already supports the click-to-select approach:\n- Playwright is already in the extraction worker (`src/extraction-worker/routes/snapshot.ts`) with rendered browser support\n- The `rendered` runtime captures screenshots and network data\n- The artifact system stores job outputs\n- The `ProfileProposalDrawer` already has per-field preview, approve/reject, and feedback\n- The `buildSelectorCandidates` function in profile-generator.ts already generates stable selectors from DOM elements\n\nThe missing piece is: no flow where the user visually points at elements on a live page.\n\n## Questions for the Oracle\n\n1. Should we move toward a click-to-select visual element picker (approach C), improve the AI approach with better candidate extraction (approach A), or rely on user-pasted selectors (approach B)?\n2. What's the right hybrid — AI proposes, user visually corrects?\n3. Is there a simpler intermediate step we should take before building a full visual element picker?\n4. What invariants from the existing architecture must be preserved?\n\n---\nCreate and maintain progress at: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/chain-runs/450aa3af/progress.md",
+  "exitCode": 0,
+  "usage": {
+    "input": 68290,
+    "output": 9771,
+    "cacheRead": 844416,
+    "cacheWrite": 0,
+    "cost": 0.35814655999999995,
+    "turns": 16
+  },
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 68290,
+        "output": 9771,
+        "cacheRead": 844416,
+        "cacheWrite": 0,
+        "cost": 0.35814655999999995,
+        "turns": 16
+      }
+    }
+  ],
+  "durationMs": 207291,
+  "toolCount": 23,
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783077538216
+}

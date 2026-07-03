@@ -1,0 +1,30 @@
+{
+  "runId": "f8450ccc-71bd-414f-a473-6c52829fd6a1",
+  "agent": "worker",
+  "task": "Implement Phase 2 of the extraction worker plan (worker shell).\n\nRead the full plan first: `docs/plans/domain-extractor-profile-worker-plan.md`\n\nPhase 2 scope:\n\nCreate these files:\n\n1. `src/extraction-worker/server.ts` — a Node-friendly HTTP server using Node's built-in `http` module (not Hono — keep it zero-dependency for the worker process). Must:\n   - Read `SHOPSITE_CMS_WORKER_HOST`, `SHOPSITE_CMS_WORKER_PORT`, `SHOPSITE_CMS_WORKER_TOKEN` from env.\n   - Default to `127.0.0.1:3032`.\n   - Reject requests without a valid `Authorization: Bearer <token>` if a token is configured.\n   - Mount health route at `/health`.\n   - Return 404 for unknown paths.\n   - Log startup to stdout.\n\n2. `src/extraction-worker/routes/health.ts` — a health handler that returns:\n   ```json\n   {\"ok\":true,\"capabilities\":{\"playwright\":true,\"crawlee\":false,\"stagehand\":false},\"version\":\"0.1.0\"}\n   ```\n   Use raw JSON stringify.\n\n3. `src/extraction-worker/auth.ts` — a helper that reads the worker token from env and checks it against the request's Authorization header. Return `{ authorized: true }` or `{ authorized: false, message: \"...\" }`.\n\n4. Add worker scripts to `package.json`:\n   ```json\n   \"worker:dev\": \"node --import tsx src/extraction-worker/server.ts\",\n   \"worker:start\": \"node dist/extraction-worker/server.js\"\n   ```\n\nTechnical notes:\n- The worker must be ESM (`\"type\": \"module\"` already set in package.json).\n- Use `import { createServer } from 'node:http'` — no external dependencies.\n- Use `.ts` extension but keep the worker simple enough that `tsx` can run it directly in dev mode.\n- `SHOPSITE_CMS_WORKER_TOKEN` should be optional; if not set, skip auth checks and log a warning.\n- The tsconfig has `noEmit: true`, so for production build we'd need a separate tsconfig. Only add the dev script for now.\n\nAlso update `docs/plans/domain-extractor-profile-worker-plan.md` to mark Phase 2 as implemented.\n\n## Validation\nAfter creating the files, run: `node --import tsx src/extraction-worker/server.ts &` and then `curl -s http://127.0.0.1:3032/health` to verify the worker starts and returns the expected health response. Kill the background process when done.\n\n## Handoff\nReport all files created/changed, your validation commands and their output, and any surprises or decisions that need parent approval.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 25013,
+        "output": 7677,
+        "cacheRead": 294528,
+        "cacheWrite": 0,
+        "cost": 0.006476058400000002,
+        "turns": 18
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783063476994
+}

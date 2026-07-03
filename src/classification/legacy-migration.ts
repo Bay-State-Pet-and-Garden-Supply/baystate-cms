@@ -77,7 +77,7 @@ export function migrateLegacyToClassificationConfig(
   const attributes: ProductAttributeConfig[] = [];
   const seenAttrIds = new Set<string>();
 
-  function addAttribute(label: string, xmlField: string) {
+  function addAttribute(label: string, _xmlField: string) {
     const id = toSlug(label);
     if (seenAttrIds.has(id)) return;
     seenAttrIds.add(id);
@@ -207,6 +207,7 @@ export function migrateLegacyToClassificationConfig(
     attributes,
     attributeProfiles,
     attributeMappings,
+    curationTargets: [],
     guidance: [],
     modelPolicy: {
       defaultProvider: 'ollama',

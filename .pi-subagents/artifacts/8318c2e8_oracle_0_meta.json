@@ -1,0 +1,39 @@
+{
+  "runId": "8318c2e8",
+  "agent": "oracle",
+  "task": "You are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\n## Context: Profile-Required Badge & Visual Picker Are Unreachable\n\nThe user reports that:\n1. Products advance into extraction and run extraction **even when no domain profile exists** — they don't fail with a \"profile required\" error\n2. The \"⚠ Profile required\" badge and \"Open Profile Builder →\" link never appear in the PipelineBoard\n3. Therefore the click-to-select visual picker (`ProfileBuilderWorkspace`) is unreachable through the pipeline UI flow\n\n### Root Cause Analysis from Codebase\n\n**The extraction pipeline has no \"profile required\" fail-fast:**\n\nIn `src/onboarding/page-extractor.ts` (line 176):\n```typescript\nconst profile = domain ? findProfileByDomain(domain) : null;\n```\nWhen `profile` is null, extraction proceeds anyway using fallback strategies (JSON-LD, meta tags, microdata, HTML heuristics). It never checks \"does this domain need a profile?\" and never fails with a profile-related error message.\n\nIn `src/onboarding/job-queue.ts` (line 354):\n```typescript\nconst extractedData = await extractProductData(item.sourceUrl, {...});\n```\nThe job queue calls extraction with no profile-awareness — it doesn't check if the domain has an extractor profile before running.\n\n**The badge logic depends on a non-existent error message:**\n\nIn `src/client/components/PipelineBoard.tsx` (lines 585-596):\n```typescript\nconst failReason = deriveProfileFailReason(item.errorMessage);\nif (failReason === 'no_profile') {\n  render badge + \"Open Profile Builder →\" link\n}\n```\n\n`deriveProfileFailReason` checks if `errorMessage` contains \"no profile\" or \"profile required\":\n```typescript\nfunction deriveProfileFailReason(errorMessage: string | null) {\n  if (!errorMessage) return null;\n  if (/no (healthy )?profile/i.test(errorMessage) || /profile.*required/i.test(errorMessage)) return 'no_profile';\n  ...\n}\n```\n\nBut extraction **never sets this error message** — when no profile exists, it just falls through to generic extraction. The badge never renders.\n\n### The Result\n\nThe full click-to-select visual picker flow (Phase 3) is unreachable because:\n1. No \"no profile\" error → badge never shows → link never renders → ProfileBuilderWorkspace never opens\n\nThe only working entry points are:\n- The `ProfileBuilderWorkspace` is imported but **unused** in `OnboardingSettings.tsx` (no button wired to it)\n- The `PipelineBoard` has the `onOpenProfileBuilder` prop and link rendering code, but the condition (`failReason === 'no_profile'`) is never met\n\n### History\n\nThe design intent was:\n- Extraction should detect that a domain lacks an extractor profile and fail-fast with a \"profile required\" error\n- The PipelineBoard renders the badge from that error message\n- The link opens the ProfileBuilderWorkspace so the user can visually build a profile\n\nBut the extraction code was never updated to produce this error. The fallback extraction strategies were always treated as a safety net, not as an indicator that the domain needs a profile.\n\n### Question for Oracle\n\nWhat's the right fix? Should we:\n1. Add a pre-extraction check in `page-extractor.ts` or `job-queue.ts` that fails-fast with \"profile required\" when no extractor profile exists for the domain?\n2. Add a `needsProfile` flag to the item stage status so the PipelineBoard can show the badge without relying on error message parsing?\n3. Wire the `ProfileBuilderWorkspace` directly into the OnboardingSettings Profiles tab UI so it's accessible without going through a failed extraction?\n4. Some hybrid — fail extraction with profile-required error for domains with no profile, AND add a direct button in the Profiles tab?\n\n### Files already reviewed\n- `src/onboarding/page-extractor.ts` — line 176, no profile check\n- `src/onboarding/job-queue.ts` — line 354, no profile awareness\n- `src/client/components/PipelineBoard.tsx` — lines 585-596, badge depends on errorMessage\n- `src/client/components/OnboardingSettings.tsx` — imports ProfileBuilderWorkspace but never uses it\n- `src/client/components/Onboarding.tsx` — only passes onOpenProfileBuilder through PipelineBoard",
+  "exitCode": 0,
+  "usage": {
+    "input": 231636,
+    "output": 8340,
+    "cacheRead": 5415808,
+    "cacheWrite": 0,
+    "cost": 1.7690964800000002,
+    "turns": 25
+  },
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 231636,
+        "output": 8340,
+        "cacheRead": 5415808,
+        "cacheWrite": 0,
+        "cost": 1.7690964800000002,
+        "turns": 25
+      }
+    }
+  ],
+  "durationMs": 341767,
+  "toolCount": 27,
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783106131665
+}

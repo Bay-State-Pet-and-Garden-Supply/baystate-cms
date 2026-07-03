@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import fs from 'fs';
 import path from 'path';
 import { getCurrentWorkspace } from '../services/workspace-service';
+import { syncFieldRegistryFromProductIndex } from '../services/workspace-service';
 import { getChangeSetDetail } from '../services/change-set-service';
 import { buildProductsXml } from '../../shopsite/xml-builder';
 import { buildUploadMultipart, extractDbmakeQuery, redactCredentials, isDbmakeSuccessful } from '../../shopsite/multipart-upload';
@@ -443,6 +444,9 @@ route.post('/sync/full-reconcile', (c) => {
 
     completeSyncJob(job.id, 'succeeded', { productCount: reindexedCount });
     addSyncJobEvent({ syncJobId: job.id, level: 'info', message: `Full reconcile complete: ${reindexedCount} products reindexed.` });
+
+    // Sync field_registry with any newly discovered ProductField keys.
+    syncFieldRegistryFromProductIndex(workspace.id);
 
     return c.json({ success: true, jobId: job.id, reindexedCount, errors: errors.length > 0 ? errors : undefined });
   } catch (err) {

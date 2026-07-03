@@ -1,0 +1,30 @@
+{
+  "runId": "7238ba53-ef25-45fa-9f9e-fbc286fa4f0a",
+  "agent": "worker",
+  "task": "## Task B3: Merge Proposals + Validation tabs into single Review tab\n\nRead `src/client/components/ProfileBuilderWorkspace.tsx` fully (~1598 lines). This is the main workspace component with 4 tabs: Overview, Snapshot, Proposals, Validation.\n\n### What to change\n\n**1. Change TabId type** from 4 tabs to 3:\n```typescript\ntype TabId = 'overview' | 'snapshot' | 'review';\n```\n\nUpdate the `activeTab` state default from `'overview'` (keep same).\n\n**2. Update the tab bar** — Replace the 4-tab rendering with 3:\n```typescript\nTABS: { id: TabId; label: string }[] = [\n  { id: 'overview', label: 'Overview' },\n  { id: 'snapshot', label: 'Snapshot' },\n  { id: 'review', label: 'Review' },\n];\n```\n\n**3. Replace `renderProposals` and `renderValidation` with a single `renderReview`**\n\nFind the `renderProposals` function (which shows the list of generations + embedded ProfileGenerationReview) and the `renderValidation` function (which shows the \"Run Validation Across Samples\" + results table + promote gate).\n\nReplace both with a single `renderReview` function that:\n\na) Shows the list of generations (kept from renderProposals) with \"Generate New Proposal\" button.\n\nb) When a generation is selected, embeds the rewritten `<ProfileGenerationReview>` (from B2) which handles the entire preview → validate → approve flow internally.\n\nc) Remove the standalone \"Run Validation Across Samples\" button + results table + promote checklist from the old validation tab — all of this is now handled inside ProfileGenerationReview's state machine.\n\nd) Remove the `handleValidate`, `snapshot-driven validate results`, and `validationResult` state that was specific to the validation tab.\n\n**4. Update `SELECTOR_FIELD_LABELS`** — Find the local constant (around line 96). If it still includes price/brand, trim to 3 fields:\n```typescript\nconst SELECTOR_FIELD_LABELS: Record<string, string> = {\n  titleSelector: 'Title',\n  descriptionSelector: 'Description',\n  imagesSelector: 'Images',\n};\n```\n\n**5. Overview tab** — The \"Active Profile\" selector table should only show the 3 active fields. If it iterates over all 5 SELECTOR_FIELDS, update it.\n\n### What to keep\n- Overview tab completely unchanged (domains header, active profile table, quick actions)\n- Snapshot tab completely unchanged (URL input, runtime toggle, results panel)\n- The overlay wrapper and close button\n- All existing state variables that are still used\n\n### What to remove\n- The standalone `handleValidate` function (validation is now inside ProfileGenerationReview)\n- `validationResult` state, `validationBusy`, `validationError`\n- The `renderValidation` function entirely\n- Any validation-tab-specific state that's no longer referenced\n\n### Acceptance\n- Only 3 tabs: Overview, Snapshot, Review\n- Review tab shows generations list + \"Generate New Proposal\" button\n- Clicking a generation opens ProfileGenerationReview with the preview-driven flow\n- The entire generate → preview → validate → approve path is reachable within the Review tab\n- `bun run typecheck` passes\n\n### Handoff\nReport all changes, typecheck result.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 51000,
+        "output": 23693,
+        "cacheRead": 2382720,
+        "cacheWrite": 0,
+        "cost": 0.020445656,
+        "turns": 54
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783076205130
+}

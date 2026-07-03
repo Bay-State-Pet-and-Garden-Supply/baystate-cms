@@ -1,0 +1,29 @@
+{
+  "runId": "16a7ac74-d5a4-44a1-88ea-617026bf0d8b",
+  "agent": "reviewer",
+  "task": "Final review of variant discovery and image expansion changes.\n\nRead these files:\n- `src/onboarding/profile-generator.ts` — FULL review. Verify:\n  1. `GeneratedSelectorProfile` has the optional `variantSelectionStrategy` field\n  2. `buildSelectorCandidates` has 6 image patterns (5 new + original), `baseUrl` parameter, and `buildSelectorCandidates(minimized, _url)` in `generateExtractorProfile`\n  3. `VariantOptionCandidate` interface and `buildVariantOptionCandidates` function exist and implement 5 discovery strategies\n  4. `buildLlmPrompt` has the variantCandidates parameter, VARIANT/OPTION CANDIDATES section in prompt, updated instructions, and variantSelectionStrategy in JSON schema\n  5. `shapeFromParsed` parses variantSelectionStrategy from LLM JSON and doesn't fail the profile on invalid strategy\n  6. `generateExtractorProfile` builds variantCandidates from original HTML and passes them to `buildLlmPrompt`\n\n- `src/shared/schemas/extraction-worker.ts` — Verify:\n  1. `VariantSelectionStrategySchema` exists with correct fields\n  2. `ProfileProposalDraftSchema.variantSelectionStrategy` and `ExtractRequestSchema.profile.variantSelectionStrategy` use the new schema\n  3. `ValidationSampleResultSchema.variantResult` has enhanced fields (containerSelector, optionType, detectedOptions, optionFields, strategyValid)\n\n- `src/extraction-worker/routes/validate.ts` — Verify:\n  1. Strategy is typed as `VariantSelectionStrategy | null`\n  2. Variant result block has real corroboration (not the old 'not yet implemented' stub)\n  3. `strategyValid` logic handles null strategy, container not found, and missing options\n\n- `src/client/components/ProfileBuilderWorkspace.tsx` — Verify:\n  1. The hardcoded `variantSelectionStrategy: null` was replaced with a read from the stored generation\n\n## Review angles\n\n1. **Completeness** — Are all required changes from the plan implemented?\n2. **Correctness** — Does `buildVariantOptionCandidates` correctly scan the original HTML (not minimized DOM)? Are the 5 discovery strategies logically sound?\n3. **Safety** — Does `shapeFromParsed` properly handle malformed LLM output without crashing or failing the profile? Is the strategy parsing defensive?\n4. **Type safety** — Run `npx tsc --noEmit --skipLibCheck` and report any issues.\n5. **Architecture** — Does the implementation follow the plan's key constraint (variant discovery runs on original HTML, not minimized)?\n\nReturn concise evidence-backed findings with file/line references. Do NOT modify any files.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 66471,
+        "output": 19050,
+        "cacheRead": 971487,
+        "cacheWrite": 0,
+        "cost": 0.42946602000000006,
+        "turns": 20
+      }
+    }
+  ],
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783069622917
+}

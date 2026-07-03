@@ -21,10 +21,14 @@ try {
   apiToken = randomBytes(32).toString('hex');
 }
 
+// Generate a shared worker token used by both the Bun server and the worker process
+const workerToken = randomBytes(32).toString('hex');
+
 const env = {
   ...process.env,
   NODE_ENV: 'development',
   SHOPSITE_CMS_API_TOKEN: apiToken,
+  SHOPSITE_CMS_WORKER_TOKEN: workerToken,
   HOST: '127.0.0.1',
 };
 
@@ -34,6 +38,22 @@ const server = spawn('bun', ['--watch', 'src/server/index.ts'], {
   stdio: 'inherit',
   env,
 });
+
+// Start extraction worker (Node.js sidecar for Playwright, snapshots, validation)
+const worker = spawn(
+  'node',
+  ['--import', 'tsx', '--watch', 'src/extraction-worker/server.ts'],
+  {
+    cwd: root,
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      SHOPSITE_CMS_WORKER_HOST: '127.0.0.1',
+      SHOPSITE_CMS_WORKER_PORT: '3032',
+      SHOPSITE_CMS_WORKER_TOKEN: workerToken,
+    },
+  },
+);
 
 // Start Vite dev server - bind to 127.0.0.1 for security
 const vite = spawn(
@@ -46,6 +66,7 @@ const vite = spawn(
       ...process.env,
       NODE_ENV: 'development',
       VITE_SHOPSITE_CMS_API_TOKEN: apiToken,
+      SHOPSITE_CMS_WORKER_TOKEN: workerToken,
     },
   },
 );
@@ -53,16 +74,20 @@ const vite = spawn(
 console.log(`ShopSite CMS dev mode started.`);
 console.log(`API token: ${apiToken}`);
 console.log(`Server bound to 127.0.0.1:${process.env.PORT ?? '3030'}`);
+console.log(`Worker bound to 127.0.0.1:3032`);
+console.log(`Worker token: ${workerToken}`);
 console.log(`Vite bound to 127.0.0.1:5173`);
 
 process.on('SIGINT', () => {
   server.kill();
   vite.kill();
+  worker.kill();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   server.kill();
   vite.kill();
+  worker.kill();
   process.exit(0);
 });

@@ -1,0 +1,30 @@
+{
+  "runId": "b4ac6f2d-b927-4389-b55d-c14bd1a8b2e5",
+  "agent": "worker",
+  "task": "Fix the validation sample flow so the Profile Builder Workspace can actually validate across confirmed samples.\n\n### Problem\n\nWhen the user opens the Profile Builder Workspace for a domain (e.g., mywoof.com) and clicks \"Validate Across Samples\", the `handleValidate` function in `ProfileBuilderWorkspace.tsx` only uses `seedSampleUrl` from props. If no seed URL is provided (the normal case when opening from the workspace directly), it shows \"No sample URLs available\" even though the domain has confirmed samples.\n\nThe governance response (`getDomainProfileGovernance`) returns `validationSampleCount` (a number) but not the actual sample URLs. The frontend can't build validate requests without the URLs.\n\n### Changes needed\n\n#### 1. Add ValidationSampleRefSchema to `src/shared/schemas/onboarding.ts`\n\nAfter `DomainProfileGovernanceSchema` and its `validationSampleCount` field, add before the closing:\n\n```typescript\nexport const ValidationSampleRefSchema = z.object({\n  url: z.string(),\n  expectedName: z.string().nullable(),\n  brandHint: z.string().nullable(),\n  itemId: z.string(),\n  confirmed: z.boolean(),\n});\nexport type ValidationSampleRef = z.infer<typeof ValidationSampleRefSchema>;\n```\n\nThen update `DomainProfileGovernanceSchema` to include an array of samples:\n\n```typescript\nexport const DomainProfileGovernanceSchema = z.object({\n  domain: z.string(),\n  activeProfile: ExtractorProfileSchema.nullable().default(null),\n  generations: z.array(ProfileGenerationGenerationSchema).default(() => []),\n  revisions: z.array(ProfileGenerationRevisionSchema).default(() => []),\n  fieldDecisions: z.array(ProfileGenerationFieldDecisionSchema).default(() => []),\n  validationSampleCount: z.number().int().default(0),\n  validationSamples: z.array(ValidationSampleRefSchema).default(() => []),\n});\n```\n\n#### 2. Update `listDomainProfileGovernance` in `src/onboarding/profile-governance-service.ts`\n\nFind the function that returns the governance summary. It already calls `listValidationSamplesByDomain`. Change its output to include the actual sample data (not just the count):\n\n```typescript\nconst validationSamples = listValidationSamplesByDomain(normalizedDomain, MAX_VALIDATION_SAMPLES);\n\nreturn {\n  domain: normalizedDomain,\n  activeProfile: (activeProfile as ExtractorProfile | null) ?? null,\n  generations,\n  revisions,\n  fieldDecisions,\n  validationSampleCount: validationSamples.length,\n  validationSamples: validationSamples.map(s => ({\n    url: s.url,\n    expectedName: s.expectedName,\n    brandHint: s.brandHint,\n    itemId: s.itemId,\n    confirmed: true,\n  })),\n};\n```\n\n#### 3. Update `handleValidate` in `ProfileBuilderWorkspace.tsx`\n\nFind the `handleValidate` function (around line 437-500). After building the samples from `seedSampleUrl`, add:\n\n```typescript\n// Also include confirmed validation samples from governance\nif (governance?.validationSamples && governance.validationSamples.length > 0) {\n  for (const vs of governance.validationSamples) {\n    if (!samples.find(s => s.url === vs.url)) {\n      samples.push({\n        url: vs.url,\n        confirmed: vs.confirmed,\n        expectedName: vs.expectedName ?? undefined,\n        upc: undefined,\n      });\n    }\n  }\n}\n```\n\nImport the new type at the top:\n```typescript\nimport type { ValidationSampleRef } from '../../shared/schemas/onboarding';\n```\n\n## Validation\n- `bun run typecheck` passes with zero errors\n- When the workspace opens for mywoof.com and the user clicks \"Validate Across Samples\", it should use the confirmed samples from the governance response\n\n## Handoff\nReport all changed files and typecheck result.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 39622,
+        "output": 6235,
+        "cacheRead": 637824,
+        "cacheWrite": 0,
+        "cost": 0.009078787199999997,
+        "turns": 24
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783072557840
+}

@@ -568,8 +568,187 @@ _Avoid_: Hidden ordering, implicit prerequisite
 > **Dev:** "If a food product is assigned to the **Dog Food** **Category Page**, do we automatically know its flavor?"
 > **Domain expert:** "No — the **Category Page** controls where customers browse for it, while flavor is a **Product Attribute** determined from the product data."
 
+## Onboarding Pipeline
+
+**Onboarding Batch**:
+A group of products imported together from a spreadsheet. It is the primary view lens for the Pipeline Board — users navigate between batches to see items at different stages. It aggregates derived progress from its items but has no lifecycle control of its own.
+_Avoid_: Active batch, processing unit, batch status
+
+**Pipeline Stage**:
+A declared step in the onboarding pipeline. Each item independently tracks which stage it is in and its stage-level status. Stages form a linear progression defined once per workspace.
+_Avoid_: Batch status, phase, step
+
+**Stage Status**:
+An item's status within a Pipeline Stage: `pending`, `in_progress`, `completed`, `failed`, or `skipped`. Failed items remain in their current stage column. The user resets them to `pending` to retry processing in the same stage — they never move backwards to a previous stage.
+_Avoid_: Item state, pipeline status, old status
+
+**Stage Advancement**:
+The action of moving one or more items from their current Pipeline Stage to the next. Items may be advanced individually or in selected groups, regardless of batch membership. Advancement is always manual — no item auto-transitions between stages. The worker only processes items within their current stage.
+_Avoid_: Batch promotion, phase transition, auto-advance
+
+**Stage Names**:
+The five declared Pipeline Stages: **Discovery**, **Extraction**, **Curation**, **Review**, and **Promotion**, in that order.
+
+**Discovery**:
+The pipeline stage that finds the official product page URL on brand sites via web search.
+
+**Extraction**:
+The pipeline stage that scrapes raw product details (titles, descriptions, images, prices) from confirmed URLs.
+
+**Domain Extractor Profile**:
+A reviewed extraction contract for one product-page structure on a domain that identifies the structures trusted during Extraction.
+_Avoid_: Crawlee profile, generic scraper, selector cache
+
+**Profile Scope**:
+The subset of a domain's product pages that a Domain Extractor Profile covers, described by both an operator-visible URL pattern and a page-structure signal.
+_Avoid_: Whole-domain assumption, URL-only rule
+
+**Page Structure Signal**:
+A stable product-page structure observation used to confirm that a Domain Extractor Profile still applies to a source URL.
+_Avoid_: Visual design, exact DOM snapshot, URL pattern
+
+**Profile Match**:
+The single healthy Domain Extractor Profile selected for a source URL before automated Extraction begins.
+_Avoid_: First profile, silent fallback, ambiguous match
+
+**Source-Page Variant**:
+An option state on a source product page that must be selected to extract evidence for one imported Product SKU.
+_Avoid_: Product family, variant group, inherited product data
+
+**Variant Selection Strategy**:
+A reviewed deterministic method for selecting the Source-Page Variant that corresponds to one imported Product SKU.
+_Avoid_: LLM guess, visual hunch, best-effort variant
+
+**Profile Health**:
+The reviewed readiness of a Domain Extractor Profile, including product identity, description, image, and relevant variant evidence, to support automated Extraction for a domain.
+_Avoid_: Profile exists, latest generation status, domain uptime
+
+**Profile Revalidation Requirement**:
+The review state created when a Domain Extractor Profile may no longer match its covered page structure.
+_Avoid_: Immediate profile deletion, transient page failure, silent profile decay
+
+**Fail-Closed Extraction**:
+The rule that automated Extraction stops for a product page when its domain lacks a healthy Domain Extractor Profile.
+_Avoid_: Generic fallback extraction, best-effort scraping
+
+**Profile-Blocked Item**:
+An Onboarding Item stopped in Extraction because no healthy Domain Extractor Profile produced a Profile Match.
+_Avoid_: Failed product, auto-retry candidate, skipped item
+
+**Profile Retry Preview**:
+A summary of Profile-Blocked Items that could be retried after a relevant Domain Extractor Profile becomes healthy.
+_Avoid_: Automatic rerun, hidden queue, batch advancement
+
+**Profile Tooling Extraction**:
+Exploratory page extraction used to build, validate, preview, or diagnose Domain Extractor Profiles without producing trusted product evidence.
+_Avoid_: Trusted extraction, curation input, product evidence
+
+**Profile Builder**:
+A proposal-only workflow that helps create or revise Domain Extractor Profiles.
+_Avoid_: Auto-profile creator, trusted extractor, profile autopilot
+
+**Profile Builder Workspace**:
+A domain-first review surface for building, validating, and approving Domain Extractor Profile proposals.
+_Avoid_: Review drawer, product drawer, inline extraction result
+
+**Profile Validation Sample**:
+A product page used to test whether a Domain Extractor Profile extracts the expected product evidence within its Profile Scope.
+_Avoid_: Training data, random URL, product approval
+
+**Confirmed Profile Sample**:
+A Profile Validation Sample whose source URL has been reviewed as the correct product page for its product.
+_Avoid_: Sitemap guess, search result, unreviewed candidate
+
+**Curation**:
+The pipeline stage that synthesizes final clean store-ready titles (integrating spreadsheet hints, web scraped details, and local packaging OCR) and classifies products into internal product types and existing category pages.
+
+**Review**:
+The pipeline stage that surfaces curated drafts in a review drawer for user approval. Items in this stage can be approved individually.
+
+**Promotion**:
+The pipeline stage that creates CMS product drafts and links them to page directories. Items in this stage remain visible in the Promotion column. When all items in a batch reach Promotion (or are skipped/failed), the batch auto-archives.
+
+**Batch Archival**:
+When all items in a batch have reached Promotion or been skipped/failed, the batch is automatically archived and disappears from the active Pipeline Board. Archived batches remain accessible via the batch list.
+_Avoid_: Batch completion, batch cleanup
+
+**Advancement Trigger**:
+A user action that selects one or more items in a given stage and advances them to the next stage. This queues the items for worker processing if the target stage is automated.
+_Avoid_: Batch promotion, auto-transition
+
+**Pipeline Board**:
+A Kanban-style UI showing columns for each Pipeline Stage. Items appear as cards within their current stage column. Each column has an advance button to move selected items to the next stage. The board renders one Onboarding Batch at a time. Clicking any card opens a review drawer — read-only inspection in automated stages, full approve/reject controls in the Review stage.
+_Avoid_: Table view, item list, batch detail view
+
+## Relationships
+
+- The **Pipeline Board** renders four automated stage columns (**Discovery**, **Extraction**, **Curation**) and two manual columns (**Review**, **Promotion**).
+- **Extraction** requires a healthy **Domain Extractor Profile** for the source URL's domain.
+- A domain may have multiple **Domain Extractor Profiles** when its product pages use different structures.
+- Each **Domain Extractor Profile** has one **Profile Scope**.
+- A **Profile Scope** includes both an operator-visible URL pattern and a **Page Structure Signal**.
+- A source URL must resolve to exactly one **Profile Match** before automated **Extraction** can produce trusted product evidence.
+- A **Profile Match** requires both the source URL and the source page's **Page Structure Signal** to fit the **Profile Scope**.
+- The most specific healthy **Profile Scope** determines the **Profile Match**.
+- Ambiguous matching **Profile Scopes** prevent a **Profile Match** until a reviewer resolves the ambiguity.
+- A default **Domain Extractor Profile** may produce a **Profile Match** only when it is explicitly scoped as the domain default and healthy.
+- When a source URL fits a **Profile Scope** URL pattern but its **Page Structure Signal** no longer fits, **Fail-Closed Extraction** stops that item.
+- A **Page Structure Signal** mismatch creates a **Profile Revalidation Requirement** for the relevant **Domain Extractor Profile**.
+- A single **Page Structure Signal** mismatch does not remove **Profile Health** without repeated mismatches or reviewer confirmation.
+- **Profile Tooling Extraction** may run when automated **Extraction** would fail closed.
+- **Profile Tooling Extraction** may support profile generation, validation, previews, and diagnostics.
+- **Profile Tooling Extraction** cannot produce trusted product evidence or advance an item past **Extraction**.
+- The **Profile Builder** produces Domain Extractor Profile proposals only.
+- The **Profile Builder** cannot create **Profile Health** without validation and reviewer approval.
+- A **Profile Builder Workspace** is organized around one domain, not one product item.
+- An **Onboarding Item** may provide a seed **Profile Validation Sample** for a **Profile Builder Workspace**.
+- A **Profile Builder Workspace** may use unreviewed sitemap product URLs as exploratory Profile Validation Samples.
+- Only **Confirmed Profile Samples** count toward **Profile Health**.
+- A normal **Domain Extractor Profile** requires at least two **Confirmed Profile Samples** within its **Profile Scope** before it can be healthy.
+- A variant-bearing **Domain Extractor Profile** requires at least one **Confirmed Profile Sample** that demonstrates correct Source-Page Variant distinction before it can be healthy.
+- A **Product SKU** may require selecting one **Source-Page Variant** during **Extraction**.
+- A **Variant Selection Strategy** may use product-linked inputs such as expected name, UPC, SKU, spreadsheet hints, URL variant parameters, embedded source-page variant data, and visible selected option labels.
+- A **Variant Selection Strategy** must fail closed when the correct **Source-Page Variant** is ambiguous.
+- The **Profile Builder** may propose a **Variant Selection Strategy**, but automated **Extraction** executes it deterministically.
+- **Source-Page Variant** selection does not create a product-family model or inherited product data.
+- A **Profile Builder Workspace** is separate from the product review drawer.
+- **Profile Health** belongs to the matched **Domain Extractor Profile**, not to the whole domain.
+- **Profile Health** is determined from confirmed same-domain product samples within the **Profile Scope**.
+- A healthy **Domain Extractor Profile** includes reviewed title, description, and image extraction coverage.
+- Price extraction is not required for **Profile Health** when the imported product provides the trusted price.
+- A **Domain Extractor Profile** for variant-bearing product pages requires reviewed evidence that the correct variant can be distinguished before it is healthy.
+- Image extraction coverage requires reviewed image previews before **Profile Health** can allow automated **Extraction**.
+- **Fail-Closed Extraction** may stop an item in **Extraction** without producing trusted product evidence.
+- **Fail-Closed Extraction** may create a **Profile-Blocked Item**.
+- A **Profile-Blocked Item** remains in **Extraction** until a reviewer chooses to retry it.
+- When a relevant **Domain Extractor Profile** becomes healthy, affected **Profile-Blocked Items** appear in a **Profile Retry Preview** rather than automatically rerunning.
+- A **Profile Retry Preview** supports selected retries; it does not advance a whole **Onboarding Batch**.
+- An **Onboarding Batch** has derived progress (counts per stage) computed from its items, not a controlling status of its own.
+- An **Onboarding Batch** contains one or more **Onboarding Items**.
+- An **Onboarding Item** is in exactly one **Pipeline Stage** at any time.
+- A **Pipeline Stage** has exactly one **Stage Status** per item.
+- **Stage Advancement** moves items from one stage to the next in the linear order: **Discovery** → **Extraction** → **Curation** → **Review** → **Promotion**.
+- An **Advancement Trigger** acts on items in any **Onboarding Batch** — batch membership does not gate advancement.
+
 ## Flagged ambiguities
 
+- "Crawlee profile system" was used to mean both the extraction contract and the crawling runtime — resolved: use **Domain Extractor Profile** for the domain contract and reserve Crawlee for runtime implementation details.
+- "healthy profile" could mean a profile row exists, a generation was promoted, or extraction recently succeeded — resolved: use **Profile Health** for reviewed readiness to support automated Extraction.
+- "domain profile" could imply exactly one extraction profile per domain — resolved: a domain may have multiple **Domain Extractor Profiles**, each with its own **Profile Scope** and **Profile Health**.
+- "default profile" could imply a silent fallback when no structure-specific profile matches — resolved: defaults must be explicit, healthy **Domain Extractor Profiles** and still produce a single **Profile Match**.
+- "profile scope" could be treated as URL-only — resolved: **Profile Scope** combines an operator-visible URL pattern with a **Page Structure Signal**.
+- A page-structure mismatch could be treated as immediate profile invalidation — resolved: it creates a **Profile Revalidation Requirement** and stops the item, while **Profile Health** changes only after repeated mismatches or reviewer confirmation.
+- Generic extraction could be treated as trusted product evidence after fail-closed matching — resolved: use **Profile Tooling Extraction** only for profile building, validation, previews, and diagnostics.
+- LLM-assisted profile building could be mistaken for automatic profile activation — resolved: the **Profile Builder** is proposal-only and cannot create **Profile Health** without validation and reviewer approval.
+- Profile review could be buried inside the product drawer — resolved: use a separate **Profile Builder Workspace** for profile building, validation, and approval.
+- Profile building could be treated as a one-off product fix — resolved: the **Profile Builder Workspace** is domain-first, and product items only provide seed samples.
+- Sitemap product URLs could be treated as validation evidence by default — resolved: only **Confirmed Profile Samples** count toward **Profile Health**.
+- New Profile Health could imply automatic reruns of every blocked item — resolved: show a **Profile Retry Preview** and let reviewers retry selected **Profile-Blocked Items**.
+- "status" was used to mean both batch lifecycle and item-level stage — resolved: use **Pipeline Stage** + **Stage Status** for items, and derived progress for batches.
+- "phase" was used interchangeably with "stage" — resolved: use **Pipeline Stage** exclusively.
+- "batch" was used as a lifecycle controller — resolved: batches are grouping/import containers with no lifecycle control.
+- "advance" was conflated with automated progression — resolved: **Stage Advancement** is always manual.
+- "review" was both a pipeline stage name and a UI drawer action — resolved: **Review** is the stage; the drawer is the **Review Drawer** within it.
 - "category" was used to mean both **Category Page** placement and **Product Type** classification — resolved: these are distinct concepts.
 - Customer-facing page names or hierarchy could be treated as direct product facts — resolved: they are **Page Context Evidence** and low-reliability.
 - "new product type" can mean either a configured **Product Type** or a suggested **Unmapped Product Type** — resolved: classifiers may suggest but not create Product Types.
@@ -595,6 +774,8 @@ _Avoid_: Hidden ordering, implicit prerequisite
 - Product review could force a Product Type when evidence is ambiguous — resolved: allow **Unknown Primary Product Type** and pause type-gated proposals including Category Page proposals without blocking product draft creation.
 - Correcting Primary Product Type could look like a special decision type — resolved: treat it as a **Proposal Decision Revision** that triggers a Classification Refresh for dependent stages while preserving prior decisions.
 - Product families or variants could imply inherited classification — resolved: classify each **Product SKU** independently until the domain has an explicit product-family concept.
+- "variant data" could mean full family modeling or source-page option selection — resolved: use **Source-Page Variant** only for selecting the correct source-page option state for one imported **Product SKU**.
+- Variant selection could rely on LLM guessing during automated Extraction — resolved: use a reviewed deterministic **Variant Selection Strategy** and fail closed on ambiguity.
 - SKU could be confused with the stable local product identity — resolved: use **Product SKU** for the store-facing onboarding key and **Product Identity** after product draft creation.
 - "field" was used to mean store-specific merchandising facts — resolved: call these **Product Attributes** in the domain language.
 - Attribute grouping could be mistaken for classification semantics — resolved: use **Attribute Groups** only for manager-facing organization and duplicate-label context.

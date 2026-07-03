@@ -17,15 +17,17 @@ import {
   setItemUrl,
   skipItem,
   resolveBrandDomains,
-  getExtractorProfiles,
-  saveExtractorProfile,
-  testExtractorProfile,
   getBrandSites,
-  submitDecisions
+  submitDecisions,
+  bulkAssignBrand,
+  bulkSkipItems,
+  bulkRetryItems
 } from '../onboarding-api';
-import type { ClassificationProposal, ClassificationEvidence } from '../../shared/schemas/classification';
 import { OnboardingSettings } from './OnboardingSettings';
-import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping } from '../../shared/schemas/onboarding';
+import { PipelineBoard } from './PipelineBoard';
+import { ProfileBuilderWorkspace } from './ProfileBuilderWorkspace';
+import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
+import type { ClassificationProposal, ClassificationEvidence } from '../../shared/schemas/classification';
 import { matchExistingBrand } from '../../shared/brand-matcher';
 
 export function Onboarding() {
@@ -61,19 +63,29 @@ export function Onboarding() {
   const [storePages, setStorePages] = useState<string[]>([]);
   const [classificationProposals, setClassificationProposals] = useState<ClassificationProposal[]>([]);
   const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
+  const [profileBuilderDomain, setProfileBuilderDomain] = useState<string | null>(null);
+  const [profileBuilderSeed, setProfileBuilderSeed] = useState<{ url?: string; item?: any } | null>(null);
 
-  // Custom Selector Editor state
-  const [titleSelector, setTitleSelector] = useState('');
-  const [priceSelector, setPriceSelector] = useState('');
-  const [descriptionSelector, setDescriptionSelector] = useState('');
-  const [brandSelector, setBrandSelector] = useState('');
-  const [imagesSelector, setImagesSelector] = useState('');
-  const [testingSelectors, setTestingSelectors] = useState(false);
-  const [selectorTestResults, setSelectorTestResults] = useState<any>(null);
-  const [selectorTestError, setSelectorTestError] = useState('');
+  // Custom Selector Editor state was removed; extractor profiles are
+  // managed in OnboardingSettings ("Domain Extractor Profiles" section).
 
   // Selection state for promotion
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
+
+  // Brand/Domain Management states
+  const [cachedBrandSites, setCachedBrandSites] = useState<BrandSite[]>([]);
+  const [catalogBrands, setCatalogBrands] = useState<string[]>([]);
+  const [activeEditBrandItem, setActiveEditBrandItem] = useState<OnboardingItem | null>(null);
+  const [editBrandName, setEditBrandName] = useState('');
+  const [editBrandDomain, setEditBrandDomain] = useState('');
+  const [propagateBrandName, setPropagateBrandName] = useState(false);
+  const [validationModalItems, setValidationModalItems] = useState<OnboardingItem[] | null>(null);
+  const [drawerBrandName, setDrawerBrandName] = useState('');
+  const [drawerBrandDomain, setDrawerBrandDomain] = useState('');
+  const [showBulkBrandModal, setShowBulkBrandModal] = useState(false);
+  const [bulkBrandName, setBulkBrandName] = useState('');
+  const [bulkBrandDomain, setBulkBrandDomain] = useState('');
+  const [lastSelectedItemId, setLastSelectedItemId] = useState<string | null>(null);
 
   // SSE reference
   const sseRef = useRef<EventSource | null>(null);
@@ -101,49 +113,25 @@ export function Onboarding() {
     }
   };
 
+  const loadBrandSites = async () => {
+    try {
+      const res = await getBrandSites();
+      setCachedBrandSites(res.brandSites);
+      if (res.catalogBrands) {
+        setCatalogBrands(res.catalogBrands);
+      }
+    } catch (err) {
+      console.error('Failed to load brand sites:', err);
+    }
+  };
+
   useEffect(() => {
     fetchBatchesList();
     loadStorePages();
+    loadBrandSites();
   }, []);
 
-  // SSE setup when a batch is active
-  const connectSSE = (batchId: string) => {
-    if (sseRef.current) {
-      sseRef.current.close();
-    }
-
-    const sse = new EventSource(`/api/onboarding/batches/${batchId}/events`);
-    sseRef.current = sse;
-
-    sse.addEventListener('item:status', (e: any) => {
-      const event = JSON.parse(e.data);
-      setItems(prev => prev.map(item => {
-        if (item.id === event.itemId) {
-          return { ...item, status: event.data.status, errorMessage: event.data.error || null, sourceUrl: event.data.sourceUrl || item.sourceUrl };
-        }
-        return item;
-      }));
-    });
-
-    sse.addEventListener('batch:progress', (e: any) => {
-      const event = JSON.parse(e.data);
-      setSelectedBatch(prev => prev ? {
-        ...prev,
-        completedItems: event.data.completed,
-        failedItems: event.data.failed,
-      } : null);
-    });
-
-    sse.addEventListener('batch:complete', (e: any) => {
-      const event = JSON.parse(e.data);
-      setSelectedBatch(prev => prev ? {
-        ...prev,
-        status: event.data.status,
-      } : null);
-      fetchBatchesList();
-    });
-  };
-
+  // SSE lifecycle handled by PipelineBoard now
   useEffect(() => {
     return () => {
       if (sseRef.current) {
@@ -163,11 +151,7 @@ export function Onboarding() {
       
       const itemsRes = await getBatchItems(batchId);
       setItems(itemsRes.items);
-
-      // Connect SSE if the batch is in a processing state
-      if (['discovering', 'extracting'].includes(batchRes.batch.status)) {
-        connectSSE(batchId);
-      }
+      await loadBrandSites();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -326,23 +310,76 @@ export function Onboarding() {
 
   const handleStartDiscovery = async () => {
     if (!selectedBatchId) return;
+    
+    const itemsToValidate = selectedItemIds.length > 0
+      ? items.filter(item => selectedItemIds.includes(item.id))
+      : items;
+
+    // Check if any items are missing brands or domains
+    const invalidItems = itemsToValidate.filter(item => {
+      if (!item.brandHint || !item.brandHint.trim()) return true;
+      
+      const site = cachedBrandSites.find(b => b.brandName.toLowerCase() === item.brandHint!.toLowerCase().trim());
+      if (!site || !site.domain || !site.domain.trim()) return true;
+      
+      return false;
+    });
+
+    if (invalidItems.length > 0) {
+      setValidationModalItems(invalidItems);
+      return;
+    }
+
+    setLoading(true);
+    setError('');
     try {
-      await startSourceDiscovery(selectedBatchId);
+      await startSourceDiscovery(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
+      setSelectedItemIds([]);
       // Refresh details
-      handleSelectBatch(selectedBatchId);
+      await handleSelectBatch(selectedBatchId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSkipAndStartDiscovery = async () => {
+    if (!selectedBatchId || !validationModalItems) return;
+    setLoading(true);
+    setError('');
+    const itemsToSkip = [...validationModalItems];
+    setValidationModalItems(null);
+    try {
+      // Mark all invalid items as skipped
+      await Promise.all(
+        itemsToSkip.map(item => updateItem(item.id, { status: 'skipped' }))
+      );
+      
+      // Then start discovery
+      await startSourceDiscovery(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
+      setSelectedItemIds([]);
+      await handleSelectBatch(selectedBatchId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleStartExtraction = async () => {
     if (!selectedBatchId) return;
+    setLoading(true);
+    setError('');
     try {
-      await startExtraction(selectedBatchId);
+      await startExtraction(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
+      setSelectedItemIds([]);
       // Refresh details
-      handleSelectBatch(selectedBatchId);
+      await handleSelectBatch(selectedBatchId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -351,7 +388,8 @@ export function Onboarding() {
     setLoading(true);
     setError('');
     try {
-      await startCuration(selectedBatchId);
+      await startCuration(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
+      setSelectedItemIds([]);
       handleSelectBatch(selectedBatchId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -382,12 +420,13 @@ export function Onboarding() {
     setReviewItemId(item.id);
     setReviewItem(item);
     setManualUrlInput(item.sourceUrl || '');
+    setDrawerBrandName(item.brandHint ? item.brandHint : '');
+    const site = cachedBrandSites.find(b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim());
+    setDrawerBrandDomain(site?.domain || '');
     setReviewSources([]);
     setReviewExtraction(null);
     setEditFields({});
 
-    setSelectorTestResults(null);
-    setSelectorTestError('');
     if (item.curationData?.classificationProposals) {
       setClassificationProposals(item.curationData.classificationProposals);
       setClassificationEvidence(item.curationData.classificationEvidence || []);
@@ -395,16 +434,14 @@ export function Onboarding() {
       setClassificationProposals([]);
       setClassificationEvidence([]);
     }
-    if (item.sourceUrl) {
-      loadSelectorProfileForUrl(item.sourceUrl);
-    }
 
     try {
       const res = await getItemDetail(item.id);
       setReviewSources(res.sources);
-      if (res.extraction) {
-        setReviewExtraction(res.extraction);
-        setEditFields(res.extraction);
+      const extractionData = res.extraction ?? res.item?.extractionData ?? null;
+      if (extractionData) {
+        setReviewExtraction(extractionData);
+        setEditFields(extractionData);
       }
       if (res.item?.curationData) {
         setCurationFields(res.item.curationData);
@@ -412,7 +449,7 @@ export function Onboarding() {
         setCurationFields(item.curationData);
       } else {
         setCurationFields({
-          curatedTitle: res.extraction?.title || item.name,
+          curatedTitle: extractionData?.title || item.name,
           packagingOcrTitle: null,
           titleSource: 'web',
           suggestedPages: [],
@@ -433,96 +470,12 @@ export function Onboarding() {
     setCurationFields({});
     setClassificationProposals([]);
     setClassificationEvidence([]);
-    // Reset selectors
-    setTitleSelector('');
-    setPriceSelector('');
-    setDescriptionSelector('');
-    setBrandSelector('');
-    setImagesSelector('');
-    setSelectorTestResults(null);
-    setSelectorTestError('');
-    
+    setDrawerBrandName('');
+    setDrawerBrandDomain('');
+
     // Refresh batch items list to show updated status
     if (selectedBatchId) {
       getBatchItems(selectedBatchId).then(res => setItems(res.items));
-    }
-  };
-
-  const loadSelectorProfileForUrl = async (url: string) => {
-    try {
-      const parsedUrl = new URL(url);
-      const domain = parsedUrl.hostname.replace(/^www\./, '');
-      const res = await getExtractorProfiles();
-      const profile = res.extractorProfiles.find(p => p.domain === domain);
-      if (profile) {
-        setTitleSelector(profile.titleSelector || '');
-        setPriceSelector(profile.priceSelector || '');
-        setDescriptionSelector(profile.descriptionSelector || '');
-        setBrandSelector(profile.brandSelector || '');
-        setImagesSelector(profile.imagesSelector || '');
-      } else {
-        setTitleSelector('');
-        setPriceSelector('');
-        setDescriptionSelector('');
-        setBrandSelector('');
-        setImagesSelector('');
-      }
-    } catch {
-      setTitleSelector('');
-      setPriceSelector('');
-      setDescriptionSelector('');
-      setBrandSelector('');
-      setImagesSelector('');
-    }
-  };
-
-  const handleTestSelectors = async () => {
-    const url = manualUrlInput || reviewItem?.sourceUrl;
-    if (!url) {
-      alert('Please specify a confirmed product URL first.');
-      return;
-    }
-    setTestingSelectors(true);
-    setSelectorTestError('');
-    setSelectorTestResults(null);
-    try {
-      const res = await testExtractorProfile({
-        url,
-        titleSelector: titleSelector || null,
-        priceSelector: priceSelector || null,
-        descriptionSelector: descriptionSelector || null,
-        brandSelector: brandSelector || null,
-        imagesSelector: imagesSelector || null,
-      });
-      if (res.success) {
-        setSelectorTestResults(res.extracted);
-      }
-    } catch (err) {
-      setSelectorTestError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setTestingSelectors(false);
-    }
-  };
-
-  const handleSaveSelectorProfile = async () => {
-    const url = manualUrlInput || reviewItem?.sourceUrl;
-    if (!url) {
-      alert('No product URL confirmed.');
-      return;
-    }
-    try {
-      const domain = new URL(url).hostname.replace(/^www\./, '');
-      await saveExtractorProfile({
-        domain,
-        titleSelector: titleSelector || null,
-        priceSelector: priceSelector || null,
-        descriptionSelector: descriptionSelector || null,
-        brandSelector: brandSelector || null,
-        imagesSelector: imagesSelector || null,
-      });
-      alert(`Selector profile saved for ${domain}! These selectors will be applied to all future extractions from this domain.`);
-    } catch (err) {
-      alert('Failed to save selector profile: ' + String(err));
     }
   };
 
@@ -536,7 +489,7 @@ export function Onboarding() {
         curation_data: { ...curationFields, classificationProposals, classificationEvidence }
       });
       if (classificationProposals.length > 0) {
-        const decs = classificationProposals.filter(p => p.status === 'accepted' || p.status === 'rejected' || p.status === 'deferred').map(p => ({ proposalId: p.id, decision: p.status as 'accepted' | 'rejected' | 'deferred' }));
+        const decs = classificationProposals.filter(p => p.status === 'accepted' || p.status === 'rejected' || p.status === 'deferred').map(p => ({ proposalId: p.id, decision: p.status as 'accepted' | 'rejected' | 'deferred', proposedValue: p.proposedValue, targetId: p.targetId }));
         if (decs.length > 0) { try { await submitDecisions(reviewItemId, decs); } catch (e) { console.warn(e); } }
       }
       alert('Item approved and saved to queue.');
@@ -562,13 +515,10 @@ export function Onboarding() {
       setReviewItem(res.item);
       setManualUrlInput(res.item.sourceUrl || '');
       setReviewSources(res.sources);
-      if (res.extraction) {
-        setReviewExtraction(res.extraction);
-        setEditFields(res.extraction);
-      }
-
-      if (res.item.sourceUrl) {
-        loadSelectorProfileForUrl(res.item.sourceUrl);
+      const extractionData = res.extraction ?? res.item?.extractionData ?? null;
+      if (extractionData) {
+        setReviewExtraction(extractionData);
+        setEditFields(extractionData);
       }
     } catch (err) {
       alert('Failed to select source: ' + (err instanceof Error ? err.message : String(err)));
@@ -584,12 +534,12 @@ export function Onboarding() {
       const res = await getItemDetail(reviewItemId);
       setReviewItem(res.item);
       setReviewSources(res.sources);
-      if (res.extraction) {
-        setReviewExtraction(res.extraction);
-        setEditFields(res.extraction);
+      const extractionData = res.extraction ?? res.item?.extractionData ?? null;
+      if (extractionData) {
+        setReviewExtraction(extractionData);
+        setEditFields(extractionData);
       }
 
-      loadSelectorProfileForUrl(manualUrlInput);
       alert('Source URL set successfully.');
     } catch (err) {
       alert('Failed to set URL: ' + (err instanceof Error ? err.message : String(err)));
@@ -614,22 +564,186 @@ export function Onboarding() {
     }
   };
 
+  const handleStartInlineEditBrand = (item: OnboardingItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setActiveEditBrandItem(item);
+    setEditBrandName(item.brandHint ? item.brandHint : '');
+    setPropagateBrandName(false);
+    
+    const site = cachedBrandSites.find(b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim());
+    setEditBrandDomain(site?.domain || '');
+  };
+
+  const handleSaveInlineBrandEdit = async (itemId: string) => {
+    setLoading(true);
+    try {
+      await updateItem(itemId, {
+        brandHint: editBrandName.trim() || null,
+        brandDomain: editBrandDomain.trim() || null,
+        propagateBrandName: propagateBrandName
+      });
+      if (selectedBatchId) {
+        const itemsRes = await getBatchItems(selectedBatchId);
+        setItems(itemsRes.items);
+        await loadBrandSites();
+      }
+      setActiveEditBrandItem(null);
+    } catch (err) {
+      alert('Failed to update brand: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveDrawerBrand = async () => {
+    if (!reviewItemId) return;
+    try {
+      await updateItem(reviewItemId, {
+        brandHint: drawerBrandName.trim() || null,
+        brandDomain: drawerBrandDomain.trim() || null,
+      });
+      if (selectedBatchId) {
+        const itemsRes = await getBatchItems(selectedBatchId);
+        setItems(itemsRes.items);
+        await loadBrandSites();
+      }
+      alert('Brand details updated.');
+    } catch (err) {
+      alert('Failed to update brand: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  const handleSaveBulkBrand = async () => {
+    if (!selectedBatchId || selectedItemIds.length === 0) return;
+    setLoading(true);
+    try {
+      await bulkAssignBrand(
+        selectedBatchId,
+        selectedItemIds,
+        bulkBrandName.trim() || null,
+        bulkBrandDomain.trim() || null
+      );
+      if (selectedBatchId) {
+        const itemsRes = await getBatchItems(selectedBatchId);
+        setItems(itemsRes.items);
+        await loadBrandSites();
+      }
+      setShowBulkBrandModal(false);
+      setBulkBrandName('');
+      setBulkBrandDomain('');
+      setSelectedItemIds([]);
+      alert(`Successfully assigned brand to ${selectedItemIds.length} items.`);
+    } catch (err) {
+      alert('Failed to bulk assign brand: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBulkSkip = async () => {
+    if (!selectedBatchId || selectedItemIds.length === 0) return;
+    if (!confirm(`Are you sure you want to skip the ${selectedItemIds.length} selected items?`)) return;
+    setLoading(true);
+    try {
+      await bulkSkipItems(selectedBatchId, selectedItemIds);
+      const itemsRes = await getBatchItems(selectedBatchId);
+      setItems(itemsRes.items);
+      setSelectedItemIds([]);
+      alert(`Successfully skipped ${selectedItemIds.length} items.`);
+    } catch (err) {
+      alert('Failed to bulk skip: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBulkRetry = async () => {
+    if (!selectedBatchId || selectedItemIds.length === 0) return;
+    if (!confirm(`Are you sure you want to reset/retry the ${selectedItemIds.length} selected items?`)) return;
+    setLoading(true);
+    try {
+      await bulkRetryItems(selectedBatchId, selectedItemIds);
+      const itemsRes = await getBatchItems(selectedBatchId);
+      setItems(itemsRes.items);
+      setSelectedItemIds([]);
+      alert(`Successfully reset ${selectedItemIds.length} items.`);
+    } catch (err) {
+      alert('Failed to bulk reset: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCheckboxClick = (item: OnboardingItem, e: React.MouseEvent<any>) => {
+    e.stopPropagation();
+
+    const isChecked = selectedItemIds.includes(item.id);
+    const targetChecked = !isChecked;
+
+    const selectableItems = items.filter(i => i.status !== 'promoted');
+    const currentIndex = selectableItems.findIndex(i => i.id === item.id);
+
+    if (e.shiftKey && lastSelectedItemId) {
+      const lastIndex = selectableItems.findIndex(i => i.id === lastSelectedItemId);
+      if (lastIndex !== -1) {
+        const start = Math.min(currentIndex, lastIndex);
+        const end = Math.max(currentIndex, lastIndex);
+        const rangeIds = selectableItems.slice(start, end + 1).map(i => i.id);
+
+        setSelectedItemIds(prev => {
+          if (targetChecked) {
+            return Array.from(new Set([...prev, ...rangeIds]));
+          } else {
+            return prev.filter(id => !rangeIds.includes(id));
+          }
+        });
+        setLastSelectedItemId(item.id);
+        return;
+      }
+    }
+
+    setSelectedItemIds(prev =>
+      targetChecked
+        ? [...prev, item.id]
+        : prev.filter(id => id !== item.id)
+    );
+    setLastSelectedItemId(item.id);
+  };
+
   // ─── LAYOUTS AND RENDERING ───────────────────────────────────────────────────
 
-  const renderBatchProgress = (batch: OnboardingBatch) => {
+  const renderBatchProgress = (batch: OnboardingBatch, itemsList?: OnboardingItem[]) => {
     const total = batch.totalItems || 1;
-    const completedPercent = Math.round((batch.completedItems / total) * 100);
-    const failedPercent = Math.round((batch.failedItems / total) * 100);
+    
+    let completed = batch.completedItems;
+    let failed = batch.failedItems;
+    let skipped = 0;
+    
+    if (itemsList && itemsList.length > 0) {
+      completed = itemsList.filter(i => ['source_found', 'needs_review', 'curated', 'ready', 'promoted'].includes(i.status)).length;
+      failed = itemsList.filter(i => i.status === 'failed').length;
+      skipped = itemsList.filter(i => i.status === 'skipped').length;
+    } else if (['review', 'curated', 'completed', 'failed'].includes(batch.status)) {
+      skipped = Math.max(0, batch.totalItems - batch.completedItems - batch.failedItems);
+    }
+    
+    const completedPercent = Math.round((completed / total) * 100);
+    const failedPercent = Math.round((failed / total) * 100);
+    const skippedPercent = Math.round((skipped / total) * 100);
 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#6b7280' }}>
-          <span>{batch.completedItems} completed / {batch.failedItems} failed ({batch.totalItems} total)</span>
+          <span>
+            {completed} completed / {failed} failed
+            {skipped > 0 && ` / ${skipped} skipped`} ({total} total)
+          </span>
           <span>{completedPercent + failedPercent}%</span>
         </div>
         <div style={{ height: 6, width: '100%', background: '#e5e7eb', borderRadius: 3, overflow: 'hidden', display: 'flex' }}>
           <div style={{ height: '100%', width: `${completedPercent}%`, background: '#16a34a' }} />
           <div style={{ height: '100%', width: `${failedPercent}%`, background: '#dc2626' }} />
+          <div style={{ height: '100%', width: `${skippedPercent}%`, background: '#9ca3af' }} />
         </div>
       </div>
     );
@@ -793,10 +907,18 @@ export function Onboarding() {
                       <div style={styles.fieldGroup}>
                         <label style={styles.label}>Onboarding Batch Name</label>
                         <input
-                          style={{ ...styles.input, width: '100%', padding: 8, border: '1px solid #d1d5db', borderRadius: 6 }}
+                          style={{
+                            ...styles.input,
+                            width: '100%',
+                            padding: 8,
+                            border: '1px solid #d1d5db',
+                            borderRadius: 6,
+                            ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                          }}
                           type="text"
                           value={uploadBatchName}
                           onChange={(e) => setUploadBatchName(e.target.value)}
+                          disabled={loadingBrands}
                         />
                       </div>
 
@@ -806,9 +928,13 @@ export function Onboarding() {
                         <div style={styles.fieldGroup}>
                           <label style={styles.label}>UPC/SKU Column *</label>
                           <select
-                            style={styles.select}
+                            style={{
+                              ...styles.select,
+                              ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                            }}
                             value={uploadMapping.upc || ''}
                             onChange={(e) => setUploadMapping(p => ({ ...p, upc: e.target.value }))}
+                            disabled={loadingBrands}
                           >
                             <option value="">-- Select --</option>
                             {uploadHeaders.map(h => <option key={h} value={h}>{h}</option>)}
@@ -818,9 +944,13 @@ export function Onboarding() {
                         <div style={styles.fieldGroup}>
                           <label style={styles.label}>Product Name Column *</label>
                           <select
-                            style={styles.select}
+                            style={{
+                              ...styles.select,
+                              ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                            }}
                             value={uploadMapping.name || ''}
                             onChange={(e) => setUploadMapping(p => ({ ...p, name: e.target.value }))}
+                            disabled={loadingBrands}
                           >
                             <option value="">-- Select --</option>
                             {uploadHeaders.map(h => <option key={h} value={h}>{h}</option>)}
@@ -830,9 +960,13 @@ export function Onboarding() {
                         <div style={styles.fieldGroup}>
                           <label style={styles.label}>Merge Name With Column (Optional)</label>
                           <select
-                            style={styles.select}
+                            style={{
+                              ...styles.select,
+                              ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                            }}
                             value={uploadMapping.nameMergeWith || ''}
                             onChange={(e) => setUploadMapping(p => ({ ...p, nameMergeWith: e.target.value || null }))}
+                            disabled={loadingBrands}
                           >
                             <option value="">-- None --</option>
                             {uploadHeaders.map(h => <option key={h} value={h}>{h}</option>)}
@@ -842,9 +976,13 @@ export function Onboarding() {
                         <div style={styles.fieldGroup}>
                           <label style={styles.label}>Price Column (Optional)</label>
                           <select
-                            style={styles.select}
+                            style={{
+                              ...styles.select,
+                              ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                            }}
                             value={uploadMapping.price || ''}
                             onChange={(e) => setUploadMapping(p => ({ ...p, price: e.target.value }))}
+                            disabled={loadingBrands}
                           >
                             <option value="">-- None --</option>
                             {uploadHeaders.map(h => <option key={h} value={h}>{h}</option>)}
@@ -854,9 +992,13 @@ export function Onboarding() {
                         <div style={styles.fieldGroup}>
                           <label style={styles.label}>Quantity Column (Optional)</label>
                           <select
-                            style={styles.select}
+                            style={{
+                              ...styles.select,
+                              ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                            }}
                             value={uploadMapping.quantity || ''}
                             onChange={(e) => setUploadMapping(p => ({ ...p, quantity: e.target.value }))}
+                            disabled={loadingBrands}
                           >
                             <option value="">-- None --</option>
                             {uploadHeaders.map(h => <option key={h} value={h}>{h}</option>)}
@@ -866,9 +1008,13 @@ export function Onboarding() {
                         <div style={styles.fieldGroup}>
                           <label style={styles.label}>Brand Column (Optional)</label>
                           <select
-                            style={styles.select}
+                            style={{
+                              ...styles.select,
+                              ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                            }}
                             value={uploadMapping.brand || ''}
                             onChange={(e) => setUploadMapping(p => ({ ...p, brand: e.target.value }))}
+                            disabled={loadingBrands}
                           >
                             <option value="">-- None --</option>
                             {uploadHeaders.map(h => <option key={h} value={h}>{h}</option>)}
@@ -878,9 +1024,13 @@ export function Onboarding() {
                         <div style={styles.fieldGroup}>
                           <label style={styles.label}>Product Page URL Column (Optional)</label>
                           <select
-                            style={styles.select}
+                            style={{
+                              ...styles.select,
+                              ...(loadingBrands ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                            }}
                             value={uploadMapping.sourceUrl || ''}
                             onChange={(e) => setUploadMapping(p => ({ ...p, sourceUrl: e.target.value }))}
+                            disabled={loadingBrands}
                           >
                             <option value="">-- None --</option>
                             {uploadHeaders.map(h => <option key={h} value={h}>{h}</option>)}
@@ -889,9 +1039,33 @@ export function Onboarding() {
                       </div>
 
                       <div style={{ ...styles.btnRow, marginTop: 24, justifyContent: 'flex-end' }}>
-                        <button style={{ ...styles.secondaryBtn, marginRight: 8 }} onClick={() => { setUploadFile(null); setShowUploadModal(false); }}>Cancel</button>
-                        <button style={styles.primaryBtn} onClick={handleNextStep} disabled={loadingBrands}>
-                          {loadingBrands ? 'Analyzing Brands...' : 'Next →'}
+                        <button
+                          style={{
+                            ...styles.secondaryBtn,
+                            marginRight: 8,
+                            ...(loadingBrands ? { opacity: 0.5, cursor: 'not-allowed' } : {})
+                          }}
+                          onClick={() => { setUploadFile(null); setShowUploadModal(false); }}
+                          disabled={loadingBrands}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          style={{
+                            ...styles.primaryBtn,
+                            ...(loadingBrands ? { opacity: 0.7, cursor: 'not-allowed', background: '#3b82f6' } : {})
+                          }}
+                          onClick={handleNextStep}
+                          disabled={loadingBrands}
+                        >
+                          {loadingBrands ? (
+                            <>
+                              <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                              Analyzing Brands...
+                            </>
+                          ) : (
+                            'Next →'
+                          )}
                         </button>
                       </div>
                     </div>
@@ -915,11 +1089,22 @@ export function Onboarding() {
                                 {brand}
                               </span>
                               <input
-                                style={{ ...styles.input, padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 13, height: 'auto', width: '100%', boxSizing: 'border-box' }}
+                                style={{
+                                  ...styles.input,
+                                  padding: '6px 10px',
+                                  border: '1px solid #d1d5db',
+                                  borderRadius: 6,
+                                  fontSize: 13,
+                                  height: 'auto',
+                                  width: '100%',
+                                  boxSizing: 'border-box',
+                                  ...(loading ? { backgroundColor: '#f3f4f6', cursor: 'not-allowed' } : {})
+                                }}
                                 type="text"
                                 placeholder="e.g. brandname.com"
                                 value={brandMappings[brand] || ''}
                                 onChange={(e) => setBrandMappings(p => ({ ...p, [brand]: e.target.value }))}
+                                disabled={loading}
                               />
                             </div>
                           ))}
@@ -927,8 +1112,33 @@ export function Onboarding() {
                       )}
 
                       <div style={{ ...styles.btnRow, marginTop: 24, justifyContent: 'space-between' }}>
-                        <button style={styles.secondaryBtn} onClick={() => setUploadStep(1)}>← Back</button>
-                        <button style={styles.primaryBtn} onClick={handleConfirmBatch}>Create Batch</button>
+                        <button
+                          style={{
+                            ...styles.secondaryBtn,
+                            ...(loading ? { opacity: 0.5, cursor: 'not-allowed' } : {})
+                          }}
+                          onClick={() => setUploadStep(1)}
+                          disabled={loading}
+                        >
+                          ← Back
+                        </button>
+                        <button
+                          style={{
+                            ...styles.primaryBtn,
+                            ...(loading ? { opacity: 0.7, cursor: 'not-allowed', background: '#3b82f6' } : {})
+                          }}
+                          onClick={handleConfirmBatch}
+                          disabled={loading}
+                        >
+                          {loading ? (
+                            <>
+                              <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                              Creating Batch...
+                            </>
+                          ) : (
+                            'Create Batch'
+                          )}
+                        </button>
                       </div>
                     </div>
                   )}
@@ -941,562 +1151,35 @@ export function Onboarding() {
     );
   }
 
-  // ─── VIEW 2: BATCH DETAIL QUEUE ──────────────────────────────────────────────
+  // ─── VIEW 2: PIPELINE BOARD ───────────────────────────────────────────────
 
-  const isBatchProcessing = selectedBatch && ['discovering', 'extracting'].includes(selectedBatch.status);
-  const isBatchFinished = selectedBatch && ['review', 'completed'].includes(selectedBatch.status);
+  if (selectedBatchId && selectedBatch) {
+    return (
+      <>
+        <PipelineBoard
+          batchId={selectedBatchId}
+          batchName={selectedBatch.name}
+          onBack={handleBackToBatches}
+          cachedBrandSites={cachedBrandSites}
+          _catalogBrands={catalogBrands}
+          onRefreshBrandSites={loadBrandSites}
+          onOpenProfileBuilder={(domain, item) => {
+            setProfileBuilderDomain(domain);
+            setProfileBuilderSeed({ url: item.sourceUrl ?? undefined, item });
+          }}
+        />
+        {profileBuilderDomain && (
+          <ProfileBuilderWorkspace
+            domain={profileBuilderDomain}
+            onClose={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}
+            seedSampleUrl={profileBuilderSeed?.url}
+            seedItem={profileBuilderSeed?.item}
+          />
+        )}
+      </>
+    );
+  }
 
-  return (
-    <div style={styles.container}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <button style={{ ...styles.secondaryBtn, padding: '4px 8px', fontSize: 12, marginBottom: 8 }} onClick={handleBackToBatches}>← All Batches</button>
-          <h1 style={{ ...styles.title, fontSize: 20 }}>
-            Batch: {selectedBatch?.name}
-            {selectedBatch && <span style={{ marginLeft: 12 }}><span style={statusStyle(selectedBatch.status)}>{statusLabel(selectedBatch.status)}</span></span>}
-          </h1>
-        </div>
-
-        <div style={styles.btnRow}>
-          {selectedBatch?.status === 'imported' && (
-            <button style={styles.primaryBtn} onClick={handleStartDiscovery} disabled={loading}>
-              🔍 Find Product Source URLs
-            </button>
-          )}
-
-          {selectedBatch?.status === 'review' && items.some(item => ['source_found', 'source_confirmed'].includes(item.status)) && (
-            <button style={styles.primaryBtn} onClick={handleStartExtraction} disabled={loading}>
-              ⚡ Scrape Product Information
-            </button>
-          )}
-
-          {selectedBatch?.status === 'review' && items.some(item => ['needs_review', 'curated'].includes(item.status)) && (
-            <button style={{ ...styles.primaryBtn, background: '#8b5cf6' }} onClick={handleStartCuration} disabled={loading}>
-              ✨ Refine & Classify Titles (OCR Curation)
-            </button>
-          )}
-
-          {(selectedBatch?.status === 'review' || selectedBatch?.status === 'completed') && items.some(item => item.status === 'curated' || item.status === 'ready') && (
-            <button
-              style={{ ...styles.primaryBtn, background: '#16a34a' }}
-              onClick={handlePromoteSelected}
-              disabled={selectedItemIds.length === 0 || loading}
-            >
-              📥 Promote Selected Drafts ({selectedItemIds.length})
-            </button>
-          )}
-        </div>
-      </div>
-
-      {error && <div style={{ color: '#dc2626', background: '#fef2f2', padding: 12, borderRadius: 6, marginBottom: 20 }}>{error}</div>}
-
-      {selectedBatch && (
-        <div style={{ ...styles.card, marginBottom: 16 }}>
-          <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600 }}>Batch Progress</h3>
-          {renderBatchProgress(selectedBatch)}
-        </div>
-      )}
-
-      {/* ─── ITEMS QUEUE ─── */}
-      <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={{ ...styles.th, width: 40 }}>
-                <input
-                  type="checkbox"
-                  checked={selectedItemIds.length > 0 && selectedItemIds.length === items.filter(i => ['needs_review', 'ready'].includes(i.status)).length}
-                  onChange={(e) => {
-                    const reviewable = items.filter(i => ['needs_review', 'ready'].includes(i.status)).map(i => i.id);
-                    setSelectedItemIds(e.target.checked ? reviewable : []);
-                  }}
-                />
-              </th>
-              <th style={styles.th}>Row</th>
-              <th style={styles.th}>UPC/SKU</th>
-              <th style={styles.th}>Name</th>
-              <th style={styles.th}>Price</th>
-              <th style={styles.th}>Source URL</th>
-              <th style={styles.th}>Status</th>
-              <th style={styles.th}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map(item => (
-              <tr
-                key={item.id}
-                style={{
-                  background: selectedItemIds.includes(item.id) ? '#eff6ff' : '#fff',
-                  cursor: 'pointer'
-                }}
-                onClick={() => handleOpenReview(item)}
-              >
-                <td style={styles.td} onClick={(e) => e.stopPropagation()}>
-                  {['needs_review', 'ready'].includes(item.status) ? (
-                    <input
-                      type="checkbox"
-                      checked={selectedItemIds.includes(item.id)}
-                      onChange={(e) => {
-                        setSelectedItemIds(prev =>
-                          e.target.checked
-                            ? [...prev, item.id]
-                            : prev.filter(id => id !== item.id)
-                        );
-                      }}
-                    />
-                  ) : null}
-                </td>
-                <td style={styles.td}>{item.rowNumber}</td>
-                <td style={styles.td}>
-                  <strong>{item.upc}</strong>
-                  {item.isDuplicate && (
-                    <span style={{ marginLeft: 4, background: '#fef2f2', color: '#991b1b', fontSize: 10, padding: '1px 4px', borderRadius: 4, fontWeight: 600 }}>Duplicate</span>
-                  )}
-                </td>
-                <td style={styles.td}>{item.name}</td>
-                <td style={styles.td}>{item.price ? `$${item.price}` : '—'}</td>
-                <td style={styles.td}>
-                  {item.sourceUrl ? (
-                    <a
-                      href={item.sourceUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      onClick={(e) => e.stopPropagation()}
-                      style={{ color: '#2563eb', textDecoration: 'none', wordBreak: 'break-all', fontSize: 13 }}
-                    >
-                      {item.sourceUrl.length > 40 ? item.sourceUrl.slice(0, 40) + '...' : item.sourceUrl}
-                    </a>
-                  ) : <span style={{ color: '#9ca3af', fontSize: 12 }}>None</span>}
-                </td>
-                <td style={styles.td}><span style={statusStyle(item.status)}>{statusLabel(item.status)}</span></td>
-                <td style={styles.td} onClick={(e) => e.stopPropagation()}>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <button
-                      style={{ background: 'none', border: 'none', color: '#2563eb', cursor: 'pointer', fontWeight: 600, fontSize: 13, padding: 0 }}
-                      onClick={() => handleOpenReview(item)}
-                    >
-                      Review
-                    </button>
-                    {item.status === 'failed' && (
-                      <button
-                        style={{ background: 'none', border: 'none', color: '#16a34a', cursor: 'pointer', fontWeight: 600, fontSize: 13, padding: 0 }}
-                        onClick={() => handleRetryItem(item.id)}
-                      >
-                        Retry
-                      </button>
-                    )}
-                    {!['promoted', 'skipped'].includes(item.status) && (
-                      <button
-                        style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: 600, fontSize: 13, padding: 0 }}
-                        onClick={() => handleSkipItem(item.id)}
-                      >
-                        Skip
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* ─── DETAIL / REVIEW DRAWER ────────────────────────────────────────────── */}
-      {reviewItemId && reviewItem && (
-        <>
-          <div className="drawer-backdrop" onClick={handleCloseReview} />
-          <div className="drawer-container" style={{ maxWidth: 850 }}>
-            <button className="drawer-close-btn" onClick={handleCloseReview}>✕</button>
-            
-            <div style={{ padding: 24, overflowY: 'auto', flex: 1 }}>
-              <h2 style={{ margin: '0 0 4px', fontSize: 20 }}>Review Item: {reviewItem.name}</h2>
-              <p style={{ margin: '0 0 20px', fontSize: 13, color: '#6b7280' }}>
-                Row {reviewItem.rowNumber} | UPC: <strong>{reviewItem.upc}</strong>
-              </p>
-
-              {reviewItem.errorMessage && (
-                <div style={{ background: '#fee2e2', color: '#991b1b', padding: 12, borderRadius: 6, marginBottom: 20, fontSize: 14 }}>
-                  <strong>Extraction Failure:</strong> {reviewItem.errorMessage}
-                </div>
-              )}
-
-              {reviewItem.isDuplicate && (
-                <div style={{ background: '#fffbeb', border: '1px solid #f59e0b', color: '#b45309', padding: 12, borderRadius: 6, marginBottom: 20, fontSize: 13 }}>
-                  ⚠️ <strong>Duplicate Warning:</strong> This product SKU/UPC already exists in your local product catalog index.
-                  If promoted, it will update/override the existing product instead of creating a new one.
-                </div>
-              )}
-
-              {/* ─── STEP 1: SOURCE URL SELECTION ─── */}
-              <div style={styles.card}>
-                <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 600 }}>Step 1: Confirmed Product Page URL</h3>
-                
-                <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                  <input
-                    style={{ ...styles.input, flex: 1 }}
-                    type="text"
-                    placeholder="Enter manual manufacturer product page URL"
-                    value={manualUrlInput}
-                    onChange={(e) => setManualUrlInput(e.target.value)}
-                  />
-                  <button style={styles.secondaryBtn} onClick={handleSetManualUrl}>Set URL</button>
-                </div>
-
-                {reviewSources.length > 0 && (
-                  <div>
-                    <h4 style={{ fontSize: 13, fontWeight: 600, color: '#4b5563', margin: '0 0 8px' }}>Google Search Discovery Matches</h4>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {reviewSources.map(src => (
-                        <div
-                          key={src.id}
-                          style={{
-                            border: '1px solid #e5e7eb',
-                            borderRadius: 6,
-                            padding: 12,
-                            background: src.isSelected ? '#f0fdf4' : '#fff',
-                            borderColor: src.isSelected ? '#16a34a' : '#e5e7eb',
-                            cursor: 'pointer'
-                          }}
-                          onClick={() => handleSelectSourceUrl(src)}
-                        >
-                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                            <strong style={{ fontSize: 14, color: src.isSelected ? '#166534' : '#111827' }}>
-                              {src.title || src.domain}
-                            </strong>
-                            <span style={{ fontSize: 11, fontWeight: 600, color: '#15803d' }}>
-                              {(src.confidence * 100).toFixed(0)}% Match
-                            </span>
-                          </div>
-                          <p style={{ margin: '0 0 4px', fontSize: 12, color: '#6b7280', wordBreak: 'break-all' }}>{src.url}</p>
-                          {src.snippet && <p style={{ margin: 0, fontSize: 12, color: '#4b5563', fontStyle: 'italic' }}>"{src.snippet}"</p>}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* ─── CUSTOM SELECTOR EDITOR ─── */}
-              {(manualUrlInput || reviewItem.sourceUrl) && (
-                <div style={styles.card}>
-                  <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 600 }}>Custom Site Selectors (Optional)</h3>
-                  <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 16px 0', lineHeight: '1.4' }}>
-                    Configure specific CSS selectors for the domain <strong>{(() => {
-                      try {
-                        return new URL(manualUrlInput || reviewItem.sourceUrl || '').hostname.replace(/^www\./, '');
-                      } catch {
-                        return '';
-                      }
-                    })()}</strong>. 
-                    Once saved, these custom selectors will override heuristics for all future extractions from this site.
-                  </p>
-                  
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                    <div style={styles.fieldGroup}>
-                      <label style={styles.label}>Title Selector</label>
-                      <input
-                        style={{ ...styles.input, fontSize: 13, padding: '6px 8px' }}
-                        type="text"
-                        placeholder="e.g. h1.product-title"
-                        value={titleSelector}
-                        onChange={(e) => setTitleSelector(e.target.value)}
-                      />
-                    </div>
-                    
-                    <div style={styles.fieldGroup}>
-                      <label style={styles.label}>Price Selector</label>
-                      <input
-                        style={{ ...styles.input, fontSize: 13, padding: '6px 8px' }}
-                        type="text"
-                        placeholder="e.g. span.price"
-                        value={priceSelector}
-                        onChange={(e) => setPriceSelector(e.target.value)}
-                      />
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-                    <div style={styles.fieldGroup}>
-                      <label style={styles.label}>Description Selector</label>
-                      <input
-                        style={{ ...styles.input, fontSize: 13, padding: '6px 8px' }}
-                        type="text"
-                        placeholder="e.g. div.desc"
-                        value={descriptionSelector}
-                        onChange={(e) => setDescriptionSelector(e.target.value)}
-                      />
-                    </div>
-                    
-                    <div style={styles.fieldGroup}>
-                      <label style={styles.label}>Brand Selector</label>
-                      <input
-                        style={{ ...styles.input, fontSize: 13, padding: '6px 8px' }}
-                        type="text"
-                        placeholder="e.g. a.brand"
-                        value={brandSelector}
-                        onChange={(e) => setBrandSelector(e.target.value)}
-                      />
-                    </div>
-                  </div>
-
-                  <div style={{ ...styles.fieldGroup, marginBottom: 16 }}>
-                    <label style={styles.label}>Images Selector</label>
-                    <input
-                      style={{ ...styles.input, fontSize: 13, padding: '6px 8px' }}
-                      type="text"
-                      placeholder="e.g. .gallery img (selects all matching images)"
-                      value={imagesSelector}
-                      onChange={(e) => setImagesSelector(e.target.value)}
-                    />
-                  </div>
-
-                  <div style={{ display: 'flex', gap: 12 }}>
-                    <button
-                      style={{ ...styles.secondaryBtn, flex: 1 }}
-                      onClick={handleTestSelectors}
-                      disabled={testingSelectors}
-                    >
-                      {testingSelectors ? 'Testing Selectors...' : '🧪 Test Selectors'}
-                    </button>
-                    
-                    <button
-                      style={{ ...styles.primaryBtn, flex: 1 }}
-                      onClick={handleSaveSelectorProfile}
-                    >
-                      💾 Save Selector Profile
-                    </button>
-                  </div>
-
-                  {selectorTestError && (
-                    <div style={{ marginTop: 12, padding: 8, background: '#fef2f2', border: '1px solid #fee2e2', borderRadius: 6, fontSize: 12, color: '#b91c1c' }}>
-                      <strong>Test failed:</strong> {selectorTestError}
-                    </div>
-                  )}
-
-                  {selectorTestResults && (
-                    <div style={{ marginTop: 12, padding: 12, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 6, fontSize: 12 }}>
-                      <strong style={{ display: 'block', marginBottom: 6, color: '#334155' }}>Test Extraction Results:</strong>
-                      <ul style={{ margin: 0, paddingLeft: 16, color: '#475569', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <li><strong>Title:</strong> {selectorTestResults.title || <span style={{ color: '#94a3b8' }}>not found</span>}</li>
-                        <li><strong>Price:</strong> {selectorTestResults.price || <span style={{ color: '#94a3b8' }}>not found</span>}</li>
-                        <li><strong>Brand:</strong> {selectorTestResults.brand || <span style={{ color: '#94a3b8' }}>not found</span>}</li>
-                        <li><strong>Description:</strong> {selectorTestResults.description ? `${selectorTestResults.description.slice(0, 80)}...` : <span style={{ color: '#94a3b8' }}>not found</span>}</li>
-                        <li><strong>Images found:</strong> {selectorTestResults.images?.length ?? 0}</li>
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ─── STEP 2: FIELD EDITING ─── */}
-              {reviewItem.status === 'needs_review' || reviewItem.status === 'ready' || reviewExtraction ? (
-                <div style={styles.card}>
-                  <h3 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 600 }}>Step 2: Extracted Product Draft Details</h3>
-                  
-                  {curationFields.packagingOcrTitle && (
-                    <div style={{ marginBottom: 12, padding: '8px 12px', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 6, fontSize: 13, color: '#5b21b6', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span>📷 Packaging OCR Title: <strong>"{curationFields.packagingOcrTitle}"</strong></span>
-                      <button
-                        type="button"
-                        style={{ ...styles.secondaryBtn, padding: '2px 6px', fontSize: 11, background: '#fff', border: '1px solid #c084fc', color: '#7c3aed' }}
-                        onClick={() => setCurationFields((p: any) => ({ ...p, curatedTitle: curationFields.packagingOcrTitle, titleSource: 'ocr' }))}
-                      >
-                        Use Packaging Title
-                      </button>
-                    </div>
-                  )}
-
-                  <div style={styles.fieldGroup}>
-                    <label style={{ ...styles.label, color: '#6d28d9', fontWeight: 'bold' }}>Final Product Title (for Store Website)</label>
-                    <input
-                      style={{ ...styles.input, fontWeight: 'bold', borderColor: '#c084fc', background: '#faf5ff' }}
-                      type="text"
-                      value={curationFields.curatedTitle || ''}
-                      onChange={(e) => setCurationFields((p: any) => ({ ...p, curatedTitle: e.target.value, titleSource: 'manual' }))}
-                    />
-                    <span style={{ fontSize: 11, color: '#6b7280', display: 'block', marginTop: 4 }}>
-                      Title source: <strong style={{ color: '#7c3aed' }}>{curationFields.titleSource}</strong> (derived from OCR, Web scraping, or LLM)
-                    </span>
-                  </div>
-                  
-                  <div style={styles.fieldGroup}>
-                    <label style={styles.label}>Raw Extracted Title (Reference)</label>
-                    <input
-                      style={{ ...styles.input, color: '#4b5563', background: '#f9fafb' }}
-                      type="text"
-                      value={editFields.title || ''}
-                      onChange={(e) => setEditFields(p => ({ ...p, title: e.target.value }))}
-                    />
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                    <div style={styles.fieldGroup}>
-                      <label style={styles.label}>Brand Name</label>
-                      <input
-                        style={styles.input}
-                        type="text"
-                        value={editFields.brand || ''}
-                        onChange={(e) => setEditFields(p => ({ ...p, brand: e.target.value }))}
-                      />
-                    </div>
-                    
-                    <div style={styles.fieldGroup}>
-                      <label style={styles.label}>Price</label>
-                      <input
-                        style={styles.input}
-                        type="text"
-                        value={editFields.price || ''}
-                        onChange={(e) => setEditFields(p => ({ ...p, price: e.target.value }))}
-                      />
-                    </div>
-                  </div>
-
-                  <div style={styles.fieldGroup}>
-                    <label style={styles.label}>Product Description</label>
-                    <textarea
-                      style={{ ...styles.input, height: 100, fontFamily: 'inherit' }}
-                      value={editFields.description || ''}
-                      onChange={(e) => setEditFields(p => ({ ...p, description: e.target.value }))}
-                    />
-                  </div>
-
-                  <div style={styles.fieldGroup}>
-                    <label style={styles.label}>Assign Category Pages (ShopSite InThesePages)</label>
-                    <div style={{ maxHeight: 120, overflowY: 'auto', border: '1px solid #d1d5db', borderRadius: 6, padding: 8, background: '#f9fafb' }}>
-                      {storePages.length === 0 ? (
-                        <span style={{ fontSize: 13, color: '#9ca3af', fontStyle: 'italic' }}>
-                          No pages available in page taxonomy. Define pages in settings or sync.
-                        </span>
-                      ) : (
-                        storePages.map((pageName) => {
-                          const isAssigned = curationFields.suggestedPages?.includes(pageName) ?? false;
-                          return (
-                            <label key={pageName} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 13, cursor: 'pointer' }}>
-                              <input
-                                type="checkbox"
-                                checked={isAssigned}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setCurationFields((p: any) => ({
-                                      ...p,
-                                      suggestedPages: [...(p.suggestedPages || []), pageName]
-                                    }));
-                                  } else {
-                                    setCurationFields((p: any) => ({
-                                      ...p,
-                                      suggestedPages: (p.suggestedPages || []).filter((name: string) => name !== pageName)
-                                    }));
-                                  }
-                                }}
-                              />
-                              <span>{pageName}</span>
-                            </label>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-
-                  <div style={styles.fieldGroup}>
-                    <label style={styles.label}>Product Type Classification</label>
-                    <input
-                      style={styles.input}
-                      type="text"
-                      placeholder="e.g. Dry Dog Food, Supplements"
-                      value={curationFields.suggestedProductType || ''}
-                      onChange={(e) => setCurationFields((p: any) => ({ ...p, suggestedProductType: e.target.value }))}
-                    />
-                  </div>
-
-                  {editFields.primaryImage && (
-                    <div style={styles.fieldGroup}>
-                      <label style={styles.label}>Extracted Images</label>
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <div style={{ position: 'relative', border: '2px solid #2563eb', borderRadius: 4, overflow: 'hidden' }}>
-                          <img
-                            src={editFields.primaryImage.startsWith('products/') ? `/${editFields.primaryImage}` : editFields.primaryImage}
-                            alt="Primary"
-                            style={{ width: 80, height: 80, objectFit: 'cover' }}
-                          />
-                          <span style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: '#2563eb', color: '#fff', fontSize: 10, textAlign: 'center', fontWeight: 600 }}>Primary</span>
-                        </div>
-                        {editFields.additionalImages?.map((img, i) => (
-                          <div key={i} style={{ border: '1px solid #e5e7eb', borderRadius: 4, overflow: 'hidden' }}>
-                            <img
-                              src={img.startsWith('products/') ? `/${img}` : img}
-                              alt={`Additional ${i}`}
-                              style={{ width: 80, height: 80, objectFit: 'cover' }}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                                    {classificationProposals.length > 0 && (
-                    <div style={{ marginTop: 16, padding: '12px 16px', background: '#f5f3ff', borderRadius: 8, border: '1px solid #ddd6fe' }}>
-                      <h4 style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 600, color: '#7c3aed' }}>🤖 AI Classification Proposals</h4>
-                      {classificationProposals.map((p) => {
-                        const sc = { pending: '#f59e0b', accepted: '#16a34a', rejected: '#dc2626', deferred: '#6b7280', stale: '#9ca3af' };
-                        const tl = { primary_product_type: 'Product Type', category_page: 'Category Page', field_assignment: 'Field', configuration_gap: 'Config Gap', reviewable_abstention: 'Abstention' };
-                        return (
-                          <div key={p.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #ede9fe', fontSize: 12 }}>
-                            <div style={{ flex: 1 }}>
-                              <span style={{ fontWeight: 600, color: '#5b21b6' }}>{(tl as any)[p.proposalType] || p.proposalType}</span>
-                              {p.targetId && <span style={{ color: '#374151', marginLeft: 4 }}>{p.targetId}</span>}
-                              <span style={{ color: (sc as any)[p.status], marginLeft: 8, fontWeight: 600 }}>● {p.status}</span>
-                              {p.confidence > 0 && <span style={{ color: '#6b7280', marginLeft: 4, fontSize: 10 }}>{(p.confidence * 100).toFixed(0)}%</span>}
-                              {p.isBulkAcceptable && <span style={{ background: '#dcfce7', color: '#16a34a', padding: '0 4px', borderRadius: 2, fontSize: 9, marginLeft: 4 }}>bulk</span>}
-                            </div>
-                            <div style={{ display: 'flex', gap: 3 }}>
-                              <button type="button" style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #16a34a', background: p.status === 'accepted' ? '#dcfce7' : '#fff', color: '#16a34a', cursor: 'pointer' }} onClick={() => setClassificationProposals(prev => prev.map(x => x.id === p.id ? { ...x as any, status: 'accepted' } : x))}>Accept</button>
-                              <button type="button" style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #dc2626', background: p.status === 'rejected' ? '#fee2e2' : '#fff', color: '#dc2626', cursor: 'pointer' }} onClick={() => setClassificationProposals(prev => prev.map(x => x.id === p.id ? { ...x as any, status: 'rejected' } : x))}>Reject</button>
-                              <button type="button" style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #d1d5db', background: '#fff', color: '#374151', cursor: 'pointer' }} onClick={() => setClassificationProposals(prev => prev.map(x => x.id === p.id ? { ...x as any, status: 'deferred' } : x))}>Defer</button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      {(() => { const safe = classificationProposals.filter(p => p.isBulkAcceptable && p.status === 'pending'); return safe.length > 0 ? (
-                        <button type="button" style={{ marginTop: 8, padding: '4px 12px', fontSize: 11, borderRadius: 4, border: '1px solid #16a34a', background: '#dcfce7', color: '#16a34a', cursor: 'pointer', fontWeight: 600 }}
-                          onClick={() => setClassificationProposals(prev => prev.map(x => x.isBulkAcceptable && x.status === 'pending' ? { ...x as any, status: 'accepted' } : x))}>
-                          ✅ Bulk Accept {safe.length} Safe Proposal{safe.length > 1 ? 's' : ''}
-                        </button>
-                      ) : null; })()}
-                      {classificationEvidence.length > 0 && (
-                        <details style={{ marginTop: 6 }}>
-                          <summary style={{ fontSize: 11, color: '#6b7280', cursor: 'pointer' }}>Evidence ({classificationEvidence.length} items)</summary>
-                          <div style={{ marginTop: 2, maxHeight: 150, overflowY: 'auto', fontSize: 10 }}>
-                            {classificationEvidence.slice(0, 20).map((e: any) => (
-                              <div key={e.id} style={{ padding: '2px 4px', color: '#4b5563', borderBottom: '1px solid #f3f4f6' }}>
-                                <strong>{e.source}</strong>: {(e.snippet || '').slice(0, 80)}
-                                {e.reliability && <span style={{ color: '#9ca3af', marginLeft: 4 }}>({e.reliability})</span>}
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      )}
-                    </div>
-                  )}
-
-<div style={{ ...styles.btnRow, marginTop: 24, justifyContent: 'flex-end' }}>
-                    <button style={styles.secondaryBtn} onClick={handleCloseReview}>Cancel</button>
-                    <button
-                      style={{ ...styles.primaryBtn, background: '#16a34a' }}
-                      onClick={handleSaveItemEdit}
-                    >
-                      ✓ Save & Approve Draft
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div style={{ textAlign: 'center', padding: 24, color: '#9ca3af', fontStyle: 'italic' }}>
-                  No product page data scraped yet. Confirmed source URL is needed to run extraction.
-                </div>
-              )}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
+  // No batch selected or batch not loaded
+  return null;
 }

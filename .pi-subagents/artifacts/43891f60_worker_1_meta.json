@@ -1,0 +1,40 @@
+{
+  "runId": "43891f60",
+  "agent": "worker",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/src/onboarding/image-utils.ts, /Users/nickborrello/Desktop/Projects/shopsite-cms/src/onboarding/profile-governance-service.ts]\n\nYou are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\nUpdate src/onboarding/profile-governance-service.ts to use the shared image utilities for image selector validation.\n\nThe file src/onboarding/image-utils.ts has already been created with:\n- collectImageSourcesFromElement\n- addImageSource\n- cleanAndDeduplicateImages\n\nYour job: Replace the simplified image extraction in the validateSingleField function (around the `if (field === 'imagesSelector')` block).\n\nCURRENT CODE collects images with just direct src attrs:\n```ts\nif (field === 'imagesSelector') {\n    const images: string[] = [];\n    const seen = new Set<string>();\n    $(selector).each((_, el) => {\n      const $img = $(el);\n      const src =\n        $img.attr('src') ??\n        $img.attr('data-src') ??\n        $img.attr('data-lazy-src') ??\n        $img.attr('data-original') ??\n        $img.attr('data-image') ??\n        '';\n      if (src && !seen.has(src)) {\n        seen.add(src);\n        images.push(src);\n      }\n    });\n    // Heuristic: if all images share a base path...\n    ...\n```\n\nREPLACE with:\n```ts\nif (field === 'imagesSelector') {\n    // Collect raw candidate URLs using the shared extractor logic\n    // (includes srcset/data-srcset, not just direct src attrs).\n    const rawImages: string[] = [];\n    const seenRaw = new Set<string>();\n    $(selector).each((_, el) => {\n      for (const src of collectImageSourcesFromElement($, el)) {\n        addImageSource(src, seenRaw, rawImages);\n      }\n    });\n\n    // Deduplicate and normalize the same way the production\n    // extractor does, so governance previews match reality.\n    const images = cleanAndDeduplicateImages(rawImages, sampleUrl);\n\n    // Warn when raw candidates exceed deduped (carousel/thumbnail dupes).\n    if (rawImages.length > images.length) {\n      warnings.push(\n        `Image selector returned ${rawImages.length} raw candidates; deduped to ${images.length}. May include duplicate or low-res carousel images.`,\n      );\n    }\n\n    return {\n      field,\n      sampleUrl,\n      itemId,\n      expectedName,\n      brandHint,\n      extractedText: null,\n      extractedImages: images,\n      warnings,\n      status: images.length > 0 ? 'pass' : 'fail',\n    };\n  }\n```\n\nAdd this import at the top:\n```ts\nimport {\n  addImageSource,\n  cleanAndDeduplicateImages,\n  collectImageSourcesFromElement,\n} from './image-utils';\n```\n\nIMPORTANT:\n- Keep the existing zero-selector check BEFORE the new image block\n- Keep the existing non-image field handling UNCHANGED\n- The `images` variable is the deduped result — use it for status and extractedImages\n\nAfter editing, run `bun run typecheck` to verify.\n\n---\nUpdate progress at: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/progress/43891f60/progress.md",
+  "exitCode": 0,
+  "usage": {
+    "input": 145627,
+    "output": 2512,
+    "cacheRead": 821504,
+    "cacheWrite": 0,
+    "cost": 0.023391351199999997,
+    "turns": 7
+  },
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 145627,
+        "output": 2512,
+        "cacheRead": 821504,
+        "cacheWrite": 0,
+        "cost": 0.023391351199999997,
+        "turns": 7
+      }
+    }
+  ],
+  "durationMs": 43824,
+  "toolCount": 7,
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783044345086
+}

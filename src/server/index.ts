@@ -8,6 +8,7 @@ const server = serve({
   port: PORT,
   hostname: HOST,
   fetch: app.fetch,
+  idleTimeout: 60, // SSE connections need longer idle timeout than Bun's default of 10s
 });
 
 console.log(`ShopSite CMS API server running on http://${HOST}:${PORT}`);

@@ -1,0 +1,30 @@
+{
+  "runId": "2f683e23-0c91-4c73-b039-5e9338a79ada",
+  "agent": "worker",
+  "task": "## Task A4: Remove price/brand from the review/approval field set\n\nRead these files first to understand the current state:\n- `src/onboarding/profile-generator.ts` — GeneratedSelectorProfile interface, validateGeneratedProfile, shouldAttemptProfileGeneration\n- `src/shared/schemas/onboarding.ts` — SELECTOR_FIELDS\n- `src/onboarding/profile-promoter.ts` — SELECTOR_KEYS\n- `src/onboarding/profile-governance-service.ts` — tally(), evaluateSelectorOnSample, textFieldsHaveStrongEvidence\n\n### What to change\n\n**1. `src/onboarding/profile-generator.ts`**\n\n**a) `GeneratedSelectorProfile` interface** — Remove `priceSelector` and `brandSelector` fields. They should no longer be in this interface since the LLM no longer outputs them and they're not managed.\n\n**b) `validateGeneratedProfile`** — Delete the blocks that check `selectors.priceSelector` and `selectors.brandSelector`. These are around lines 1066 and 1108 (search for \"priceSelector\" and \"brandSelector\"). Re-tune the confidence weights:\n\nReplace the existing weight logic with:\n```typescript\n// Confidence: title (0.45) + description (0.15) + images (0.10) + expected name overlap (0.10)\nlet confidence = 0;\nif (selectors.titleSelector) confidence += 0.45;\nif (selectors.descriptionSelector) confidence += 0.15;\nif (selectors.imagesSelector) confidence += 0.10;\nif (expected?.name) confidence += 0.10;\n// Cap at 1.0\nconfidence = Math.min(1.0, confidence);\n```\n\nKeep the `:nth-of-type` low-stability flag for `readyForReview` — if any selector is low-stability, set `readyForReview = false`.\n\n**c) `shouldAttemptProfileGeneration`** — Change the improvement target check from `!description || !brand` to `!input.extractionResult.description`. Keep the price-only exclusion as-is.\n\n**2. `src/shared/schemas/onboarding.ts`**\n\nChange `SELECTOR_FIELDS` from 5 elements to 3:\n```typescript\nexport const SELECTOR_FIELDS: ReadonlyArray<SelectorField> = [\n  'titleSelector',\n  'descriptionSelector',\n  'imagesSelector',\n];\n```\n\nUpdate the doc comment: \"Active selector fields managed in review and approval. The SelectorFieldEnum also includes priceSelector and brandSelector for historical compatibility.\"\n\n**3. `src/onboarding/profile-promoter.ts`**\n\nChange `SELECTOR_KEYS` from 5 to 3:\n```typescript\nexport const SELECTOR_KEYS = [\n  'titleSelector',\n  'descriptionSelector',\n  'imagesSelector',\n] as const;\n```\n\nIn `promoteGeneratedProfile`, the `normalizedApproval` initializer will automatically only cover these 3 fields.\n\n**4. `src/onboarding/profile-governance-service.ts`**\n\n**a)** In the `EMPTY_FIELD_TALLY` initializer and the `tally()` function, remove `priceSelector` and `brandSelector`. Only keep `titleSelector`, `descriptionSelector`, `imagesSelector`.\n\n**b)** In `evaluateSelectorOnSample`, delete the `if (field === 'priceSelector') { ... }` numeric-check branch (around line 370). Since `SELECTOR_KEYS` no longer includes priceSelector, this branch is dead code, but remove it for cleanliness.\n\n**c)** Change `textFieldsHaveStrongEvidence` from:\n```typescript\nconst textFieldsHaveStrongEvidence = ['titleSelector', 'descriptionSelector', 'brandSelector'].some(...)\n```\nto:\n```typescript\nconst textFieldsHaveStrongEvidence = ['titleSelector', 'descriptionSelector'].some(...)\n```\n\nSame for `textFieldsHaveLimitedEvidence`.\n\n### Keep unchanged\n- `SelectorFieldEnum` stays at 5 members (`'titleSelector' | 'priceSelector' | 'descriptionSelector' | 'brandSelector' | 'imagesSelector'`) for historical row compatibility\n- `ExtractorProfileSchema` keeps `priceSelector`/`brandSelector` as nullable fields for storage\n- `StructuredFeedbackTextSchema.field` stays using `SelectorFieldEnum`\n\n### Validation\n- `bun run typecheck` passes with zero errors\n- `bun run test` passes\n\n### Handoff\nReport all files changed, typecheck + test results.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/deepseek-v4-flash:medium",
+  "attemptedModels": [
+    "opencode-go/deepseek-v4-flash:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/deepseek-v4-flash:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 109729,
+        "output": 55194,
+        "cacheRead": 10354560,
+        "cacheWrite": 0,
+        "cost": 0.05980914799999998,
+        "turns": 115
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783075269195
+}

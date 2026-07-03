@@ -1,0 +1,1 @@
+All clear. Here is the structured acceptance report.

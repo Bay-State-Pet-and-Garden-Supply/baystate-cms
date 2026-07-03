@@ -1,0 +1,1 @@
+Typecheck and tests clean (same 8 pre-existing failures). Now launch the remaining workers in parallel:

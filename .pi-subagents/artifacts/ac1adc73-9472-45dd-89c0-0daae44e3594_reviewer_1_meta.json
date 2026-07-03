@@ -1,0 +1,29 @@
+{
+  "runId": "ac1adc73-9472-45dd-89c0-0daae44e3594",
+  "agent": "reviewer",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md, /Users/nickborrello/Desktop/Projects/shopsite-cms/progress.md]\n\nReview the Domain Diagnostics MVP for code quality and UI integration.\n\nNew/changed files to inspect:\n- src/client/components/OnboardingSettings.tsx (focus on new Domain Diagnostics section)\n- src/onboarding/domain-diagnostics-service.ts\n- src/tests/unit/domain-diagnostics-service.test.ts\n\nVerify these quality criteria:\n1. Diagnostics section uses existing inline style patterns (styles.section, styles.table, etc.)\n2. The section has stable id anchors for linking\n3. Links from diagnostics rows to Brand Sites / Domain Extractor Profiles / Generated Profile Governance sections work\n4. The Read-only Refresh button only re-fetches diagnostics, no side effects\n5. Empty state message is clear\n6. Health badge colors match the plan spec (ok=green, blocked=red, offline=gray, mismatch=amber, unknown=outline)\n7. No destructive action buttons (no clear, delete, refresh-sitemap, generate-profile)\n8. Helper functions (domainHealthBadgeStyle, formatOptionalIsoDate, truncateText) are clean\n9. State management follows existing patterns (useState + fetchData integration)\n10. The new section fits naturally between Domain Extractor Profiles and Generated Profile Governance\n11. Tests cover: empty DB, single-source domains, full populate, stale rows NOT deleted\n\nReport file:line references for any issues. Do not modify files.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/ac1adc73-9472-45dd-89c0-0daae44e3594/validation-diag-quality.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.5:xhigh",
+  "attemptedModels": [
+    "openai-codex/gpt-5.5:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.5:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 166149,
+        "output": 12452,
+        "cacheRead": 1919488,
+        "cacheWrite": 0,
+        "cost": 2.1640490000000003,
+        "turns": 39
+      }
+    }
+  ],
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783030852878
+}

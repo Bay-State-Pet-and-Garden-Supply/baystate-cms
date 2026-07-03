@@ -1,0 +1,5 @@
+# Run browser profile tooling in a separate worker
+
+Browser-heavy profile tooling will run in a separate worker process instead of being embedded directly in the Bun API server. The Bun server remains responsible for local state, SQLite persistence, profile matching, review workflows, and trusted fail-closed orchestration, while the worker owns Playwright, Crawlee validation sweeps, optional Stagehand proposal assistance, screenshots, network capture, and browser pooling. The worker does not read or write SQLite; it returns structured results and artifact references for the Bun server to persist. Worker calls use a mixed execution model: quick health, page snapshot, single-page preview, and deterministic extraction requests can be synchronous HTTP calls, while Crawlee validation sweeps and profile proposal runs are queued by the Bun server and executed by the worker. This preserves a local-first default while avoiding Bun compatibility risk for Node-oriented browser tooling and keeping LLM/browser-agent proposal work isolated from trusted Extraction.
+
+**Status**: accepted

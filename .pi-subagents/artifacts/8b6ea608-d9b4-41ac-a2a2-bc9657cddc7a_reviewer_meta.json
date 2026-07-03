@@ -1,0 +1,29 @@
+{
+  "runId": "8b6ea608-d9b4-41ac-a2a2-bc9657cddc7a",
+  "agent": "reviewer",
+  "task": "Review the new extraction worker implementation. This is a Node.js HTTP sidecar for browser-heavy profile tooling that runs alongside the main Bun API server.\n\n## Files to review\n\nRead every file:\n- `src/extraction-worker/server.ts` — HTTP server, routing, auth\n- `src/extraction-worker/auth.ts` — bearer token auth\n- `src/extraction-worker/artifacts.ts` — artifact file writing\n- `src/extraction-worker/routes/health.ts` — health endpoint\n- `src/extraction-worker/routes/snapshot.ts` — POST /profile-tooling/snapshot (static + Playwright page capture)\n- `src/extraction-worker/routes/validate.ts` — POST /profile-tooling/validate (multi-sample validation sweeps)\n- `src/extraction-worker/routes/extract.ts` — POST /profile-runner/extract (trusted deterministic extraction)\n- `src/server/extraction-worker-client.ts` — Bun-side typed HTTP client\n- `src/shared/schemas/extraction-worker.ts` — Zod schemas for all worker types\n- `docs/plans/domain-extractor-profile-worker-plan.md` — the full implementation plan\n- `docs/adr/0009-run-browser-profile-tooling-in-a-separate-worker.md` — the ADR\n- `scripts/dev.ts` — updated to spawn worker in dev mode\n- `package.json` — worker scripts\n- `src/server/routes/onboarding-routes.ts` — check the health route was added correctly\n\n## Review angles\n\n1. **Security** — are there any paths where auth could be bypassed? Is the worker token handled safely? Are there any secrets or credentials being exposed?\n\n2. **Correctness** — do the extraction implementations handle edge cases (empty pages, blocked pages, malformed HTML, network errors, timeout conditions)? Does the extraction path properly fail closed when selectors don't match?\n\n3. **Architecture** — does the code follow the invariant from the ADR plan (worker never reads/writes SQLite, no LLM in trusted extraction, all outputs validated through Zod)? Are there any violations?\n\n4. **Error handling** — does every route handler properly catch and surface errors in warnings instead of throwing? Are there uncaught promise rejections?\n\n5. **Type safety** — run `npx tsc --noEmit --skipLibCheck` and report any issues found.\n\n6. **Consistency** — does the design match the plan? Are all the API endpoints shaped like the plan says they should be?\n\nReturn concise evidence-backed findings with file/line references. Do NOT modify any files.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/glm-5.2:xhigh",
+  "attemptedModels": [
+    "opencode-go/glm-5.2:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/glm-5.2:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 76644,
+        "output": 15789,
+        "cacheRead": 424704,
+        "cacheWrite": 0,
+        "cost": 0.28719624,
+        "turns": 14
+      }
+    }
+  ],
+  "skills": [
+    "context-mode"
+  ],
+  "timestamp": 1783065299409
+}

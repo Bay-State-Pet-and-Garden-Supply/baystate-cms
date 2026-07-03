@@ -1,0 +1,30 @@
+{
+  "runId": "c28d82b9-b534-4ef1-a6d6-803fe1b7c253",
+  "agent": "context-builder",
+  "task": "Map the sitemap_cache repository and build context for a Domain Diagnostics panel.\n\nRead these files completely:\n- src/db/repositories/sitemap-cache-repo.ts (getCachedSitemapUrls, insertSitemapCache, clearSitemapCache)\n- src/server/routes/onboarding-routes.ts (look for existing /onboarding/settings/ routes pattern)\n- src/client/onboarding-api.ts (look at existing API function patterns)\n\nProduce a compact spec for:\n1. What NEW read-only repo function is needed (list all sitemap caches without expiring them)\n2. What NEW clear-by-domain repo function is needed\n3. What NEW server route(s) are needed (GET /onboarding/settings/domain-diagnostics, POST clear-sitemap-cache)\n4. What NEW client API function(s) are needed\n5. The exact data shape to return per domain: domain, sitemapUrlsCount, sitemapFetchedAt, sitemapExpiresAt, sitemapSourceUrl\n\nInclude an implementation-ready meta-prompt section at the end.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/c28d82b9-b534-4ef1-a6d6-803fe1b7c253/context-build/sitemap-layer.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return concrete findings with file paths and severity when applicable\n\nRequired evidence: review-findings, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/minimax-m3:high",
+  "attemptedModels": [
+    "opencode-go/minimax-m3:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/minimax-m3:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 45148,
+        "output": 8549,
+        "cacheRead": 554378,
+        "cacheWrite": 0,
+        "cost": 0.057065879999999986,
+        "turns": 21
+      }
+    }
+  ],
+  "skills": [
+    "fallow",
+    "context-mode"
+  ],
+  "timestamp": 1783028993583
+}

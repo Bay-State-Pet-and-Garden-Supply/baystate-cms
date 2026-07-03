@@ -1,0 +1,30 @@
+{
+  "runId": "395524bc-c010-4df6-976d-52426ae352cf",
+  "agent": "worker",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/context.md, /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md]\n\nYou are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\nImplement Phase 1 (tasks 4-8) from the plan at /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/b8bb8c56/plans/generated-profile-governance-plan.md. Read that plan first, then the Phase 0 handoff at Output saved to: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/395524bc-c010-4df6-976d-52426ae352cf/chain-artifacts/phase0-handoff.md (12.1 KB, 172 lines). Read this file if needed..\n\nTask 4: Add normalized governance tables to src/db/migrations.ts: profile_generation_revisions (with columns: id, generation_id FK, revision_number, parent_revision_id FK, source, feedback_json, selectors_json, field_samples_json, validation_summary_json, status, confidence, llm_task, llm_provider, llm_model, error_message, created_at, updated_at), profile_generation_validation_results (id, revision_id FK, selector_field, sample_url, item_id, expected_name, brand_hint, extracted_value_json, image_previews_json, warnings_json, status, created_at), profile_generation_field_decisions (id, generation_id FK, revision_id FK, domain, selector_field, decision, previous_selector, proposed_selector, approved_selector, feedback_json, validation_result_ids_json, decided_at, decided_by, notes). Add indexes. Idempotent (IF NOT EXISTS).\n\nTask 5: Create governance repos: src/db/repositories/profile-generation-revision-repo.ts with typed interfaces, JSON round-trip helpers, insert/find/list/update-status functions, and insertRevisionValidationResults/listValidationResultsByRevision. Create src/db/repositories/profile-generation-field-decision-repo.ts with insert/find/list functions including findLatestApprovedFieldDecision(domain, selectorField). Normalize domains.\n\nTask 6: Update src/onboarding/profile-promoter.ts — resolve latest validated revision and write normalized field_decisions rows. Capture previous_selector from findProfileByDomain before upsertProfile. Remove approval appends to JSON blob; replace with normalized decisions. Remove global title requirement when approving non-title fields.\n\nTask 7: Add rollback service — `rollbackProfileField(domain, selectorField, decisionId)` reads previous_selector from decision, calls merge-style upsertProfile, inserts rolled_back decision row. In profile-promoter.ts or new profile-governance-service.ts.\n\nTask 8: Create DB-dependent tests: src/tests/unit/profile-generation-revision-repo.test.ts, src/tests/unit/profile-generation-field-decision-repo.test.ts. Add to package.json bun test list and vitest.config.ts excludes.\n\nAfter completing, run: bun run typecheck, bun test (all DB-dependent tests), bunx vitest run. Ensure all existing tests still pass.\n\nReturn changed files, commands, and residual risks.\n\n---\nUpdate progress at: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/progress/395524bc-c010-4df6-976d-52426ae352cf/progress.md\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/395524bc-c010-4df6-976d-52426ae352cf/chain-artifacts/phase1-handoff.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: optional by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "opencode-go/minimax-m3:medium",
+  "attemptedModels": [
+    "opencode-go/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/minimax-m3:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 234187,
+        "output": 46446,
+        "cacheRead": 19878988,
+        "cacheWrite": 0,
+        "cost": 1.3187305799999998,
+        "turns": 99
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1782987804913
+}

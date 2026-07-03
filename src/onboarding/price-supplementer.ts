@@ -1,4 +1,5 @@
 import { getApiKey } from '../db/repositories/api-key-repo';
+import { getCachedSerperResults, insertSerperCache } from '../db/repositories/serper-cache-repo';
 
 interface SupplementalPrice {
   price: string | null;
@@ -27,25 +28,42 @@ export async function supplementPrice(
   try {
     console.log(`[PriceSupplementer] Searching pricing for: "${productName}"`);
     
-    const response = await fetch('https://google.serper.dev/search', {
-      method: 'POST',
-      headers: {
-        'X-API-KEY': apiKeyRow.api_key,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        q: query,
-        num: 5, // fetch top 5 results for better snippet parsing chance
-      }),
-    });
+    let results: Array<{ link: string; title: string; snippet?: string }> = [];
+    const cached = getCachedSerperResults(query);
+    if (cached) {
+      console.log(`[PriceSupplementer] Using cached Serper results for query: "${query}"`);
+      results = cached;
+    } else {
+      const response = await fetch('https://google.serper.dev/search', {
+        method: 'POST',
+        headers: {
+          'X-API-KEY': apiKeyRow.api_key,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          q: query,
+          num: 5, // fetch top 5 results for better snippet parsing chance
+        }),
+      });
 
-    if (!response.ok) {
-      console.warn(`[PriceSupplementer] Serper query failed: ${response.statusText}`);
-      return { price: null, sourceUrl: null };
+      if (!response.ok) {
+        console.warn(`[PriceSupplementer] Serper query failed: ${response.statusText}`);
+        return { price: null, sourceUrl: null };
+      }
+
+      const data = await response.json() as { organic?: Array<{ link: string; title: string; snippet?: string }> };
+      results = data.organic ?? [];
+      
+      insertSerperCache(
+        query,
+        results.map((r, idx) => ({
+          title: r.title,
+          link: r.link,
+          snippet: r.snippet ?? '',
+          position: idx + 1,
+        }))
+      );
     }
-
-    const data = await response.json() as { organic?: Array<{ link: string; title: string; snippet?: string }> };
-    const results = data.organic ?? [];
 
     if (results.length === 0) {
       console.log('[PriceSupplementer] No pricing results found from Serper search.');

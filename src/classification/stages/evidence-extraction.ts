@@ -2,7 +2,7 @@ import type { StageDefinition, StageContext, StageInput, StageResult } from '../
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../../db/connection';
 import { getVlmConfig, callVlm } from '../../onboarding/vlm-client';
-import { getLlmConfig, callLlm } from '../../onboarding/llm-client';
+import { getLlmConfigForTask, callLlmForTask } from '../../onboarding/llm-client';
 import { getCachedDataSharingPolicy } from '../../db/repositories/classification-config-repo';
 import fs from 'fs';
 import path from 'path';
@@ -222,7 +222,7 @@ export const evidenceExtractionStage: StageDefinition = {
 
     // ── LLM-based text extraction for richer attributes ───────────────────
     if (canUseCloud) {
-      const llmConfig = getLlmConfig();
+      const llmConfig = getLlmConfigForTask('classification_evidence_extraction', { allowFallback: true });
       if (llmConfig) {
         const allText = [
           extData.title,
@@ -235,7 +235,10 @@ export const evidenceExtractionStage: StageDefinition = {
           try {
             const prompt = `Extract the following attributes from this product text. Return ONLY valid JSON with these keys (omit any you cannot determine): {"flavor": "..." | null, "color": "..." | null, "material": "..." | null, "size": "..." | null, "lifeStage": "..." | null, "breedSize": "..." | null, "productForm": "..." | null, "healthConcern": "..." | null, "ingredientKeywords": ["..."]}. Do not guess. Only include values that are explicitly mentioned.\n\nProduct text:\n${allText.slice(0, 3000)}`;
 
-            const response = await callLlm(prompt, 'You are a precise product data extraction assistant. Return only valid JSON.');
+            const response = await callLlmForTask('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', { allowFallback: true });
+            if (response == null) {
+              throw new Error('LLM call returned null');
+            }
             const parsed = JSON.parse(response.trim());
             for (const [key, val] of Object.entries(parsed)) {
               if (val === null || val === undefined) continue;

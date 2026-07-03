@@ -90,9 +90,35 @@ export function recordDomainStatus(
 /**
  * Clear domain status cache (useful for troubleshooting or resetting).
  */
+// fallow-ignore-next-line unused-export
 export function clearDomainStatus(domain: string): boolean {
   const db = getDb();
   const normDomain = normalizeDomain(domain);
   const result = db.query('DELETE FROM domain_status WHERE domain = ?').run(normDomain);
   return result.changes > 0;
+}
+
+/**
+ * Read-only listing of every persisted `domain_status` row, sorted
+ * alphabetically by domain. Intended for diagnostics surfaces that
+ * must surface stale rows (older than 7 days) without deleting them.
+ *
+ * Unlike `getDomainStatus()`, this function:
+ *   - never applies the 7-day expiration rule
+ *   - never deletes the row when it is stale
+ *   - returns the raw `status`/`checked_at`/`reason` values so the
+ *     caller can render its own "stale" indicator.
+ */
+export function listAllDomainStatuses(): DomainStatus[] {
+  const db = getDb();
+  const rows = db.query(
+    'SELECT domain, status, checked_at, reason FROM domain_status ORDER BY domain ASC',
+  ).all() as DbDomainStatus[];
+
+  return rows.map((row) => ({
+    domain: row.domain,
+    status: row.status as DomainStatus['status'],
+    checkedAt: row.checked_at,
+    reason: row.reason,
+  }));
 }

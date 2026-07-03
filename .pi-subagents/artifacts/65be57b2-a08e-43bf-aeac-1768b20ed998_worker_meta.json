@@ -1,0 +1,30 @@
+{
+  "runId": "65be57b2-a08e-43bf-aeac-1768b20ed998",
+  "agent": "worker",
+  "task": "You are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\nImplement the approved profile-governance changes in the active worktree. User decisions/invariants:\n1. AI-generated extractor profiles must ALWAYS require explicit human approval before affecting future extractions. No auto-promotion no matter confidence.\n2. Approval must be per selector field, not whole-profile-only. Images are especially uncertain.\n\nCurrent context:\n- Existing generated-profile primitives were implemented in `src/onboarding/profile-generator.ts`, `src/onboarding/profile-promoter.ts`, `src/db/repositories/profile-generation-repo.ts`, and tests.\n- `src/onboarding/page-extractor.ts` may still do in-memory retry when feature flag is enabled; that is okay because it does not affect future extractions, but any persistent promotion must require explicit approval.\n- `src/onboarding/profile-promoter.ts` currently has `SHOPSITE_CMS_PROFILE_AUTO_PROMOTE_ENABLED` and a conservative/auto-promote path. Remove or neuter that path.\n\nImplement:\n1. Remove/neuter `SHOPSITE_CMS_PROFILE_AUTO_PROMOTE_ENABLED` and `isAutoPromoteEnabled()` so there is no environment-based auto-promotion path.\n2. Update `promoteGeneratedProfile` (or create a replacement API-level helper if cleaner) to require an explicit list/map of approved fields, e.g. `{ titleSelector: true, descriptionSelector: true, imagesSelector: false }`. It should:\n   - refuse promotion if no approved fields are provided,\n   - only call merge-style `upsertProfile` with selectors for fields explicitly approved,\n   - allow title-only, title+description, etc.,\n   - never implicitly promote images or any other selector based on confidence,\n   - mark the generation as `promoted` only if at least one approved field was written,\n   - store/update validation or error metadata to indicate which fields were approved if the repository API supports it; otherwise document residual gap.\n3. Adjust tests in `src/tests/unit/profile-promoter.test.ts`:\n   - remove auto-promote env tests,\n   - add approval-required tests,\n   - add per-field approval tests showing unapproved fields are not written,\n   - explicit image approval test if imagesSelector is allowed to be promoted manually,\n   - no fields approved -> rejected/failure.\n4. Update any exports/imports/callers/docs/comments referring to auto-promote.\n5. Run `bun run typecheck`, `bun test src/tests/unit/profile-promoter.test.ts`, and `bun run test` if feasible.\n\nDo not build UI yet. This worker only enforces the backend invariant and tests. Return changed files, commands, and residual risks.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/65be57b2-a08e-43bf-aeac-1768b20ed998/worker-handoffs/profile-approval-required.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: optional by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "opencode-go/minimax-m3:medium",
+  "attemptedModels": [
+    "opencode-go/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/minimax-m3:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 193723,
+        "output": 26517,
+        "cacheRead": 8502071,
+        "cacheWrite": 0,
+        "cost": 0.6000615599999999,
+        "turns": 55
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1782985290121
+}

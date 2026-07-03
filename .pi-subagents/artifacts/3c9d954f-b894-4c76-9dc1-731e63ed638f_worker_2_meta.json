@@ -1,0 +1,30 @@
+{
+  "runId": "3c9d954f-b894-4c76-9dc1-731e63ed638f",
+  "agent": "worker",
+  "task": "[Read from: /Users/nickborrello/Desktop/Projects/shopsite-cms/context.md, /Users/nickborrello/Desktop/Projects/shopsite-cms/plan.md]\n\nCreate `src/onboarding/sitemap-matcher.ts` for matching onboarding items against sitemap URLs.\n\nContext from our architecture decisions:\n- Pre-filter approach: Domain URL pattern rules → token overlap → LLM picks best match\n- Confidence scoring: base 0.7 for sitemap candidates, + up to 0.25 for token overlap\n- The LLM uses the consolidated product name from Serper Pass 1 when available\n\nRequirements:\n\n1. Main export: `async function matchSitemapUrls(sitemapUrls: string[], itemName: string, consolidatedName: string | null, upc: string, domain: string, productUrlPattern?: string | null): Promise<SitemapMatchResult[]>`\n\n2. Return type:\n```typescript\ninterface SitemapMatchResult {\n  url: string;\n  confidence: number;\n  sourceMethod: 'sitemap_name' | 'sitemap_upc';\n  matchType: 'upc_exact' | 'llm_selected' | 'token_overlap';\n}\n```\n\n3. Matching algorithm (three passes):\n   a. **UPC exact match**: Check if any sitemap URL literally contains the UPC. If found, return as high-confidence (0.95) with matchType 'upc_exact'.\n   \n   b. **Product URL filtering**: If productUrlPattern is provided, filter sitemapUrls to only those matching the pattern. If no pattern, use generic heuristic: URLs containing /products/, /p/, /shop/, /item/, /dp/ in the path.\n   \n   c. **Token overlap pre-filter**:\n      - Use consolidatedName if available, otherwise itemName\n      - Tokenize the name (lowercase, split on non-word chars, filter words > 2 chars, remove common stop words)\n      - For each product URL, extract slug (last path segment, strip extension)\n      - Compute overlap: count name tokens that are substrings of URL slug (bidirectional matching like existing scoreResult)\n      - Score = matches / totalTokens\n      - Return top 10 candidates by overlap score\n   \n   d. **LLM selection**:\n      - If 2+ candidates, call LLM via getLlmConfigForTask with the product_name_consolidation task\n      - Prompt: \"Given this product: [name], which URL is the correct product page? Return ONLY the URL.\"\n      - LLM-selected URL gets +0.15 confidence boost\n      - If no LLM, fall back to highest token overlap\n\n4. For non-LLM matches, confidence = 0.7 + (0.25 * tokenOverlapRatio)\n\n5. Handle empty productUrls gracefully — return empty array. Log diagnostics at each step.\n\n6. Import getLlmConfigForTask and callLlmForTask from ./llm-client for LLM matching.\n\n---\nUpdate progress at: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/progress/3c9d954f-b894-4c76-9dc1-731e63ed638f/progress.md\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/nickborrello/Desktop/Projects/shopsite-cms/.pi-subagents/artifacts/outputs/3c9d954f-b894-4c76-9dc1-731e63ed638f/handoff/sitemap_matcher_result.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "opencode-go/minimax-m3:medium",
+  "attemptedModels": [
+    "opencode-go/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "opencode-go/minimax-m3:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 136992,
+        "output": 43425,
+        "cacheRead": 11470582,
+        "cacheWrite": 0,
+        "cost": 0.7814425199999996,
+        "turns": 140
+      }
+    }
+  ],
+  "skills": [
+    "agent-browser",
+    "context-mode"
+  ],
+  "timestamp": 1783021820288
+}

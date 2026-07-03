@@ -1,0 +1,430 @@
+/**
+ * LlmTaskConfigPanel.tsx — per-task model routing settings.
+ *
+ * Renders one row per known LLM task (`product_name_consolidation`,
+ * `profile_generation`, `profile_revision`, `product_curation`,
+ * `category_classification`, `classification_evidence_extraction`).
+ *
+ * Each row lets the operator:
+ *  - pick a provider (deepseek/openai/ollama)
+ *  - select a model (auto-populated from the provider's /models endpoint)
+ *  - optionally set temperature
+ *  - clear the row (which removes the routing and falls through
+ *    to the generic config — except for profile tasks, which
+ *    fail closed when not configured)
+ *
+ * Rows for `profile_generation` and `profile_revision` are
+ * marked as "Required" because the governance invariant says
+ * those tasks must never silently fall back to a different
+ * model.
+ */
+
+import React, { useEffect, useState, useCallback } from 'react';
+import {
+  getLlmTaskConfigs,
+  upsertLlmTaskConfig,
+  deleteLlmTaskConfig,
+  getDeepseekModels,
+  getOpenaiModels,
+  getOllamaModels,
+} from '../onboarding-api';
+import type { LlmTask, LlmProvider, LlmTaskConfig } from '../../shared/schemas/onboarding';
+
+const REQUIRED_TASKS: ReadonlyArray<LlmTask> = ['profile_generation', 'profile_revision'];
+
+const TASK_LABELS: Record<LlmTask, string> = {
+  product_name_consolidation: 'Product name consolidation',
+  profile_generation: 'Profile generation (AI selector proposal)',
+  profile_revision: 'Profile revision (AI selector revision)',
+  product_curation: 'Product curation',
+  category_classification: 'Category classification',
+  classification_evidence_extraction: 'Classification evidence extraction',
+};
+
+const TASK_HINTS: Record<LlmTask, string> = {
+  product_name_consolidation: 'Used by `consolidateProductName()` to canonicalize a raw catalog name. May fall back to the LCS algorithm when not configured.',
+  profile_generation: 'Generates a fresh selector profile from the minimized DOM. Fails closed when not configured.',
+  profile_revision: 'Revises a selector profile from structured store-manager feedback. Fails closed when not configured.',
+  product_curation: 'Curates product metadata (titles, packaging alignment). May fall back when not configured.',
+  category_classification: 'Classifies products into the internal category tree. May fall back when not configured.',
+  classification_evidence_extraction: 'Extracts evidence for the classification pipeline. May fall back when not configured.',
+};
+
+const PROVIDERS: ReadonlyArray<LlmProvider> = ['deepseek', 'openai', 'ollama'];
+
+interface LlmTaskConfigPanelProps {
+  /** Refresh hook for parent to reload when child mutates. */
+  onChange?: () => void;
+}
+
+/**
+ * Fetch available models for a given provider using the provider's /models endpoint.
+ * Returns the model list (or empty array on error).
+ */
+async function fetchModelsForProvider(provider: LlmProvider): Promise<string[]> {
+  try {
+    switch (provider) {
+      case 'deepseek': {
+        const res = await getDeepseekModels();
+        return res.models;
+      }
+      case 'openai': {
+        const res = await getOpenaiModels();
+        return res.models;
+      }
+      case 'ollama': {
+        const res = await getOllamaModels();
+        return res.models;
+      }
+    }
+  } catch {
+    return [];
+  }
+}
+
+export function LlmTaskConfigPanel(props: LlmTaskConfigPanelProps): React.ReactElement {
+  const { onChange } = props;
+  const [configs, setConfigs] = useState<LlmTaskConfig[]>([]);
+  const [knownTasks, setKnownTasks] = useState<LlmTask[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string>('');
+
+  const load = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await getLlmTaskConfigs();
+      setConfigs(res.taskConfigs);
+      setKnownTasks(res.knownTasks);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <span style={{ margin: 0, fontSize: 14 }}>
+          {loading && <span style={{ marginLeft: 8, fontSize: 12, color: '#9ca3af' }}>loading…</span>}
+        </span>
+        <button
+          type="button"
+          onClick={load}
+          style={{
+            background: 'none',
+            border: '1px solid #d1d5db',
+            borderRadius: 6,
+            padding: '4px 12px',
+            fontSize: 12,
+            cursor: 'pointer',
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+      {error && (
+        <p style={{ color: '#dc2626', fontSize: 13, background: '#fef2f2', padding: 8, borderRadius: 4 }}>
+          {error}
+        </p>
+      )}
+      <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px' }}>
+        Each task gets its own model. Provider credentials live in the LLM Providers section;
+        this panel only routes the model selection. Profile generation and revision
+        require an explicit config (the system fails closed if missing).
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {knownTasks.map((task) => (
+          <LlmTaskConfigRow
+            key={task}
+            task={task}
+            config={configs.find((c) => c.task === task) ?? null}
+            onSaved={async () => {
+              await load();
+              onChange?.();
+            }}
+            onCleared={async () => {
+              await load();
+              onChange?.();
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface LlmTaskConfigRowProps {
+  task: LlmTask;
+  config: LlmTaskConfig | null;
+  onSaved: () => Promise<void> | void;
+  onCleared: () => Promise<void> | void;
+}
+
+function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
+  const { task, config, onSaved, onCleared } = props;
+  const [provider, setProvider] = useState<LlmProvider>(config?.provider ?? 'deepseek');
+  const [model, setModel] = useState<string>(config?.model ?? '');
+  const [temperature, setTemperature] = useState<string>(
+    config?.temperature !== null && config?.temperature !== undefined ? String(config.temperature) : '',
+  );
+  const [busy, setBusy] = useState<boolean>(false);
+  const [error, setError] = useState<string>('');
+
+  // Model dropdown state
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState<boolean>(false);
+
+  useEffect(() => {
+    setProvider(config?.provider ?? 'deepseek');
+    setModel(config?.model ?? '');
+    setTemperature(
+      config?.temperature !== null && config?.temperature !== undefined ? String(config.temperature) : '',
+    );
+  }, [config?.id, config?.provider, config?.model, config?.temperature]);
+
+  // Fetch models when provider changes
+  const loadModels = useCallback(async (p: LlmProvider) => {
+    setLoadingModels(true);
+    try {
+      const models = await fetchModelsForProvider(p);
+      setAvailableModels(models);
+      // Auto-select first model if current model isn't in the list
+      if (models.length > 0 && !models.includes(model) && !model) {
+        setModel(models[0]);
+      }
+    } catch {
+      // best-effort
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [model]);
+
+  useEffect(() => {
+    loadModels(provider);
+  }, [provider]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const required = REQUIRED_TASKS.includes(task);
+  const missing = !config;
+
+  const handleSave = async () => {
+    setError('');
+    if (!model.trim()) {
+      setError('Model is required');
+      return;
+    }
+    setBusy(true);
+    try {
+      const temperatureNum =
+        temperature.trim() === '' ? null : Number(temperature);
+      if (temperatureNum !== null && Number.isNaN(temperatureNum)) {
+        setError('Temperature must be a number or empty');
+        return;
+      }
+      await upsertLlmTaskConfig(task, {
+        provider,
+        model: model.trim(),
+        baseUrlOverride: null,
+        temperature: temperatureNum,
+      });
+      await onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleClear = async () => {
+    if (!config) return;
+    if (!confirm(`Clear routing for ${task}?`)) return;
+    setBusy(true);
+    try {
+      await deleteLlmTaskConfig(task);
+      await onCleared();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        border: '1px solid #e5e7eb',
+        borderRadius: 6,
+        padding: 12,
+        background: missing && required ? '#fef2f2' : '#fff',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <div>
+          <strong style={{ fontSize: 13 }}>{TASK_LABELS[task]}</strong>
+          {required && (
+            <span
+              style={{
+                marginLeft: 8,
+                fontSize: 10,
+                fontWeight: 600,
+                background: '#dc2626',
+                color: '#fff',
+                padding: '1px 6px',
+                borderRadius: 3,
+                textTransform: 'uppercase',
+              }}
+            >
+              Required
+            </span>
+          )}
+          {missing && required && (
+            <span
+              style={{
+                marginLeft: 6,
+                fontSize: 11,
+                color: '#b45309',
+                fontWeight: 500,
+              }}
+            >
+              Not configured — extraction / revision will fail
+            </span>
+          )}
+        </div>
+        {config && (
+          <button
+            type="button"
+            onClick={handleClear}
+            disabled={busy}
+            style={{
+              background: 'none',
+              border: '1px solid #dc2626',
+              color: '#dc2626',
+              borderRadius: 4,
+              padding: '2px 8px',
+              fontSize: 11,
+              cursor: busy ? 'not-allowed' : 'pointer',
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 8px' }}>{TASK_HINTS[task]}</p>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <label style={{ fontSize: 12 }}>
+          <span style={{ display: 'block', color: '#4b5563', marginBottom: 2 }}>Provider</span>
+          <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value as LlmProvider)}
+            disabled={busy}
+            style={{ padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12 }}
+          >
+            {PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label style={{ fontSize: 12, flex: '1 1 220px' }}>
+          <span style={{ display: 'block', color: '#4b5563', marginBottom: 2 }}>Model</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={busy || loadingModels}
+              style={{
+                flex: 1,
+                padding: '4px 6px',
+                border: '1px solid #d1d5db',
+                borderRadius: 4,
+                fontSize: 12,
+                background: '#fff',
+              }}
+            >
+              {loadingModels ? (
+                <option value="">Loading models…</option>
+              ) : availableModels.length === 0 ? (
+                <>
+                  {model && <option value={model}>{model}</option>}
+                  <option value="">Enter model name</option>
+                </>
+              ) : (
+                <>
+                  <option value="">— Select model —</option>
+                  {availableModels.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </>
+              )}
+            </select>
+            <button
+              type="button"
+              onClick={() => loadModels(provider)}
+              disabled={busy || loadingModels}
+              title="Refresh models list"
+              style={{
+                background: 'none',
+                border: '1px solid #d1d5db',
+                borderRadius: 4,
+                padding: '4px 8px',
+                fontSize: 11,
+                cursor: busy || loadingModels ? 'not-allowed' : 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {loadingModels ? '…' : '↻'}
+            </button>
+          </div>
+        </label>
+        <label style={{ fontSize: 12, width: 80 }}>
+          <span style={{ display: 'block', color: '#4b5563', marginBottom: 2 }}>Temp</span>
+          <input
+            type="text"
+            value={temperature}
+            onChange={(e) => setTemperature(e.target.value)}
+            disabled={busy}
+            placeholder="0.1"
+            style={{
+              width: '100%',
+              padding: '4px 6px',
+              border: '1px solid #d1d5db',
+              borderRadius: 4,
+              fontSize: 12,
+              boxSizing: 'border-box',
+            }}
+          />
+        </label>
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={busy}
+          style={{
+            background: '#2563eb',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 4,
+            padding: '6px 14px',
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: busy ? 'not-allowed' : 'pointer',
+            alignSelf: 'flex-end',
+            marginBottom: 1,
+          }}
+        >
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {error && (
+        <p style={{ color: '#dc2626', fontSize: 12, margin: '6px 0 0' }}>{error}</p>
+      )}
+    </div>
+  );
+}

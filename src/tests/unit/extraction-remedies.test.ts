@@ -1,8 +1,13 @@
 import { expect, test, describe, beforeAll, afterAll } from 'vitest';
 import { unlinkSync } from 'node:fs';
-import { initDb, closeDb, resetDb } from '../../db/connection';
+import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { getDomainStatus, recordDomainStatus, clearDomainStatus } from '../../db/repositories/domain-status-repo';
+import {
+  getDomainStatus,
+  recordDomainStatus,
+  clearDomainStatus,
+  listAllDomainStatuses,
+} from '../../db/repositories/domain-status-repo';
 import { validateExtraction } from '../../onboarding/extraction-validator';
 
 describe('Extraction Remedies and Validation Tests', () => {
@@ -50,6 +55,61 @@ describe('Extraction Remedies and Validation Tests', () => {
 
       const retrieved = getDomainStatus('earthanimal.com');
       expect(retrieved).toBeNull();
+    });
+  });
+
+  describe('listAllDomainStatuses (read-only diagnostics)', () => {
+    test('returns rows sorted by domain ascending', () => {
+      recordDomainStatus('zeta.example.com', 'ok', 'zeta reason');
+      recordDomainStatus('alpha.example.com', 'blocked', 'alpha reason');
+      recordDomainStatus('mid.example.com', 'offline', 'mid reason');
+
+      const all = listAllDomainStatuses();
+      const domains = all.map((r) => r.domain);
+      expect(domains).toEqual([...domains].sort());
+      expect(domains).toContain('alpha.example.com');
+      expect(domains).toContain('mid.example.com');
+      expect(domains).toContain('zeta.example.com');
+    });
+
+    test('returns a >7-day-old row without deleting it', () => {
+      const domain = 'ancient.example.com';
+      recordDomainStatus(domain, 'blocked', 'long-running block');
+
+      // Manually rewind checked_at to 30 days ago.
+      const db = getDb();
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      db.query('UPDATE domain_status SET checked_at = ? WHERE domain = ?').run(thirtyDaysAgo, domain);
+
+      // listAllDomainStatuses must surface the stale row.
+      const rows = listAllDomainStatuses();
+      const found = rows.find((r) => r.domain === domain);
+      expect(found).toBeDefined();
+      expect(found?.status).toBe('blocked');
+      expect(found?.reason).toBe('long-running block');
+
+      // And critically: the row must still exist in the table.
+      const stillThere = db
+        .query('SELECT COUNT(*) as count FROM domain_status WHERE domain = ?')
+        .get(domain) as { count: number };
+      expect(stillThere.count).toBe(1);
+
+      // For comparison: getDomainStatus() WOULD have deleted it.
+      const evicted = getDomainStatus(domain);
+      expect(evicted).toBeNull();
+      const after = db
+        .query('SELECT COUNT(*) as count FROM domain_status WHERE domain = ?')
+        .get(domain) as { count: number };
+      expect(after.count).toBe(0);
+    });
+
+    test('returns no rows when the table is empty', () => {
+      // Clear any rows from earlier tests to validate the empty case.
+      const db = getDb();
+      db.query('DELETE FROM domain_status').run();
+
+      const all = listAllDomainStatuses();
+      expect(all).toEqual([]);
     });
   });
 

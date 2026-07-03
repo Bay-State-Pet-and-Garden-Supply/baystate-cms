@@ -222,7 +222,7 @@ function App() {
         </span>
       </nav>
 
-      <main style={styles.main}>
+      <main style={view === 'onboarding' ? { ...styles.main, maxWidth: 'none', margin: 0 } : styles.main}>
         {view === 'setup' && (
           <SetupWizard
             onComplete={handleSetupComplete}
@@ -262,6 +262,18 @@ function App() {
         @keyframes slideIn {
           from { transform: translateX(100%); }
           to { transform: translateX(0); }
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+        .spinner {
+          display: inline-block;
+          width: 20px;
+          height: 20px;
+          border: 2px solid rgba(0, 0, 0, 0.15);
+          border-radius: 50%;
+          border-top-color: currentColor;
+          animation: spin 0.8s linear infinite;
         }
         .drawer-backdrop {
           position: fixed;

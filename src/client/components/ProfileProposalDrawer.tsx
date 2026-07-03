@@ -772,8 +772,46 @@ export function ProfileProposalDrawer(
                 })}
               </tbody>
             </table>
-
-            {/* Image previews review checkbox */}
+            {/* Custom Fields */}
+            {Object.keys(proposedSelectors)
+              .filter(k => !["titleSelector","descriptionSelector","imagesSelector"].includes(k) && proposedSelectors[k])
+              .length > 0 && (
+              <>
+                <hr style={{ border: 'none', borderTop: '1px solid #e5e7eb', margin: '16px 0' }} />
+                <h4 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px', color: '#374151' }}>Custom Fields</h4>
+                <table style={styles.table}>
+                  <thead>
+                    <tr>
+                      <th style={styles.th}>Field</th>
+                      <th style={styles.th}>Current Selector</th>
+                      <th style={styles.th}>Proposed Selector</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(proposedSelectors)
+                      .filter(([k]) => !["titleSelector","descriptionSelector","imagesSelector"].includes(k))
+                      .filter(([, v]) => v)
+                      .map(([field, selector]) => {
+                        const active = activeSelectors[field] ?? null;
+                        const changed = selector && selector !== active;
+                        return (
+                          <tr key={field}>
+                            <td style={styles.td}><strong>{field}</strong></td>
+                            <td style={styles.td}><code style={styles.code}>{active || '—'}</code></td>
+                            <td style={styles.td}>
+                              <code style={{ ...styles.code, color: changed ? '#9333ea' : '#9ca3af', fontWeight: changed ? 600 : 400 }}>
+                                {selector}
+                              </code>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </>
+            )}
+            
+            {/* Image previews review checkbox */}            {/* Image previews review checkbox */}
             <div style={{ marginTop: 12 }}>
               <label
                 style={{
