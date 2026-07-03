@@ -96,10 +96,11 @@ function collectImageSourcesFromElement(
 ): string[] {
   const sources: string[] = [];
   const $el = $(el as cheerio.AnyNode);
-  const $target = $el.is('img,source')
-    ? $el
-    : $el.find('img,source').first();
-  if ($target.length === 0) return sources;
+  const targets = $el.is('img,source') ? $el : $el.find('img,source');
+  if (targets.length === 0) return sources;
+
+  targets.each((_, t) => {
+    const $t = $(t);
 
   const directAttrs = [
     'src',
@@ -110,15 +111,16 @@ function collectImageSourcesFromElement(
     'data-zoom-image',
   ];
   for (const attr of directAttrs) {
-    const value = $target.attr(attr);
+    const value = $t.attr(attr);
     if (isUsableImageSource(value)) sources.push(value!.trim());
   }
 
   for (const attr of ['srcset', 'data-srcset']) {
-    for (const candidate of parseSrcsetCandidates($target.attr(attr))) {
+    for (const candidate of parseSrcsetCandidates($t.attr(attr))) {
       if (isUsableImageSource(candidate)) sources.push(candidate.trim());
     }
   }
+  });
 
   return sources;
 }

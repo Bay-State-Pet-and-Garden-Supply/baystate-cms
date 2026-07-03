@@ -67,29 +67,32 @@ export function collectImageSourcesFromElement(
 ): string[] {
   const sources: string[] = [];
   const $el = $(el);
-  const $target = $el.is('img,source')
+  const $targets = $el.is('img,source')
     ? $el
-    : $el.find('img,source').first();
-  if ($target.length === 0) return sources;
+    : $el.find('img,source');
+  if ($targets.length === 0) return sources;
 
-  const directAttrs = [
-    'src',
-    'data-src',
-    'data-lazy-src',
-    'data-original',
-    'data-image',
-    'data-zoom-image',
-  ];
-  for (const attr of directAttrs) {
-    const value = $target.attr(attr);
-    if (isUsableImageSource(value)) sources.push(value!.trim());
-  }
-
-  for (const attr of ['srcset', 'data-srcset']) {
-    for (const candidate of parseSrcsetCandidates($target.attr(attr))) {
-      if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+  $targets.each((_, t) => {
+    const $t = $(t);
+    const directAttrs = [
+      'src',
+      'data-src',
+      'data-lazy-src',
+      'data-original',
+      'data-image',
+      'data-zoom-image',
+    ];
+    for (const attr of directAttrs) {
+      const value = $t.attr(attr);
+      if (isUsableImageSource(value)) sources.push(value!.trim());
     }
-  }
+
+    for (const attr of ['srcset', 'data-srcset']) {
+      for (const candidate of parseSrcsetCandidates($t.attr(attr))) {
+        if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+      }
+    }
+  });
 
   return sources;
 }

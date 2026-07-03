@@ -1597,19 +1597,20 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
           return true;
         };
         const imageSourcesForElement = (el: Element): string[] => {
-          const target = el instanceof HTMLImageElement || el instanceof HTMLSourceElement
-            ? el
-            : el.querySelector('img,source');
-          if (!target) return [];
           const sources: string[] = [];
-          if (target instanceof HTMLImageElement && isUsableImageSource(target.currentSrc)) sources.push(target.currentSrc.trim());
-          for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
-            const value = target.getAttribute(attr);
-            if (isUsableImageSource(value)) sources.push(value.trim());
-          }
-          for (const attr of ['srcset', 'data-srcset']) {
-            for (const candidate of parseSrcsetCandidates(target.getAttribute(attr))) {
-              if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+          const targets = el instanceof HTMLImageElement || el instanceof HTMLSourceElement
+            ? [el]
+            : Array.from(el.querySelectorAll('img,source'));
+          for (const target of targets) {
+            if (target instanceof HTMLImageElement && isUsableImageSource(target.currentSrc)) sources.push(target.currentSrc.trim());
+            for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
+              const value = target.getAttribute(attr);
+              if (isUsableImageSource(value)) sources.push(value.trim());
+            }
+            for (const attr of ['srcset', 'data-srcset']) {
+              for (const candidate of parseSrcsetCandidates(target.getAttribute(attr))) {
+                if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+              }
             }
           }
           return sources;
