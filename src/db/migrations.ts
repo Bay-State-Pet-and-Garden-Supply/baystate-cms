@@ -98,6 +98,16 @@ export function runMigrations(): void {
     console.error('Failed to update extractor_profiles columns:', e);
   }
 
+  // Ensure extractor_profiles has custom_selectors_json column
+  try {
+    const cols = db.query('PRAGMA table_info(extractor_profiles)').all() as Array<{ name: string }>;
+    if (cols.length > 0 && !cols.some(col => col.name === 'custom_selectors_json')) {
+      db.exec("ALTER TABLE extractor_profiles ADD COLUMN custom_selectors_json TEXT DEFAULT '{}';");
+    }
+  } catch (e) {
+    console.error('Failed to update extractor_profiles columns:', e);
+  }
+
   // Ensure domain_status table exists
   try {
     db.exec(`
@@ -363,7 +373,4 @@ export function getSchemaVersion(): string {
     | { value: string }
     | undefined;
   return row?.value ?? '0';
-
-  // Migration 2026-07-03: Add custom_selectors_json to extractor_profiles
-  db.run(`ALTER TABLE extractor_profiles ADD COLUMN custom_selectors_json TEXT DEFAULT '{}'`);
 }
