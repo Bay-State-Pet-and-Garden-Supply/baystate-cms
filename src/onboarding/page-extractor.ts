@@ -180,59 +180,45 @@ export async function extractProductData(
     ? findBrandSites(expected.brandHint).some(s => domain.includes(s.domain) || s.domain.includes(domain))
     : false;
 
-  // 1. Try fast-path HTTP fetch first
-  console.log(`[PageExtractor] Trying fast HTTP extraction for: ${url}`);
-  let httpDetailed: HttpExtractionDetailed | null = null;
-  try {
-    httpDetailed = await extractViaHttpDetailed(url, profile, expected);
-    const httpResult = httpDetailed.data;
-
-    if (expected) {
-      const validation = validateExtraction(httpResult, {
-        name: expected.name,
-        brandHint: expected.brandHint,
-        domain: domain,
-      });
-
-      if (validation.valid) {
-        console.log(`[PageExtractor] HTTP extraction succeeded and passed validation (confidence: ${validation.confidence})`);
-
-        // Record ok status in domain status
-        if (domain) {
-          recordDomainStatus(domain, 'ok');
+  // 1. When a profile exists, use Playwright first (captures JS-rendered content like galleries)
+  // 2. Fall back to fast HTTP/Cheerio if Playwright is unavailable
+  if (!profile) {
+    // No profile — try HTTP first for speed
+    console.log(`[PageExtractor] Trying fast HTTP extraction for: ${url}`);
+    let httpDetailed: HttpExtractionDetailed | null = null;
+    try {
+      httpDetailed = await extractViaHttpDetailed(url, null, expected);
+      const httpResult = httpDetailed.data;
+      if (expected) {
+        const validation = validateExtraction(httpResult, {
+          name: expected.name,
+          brandHint: expected.brandHint,
+          domain: domain,
+        });
+        if (validation.valid) {
+          console.log(`[PageExtractor] HTTP extraction succeeded and passed validation (confidence: ${validation.confidence})`);
+          if (domain) recordDomainStatus(domain, 'ok');
+          let result = httpResult;
+          result.price = expected?.price || null;
+          if (expected?.price) {
+            result = { ...result };
+            result.fieldProvenance = { ...result.fieldProvenance, price: 'spreadsheet-import' };
+          } else {
+            result = { ...result };
+            const { price: _, ...restProvenance } = result.fieldProvenance;
+            result.fieldProvenance = restProvenance;
+          }
+          return result;
         }
-
-        // Assign spreadsheet price to result, completely bypassing supplemental price lookups or web pricing
-        let result = httpResult;
-        result.price = expected?.price || null;
-        if (expected?.price) {
-          result = { ...result };
-          result.fieldProvenance = { ...result.fieldProvenance, price: 'spreadsheet-import' };
-        } else {
-          result = { ...result };
-          const { price: _, ...restProvenance } = result.fieldProvenance;
-          result.fieldProvenance = restProvenance;
-        }
-
-        // Auto profile generation is disabled (operator must explicitly
-        // click "Generate Profile" in the Domain Configuration UI).
-        // See decision: profiles are domain-scoped; one proposal per
-        // domain created on demand, never during extraction.
-
-        return result;
-      } else {
-        console.warn(`[PageExtractor] HTTP extraction failed validation: ${validation.reason}. Status: ${validation.status}`);
-        // If it is blocked or offline, fail over to Playwright.
-        // If it is a catalog mismatch, we also attempt Playwright to see if rendering changes the page, but keep validation active.
-      }
-    } else {
-      if (httpResult.title) {
+      } else if (httpResult.title) {
         return httpResult;
       }
+    } catch (err) {
+      console.warn(`[PageExtractor] HTTP extraction threw an error:`, err);
     }
-  } catch (err) {
-    console.warn(`[PageExtractor] HTTP extraction threw an error:`, err);
   }
+
+  console.log(`[PageExtractor] ${profile ? 'Using profile —' : 'Falling back to'} Playwright extraction for: ${url}`);
 
   // 2. Fallback to Playwright stealth mode
   console.log(`[PageExtractor] Falling back to Playwright stealth extraction for: ${url}`);
@@ -692,6 +678,18 @@ async function extractCustomSelectors(
       const el = document.querySelector(prof.brandSelector);
       data.brand = el?.textContent?.trim() || '';
     }
+    // Custom selectors
+    if (prof.customSelectors) {
+      const cFields: Record<string, string> = {};
+      for (const [fieldName, selector] of Object.entries(prof.customSelectors)) {
+        if (!selector) continue;
+        try {
+          const el = document.querySelector(selector);
+          if (el) cFields[fieldName] = el.textContent?.trim() || '';
+        } catch { /* skip bad selectors */ }
+      }
+      if (Object.keys(cFields).length > 0) (data as any).customFields = cFields;
+    }
     if (prof.imagesSelector) {
       const parseSrcsetCandidates = (srcset: string | null | undefined): string[] => {
         if (!srcset) return [];
@@ -707,19 +705,20 @@ async function extractCustomSelectors(
         return true;
       };
       const imageSourcesForElement = (el: Element): string[] => {
-        const target = el instanceof HTMLImageElement || el instanceof HTMLSourceElement
-          ? el
-          : el.querySelector('img,source');
-        if (!target) return [];
         const sources: string[] = [];
-        if (target instanceof HTMLImageElement && isUsableImageSource(target.currentSrc)) sources.push(target.currentSrc.trim());
-        for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
-          const value = target.getAttribute(attr);
-          if (isUsableImageSource(value)) sources.push(value.trim());
-        }
-        for (const attr of ['srcset', 'data-srcset']) {
-          for (const candidate of parseSrcsetCandidates(target.getAttribute(attr))) {
-            if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+        const targets = el instanceof HTMLImageElement || el instanceof HTMLSourceElement
+          ? [el]
+          : Array.from(el.querySelectorAll('img,source'));
+        for (const target of targets) {
+          if (target instanceof HTMLImageElement && isUsableImageSource(target.currentSrc)) sources.push(target.currentSrc.trim());
+          for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
+            const value = target.getAttribute(attr);
+            if (isUsableImageSource(value)) sources.push(value.trim());
+          }
+          for (const attr of ['srcset', 'data-srcset']) {
+            for (const candidate of parseSrcsetCandidates(target.getAttribute(attr))) {
+              if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+            }
           }
         }
         return sources;
