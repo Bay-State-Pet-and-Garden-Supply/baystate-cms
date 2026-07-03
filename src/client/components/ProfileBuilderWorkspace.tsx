@@ -1042,11 +1042,14 @@ export function ProfileBuilderWorkspace(
                         <strong style={{ textTransform: 'capitalize' }}>{k}:</strong>
                         {k === 'images' && Array.isArray(v) && v.length > 0 ? (
                           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
-                            {(v as string[]).slice(0, 6).map((url, i) => (
-                              <img key={i} src={url} alt="" style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 4, border: '1px solid #e5e7eb' }}
+                            {(v as string[]).slice(0, 20).map((url, i) => {
+                              const src = url.startsWith('//') ? 'https:' + url : url;
+                              return (
+                              <img key={i} src={src} alt="" style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 4, border: '1px solid #e5e7eb' }}
                                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-                            ))}
-                            {(v as string[]).length > 6 && <span style={{ fontSize: 11, color: '#6b7280', alignSelf: 'center' }}>+{(v as string[]).length - 6} more</span>}
+                              );
+                            })}
+                            {(v as string[]).length > 20 && <span style={{ fontSize: 11, color: '#6b7280', alignSelf: 'center' }}>+{(v as string[]).length - 20} more</span>}
                           </div>
                         ) : Array.isArray(v) ? (
                           <span>{v.join(', ').slice(0, 120)}</span>
