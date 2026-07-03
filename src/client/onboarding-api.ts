@@ -137,7 +137,7 @@ export async function skipStageItems(itemIds: string[]): Promise<{ success: bool
   });
 }
 
-export async function resetItemsToStage(
+async function resetItemsToStage(
   itemIds: string[],
   targetStage: string,
 ): Promise<{ success: boolean; reset: number }> {
