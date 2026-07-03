@@ -1162,7 +1162,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
                       {/* Actions column */}
                       <td style={styles.td}>
                         <button
-                          onClick={(e) => { e.stopPropagation(); setWorkspaceDomain(entry.domain); }}
+                          onClick={(e) => { e.stopPropagation(); setDrawerState(null); setWorkspaceDomain(entry.domain); }}
                           style={{ padding: '4px 8px', fontSize: 12, cursor: 'pointer', border: '1px solid #007bff', borderRadius: 4, color: '#007bff', background: '#fff' }}
                         >
                           Open Profile Builder
@@ -1214,16 +1214,17 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
                             onGenerateProfile={() => handleGenerateProfile(entry.domain)}
                             onAddBrand={() => handleAddBrand(entry.domain)}
                             onDeleteBrand={(brandIndex) => handleDeleteBrand(entry.domain, brandIndex)}
-                            onReviewProposal={(proposal, revisionId) =>
+                            onReviewProposal={(proposal, revisionId) => {
                               setDrawerState({
                                 domain: entry.domain,
                                 proposal,
                                 revisionId,
                                 testUrl: (editingDomainData[entry.domain]?.sampleTestUrl || '') as string,
-                              })
-                            }
+                              });
+                              setWorkspaceDomain(null);
+                            }}
                             onCancel={() => setExpandedDomain(null)}
-                            onShowRetryPreview={() => setRetryPreviewDomain(entry.domain)}
+                            onShowRetryPreview={() => { setDrawerState(null); setWorkspaceDomain(null); setRetryPreviewDomain(entry.domain); }}
                           />
                         </td>
                       </tr>
