@@ -1514,6 +1514,13 @@ function mergeExtractionLayers(
   // Calculate overall confidence
   const confidence = confidenceFactors > 0 ? confidenceScore / confidenceFactors : 0;
 
+  // Transfer custom fields from profile selector extraction
+  let customFields: Record<string, string> = {};
+  if (raw.custom && typeof raw.custom === 'object' && 'customFields' in raw.custom) {
+    const cf = (raw.custom as any).customFields;
+    if (cf && typeof cf === 'object') customFields = cf;
+  }
+
   return {
     title,
     brand,
@@ -1530,6 +1537,6 @@ function mergeExtractionLayers(
     confidence,
     fieldProvenance: provenance,
     packagingTitle: null,
-      customFields: {},
+    customFields,
   };
 }
