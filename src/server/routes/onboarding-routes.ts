@@ -1567,8 +1567,8 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
     await page.waitForTimeout(1500);
 
     const customSelectorsJson = JSON.stringify(customSelectors || {});
-    const canonicalImageUrl = (u: string) => { try { return u.split('?')[0]; } catch { return u; } };
     const extracted = await page.evaluate((sel: any) => {
+      const canonicalImageUrl = (u: string) => { try { return u.split('?')[0]; } catch { return u; } };
       const res: Record<string, string | string[]> = {};
       
       if (sel.titleSelector) {
