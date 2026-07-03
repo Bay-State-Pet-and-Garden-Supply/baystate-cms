@@ -1,3 +1,5 @@
+// fallow-ignore-file unused-export
+
 import { z } from 'zod';
 import {
   ClassificationConfigSnapshotRefSchema,
@@ -6,9 +8,6 @@ import {
   ClassificationProposalDecisionSchema,
   ClassificationHistoryEventSchema,
 } from './classification';
-
-// fallow-ignore-file unused-exports
-// fallow-ignore-file unused-types
 
 // ─── Column Mapping ────────────────────────────────────────────────────────────
 

@@ -1154,6 +1154,7 @@ export interface ProfileGenerationTriggerInput {
  *     handled by `supplementPrice` in the integration.
  *  6. The extraction confidence is above `MIN_TRIGGER_CONFIDENCE`.
  */
+// fallow-ignore-next-line unused-export
 export function shouldAttemptProfileGeneration(
   input: ProfileGenerationTriggerInput,
 ): boolean {
@@ -1231,6 +1232,7 @@ const MIN_MULTI_SAMPLE_PASS = 2;
  * in isolation. The caller is expected to fetch the samples with the
  * same HTTP headers used by the page extractor.
  */
+// fallow-ignore-next-line unused-export
 export function validateProfileAcrossSamples(
   selectors: GeneratedSelectorProfile,
   samples: ValidationSample[],

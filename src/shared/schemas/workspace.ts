@@ -1,7 +1,7 @@
+// fallow-ignore-file unused-export
+
 import { z } from 'zod';
 
-// fallow-ignore-file unused-exports
-// fallow-ignore-file unused-types
 
 export const WorkspaceSchema = z.object({
   id: z.string(),

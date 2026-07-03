@@ -23,6 +23,7 @@ export interface BuildStableSelectorResult {
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Stable data-* attribute names that make excellent selectors. */
+// fallow-ignore-next-line unused-export
 export const STABLE_DATA_ATTRS = [
   'data-testid',
   'data-test',
@@ -48,6 +49,7 @@ export const SEMANTIC_HINT_SUBSTRINGS: Record<string, string[]> = {
  * as stable selectors (CSS modules, React keys, Shopify section ids,
  * hex-only hashes, etc.).
  */
+// fallow-ignore-next-line unused-export
 export function isLikelyGeneratedId(id: string): boolean {
   if (!id) return true;
   if (id.length < 2) return true;
@@ -61,6 +63,7 @@ export function isLikelyGeneratedId(id: string): boolean {
 }
 
 /** Lowercase a class string list and return as a Set for quick lookup. */
+// fallow-ignore-next-line unused-export
 export function classSet(className: string | undefined): Set<string> {
   const set = new Set<string>();
   if (!className) return set;
@@ -71,6 +74,7 @@ export function classSet(className: string | undefined): Set<string> {
 }
 
 /** Return a CSS attribute selector for a given attribute. */
+// fallow-ignore-next-line unused-export
 export function attrSelector(attr: string, value: string): string {
   // Escape any double quotes in the value.
   const safe = value.replace(/"/g, '\\"');

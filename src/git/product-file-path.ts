@@ -24,6 +24,7 @@ export function encodeSkuForFilename(sku: string): string {
   return result;
 }
 
+// fallow-ignore-next-line unused-export
 export function decodeSkuFromFilename(filename: string): string {
   // Simple percent-decoding
   try {
@@ -47,6 +48,7 @@ export function skuToProductFilePath(sku: string): string {
   return `products/${encodeSkuForFilename(sku)}.json`;
 }
 
+// fallow-ignore-next-line unused-export
 export function productFilePathToSku(filePath: string): string {
   const basename = filePath.split('/').pop() ?? filePath;
   const withoutExt = stripJsonExtension(basename);

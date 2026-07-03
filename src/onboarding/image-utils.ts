@@ -33,6 +33,7 @@ export function parseSrcsetCandidates(
  * Returns `true` when a source URL is usable as a product image —
  * non-empty, not a data URI, and not an SVG.
  */
+/** @expected-unused */
 export function isUsableImageSource(
   src: string | null | undefined,
 ): src is string {

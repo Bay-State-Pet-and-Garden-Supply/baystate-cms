@@ -86,6 +86,7 @@ function customSelectorsHadAnyValue(
  * extracts structured data without launching a browser. Returns the
  * detailed diagnostics needed by the profile-generation trigger.
  */
+// fallow-ignore-next-line unused-export
 export async function extractViaHttpDetailed(
   url: string,
   profile?: ExtractorProfile | null,

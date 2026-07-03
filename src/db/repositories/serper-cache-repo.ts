@@ -35,6 +35,7 @@ export function insertSerperCache(query: string, results: SerperSearchResult[]):
   ).run(query, resultsJson, now);
 }
 
+// fallow-ignore-next-line unused-export
 export function clearSerperCache(): void {
   const db = getDb();
   db.query('DELETE FROM serper_cache').run();

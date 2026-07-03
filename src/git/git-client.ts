@@ -9,10 +9,12 @@ export class GitClient {
     this.gitDir = path.join(repoPath, '.git');
   }
 
+  // fallow-ignore-next-line unused-class-member
   get repoDir(): string {
     return this.repoPath;
   }
 
+  // fallow-ignore-next-line unused-class-member
   isInstalled(): boolean {
     try {
       execFileSync('git', ['--version'], { stdio: 'pipe' });
@@ -70,6 +72,7 @@ export class GitClient {
     }).trim();
   }
 
+  // fallow-ignore-next-line unused-class-member
   readFileAtHead(filePath: string): string | null {
     try {
       return execFileSync('git', ['show', `HEAD:${filePath}`], {

@@ -98,11 +98,13 @@ import type {
 
 /** Minimum number of confirmed same-domain samples that must validate
  *  before `imagesSelector` can be approved. */
+// fallow-ignore-next-line unused-export
 export const MIN_IMAGE_APPROVAL_SAMPLES = 2;
 
 /** Maximum number of samples the validation service will fetch per
  *  re-validation. Capped to keep a single revision validation bounded
  *  and to avoid a runaway request fan-out. */
+// fallow-ignore-next-line unused-export
 export const MAX_VALIDATION_SAMPLES = 10;
 
 // ─── Domain governance summary ────────────────────────────────────────────────

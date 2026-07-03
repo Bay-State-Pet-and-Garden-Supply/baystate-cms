@@ -29,6 +29,7 @@ export function closeDb(): void {
   }
 }
 
+// fallow-ignore-next-line unused-export
 export function resetDb(): void {
   closeDb();
   _db = null;

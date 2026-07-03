@@ -33,6 +33,7 @@ export function hashJson(value: unknown): string {
   return Math.abs(hash).toString(36);
 }
 
+// fallow-ignore-next-line unused-export
 export function parseJsonFile<T>(content: string): T {
   return JSON.parse(content) as T;
 }

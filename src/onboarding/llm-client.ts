@@ -110,6 +110,7 @@ export const PROFILE_TASKS_REQUIRE_EXPLICIT: ReadonlySet<LlmTask> = new Set([
  * order (DeepSeek → OpenAI → Ollama) and is used when no task-
  * specific config is found AND the caller allows fallback.
  */
+/** @expected-unused */
 export function getLlmConfig(): LlmConfig | null {
   // Try DeepSeek first (recommended cloud)
   const deepseek = getApiKey('deepseek');
@@ -355,6 +356,7 @@ export async function callLlmForTask(
  * continue to use this. New code should prefer the task-specific
  * helper.
  */
+// fallow-ignore-next-line unused-export
 export async function callLlm(
   prompt: string,
   systemPrompt = 'You are a helpful product cataloging assistant.',
