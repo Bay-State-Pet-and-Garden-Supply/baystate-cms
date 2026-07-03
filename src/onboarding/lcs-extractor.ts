@@ -30,7 +30,7 @@ const SITE_SUFFIXES = [
 /**
  * Strip common site name suffixes from a search result title.
  */
-export function stripSiteSuffix(title: string): string {
+function stripSiteSuffix(title: string): string {
   let cleaned = title.trim();
   for (const pattern of SITE_SUFFIXES) {
     cleaned = cleaned.replace(pattern, '');

@@ -69,6 +69,7 @@ export class ShopSiteHttpClient {
     }
   }
 
+  // fallow-ignore-next-line unused-class-member
   async fetchProductsXml(
     options?: { version?: string; fields?: string[] },
   ): Promise<Result<string>> {

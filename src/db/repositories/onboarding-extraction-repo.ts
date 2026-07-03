@@ -62,7 +62,7 @@ export function getLatestExtraction(itemId: string): OnboardingExtractionRow | u
   ).get(itemId) as OnboardingExtractionRow | undefined;
 }
 
-export function listExtractionsByItem(itemId: string): OnboardingExtractionRow[] {
+function listExtractionsByItem(itemId: string): OnboardingExtractionRow[] {
   const db = getDb();
   return db.query(
     'SELECT * FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC',

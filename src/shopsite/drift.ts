@@ -104,7 +104,7 @@ export function detectDrift(
  * Excludes transient fields (id, timestamps, pulled/synced hashes) that change
  * on every normalization and would cause false drift detection.
  */
-export function computeContentHash(product: Record<string, unknown>): string {
+function computeContentHash(product: Record<string, unknown>): string {
   const relevant: Record<string, unknown> = {
     sku: product.sku,
     status: product.status,

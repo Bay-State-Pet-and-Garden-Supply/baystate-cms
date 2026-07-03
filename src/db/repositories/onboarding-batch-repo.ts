@@ -1,6 +1,7 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
-import type { OnboardingBatch, BatchStatus } from '../../shared/schemas/onboarding';
+import { getStageCounts } from './onboarding-item-repo';
+import type { OnboardingBatch, BatchStatus, PipelineStage } from '../../shared/schemas/onboarding';
 
 export interface OnboardingBatchRow {
   id: string;
@@ -22,7 +23,7 @@ function mapRowToBatch(row: OnboardingBatchRow): OnboardingBatch {
     workspaceId: row.workspace_id,
     name: row.name,
     fileName: row.file_name,
-    status: row.status as any,
+    status: (row.status || 'active') as BatchStatus,
     totalItems: row.total_items,
     completedItems: row.completed_items,
     failedItems: row.failed_items,
@@ -46,7 +47,7 @@ export function createBatch(data: {
   db.query(
     `INSERT INTO onboarding_batches
       (id, workspace_id, name, file_name, status, total_items, completed_items, failed_items, column_mapping_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, 'imported', ?, 0, 0, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, 'active', ?, 0, 0, ?, ?, ?)`,
   ).run(id, data.workspaceId, data.name, data.fileName, data.totalItems, data.columnMappingJson ?? null, now, now);
 
   return {
@@ -54,7 +55,7 @@ export function createBatch(data: {
     workspaceId: data.workspaceId,
     name: data.name,
     fileName: data.fileName,
-    status: 'imported',
+    status: 'active',
     totalItems: data.totalItems,
     completedItems: 0,
     failedItems: 0,
@@ -78,9 +79,42 @@ export function listBatches(workspaceId: string): OnboardingBatch[] {
   return rows.map(mapRowToBatch);
 }
 
-export function updateBatchStatus(
+/**
+ * Archive or reactivate a batch. Batches no longer carry pipeline lifecycle status.
+ */
+export function setBatchArchived(id: string, archived: boolean): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.query('UPDATE onboarding_batches SET status = ?, updated_at = ? WHERE id = ?').run(
+    archived ? 'archived' : 'active',
+    now,
+    id,
+  );
+}
+
+/**
+ * Get derived stage distribution for a batch (computed from items, not stored).
+ */
+function getBatchStageDistribution(batchId: string): Record<PipelineStage, number> {
+  return getStageCounts(batchId);
+}
+
+/**
+ * Compute whether all items in a batch have reached promotion or been skipped.
+ */
+export function isBatchComplete(batchId: string): boolean {
+  const db = getDb();
+  const remaining = db.query(
+    `SELECT COUNT(*) as count FROM onboarding_items
+     WHERE batch_id = ? AND stage != 'promotion' AND stage_status NOT IN ('skipped', 'failed')`,
+  ).get(batchId) as { count: number };
+  return remaining.count === 0;
+}
+
+/** @deprecated — batches no longer control pipeline lifecycle. Use setBatchArchived instead. */
+function updateBatchStatus(
   id: string,
-  status: BatchStatus,
+  status: string,
   counters?: { completedItems?: number; failedItems?: number },
 ): void {
   const db = getDb();
@@ -106,7 +140,8 @@ export function updateBatchStatus(
   }
 }
 
-export function incrementBatchCounters(
+/** @deprecated — use getStageCounts + batch completion logic instead */
+function incrementBatchCounters(
   id: string,
   field: 'completed_items' | 'failed_items',
 ): void {

@@ -277,6 +277,6 @@ export function validateProduct(
 /**
  * Check if a scope has blockers.
  */
-export function scopeHasBlockers(scopeType: string, scopeId: string): boolean {
+function scopeHasBlockers(scopeType: string, scopeId: string): boolean {
   return hasBlockers(scopeType, scopeId);
 }

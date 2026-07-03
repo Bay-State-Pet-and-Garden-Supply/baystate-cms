@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+// fallow-ignore-file unused-exports
+// fallow-ignore-file unused-types
+
 // ─── Helper Schemas ────────────────────────────────────────────────────────────
 
 /**
@@ -88,6 +91,37 @@ export type ProductAttributeConfig = z.infer<typeof ProductAttributeConfigSchema
 
 export const CardinalityEnum = z.enum(['single', 'multiple']);
 export type Cardinality = z.infer<typeof CardinalityEnum>;
+
+// ─── Configurable curation targets ─────────────────────────────────────────────
+
+export const CurationTargetKindEnum = z.enum(['product_type', 'product_field', 'page']);
+export type CurationTargetKind = z.infer<typeof CurationTargetKindEnum>;
+
+export const CurationTargetOptionSourceEnum = z.enum(['configured', 'live_store']);
+export type CurationTargetOptionSource = z.infer<typeof CurationTargetOptionSourceEnum>;
+
+/**
+ * Manager-selected classification target for the curation stage.
+ *
+ * Examples:
+ * - kind=product_field, catalogField=ProductField24, selectionMode=single
+ * - kind=page, selectionMode=multiple
+ * - kind=product_type for the optional internal Primary Product Type gate
+ */
+export const CurationTargetConfigSchema = z.object({
+  id: ClassificationSlugSchema,
+  kind: CurationTargetKindEnum,
+  label: z.string().min(1),
+  enabled: z.boolean().default(true),
+  selectionMode: CardinalityEnum.default('single'),
+  attributeId: ClassificationSlugSchema.nullable().default(null),
+  catalogField: z.string().nullable().default(null),
+  optionSource: CurationTargetOptionSourceEnum.default('configured'),
+  required: z.boolean().default(false),
+  sortOrder: z.number().int().default(0),
+});
+
+export type CurationTargetConfig = z.infer<typeof CurationTargetConfigSchema>;
 
 /**
  * One attribute entry within an attribute profile.
@@ -222,6 +256,7 @@ export const ClassificationConfigSchema = z.object({
   attributes: z.array(ProductAttributeConfigSchema).default(() => []),
   attributeProfiles: z.array(AttributeProfileConfigSchema).default(() => []),
   attributeMappings: z.array(AttributeMappingConfigSchema).default(() => []),
+  curationTargets: z.array(CurationTargetConfigSchema).default(() => []),
   guidance: z.array(GuidanceConfigSchema).default(() => []),
   modelPolicy: ModelPolicyConfigSchema.default(() => ({
     defaultProvider: 'ollama' as const,

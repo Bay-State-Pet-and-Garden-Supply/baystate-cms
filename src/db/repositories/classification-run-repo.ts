@@ -49,7 +49,7 @@ export function completeRun(
   );
 }
 
-export function getRecentRun(workspaceId: string, sku: string): ClassificationRunRow | null {
+function getRecentRun(workspaceId: string, sku: string): ClassificationRunRow | null {
   const row = getDb()
     .query('SELECT * FROM classification_runs WHERE workspace_id = ? AND product_sku = ? ORDER BY started_at DESC LIMIT 1')
     .get(workspaceId, sku) as Record<string, any> | undefined;
@@ -57,7 +57,7 @@ export function getRecentRun(workspaceId: string, sku: string): ClassificationRu
   return mapRun(row);
 }
 
-export function getRun(id: string): ClassificationRunRow | null {
+function getRun(id: string): ClassificationRunRow | null {
   const row = getDb()
     .query('SELECT * FROM classification_runs WHERE id = ?')
     .get(id) as Record<string, any> | undefined;
@@ -82,7 +82,7 @@ export function getEvidenceByRun(runId: string): ClassificationEvidence[] {
   return rows.map(mapEvidence);
 }
 
-export function getEvidenceBySku(productSku: string): ClassificationEvidence[] {
+function getEvidenceBySku(productSku: string): ClassificationEvidence[] {
   const rows = getDb()
     .query('SELECT * FROM classification_evidence WHERE product_sku = ? ORDER BY created_at DESC')
     .all(productSku) as Record<string, any>[];
@@ -98,7 +98,7 @@ export function getProposalsByRun(runId: string): ClassificationProposal[] {
   return rows.map(mapProposal);
 }
 
-export function getProposalsBySku(productSku: string): ClassificationProposal[] {
+function getProposalsBySku(productSku: string): ClassificationProposal[] {
   const rows = getDb()
     .query('SELECT * FROM classification_proposals WHERE product_sku = ? ORDER BY created_at DESC')
     .all(productSku) as Record<string, any>[];
@@ -110,6 +110,24 @@ export function getAcceptedProposals(productSku: string): ClassificationProposal
     .query('SELECT * FROM classification_proposals WHERE product_sku = ? AND status = ?')
     .all(productSku, 'accepted') as Record<string, any>[];
   return rows.map(mapProposal);
+}
+
+export function updateProposalReviewValue(
+  proposalId: string,
+  proposedValue: unknown,
+  targetId?: string | null,
+): void {
+  if (targetId !== undefined) {
+    getDb().run(
+      'UPDATE classification_proposals SET proposed_value_json = ?, target_id = ? WHERE id = ?',
+      [JSON.stringify(proposedValue), targetId, proposalId],
+    );
+    return;
+  }
+  getDb().run(
+    'UPDATE classification_proposals SET proposed_value_json = ? WHERE id = ?',
+    [JSON.stringify(proposedValue), proposalId],
+  );
 }
 
 // ─── Decisions ─────────────────────────────────────────────────────────────────
@@ -134,7 +152,7 @@ export function recordDecision(decision: ClassificationProposalDecision): void {
   getDb().run('UPDATE classification_proposals SET status = ? WHERE id = ?', [newStatus, decision.proposalId]);
 }
 
-export function getDecisionsByProposal(proposalId: string): ClassificationProposalDecision[] {
+function getDecisionsByProposal(proposalId: string): ClassificationProposalDecision[] {
   const rows = getDb()
     .query('SELECT * FROM classification_proposal_decisions WHERE proposal_id = ? ORDER BY created_at DESC')
     .all(proposalId) as Record<string, any>[];
@@ -170,7 +188,7 @@ export function recordHistoryEvent(
   );
 }
 
-export function getHistoryBySku(productSku: string): Record<string, any>[] {
+function getHistoryBySku(productSku: string): Record<string, any>[] {
   return getDb()
     .query('SELECT * FROM classification_history_events WHERE product_sku = ? ORDER BY created_at DESC')
     .all(productSku) as Record<string, any>[];

@@ -24,6 +24,7 @@ export function getPage(id: string): PageRow | null {
   return row ? mapPageRow(row) : null;
 }
 
+// fallow-ignore-next-line unused-export
 export function getPageByName(name: string): PageRow | null {
   const db = getDb();
   const row = db.query('SELECT * FROM page_index WHERE name = ?').get(name) as Record<string, any> | undefined;
@@ -81,7 +82,7 @@ export function assignProductToPage(productSku: string, pageName: string): void 
   );
 }
 
-export function unassignProductFromPage(productSku: string, pageName: string): void {
+function unassignProductFromPage(productSku: string, pageName: string): void {
   const db = getDb();
   db.run('DELETE FROM product_pages WHERE product_sku = ? AND page_name = ?', [productSku, pageName]);
 }
@@ -92,7 +93,7 @@ export function getProductPages(productSku: string): string[] {
   return rows.map(r => r.page_name);
 }
 
-export function getPageProducts(pageName: string): string[] {
+function getPageProducts(pageName: string): string[] {
   const db = getDb();
   const rows = db.query('SELECT product_sku FROM product_pages WHERE page_name = ?').all(pageName) as Array<{ product_sku: string }>;
   return rows.map(r => r.product_sku);

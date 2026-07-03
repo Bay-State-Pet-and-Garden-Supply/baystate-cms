@@ -16,7 +16,7 @@ import type { Product } from '../../shared/types';
 import type { FieldRegistryEntry } from '../../shared/types';
 import type { Workspace } from '../../shared/types';
 
-export interface BootstrapResult {
+interface BootstrapResult {
   success: boolean;
   productCount: number;
   commitHash?: string;
@@ -175,6 +175,9 @@ export function bootstrapFromXml(
         hasWarnings: warnings.length > 0 ? 1 : 0,
         createdAt: product.metadata.createdAt,
         updatedAt: product.metadata.updatedAt,
+        description: product.core.description,
+        searchKeywords: product.core.seo.searchKeywords,
+        customFields: product.customFields,
       });
     }
 

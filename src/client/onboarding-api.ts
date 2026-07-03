@@ -137,7 +137,7 @@ export async function skipStageItems(itemIds: string[]): Promise<{ success: bool
   });
 }
 
-export async function completeReviewStage(itemIds: string[]): Promise<{ success: boolean; count: number }> {
+async function completeReviewStage(itemIds: string[]): Promise<{ success: boolean; count: number }> {
   return request<{ success: boolean; count: number }>('/items/review-complete', {
     method: 'POST',
     body: JSON.stringify({ itemIds }),
@@ -296,7 +296,7 @@ export async function getBrandSites(): Promise<{ brandSites: BrandSite[]; catalo
   return request<{ brandSites: BrandSite[]; catalogBrands?: string[] }>('/settings/brand-sites');
 }
 
-export async function deleteBrandSite(id: string): Promise<{ success: boolean }> {
+async function deleteBrandSite(id: string): Promise<{ success: boolean }> {
   return request<{ success: boolean }>(`/settings/brand-sites/${id}`, {
     method: 'DELETE',
   });
@@ -322,7 +322,7 @@ export async function getExtractorProfiles(): Promise<{ extractorProfiles: Extra
   return request<{ extractorProfiles: ExtractorProfile[] }>('/settings/extractor-profiles');
 }
 
-export async function saveExtractorProfile(data: {
+async function saveExtractorProfile(data: {
   domain: string;
   titleSelector?: string | null;
   priceSelector?: string | null;
@@ -337,7 +337,7 @@ export async function saveExtractorProfile(data: {
   });
 }
 
-export async function deleteExtractorProfile(id: string): Promise<{ success: boolean }> {
+async function deleteExtractorProfile(id: string): Promise<{ success: boolean }> {
   return request<{ success: boolean }>(`/settings/extractor-profiles/${id}`, {
     method: 'DELETE',
   });
@@ -471,7 +471,7 @@ async function classificationRequest<T>(path: string, options?: RequestInit): Pr
   return data as T;
 }
 
-export async function getClassificationConfig(): Promise<ClassificationConfigResponse> {
+async function getClassificationConfig(): Promise<ClassificationConfigResponse> {
   return classificationRequest<ClassificationConfigResponse>('/config');
 }
 
@@ -488,7 +488,7 @@ export async function saveCurationTargets(
   });
 }
 
-export async function migrateLegacyClassification(): Promise<{ success: boolean; summary: any }> {
+async function migrateLegacyClassification(): Promise<{ success: boolean; summary: any }> {
   return classificationRequest<{ success: boolean; summary: any }>('/migrate-legacy', {
     method: 'POST',
   });
@@ -801,7 +801,7 @@ export async function pickElementVisually(
   });
 }
 
-export async function validateProfileDraft(
+async function validateProfileDraft(
   req: ValidateRequest,
 ): Promise<{ ok: boolean; data?: ValidateResponse; error?: string }> {
   return request('/settings/profile-tooling/validate', {
@@ -810,7 +810,7 @@ export async function validateProfileDraft(
   });
 }
 
-export async function getDomainDiagnosticsForDomain(
+async function getDomainDiagnosticsForDomain(
   domain: string,
 ): Promise<DomainDiagnosticsEntry> {
   return request(`/settings/domain-diagnostics/${encodeURIComponent(domain)}`);

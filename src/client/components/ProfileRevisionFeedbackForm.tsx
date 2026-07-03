@@ -413,4 +413,3 @@ export function ProfileRevisionFeedbackForm(
 
 // Re-export for convenience so callers do not need to import the
 // SelectorField list separately.
-export { TEXT_FIELDS };

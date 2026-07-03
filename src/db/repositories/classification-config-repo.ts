@@ -25,7 +25,7 @@ export interface ConfigFileMeta {
   updatedAt: string;
 }
 
-export function listConfigFiles(workspaceId: string): ConfigFileMeta[] {
+function listConfigFiles(workspaceId: string): ConfigFileMeta[] {
   const rows = getDb()
     .query('SELECT * FROM classification_config_files WHERE workspace_id = ? ORDER BY file_name')
     .all(workspaceId) as Record<string, any>[];
@@ -174,6 +174,11 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
     }
     upsertConfigFile(workspaceId, 'mappings.json', 1, config.attributeMappings);
 
+    // Curation targets are file-backed stage settings. They do not need a
+    // dedicated cache table because stages read them from the active config,
+    // but tracking the file keeps config metadata/snapshots complete.
+    upsertConfigFile(workspaceId, 'curation-targets.json', 1, config.curationTargets ?? []);
+
     // Guidance
     db.run('DELETE FROM classification_guidance WHERE workspace_id = ?', [workspaceId]);
     for (const g of config.guidance) {
@@ -308,7 +313,7 @@ export function getCachedAttributeMappings(workspaceId: string): AttributeMappin
   }));
 }
 
-export function getCachedGuidance(workspaceId: string): GuidanceConfig[] {
+function getCachedGuidance(workspaceId: string): GuidanceConfig[] {
   const rows = getDb()
     .query('SELECT * FROM classification_guidance WHERE workspace_id = ?')
     .all(workspaceId) as Record<string, any>[];
@@ -322,7 +327,7 @@ export function getCachedGuidance(workspaceId: string): GuidanceConfig[] {
   }));
 }
 
-export function getCachedModelPolicy(workspaceId: string): ModelPolicyConfig | null {
+function getCachedModelPolicy(workspaceId: string): ModelPolicyConfig | null {
   const row = getDb()
     .query('SELECT * FROM classification_model_policies WHERE workspace_id = ?')
     .get(workspaceId) as Record<string, any> | undefined;

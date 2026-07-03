@@ -6,12 +6,19 @@
 
 import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
+import { extractProductJsonFromHtml } from './shopify-json';
 import type { ExtractionData } from '../shared/schemas/onboarding';
 import { findProfileByDomain, type ExtractorProfile } from '../db/repositories/extractor-profile-repo';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { recordDomainStatus } from '../db/repositories/domain-status-repo';
-import { validateExtraction } from './extraction-validator';
-import { supplementPrice } from './price-supplementer';
+import { validateExtraction, type ValidationResult } from './extraction-validator';
+import {
+  addImageSource,
+  canonicalizeUrl,
+  cleanAndDeduplicateImages,
+  collectImageSourcesFromElement,
+} from './image-utils';
+
 
 interface RawExtraction {
   custom: Record<string, string | string[]> | null;
@@ -21,25 +28,73 @@ interface RawExtraction {
   htmlHeuristics: Record<string, string | string[]>;
   images: string[];
   networkProducts: Record<string, unknown>[];
+  productJSON?: Record<string, any> | null;
+}
+
+/** Standard browser User-Agent used for HTTP and Playwright fetches. */
+const HTTP_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+/** Standard headers used for HTTP extraction. Exported for multi-sample validation. */
+export const HTTP_EXTRACTION_HEADERS: Record<string, string> = {
+  'User-Agent': HTTP_USER_AGENT,
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache',
+};
+
+/** Timeout (ms) for HTTP fetches. */
+const HTTP_FETCH_TIMEOUT_MS = 15000;
+
+/** Detailed result returned by the HTTP extraction path. */
+export interface HttpExtractionDetailed {
+  /** The merged, layered extraction result. */
+  data: ExtractionData;
+  /** Raw HTML fetched from the URL. */
+  html: string;
+  /** The raw, per-layer extraction payloads (custom/jsonLd/metaTags/...). */
+  raw: RawExtraction;
+  /**
+   * True if the custom selector layer produced any non-empty value for the
+   * known product fields. Used by the profile-generation trigger to detect
+   * "stale" profiles that should be regenerated.
+   */
+  customHadAnyValue: boolean;
 }
 
 /**
- * Fast-path HTTP extraction using Cheerio.
- * Fetches the page markup and extracts structured data without launching a browser.
+ * Return `true` if a custom-selector extraction produced at least one
+ * non-empty value across the known product fields.
  */
-export async function extractViaHttp(
-  url: string,
-  profile?: ExtractorProfile | null
-): Promise<ExtractionData> {
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Cache-Control': 'no-cache',
-    'Pragma': 'no-cache',
-  };
+function customSelectorsHadAnyValue(
+  custom: Record<string, string | string[]> | null,
+): boolean {
+  if (!custom) return false;
+  for (const value of Object.values(custom)) {
+    if (Array.isArray(value)) {
+      if (value.length > 0) return true;
+    } else if (typeof value === 'string' && value.trim().length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
-  const response = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
+/**
+ * Fast-path HTTP extraction using Cheerio. Fetches the page markup and
+ * extracts structured data without launching a browser. Returns the
+ * detailed diagnostics needed by the profile-generation trigger.
+ */
+export async function extractViaHttpDetailed(
+  url: string,
+  profile?: ExtractorProfile | null,
+  expected?: { name?: string; brandHint?: string | null; price?: string | null },
+): Promise<HttpExtractionDetailed> {
+  const response = await fetch(url, {
+    headers: HTTP_EXTRACTION_HEADERS,
+    signal: AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS),
+  });
   if (!response.ok) {
     throw new Error(`HTTP fetch failed: ${response.status} ${response.statusText}`);
   }
@@ -68,6 +123,9 @@ export async function extractViaHttp(
   // Layer 5: Image Gallery
   const images = extractImagesCheerio($, url);
 
+  // Layer 6: Shopify productJSON from script assignments
+  const productJSON = extractProductJsonFromHtml(html);
+
   const raw: RawExtraction = {
     custom,
     jsonLd,
@@ -76,9 +134,29 @@ export async function extractViaHttp(
     htmlHeuristics,
     images,
     networkProducts: [],
+    productJSON,
   };
 
-  return mergeExtractionLayers(raw, url);
+  return {
+    data: mergeExtractionLayers(raw, url, expected),
+    html,
+    raw,
+    customHadAnyValue: customSelectorsHadAnyValue(custom),
+  };
+}
+
+/**
+ * Fast-path HTTP extraction using Cheerio. Thin wrapper over
+ * `extractViaHttpDetailed` that returns only the merged data — preserves
+ * the public API expected by existing callers (notably `supplementPrice`).
+ */
+async function extractViaHttp(
+  url: string,
+  profile?: ExtractorProfile | null,
+  expected?: { name?: string; brandHint?: string | null; price?: string | null },
+): Promise<ExtractionData> {
+  const detailed = await extractViaHttpDetailed(url, profile, expected);
+  return detailed.data;
 }
 
 /**
@@ -88,7 +166,7 @@ export async function extractViaHttp(
  */
 export async function extractProductData(
   url: string,
-  expected?: { name: string; brandHint?: string | null }
+  expected?: { name: string; brandHint?: string | null; price?: string | null }
 ): Promise<ExtractionData> {
   let domain = '';
   try {
@@ -103,9 +181,11 @@ export async function extractProductData(
 
   // 1. Try fast-path HTTP fetch first
   console.log(`[PageExtractor] Trying fast HTTP extraction for: ${url}`);
+  let httpDetailed: HttpExtractionDetailed | null = null;
   try {
-    const httpResult = await extractViaHttp(url, profile);
-    
+    httpDetailed = await extractViaHttpDetailed(url, profile, expected);
+    const httpResult = httpDetailed.data;
+
     if (expected) {
       const validation = validateExtraction(httpResult, {
         name: expected.name,
@@ -115,25 +195,30 @@ export async function extractProductData(
 
       if (validation.valid) {
         console.log(`[PageExtractor] HTTP extraction succeeded and passed validation (confidence: ${validation.confidence})`);
-        
+
         // Record ok status in domain status
         if (domain) {
           recordDomainStatus(domain, 'ok');
         }
 
-        // Supplement price if missing on brand domains
-        if (!httpResult.price) {
-          if (isKnownBrand) {
-            const searchNameForPrice = httpResult.title || expected.name;
-            const pricing = await supplementPrice(searchNameForPrice, (u) => extractViaHttp(u, null));
-            if (pricing.price) {
-              httpResult.price = pricing.price;
-              httpResult.fieldProvenance.price = 'supplemental-retailer';
-            }
-          }
+        // Assign spreadsheet price to result, completely bypassing supplemental price lookups or web pricing
+        let result = httpResult;
+        result.price = expected?.price || null;
+        if (expected?.price) {
+          result = { ...result };
+          result.fieldProvenance = { ...result.fieldProvenance, price: 'spreadsheet-import' };
+        } else {
+          result = { ...result };
+          const { price: _, ...restProvenance } = result.fieldProvenance;
+          result.fieldProvenance = restProvenance;
         }
 
-        return httpResult;
+        // Auto profile generation is disabled (operator must explicitly
+        // click "Generate Profile" in the Domain Configuration UI).
+        // See decision: profiles are domain-scoped; one proposal per
+        // domain created on demand, never during extraction.
+
+        return result;
       } else {
         console.warn(`[PageExtractor] HTTP extraction failed validation: ${validation.reason}. Status: ${validation.status}`);
         // If it is blocked or offline, fail over to Playwright.
@@ -151,6 +236,11 @@ export async function extractProductData(
   // 2. Fallback to Playwright stealth mode
   console.log(`[PageExtractor] Falling back to Playwright stealth extraction for: ${url}`);
   let rawExtraction: RawExtraction | null = null;
+  // Captured by task 15 — only populated when extraction succeeds and
+  // validation passes. Used as input to the optional Playwright path of
+  // the profile generation trigger.
+  let playwrightHtml: string | null = null;
+  let playwrightCustomHadAnyValue = false;
 
   const userAgents = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -183,7 +273,7 @@ export async function extractProductData(
       const type = req.resourceType();
       const reqUrl = req.url();
       const isTracker = /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i.test(reqUrl);
-      
+
       if (type === 'image' || type === 'font' || type === 'media' || type === 'stylesheet' || isTracker) {
         route.abort();
       } else {
@@ -220,6 +310,11 @@ export async function extractProductData(
       // Layer 5: Image Gallery (img tags are still in DOM even if blocked)
       const images = await extractImages(page, url);
 
+      // Layer 6: Shopify productJSON from page context
+      const productJSON = await page.evaluate(() => {
+        return (window as any).productJSON || null;
+      }).catch(() => null);
+
       rawExtraction = {
         custom,
         jsonLd,
@@ -228,7 +323,20 @@ export async function extractProductData(
         htmlHeuristics,
         images,
         networkProducts: [],
+        productJSON,
       };
+      playwrightCustomHadAnyValue = customSelectorsHadAnyValue(custom);
+
+      // Task 15: capture rendered HTML for the optional Playwright path of
+      // the profile generation trigger. Captured only when extraction
+      // succeeded, so a later failure does not produce a half-rendered
+      // HTML snapshot.
+      try {
+        playwrightHtml = await page.content();
+      } catch (captureErr) {
+        console.warn('[PageExtractor] Failed to capture Playwright HTML for profile generation:', captureErr);
+        playwrightHtml = null;
+      }
     };
 
     await Promise.race([
@@ -255,7 +363,7 @@ export async function extractProductData(
     throw new Error(`Failed to extract data from ${url}`);
   }
 
-  const result = mergeExtractionLayers(rawExtraction, url);
+  const result = mergeExtractionLayers(rawExtraction, url, expected);
 
   // 3. Post-extraction validation gate for Playwright result
   if (expected) {
@@ -272,17 +380,23 @@ export async function extractProductData(
       throw new Error(`Extraction validation failed: ${validation.reason}`);
     }
 
-    // Supplement pricing if missing on brand domains
-    if (!result.price) {
-      if (isKnownBrand) {
-        const searchNameForPrice = result.title || expected.name;
-        const pricing = await supplementPrice(searchNameForPrice, (u) => extractViaHttp(u, null));
-        if (pricing.price) {
-          result.price = pricing.price;
-          result.fieldProvenance.price = 'supplemental-retailer';
-        }
-      }
+    // Assign spreadsheet price to result, completely bypassing supplemental price lookups or web pricing
+    result.price = expected?.price || null;
+    if (expected?.price) {
+      result.fieldProvenance.price = 'spreadsheet-import';
+    } else {
+      delete result.fieldProvenance.price;
     }
+
+    // Task 15: secondary profile generation path. Fires when the HTTP
+    // path did NOT pass validation (e.g. page needs JS rendering) but
+    // the Playwright render did, and the feature flag is on.
+    //
+    // This path is proposal-only: the generated selector set is audited
+    // Auto profile generation is disabled (operator must explicitly
+    // click "Generate Profile" in the Domain Configuration UI).
+    // See decision: profiles are domain-scoped; one proposal per
+    // domain created on demand, never during extraction.
   }
 
   return result;
@@ -310,9 +424,14 @@ function extractCustomSelectorsCheerio(
   }
   if (profile.imagesSelector) {
     const images: string[] = [];
+    const seen = new Set<string>();
     $(profile.imagesSelector).each((_, el) => {
-      const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src') || '';
-      if (src) images.push(src);
+      for (const src of collectImageSourcesFromElement($, el)) {
+        if (!seen.has(src)) {
+          seen.add(src);
+          images.push(src);
+        }
+      }
     });
     data.images = images;
   }
@@ -481,39 +600,46 @@ function extractHtmlHeuristicsCheerio($: cheerio.CheerioAPI): Record<string, str
   return data;
 }
 
+
+
 function extractImagesCheerio($: cheerio.CheerioAPI, baseUrl: string): string[] {
   const images: string[] = [];
   const seen = new Set<string>();
 
-  const imgSelectors = [
+  const specificSelectors = [
     '.product-image img', '.pdp-image img', '.product-gallery img',
     '[data-testid="product-image"] img', '#product-images img',
     '.product-media img', '.gallery img', '.product-photo img',
     'img[itemprop="image"]',
+  ];
+
+  const fallbackSelectors = [
     'main img', '#content img', '.content img',
   ];
 
-  for (const sel of imgSelectors) {
+  const collectFromSelector = (sel: string) => {
     $(sel).each((_, el) => {
-      const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src') || '';
-      if (src && !seen.has(src) && !src.endsWith('.svg') && !src.startsWith('data:image/svg')) {
-        seen.add(src);
-        images.push(src);
+      for (const src of collectImageSourcesFromElement($, el)) {
+        addImageSource(src, seen, images);
       }
     });
-    if (images.length > 0) break;
+  };
+
+  // Try product-scoped selectors first, collecting src/srcset from only
+  // those matched elements. Do not scan every img[srcset] on the page:
+  // many Shopify themes render recommendation/product-card carousels with
+  // srcsets before the PDP media, which polluted additionalImages for Woof.
+  for (const sel of specificSelectors) {
+    collectFromSelector(sel);
   }
 
-  $('img[srcset]').each((_, el) => {
-    const srcset = $(el).attr('srcset') ?? '';
-    const parts = srcset.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
-    for (const src of parts) {
-      if (src && !seen.has(src) && !src.endsWith('.svg') && !src.startsWith('data:image/svg')) {
-        seen.add(src);
-        images.push(src);
-      }
+  // If no images found from specific product selectors, use bounded content
+  // fallbacks. Srcset parsing is still scoped to those fallback matches.
+  if (images.length === 0) {
+    for (const sel of fallbackSelectors) {
+      collectFromSelector(sel);
     }
-  });
+  }
 
   return images.map(src => {
     try {
@@ -551,13 +677,46 @@ async function extractCustomSelectors(
       data.brand = el?.textContent?.trim() || '';
     }
     if (prof.imagesSelector) {
-      const imgEls = document.querySelectorAll(prof.imagesSelector);
-      data.images = Array.from(imgEls)
-        .map(el => {
-          const img = el as HTMLImageElement;
-          return img.src || img.dataset.src || img.getAttribute('data-lazy-src') || '';
-        })
-        .filter(Boolean);
+      const parseSrcsetCandidates = (srcset: string | null | undefined): string[] => {
+        if (!srcset) return [];
+        return srcset.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
+      };
+      const isUsableImageSource = (src: string | null | undefined): src is string => {
+        if (!src) return false;
+        const trimmed = src.trim();
+        if (!trimmed) return false;
+        const lower = trimmed.toLowerCase();
+        if (lower.startsWith('data:')) return false;
+        if (lower.split(/[?#]/)[0].endsWith('.svg')) return false;
+        return true;
+      };
+      const imageSourcesForElement = (el: Element): string[] => {
+        const target = el instanceof HTMLImageElement || el instanceof HTMLSourceElement
+          ? el
+          : el.querySelector('img,source');
+        if (!target) return [];
+        const sources: string[] = [];
+        if (target instanceof HTMLImageElement && isUsableImageSource(target.currentSrc)) sources.push(target.currentSrc.trim());
+        for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
+          const value = target.getAttribute(attr);
+          if (isUsableImageSource(value)) sources.push(value.trim());
+        }
+        for (const attr of ['srcset', 'data-srcset']) {
+          for (const candidate of parseSrcsetCandidates(target.getAttribute(attr))) {
+            if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+          }
+        }
+        return sources;
+      };
+
+      const seen = new Set<string>();
+      data.images = Array.from(document.querySelectorAll(prof.imagesSelector))
+        .flatMap(imageSourcesForElement)
+        .filter(src => {
+          if (seen.has(src)) return false;
+          seen.add(src);
+          return true;
+        });
     }
     
     return data;
@@ -757,47 +916,75 @@ async function extractImages(page: import('playwright').Page, baseUrl: string): 
     const images: string[] = [];
     const seen = new Set<string>();
 
-    // Product image selectors
-    const imgSelectors = [
+    const specificSelectors = [
       '.product-image img', '.pdp-image img', '.product-gallery img',
       '[data-testid="product-image"] img', '#product-images img',
       '.product-media img', '.gallery img', '.product-photo img',
       'img[itemprop="image"]',
-      // Fallback: large images in the main content area
+    ];
+
+    const fallbackSelectors = [
       'main img', '#content img', '.content img',
     ];
 
-    for (const sel of imgSelectors) {
-      const els = document.querySelectorAll(sel);
-      for (const el of els) {
-        const img = el as HTMLImageElement;
-        const src = img.src || img.dataset.src || img.getAttribute('data-lazy-src') || '';
-        if (src && !seen.has(src)) {
-          // Filter out tiny images (icons, spacers)
-          const naturalWidth = img.naturalWidth || parseInt(img.getAttribute('width') ?? '0');
-          const naturalHeight = img.naturalHeight || parseInt(img.getAttribute('height') ?? '0');
-          if (naturalWidth > 100 || naturalHeight > 100 || (!naturalWidth && !naturalHeight)) {
-            // Skip SVGs and data URIs for icons
-            if (!src.endsWith('.svg') && !src.startsWith('data:image/svg')) {
-              seen.add(src);
-              images.push(src);
-            }
+    const parseSrcsetCandidates = (srcset: string | null | undefined): string[] => {
+      if (!srcset) return [];
+      return srcset.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
+    };
+    const isUsableImageSource = (src: string | null | undefined): src is string => {
+      if (!src) return false;
+      const trimmed = src.trim();
+      if (!trimmed) return false;
+      const lower = trimmed.toLowerCase();
+      if (lower.startsWith('data:')) return false;
+      if (lower.split(/[?#]/)[0].endsWith('.svg')) return false;
+      return true;
+    };
+    const imageSourcesForElement = (el: Element): string[] => {
+      const target = el instanceof HTMLImageElement || el instanceof HTMLSourceElement
+        ? el
+        : el.querySelector('img,source');
+      if (!target) return [];
+
+      const sources: string[] = [];
+      if (target instanceof HTMLImageElement && isUsableImageSource(target.currentSrc)) sources.push(target.currentSrc.trim());
+      for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
+        const value = target.getAttribute(attr);
+        if (isUsableImageSource(value)) sources.push(value.trim());
+      }
+      for (const attr of ['srcset', 'data-srcset']) {
+        for (const candidate of parseSrcsetCandidates(target.getAttribute(attr))) {
+          if (isUsableImageSource(candidate)) sources.push(candidate.trim());
+        }
+      }
+      return sources;
+    };
+    const hasLargeEnoughDimensions = (el: Element): boolean => {
+      const img = el instanceof HTMLImageElement ? el : el.querySelector('img');
+      if (!img) return true;
+      const naturalWidth = img.naturalWidth || parseInt(img.getAttribute('width') ?? '0');
+      const naturalHeight = img.naturalHeight || parseInt(img.getAttribute('height') ?? '0');
+      return naturalWidth > 100 || naturalHeight > 100 || (!naturalWidth && !naturalHeight);
+    };
+    const collectFromSelector = (sel: string) => {
+      for (const el of document.querySelectorAll(sel)) {
+        if (!hasLargeEnoughDimensions(el)) continue;
+        for (const src of imageSourcesForElement(el)) {
+          if (!seen.has(src)) {
+            seen.add(src);
+            images.push(src);
           }
         }
       }
-      if (images.length > 0) break; // Use the first selector that matches
+    };
+
+    for (const sel of specificSelectors) {
+      collectFromSelector(sel);
     }
 
-    // Also check for high-res via srcset
-    const srcsets = document.querySelectorAll('img[srcset]');
-    for (const el of srcsets) {
-      const srcset = el.getAttribute('srcset') ?? '';
-      const parts = srcset.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
-      for (const src of parts) {
-        if (src && !seen.has(src) && !src.endsWith('.svg')) {
-          seen.add(src);
-          images.push(src);
-        }
+    if (images.length === 0) {
+      for (const sel of fallbackSelectors) {
+        collectFromSelector(sel);
       }
     }
 
@@ -814,9 +1001,234 @@ async function extractImages(page: import('playwright').Page, baseUrl: string): 
   }).filter(src => src.startsWith('http'));
 }
 
+
+// ─── Variant Inference from Expected Name ──────────────────────────────────────────────────
+
+/**
+ * Common size aliases used in product catalog names. Lower-cased keys.
+ * Values are the canonical tokens we look for in variant option fields.
+ */
+const SIZE_ALIASES: Record<string, string[]> = {
+  xs:        ['x-small', 'xsmall', 'extra small', 'xtra small', 'x small'],
+  sm:        ['small', 'sm'],
+  md:        ['medium', 'med', 'md'],
+  lg:        ['large', 'lg'],
+  xl:        ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large', 'x small'],
+  'x-small': ['x-small', 'xsmall', 'extra small', 'xtra small', 'x small'],
+  'x-large': ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
+  'x small': ['x-small', 'xsmall', 'extra small', 'xtra small', 'x small'],
+  'x large': ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
+  'xlarge':  ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
+  small:     ['small', 'sm'],
+  medium:    ['medium', 'med', 'md'],
+  large:     ['large', 'lg'],
+  'extra large': ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
+  'extra small': ['x-small', 'xsmall', 'extra small', 'xtra small'],
+};
+
+function normalizeToken(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function tokenSet(s: string): Set<string> {
+  return new Set(normalizeToken(s).split(/\s+/).filter(Boolean));
+}
+
+/**
+ * Extract the variant descriptor text from a single Shopify variant
+ * object — concatenates title, public_title, name, option1..3, options
+ * array, and sku.
+ */
+function variantDescriptor(v: any): { text: string; tokens: Set<string> } {
+  const parts: string[] = [];
+  if (v?.title) parts.push(String(v.title));
+  if (v?.public_title) parts.push(String(v.public_title));
+  if (v?.name) parts.push(String(v.name));
+  for (const key of ['option1', 'option2', 'option3']) {
+    if (v?.[key]) parts.push(String(v[key]));
+  }
+  if (Array.isArray(v?.options)) {
+    for (const opt of v.options) {
+      if (typeof opt === 'string') parts.push(opt);
+    }
+  }
+  if (v?.sku) parts.push(String(v.sku));
+  const text = parts.join(' ').toLowerCase();
+  return { text, tokens: tokenSet(parts.join(' ')) };
+}
+
+/**
+ * Expand size aliases found in the expected name into all the strings
+ * we might see on a variant option. E.g. "SM" -> "small sm",
+ * "LG" -> "large lg", "XL" -> "x large extra large x-large xl".
+ */
+function expandExpectedNameTokens(expected: string): Set<string> {
+  const raw = normalizeToken(expected);
+  const words = raw.split(/\s+/).filter(Boolean);
+  const expanded = new Set<string>();
+  for (const w of words) {
+    expanded.add(w);
+    // Add the full alias forms AND their individual pieces so token-set
+    // overlap and exact option2 comparison both work.
+    const aliases = SIZE_ALIASES[w];
+    if (aliases) {
+      for (const a of aliases) {
+        expanded.add(normalizeToken(a));
+      }
+    }
+  }
+  return expanded;
+}
+
+/**
+ * Score a single variant against the expected product name.
+ * Higher = better match. Returns 0 if no overlap.
+ */
+function getExpectedSizeAliasForms(expected: string): Set<string> {
+  const raw = normalizeToken(expected);
+  const words = raw.split(/\s+/).filter(Boolean);
+  const forms = new Set<string>();
+  for (const w of words) {
+    forms.add(w);
+    const aliases = SIZE_ALIASES[w];
+    if (aliases) {
+      for (const a of aliases) {
+        forms.add(normalizeToken(a));
+      }
+    }
+  }
+  return forms;
+}
+
+function scoreVariant(v: any, expectedTokens: Set<string>, expectedNameLower: string): number {
+  const desc = variantDescriptor(v);
+  if (!desc.text) return 0;
+  let score = 0;
+  // Token overlap (each shared token = 1 point)
+  let shared = 0;
+  for (const t of expectedTokens) {
+    if (t.length < 2) continue;
+    if (desc.tokens.has(t)) shared++;
+  }
+  score += shared * 10;
+  // Exact option2 (size) match: strong disambiguator. option2 is the
+  // size on most Woof/Shopify PDPs; matching it precisely against the
+  // FULL alias form (e.g. "x large") breaks ties between "Large" and
+  // "X-Large" (both share the "large" piece token).
+  const option2 = v?.option2;
+  if (option2 && typeof option2 === 'string') {
+    const option2Norm = normalizeToken(option2);
+    const fullForms = getExpectedSizeAliasForms(expectedNameLower);
+    if (fullForms.has(option2Norm) && option2Norm.length >= 2) {
+      score += 60;
+    }
+  }
+  // Exact option1 (color) match: also a strong disambiguator.
+  const option1 = v?.option1;
+  if (option1 && typeof option1 === 'string') {
+    const option1Norm = normalizeToken(option1);
+    // option1 is a color (multi-word like "Forest Green"), so check
+    // both the full form and any multi-word expected tokens.
+    for (const t of expectedTokens) {
+      if (t.length < 2) continue;
+      if (option1Norm === t) { score += 60; break; }
+    }
+  }
+  // Exact title match: very strong signal
+  if (desc.text === expectedNameLower) score += 100;
+  // Variant title contains the expected name as substring
+  if (desc.text.includes(expectedNameLower) && expectedNameLower.length > 3) score += 50;
+  // SKU match: strong signal
+  if (v?.sku && typeof v.sku === 'string' && expectedNameLower.includes(v.sku.toLowerCase())) {
+    score += 40;
+  }
+  // Variant has featured_image: tiebreaker
+  if (v?.featured_image || v?.featured_media || v?.image) score += 1;
+  return score;
+}
+
+/**
+ * Pick the best-matching Shopify variant for an expected product name
+ * when the URL doesn't include a `?variant=` parameter. Returns null
+ * when the match is ambiguous or below the confidence threshold.
+ *
+ * Strategy:
+ *   1. Expand expected-name tokens (size aliases, color words).
+ *   2. Identify tokens that are common to ALL variants (e.g. "Pupsicle")
+ *      and exclude them — only differentiating tokens should break ties.
+ *   3. Score every variant against the distinguishing token set.
+ *   4. Require (a) the top score > 0, (b) the top score is strictly
+ *      greater than the runner-up, and (c) the top score clears a
+ *      minimum threshold. This prevents guessing when the name is too
+ *      generic (e.g. just "Pupsicle" with no color or size).
+ */
+function inferVariantFromExpectedName(
+  variants: any[],
+  expectedName: string,
+  brandHint?: string | null,
+): any | null {
+  if (!Array.isArray(variants) || variants.length === 0) return null;
+  const expectedNameLower = expectedName.toLowerCase();
+  const expectedTokens = expandExpectedNameTokens(expectedName);
+
+  // Exclude generic brand token from the scoring set so a name like
+  // "WOOF PUPSICLE LAVENDER SM" doesn't double-count "woof" against
+  // variants that all say "woof" in their name.
+  if (brandHint) {
+    const brandTokens = normalizeToken(brandHint).split(/\s+/).filter(Boolean);
+    for (const b of brandTokens) expectedTokens.delete(b);
+  }
+
+  // Identify tokens shared across ALL variants (e.g. "Pupsicle"). These
+  // are the "base" of the product and should NOT break ties — only
+  // differentiating tokens (color/size/sku) should pick a variant.
+  const variantTexts = variants.map(v => variantDescriptor(v).text);
+  const baseShared = (() => {
+    if (variantTexts.length === 0) return new Set<string>();
+    const first = tokenSet(variantTexts[0]);
+    const common = new Set<string>();
+    for (const t of first) {
+      if (variantTexts.every(vt => tokenSet(vt).has(t))) common.add(t);
+    }
+    return common;
+  })();
+
+  const distinguishingTokens = new Set<string>();
+  for (const t of expectedTokens) {
+    if (!baseShared.has(t)) distinguishingTokens.add(t);
+  }
+  const tokensToUse = distinguishingTokens.size > 0 ? distinguishingTokens : expectedTokens;
+
+  let bestScore = 0;
+  let secondScore = 0;
+  let bestVariant: any = null;
+  for (const v of variants) {
+    const s = scoreVariant(v, tokensToUse, expectedNameLower);
+    if (s > bestScore) {
+      secondScore = bestScore;
+      bestScore = s;
+      bestVariant = v;
+    } else if (s > secondScore) {
+      secondScore = s;
+    }
+  }
+
+  if (!bestVariant || bestScore <= 0) return null;
+  // Require a clear winner: the runner-up must not match the top.
+  if (bestScore === secondScore && secondScore > 0) return null;
+  // Minimum threshold: at least one distinguishing token must have
+  // matched (shared >= 1 with a per-token weight of 10 means score >= 10).
+  if (bestScore < 10) return null;
+  return bestVariant;
+}
+
 // ─── Merge Layers ──────────────────────────────────────────────────────────────
 
-function mergeExtractionLayers(raw: RawExtraction, sourceUrl: string): ExtractionData {
+function mergeExtractionLayers(
+  raw: RawExtraction,
+  sourceUrl: string,
+  expected?: { name?: string; brandHint?: string | null; price?: string | null },
+): ExtractionData {
   const provenance: Record<string, string> = {};
   let confidenceScore = 0;
   let confidenceFactors = 0;
@@ -832,8 +1244,24 @@ function mergeExtractionLayers(raw: RawExtraction, sourceUrl: string): Extractio
     return null;
   }
 
+  // Parse variantId from sourceUrl
+  let variantId: string | null = null;
+  try {
+    const urlObj = new URL(sourceUrl);
+    variantId = urlObj.searchParams.get('variant');
+  } catch { /* ignore */ }
+
+  let matchedVariant: any = null;
+  if (variantId && raw.productJSON && Array.isArray(raw.productJSON.variants)) {
+    matchedVariant = raw.productJSON.variants.find(
+      (v: any) => v.id?.toString() === variantId || v.id === Number(variantId)
+    );
+  } else if (expected?.name && raw.productJSON && Array.isArray(raw.productJSON.variants)) {
+    matchedVariant = inferVariantFromExpectedName(raw.productJSON.variants, expected.name, expected.brandHint ?? null);
+  }
+
   // Title
-  const title = pick('title',
+  let title = pick('title',
     [raw.custom?.title as string, 'custom-selector'],
     [raw.jsonLd?.name as string, 'json-ld'],
     [raw.microdata.name, 'microdata'],
@@ -841,6 +1269,16 @@ function mergeExtractionLayers(raw: RawExtraction, sourceUrl: string): Extractio
     [raw.htmlHeuristics.title as string, 'html'],
     [raw.metaTags['page:title'], 'meta'],
   );
+
+  // If we matched a variant, let's enrich the title to include the variant options
+  if (matchedVariant && title) {
+    const variantTitle = matchedVariant.title || matchedVariant.name || '';
+    if (variantTitle && !title.toLowerCase().includes(variantTitle.toLowerCase())) {
+      title = `${title} - ${variantTitle}`;
+      provenance.title = 'shopify-variant-enrichment';
+    }
+  }
+
   if (title) { confidenceScore++; confidenceFactors++; } else { confidenceFactors++; }
 
   // Brand
@@ -890,37 +1328,125 @@ function mergeExtractionLayers(raw: RawExtraction, sourceUrl: string): Extractio
     }
   }
 
+  // If we matched a variant and it has a price, override to use it
+  if (matchedVariant && matchedVariant.price) {
+    const priceVal = typeof matchedVariant.price === 'number'
+      ? (matchedVariant.price / 100).toFixed(2)
+      : matchedVariant.price;
+    price = priceVal.toString();
+    provenance.price = 'shopify-variant-enrichment';
+  }
+
   if (price) { confidenceScore++; confidenceFactors++; } else { confidenceFactors++; }
 
   // Images
-  const customImages = (raw.custom?.images as string[]) ?? [];
+  const rawAllImages = (raw.custom?.images as string[]) ?? [];
+  const customImages = cleanAndDeduplicateImages(rawAllImages, sourceUrl);
+  const extractedImages = raw.images || [];
+  const combinedImages = [...customImages, ...extractedImages];
+  const allImages = cleanAndDeduplicateImages(combinedImages, sourceUrl);
+
   let primaryImage: string | null = null;
   let provenanceSrc = 'json-ld';
 
-  if (customImages.length > 0) {
-    primaryImage = customImages[0];
-    provenanceSrc = 'custom-selector';
-  } else {
-    const primaryImageCandidates = [
-      raw.jsonLd?.image as string | string[] | undefined,
-      raw.metaTags['og:image'],
-      raw.microdata.image,
-    ];
+  // 1. If we matched a variant, try to use the variant's featured image as primaryImage
+  if (matchedVariant) {
+    let variantImg = matchedVariant.featured_image?.src
+      || matchedVariant.featured_media?.preview_image?.src
+      || matchedVariant.thumbnail_image?.desktop
+      || matchedVariant.image?.src;
 
-    for (const candidate of primaryImageCandidates) {
-      if (candidate) {
-        primaryImage = Array.isArray(candidate) ? candidate[0] : candidate;
-        provenanceSrc = 'json-ld';
-        break;
+    // Fallback: search allImages for filenames matching variant option values (like color names "Tie Dye")
+    if (!variantImg && Array.isArray(matchedVariant.options)) {
+      for (const opt of matchedVariant.options) {
+        if (!opt || typeof opt !== 'string') continue;
+        const normalizedOpt = opt.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normalizedOpt.length < 3) continue; // skip short values like size indicators
+        
+        const match = allImages.find(img => {
+          try {
+            const filename = new URL(img).pathname.split('/').pop()?.toLowerCase() || '';
+            const normalizedFilename = filename.replace(/[^a-z0-9]/g, '');
+            return normalizedFilename.includes(normalizedOpt);
+          } catch {
+            return false;
+          }
+        });
+        
+        if (match) {
+          variantImg = match;
+          break;
+        }
+      }
+    }
+      
+    if (variantImg) {
+      let variantImageUrl: string = variantImg;
+      if (variantImageUrl.startsWith('//')) {
+        variantImageUrl = 'https:' + variantImageUrl;
+      }
+      // Force Shopify variant image to 1200px width (high res)
+      try {
+        const imgUrlObj = new URL(variantImageUrl);
+        if (imgUrlObj.hostname.includes('shopify.com') || imgUrlObj.pathname.includes('/cdn/shop/')) {
+          const vParam = imgUrlObj.searchParams.get('v');
+          imgUrlObj.search = '';
+          if (vParam) imgUrlObj.searchParams.set('v', vParam);
+          imgUrlObj.searchParams.set('width', '1200');
+          variantImageUrl = imgUrlObj.href;
+        }
+      } catch {
+        /* keep the original variant image URL */
+      }
+      primaryImage = variantImageUrl;
+      provenanceSrc = 'shopify-variant';
+    }
+  }
+
+  // 2. Fall back to custom selector or structured data
+  if (!primaryImage) {
+    if (customImages.length > 0) {
+      primaryImage = customImages[0];
+      provenanceSrc = 'custom-selector';
+    } else {
+      const primaryImageCandidates = [
+        raw.jsonLd?.image as string | string[] | undefined,
+        raw.metaTags['og:image'],
+        raw.microdata.image,
+      ];
+
+      for (const candidate of primaryImageCandidates) {
+        if (candidate) {
+          primaryImage = Array.isArray(candidate) ? candidate[0] : candidate;
+          provenanceSrc = 'json-ld';
+          break;
+        }
       }
     }
   }
 
-  // Use HTML-extracted images if no structured data images
-  const allImages = customImages.length > 0 
-    ? customImages 
-    : (raw.images.length > 0 ? raw.images : []);
+  // 3. Normalize primaryImage protocol/relative paths and width if Shopify CDN
+  if (primaryImage) {
+    try {
+      const imgUrlObj = new URL(primaryImage, sourceUrl);
+      primaryImage = imgUrlObj.href;
+      if (provenanceSrc !== 'shopify-variant') {
+        if (imgUrlObj.hostname.includes('shopify.com') || imgUrlObj.pathname.includes('/cdn/shop/')) {
+          const vParam = imgUrlObj.searchParams.get('v');
+          imgUrlObj.search = '';
+          if (vParam) imgUrlObj.searchParams.set('v', vParam);
+          imgUrlObj.searchParams.set('width', '1200');
+          primaryImage = imgUrlObj.href;
+        }
+      }
+    } catch {
+      if (primaryImage.startsWith('//')) {
+        primaryImage = 'https:' + primaryImage;
+      }
+    }
+  }
 
+  // Use HTML-extracted images if no structured/variant primary image found
   if (!primaryImage && allImages.length > 0) {
     primaryImage = allImages[0];
     provenanceSrc = 'html';
@@ -934,7 +1460,11 @@ function mergeExtractionLayers(raw: RawExtraction, sourceUrl: string): Extractio
     confidenceFactors++; 
   }
 
-  const additionalImages = allImages.filter(img => img !== primaryImage);
+  // Exclude primaryImage from allImages to get additionalImages
+  const primaryCanonical = primaryImage ? canonicalizeUrl(primaryImage, sourceUrl) : '';
+  const additionalImages = allImages.filter(img => {
+    return canonicalizeUrl(img, sourceUrl) !== primaryCanonical;
+  });
 
   // Bullet points
   const bulletPoints = (raw.htmlHeuristics.bulletPoints as string[] | undefined) ?? [];

@@ -9,6 +9,7 @@ import { GitClient } from '../../git/git-client';
 import { createWorkspaceDirs, writeGitignore, writeStoreConfig } from '../../git/workspace-files';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
+import { upsertRegistryEntry, listRegistry } from '../../db/repositories/field-registry-repo';
 import type { ClassificationConfig } from '../../shared/types';
 
 import type { Workspace } from '../../shared/types';
@@ -108,6 +109,7 @@ export function createWorkspace(name: string, workspacePath: string): { workspac
     attributes: [],
     attributeProfiles: [],
     attributeMappings: [],
+    curationTargets: [],
     guidance: [],
     modelPolicy: { defaultProvider: 'ollama', defaultModel: '', stageOverrides: {}, imageDataSharing: 'local_only', textDataSharing: 'local_only' },
     dataSharing: { imagePolicy: 'local_only', textPolicy: 'local_only', sensitiveDataFiltering: true, retentionDays: 90 },
@@ -185,6 +187,7 @@ export function closeWorkspace(): void {
   closeDb();
 }
 
+// fallow-ignore-next-line unused-type
 export interface RecentWorkspace {
   name: string;
   path: string;
@@ -205,7 +208,7 @@ export function getRecentWorkspaces(): RecentWorkspace[] {
   return [];
 }
 
-export function saveRecentWorkspaces(list: RecentWorkspace[]): void {
+function saveRecentWorkspaces(list: RecentWorkspace[]): void {
   try {
     fs.writeFileSync(RECENT_WORKSPACES_FILE, JSON.stringify(list, null, 2), 'utf-8');
   } catch (err) {
@@ -213,7 +216,7 @@ export function saveRecentWorkspaces(list: RecentWorkspace[]): void {
   }
 }
 
-export function addRecentWorkspace(name: string, workspacePath: string): void {
+function addRecentWorkspace(name: string, workspacePath: string): void {
   const resolved = path.resolve(workspacePath.trim());
   let list = getRecentWorkspaces();
   list = list.filter(item => path.resolve(item.path) !== resolved);
@@ -235,7 +238,7 @@ export function removeRecentWorkspace(workspacePath: string): void {
   saveRecentWorkspaces(list);
 }
 
-export function autoLoadLastWorkspace(): Workspace | null {
+function autoLoadLastWorkspace(): Workspace | null {
   const list = getRecentWorkspaces();
   if (list.length === 0) return null;
   const last = list[0];
@@ -251,9 +254,17 @@ export function autoLoadLastWorkspace(): Workspace | null {
   }
 }
 
-export function backfillProductIndex(workspacePath: string): void {
+function backfillProductIndex(workspacePath: string): void {
   const db = getDb();
-  const needsBackfill = db.query("SELECT COUNT(*) as count FROM product_index WHERE custom_fields IS NULL").get() as { count: number } | undefined;
+  const ws = findWorkspace();
+  const workspaceId = ws?.id ?? '';
+
+  const needsBackfill = db.query(`
+    SELECT COUNT(*) as count FROM product_index 
+    WHERE custom_fields IS NULL 
+       OR custom_fields = '{}' 
+       OR (custom_fields LIKE '%ProductField1%' AND custom_fields NOT LIKE '%ProductField16%')
+  `).get() as { count: number } | undefined;
   const count = needsBackfill?.count ?? 0;
   if (count > 0) {
     const productsDir = path.join(workspacePath, 'products');
@@ -284,5 +295,68 @@ export function backfillProductIndex(workspacePath: string): void {
       });
       trans();
     }
+  }
+
+  // Always check for registry gaps regardless of product index backfill status —
+  // the registry can drift if product files were created or updated through
+  // onboarding, promotion, or manual edits after the initial bootstrap.
+  if (workspaceId) {
+    syncFieldRegistryFromProductIndex(workspaceId);
+  }
+}
+
+/**
+ * Ensures the field_registry has an entry for every ProductField key present
+ * in product_index.custom_fields. Runs on every workspace load so the
+ * registry stays 1:1 with the live catalog.
+ */
+export function syncFieldRegistryFromProductIndex(workspaceId: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  // Scan a large sample of product rows for ProductField keys. A sample of
+  // 5000 is enough to discover every distinct ProductField in any real
+  // catalog; avoid DISTINCT on the full JSON column which would be slow.
+  const rows = db
+    .query("SELECT custom_fields FROM product_index WHERE custom_fields IS NOT NULL AND custom_fields != '' AND custom_fields != '{}' LIMIT 5000")
+    .all() as Array<{ custom_fields: string | null }>;
+
+  const allKeys = new Set<string>();
+  for (const row of rows) {
+    if (!row.custom_fields) continue;
+    try {
+      const customFields = JSON.parse(String(row.custom_fields)) as Record<string, unknown>;
+      for (const key of Object.keys(customFields)) {
+        if (key.startsWith('ProductField')) allKeys.add(key);
+      }
+    } catch { /* skip malformed */ }
+  }
+
+  if (allKeys.size === 0) return;
+
+  const existing = listRegistry(workspaceId);
+  const existingNames = new Set(existing.map(entry => entry.xmlField));
+
+  let newCount = 0;
+  for (const key of allKeys) {
+    if (existingNames.has(key)) continue;
+    upsertRegistryEntry({
+      id: randomUUID(),
+      workspaceId,
+      xmlField: key,
+      label: key,
+      kind: 'custom',
+      dataType: 'string',
+      editable: true,
+      required: false,
+      uiGroup: 'Custom Fields',
+      sampleValuesJson: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    newCount++;
+  }
+  if (newCount > 0) {
+    console.log(`[WorkspaceService] Synced ${newCount} missing field_registry entries from product_index.`);
   }
 }

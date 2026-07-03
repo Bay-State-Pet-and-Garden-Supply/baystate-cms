@@ -144,7 +144,7 @@ export function insertProductIndex(row: ProductIndexRow): void {
   );
 }
 
-export function updateProductSyncStatus(sku: string, syncStatus: string): void {
+function updateProductSyncStatus(sku: string, syncStatus: string): void {
   const db = getDb();
   db.run('UPDATE product_index SET sync_status = ?, updated_at = ? WHERE sku = ?', [
     syncStatus, new Date().toISOString(), sku,
@@ -178,7 +178,7 @@ export function updateProductIndex(row: Partial<ProductIndexRow> & { sku: string
   db.run(`UPDATE product_index SET ${sets.join(', ')} WHERE sku = ?`, params);
 }
 
-export function deleteProductIndex(sku: string): void {
+function deleteProductIndex(sku: string): void {
   const db = getDb();
   db.run('DELETE FROM product_index WHERE sku = ?', [sku]);
 }

@@ -1,10 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import { getDb } from '../db/connection';
 import { listPages } from '../db/repositories/page-repo';
-import { getLlmConfig, callLlm } from './llm-client';
+import { callLlmForTask, getLlmConfigForTask } from './llm-client';
 import { getVlmConfig, callVlm } from './vlm-client';
 import { loadClassificationConfig } from '../classification/config-loader';
+import { hasExplicitCurationTargets } from '../classification/curation-targets';
 import { createConfigSnapshot } from '../db/repositories/classification-config-repo';
 import {
   createRun,
@@ -23,13 +23,13 @@ import {
   productDraftProjectionStage,
 } from '../classification';
 import type { StageDefinition } from '../classification/types';
-import type { OnboardingItem, ExtractionData, CurationData } from '../shared/schemas/onboarding';
+import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
 
 /**
  * Downloads/reads the local primary image and performs VLM OCR to find the packaging title.
  */
-export async function extractPackagingTitle(
+async function extractPackagingTitle(
   imageUrl: string,
   workspacePath: string
 ): Promise<string | null> {
@@ -68,14 +68,14 @@ export async function extractPackagingTitle(
 /**
  * Synthesizes the optimal store product title using all available name signals.
  */
-export async function finalizeTitle(signals: {
+async function finalizeTitle(signals: {
   name: string;
   brandHint?: string | null;
   webTitle?: string | null;
   ocrTitle?: string | null;
 }): Promise<{ title: string; source: 'web' | 'ocr' | 'llm' }> {
-  const llmConfig = getLlmConfig();
-  
+  const llmConfig = getLlmConfigForTask('product_curation', { allowFallback: true });
+
   // If LLM is not configured, fall back to simple consensus logic
   if (!llmConfig) {
     if (signals.ocrTitle) {
@@ -105,7 +105,7 @@ Rules for final product name:
 5. Clean up casing issues (e.g. "DR MARTY" -> "Dr. Marty", "YAK DNTL" -> "Yak Dental").
 6. Return ONLY the finalized product name. Do not explain your reasoning or add any quotes or markdown formatting.`;
 
-    const cleanTitle = await callLlm(prompt, 'You are a clean product taxonomy assistant.');
+    const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', { allowFallback: true });
     if (cleanTitle && cleanTitle.length > 2) {
       console.log(`[ProductCurator] LLM consolidated title: "${cleanTitle}"`);
       return { title: cleanTitle, source: 'llm' };
@@ -121,13 +121,13 @@ Rules for final product name:
 /**
  * Classifies product into store category pages and determines the product type.
  */
-export async function classifyProduct(
+async function classifyProduct(
   title: string,
   description: string | null
 ): Promise<{ suggestedPages: string[]; suggestedProductType: string | null }> {
-  const llmConfig = getLlmConfig();
+  const llmConfig = getLlmConfigForTask('category_classification', { allowFallback: true });
   const pages = listPages().map(p => p.name);
-  
+
   let suggestedPages: string[] = [];
   let suggestedProductType: string | null = null;
 
@@ -152,7 +152,10 @@ Rules:
 3. If no categories match, return an empty array [].
 4. Return ONLY valid JSON and nothing else. Do not wrap in markdown code blocks.`;
 
-      const responseText = await callLlm(prompt, 'You are a precise JSON classifier.');
+      const responseText = await callLlmForTask('category_classification', prompt, 'You are a precise JSON classifier.', { allowFallback: true });
+      if (responseText == null) {
+        throw new Error('LLM call returned null');
+      }
       const parsed = JSON.parse(responseText.trim());
       if (Array.isArray(parsed)) {
         suggestedPages = parsed.filter(p => pages.includes(p));
@@ -170,7 +173,10 @@ Product Name: "${title}"
 Description: "${description || ''}"
 Return ONLY the product type name. Do not add markdown or punctuation.`;
 
-    const typeResponse = await callLlm(prompt, 'You are a precise classification assistant.');
+    const typeResponse = await callLlmForTask('category_classification', prompt, 'You are a precise classification assistant.', { allowFallback: true });
+    if (typeResponse == null) {
+      throw new Error('LLM call returned null');
+    }
     suggestedProductType = typeResponse.replace(/[".]/g, '').trim();
     console.log(`[ProductCurator] Suggested product type for "${title}": "${suggestedProductType}"`);
   } catch (err: any) {
@@ -185,7 +191,8 @@ Return ONLY the product type name. Do not add markdown or punctuation.`;
  */
 export async function curateItem(
   item: OnboardingItem,
-  workspacePath: string
+  workspacePath: string,
+  options: { skipLegacyClassification?: boolean } = {},
 ): Promise<CurationData> {
   const ext = item.extractionData;
   if (!ext) {
@@ -208,8 +215,12 @@ export async function curateItem(
     ocrTitle: ocrTitle,
   });
 
-  // Step 3: Page & Category Classification
-  const classification = await classifyProduct(finalized.title, ext.description);
+  // Step 3: Page & Category Classification. The modular pipeline can disable
+  // this legacy free-form classification so only manager-selected targets are
+  // filled during curation.
+  const classification = options.skipLegacyClassification
+    ? { suggestedPages: [], suggestedProductType: null }
+    : await classifyProduct(finalized.title, ext.description);
 
   return {
     curatedTitle: finalized.title,
@@ -248,13 +259,18 @@ export async function curateItemWithPipeline(
 
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
 
-  // Step 0: Run classic curation for base fields (title, OCR)
-  const baseCuration = await curateItem(item, workspacePath);
-
-  // Check if classification config exists
+  // Check if classification config exists. Page-only target configuration is
+  // valid, so curationTargets also activates the modular path.
   const classConfig = loadClassificationConfig(workspacePath);
   const hasConfig = classConfig.manifest != null &&
-    (classConfig.productTypes.length > 0 || classConfig.attributes.length > 0);
+    (classConfig.productTypes.length > 0 || classConfig.attributes.length > 0 || (classConfig.curationTargets?.length ?? 0) > 0);
+
+  // Step 0: Run classic curation for base fields (title, OCR). If the modular
+  // target list is explicit, skip the old Product Type/Page classifier to avoid
+  // filling fields the manager did not choose.
+  const baseCuration = await curateItem(item, workspacePath, {
+    skipLegacyClassification: hasConfig && hasExplicitCurationTargets(classConfig),
+  });
 
   if (!hasConfig) {
     console.log('[ProductCurator] No classification config — returning classic curation only.');

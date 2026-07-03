@@ -6,7 +6,7 @@ import { Database } from 'bun:sqlite';
 
 export type DbDatabase = Database;
 
-export function createDatabase(dbPath: string): Database {
+function createDatabase(dbPath: string): Database {
   return new Database(dbPath);
 }
 

@@ -907,7 +907,7 @@ export function rollbackProfileFieldBy(
  * independent of the `promoted` status — promotion is recorded on
  * the field-decision rows.
  */
-export function markGenerationValidated(
+function markGenerationValidated(
   generationId: string,
   options: { confidence?: number; errorMessage?: string | null } = {},
 ): void {
@@ -922,7 +922,7 @@ export function markGenerationValidated(
  * when validation explicitly fails or when the operator rejects
  * the proposal wholesale.
  */
-export function markGenerationRejected(
+function markGenerationRejected(
   generationId: string,
   errorMessage: string,
 ): void {
@@ -930,6 +930,7 @@ export function markGenerationRejected(
 }
 
 /** Re-export the list of all active profiles for the UI. */
+// fallow-ignore-next-line unused-export
 export function listAllActiveProfiles(): ExtractorProfile[] {
   return listAllProfiles();
 }

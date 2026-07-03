@@ -354,6 +354,7 @@ function kindHintsFor(
 }
 
 /** Build the SelectorCandidate list for a given minimized HTML body. */
+// fallow-ignore-next-line unused-export
 export function buildSelectorCandidates(html: string, baseUrl?: string): SelectorCandidate[] {
   if (!html || typeof html !== 'string') return [];
   const $ = cheerio.load(html);
@@ -472,7 +473,7 @@ export interface VariantOptionCandidate {
 
 const VARIANT_CANDIDATE_LIMIT = 20;
 
-export function buildVariantOptionCandidates(html: string, baseUrl?: string): VariantOptionCandidate[] {
+function buildVariantOptionCandidates(html: string, baseUrl?: string): VariantOptionCandidate[] {
   const $ = cheerio.load(html);
   const candidates: VariantOptionCandidate[] = [];
   const seenContainers = new Set<string>();
@@ -1213,7 +1214,7 @@ export interface MultiSampleValidationResult {
 
 /** Minimum number of successful same-domain samples required to be
  * flagged as `readyForReview`. */
-export const MIN_MULTI_SAMPLE_PASS = 2;
+const MIN_MULTI_SAMPLE_PASS = 2;
 
 /**
  * Validate a `GeneratedSelectorProfile` against multiple pre-fetched

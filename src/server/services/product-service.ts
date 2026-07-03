@@ -14,6 +14,7 @@ import type { Product, ProductOperation } from '../../shared/types';
 import type { ProductIndexRow } from '../../db/repositories/product-index-repo';
 
 
+// fallow-ignore-next-line unused-type
 export interface DraftOverlay {
   changeSetId: string;
   sku: string;
@@ -146,12 +147,14 @@ function createEmptyProduct(sku: string): Product {
   };
 }
 
+// fallow-ignore-next-line unused-type
 export interface BulkImportItem {
   sku: string;
   name: string;
   price: string | null;
 }
 
+// fallow-ignore-next-line unused-type
 export interface BulkImportResult {
   changeSetId: string;
   imported: string[];
@@ -243,6 +246,7 @@ export function bulkImportDrafts(
   };
 }
 
+// fallow-ignore-next-line unused-type
 export interface CatalogHealthReport {
   totalProducts: number;
   healthyProducts: number;
@@ -388,6 +392,7 @@ export function getCatalogHealthReport(): CatalogHealthReport {
   };
 }
 
+// fallow-ignore-next-line unused-type
 export interface HealthRuleConfig {
   code: string;
   name: string;
@@ -396,12 +401,13 @@ export interface HealthRuleConfig {
   severity: 'blocker' | 'warning' | 'info' | 'disabled';
 }
 
+// fallow-ignore-next-line unused-type
 export interface HealthConfig {
   schemaVersion: number;
   rules: HealthRuleConfig[];
 }
 
-export const DEFAULT_HEALTH_RULES: HealthRuleConfig[] = [
+const DEFAULT_HEALTH_RULES: HealthRuleConfig[] = [
   {
     code: 'MISSING_NAME',
     name: 'Product Name Populate check',
@@ -499,7 +505,7 @@ export function saveHealthConfig(workspacePath: string, rules: HealthRuleConfig[
   return { success: true };
 }
 
-export function getHealthRulesRecord(workspacePath: string): Record<string, 'blocker' | 'warning' | 'info' | 'disabled'> {
+function getHealthRulesRecord(workspacePath: string): Record<string, 'blocker' | 'warning' | 'info' | 'disabled'> {
   const config = getHealthConfig(workspacePath);
   const record: Record<string, 'blocker' | 'warning' | 'info' | 'disabled'> = {};
   for (const rule of config.rules) {

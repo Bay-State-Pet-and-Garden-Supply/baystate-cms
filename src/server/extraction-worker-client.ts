@@ -174,7 +174,7 @@ export async function snapshotPage(
  * For multi-sample or LLM-enabled runs, prefer the queued job path
  * rather than this synchronous call.
  */
-export async function proposeProfile(
+async function proposeProfile(
   request: ProfileProposalRequest,
 ): Promise<{ ok: true; data: ProfileProposalResponse } | { ok: false; error: string }> {
   return workerFetch(ProfileProposalResponseSchema, {
@@ -212,7 +212,7 @@ export async function validateProfile(
  * allowed. If the worker cannot produce trusted product evidence,
  * the caller must fail the item or keep it blocked in Extraction.
  */
-export async function trustedExtract(
+async function trustedExtract(
   request: ExtractRequest,
 ): Promise<{ ok: true; data: ExtractResponse } | { ok: false; error: string }> {
   return workerFetch(ExtractResponseSchema, {
@@ -261,7 +261,7 @@ export async function pickElement(
  * tracking, retries, and persistence; the worker receives the
  * payload and executes.
  */
-export async function submitWorkerJob(
+async function submitWorkerJob(
   jobId: string,
   payload: WorkerJobPayload,
 ): Promise<{ ok: true; data: WorkerJobResult } | { ok: false; error: string }> {
@@ -278,7 +278,7 @@ export async function submitWorkerJob(
  * and progress. The Bun server may call this on an interval or in
  * response to an SSE request from the frontend.
  */
-export async function getWorkerJobStatus(
+async function getWorkerJobStatus(
   jobId: string,
 ): Promise<{ ok: true; data: WorkerJobResult } | { ok: false; error: string }> {
   return workerFetch(WorkerJobResultSchema, {

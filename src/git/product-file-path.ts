@@ -6,6 +6,7 @@
 
 const FILENAME_SAFE_RE = /^[a-zA-Z0-9._-]+$/;
 
+// fallow-ignore-next-line unused-export
 export function encodeSkuForFilename(sku: string): string {
   if (FILENAME_SAFE_RE.test(sku)) {
     return sku;
@@ -35,7 +36,7 @@ export function decodeSkuFromFilename(filename: string): string {
   }
 }
 
-export function stripJsonExtension(filename: string): string {
+function stripJsonExtension(filename: string): string {
   if (filename.endsWith('.json')) {
     return filename.slice(0, -5);
   }

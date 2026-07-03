@@ -1,0 +1,48 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "entry": [
+    "src/server/index.ts",
+    "src/client/App.tsx",
+    "src/extraction-worker/server.ts",
+    "src/onboarding/job-queue.ts",
+    "src/db/migrations.ts"
+  ],
+  "ignorePatterns": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/*.test.tsx",
+    "**/*.spec.tsx",
+    "scratch/**",
+    ".pi-subagents/**",
+    ".agents/**",
+    ".fallow/**"
+  ],
+  "dynamicallyLoaded": [
+    "src/client/components/GeneratedProfilesPanel.tsx",
+    "src/client/components/ProfileFieldValidationTable.tsx",
+    "src/client/components/SearchableBrandSelector.tsx",
+    "src/client/components/ImagePreviewGrid.tsx",
+    "src/client/components/ProfileExtractionPreview.tsx",
+    "src/client/components/ProfileRetryPreview.tsx",
+    "src/client/components/ElementPickerButton.tsx",
+    "src/client/components/ProfileBuilderWorkspace.tsx",
+    "src/client/components/ProfileProposalDrawer.tsx",
+    "src/client/components/ProfileRevisionFeedbackForm.tsx",
+    "src/onboarding/price-supplementer.ts"
+  ],
+  "publicPackages": [
+    "@baystate/shopsite-cms"
+  ],
+  "ignoreDependencies": [
+    "cheerio"
+  ],
+  "rules": {
+    "unused-exports": "error",
+    "unused-types": "warn",
+    "unused-files": "error",
+    "unused-dependencies": "error",
+    "unused-class-members": "warn",
+    "duplicate-exports": "warn",
+    "unlisted-dependencies": "warn"
+  }
+}

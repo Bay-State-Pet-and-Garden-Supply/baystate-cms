@@ -30,7 +30,7 @@ export function addAuditLog(entry: {
   return { id, ...entry, detailsJson: entry.detailsJson ?? null };
 }
 
-export function listAuditLogs(workspaceId: string, limit = 50): AuditLogRow[] {
+function listAuditLogs(workspaceId: string, limit = 50): AuditLogRow[] {
   const db = getDb();
   const rows = db.query(
     'SELECT * FROM audit_log WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?',

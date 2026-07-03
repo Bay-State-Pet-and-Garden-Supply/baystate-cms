@@ -72,7 +72,7 @@ export function listDrift(workspaceId: string, status?: string, limit?: number, 
   return rows.map(mapRow);
 }
 
-export function findBlockingDriftForSku(workspaceId: string, sku: string): DriftRow | null {
+function findBlockingDriftForSku(workspaceId: string, sku: string): DriftRow | null {
   const db = getDb();
   const row = db.query(
     `SELECT * FROM remote_drift

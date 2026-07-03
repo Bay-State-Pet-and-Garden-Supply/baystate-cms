@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+// fallow-ignore-file unused-exports
+// fallow-ignore-file unused-types
+
 export const MediaSchema = z.object({
   primary: z.string().nullable().default(null),
   additional: z.array(z.string()).default(() => [] as string[]),

@@ -1,6 +1,6 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
-import type { OnboardingItem, ItemStatus } from '../../shared/schemas/onboarding';
+import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus } from '../../shared/schemas/onboarding';
 
 export interface OnboardingItemRow {
   id: string;
@@ -12,7 +12,11 @@ export interface OnboardingItemRow {
   brand_hint: string | null;
   department_hint: string | null;
   source_url: string | null;
+  expected_name: string | null;
+  /** DEPRECATED — use stage + stage_status. Kept for backward compat during migration. */
   status: string;
+  stage: string;
+  stage_status: string;
   error_message: string | null;
   retry_count: number;
   is_duplicate: number;
@@ -37,7 +41,11 @@ export interface InsertItemData {
   existingSku?: string | null;
 }
 
-export function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
+const STAGE_ORDER: PipelineStage[] = ['discovery', 'extraction', 'curation', 'review', 'promotion'];
+
+const PIPELINE_STAGES = STAGE_ORDER;
+
+function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
   return {
     id: row.id,
     batchId: row.batch_id,
@@ -48,7 +56,10 @@ export function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
     brandHint: row.brand_hint,
     departmentHint: row.department_hint,
     sourceUrl: row.source_url,
-    status: row.status as ItemStatus,
+    expectedName: row.expected_name ?? null,
+    stage: (row.stage || 'discovery') as PipelineStage,
+    stageStatus: (row.stage_status || 'pending') as StageStatus,
+    status: (row.status || 'imported') as ItemStatus,
     errorMessage: row.error_message,
     retryCount: row.retry_count,
     isDuplicate: row.is_duplicate === 1,
@@ -61,14 +72,17 @@ export function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
   };
 }
 
+// ─── INSERT ────────────────────────────────────────────────────────────────────
+
 export function insertItems(batchId: string, items: InsertItemData[]): OnboardingItem[] {
   const db = getDb();
   const now = new Date().toISOString();
   const stmt = db.query(
     `INSERT INTO onboarding_items
-      (id, batch_id, upc, name, price, quantity, brand_hint, department_hint, source_url,
-       status, error_message, retry_count, is_duplicate, existing_sku, extraction_data_json, curation_data_json, row_number, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', NULL, 0, ?, ?, NULL, NULL, ?, ?, ?)`,
+      (id, batch_id, upc, name, price, quantity, brand_hint, department_hint, source_url, expected_name,
+       status, stage, stage_status, error_message, retry_count, is_duplicate, existing_sku,
+       extraction_data_json, curation_data_json, row_number, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', 'discovery', 'pending', NULL, 0, ?, ?, NULL, NULL, ?, ?, ?)`,
   );
 
   const inserted: OnboardingItem[] = [];
@@ -103,7 +117,10 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
         brandHint: item.brandHint ?? null,
         departmentHint: item.departmentHint ?? null,
         sourceUrl: item.sourceUrl ?? null,
-        status: 'imported',
+        expectedName: null,
+        stage: 'discovery' as PipelineStage,
+        stageStatus: 'pending' as StageStatus,
+        status: 'imported' as ItemStatus,
         errorMessage: null,
         retryCount: 0,
         isDuplicate: !!item.isDuplicate,
@@ -120,6 +137,8 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
 
   return inserted;
 }
+
+// ─── LOOKUPS ────────────────────────────────────────────────────────────────────
 
 export function findItemById(id: string): OnboardingItem | undefined {
   const db = getDb();
@@ -149,7 +168,231 @@ export function listItemsByBatch(
   return rows.map(mapRowToItem);
 }
 
-export function updateItemStatus(
+// ─── STAGE-BASED METHODS ────────────────────────────────────────────────────────
+
+/**
+ * Get all items for a batch, grouped by stage. Used by the Pipeline Board.
+ */
+export function listItemsByBatchStaged(batchId: string): Record<PipelineStage, OnboardingItem[]> {
+  const db = getDb();
+  const rows = db.query(
+    'SELECT * FROM onboarding_items WHERE batch_id = ? ORDER BY row_number',
+  ).all(batchId) as OnboardingItemRow[];
+
+  const items = rows.map(mapRowToItem);
+  const grouped: Record<PipelineStage, OnboardingItem[]> = {
+    discovery: [],
+    extraction: [],
+    curation: [],
+    review: [],
+    promotion: [],
+  };
+
+  for (const item of items) {
+    const stage = item.stage;
+    if (grouped[stage]) {
+      grouped[stage].push(item);
+    }
+  }
+
+  return grouped;
+}
+
+/**
+ * Get items that are pending within a specific stage — used by the worker.
+ * Optionally filtered by workspaceId for multi-workspace support.
+ */
+export function getPendingItemsByStage(
+  stage: PipelineStage,
+  limit: number,
+  workspaceId?: string,
+): OnboardingItem[] {
+  const db = getDb();
+
+  let rows: OnboardingItemRow[];
+  if (workspaceId) {
+    rows = db.query(
+      `SELECT i.* FROM onboarding_items i
+       JOIN onboarding_batches b ON i.batch_id = b.id
+       WHERE b.workspace_id = ? AND b.status = 'active' AND i.stage = ? AND i.stage_status = 'pending'
+       ORDER BY i.row_number
+       LIMIT ?`,
+    ).all(workspaceId, stage, limit) as OnboardingItemRow[];
+  } else {
+    rows = db.query(
+      `SELECT i.* FROM onboarding_items i
+       JOIN onboarding_batches b ON i.batch_id = b.id
+       WHERE b.status = 'active' AND i.stage = ? AND i.stage_status = 'pending'
+       ORDER BY i.row_number
+       LIMIT ?`,
+    ).all(stage, limit) as OnboardingItemRow[];
+  }
+  return rows.map(mapRowToItem);
+}
+
+/**
+ * Advance one or more items to the next stage.
+ * Only advances items that are 'completed' in their current stage.
+ * Sets items to pending in the target stage. Resets retry_count and error_message.
+ */
+export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; skipped: number } {
+  if (itemIds.length === 0) return { advanced: 0, skipped: 0 };
+
+  const db = getDb();
+  const now = new Date().toISOString();
+  let advanced = 0;
+  let skipped = 0;
+
+  db.transaction(() => {
+    for (const id of itemIds) {
+      const item = findItemById(id);
+      if (!item) {
+        skipped++;
+        continue;
+      }
+
+      // Only advance items that are 'completed' in their current stage
+      if (item.stageStatus !== 'completed') {
+        skipped++;
+        continue;
+      }
+
+      const currentIdx = STAGE_ORDER.indexOf(item.stage);
+      if (currentIdx < 0 || currentIdx >= STAGE_ORDER.length - 1) {
+        // Already at promotion or unknown stage — can't advance
+        skipped++;
+        continue;
+      }
+
+      const nextStage = STAGE_ORDER[currentIdx + 1];
+      db.query(
+        `UPDATE onboarding_items
+         SET stage = ?, stage_status = 'pending', error_message = NULL, retry_count = 0, updated_at = ?
+         WHERE id = ?`,
+      ).run(nextStage, now, id);
+      advanced++;
+    }
+  })();
+
+  return { advanced, skipped };
+}
+
+/**
+ * Update the stage_status of an item (used by worker while processing).
+ */
+export function updateItemStageStatus(
+  id: string,
+  stageStatus: StageStatus,
+  errorMessage?: string | null,
+): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.query(
+    'UPDATE onboarding_items SET stage_status = ?, error_message = ?, updated_at = ? WHERE id = ?',
+  ).run(stageStatus, errorMessage ?? null, now, id);
+}
+
+/**
+ * Mark an item's review stage as completed with the current timestamp.
+ * Sets stage_status='completed' for items in the review stage.
+ */
+export function completeReviewStage(id: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.query(
+    "UPDATE onboarding_items SET stage_status = 'completed', updated_at = ? WHERE id = ? AND stage = 'review'",
+  ).run(now, id);
+}
+
+/**
+ * Mark an item's promotion stage as completed or failed.
+ */
+export function completePromotionStage(id: string, success: boolean, errorMessage?: string | null): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  if (success) {
+    db.query(
+      "UPDATE onboarding_items SET stage_status = 'completed', error_message = NULL, updated_at = ? WHERE id = ? AND stage = 'promotion'",
+    ).run(now, id);
+  } else {
+    db.query(
+      'UPDATE onboarding_items SET stage_status = ?, error_message = ?, updated_at = ? WHERE id = ?',
+    ).run('failed', errorMessage ?? null, now, id);
+  }
+}
+
+/**
+ * Stage-aware update for source URL + completion in discovery stage.
+ */
+export function setDiscoverySourceUrl(id: string, url: string): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.query(
+    "UPDATE onboarding_items SET source_url = ?, stage_status = 'completed', updated_at = ? WHERE id = ?",
+  ).run(url, now, id);
+}
+
+/**
+ * Get stage distribution counts for a batch (for column headers).
+ */
+export function getStageCounts(batchId: string): Record<PipelineStage, number> {
+  const db = getDb();
+  const rows = db.query(
+    'SELECT stage, COUNT(*) as count FROM onboarding_items WHERE batch_id = ? GROUP BY stage',
+  ).all(batchId) as Array<{ stage: string; count: number }>;
+
+  const counts: Record<PipelineStage, number> = {
+    discovery: 0,
+    extraction: 0,
+    curation: 0,
+    review: 0,
+    promotion: 0,
+  };
+
+  for (const row of rows) {
+    const stage = row.stage as PipelineStage;
+    if (Object.prototype.hasOwnProperty.call(counts, stage)) {
+      counts[stage] = row.count;
+    }
+  }
+
+  return counts;
+}
+
+/**
+ * Reset items back to pending in their current stage (for retry).
+ */
+export function resetItemsToPending(itemIds: string[]): void {
+  if (itemIds.length === 0) return;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const placeholders = itemIds.map(() => '?').join(', ');
+  db.query(
+    `UPDATE onboarding_items
+     SET stage_status = 'pending', error_message = NULL, retry_count = 0, updated_at = ?
+     WHERE id IN (${placeholders})`,
+  ).run(now, ...itemIds);
+}
+
+/**
+ * Skip items (mark as skipped in current stage).
+ */
+export function skipItems(itemIds: string[]): void {
+  if (itemIds.length === 0) return;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const placeholders = itemIds.map(() => '?').join(', ');
+  db.query(
+    `UPDATE onboarding_items
+     SET stage_status = 'skipped', updated_at = ?
+     WHERE id IN (${placeholders})`,
+  ).run(now, ...itemIds);
+}
+
+// ─── DEPRECATED — kept for backward compat during migration ────────────────────
+
+/** @deprecated Use updateItemStageStatus instead */
+function updateItemStatus(
   id: string,
   status: ItemStatus,
   errorMessage?: string | null,
@@ -161,15 +404,17 @@ export function updateItemStatus(
   ).run(status, errorMessage ?? null, now, id);
 }
 
+/** @deprecated Use setDiscoverySourceUrl instead (sets stage_status only, no legacy status) */
+// fallow-ignore-next-line unused-export
 export function updateItemSourceUrl(id: string, url: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.query(
-    'UPDATE onboarding_items SET source_url = ?, status = ?, updated_at = ? WHERE id = ?',
+    "UPDATE onboarding_items SET source_url = ?, status = ?, stage_status = 'completed', updated_at = ? WHERE id = ?",
   ).run(url, 'source_confirmed', now, id);
 }
 
-export function updateItemExtractionData(id: string, extractionDataJson: string): void {
+function updateItemExtractionData(id: string, extractionDataJson: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.query(
@@ -177,12 +422,20 @@ export function updateItemExtractionData(id: string, extractionDataJson: string)
   ).run(extractionDataJson, now, id);
 }
 
-export function updateItemCurationData(id: string, curationDataJson: string): void {
+function updateItemCurationData(id: string, curationDataJson: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.query(
     'UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?',
   ).run(curationDataJson, now, id);
+}
+
+export function updateItemExpectedName(id: string, expectedName: string | null): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.query(
+    'UPDATE onboarding_items SET expected_name = ?, updated_at = ? WHERE id = ?',
+  ).run(expectedName, now, id);
 }
 
 export function incrementRetryCount(id: string): number {
@@ -195,7 +448,8 @@ export function incrementRetryCount(id: string): number {
   return row.retry_count;
 }
 
-export function countItemsByStatus(batchId: string): Record<string, number> {
+/** @deprecated Use getStageCounts instead */
+function countItemsByStatus(batchId: string): Record<string, number> {
   const db = getDb();
   const rows = db.query(
     'SELECT status, COUNT(*) as count FROM onboarding_items WHERE batch_id = ? GROUP BY status',
@@ -208,7 +462,8 @@ export function countItemsByStatus(batchId: string): Record<string, number> {
   return counts;
 }
 
-export function getNextPendingItems(
+/** @deprecated Use getPendingItemsByStage instead */
+function getNextPendingItems(
   batchId: string,
   status: ItemStatus,
   limit: number,

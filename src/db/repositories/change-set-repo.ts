@@ -120,7 +120,7 @@ export function listChangeSetItems(changeSetId: string): ChangeSetItemRow[] {
   return rows.map(mapItemRow);
 }
 
-export function deleteChangeSetItem(changeSetId: string, sku: string): void {
+function deleteChangeSetItem(changeSetId: string, sku: string): void {
   const db = getDb();
   db.run('DELETE FROM change_set_items WHERE change_set_id = ? AND sku = ?', [changeSetId, sku]);
 }

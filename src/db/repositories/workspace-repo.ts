@@ -8,7 +8,7 @@ export function findWorkspace(): Workspace | null {
   return mapRowToWorkspace(row);
 }
 
-export function findWorkspaceById(id: string): Workspace | null {
+function findWorkspaceById(id: string): Workspace | null {
   const db = getDb();
   const row = db.query('SELECT * FROM workspace WHERE id = ?').get(id) as Record<string, unknown> | undefined;
   if (!row) return null;

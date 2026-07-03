@@ -313,26 +313,26 @@ export interface ProductTypeDetail extends ProductType {
   fields: ProductTypeField[];
 }
 
-export function listProductTypes() {
+function listProductTypes() {
   return request<{ types: ProductType[] }>('/product-types');
 }
 
-export function getProductType(id: string) {
+function getProductType(id: string) {
   return request<{ productType: ProductTypeDetail }>(`/product-types/${id}`);
 }
 
-export function createProductType(name: string) {
+function createProductType(name: string) {
   return request<{ success: boolean; productType: ProductType }>('/product-types', {
     method: 'POST',
     body: JSON.stringify({ name }),
   });
 }
 
-export function deleteProductType(id: string) {
+function deleteProductType(id: string) {
   return request<{ success: boolean }>(`/product-types/${id}`, { method: 'DELETE' });
 }
 
-export function upsertProductTypeField(
+function upsertProductTypeField(
   productTypeId: string,
   xmlField: string,
   label: string,
@@ -346,7 +346,7 @@ export function upsertProductTypeField(
   });
 }
 
-export function deleteProductTypeField(productTypeId: string, xmlField: string) {
+function deleteProductTypeField(productTypeId: string, xmlField: string) {
   return request<{ success: boolean }>(`/product-types/${productTypeId}/fields/${encodeURIComponent(xmlField)}`, {
     method: 'DELETE',
   });
@@ -364,26 +364,26 @@ export interface Page {
   updatedAt: string;
 }
 
-export function listPages() {
+function listPages() {
   return request<{ pages: Page[] }>('/pages');
 }
 
-export function upsertPage(name: string, fileName?: string | null, parentId?: string | null) {
+function upsertPage(name: string, fileName?: string | null, parentId?: string | null) {
   return request<{ success: boolean; page: Page }>('/pages', {
     method: 'POST',
     body: JSON.stringify({ name, fileName, parentId }),
   });
 }
 
-export function deletePage(id: string) {
+function deletePage(id: string) {
   return request<{ success: boolean }>(`/pages/${id}`, { method: 'DELETE' });
 }
 
-export function getProductPages(sku: string) {
+function getProductPages(sku: string) {
   return request<{ pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`);
 }
 
-export function saveProductPages(sku: string, pages: string[]) {
+function saveProductPages(sku: string, pages: string[]) {
   return request<{ success: boolean; pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`, {
     method: 'POST',
     body: JSON.stringify({ pages }),

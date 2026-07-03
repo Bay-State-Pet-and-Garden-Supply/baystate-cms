@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { ExtractionDataSchema } from './onboarding';
 
+// fallow-ignore-file unused-exports
+// fallow-ignore-file unused-types
+
 // ─── Capabilities ──────────────────────────────────────────────────────────────
 
 export const WorkerCapabilitiesSchema = z.object({

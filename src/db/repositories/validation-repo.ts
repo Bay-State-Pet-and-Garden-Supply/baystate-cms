@@ -45,7 +45,7 @@ export function hasBlockers(scopeType: string, scopeId: string): boolean {
   return row.cnt > 0;
 }
 
-export function listValidationResultsByScope(scopeType: string): ValidationResultRow[] {
+function listValidationResultsByScope(scopeType: string): ValidationResultRow[] {
   const db = getDb();
   const rows = db.query(
     'SELECT * FROM validation_results WHERE scope_type = ? ORDER BY created_at ASC',
