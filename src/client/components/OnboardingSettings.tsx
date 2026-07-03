@@ -1089,30 +1089,8 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
                     {/* Collapsed row */}
                     <tr
                       onClick={() => {
-                        if (!editingDomainData[entry.domain]) {
-                          // Pre-populate selectors from active profile when available
-                          const activeProfile = entry.hasActiveProfile
-                            ? profiles[entry.domain]
-                            : undefined;
-                          setEditingDomainData(prev => ({
-                            ...prev,
-                            [entry.domain]: {
-                              titleSelector: activeProfile?.titleSelector ?? null,
-                              priceSelector: activeProfile?.priceSelector ?? null,
-                              descriptionSelector: activeProfile?.descriptionSelector ?? null,
-                              brandSelector: activeProfile?.brandSelector ?? null,
-                              imagesSelector: activeProfile?.imagesSelector ?? null,
-                              sitemapProductUrlPattern: activeProfile?.sitemapProductUrlPattern ?? null,
-                              brands: entry.brandAssociations.map(b => ({
-                                id: b.id,
-                                brandName: b.brandName,
-                                successCount: b.successCount,
-                              })),
-                              sampleTestUrl: '',
-                            },
-                          }));
-                        }
-                        setExpandedDomain(isExpanded ? null : entry.domain);
+                        setDrawerState(null);
+                        setWorkspaceDomain(entry.domain);
                       }}
                       style={{ cursor: 'pointer', background: isExpanded ? '#f0f7ff' : undefined }}
                     >
