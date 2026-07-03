@@ -14,6 +14,9 @@ import {
   getExtractionWorkerHealth,
   snapshotPageForBuilder,
   generateProfileForDomain,
+  fetchPageHtml,
+  generateSelectorFromElement,
+  testExtractorProfile,
   type GenerateProfileResult,
 } from '../onboarding-api';
 import type {
@@ -312,6 +315,20 @@ export function ProfileBuilderWorkspace(
     Record<string, { selector: string; stability: string }>
   >({});
 
+  // Paste-element state
+  const [pastedTitle, setPastedTitle] = useState('');
+  const [pastedDescription, setPastedDescription] = useState('');
+  const [pastedImages, setPastedImages] = useState('');
+  const [pasteGenBusy, setPasteGenBusy] = useState<string | null>(null);
+  const [pasteError, setPasteError] = useState('');
+
+  // Test/save state
+  const [testResult, setTestResult] = useState<any>(null);
+  const [testBusy, setTestBusy] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
   // ── Proposals state ────────────────────────────────────────────────────
   const [selectedGenerationId, setSelectedGenerationId] = useState<string | null>(null);
   const [proposalGenerating, setProposalGenerating] = useState(false);
@@ -407,6 +424,96 @@ export function ProfileBuilderWorkspace(
       setSnapshotBusy(false);
     }
   };
+
+  // ── Paste-element generate ──────────────────────────────────────────────
+  const handlePasteGenerate = async (field: string, outerHTML: string) => {
+    if (!outerHTML.trim() || !snapshotUrl.trim()) return;
+    setPasteGenBusy(field);
+    setPasteError('');
+    try {
+      const htmlRes = await fetchPageHtml(snapshotUrl.trim());
+      if (!htmlRes.ok || !htmlRes.html) {
+        setPasteError(htmlRes.error || 'Failed to fetch page HTML');
+        return;
+      }
+      const res = await generateSelectorFromElement({ html: htmlRes.html, outerHTML });
+      if (!res.ok || !res.data) {
+        setPasteError(res.error || 'Failed to generate selector');
+        return;
+      }
+      const data = res.data;
+      const key = field === 'title' ? 'title' : field === 'description' ? 'description' : 'images';
+      setPickedSelectors((prev) => ({ ...prev, [key]: { selector: data.selector, stability: data.stability } }));
+    } catch (err) {
+      setPasteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPasteGenBusy(null);
+    }
+  };
+
+  // ── Test extraction ─────────────────────────────────────────────────────
+  const handleTestExtraction = async () => {
+    if (!snapshotUrl.trim()) return;
+    setTestBusy(true);
+    setTestResult(null);
+    setPasteError('');
+    try {
+      const sel = (key: string) => pickedSelectors[key]?.selector || null;
+      const res = await testExtractorProfile({
+        url: snapshotUrl.trim(),
+        titleSelector: sel('title'),
+        descriptionSelector: sel('description'),
+        imagesSelector: sel('images'),
+      });
+      if (res.success) {
+        setTestResult(res.extracted);
+      } else {
+        setPasteError('Test extraction failed');
+      }
+    } catch (err) {
+      setPasteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
+  // ── Save profile ────────────────────────────────────────────────────────
+  const handleSaveProfile = async () => {
+    setSaveBusy(true);
+    setSaveError('');
+    try {
+      const sel = (key: string) => pickedSelectors[key]?.selector || null;
+      const body: Record<string, any> = {
+        domain,
+        titleSelector: sel('title'),
+        descriptionSelector: sel('description'),
+        imagesSelector: sel('images'),
+      };
+      if (Object.keys(customPickedFields).length > 0) {
+        const cSel: Record<string, string> = {};
+        for (const [name, s] of Object.entries(customPickedFields)) {
+          cSel[name] = s.selector;
+        }
+        body.customSelectors = cSel;
+      }
+      const res = await fetch('/api/onboarding/settings/extractor-profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSaveSuccess(true);
+      } else {
+        setSaveError(data.error || 'Save failed');
+      }
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
 
 
 
@@ -634,35 +741,61 @@ export function ProfileBuilderWorkspace(
         {snapshotError && <div style={s.errorBox}>{snapshotError}</div>}
       </div>
 
-      {/* ─── Paste Element HTML — Primary Method ─── */}
-      <div style={{ ...s.section, marginBottom: 16 }}>
-        <details style={{ marginBottom: 12 }} open>
-          <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, color: '#166534' }}>
-            📋 Paste Element HTML (reliable)
-          </summary>
-          <div style={{ marginTop: 8, padding: 12, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0' }}>
-            <p style={{ fontSize: 12, color: '#4b5563', margin: '0 0 8px', lineHeight: 1.5 }}>
-              Open your browser's DevTools (<strong>F12</strong>), find the element, right-click it in the Elements panel,
-              select <strong>Copy → Copy outerHTML</strong>, and paste below.
-            </p>
-            <details style={{ fontSize: 12, color: '#6b7280' }}>
-              <summary style={{ cursor: 'pointer', fontWeight: 500 }}>Step-by-step instructions</summary>
-              <ol style={{ margin: '8px 0 0', paddingLeft: 20, lineHeight: 1.6 }}>
-                <li>Right-click the product title on the page → <strong>Inspect</strong></li>
-                <li>The DevTools Elements panel opens with the element highlighted</li>
-                <li>Right-click the highlighted element in the panel → <strong>Copy → Copy outerHTML</strong></li>
-                <li>Paste into one of the fields below and click <strong>Generate Selector</strong></li>
-              </ol>
-            </details>
-            <p style={{ fontSize: 11, color: '#6b7280', margin: '8px 0 0', fontStyle: 'italic' }}>
-              Need to select an element that isn't listed here? Use the <strong>Custom Fields</strong> section below.
-              Or try the visual picker (below, experimental).
-            </p>
-          </div>
-        </details>
-      </div>
+            {/* ─── Paste Element HTML — Primary Method ─── */}
+      {snapshotResult && (
+        <div style={{ ...s.section, marginBottom: 16 }}>
+          <details style={{ marginBottom: 12 }} open>
+            <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: 14, color: '#166534' }}>
+              📋 Paste Element HTML — No browser needed
+            </summary>
+            <div style={{ marginTop: 8, padding: 12, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0' }}>
+              <p style={{ fontSize: 12, color: '#4b5563', margin: '0 0 8px', lineHeight: 1.5 }}>
+                Open DevTools (<strong>F12</strong>), find the element, right-click it in the Elements panel,
+                select <strong>Copy → Copy outerHTML</strong>, paste below, and click <strong>Generate</strong>.
+              </p>
+              {['title', 'description', 'images'].map((field) => {
+                const label = field === 'title' ? 'Title' : field === 'description' ? 'Description' : 'Images';
+                const key = field as 'title' | 'description' | 'images';
+                const val = field === 'title' ? pastedTitle : field === 'description' ? pastedDescription : pastedImages;
+                const setVal = field === 'title' ? setPastedTitle : field === 'description' ? setPastedDescription : setPastedImages;
+                return (
+                  <div key={field} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>{label}</div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <textarea
+                        value={val}
+                        onChange={(e) => setVal(e.target.value)}
+                        rows={2}
+                        placeholder={'Paste ' + label + ' outerHTML here...'}
+                        style={{ flex: 1, padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 11, fontFamily: 'monospace', resize: 'vertical' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handlePasteGenerate(field, val)}
+                        disabled={pasteGenBusy !== null || !val.trim()}
+                        style={{ padding: '4px 12px', fontSize: 12, background: pasteGenBusy === field ? '#9ca3af' : '#16a34a', color: '#fff', border: 'none', borderRadius: 4, cursor: pasteGenBusy !== null ? 'not-allowed' : 'pointer', fontWeight: 600, whiteSpace: 'nowrap', alignSelf: 'flex-start' }}
+                      >
+                        {pasteGenBusy === field ? 'Generating...' : 'Generate'}
+                      </button>
+                    </div>
+                    {pickedSelectors[key] && (
+                      <div style={{ marginTop: 4, padding: '4px 8px', background: '#f0fdf4', borderRadius: 4, border: '1px solid #bbf7d0', fontSize: 11 }}>
+                        <code>{pickedSelectors[key].selector}</code>
+                        <span style={{ marginLeft: 4, fontSize: 10, fontWeight: 700, color: pickedSelectors[key].stability === 'high' ? '#16a34a' : pickedSelectors[key].stability === 'medium' ? '#d97706' : '#dc2626' }}>
+                          {pickedSelectors[key].stability}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {pasteError && <p style={{ fontSize: 11, color: '#dc2626', marginTop: 4 }}>{pasteError}</p>}
+            </div>
+          </details>
+        </div>
+      )}
 
-      {/* ─── Visual Select — Hero Section ─── */}
+      {/* ─── Visual Select — Hero Section ─── */}{/* ─── Visual Select — Hero Section ─── */}
       {snapshotResult && (
         <>
           <div style={{ ...s.section, marginBottom: 32 }}>
@@ -905,14 +1038,54 @@ export function ProfileBuilderWorkspace(
               )}
             </div>
 
-            {/* Progress */}
+            {/* ─── Test & Save ─── */}
+          {Object.keys(pickedSelectors).length > 0 && (
+            <div style={{ marginTop: 16, padding: 16, background: '#fff', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <button
+                  type="button"
+                  onClick={handleTestExtraction}
+                  disabled={testBusy || !pickedSelectors.title}
+                  style={{ padding: '8px 20px', fontSize: 13, background: testBusy ? '#9ca3af' : '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: testBusy ? 'not-allowed' : 'pointer', fontWeight: 600 }}
+                >
+                  {testBusy ? 'Testing...' : 'Test Extraction'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveProfile}
+                  disabled={saveBusy || saveSuccess || !pickedSelectors.title}
+                  style={{ padding: '8px 20px', fontSize: 13, background: saveBusy || saveSuccess ? '#9ca3af' : '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: saveBusy || !pickedSelectors.title ? 'not-allowed' : 'pointer', fontWeight: 600 }}
+                >
+                  {saveBusy ? 'Saving...' : saveSuccess ? '✓ Saved!' : 'Save Profile'}
+                </button>
+              </div>
+              {saveError && <p style={{ fontSize: 12, color: '#dc2626', marginTop: 6 }}>{saveError}</p>}
+              {saveSuccess && (
+                <p style={{ fontSize: 12, color: '#16a34a', marginTop: 6, fontWeight: 600 }}>
+                  ✓ Profile saved for {domain}. Close this panel and advance items to extraction.
+                </p>
+              )}
+              {testResult && (
+                <div style={{ marginTop: 8, padding: 8, background: '#f8f9fa', borderRadius: 4, fontSize: 12 }}>
+                  <strong>Extraction preview:</strong>
+                  <ul style={{ margin: '4px 0 0', paddingLeft: 16 }}>
+                    {Object.entries(testResult).map(([k, v]) => (
+                      <li key={k}><strong>{k}:</strong> {String(v).slice(0, 80)}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Progress */}
             {Object.keys(pickedSelectors).length > 0 && (
               <div style={{ marginTop: 20, padding: 16, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0', textAlign: 'center' }}>
                 <p style={{ fontSize: 14, fontWeight: 600, color: '#166534', margin: '0 0 8px' }}>
                   {'✓'} {Object.keys(pickedSelectors).length >= 3 ? 'All elements selected!' : Object.keys(pickedSelectors).length + '/3 elements selected'}
                 </p>
                 <p style={{ fontSize: 12, color: '#4b5563', margin: 0 }}>
-                  The selected selectors are ready. Use the paste-element flow or suggest revisions from the Review tab to persist them.
+                  Use <strong>Test Extraction</strong> to preview, then <strong>Save Profile</strong> to persist.
                 </p>
               </div>
             )}
