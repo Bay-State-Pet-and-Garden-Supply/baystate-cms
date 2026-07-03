@@ -1498,10 +1498,10 @@ export function PipelineBoard({
               {reviewItem && reviewItem.stage !== 'discovery' && (reviewExtraction || curationFields.curatedTitle || classificationProposals.length > 0) && (
                 <>
                   {/* Curated Title */}
-                  {/* Curated Title */}
-                  {curationFields.curatedTitle && (
+                  {/* Curated Title — only shown in curation+ stages */}
+                  {curationFields.curatedTitle && reviewItem?.stage !== 'extraction' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Store-Ready Title</h3>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Extracted Title</h3>
                       <input
                         type="text"
                         value={curationFields.curatedTitle}
@@ -1533,7 +1533,7 @@ export function PipelineBoard({
                     <>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                         <div>
-                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Price</label>
+                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Price (from import)</label>
                           <div style={{ fontSize: 13, color: '#374151', padding: '4px 0' }}>{reviewExtraction.price || '—'}</div>
                         </div>
                         <div>
@@ -1552,8 +1552,8 @@ export function PipelineBoard({
                         </div>
                       )}
 
-                      {/* Suggested Product Type */}
-                      {curationFields.suggestedProductType && reviewItem?.stage === 'curation' && (
+                      {/* Suggested Product Type — only in curation stage */}
+                      {curationFields.suggestedProductType && (reviewItem?.stage === 'curation' || reviewItem?.stage === 'review') && (
                         <div>
                           <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Suggested Product Type</label>
                           <div style={{ display: 'inline-block', fontSize: 12, fontWeight: 600, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 6, padding: '4px 10px', marginTop: 4 }}>
