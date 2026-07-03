@@ -487,6 +487,7 @@ export function ProfileBuilderWorkspace(
       const data = await res.json();
       if (data.success) {
         setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 3000);
       } else {
         setSaveError(data.error || 'Save failed');
       }
@@ -1021,8 +1022,8 @@ export function ProfileBuilderWorkspace(
                 <button
                   type="button"
                   onClick={handleSaveProfile}
-                  disabled={saveBusy || saveSuccess || !pickedSelectors.title}
-                  style={{ padding: '8px 20px', fontSize: 13, background: saveBusy || saveSuccess ? '#9ca3af' : '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: saveBusy || !pickedSelectors.title ? 'not-allowed' : 'pointer', fontWeight: 600 }}
+                  disabled={saveBusy || !pickedSelectors.title}
+                  style={{ padding: '8px 20px', fontSize: 13, background: saveBusy ? '#9ca3af' : '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: saveBusy || !pickedSelectors.title ? 'not-allowed' : 'pointer', fontWeight: 600 }}
                 >
                   {saveBusy ? 'Saving...' : saveSuccess ? '✓ Saved!' : 'Save Profile'}
                 </button>
