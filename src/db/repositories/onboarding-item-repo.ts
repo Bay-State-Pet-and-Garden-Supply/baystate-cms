@@ -389,8 +389,6 @@ export function skipItems(itemIds: string[]): void {
   ).run(now, ...itemIds);
 }
 
-// ─── DEPRECATED — kept for backward compat during migration ────────────────────
-
 /**
  * Reset items to a specific pipeline stage with 'completed' status.
  * Preserves all existing extraction/curation data and source URLs.
@@ -413,7 +411,7 @@ export function resetItemsToStage(
   return { reset: itemIds.length };
 }
 
-/** @deprecated Use updateItemStageStatus instead */
+// ─── DEPRECATED — kept for backward compat during migration ────────────────────
 function updateItemStatus(
   id: string,
   status: ItemStatus,

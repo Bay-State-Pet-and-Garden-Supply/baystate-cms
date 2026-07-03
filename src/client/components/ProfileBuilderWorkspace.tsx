@@ -774,7 +774,7 @@ export function ProfileBuilderWorkspace(
                   {'✓'} {Object.keys(pickedSelectors).length >= 3 ? 'All elements selected!' : Object.keys(pickedSelectors).length + '/3 elements selected'}
                 </p>
                 <p style={{ fontSize: 12, color: '#4b5563', margin: 0 }}>
-                  Go to the <strong>Review</strong> tab to save and approve your selections.
+                  The selected selectors are ready. Use the paste-element flow or suggest revisions from the Review tab to persist them.
                 </p>
               </div>
             )}
