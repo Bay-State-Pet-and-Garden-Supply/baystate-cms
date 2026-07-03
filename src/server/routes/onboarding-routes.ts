@@ -1663,7 +1663,10 @@ route.post('/onboarding/extractor-profiles/test', async (c) => {
       } catch { /* fallback to CSS selectors */ }
     }
 
-    return c.json({ success: true, extracted: { ...extracted, variantOptions: shopifyVariantOptions, shopifyImages } });
+    const result: Record<string, any> = { ...extracted };
+      if (shopifyVariantOptions.length > 0) result.variantOptions = shopifyVariantOptions;
+      if (shopifyImages.length > 0) result.shopifyImages = shopifyImages;
+      return c.json({ success: true, extracted: result });
   } catch (err) {
     console.error('[OnboardingRoutes] Custom selector test run failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);

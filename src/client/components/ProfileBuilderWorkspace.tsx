@@ -1037,7 +1037,7 @@ export function ProfileBuilderWorkspace(
                 <div style={{ marginTop: 8, padding: 12, background: '#f8f9fa', borderRadius: 4, fontSize: 12 }}>
                   <strong style={{ fontSize: 13 }}>Extraction preview:</strong>
                   <ul style={{ margin: '4px 0 0', paddingLeft: 16, listStyle: 'none' }}>
-                    {Object.entries(testResult).map(([k, v]) => (
+                    {Object.entries(testResult).filter(([, v]) => v !== null && v !== '' && !(Array.isArray(v) && v.length === 0)).map(([k, v]) => (
                       <li key={k} style={{ marginTop: 6 }}>
                         <strong style={{ textTransform: 'capitalize' }}>{k}:</strong>
                         {k === 'images' && Array.isArray(v) && v.length > 0 ? (
