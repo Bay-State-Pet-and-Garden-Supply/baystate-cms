@@ -6,7 +6,6 @@
 
 import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
-import { extractProductJsonFromHtml } from './shopify-json';
 import type { ExtractionData } from '../shared/schemas/onboarding';
 import { findProfileByDomain, type ExtractorProfile } from '../db/repositories/extractor-profile-repo';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
@@ -124,8 +123,8 @@ export async function extractViaHttpDetailed(
   // Layer 5: Image Gallery
   const images = extractImagesCheerio($, url);
 
-  // Layer 6: Shopify productJSON from script assignments
-  const productJSON = extractProductJsonFromHtml(html);
+  // Layer 6: Shopify productJSON — deprecated, variant logic removed
+  const productJSON = null;
 
   const raw: RawExtraction = {
     custom,
@@ -271,7 +270,7 @@ export async function extractProductData(
       } else {
         // No profile — try all extraction layers
         try { custom = profile ? await extractCustomSelectors(page, profile) : null; } catch {}
-        try { productJSON = await page.evaluate(() => (window as any).productJSON || null).catch(() => null); } catch {}
+        // productJSON extraction deprecated
       }
       rawExtraction = {
         custom,
