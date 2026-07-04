@@ -227,25 +227,16 @@ export async function extractProductData(
   let playwrightHtml: string | null = null;
   let playwrightCustomHadAnyValue = false;
 
-  const userAgents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  ];
-  const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
   const timeoutMs = isKnownBrand ? 40000 : 25000;
 
   const browser = await chromium.launch({
     headless: true,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--window-size=1280,800',
-    ]
   });
 
   try {
     const context = await browser.newContext({
-      userAgent: randomUserAgent,
+      userAgent,
       viewport: { width: 1280, height: 800 },
       locale: 'en-US',
     });
@@ -256,6 +247,11 @@ export async function extractProductData(
     const extractTask = async () => {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs - 5000 });
       await page.waitForTimeout(2000);
+      // Debug: log page title to verify page loaded correctly
+      const pageTitle = await page.title();
+      if (!pageTitle || pageTitle.includes('Just a moment') || pageTitle.includes('Cloudflare') || pageTitle.includes('Attention Required')) {
+        console.error(`[PageExtractor] WARNING: Page may be blocked. Title: "${pageTitle}" URL: ${url}`);
+      }
 
       // When profile exists, extract via profile selectors only (no fallback layers)
       let custom: Record<string, string | string[]> | null = null;
