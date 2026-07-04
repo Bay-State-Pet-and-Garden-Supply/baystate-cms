@@ -988,6 +988,20 @@ export function PipelineBoard({
                   </span>
                 )}
               </p>
+              {(() => {
+                try {
+                  const domain = reviewItem.sourceUrl ? new URL(reviewItem.sourceUrl).hostname.replace(/^www./, '') : null;
+                  if (!domain) return null;
+                  return (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); closeReview(); onOpenProfileBuilder?.(domain, reviewItem); }}
+                      style={{ marginTop: 8, padding: '4px 12px', fontSize: 12, cursor: 'pointer', border: '1px solid #007bff', borderRadius: 4, color: '#007bff', background: '#fff', fontWeight: 600 }}
+                    >
+                      Open Profile Builder
+                    </button>
+                  );
+                } catch { return null; }
+              })()}
             </div>
 
             {/* Scrollable Body */}
@@ -1538,7 +1552,7 @@ export function PipelineBoard({
                         </div>
                         <div>
                           <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Brand</label>
-                          <div style={{ fontSize: 13, color: '#374151', padding: '4px 0' }}>{reviewExtraction.brand || '—'}</div>
+                          <div style={{ fontSize: 13, color: '#374151', padding: '4px 0' }}>{reviewExtraction.brand || reviewItem.brandHint || '—'}</div>
                         </div>
                       </div>
 
