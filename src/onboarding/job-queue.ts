@@ -376,6 +376,10 @@ export class OnboardingWorker {
         price: item.price,
       });
 
+      // Inject spreadsheet values into extraction result
+      if (item.brandHint && !extractedData.brand) extractedData.brand = item.brandHint;
+      if (item.price && !extractedData.price) extractedData.price = item.price;
+
       insertExtraction({
         itemId: item.id,
         sourceUrl: item.sourceUrl,

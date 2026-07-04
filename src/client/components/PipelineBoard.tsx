@@ -1549,16 +1549,7 @@ export function PipelineBoard({
                         <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Title</label>
                         <div style={{ fontSize: 13, color: '#374151', padding: '4px 0', fontWeight: 600 }}>{reviewExtraction.title || '—'}</div>
                       </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                        <div>
-                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Price (from import)</label>
-                          <div style={{ fontSize: 13, color: '#374151', padding: '4px 0' }}>{reviewExtraction.price || '—'}</div>
-                        </div>
-                        <div>
-                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Brand</label>
-                          <div style={{ fontSize: 13, color: '#374151', padding: '4px 0' }}>{reviewExtraction.brand || reviewItem.brandHint || '—'}</div>
-                        </div>
-                      </div>
+
 
                       {reviewExtraction.description && (
                         <div>
