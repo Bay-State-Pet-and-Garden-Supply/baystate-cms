@@ -311,6 +311,9 @@ export function ProfileBuilderWorkspace(
   const [pickedSelectors, setPickedSelectors] = useState<
     Record<string, { selector: string; stability: string }>
   >({});
+  const [titleOptionalSelectors, setTitleOptionalSelectors] = useState<
+    Array<{ selector: string; stability: string }>
+  >([]);
   const [customFieldName, setCustomFieldName] = useState('');
   const [customPickedFields, setCustomPickedFields] = useState<
     Record<string, { selector: string; stability: string }>
@@ -382,6 +385,11 @@ export function ProfileBuilderWorkspace(
           if (v) cfs[k] = { selector: v as string, stability: 'medium' };
         }
         if (Object.keys(cfs).length > 0) setCustomPickedFields(cfs);
+      }
+      if (activeProfile.titleOptionalSelectors?.length) {
+        setTitleOptionalSelectors(
+          activeProfile.titleOptionalSelectors.map(s => ({ selector: s, stability: 'medium' })),
+        );
       }
     }
   }, [activeProfile]);
@@ -470,9 +478,13 @@ export function ProfileBuilderWorkspace(
       for (const [name, val] of Object.entries(customPickedFields)) {
         if (val.selector) customSel[name] = val.selector;
       }
+      const titleOptionalSelectorsList = titleOptionalSelectors
+        .map(t => t.selector.trim())
+        .filter(Boolean);
       const res = await testExtractorProfile({
         url: snapshotUrl.trim(),
         titleSelector: sel('title'),
+        titleOptionalSelectors: titleOptionalSelectorsList.length > 0 ? titleOptionalSelectorsList : undefined,
         descriptionSelector: sel('description'),
         imagesSelector: sel('images'),
         customSelectors: Object.keys(customSel).length > 0 ? customSel : undefined,
@@ -495,9 +507,13 @@ export function ProfileBuilderWorkspace(
     setSaveError('');
     try {
       const sel = (key: string) => pickedSelectors[key]?.selector || null;
+      const titleOptionalSelectorsList = titleOptionalSelectors
+        .map(t => t.selector.trim())
+        .filter(Boolean);
       const body: Record<string, any> = {
         domain,
         titleSelector: sel('title'),
+        titleOptionalSelectors: titleOptionalSelectorsList.length > 0 ? titleOptionalSelectorsList : undefined,
         descriptionSelector: sel('description'),
         imagesSelector: sel('images'),
       };
@@ -717,6 +733,11 @@ export function ProfileBuilderWorkspace(
           <h3 style={{ ...s.sectionTitle, margin: '0 0 8px', fontSize: 14 }}>Current Profile for {domain}</h3>
           <div style={{ fontSize: 12, color: '#4b5563' }}>
             {activeProfile.titleSelector && <div style={{ marginBottom: 4 }}><strong>Title:</strong> <code style={s.code}>{activeProfile.titleSelector}</code></div>}
+            {activeProfile.titleOptionalSelectors?.length ? (
+              <div style={{ marginBottom: 4 }}><strong>Title extras:</strong> {activeProfile.titleOptionalSelectors.map((sel, i) => (
+                <code key={i} style={{ ...s.code, marginLeft: 4 }}>{sel}</code>
+              ))}</div>
+            ) : null}
             {activeProfile.descriptionSelector && <div style={{ marginBottom: 4 }}><strong>Description:</strong> <code style={s.code}>{activeProfile.descriptionSelector}</code></div>}
             {activeProfile.imagesSelector && <div style={{ marginBottom: 4 }}><strong>Images:</strong> <code style={s.code}>{activeProfile.imagesSelector}</code></div>}
             {activeProfile.customSelectors && Object.keys(activeProfile.customSelectors).length > 0 && (
@@ -837,6 +858,46 @@ export function ProfileBuilderWorkspace(
                     </span>
                   </div>
                 )}
+
+                {/* Optional title selectors (subheadings, taglines that form part of the product name) */}
+                <div style={{ marginTop: 12, borderTop: '1px solid #f3f4f6', paddingTop: 10 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: '#6b7280', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                    + Subtitle / Subheading Selectors
+                  </div>
+                  <p style={{ fontSize: 11, color: '#9ca3af', margin: '0 0 6px' }}>
+                    If the product name spans multiple elements (e.g. h1 + subheading), add extra selectors here. Their text is appended with " — ".
+                  </p>
+                  {titleOptionalSelectors.map((tos, idx) => (
+                    <div key={idx} style={{ display: 'flex', gap: 4, marginBottom: 4, alignItems: 'center' }}>
+                      <span style={{ fontSize: 10, color: '#9ca3af', fontWeight: 600, minWidth: 16 }}>{idx + 1}.</span>
+                      <input
+                        type="text"
+                        value={tos.selector}
+                        onChange={(e) => {
+                          const next = [...titleOptionalSelectors];
+                          next[idx] = { ...next[idx], selector: e.target.value };
+                          setTitleOptionalSelectors(next);
+                        }}
+                        placeholder=".product-subheading, h2.subtitle, ..."
+                        style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setTitleOptionalSelectors(prev => prev.filter((_, i) => i !== idx))}
+                        style={{ background: 'none', border: '1px solid #dc2626', color: '#dc2626', borderRadius: 4, padding: '2px 8px', fontSize: 11, cursor: 'pointer' }}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setTitleOptionalSelectors(prev => [...prev, { selector: '', stability: 'low' }])}
+                    style={{ background: 'none', border: '1px dashed #9ca3af', borderRadius: 4, padding: '4px 12px', fontSize: 11, color: '#6b7280', cursor: 'pointer', marginTop: 4 }}
+                  >
+                    + Add subtitle selector
+                  </button>
+                </div>
               </div>
 
               {/* Description */}

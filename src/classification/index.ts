@@ -8,6 +8,7 @@
  * 3. The pipeline runner resolves dependencies automatically
  */
 export { evidenceExtractionStage } from './stages/evidence-extraction';
+export { nameConsolidationStage } from './stages/name-consolidation';
 export { primaryProductTypeStage } from './stages/primary-product-type';
 export { attributeApplicabilityStage } from './stages/attribute-applicability';
 export { productAttributeProposalsStage } from './stages/attribute-proposals';

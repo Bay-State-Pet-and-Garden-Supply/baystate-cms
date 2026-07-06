@@ -88,7 +88,7 @@ describe('Phase 2: Change Sets and Approval', () => {
     expect(xml).toContain('<Subproducts>');
   });
 
-  it('should create export package with manifest and instructions', () => {
+  it('should create export package with manifest and instructions', async () => {
     const parsed = parseProductsXml(fixtureXml);
     const workspaceId = 'test-ws';
     const products = [];
@@ -98,7 +98,7 @@ describe('Phase 2: Change Sets and Approval', () => {
       if (product.sku) products.push(product);
     }
 
-    const exportResult = createExportPackage(testDir, 'test-cs-001', products, {
+    const exportResult = await createExportPackage(testDir, 'test-cs-001', products, {
       changeSetTitle: 'Test Export',
     });
 

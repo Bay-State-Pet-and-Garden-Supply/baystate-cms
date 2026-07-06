@@ -36,6 +36,7 @@ import type {
   Cardinality,
   CurationTargetKind,
   CurationTargetOptionSource,
+  BrandConfig,
 } from './schemas/classification';
 
 export type {
@@ -89,6 +90,7 @@ export type {
   Cardinality,
   CurationTargetKind,
   CurationTargetOptionSource,
+  BrandConfig,
 };
 
 /** Syncable product status for a change set item */

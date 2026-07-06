@@ -26,7 +26,10 @@ export type LlmTask =
   | 'profile_revision'
   | 'product_curation'
   | 'category_classification'
-  | 'classification_evidence_extraction';
+  | 'classification_evidence_extraction'
+  | 'product_type_classification'
+  | 'category_page_assignment'
+  | 'attribute_value_classification';
 
 export const LLM_TASKS: ReadonlyArray<LlmTask> = [
   'product_name_consolidation',
@@ -35,6 +38,9 @@ export const LLM_TASKS: ReadonlyArray<LlmTask> = [
   'product_curation',
   'category_classification',
   'classification_evidence_extraction',
+  'product_type_classification',
+  'category_page_assignment',
+  'attribute_value_classification',
 ];
 
 /**

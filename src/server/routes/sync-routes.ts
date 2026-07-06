@@ -16,6 +16,7 @@ import { addAuditLog } from '../../db/repositories/audit-log-repo';
 import { hashJson } from '../../git/deterministic-json';
 import { skuToProductFilePath } from '../../git/product-file-path';
 import { getDb } from '../../db/connection';
+import { createImagesZip } from '../../shopsite/zip-generator';
 import type { Product } from '../../shared/types';
 
 const route = new Hono();
@@ -229,6 +230,22 @@ async function runDirectSync(options: {
     const xml = buildProductsXml(products);
     addSyncJobEvent({ syncJobId: job.id, level: 'info', message: `Generated XML for ${products.length} product(s)` });
 
+    // Generate brand-organized images ZIP
+    let zipPath: string | null = null;
+    try {
+      const exportsDir = path.join(options.workspacePath, 'exports', options.changeSetId);
+      if (!fs.existsSync(exportsDir)) {
+        fs.mkdirSync(exportsDir, { recursive: true });
+      }
+      zipPath = path.join(exportsDir, 'shopsite-images.zip');
+      await createImagesZip(options.workspacePath, products, zipPath);
+      addSyncJobEvent({ syncJobId: job.id, level: 'info', message: 'Images ZIP generated.' });
+    } catch (zipErr) {
+      const zipMsg = zipErr instanceof Error ? zipErr.message : String(zipErr);
+      addSyncJobEvent({ syncJobId: job.id, level: 'warning', message: `Images ZIP generation failed: ${zipMsg}` });
+      zipPath = null;
+    }
+
     const uploadResult = await directUpload(xml, config);
     addSyncJobEvent({
       syncJobId: job.id,
@@ -299,6 +316,7 @@ async function runDirectSync(options: {
         jobId: job.id,
         productCount: products.length,
         publishCompleted,
+        zipPath,
         warnings: options.publish && !publishCompleted ? ['Storefront generation may need retry.'] : [],
       },
     };

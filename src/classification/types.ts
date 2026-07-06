@@ -8,6 +8,7 @@ import type {
 
 export type ClassificationStageName =
   | 'evidence_extraction'
+  | 'name_consolidation'
   | 'primary_product_type_proposal'
   | 'attribute_applicability'
   | 'product_attribute_proposals'
@@ -40,6 +41,9 @@ export interface StageOutput {
   abstained: boolean;
   /** Reason for abstention or failure */
   message?: string;
+  /** Arbitrary metadata returned by the stage (e.g. compatibility data for CurationData fields).
+   * This data is NOT represented as proposals and does NOT appear in the Review UI. */
+  metadata?: Record<string, unknown>;
 }
 
 // ─── Stage Result ──────────────────────────────────────────────────────────────
@@ -57,6 +61,22 @@ export interface StageContext {
   configSnapshotRef: ClassificationConfigSnapshotRef;
   /** Current run ID for recording results */
   runId: string;
+  /**
+   * Optional product-line group context for sibling-aware processing.
+   * Populated before name_consolidation when the item belongs to a
+   * product line with sibling items in the same batch.
+   */
+  productLineContext?: {
+    groupId: string;
+    groupLabel: string;
+    siblingNames: string[];
+    siblingWebTitles: string[];
+    siblingOcrTitles: string[];
+    siblingSkus: string[];
+  };
+  /** Pre-computed coordinated title from cohort LLM call. When present,
+   *  name_consolidation uses this instead of making its own LLM call. */
+  preComputedTitle?: string;
 }
 
 // ─── Stage Definition ──────────────────────────────────────────────────────────
@@ -89,4 +109,18 @@ export interface PipelineRun {
   onboardingItemId?: string;
   stages: ClassificationStageName[];
   stageOrder: ClassificationStageName[];
+}
+
+// ─── Pipeline Run Result ─────────────────────────────────────────────────────────
+
+/**
+ * Aggregated result from a full classification pipeline run.
+ */
+export interface PipelineRunResult {
+  /** All evidence accumulated across all stages */
+  evidence: ClassificationEvidence[];
+  /** All proposals accumulated across all stages */
+  proposals: ClassificationProposal[];
+  /** Per-stage output metadata, keyed by stage name */
+  stageOutputs: Partial<Record<ClassificationStageName, StageOutput>>;
 }

@@ -16,6 +16,7 @@ import pageRoutes from './routes/page-routes';
 import dashboardRoutes from './routes/dashboard-routes';
 import onboardingRoutes from './routes/onboarding-routes';
 import classificationRoutes from './routes/classification-routes';
+import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
 
@@ -47,6 +48,12 @@ app.use('*', cors({
   ],
   credentials: true,
 }));
+
+// Autoload middleware to ensure database is initialized on demand
+app.use('/api/*', async (c, next) => {
+  getCurrentWorkspace();
+  await next();
+});
 
 app.onError(errorHandler);
 

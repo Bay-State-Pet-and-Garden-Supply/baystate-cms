@@ -4,6 +4,7 @@ import {
   advanceItems,
   resetStageItems,
   skipStageItems,
+  moveToPreviousStage,
   updateItem,
   getItemDetail,
   setItemUrl,
@@ -102,6 +103,8 @@ export function PipelineBoard({
   const [storePages, setStorePages] = useState<string[]>([]);
   const [_drawerBrandName, setDrawerBrandName] = useState('');
   const [_drawerBrandDomain, setDrawerBrandDomain] = useState('');
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // SSE
   const sseRef = React.useRef<EventSource | null>(null);
@@ -111,6 +114,9 @@ export function PipelineBoard({
   // target within the same column. Held in a ref so it survives re-renders
   // (and batched state updates) without forcing a re-render of its own.
   const rangeAnchorIdRef = React.useRef<string | null>(null);
+
+  // Ref for keyboard nav — updated before return to avoid TDZ
+  const navRef = React.useRef({ handlePrevItem: () => {}, handleNextItem: () => {}, hasPrev: false, hasNext: false });
 
   // Total card count across all stages — used by the header counter. Cheap
   // (one reduce), so no need to memoize.
@@ -191,6 +197,8 @@ export function PipelineBoard({
     };
   }, [batchId, fetchStaged, loadStorePages, loadCurationTargets]);
 
+
+
   // ─── Selection ──────────────────────────────────────────────────────────────
 
   /**
@@ -270,58 +278,25 @@ export function PipelineBoard({
 
   // ─── Actions ────────────────────────────────────────────────────────────────
 
-  const handleAdvance = async (stage: PipelineStage) => {
-    const stageItems = staged[stage] || [];
-    const idsToAdvance = stageItems
-      .filter(item => selectedIds.has(item.id))
-      .map(item => item.id);
-
-    if (idsToAdvance.length === 0) {
-      // Advance all in column if nothing selected
-      const allIds = stageItems
-        .filter(item => item.stageStatus === 'completed')
-        .map(item => item.id);
-      if (allIds.length === 0) return;
-      
-      if (!confirm(`Advance all ${allIds.length} completed items from ${STAGE_LABELS[stage]}?`)) return;
-      
-      setLoading(true);
-      try {
-        await advanceItems(allIds);
-        clearSelection();
-        await fetchStaged();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setLoading(false);
-      }
-    } else {
-      setLoading(true);
-      try {
-        await advanceItems(idsToAdvance);
-        clearSelection();
-        await fetchStaged();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setLoading(false);
-      }
-    }
+  const getSelectedItems = () => {
+    const allItems = Object.values(staged).flat();
+    return allItems.filter(item => selectedIds.has(item.id));
   };
 
-  const handleReset = async (stage: PipelineStage) => {
-    const stageItems = staged[stage] || [];
-    const idsToReset = stageItems
-      .filter(item => selectedIds.has(item.id))
-      .map(item => item.id);
+  const handleSendBackSelected = async () => {
+    const selectedItems = getSelectedItems();
+    const eligibleItems = selectedItems.filter(item => item.stage !== 'discovery');
+    if (eligibleItems.length === 0) {
+      alert('Selected products in the Discovery stage cannot be sent back.');
+      return;
+    }
 
-    if (idsToReset.length === 0) return;
-
-    if (!confirm(`Reset ${idsToReset.length} items in ${STAGE_LABELS[stage]}?`)) return;
+    const count = eligibleItems.length;
+    if (!confirm(`Send ${count} selected product(s) back to their previous stage? This will clear current stage results.`)) return;
 
     setLoading(true);
     try {
-      await resetStageItems(idsToReset);
+      await moveToPreviousStage(eligibleItems.map(item => item.id));
       clearSelection();
       await fetchStaged();
     } catch (err) {
@@ -331,19 +306,107 @@ export function PipelineBoard({
     }
   };
 
-  const handleSkip = async (stage: PipelineStage) => {
-    const stageItems = staged[stage] || [];
-    const idsToSkip = stageItems
-      .filter(item => selectedIds.has(item.id))
-      .map(item => item.id);
+  const handleResetSelected = async () => {
+    const selectedItems = getSelectedItems();
+    if (selectedItems.length === 0) return;
 
-    if (idsToSkip.length === 0) return;
-
-    if (!confirm(`Skip ${idsToSkip.length} items in ${STAGE_LABELS[stage]}?`)) return;
+    const count = selectedItems.length;
+    if (!confirm(`Reset ${count} selected product(s)?`)) return;
 
     setLoading(true);
     try {
-      await skipStageItems(idsToSkip);
+      await resetStageItems(selectedItems.map(item => item.id));
+      clearSelection();
+      await fetchStaged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSkipSelected = async () => {
+    const selectedItems = getSelectedItems();
+    const eligibleItems = selectedItems.filter(item => item.stage !== 'promotion');
+    if (eligibleItems.length === 0) {
+      alert('Selected products in the Promotion stage cannot be skipped.');
+      return;
+    }
+
+    const count = eligibleItems.length;
+    if (!confirm(`Skip ${count} selected product(s) in their current stage?`)) return;
+
+    setLoading(true);
+    try {
+      await skipStageItems(eligibleItems.map(item => item.id));
+      clearSelection();
+      await fetchStaged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAdvanceSelected = async () => {
+    const selectedItems = getSelectedItems();
+    const eligibleItems = selectedItems.filter(item => item.stage !== 'promotion');
+    if (eligibleItems.length === 0) {
+      alert('Selected products in the Promotion stage cannot be advanced (use "Create Drafts" instead).');
+      return;
+    }
+
+    // Curation validation
+    const curationItemsToValidate = eligibleItems.filter(item => item.stage === 'curation');
+    const itemsWithPendingProposals = curationItemsToValidate.filter(item => {
+      const proposals = item.curationData?.classificationProposals || [];
+      return proposals.some((p: any) => p.targetId !== 'product_draft_projection' && p.status !== 'accepted' && p.status !== 'rejected');
+    });
+
+    if (itemsWithPendingProposals.length > 0) {
+      const names = itemsWithPendingProposals.map(item => `'${item.name || item.upc}'`).join(', ');
+      alert(`Cannot advance: the following products have AI proposals that haven't been accepted or rejected: ${names}`);
+      return;
+    }
+
+    const count = eligibleItems.length;
+    if (!confirm(`Advance ${count} selected product(s) to their next stage?`)) return;
+
+    setLoading(true);
+    try {
+      await advanceItems(eligibleItems.map(item => item.id));
+      clearSelection();
+      await fetchStaged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePromoteSelected = async () => {
+    const selectedItems = getSelectedItems();
+    const eligibleItems = selectedItems.filter(item =>
+      item.stage === 'promotion' && (item.stageStatus === 'pending' || item.stageStatus === 'completed')
+    );
+    if (eligibleItems.length === 0) {
+      alert('No selected products are in the Promotion stage and ready/completed.');
+      return;
+    }
+
+    const count = eligibleItems.length;
+    if (!confirm(`Create product drafts for ${count} promotion product(s)?`)) return;
+
+    setLoading(true);
+    try {
+      const res = await fetch('/api/onboarding/batches/' + batchId + '/promote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds: eligibleItems.map(i => i.id) }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Promotion failed');
+      alert(`Created ${data.count} product drafts!`);
       clearSelection();
       await fetchStaged();
     } catch (err) {
@@ -361,6 +424,8 @@ export function PipelineBoard({
     setManualUrlInput(item.sourceUrl || '');
     setShowEditUrl(false);
     setDrawerBrandName(item.brandHint || '');
+    setSaveStatus('idle');
+    setSaveError(null);
     const site = cachedBrandSites.find(
       b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim(),
     );
@@ -413,7 +478,26 @@ export function PipelineBoard({
     setCurationFields({});
     setClassificationProposals([]);
     setClassificationEvidence([]);
+    setSaveStatus('idle');
+    setSaveError(null);
     await fetchStaged();
+  };
+
+  const itemsInStage = reviewItem ? (staged[reviewItem.stage] || []) : [];
+  const currentReviewIndex = reviewItem ? itemsInStage.findIndex(item => item.id === reviewItem.id) : -1;
+  const hasPrev = currentReviewIndex > 0;
+  const hasNext = currentReviewIndex !== -1 && currentReviewIndex < itemsInStage.length - 1;
+
+  const handlePrevItem = () => {
+    if (hasPrev) {
+      openReview(itemsInStage[currentReviewIndex - 1]);
+    }
+  };
+
+  const handleNextItem = () => {
+    if (hasNext) {
+      openReview(itemsInStage[currentReviewIndex + 1]);
+    }
   };
 
   const handleResetSingle = async () => {
@@ -457,13 +541,68 @@ export function PipelineBoard({
 
   const productTypeOptions = () => curationTargetState?.candidates.productTypes ?? [];
 
+  const saveChangesQuietly = async (
+    itemId: string,
+    currentEditFields: Partial<ExtractionData>,
+    currentCurationFields: Partial<CurationData>,
+    currentProposals: ClassificationProposal[]
+  ) => {
+    setSaveStatus('saving');
+    setSaveError(null);
+    try {
+      await updateItem(itemId, {
+        extraction_data: currentEditFields,
+        curation_data: { ...currentCurationFields, classificationProposals: currentProposals, classificationEvidence },
+      });
+      if (currentProposals.length > 0) {
+        const decs = currentProposals
+          .filter(p => ['accepted', 'rejected', 'deferred'].includes(p.status))
+          .map(p => ({
+            proposalId: p.id,
+            decision: p.status as 'accepted' | 'rejected' | 'deferred',
+            proposedValue: p.proposedValue,
+            targetId: p.targetId,
+          }));
+        if (decs.length > 0) {
+          try { await submitDecisions(itemId, decs); } catch (e) { console.warn(e); }
+        }
+      }
+      setSaveStatus('saved');
+      setTimeout(() => {
+        setSaveStatus(prev => prev === 'saved' ? 'idle' : prev);
+      }, 1500);
+    } catch (err) {
+      setSaveStatus('error');
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const updateProposal = (proposalId: string, patch: Partial<ClassificationProposal>) => {
-    setClassificationProposals(prev => prev.map(p => p.id === proposalId ? { ...p, ...patch } : p));
+    const nextProposals = classificationProposals.map(p => p.id === proposalId ? { ...p, ...patch } : p);
+    setClassificationProposals(nextProposals);
+    if (reviewItem) {
+      saveChangesQuietly(reviewItem.id, editFields, curationFields, nextProposals);
+    }
   };
 
   const handleApproveReview = async () => {
     if (!reviewItem) return;
+
+    if (!curationFields.suggestedPages || curationFields.suggestedPages.length === 0) {
+      alert('At least one page assignment is required.');
+      return;
+    }
+
+    if (!curationFields.curatedWeight || !curationFields.curatedWeight.trim()) {
+      alert('Weight is required.');
+      return;
+    }
+
+    // Determine the next item in this stage before updating state
+    const nextItem = hasNext ? itemsInStage[currentReviewIndex + 1] : null;
+
     try {
+      setSaveStatus('saving');
       await updateItem(reviewItem.id, {
         extraction_data: editFields,
         curation_data: { ...curationFields, classificationProposals, classificationEvidence },
@@ -491,9 +630,15 @@ export function PipelineBoard({
       } catch (e) {
         console.warn('Failed to complete review stage:', e);
       }
-      alert('Item approved! Advance to Promotion when ready.');
-      closeReview();
+      setSaveStatus('saved');
+      if (nextItem) {
+        openReview(nextItem);
+      } else {
+        closeReview();
+      }
     } catch (err) {
+      setSaveStatus('error');
+      setSaveError(err instanceof Error ? err.message : String(err));
       alert('Error updating item: ' + (err instanceof Error ? err.message : String(err)));
     }
   };
@@ -653,7 +798,6 @@ export function PipelineBoard({
     const completedCount = items.filter(i => i.stageStatus === 'completed').length;
     const failedCount = items.filter(i => i.stageStatus === 'failed').length;
     const skippedCount = items.filter(i => i.stageStatus === 'skipped').length;
-    const isAutomated = ['discovery', 'extraction', 'curation'].includes(stage);
     const columnAllSelected = items.length > 0 && items.every(i => selectedIds.has(i.id));
 
     return (
@@ -739,117 +883,39 @@ export function PipelineBoard({
             items.map(renderCard)
           )}
         </div>
-
-        {/* Column Actions */}
-        <div style={{
-          padding: '8px 12px',
-          borderTop: '1px solid #e5e7eb',
-          background: '#fff',
-          display: 'flex',
-          gap: 6,
-          flexWrap: 'wrap',
-        }}>
-          {stage !== 'promotion' && (
-            <>
-              <button
-                onClick={() => handleAdvance(stage)}
-                disabled={loading}
-                style={{
-                  flex: 1,
-                  padding: '6px 12px',
-                  fontSize: 12,
-                  fontWeight: 600,
-                  background: isAutomated ? '#2563eb' : '#16a34a',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: 4,
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  opacity: loading ? 0.7 : 1,
-                }}
-              >
-                {stage === 'review' ? '✓ Advance to Promotion' : '▶ Advance'}
-              </button>
-              <button
-                onClick={() => handleSkip(stage)}
-                disabled={loading}
-                style={{
-                  padding: '6px 8px',
-                  fontSize: 11,
-                  background: '#fff',
-                  border: '1px solid #d1d5db',
-                  color: '#6b7280',
-                  borderRadius: 4,
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Skip
-              </button>
-              <button
-                onClick={() => handleReset(stage)}
-                disabled={loading}
-                style={{
-                  padding: '6px 8px',
-                  fontSize: 11,
-                  background: '#fff',
-                  border: '1px solid #d1d5db',
-                  color: '#2563eb',
-                  borderRadius: 4,
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Reset
-              </button>
-            </>
-          )}
-          {stage === 'promotion' && (
-            <button
-              onClick={async () => {
-                const promotableItems = staged.promotion.filter(i =>
-                  i.stageStatus === 'pending' || i.stageStatus === 'completed'
-                );
-                if (promotableItems.length === 0) {
-                  alert('No items ready for promotion.');
-                  return;
-                }
-                if (!confirm(`Create product drafts for ${promotableItems.length} promotion items?`)) return;
-                setLoading(true);
-                try {
-                  const res = await fetch('/api/onboarding/batches/' + batchId + '/promote', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ itemIds: promotableItems.map(i => i.id) }),
-                  });
-                  const data = await res.json();
-                  if (!res.ok) throw new Error(data.error || 'Promotion failed');
-                  alert(`Created ${data.count} product drafts!`);
-                  await fetchStaged();
-                } catch (err) {
-                  setError(err instanceof Error ? err.message : String(err));
-                } finally {
-                  setLoading(false);
-                }
-              }}
-              disabled={loading}
-              style={{
-                flex: 1,
-                padding: '6px 12px',
-                fontSize: 12,
-                fontWeight: 600,
-                background: '#7c3aed',
-                color: '#fff',
-                border: 'none',
-                borderRadius: 4,
-                cursor: loading ? 'not-allowed' : 'pointer',
-                opacity: loading ? 0.7 : 1,
-              }}
-            >
-              🚀 Create Drafts
-            </button>
-          )}
-        </div>
       </div>
     );
   };
+
+  // Keep navRef.current in sync for the keyboard nav effect
+  navRef.current = { handlePrevItem, handleNextItem, hasPrev, hasNext };
+
+  useEffect(() => {
+    if (!reviewItem) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const { hasPrev: hp, hasNext: hn, handlePrevItem: prev, handleNextItem: next } = navRef.current;
+      if (e.key === 'ArrowLeft' && hp) {
+        e.preventDefault();
+        prev();
+      } else if (e.key === 'ArrowRight' && hn) {
+        e.preventDefault();
+        next();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [reviewItem]);
+
+  const selectedItems = getSelectedItems();
+  const hasSendBackEligible = selectedItems.some(item => item.stage !== 'discovery');
+  const hasResetEligible = selectedItems.length > 0;
+  const hasSkipEligible = selectedItems.some(item => item.stage !== 'promotion');
+  const hasAdvanceEligible = selectedItems.some(item => item.stage !== 'promotion');
+  const hasPromoteEligible = selectedItems.some(item =>
+    item.stage === 'promotion' && (item.stageStatus === 'pending' || item.stageStatus === 'completed')
+  );
 
   return (
     <div style={{ height: 'calc(100vh - 48px)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -898,22 +964,139 @@ export function PipelineBoard({
           </div>
           <div style={{ fontSize: 12, color: '#6b7280' }}>
             {totalCards > 0 && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <span>{selectedIds.size} of {totalCards} selected</span>
                 {selectedIds.size > 0 && (
-                  <button
-                    onClick={clearSelection}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#6b7280',
-                      cursor: 'pointer',
-                      fontSize: 12,
-                      fontWeight: 600,
-                    }}
-                  >
-                    Clear
-                  </button>
+                  <>
+                    <span style={{ color: '#e5e7eb' }}>|</span>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      {hasSendBackEligible && (
+                        <button
+                          onClick={handleSendBackSelected}
+                          disabled={loading}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: '#fff',
+                            border: '1px solid #fee2e2',
+                            color: '#dc2626',
+                            borderRadius: 4,
+                            cursor: loading ? 'not-allowed' : 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 2,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          ◀ Send Back
+                        </button>
+                      )}
+                      {hasResetEligible && (
+                        <button
+                          onClick={handleResetSelected}
+                          disabled={loading}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: '#fff',
+                            border: '1px solid #d1d5db',
+                            color: '#2563eb',
+                            borderRadius: 4,
+                            cursor: loading ? 'not-allowed' : 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 2,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          🔄 Reset
+                        </button>
+                      )}
+                      {hasSkipEligible && (
+                        <button
+                          onClick={handleSkipSelected}
+                          disabled={loading}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: '#fff',
+                            border: '1px solid #d1d5db',
+                            color: '#6b7280',
+                            borderRadius: 4,
+                            cursor: loading ? 'not-allowed' : 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 2,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          ⊘ Skip
+                        </button>
+                      )}
+                      {hasAdvanceEligible && (
+                        <button
+                          onClick={handleAdvanceSelected}
+                          disabled={loading}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: '#16a34a',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 4,
+                            cursor: loading ? 'not-allowed' : 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 2,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          ▶ Advance
+                        </button>
+                      )}
+                      {hasPromoteEligible && (
+                        <button
+                          onClick={handlePromoteSelected}
+                          disabled={loading}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: '#7c3aed',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 4,
+                            cursor: loading ? 'not-allowed' : 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 2,
+                            transition: 'all 0.15s',
+                          }}
+                        >
+                          🚀 Create Drafts
+                        </button>
+                      )}
+                    </div>
+                    <span style={{ color: '#e5e7eb' }}>|</span>
+                    <button
+                      onClick={clearSelection}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: '#6b7280',
+                        cursor: 'pointer',
+                        fontSize: 12,
+                        fontWeight: 600,
+                        textDecoration: 'underline',
+                      }}
+                    >
+                      Clear
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -966,16 +1149,57 @@ export function PipelineBoard({
               position: 'relative',
               flexShrink: 0
             }}>
-              <button
-                onClick={closeReview}
-                style={{
-                  position: 'absolute', top: 20, right: 20,
-                  background: 'none', border: 'none', fontSize: 20,
-                  cursor: 'pointer', color: '#6b7280',
-                }}
-              >
-                ✕
-              </button>
+              <div style={{
+                position: 'absolute', top: 20, right: 20,
+                display: 'flex', alignItems: 'center', gap: 8
+              }}>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button
+                    onClick={handlePrevItem}
+                    disabled={!hasPrev}
+                    style={{
+                      padding: '4px 8px',
+                      background: '#fff',
+                      border: '1px solid #d1d5db',
+                      borderRadius: 4,
+                      color: hasPrev ? '#374151' : '#d1d5db',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: hasPrev ? 'pointer' : 'not-allowed',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                    }}
+                  >
+                    ◀ Prev
+                  </button>
+                  <button
+                    onClick={handleNextItem}
+                    disabled={!hasNext}
+                    style={{
+                      padding: '4px 8px',
+                      background: '#fff',
+                      border: '1px solid #d1d5db',
+                      borderRadius: 4,
+                      color: hasNext ? '#374151' : '#d1d5db',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: hasNext ? 'pointer' : 'not-allowed',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                    }}
+                  >
+                    Next ▶
+                  </button>
+                </div>
+                <button
+                  onClick={closeReview}
+                  style={{
+                    background: 'none', border: 'none', fontSize: 20,
+                    cursor: 'pointer', color: '#6b7280', marginLeft: 4,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center'
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
 
               <h2 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 600, color: '#111827' }}>
                 Review: {reviewItem.expectedName || reviewItem.name}
@@ -1520,6 +1744,10 @@ export function PipelineBoard({
                         type="text"
                         value={curationFields.curatedTitle}
                         onChange={(e) => setCurationFields((p: any) => ({ ...p, curatedTitle: e.target.value, titleSource: 'manual' }))}
+                        onBlur={(e) => {
+                          const nextCuration = { ...curationFields, curatedTitle: e.target.value, titleSource: 'manual' as const };
+                          saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
+                        }}
                         style={{ width: '100%', padding: '8px', border: '1px solid #c084fc', borderRadius: 6, fontSize: 14, fontWeight: 600, background: '#faf5ff', boxSizing: 'border-box' }}
                       />
                       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 11 }}>
@@ -1534,58 +1762,34 @@ export function PipelineBoard({
                     </div>
                   )}
 
-                  {/* Packaging OCR Title */}
-                  {curationFields.packagingOcrTitle && curationFields.packagingOcrTitle !== curationFields.curatedTitle && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '8px 12px', background: '#fefce8', border: '1px solid #fde68a', borderRadius: 6 }}>
-                      <label style={{ fontSize: 11, fontWeight: 500, color: '#92400e' }}>📦 VLM OCR (Packaging)</label>
-                      <span style={{ fontSize: 13, color: '#78350f' }}>{curationFields.packagingOcrTitle}</span>
+                  {/* Weight — shown in curation+ stages */}
+                  {reviewItem?.stage !== 'extraction' && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 12 }}>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Weight</h3>
+                      <input
+                        type="text"
+                        value={curationFields.curatedWeight ?? ''}
+                        onChange={(e) => setCurationFields((p: any) => ({ ...p, curatedWeight: e.target.value }))}
+                        onBlur={(e) => {
+                          const nextCuration = { ...curationFields, curatedWeight: e.target.value };
+                          saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
+                        }}
+                        placeholder="e.g. 15 lbs, 500g"
+                        style={{ width: '100%', padding: '8px', border: '1px solid #c084fc', borderRadius: 6, fontSize: 14, fontWeight: 600, background: '#faf5ff', boxSizing: 'border-box' }}
+                      />
                     </div>
                   )}
 
-                  {/* Extracted fields */}
-                  {reviewExtraction && (
-                    <>
-                      <div>
-                        <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Title</label>
-                        <div style={{ fontSize: 13, color: '#374151', padding: '4px 0', fontWeight: 600 }}>{reviewExtraction.title || '—'}</div>
+
+
+                  {/* Suggested Product Type — only in curation stage */}
+                  {curationFields.suggestedProductType && (reviewItem?.stage === 'curation' || reviewItem?.stage === 'review') && (
+                    <div>
+                      <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Suggested Product Type</label>
+                      <div style={{ display: 'inline-block', fontSize: 12, fontWeight: 600, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 6, padding: '4px 10px', marginTop: 4 }}>
+                        {curationFields.suggestedProductType}
                       </div>
-
-
-                      {reviewExtraction.description && (
-                        <div>
-                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Description</label>
-                          <p style={{ fontSize: 12, color: '#4b5563', margin: '4px 0 0', lineHeight: 1.5 }}>
-                            {reviewExtraction.description.slice(0, 300)}
-                            {reviewExtraction.description.length > 300 ? '...' : ''}
-                          </p>
-                        </div>
-                      )}
-
-                      {/* Suggested Product Type — only in curation stage */}
-                      {curationFields.suggestedProductType && (reviewItem?.stage === 'curation' || reviewItem?.stage === 'review') && (
-                        <div>
-                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Suggested Product Type</label>
-                          <div style={{ display: 'inline-block', fontSize: 12, fontWeight: 600, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 6, padding: '4px 10px', marginTop: 4 }}>
-                            {curationFields.suggestedProductType}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Custom fields from extraction */}
-                      {reviewExtraction?.customFields && Object.keys(reviewExtraction.customFields).length > 0 && (
-                        <div>
-                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563', marginTop: 8, display: 'block' }}>Additional Fields</label>
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 4 }}>
-                            {Object.entries(reviewExtraction.customFields).map(([fieldName, value]) => (
-                              <div key={fieldName}>
-                                <label style={{ fontSize: 10, fontWeight: 600, color: '#6b7280', textTransform: 'capitalize' }}>{fieldName}</label>
-                                <div style={{ fontSize: 13, color: '#374151', padding: '2px 0' }}>{String(value)}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </>
+                    </div>
                   )}
 
                   {/* Extracted Images Gallery */}
@@ -1678,11 +1882,13 @@ export function PipelineBoard({
                                   ...(oldPrimary ? [oldPrimary] : []),
                                   ...additionalImages.filter(x => x !== newPrimary)
                                 ];
-                                setEditFields((prev: any) => ({
-                                  ...prev,
+                                const nextEdit = {
+                                  ...editFields,
                                   primaryImage: newPrimary,
                                   additionalImages: newAdditional
-                                }));
+                                };
+                                setEditFields(nextEdit);
+                                saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
                               }}
                               style={{
                                 padding: '6px 16px',
@@ -1704,20 +1910,23 @@ export function PipelineBoard({
                           )}
                           <button
                             onClick={() => {
+                              let nextEdit;
                               if (activeImage.isPrimary) {
                                 const newPrimary = additionalImages[0] || null;
                                 const newAdditional = additionalImages.slice(1);
-                                setEditFields((prev: any) => ({
-                                  ...prev,
+                                nextEdit = {
+                                  ...editFields,
                                   primaryImage: newPrimary,
                                   additionalImages: newAdditional
-                                }));
+                                };
                               } else {
-                                setEditFields((prev: any) => ({
-                                  ...prev,
+                                nextEdit = {
+                                  ...editFields,
                                   additionalImages: additionalImages.filter(x => x !== activeImage.url)
-                                }));
+                                };
                               }
+                              setEditFields(nextEdit);
+                              saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
                               setActiveImageIdx(prev => Math.max(0, prev - 1));
                             }}
                             style={{
@@ -1810,10 +2019,12 @@ export function PipelineBoard({
                   })()}
 
                   {/* Classification Proposals */}
-                  {classificationProposals.length > 0 && (
+                  {classificationProposals.filter(p => p.targetId !== 'product_draft_projection').length > 0 && (
                     <div style={{ padding: 12, background: '#f5f3ff', borderRadius: 8, border: '1px solid #ddd6fe' }}>
                       <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px', color: '#7c3aed' }}>🤖 AI Proposals</h3>
-                      {classificationProposals.map((p) => {
+                      {classificationProposals
+                        .filter(p => p.targetId !== 'product_draft_projection')
+                        .map((p) => {
                         const sc: Record<string, string> = { pending: '#f59e0b', accepted: '#16a34a', rejected: '#dc2626', deferred: '#6b7280', stale: '#9ca3af' };
                         const tl: Record<string, string> = { primary_product_type: 'Product Type', category_page: 'Page', field_assignment: 'Product Field', configuration_gap: 'Gap', reviewable_abstention: 'Needs Review' };
                         const fieldMeta = fieldTargetForProposal(p);
@@ -1895,48 +2106,27 @@ export function PipelineBoard({
                     </div>
                   )}
 
-                  {/* Classification Evidence */}
-                  {classificationEvidence.length > 0 && (
-                    <div style={{ padding: 12, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px', color: '#334155' }}>📋 Evidence Used</h3>
-                      <div style={{ maxHeight: 200, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        {classificationEvidence.map((ev: any) => (
-                          <div key={ev.id} style={{ fontSize: 11, padding: '6px 8px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 4 }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-                              <span style={{ fontWeight: 600, color: '#334155' }}>{ev.sourceField || ev.source}</span>
-                              <span style={{ color: ev.reliability === 'high' ? '#16a34a' : ev.reliability === 'medium' ? '#d97706' : '#dc2626', fontWeight: 500 }}>
-                                {ev.reliability}
-                              </span>
-                            </div>
-                            <div style={{ color: '#475569', fontStyle: 'italic' }}>
-                              &ldquo;{ev.snippet ? (ev.snippet.slice(0, 150) + (ev.snippet.length > 150 ? '...' : '')) : ev.value?.slice(0, 150)}
-                            </div>
-                            {ev.sourceUrl && (
-                              <a href={ev.sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: '#2563eb', marginTop: 2, display: 'inline-block' }}>
-                                Source ↗
-                              </a>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
 
-                  {/* Category Pages */}
+
+                  {/* Product Pages */}
                   {storePages.length > 0 && (
                     <div>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Category Pages</h3>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Product Pages</h3>
                       <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid #d1d5db', borderRadius: 6, padding: 8 }}>
                         {storePages.map((pageName) => {
                           const isAssigned = curationFields.suggestedPages?.includes(pageName) ?? false;
                           return (
                             <label key={pageName} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', fontSize: 12, cursor: 'pointer' }}>
                               <input type="checkbox" checked={isAssigned} onChange={(e) => {
+                                let nextPages;
                                 if (e.target.checked) {
-                                  setCurationFields((p: any) => ({ ...p, suggestedPages: [...(p.suggestedPages || []), pageName] }));
+                                  nextPages = [...(curationFields.suggestedPages || []), pageName];
                                 } else {
-                                  setCurationFields((p: any) => ({ ...p, suggestedPages: (p.suggestedPages || []).filter((n: string) => n !== pageName) }));
+                                  nextPages = (curationFields.suggestedPages || []).filter((n: string) => n !== pageName);
                                 }
+                                const nextCuration = { ...curationFields, suggestedPages: nextPages };
+                                setCurationFields(nextCuration);
+                                saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
                               }} />
                               {pageName}
                             </label>
@@ -1956,35 +2146,31 @@ export function PipelineBoard({
               display: 'flex',
               gap: 8,
               justifyContent: 'flex-end',
+              alignItems: 'center',
               flexShrink: 0,
               background: '#fff'
             }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginRight: 'auto' }}>
+                {saveStatus === 'saving' && (
+                  <span style={{ fontSize: 13, color: '#4b5563', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5, borderColor: '#4b5563', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
+                    Saving...
+                  </span>
+                )}
+                {saveStatus === 'saved' && (
+                  <span style={{ fontSize: 13, color: '#16a34a', fontWeight: 500 }}>
+                    ✓ Saved
+                  </span>
+                )}
+                {saveStatus === 'error' && (
+                  <span style={{ fontSize: 13, color: '#dc2626', fontWeight: 500 }}>
+                    Error: {saveError}
+                  </span>
+                )}
+              </div>
                <button onClick={closeReview} style={{ padding: '8px 16px', background: '#fff', border: '1px solid #d1d5db', borderRadius: 6, cursor: 'pointer', fontSize: 13, color: '#374151', fontWeight: 500 }}>
                 {reviewItem && ['discovery', 'extraction', 'curation'].includes(reviewItem.stage) ? 'Close' : 'Cancel'}
               </button>
-              {reviewItem && reviewItem.stage !== 'review' && (
-                <button
-                  onClick={async () => {
-                    try {
-                      await updateItem(reviewItem.id, {
-                        extraction_data: editFields,
-                        curation_data: curationFields,
-                      });
-                      alert('Changes saved successfully!');
-                      const res = await getItemDetail(reviewItem.id);
-                      setReviewItem(res.item);
-                      if (res.extraction) {
-                        setReviewExtraction(res.extraction);
-                      }
-                    } catch (err) {
-                      alert('Failed to save changes: ' + String(err));
-                    }
-                  }}
-                  style={{ padding: '8px 16px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
-                >
-                  Save Changes
-                </button>
-              )}
               {reviewItem && reviewItem.stage === 'review' && (
                 <button onClick={handleApproveReview} style={{ padding: '8px 16px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
                   ✓ Approve

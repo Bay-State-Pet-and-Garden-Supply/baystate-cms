@@ -74,10 +74,10 @@ route.post('/change-sets/:id/approve', (c) => {
 route.post('/change-sets/:id/discard', (c) => {
   const id = c.req.param('id');
   const discarded = discardChangeSet(id);
-  if (!discarded) {
-    return c.json({ error: 'Change set not found or not in draft status' }, 404);
+  if (!discarded.success) {
+    return c.json({ error: 'Change set not found' }, 404);
   }
-  return c.json({ success: true });
+  return c.json({ success: true, reopenedDrift: discarded.reopenedDrift });
 });
 
 export default route;

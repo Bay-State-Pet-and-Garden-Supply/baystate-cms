@@ -130,12 +130,24 @@ export function extractDbmakeQuery(uploadResponse: string): string | null {
 export function isDbmakeSuccessful(responseText: string): boolean {
   const body = responseText.trim().toLowerCase();
 
+  // ── ShopSite success signals ───────────────────────────────────────────
+  // dbmake.cgi returns an HTML page with <title>Products Upload Results</title>
+  // and lines like "Added database record N: name" or "Updated database record N: name".
+  const shopiteSuccessSignals = [
+    'products upload results',
+    'added database record',
+    'updated database record',
+  ];
+  if (shopiteSuccessSignals.some(s => body.includes(s))) {
+    return true;
+  }
+
   const hasErrorLike = body.includes('error') || body.includes('failed') || body.includes('fail') || body.includes('exception');
   const harmlessly = body.includes('no errors') || body.includes('without error') || body.includes('0 errors') || body.includes('0 failures') || body.includes('0 failed') || body.includes('0 records failed') || body.includes('0 record failed');
 
   if (hasErrorLike && !harmlessly) {
     // Double-check for strong success signal overriding error
-    const successSignals = ['operation complete', 'successful', 'completed successfully', 'accepted', 'updated database record'];
+    const successSignals = ['operation complete', 'successful', 'completed successfully', 'accepted'];
     if (successSignals.some(s => body.includes(s))) {
       return true;
     }

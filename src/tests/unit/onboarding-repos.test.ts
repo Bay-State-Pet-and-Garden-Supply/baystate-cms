@@ -22,6 +22,7 @@ import {
   completeReviewStage,
   completePromotionStage,
   setDiscoverySourceUrl,
+  sendItemsToPreviousStage,
 } from '../../db/repositories/onboarding-item-repo';
 import {
   insertSources,
@@ -225,6 +226,59 @@ describe('Onboarding Repositories CRUD', () => {
     expect(b?.stageStatus).toBe('pending');
   });
 
+  it('should prevent advancement from curation to review if there are pending AI proposals', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Proposal Test', fileName: 'proposal.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [
+      { upc: '123456789012', name: 'Proposal Product', rowNumber: 1 },
+    ]);
+    const item = items[0];
+
+    const curationData = {
+      curatedTitle: 'Proposal Product',
+      curatedWeight: '12 oz',
+      suggestedPages: ['Test Page'],
+      classificationProposals: [
+        {
+          id: 'proposal-1',
+          runId: 'run-1',
+          productSku: '123456789012',
+          proposalType: 'field_assignment',
+          targetId: 'brand',
+          proposedValue: 'My Brand',
+          confidence: 0.9,
+          evidenceIds: [],
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        }
+      ],
+      classificationEvidence: [],
+    };
+
+    const db = getDb();
+    db.query(
+      "UPDATE onboarding_items SET stage = 'curation', stage_status = 'completed', curation_data_json = ? WHERE id = ?"
+    ).run(JSON.stringify(curationData), item.id);
+
+    // Try to advance — should be skipped due to pending proposal
+    const res1 = advanceItemsToNextStage([item.id]);
+    expect(res1.advanced).toBe(0);
+    expect(res1.skipped).toBe(1);
+
+    // Mark proposal as accepted and try again
+    curationData.classificationProposals[0].status = 'accepted';
+    db.query(
+      "UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?"
+    ).run(JSON.stringify(curationData), item.id);
+
+    const res2 = advanceItemsToNextStage([item.id]);
+    expect(res2.advanced).toBe(1);
+    expect(res2.skipped).toBe(0);
+
+    const advancedItem = findItemById(item.id);
+    expect(advancedItem?.stage).toBe('review');
+    expect(advancedItem?.stageStatus).toBe('pending');
+  });
+
   it('should implement skip and reset operations', () => {
     const batch = createBatch({ workspaceId: wsId, name: 'Skip Test', fileName: 'skip.xlsx', totalItems: 2 });
     const items = insertItems(batch.id, [
@@ -349,6 +403,132 @@ describe('Onboarding Repositories CRUD', () => {
     brandMatches = findBrandSites('Nike');
     expect(brandMatches.length).toBe(1);
     expect(brandMatches[0].domain).toBe('nike-new.com');
+  });
+
+  it('should support sendItemsToPreviousStage and undo results appropriately per stage', () => {
+    const db = getDb();
+    const batch = createBatch({ workspaceId: wsId, name: 'Previous Stage Test', fileName: 'prev.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [
+      { upc: '999999999999', name: 'Previous Test A', rowNumber: 1 },
+    ]);
+    const item = items[0];
+
+    // --- 1. Test going back from extraction to discovery ---
+    db.query("UPDATE onboarding_items SET stage = 'extraction', stage_status = 'pending', extraction_data_json = ? WHERE id = ?").run(
+      JSON.stringify({ title: 'Extracted' }),
+      item.id
+    );
+    insertExtraction({
+      itemId: item.id,
+      sourceUrl: 'https://example.com/source',
+      extractionDataJson: JSON.stringify({ title: 'Extracted' }),
+      extractionMethod: 'test',
+      confidence: 1.0,
+    });
+
+    const res1 = sendItemsToPreviousStage([item.id]);
+    expect(res1.moved).toBe(1);
+
+    const afterRes1 = findItemById(item.id);
+    expect(afterRes1?.stage).toBe('discovery');
+    expect(afterRes1?.stageStatus).toBe('completed');
+    expect(afterRes1?.extractionData).toBeNull();
+    expect(afterRes1?.status).toBe('source_confirmed');
+    expect(getLatestExtraction(item.id)).toBeFalsy();
+
+    // --- 2. Test going back from curation to extraction ---
+    db.query("UPDATE onboarding_items SET stage = 'curation', stage_status = 'pending', curation_data_json = ? WHERE id = ?").run(
+      JSON.stringify({ curatedTitle: 'Curated' }),
+      item.id
+    );
+
+    const res2 = sendItemsToPreviousStage([item.id]);
+    expect(res2.moved).toBe(1);
+
+    const afterRes2 = findItemById(item.id);
+    expect(afterRes2?.stage).toBe('extraction');
+    expect(afterRes2?.stageStatus).toBe('completed');
+    expect(afterRes2?.curationData).toBeNull();
+
+    // --- 3. Test going back from review to curation ---
+    db.query("UPDATE onboarding_items SET stage = 'review', stage_status = 'pending', status = 'ready' WHERE id = ?").run(item.id);
+    
+    // Simulate classification run, proposals, decisions
+    const runId = 'test-run-id';
+    db.run(
+      `INSERT INTO classification_runs (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, 'completed', ?)`,
+      [runId, wsId, item.id, item.upc, new Date().toISOString()]
+    );
+    const proposalId = 'test-prop-id';
+    db.run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, created_at)
+       VALUES (?, ?, ?, 'field_assignment', 'attr-id', '"val"', 1.0, 'accepted', 1, 0, ?)`,
+      [proposalId, runId, item.upc, new Date().toISOString()]
+    );
+    db.run(
+      `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, created_at)
+       VALUES (?, ?, 'accepted', ?)`,
+      ['dec-id', proposalId, new Date().toISOString()]
+    );
+
+    const res3 = sendItemsToPreviousStage([item.id]);
+    expect(res3.moved).toBe(1);
+
+    const afterRes3 = findItemById(item.id);
+    expect(afterRes3?.stage).toBe('curation');
+    expect(afterRes3?.stageStatus).toBe('completed');
+    expect(afterRes3?.status).toBe('curated');
+
+    // Verify proposals status reverted to pending and decisions deleted
+    const prop = db.query('SELECT status FROM classification_proposals WHERE id = ?').get(proposalId) as { status: string };
+    expect(prop.status).toBe('pending');
+    const decCount = db.query('SELECT COUNT(*) as count FROM classification_proposal_decisions WHERE proposal_id = ?').get(proposalId) as { count: number };
+    expect(decCount.count).toBe(0);
+
+    // --- 4. Test going back from promotion to review ---
+    db.query("UPDATE onboarding_items SET stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(item.id);
+    
+    // Simulate draft change set and change set items, and product page assignment
+    const changeSetId = 'test-cs-id';
+    db.run(
+      `INSERT INTO change_sets (id, workspace_id, title, status, base_commit, created_at, updated_at)
+       VALUES (?, ?, 'Test CS', 'draft', 'base', ?, ?)`,
+      [changeSetId, wsId, new Date().toISOString(), new Date().toISOString()]
+    );
+    db.run(
+      `INSERT INTO change_set_items (id, change_set_id, sku, operation, draft_json, draft_hash, validation_status, created_at, updated_at)
+       VALUES (?, ?, ?, 'create', '{}', 'hash', 'unknown', ?, ?)`,
+      ['cs-item-id', changeSetId, item.upc, new Date().toISOString(), new Date().toISOString()]
+    );
+    db.run(
+      `INSERT INTO product_pages (product_sku, page_name, created_at)
+       VALUES (?, 'page-name', ?)`,
+      [item.upc, new Date().toISOString()]
+    );
+
+    const res4 = sendItemsToPreviousStage([item.id]);
+    expect(res4.moved).toBe(1);
+
+    const afterRes4 = findItemById(item.id);
+    expect(afterRes4?.stage).toBe('review');
+    expect(afterRes4?.stageStatus).toBe('completed');
+    expect(afterRes4?.status).toBe('ready');
+
+    // Verify change set item deleted and pages cleared
+    const csItemCount = db.query('SELECT COUNT(*) as count FROM change_set_items WHERE change_set_id = ?').get(changeSetId) as { count: number };
+    expect(csItemCount.count).toBe(0);
+    const pagesCount = db.query('SELECT COUNT(*) as count FROM product_pages WHERE product_sku = ?').get(item.upc) as { count: number };
+    expect(pagesCount.count).toBe(0);
+
+    // Clean up
+    db.run('DELETE FROM product_pages WHERE product_sku = ?', [item.upc]);
+    db.run('DELETE FROM change_set_items WHERE change_set_id = ?', [changeSetId]);
+    db.run('DELETE FROM change_sets WHERE id = ?', [changeSetId]);
+    db.run('DELETE FROM classification_proposals WHERE run_id = ?', [runId]);
+    db.run('DELETE FROM classification_runs WHERE id = ?', [runId]);
+    db.run('DELETE FROM onboarding_items WHERE batch_id = ?', [batch.id]);
+    db.run('DELETE FROM onboarding_batches WHERE id = ?', [batch.id]);
   });
 });
 

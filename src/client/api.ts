@@ -108,6 +108,7 @@ export interface ExportResult {
   xmlPath: string;
   manifestPath: string;
   instructionsPath: string;
+  zipPath: string;
   productCount: number;
 }
 
@@ -229,14 +230,14 @@ export interface SyncJobDetail {
 }
 
 export function pushPublish(changeSetId: string) {
-  return request<{ success: boolean; jobId: string; productCount: number; publishCompleted: boolean; warnings: string[] }>(
+  return request<{ success: boolean; jobId: string; productCount: number; publishCompleted: boolean; zipPath: string | null; warnings: string[] }>(
     '/sync/push-publish',
     { method: 'POST', body: JSON.stringify({ changeSetId }) },
   );
 }
 
 export function uploadOnly(changeSetId: string) {
-  return request<{ success: boolean; jobId: string; productCount: number; warning: string }>(
+  return request<{ success: boolean; jobId: string; productCount: number; zipPath: string | null; warning: string }>(
     '/sync/upload-only',
     { method: 'POST', body: JSON.stringify({ changeSetId }) },
   );

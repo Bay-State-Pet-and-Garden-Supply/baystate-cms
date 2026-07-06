@@ -32,7 +32,10 @@ export function normalizeProduct(
   const disabled = disabledRaw ? disabledRaw.toLowerCase() === 'checked' || disabledRaw === '1' : false;
   const productId = fields['ProductID'] ?? null;
   const productGuid = fields['ProductGUID'] ?? null;
-  const gtin = fields['GoogleGTIN'] ?? null;
+  const rawGtin = fields['GoogleGTIN'] ?? null;
+  const rawUnderscoreGtin = fields['Google_GTIN'] ?? null;
+  const rawLegacyGtin = fields['GTIN'] ?? null;
+  const gtin = rawGtin ?? rawUnderscoreGtin ?? rawLegacyGtin;
 
   // Collect ProductField* and unknown fields
   const customFields: Record<string, string> = {};
@@ -44,6 +47,14 @@ export function normalizeProduct(
       customFields[tag] = value;
       observedFields[tag] = value;
     }
+  }
+
+  // Persist GTIN in customFields, preserving the original tag distinction
+  if (rawLegacyGtin) {
+    customFields['GTIN'] = rawLegacyGtin;
+  }
+  if (rawGtin || rawUnderscoreGtin) {
+    customFields['GoogleGTIN'] = gtin;
   }
 
   // Build registry observations
@@ -62,7 +73,10 @@ export function normalizeProduct(
     Availability: { label: 'Availability', kind: 'core' },
     ProductID: { label: 'ShopSite Product ID', kind: 'system' },
     ProductGUID: { label: 'ShopSite GUID', kind: 'system' },
-    GoogleGTIN: { label: 'GTIN/UPC', kind: 'custom' },
+    GTIN: { label: 'GTIN/UPC', kind: 'custom' },
+    GoogleGTIN: { label: 'Google GTIN', kind: 'custom' },
+    Google_GTIN: { label: 'Google GTIN (legacy)', kind: 'custom' },
+    FileName: { label: 'Product Page File Name', kind: 'core' },
     ProductDisabled: { label: 'Product Disabled', kind: 'system' },
   };
 
@@ -151,7 +165,7 @@ export function normalizeProduct(
         additional: additionalImages,
       },
       seo: {
-        fileName: null,
+        fileName: fields['FileName'] || null,
         searchKeywords: fields['SearchKeywords'] ?? null,
         googleProductCategory: gtin ? 'GTIN:' + gtin : null,
       },

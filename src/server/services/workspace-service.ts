@@ -110,6 +110,7 @@ export function createWorkspace(name: string, workspacePath: string): { workspac
     attributeProfiles: [],
     attributeMappings: [],
     curationTargets: [],
+    brands: [],
     guidance: [],
     modelPolicy: { defaultProvider: 'ollama', defaultModel: '', stageOverrides: {}, imageDataSharing: 'local_only', textDataSharing: 'local_only' },
     dataSharing: { imagePolicy: 'local_only', textPolicy: 'local_only', sensitiveDataFiltering: true, retentionDays: 90 },

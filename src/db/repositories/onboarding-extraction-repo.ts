@@ -55,6 +55,19 @@ export function insertExtraction(data: {
   };
 }
 
+/**
+ * Update the extraction_data_json on the latest extraction record for an item.
+ * Used when a user edits extraction results via the pipeline board save flow.
+ */
+export function updateLatestExtractionData(itemId: string, extractionDataJson: string): void {
+  const db = getDb();
+  db.query(
+    `UPDATE onboarding_extractions
+     SET extraction_data_json = ?
+     WHERE id = (SELECT id FROM onboarding_extractions WHERE item_id = ? ORDER BY created_at DESC LIMIT 1)`,
+  ).run(extractionDataJson, itemId);
+}
+
 export function getLatestExtraction(itemId: string): OnboardingExtractionRow | undefined {
   const db = getDb();
   return db.query(

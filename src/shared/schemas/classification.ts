@@ -113,6 +113,8 @@ export const CurationTargetConfigSchema = z.object({
   kind: CurationTargetKindEnum,
   label: z.string().min(1),
   enabled: z.boolean().default(true),
+  /** When true, this target is always included regardless of the enabled flag */
+  mandatory: z.boolean().default(false),
   selectionMode: CardinalityEnum.default('single'),
   attributeId: ClassificationSlugSchema.nullable().default(null),
   catalogField: z.string().nullable().default(null),
@@ -247,6 +249,21 @@ export const DataSharingConfigSchema = z.object({
 
 export type DataSharingConfig = z.infer<typeof DataSharingConfigSchema>;
 
+// ─── Brand configuration ────────────────────────────────────────────────────────
+
+/**
+ * A configured canonical brand with aliases for deterministic resolution.
+ * Brands are stored in store/classification/brands.json.
+ */
+export const BrandConfigSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  aliases: z.array(z.string()).default(() => []),
+  oldIdAliases: z.array(z.string()).default(() => []),
+});
+
+export type BrandConfig = z.infer<typeof BrandConfigSchema>;
+
 /**
  * Aggregate classification configuration for snapshot validation.
  */
@@ -257,6 +274,7 @@ export const ClassificationConfigSchema = z.object({
   attributeProfiles: z.array(AttributeProfileConfigSchema).default(() => []),
   attributeMappings: z.array(AttributeMappingConfigSchema).default(() => []),
   curationTargets: z.array(CurationTargetConfigSchema).default(() => []),
+  brands: z.array(BrandConfigSchema).default(() => []),
   guidance: z.array(GuidanceConfigSchema).default(() => []),
   modelPolicy: ModelPolicyConfigSchema.default(() => ({
     defaultProvider: 'ollama' as const,
@@ -279,6 +297,7 @@ export type ClassificationConfig = z.infer<typeof ClassificationConfigSchema>;
 
 export const ClassificationStageNameEnum = z.enum([
   'evidence_extraction',
+  'name_consolidation',
   'primary_product_type_proposal',
   'attribute_applicability',
   'product_attribute_proposals',

@@ -124,6 +124,13 @@ export function addImageSource(
  * Handles: `_80x80`, `_150x150_crop_center`, `_small`, `_thumb`,
  * `_medium`, `_large`, `_icon`, `_grande`, `_compact` and numeric
  * variants like `_800x`.
+ *
+ * The optional crop-position suffix is constrained to known Shopify
+ * transformation qualifiers (e.g. `_crop_center`, `_crop_top_left`)
+ * via `(?:_crop_[a-z_]+)?`.  A previously permissive pattern
+ * `(?:_[a-z0-9-_]+)?` matched gallery image indices (`_1`, `_2`,
+ * `_1-Lavender_…`) after size-like patterns in uploaded filenames,
+ * collapsing distinct gallery photos into a single canonical key.
  */
 export function canonicalizeUrl(
   urlStr: string,
@@ -140,7 +147,7 @@ export function canonicalizeUrl(
     parsedUrl.search = '';
     let pathname = parsedUrl.pathname;
     pathname = pathname.replace(
-      /_(?:[0-9]+x[0-9]*|[0-9]*x[0-9]+|small|thumb|medium|large|icon|grande|compact)(?:_[a-z0-9-_]+)?(?=\.[a-z0-9]+$)/i,
+      /_(?:[0-9]+x[0-9]*|[0-9]*x[0-9]+|small|thumb|medium|large|icon|grande|compact)(?:_crop_[a-z_]+)?(?=\.[a-z0-9]+$)/i,
       '',
     );
     return parsedUrl.host + pathname;
@@ -183,7 +190,7 @@ export function cleanAndDeduplicateImages(
       parsedUrl.search = '';
       let pathname = parsedUrl.pathname;
       pathname = pathname.replace(
-        /_(?:[0-9]+x[0-9]*|[0-9]*x[0-9]+|small|thumb|medium|large|icon|grande|compact)(?:_[a-z0-9-_]+)?(?=\.[a-z0-9]+$)/i,
+        /_(?:[0-9]+x[0-9]*|[0-9]*x[0-9]+|small|thumb|medium|large|icon|grande|compact)(?:_crop_[a-z_]+)?(?=\.[a-z0-9]+$)/i,
         '',
       );
 

@@ -11,6 +11,7 @@ import { findProfileByDomain, type ExtractorProfile } from '../db/repositories/e
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { recordDomainStatus } from '../db/repositories/domain-status-repo';
 import { validateExtraction, type ValidationResult } from './extraction-validator';
+import { runProfileExtraction } from './profile-runner-client';
 import {
   addImageSource,
   canonicalizeUrl,
@@ -217,7 +218,68 @@ export async function extractProductData(
     }
   }
 
-  console.log(`[PageExtractor] ${profile ? 'Using profile —' : 'Falling back to'} Playwright extraction for: ${url}`);
+  // ── Profile-based extraction: delegate to extraction worker ──────────
+  // The worker uses Crawlee + Camoufox (anti-detect Firefox) to render the
+  // page and run the profile's CSS selectors. This respects ADR 0009 (browser
+  // tooling lives in the worker, not the Bun server).
+  if (profile && expected) {
+    console.log(`[PageExtractor] Delegating profile extraction to worker for: ${url}`);
+    const workerResult = await runProfileExtraction({
+      sourceUrl: url,
+      profile,
+      expected: {
+        name: expected.name,
+        brandHint: expected.brandHint,
+        price: expected.price,
+      },
+    });
+
+    if (workerResult.ok && workerResult.data.title) {
+      console.log(`[PageExtractor] Worker extraction succeeded for: ${url}`);
+      if (domain) recordDomainStatus(domain, 'ok');
+
+      // Spreadsheet price override
+      const result = workerResult.data;
+      result.price = expected?.price || null;
+      if (expected?.price) {
+        result.fieldProvenance = { ...result.fieldProvenance, price: 'spreadsheet-import' };
+      }
+
+      return result;
+    }
+
+    // Worker failed — record domain status and throw
+    let errorDetail: string;
+    if (!workerResult.ok) {
+      errorDetail = workerResult.error;
+    } else {
+      errorDetail = 'Worker returned ok:false with no title';
+    }
+    console.warn(`[PageExtractor] Worker extraction failed: ${errorDetail}`);
+
+    if (workerResult.warnings.length > 0) {
+      console.warn(`[PageExtractor] Worker warnings: ${workerResult.warnings.join('; ')}`);
+    }
+
+    if (domain) {
+      // Check if warnings indicate a Cloudflare block
+      const hasBlockWarning = workerResult.warnings.some(
+        (w) =>
+          w.toLowerCase().includes('cloudflare') ||
+          w.toLowerCase().includes('blocked') ||
+          w.toLowerCase().includes('just a moment'),
+      );
+      recordDomainStatus(domain, hasBlockWarning ? 'blocked' : 'offline', errorDetail);
+    }
+
+    throw new Error(errorDetail);
+  }
+
+  // ── No-profile fallback: try Playwright directly in-process ───────────
+  // This path is only reached when there is no profile (and HTTP extraction
+  // did not succeed). It runs all extraction layers (JSON-LD, meta, etc.)
+  // as a best-effort fallback.
+  console.log(`[PageExtractor] Falling back to direct Playwright extraction for: ${url}`);
 
   // 2. Fallback to Playwright stealth mode
   let rawExtraction: RawExtraction | null = null;
@@ -365,6 +427,16 @@ function extractCustomSelectorsCheerio(
   
   if (profile.titleSelector) {
     data.title = $(profile.titleSelector).first().text().trim() || '';
+    // If titleOptionalSelectors are configured, extract their text and append
+    if (profile.titleOptionalSelectors?.length && data.title) {
+      const extras = profile.titleOptionalSelectors
+        .map(sel => $(sel).first().text().trim())
+        .filter(Boolean)
+        .join(' — ');
+      if (extras) {
+        data.title += ' — ' + extras;
+      }
+    }
   }
   if (profile.priceSelector) {
     data.price = $(profile.priceSelector).first().text().trim() || '';
@@ -631,6 +703,19 @@ async function extractCustomSelectors(
     if (prof.titleSelector) {
       const el = document.querySelector(prof.titleSelector);
       data.title = el?.textContent?.trim() || '';
+      // If titleOptionalSelectors are configured, extract their text and append
+      if (prof.titleOptionalSelectors?.length && data.title) {
+        const extras = prof.titleOptionalSelectors
+          .map((sel: string) => {
+            const subEl = document.querySelector(sel);
+            return subEl?.textContent?.trim() || '';
+          })
+          .filter(Boolean)
+          .join(' — ');
+        if (extras) {
+          data.title += ' — ' + extras;
+        }
+      }
     }
     if (prof.priceSelector) {
       const el = document.querySelector(prof.priceSelector);
@@ -983,225 +1068,7 @@ async function extractImages(page: import('playwright').Page, baseUrl: string): 
 }
 
 
-// ─── Variant Inference from Expected Name ──────────────────────────────────────────────────
-
-/**
- * Common size aliases used in product catalog names. Lower-cased keys.
- * Values are the canonical tokens we look for in variant option fields.
- */
-const SIZE_ALIASES: Record<string, string[]> = {
-  xs:        ['x-small', 'xsmall', 'extra small', 'xtra small', 'x small'],
-  sm:        ['small', 'sm'],
-  md:        ['medium', 'med', 'md'],
-  lg:        ['large', 'lg'],
-  xl:        ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large', 'x small'],
-  'x-small': ['x-small', 'xsmall', 'extra small', 'xtra small', 'x small'],
-  'x-large': ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
-  'x small': ['x-small', 'xsmall', 'extra small', 'xtra small', 'x small'],
-  'x large': ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
-  'xlarge':  ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
-  small:     ['small', 'sm'],
-  medium:    ['medium', 'med', 'md'],
-  large:     ['large', 'lg'],
-  'extra large': ['x-large', 'xlarge', 'x large', 'extra large', 'xtra large'],
-  'extra small': ['x-small', 'xsmall', 'extra small', 'xtra small'],
-};
-
-function normalizeToken(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
-function tokenSet(s: string): Set<string> {
-  return new Set(normalizeToken(s).split(/\s+/).filter(Boolean));
-}
-
-/**
- * Extract the variant descriptor text from a single Shopify variant
- * object — concatenates title, public_title, name, option1..3, options
- * array, and sku.
- */
-function variantDescriptor(v: any): { text: string; tokens: Set<string> } {
-  const parts: string[] = [];
-  if (v?.title) parts.push(String(v.title));
-  if (v?.public_title) parts.push(String(v.public_title));
-  if (v?.name) parts.push(String(v.name));
-  for (const key of ['option1', 'option2', 'option3']) {
-    if (v?.[key]) parts.push(String(v[key]));
-  }
-  if (Array.isArray(v?.options)) {
-    for (const opt of v.options) {
-      if (typeof opt === 'string') parts.push(opt);
-    }
-  }
-  if (v?.sku) parts.push(String(v.sku));
-  const text = parts.join(' ').toLowerCase();
-  return { text, tokens: tokenSet(parts.join(' ')) };
-}
-
-/**
- * Expand size aliases found in the expected name into all the strings
- * we might see on a variant option. E.g. "SM" -> "small sm",
- * "LG" -> "large lg", "XL" -> "x large extra large x-large xl".
- */
-function expandExpectedNameTokens(expected: string): Set<string> {
-  const raw = normalizeToken(expected);
-  const words = raw.split(/\s+/).filter(Boolean);
-  const expanded = new Set<string>();
-  for (const w of words) {
-    expanded.add(w);
-    // Add the full alias forms AND their individual pieces so token-set
-    // overlap and exact option2 comparison both work.
-    const aliases = SIZE_ALIASES[w];
-    if (aliases) {
-      for (const a of aliases) {
-        expanded.add(normalizeToken(a));
-      }
-    }
-  }
-  return expanded;
-}
-
-/**
- * Score a single variant against the expected product name.
- * Higher = better match. Returns 0 if no overlap.
- */
-function getExpectedSizeAliasForms(expected: string): Set<string> {
-  const raw = normalizeToken(expected);
-  const words = raw.split(/\s+/).filter(Boolean);
-  const forms = new Set<string>();
-  for (const w of words) {
-    forms.add(w);
-    const aliases = SIZE_ALIASES[w];
-    if (aliases) {
-      for (const a of aliases) {
-        forms.add(normalizeToken(a));
-      }
-    }
-  }
-  return forms;
-}
-
-function scoreVariant(v: any, expectedTokens: Set<string>, expectedNameLower: string): number {
-  const desc = variantDescriptor(v);
-  if (!desc.text) return 0;
-  let score = 0;
-  // Token overlap (each shared token = 1 point)
-  let shared = 0;
-  for (const t of expectedTokens) {
-    if (t.length < 2) continue;
-    if (desc.tokens.has(t)) shared++;
-  }
-  score += shared * 10;
-  // Exact option2 (size) match: strong disambiguator. option2 is the
-  // size on most Woof/Shopify PDPs; matching it precisely against the
-  // FULL alias form (e.g. "x large") breaks ties between "Large" and
-  // "X-Large" (both share the "large" piece token).
-  const option2 = v?.option2;
-  if (option2 && typeof option2 === 'string') {
-    const option2Norm = normalizeToken(option2);
-    const fullForms = getExpectedSizeAliasForms(expectedNameLower);
-    if (fullForms.has(option2Norm) && option2Norm.length >= 2) {
-      score += 60;
-    }
-  }
-  // Exact option1 (color) match: also a strong disambiguator.
-  const option1 = v?.option1;
-  if (option1 && typeof option1 === 'string') {
-    const option1Norm = normalizeToken(option1);
-    // option1 is a color (multi-word like "Forest Green"), so check
-    // both the full form and any multi-word expected tokens.
-    for (const t of expectedTokens) {
-      if (t.length < 2) continue;
-      if (option1Norm === t) { score += 60; break; }
-    }
-  }
-  // Exact title match: very strong signal
-  if (desc.text === expectedNameLower) score += 100;
-  // Variant title contains the expected name as substring
-  if (desc.text.includes(expectedNameLower) && expectedNameLower.length > 3) score += 50;
-  // SKU match: strong signal
-  if (v?.sku && typeof v.sku === 'string' && expectedNameLower.includes(v.sku.toLowerCase())) {
-    score += 40;
-  }
-  // Variant has featured_image: tiebreaker
-  if (v?.featured_image || v?.featured_media || v?.image) score += 1;
-  return score;
-}
-
-/**
- * Pick the best-matching Shopify variant for an expected product name
- * when the URL doesn't include a `?variant=` parameter. Returns null
- * when the match is ambiguous or below the confidence threshold.
- *
- * Strategy:
- *   1. Expand expected-name tokens (size aliases, color words).
- *   2. Identify tokens that are common to ALL variants (e.g. "Pupsicle")
- *      and exclude them — only differentiating tokens should break ties.
- *   3. Score every variant against the distinguishing token set.
- *   4. Require (a) the top score > 0, (b) the top score is strictly
- *      greater than the runner-up, and (c) the top score clears a
- *      minimum threshold. This prevents guessing when the name is too
- *      generic (e.g. just "Pupsicle" with no color or size).
- */
-function inferVariantFromExpectedName(
-  variants: any[],
-  expectedName: string,
-  brandHint?: string | null,
-): any | null {
-  if (!Array.isArray(variants) || variants.length === 0) return null;
-  const expectedNameLower = expectedName.toLowerCase();
-  const expectedTokens = expandExpectedNameTokens(expectedName);
-
-  // Exclude generic brand token from the scoring set so a name like
-  // "WOOF PUPSICLE LAVENDER SM" doesn't double-count "woof" against
-  // variants that all say "woof" in their name.
-  if (brandHint) {
-    const brandTokens = normalizeToken(brandHint).split(/\s+/).filter(Boolean);
-    for (const b of brandTokens) expectedTokens.delete(b);
-  }
-
-  // Identify tokens shared across ALL variants (e.g. "Pupsicle"). These
-  // are the "base" of the product and should NOT break ties — only
-  // differentiating tokens (color/size/sku) should pick a variant.
-  const variantTexts = variants.map(v => variantDescriptor(v).text);
-  const baseShared = (() => {
-    if (variantTexts.length === 0) return new Set<string>();
-    const first = tokenSet(variantTexts[0]);
-    const common = new Set<string>();
-    for (const t of first) {
-      if (variantTexts.every(vt => tokenSet(vt).has(t))) common.add(t);
-    }
-    return common;
-  })();
-
-  const distinguishingTokens = new Set<string>();
-  for (const t of expectedTokens) {
-    if (!baseShared.has(t)) distinguishingTokens.add(t);
-  }
-  const tokensToUse = distinguishingTokens.size > 0 ? distinguishingTokens : expectedTokens;
-
-  let bestScore = 0;
-  let secondScore = 0;
-  let bestVariant: any = null;
-  for (const v of variants) {
-    const s = scoreVariant(v, tokensToUse, expectedNameLower);
-    if (s > bestScore) {
-      secondScore = bestScore;
-      bestScore = s;
-      bestVariant = v;
-    } else if (s > secondScore) {
-      secondScore = s;
-    }
-  }
-
-  if (!bestVariant || bestScore <= 0) return null;
-  // Require a clear winner: the runner-up must not match the top.
-  if (bestScore === secondScore && secondScore > 0) return null;
-  // Minimum threshold: at least one distinguishing token must have
-  // matched (shared >= 1 with a per-token weight of 10 means score >= 10).
-  if (bestScore < 10) return null;
-  return bestVariant;
-}
+// Helper functions size/color aliases moved to variant-resolver.ts for Discovery-time resolution.
 
 // ─── Merge Layers ──────────────────────────────────────────────────────────────
 
@@ -1237,8 +1104,6 @@ function mergeExtractionLayers(
     matchedVariant = raw.productJSON.variants.find(
       (v: any) => v.id?.toString() === variantId || v.id === Number(variantId)
     );
-  } else if (expected?.name && raw.productJSON && Array.isArray(raw.productJSON.variants)) {
-    matchedVariant = inferVariantFromExpectedName(raw.productJSON.variants, expected.name, expected.brandHint ?? null);
   }
 
   // Title
@@ -1502,6 +1367,7 @@ function mergeExtractionLayers(
     confidence,
     fieldProvenance: provenance,
     packagingTitle: null,
+    packagingOcrData: null,
     customFields,
   };
 }

@@ -19,8 +19,9 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
+import { runRenderedPage } from '../browser/rendered-page-runner';
+import { loadWorkerBrowserConfig } from '../browser/config';
 import {
   ExtractRequestSchema,
   ExtractResponseSchema,
@@ -249,12 +250,12 @@ function collectImagesFromSelector(
 
 // ─── Helper: evaluate a text selector in Playwright ──────────────────────────
 
-function makeTextSelectorEvaluator(): string {
+function makeTextSelectorEvaluator(sel: string): string {
   return `
-    (sel) => {
-      const el = document.querySelector(sel);
+    (() => {
+      const el = document.querySelector(${JSON.stringify(sel)});
       return el ? (el.textContent || '').trim() : '';
-    }
+    })()
   `;
 }
 
@@ -262,7 +263,7 @@ function makeTextSelectorEvaluator(): string {
 
 function makePlaywrightJsonLdExtractor(): string {
   return `
-    () => {
+    (() => {
       const results = [];
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const script of scripts) {
@@ -280,7 +281,7 @@ function makePlaywrightJsonLdExtractor(): string {
         } catch (e) { /* skip invalid JSON */ }
       }
       return results;
-    }
+    })()
   `;
 }
 
@@ -288,7 +289,7 @@ function makePlaywrightJsonLdExtractor(): string {
 
 function makePlaywrightMetaExtractor(): string {
   return `
-    () => {
+    (() => {
       const tags = {};
       const metas = document.querySelectorAll('meta');
       for (const meta of metas) {
@@ -301,7 +302,7 @@ function makePlaywrightMetaExtractor(): string {
         tags['page:title'] = titleEl.textContent.trim();
       }
       return tags;
-    }
+    })()
   `;
 }
 
@@ -385,6 +386,17 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
     title = $(titleSelector).first().text().trim() || null;
     if (title) {
       titleProvenance = 'profile-selector';
+      // Concatenate optional title selectors (e.g. subheadings, taglines)
+      const toSel = request.profile.titleOptionalSelectors;
+      if (toSel && toSel.length > 0) {
+        const extras = toSel
+          .map(sel => $(sel).first().text().trim())
+          .filter(Boolean)
+          .join(' — ');
+        if (extras) {
+          title += ' — ' + extras;
+        }
+      }
     } else {
       // Fall back to JSON-LD or meta
       title =
@@ -546,8 +558,8 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
 
   // Extract custom selectors
   const customFields: Record<string, string> = {};
-  if (selectors.customSelectors) {
-    for (const [fieldName, selector] of Object.entries(selectors.customSelectors)) {
+  if (profile.customSelectors) {
+    for (const [fieldName, selector] of Object.entries(profile.customSelectors)) {
       if (!selector) continue;
       try {
         const val = $(selector).first().text().trim();
@@ -593,379 +605,344 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
   const selectors = profile.selectors || {};
-  const renderedCustomFields: Record<string, string> = {};
 
-  const titleSelector = selectors['titleSelector'] || selectors['title'] || null;
-  const brandSelector = selectors['brandSelector'] || selectors['brand'] || null;
-  const descriptionSelector = selectors['descriptionSelector'] || selectors['description'] || null;
-  const priceSelector = selectors['priceSelector'] || selectors['price'] || null;
-  const imagesSelector = selectors['imagesSelector'] || selectors['images'] || selectors['imageSelector'] || selectors['image'] || null;
+  // The runner + extractor is wrapped so we can lazily pull selectors into
+  // the Playwright callback without serialising the whole request object.
+  const runnerConfig = loadWorkerBrowserConfig();
 
-  let browser;
-  try {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--window-size=1280,800',
-      ],
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    warnings.push(`Failed to launch Playwright: ${msg}`);
-    return buildFailedResult(request, warnings);
-  }
+  const result = await runRenderedPage(
+    {
+      url: sourceUrl,
+      navigationTimeoutMs: RENDERED_NAVIGATE_TIMEOUT_MS,
+      dwellMs: RENDERED_DWELL_MS,
+    },
+    async ({ page }, dwellMs) => {
+      // Dwell for dynamic content before any checks or extraction.
+      // This allows JS-rendered content to appear and improves
+      // Cloudflare pass-through by simulating real user behavior.
+      await page.waitForTimeout(dwellMs);
 
-  let finalUrl = sourceUrl;
-  let jsonLd: Record<string, unknown> | null = null;
-  let metaTags: Record<string, string> = {};
-  const embeddedData: Record<string, unknown>[] = [];
-
-  // Collected field values
-  let title: string | null = null;
-  let brand: string | null = null;
-  let description: string | null = null;
-  let price: string | null = null;
-  let primaryImage: string | null = null;
-  const additionalImages: string[] = [];
-
-  const titleProvenance: string[] = [];
-  let brandProvenance = '';
-  let descriptionProvenance = '';
-  let priceProvenance = '';
-  let imageProvenance = '';
-
-  try {
-    const context = await browser.newContext({
-      userAgent: HTTP_USER_AGENT,
-      viewport: { width: 1280, height: 800 },
-      locale: 'en-US',
-    });
-
-    const page = await context.newPage();
-
-    // Block resource types (same pattern as snapshot.ts)
-    await page.route('**/*', async (route) => {
-      const req = route.request();
-      const type = req.resourceType();
-      const reqUrl = req.url();
-      const isTracker =
-        /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i.test(
-          reqUrl,
-        );
+      // ── Detect Cloudflare / WAF challenge pages early ────────────────
+      const pageTitle = await page.title();
       if (
-        type === 'image' ||
-        type === 'font' ||
-        type === 'media' ||
-        type === 'stylesheet' ||
-        isTracker
+        !pageTitle ||
+        pageTitle.includes('Just a moment') ||
+        pageTitle.includes('Cloudflare') ||
+        pageTitle.includes('Attention Required') ||
+        pageTitle.includes('verify you are human')
       ) {
-        await route.abort();
-      } else {
-        await route.continue();
-      }
-    });
-
-    // Navigate
-    try {
-      await page.goto(sourceUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: RENDERED_NAVIGATE_TIMEOUT_MS,
-      });
-      finalUrl = page.url();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      warnings.push(`Navigation failed: ${msg}`);
-    }
-
-    // Dwell for dynamic content
-    await page.waitForTimeout(RENDERED_DWELL_MS);
-
-    // ── Extract JSON-LD ────────────────────────────────────────────────
-    try {
-      const jsonLdArray: Record<string, unknown>[] = await page.evaluate(
-        makePlaywrightJsonLdExtractor(),
-      );
-      // Find the first Product type
-      for (const item of jsonLdArray) {
-        const findProduct = (obj: Record<string, unknown>): Record<string, unknown> | null => {
-          if (obj['@type'] === 'Product') return obj;
-          if (Array.isArray(obj['@graph'])) {
-            for (const g of obj['@graph'] as Record<string, unknown>[]) {
-              const found = findProduct(g);
-              if (found) return found;
-            }
-          }
-          return null;
+        // Return a sentinel so the caller knows it was blocked
+        return {
+          blocked: true as const,
+          title: null, brand: null, description: null,
+          price: null, primaryImage: null, additionalImages: [] as string[],
+          provenance: {} as Record<string, string>,
+          customFields: {} as Record<string, string>,
         };
-        const product = findProduct(item);
-        if (product) {
-          jsonLd = product;
-          break;
-        }
       }
-    } catch (err) {
-      warnings.push(
-        `JSON-LD extraction failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
 
-    // ── Extract meta tags ─────────────────────────────────────────────
-    try {
-      metaTags = await page.evaluate(makePlaywrightMetaExtractor());
-    } catch (err) {
-      warnings.push(
-        `Meta tag extraction failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+      const finalUrl = page.url();
 
-    // ── Extract embedded product data ──────────────────────────────────
-    try {
-      const embedded = (await page.evaluate(makePlaywrightEmbeddedExtractor())) as Record<string, unknown>[];
-      embeddedData.push(...embedded);
-    } catch {
-      // non-critical
-    }
+      // ── Block only trackers (not images/fonts/styles — those help
+      //     Cloudflare fingerprinting and are needed for profile selectors)
+      await page.route('**/*', async (route) => {
+        const req = route.request();
+        const reqUrl = req.url();
+        if (
+          /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i.test(reqUrl)
+        ) {
+          await route.abort();
+        } else {
+          await route.continue();
+        }
+      });
 
-    // ── Evaluate text selectors in browser ─────────────────────────────
-
-    // Title
-    if (titleSelector) {
+      // ── Extract JSON-LD ──────────────────────────────────────────────
+      let jsonLd: Record<string, unknown> | null = null;
       try {
-        title = await page.evaluate(makeTextSelectorEvaluator(), titleSelector);
+        const jsonLdArray: Record<string, unknown>[] = await page.evaluate(
+          makePlaywrightJsonLdExtractor(),
+        );
+        for (const item of jsonLdArray) {
+          const findProduct = (obj: Record<string, unknown>): Record<string, unknown> | null => {
+            if (obj['@type'] === 'Product') return obj;
+            if (Array.isArray(obj['@graph'])) {
+              for (const g of obj['@graph'] as Record<string, unknown>[]) {
+                const found = findProduct(g);
+                if (found) return found;
+              }
+            }
+            return null;
+          };
+          const product = findProduct(item);
+          if (product) {
+            jsonLd = product;
+            break;
+          }
+        }
+      } catch {
+        // non-critical
+      }
+
+      // ── Extract meta tags ───────────────────────────────────────────
+      let metaTags: Record<string, string> = {};
+      try {
+        metaTags = await page.evaluate(makePlaywrightMetaExtractor());
+      } catch {
+        // non-critical
+      }
+
+      // ── Selector helpers ────────────────────────────────────────────
+      const titleSelector = selectors['titleSelector'] || selectors['title'] || null;
+      const brandSelector = selectors['brandSelector'] || selectors['brand'] || null;
+      const descriptionSelector = selectors['descriptionSelector'] || selectors['description'] || null;
+      const priceSelector = selectors['priceSelector'] || selectors['price'] || null;
+      const imagesSelector = selectors['imagesSelector'] || selectors['images'] || selectors['imageSelector'] || selectors['image'] || null;
+
+      const evalText = async (sel: string): Promise<string> => {
+        try {
+          return await page.evaluate(makeTextSelectorEvaluator(sel));
+        } catch {
+          return '';
+        }
+      };
+
+      // ── Title ────────────────────────────────────────────────────────
+      let title: string | null = null;
+      const titleProvenance: string[] = [];
+
+      if (titleSelector) {
+        title = await evalText(titleSelector);
         if (title) {
           titleProvenance.push('profile-selector');
-        }
-      } catch {
-        // selector evaluation failed
-      }
-    }
-
-    // If no title from selector, use JSON-LD or meta
-    if (!title) {
-      title =
-        (jsonLd?.name as string) ||
-        metaTags['og:title'] ||
-        metaTags['page:title'] ||
-        null;
-      if (title) {
-        titleProvenance.push(title === jsonLd?.name ? 'json-ld' : 'meta');
-        if (titleSelector) {
-          warnings.push(
-            `titleSelector "${titleSelector}" returned empty; fell back to ${titleProvenance[0]}`,
-          );
+          // Concatenate optional title selectors (e.g. subheadings, taglines)
+          const toSel = request.profile.titleOptionalSelectors;
+          if (toSel && toSel.length > 0) {
+            for (const sel of toSel) {
+              const extra = await evalText(sel);
+              if (extra) {
+                title += ' — ' + extra;
+              }
+            }
+          }
         }
       }
-    }
+      if (!title) {
+        title =
+          (jsonLd?.name as string) ||
+          metaTags['og:title'] ||
+          metaTags['page:title'] ||
+          null;
+        if (title) {
+          const src = title === jsonLd?.name ? 'json-ld' : 'meta';
+          titleProvenance.push(src);
+          if (titleSelector) {
+            warnings.push(`titleSelector "${titleSelector}" empty; fell back to ${src}`);
+          }
+        }
+      }
 
-    if (!title) {
-      warnings.push('Title could not be extracted — returning ok: false');
-      return buildFailedResult(request, warnings);
-    }
-
-    // Brand
-    if (brandSelector) {
-      try {
-        brand = await page.evaluate(makeTextSelectorEvaluator(), brandSelector);
+      // ── Brand ─────────────────────────────────────────────────────────
+      let brand: string | null = null;
+      let brandProvenance = '';
+      if (brandSelector) {
+        brand = await evalText(brandSelector);
         if (brand) brandProvenance = 'profile-selector';
-      } catch {
-        // ignore
       }
-    }
-    if (!brand) {
-      const jsonLdBrand = jsonLd?.brand as
-        | Record<string, unknown>
-        | string
-        | undefined;
-      const brandFromJsonLd =
-        typeof jsonLdBrand === 'string'
-          ? jsonLdBrand
-          : ((jsonLdBrand as Record<string, unknown>)?.name as string | undefined);
-      if (brandFromJsonLd) {
-        brand = brandFromJsonLd;
-        brandProvenance = 'json-ld';
+      if (!brand) {
+        const jb = jsonLd?.brand as Record<string, unknown> | string | undefined;
+        const bfj = typeof jb === 'string' ? jb : (jb as Record<string, unknown>)?.name as string | undefined;
+        if (bfj) { brand = bfj; brandProvenance = 'json-ld'; }
       }
-    }
 
-    // Description
-    if (descriptionSelector) {
-      try {
-        description = await page.evaluate(makeTextSelectorEvaluator(), descriptionSelector);
+      // ── Description ──────────────────────────────────────────────────
+      let description: string | null = null;
+      let descriptionProvenance = '';
+      if (descriptionSelector) {
+        description = await evalText(descriptionSelector);
         if (description) descriptionProvenance = 'profile-selector';
-      } catch {
-        // ignore
       }
-    }
-    if (!description) {
-      description =
-        (jsonLd?.description as string) ||
-        metaTags['og:description'] ||
-        metaTags['description'] ||
-        null;
-      if (description) descriptionProvenance = 'json-ld';
-    }
+      if (!description) {
+        description =
+          (jsonLd?.description as string) ||
+          metaTags['og:description'] ||
+          metaTags['description'] ||
+          null;
+        if (description) descriptionProvenance = 'json-ld';
+      }
 
-    // Price
-    if (expected?.price) {
-      price = expected.price;
-      priceProvenance = 'spreadsheet-import';
-    } else if (priceSelector) {
-      try {
-        price = await page.evaluate(makeTextSelectorEvaluator(), priceSelector);
+      // ── Price ─────────────────────────────────────────────────────────
+      let price: string | null = null;
+      let priceProvenance = '';
+      if (expected?.price) {
+        price = expected.price;
+        priceProvenance = 'spreadsheet-import';
+      } else if (priceSelector) {
+        price = await evalText(priceSelector);
         if (price) {
           priceProvenance = 'profile-selector';
-          const match = price.match(/\$?(\d+\.?\d*)/);
-          if (match) price = match[0];
+          const m = price.match(/\$?(\d+\.?\d*)/);
+          if (m) price = m[0];
         }
-      } catch {
-        // ignore
       }
-    }
-    if (!price) {
-      const jsonLdOffers = jsonLd?.offers as Record<string, unknown> | undefined;
-      price = jsonLdOffers?.price as string | undefined ||
-              metaTags['product:price:amount'] ||
-              null;
-      if (price) {
-        priceProvenance = jsonLdOffers?.price ? 'json-ld' : 'meta';
+      if (!price) {
+        const offers = jsonLd?.offers as Record<string, unknown> | undefined;
+        price = (offers?.price as string) || metaTags['product:price:amount'] || null;
+        if (price) priceProvenance = offers?.price ? 'json-ld' : 'meta';
       }
-    }
 
-    // ── Images from selector ──────────────────────────────────────────
-    if (imagesSelector) {
-      try {
-        const rawImages: string[] = await page.evaluate(
-          `((sel, baseUrl) => {
-            const seen = new Set();
-            const images = [];
-            const els = document.querySelectorAll(sel);
-            for (const el of els) {
-              const target = el.tagName === 'IMG' || el.tagName === 'SOURCE'
-                ? el
-                : el.querySelector('img,source');
-              if (!target) continue;
-              const tryAdd = (src) => {
-                if (!src) return;
-                const t = src.trim();
-                if (!t) return;
-                const l = t.toLowerCase();
-                if (l.startsWith('data:')) return;
-                if (l.startsWith('blob:')) return;
-                const p = l.split(/[?#]/)[0];
-                if (p.endsWith('.svg')) return;
-                if (seen.has(t)) return;
-                seen.add(t);
-                images.push(t);
-              };
-              if (target.tagName === 'IMG') {
-                tryAdd(target.currentSrc);
-              }
-              for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
-                tryAdd(target.getAttribute(attr));
-              }
-              for (const attr of ['srcset', 'data-srcset']) {
-                const srcset = target.getAttribute(attr);
-                if (srcset) {
-                  for (const part of srcset.split(',')) {
-                    const url = part.trim().split(' ')[0];
-                    if (url && !url.startsWith('data:') && !seen.has(url)) {
-                      seen.add(url);
-                      images.push(url);
+      // ── Images from selector ────────────────────────────────────────
+      let primaryImage: string | null = null;
+      const additionalImages: string[] = [];
+      let imageProvenance = '';
+
+      if (imagesSelector) {
+        try {
+          const rawImages: string[] = await page.evaluate(
+            `((sel, baseUrl) => {
+              const seen = new Set();
+              const images = [];
+              const els = document.querySelectorAll(sel);
+              for (const el of els) {
+                const targets = el.tagName === 'IMG' || el.tagName === 'SOURCE'
+                  ? [el]
+                  : Array.from(el.querySelectorAll('img,source'));
+                for (const target of targets) {
+                  const tryAdd = (src) => {
+                    if (!src) return;
+                    const t = src.trim();
+                    if (!t) return;
+                    const l = t.toLowerCase();
+                    if (l.startsWith('data:')) return;
+                    if (l.startsWith('blob:')) return;
+                    const p = l.split(/[?#]/)[0];
+                    if (p.endsWith('.svg')) return;
+                    if (seen.has(p)) return;
+                    seen.add(p);
+                    images.push(t);
+                  };
+                  if (target.tagName === 'IMG') tryAdd(target.currentSrc);
+                  for (const attr of ['src','data-src','data-lazy-src','data-original','data-image','data-zoom-image']) {
+                    tryAdd(target.getAttribute(attr));
+                  }
+                  for (const attr of ['srcset','data-srcset']) {
+                    const srcset = target.getAttribute(attr);
+                    if (srcset) {
+                      for (const part of srcset.split(',')) {
+                        const url = part.trim().split(' ')[0];
+                        if (url && !url.startsWith('data:')) {
+                          const lUrl = url.toLowerCase();
+                          const p = lUrl.split(/[?#]/)[0];
+                          if (!seen.has(p)) {
+                            seen.add(p);
+                            images.push(url);
+                          }
+                        }
+                      }
                     }
                   }
                 }
               }
-            }
-            return images.map(s => {
-              try { return new URL(s, baseUrl).href; }
-              catch { return s; }
-            }).filter(s => s.startsWith('http'));
-          })(${JSON.stringify(imagesSelector)}, ${JSON.stringify(finalUrl)})`
-        );
-        if (rawImages.length > 0) {
-          primaryImage = rawImages[0];
-          additionalImages.push(...rawImages.slice(1));
-          imageProvenance = 'profile-selector';
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    // Fallback images from JSON-LD / meta
-    if (!primaryImage && jsonLd?.image) {
-      const jsonLdImage = jsonLd.image as string | string[];
-      const imgUrl = Array.isArray(jsonLdImage) ? jsonLdImage[0] : jsonLdImage;
-      const resolved = resolveUrl(imgUrl, finalUrl);
-      if (resolved) {
-        primaryImage = resolved;
-        imageProvenance = 'json-ld';
-      }
-    }
-
-    if (!primaryImage && metaTags['og:image']) {
-      const resolved = resolveUrl(metaTags['og:image'], finalUrl);
-      if (resolved) {
-        primaryImage = resolved;
-        imageProvenance = 'meta';
-      }
-    }
-
-    // Extract custom selectors while browser is still open
-    if (selectors.customSelectors) {
-      for (const [fieldName, selector] of Object.entries(selectors.customSelectors)) {
-        if (!selector) continue;
-        try {
-          const val: string = (await page.evaluate(makeTextSelectorEvaluator(), selector)) as string;
-          if (val) {
-            renderedCustomFields[fieldName] = val;
+              return images.map(s => {
+                try { return new URL(s, baseUrl).href; }
+                catch { return s; }
+              }).filter(s => s.startsWith('http'));
+            })(${JSON.stringify(imagesSelector)}, ${JSON.stringify(finalUrl)})`
+          );
+          if (rawImages.length > 0) {
+            primaryImage = rawImages[0];
+            additionalImages.push(...rawImages.slice(1).slice(0, 29));
+            imageProvenance = 'profile-selector';
           }
-        } catch { /* skip bad selectors */ }
+        } catch { /* ignore */ }
       }
-    }
 
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    warnings.push(`Rendered extraction error: ${msg}`);
+      // Fallback images from JSON-LD / meta
+      if (!primaryImage && jsonLd?.image) {
+        const img = jsonLd.image as string | string[];
+        const url = Array.isArray(img) ? img[0] : img;
+        const resolved = resolveUrl(url, finalUrl);
+        if (resolved) { primaryImage = resolved; imageProvenance = 'json-ld'; }
+      }
+      if (!primaryImage && metaTags['og:image']) {
+        const resolved = resolveUrl(metaTags['og:image'], finalUrl);
+        if (resolved) { primaryImage = resolved; imageProvenance = 'meta'; }
+      }
+
+      // ── Custom selectors ────────────────────────────────────────────
+      const customFields: Record<string, string> = {};
+      if (profile.customSelectors) {
+        for (const [fieldName, selector] of Object.entries(profile.customSelectors)) {
+          if (!selector) continue;
+          const val = await evalText(selector);
+          if (val) customFields[fieldName] = val;
+        }
+      }
+
+      // ── Build provenance ────────────────────────────────────────────
+      const provenance: Record<string, string> = {};
+      if (title) provenance.title = titleProvenance[0] || 'json-ld';
+      if (brand) provenance.brand = brandProvenance;
+      if (description) provenance.description = descriptionProvenance;
+      if (price) provenance.price = priceProvenance;
+      if (primaryImage) provenance.primaryImage = imageProvenance;
+      if (additionalImages.length > 0) provenance.additionalImages = imageProvenance;
+      if (sourceUrl) provenance.sourceUrl = 'request';
+      provenance.profileRuntime = 'rendered';
+      if (Object.keys(customFields).length > 0) provenance.customFields = 'profile-selector';
+
+      return {
+        blocked: false as const,
+        title: title ?? null,
+        brand: brand ?? null,
+        description: description ?? null,
+        price: price ?? null,
+        primaryImage: primaryImage ?? null,
+        additionalImages,
+        provenance,
+        customFields,
+      };
+    },
+    runnerConfig,
+  );
+
+  // ── Handle runner failure (could not launch / navigate) ──────────────
+  if (!result.ok) {
+    warnings.push(`Rendered extraction failed: ${result.error}`);
+    return buildFailedResult(request, warnings);
   }
 
-  // ── Build provenance record ──────────────────────────────────────────
-  const provenance: Record<string, string> = {};
-  if (title) provenance.title = titleProvenance.length > 0 ? titleProvenance[0] : 'json-ld';
-  if (brand) provenance.brand = brandProvenance;
-  if (description) provenance.description = descriptionProvenance;
-  if (price) provenance.price = priceProvenance;
-  if (primaryImage) provenance.primaryImage = imageProvenance;
-  if (additionalImages.length > 0) provenance.additionalImages = imageProvenance;
-  if (sourceUrl) provenance.sourceUrl = 'request';
-  provenance.profileRuntime = 'rendered';
+  const extracted = result.data;
 
-  try {
-    await Promise.race([
-      browser.close(),
-      new Promise((resolve) => setTimeout(resolve, 2000)),
-    ]);
-  } catch {
-    // ignore close errors
+  // ── Cloudflare block detection ───────────────────────────────────────
+  if (extracted.blocked) {
+    warnings.push('Page appears to be blocked by Cloudflare or WAF');
+    return buildFailedResult(request, warnings);
+  }
+
+  // ── Hard fail when no title extracted ────────────────────────────────
+  if (!extracted.title) {
+    warnings.push('Title could not be extracted — returning ok: false');
+    return buildFailedResult(request, warnings);
   }
 
   const data = buildExtractionData(
     {
-      title: title!,
-      brand,
-      description,
-      price,
-      primaryImage,
-      additionalImages,
-      provenance,
+      title: extracted.title,
+      brand: extracted.brand,
+      description: extracted.description,
+      price: extracted.price,
+      primaryImage: extracted.primaryImage,
+      additionalImages: extracted.additionalImages,
+      provenance: extracted.provenance,
     },
     sourceUrl,
     expected.name,
   );
 
   // Merge custom fields into result
-  if (Object.keys(renderedCustomFields).length > 0) {
-    (data as ExtractionData).customFields = renderedCustomFields;
+  if (Object.keys(extracted.customFields).length > 0) {
+    (data as ExtractionData).customFields = extracted.customFields;
   }
 
   return { data, warnings };
@@ -1032,7 +1009,8 @@ function buildExtractionData(
     confidence,
     fieldProvenance: provenance,
     packagingTitle: null,
-        customFields: {},
+    packagingOcrData: null,
+    customFields: {},
   };
 }
 
@@ -1067,7 +1045,8 @@ function buildFailedResult(
     confidence: 0,
     fieldProvenance: provenance,
     packagingTitle: null,
-  customFields: {},
+    packagingOcrData: null,
+    customFields: {},
   };
 
   return { data, warnings };

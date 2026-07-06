@@ -344,6 +344,29 @@ describe('canonicalizeUrl', () => {
     const result = canonicalizeUrl('not-a-url');
     expect(result).toBe('not-a-url');
   });
+
+  it('does not collapse gallery images with indices after size patterns', () => {
+    // Uploaded filenames like `Gallery_1200x1200_1.png` have the size
+    // pattern as part of the original name, not a Shopify-generated
+    // suffix. The regex must not strip `_1200x1200_1` because the
+    // optional suffix is constrained to crop qualifiers (e.g.
+    // `_crop_center`), so the lookahead fails when `_1` follows the
+    // size pattern instead of the file extension.
+    const result1 = canonicalizeUrl('//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_1.png');
+    const result2 = canonicalizeUrl('//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_2.png');
+    const result3 = canonicalizeUrl('//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_1-Lavender_139e0de8-5f63-45f0-90e6-c39f9c951a48.png');
+    expect(result1).not.toBe(result2);
+    expect(result1).not.toBe(result3);
+    expect(result2).not.toBe(result3);
+  });
+
+  it('still strips size suffixes followed by crop qualifiers', () => {
+    // `_crop_top_left` is a valid Shopify transformation qualifier and
+    // should still be stripped along with the size pattern.
+    const result = canonicalizeUrl('https://cdn.shopify.com/s/files/1/0001/products/photo_80x80_crop_top_left.jpg');
+    expect(result).toContain('/photo.jpg');
+    expect(result).not.toContain('_crop_top_left');
+  });
 });
 
 describe('cleanAndDeduplicateImages', () => {
@@ -417,6 +440,25 @@ describe('cleanAndDeduplicateImages', () => {
     ];
     const result = cleanAndDeduplicateImages(urls);
     expect(result).toHaveLength(2);
+  });
+
+  it('preserves distinct gallery images with size-like patterns in filenames', () => {
+    // Regression test: the mywoof.com Poomergency product page has 6
+    // gallery images whose uploaded filenames contain `_1200x1200_`
+    // followed by an index (`_1`, `_2`, ..., `_6`).  The old permissive
+    // regex suffix `(?:_[a-z0-9-_]+)?` matched these indices, collapsing
+    // all 6 images to the same canonical key and causing production
+    // extraction to return only 1 image instead of 6.
+    const urls = [
+      '//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_1-Lavender_139e0de8-5f63-45f0-90e6-c39f9c951a48.png?v=1752698667&width=1200',
+      '//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_2.png?v=1752505715&width=1200',
+      '//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_3.png?v=1752505715&width=1200',
+      '//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_4.png?v=1752505715&width=1200',
+      '//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_5.png?v=1752505711&width=1200',
+      '//mywoof.com/cdn/shop/files/Woof_Poomergency_Gallery_1200x1200_6.png?v=1752505711&width=1200',
+    ];
+    const result = cleanAndDeduplicateImages(urls, 'https://mywoof.com');
+    expect(result).toHaveLength(6);
   });
 
   it('returns empty array for empty input', () => {

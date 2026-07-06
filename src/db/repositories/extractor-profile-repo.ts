@@ -5,6 +5,7 @@ export interface ExtractorProfile {
   id: string;
   domain: string;
   titleSelector: string | null;
+  titleOptionalSelectors: string[];
   priceSelector: string | null;
   descriptionSelector: string | null;
   brandSelector: string | null;
@@ -20,6 +21,7 @@ interface DbProfile {
   id: string;
   domain: string;
   title_selector: string | null;
+  title_optional_selectors_json: string | null;
   price_selector: string | null;
   description_selector: string | null;
   brand_selector: string | null;
@@ -36,6 +38,7 @@ function mapToProfile(db: DbProfile): ExtractorProfile {
     id: db.id,
     domain: db.domain,
     titleSelector: db.title_selector,
+    titleOptionalSelectors: db.title_optional_selectors_json ? JSON.parse(db.title_optional_selectors_json) : [],
     priceSelector: db.price_selector,
     descriptionSelector: db.description_selector,
     brandSelector: db.brand_selector,
@@ -78,6 +81,7 @@ export function upsertProfile(
   domain: string,
   selectors: {
     titleSelector?: string | null;
+    titleOptionalSelectors?: string[];
     priceSelector?: string | null;
     descriptionSelector?: string | null;
     brandSelector?: string | null;
@@ -102,6 +106,10 @@ export function upsertProfile(
   };
 
   const tSel = resolve(existing?.title_selector ?? null, selectors.titleSelector);
+  // titleOptionalSelectors: undefined = preserve existing; explicit array = replace
+  const toSel = selectors.titleOptionalSelectors !== undefined
+    ? selectors.titleOptionalSelectors
+    : (existing?.title_optional_selectors_json ? JSON.parse(existing.title_optional_selectors_json) : []);
   const pSel = resolve(existing?.price_selector ?? null, selectors.priceSelector);
   const dSel = resolve(existing?.description_selector ?? null, selectors.descriptionSelector);
   const bSel = resolve(existing?.brand_selector ?? null, selectors.brandSelector);
@@ -115,13 +123,14 @@ export function upsertProfile(
   if (existing) {
     db.query(`
       UPDATE extractor_profiles
-      SET title_selector = ?, price_selector = ?, description_selector = ?, brand_selector = ?, images_selector = ?, custom_selectors_json = ?, sitemap_product_url_pattern = ?, shopify_json_path = ?, updated_at = ?
+      SET title_selector = ?, title_optional_selectors_json = ?, price_selector = ?, description_selector = ?, brand_selector = ?, images_selector = ?, custom_selectors_json = ?, sitemap_product_url_pattern = ?, shopify_json_path = ?, updated_at = ?
       WHERE domain = ?
-    `).run(tSel, pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, now, normalizedDomain);
+    `).run(tSel, JSON.stringify(toSel), pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, now, normalizedDomain);
 
     return mapToProfile({
       ...existing,
       title_selector: tSel,
+      title_optional_selectors_json: JSON.stringify(toSel),
       price_selector: pSel,
       description_selector: dSel,
       brand_selector: bSel,
@@ -135,14 +144,15 @@ export function upsertProfile(
 
   const id = randomUUID();
   db.query(`
-    INSERT INTO extractor_profiles (id, domain, title_selector, price_selector, description_selector, brand_selector, images_selector, custom_selectors_json, sitemap_product_url_pattern, shopify_json_path, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, normalizedDomain, tSel, pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, now, now);
+    INSERT INTO extractor_profiles (id, domain, title_selector, title_optional_selectors_json, price_selector, description_selector, brand_selector, images_selector, custom_selectors_json, sitemap_product_url_pattern, shopify_json_path, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, normalizedDomain, tSel, JSON.stringify(toSel), pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, now, now);
 
   return {
     id,
     domain: normalizedDomain,
     titleSelector: tSel,
+    titleOptionalSelectors: toSel,
     priceSelector: pSel,
     descriptionSelector: dSel,
     brandSelector: bSel,

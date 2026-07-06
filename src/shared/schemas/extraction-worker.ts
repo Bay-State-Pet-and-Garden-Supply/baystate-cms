@@ -10,6 +10,8 @@ export const WorkerCapabilitiesSchema = z.object({
   playwright: z.boolean().default(true),
   crawlee: z.boolean().default(false),
   stagehand: z.boolean().default(false),
+  /** Camoufox anti-detect browser backend availability. */
+  camoufox: z.boolean().default(false),
 });
 
 export type WorkerCapabilities = z.infer<typeof WorkerCapabilitiesSchema>;
@@ -149,6 +151,7 @@ export const ProfileProposalDraftSchema = z.object({
   pageStructureSignals: z.array(z.string()).default(() => []),
   runtime: z.enum(['static', 'rendered']).default('static'),
   selectors: z.record(z.string(), z.string().nullable()).default(() => ({})),
+  titleOptionalSelectors: z.array(z.string()).default(() => []),
   imageRules: z.record(z.string(), z.unknown()).default(() => ({})),
   variantSelectionStrategy: VariantSelectionStrategySchema.nullable().default(null),
   warnings: z.array(z.string()).default(() => []),
@@ -238,6 +241,8 @@ export const ExtractRequestSchema = z.object({
   profile: z.object({
     runtime: z.enum(['static', 'rendered']).default('rendered'),
     selectors: z.record(z.string(), z.string().nullable()).default(() => ({})),
+    titleOptionalSelectors: z.array(z.string()).default(() => []),
+    customSelectors: z.record(z.string(), z.string()).default(() => ({})),
     imageRules: z.record(z.string(), z.unknown()).default(() => ({})),
     variantSelectionStrategy: VariantSelectionStrategySchema.nullable().default(null),
   }),

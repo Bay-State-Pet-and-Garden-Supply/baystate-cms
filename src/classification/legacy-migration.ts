@@ -208,6 +208,7 @@ export function migrateLegacyToClassificationConfig(
     attributeProfiles,
     attributeMappings,
     curationTargets: [],
+    brands: [],
     guidance: [],
     modelPolicy: {
       defaultProvider: 'ollama',

@@ -185,16 +185,19 @@ export function approveChangeSet(
 }
 
 /**
- * Discard a draft change set.
+ * Discard/delete a change set in any status.
+ * Cleans up old, approved, or abandoned change sets without restriction.
  * Reopens any linked drift rows so the same remote differences remain blocking.
  */
 export function discardChangeSet(changeSetId: string): { success: boolean; reopenedDrift?: boolean } {
   const cs = findChangeSetById(changeSetId);
-  if (!cs || cs.status !== 'draft') return { success: false };
+  if (!cs) return { success: false };
   const workspaceId = cs.workspaceId;
   deleteChangeSet(changeSetId);
 
   // Reopen linked drift so remote differences stay blocking
-  reopenDriftForChangeSet(workspaceId, changeSetId);
-  return { success: true, reopenedDrift: true };
+  if (cs.status === 'draft') {
+    reopenDriftForChangeSet(workspaceId, changeSetId);
+  }
+  return { success: true, reopenedDrift: cs.status === 'draft' };
 }

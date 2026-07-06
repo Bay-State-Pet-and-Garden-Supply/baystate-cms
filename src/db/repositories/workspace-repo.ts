@@ -2,10 +2,17 @@ import { getDb } from '../connection';
 import type { Workspace } from '@/shared/types';
 
 export function findWorkspace(): Workspace | null {
-  const db = getDb();
-  const row = db.query('SELECT * FROM workspace LIMIT 1').get() as Record<string, unknown> | undefined;
-  if (!row) return null;
-  return mapRowToWorkspace(row);
+  try {
+    const db = getDb();
+    const row = db.query('SELECT * FROM workspace LIMIT 1').get() as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return mapRowToWorkspace(row);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Database not initialized')) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 function findWorkspaceById(id: string): Workspace | null {

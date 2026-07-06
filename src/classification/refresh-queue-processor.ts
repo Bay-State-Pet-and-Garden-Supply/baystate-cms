@@ -67,7 +67,18 @@ export async function processRefreshQueue(
         updatedAt: String(itemRow.updated_at),
       };
 
-      await curateItemWithPipeline(item as any, workspacePath, workspaceId);
+      const curationData = await curateItemWithPipeline(item as any, workspacePath, workspaceId);
+
+      // Persist the updated curation data so the Review UI reflects changes
+      try {
+        db.query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
+          JSON.stringify(curationData),
+          new Date().toISOString(),
+          item.id,
+        );
+      } catch (persistErr: any) {
+        console.error(`[RefreshQueue] Failed to persist curation data for ${sku}: ${persistErr.message}`);
+      }
 
       db.run(
         "UPDATE classification_refresh_queue SET status = 'completed', completed_at = ? WHERE id = ?",

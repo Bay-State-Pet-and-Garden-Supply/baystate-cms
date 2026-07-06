@@ -29,7 +29,7 @@ const PORT = parseInt(process.env.SHOPSITE_CMS_WORKER_PORT ?? '3032', 10);
 
 // ─── Request router ────────────────────────────────────────────────────────────
 
-function route(req: IncomingMessage, res: ServerResponse): void {
+async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { method, url } = req;
 
   // ── Auth middleware (applies to all routes) ─────────────────────────
@@ -42,7 +42,7 @@ function route(req: IncomingMessage, res: ServerResponse): void {
 
   // ── Health ───────────────────────────────────────────────────────────
   if (method === 'GET' && url === '/health') {
-    handleHealth(res);
+    await handleHealth(res);
     return;
   }
 
@@ -83,7 +83,13 @@ function route(req: IncomingMessage, res: ServerResponse): void {
 
 // ─── Server ────────────────────────────────────────────────────────────────────
 
-const server = createServer(route);
+const server = createServer((req, res) => {
+  route(req, res).catch((err) => {
+    console.error('[server] Unhandled route error:', err);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'Internal server error' }));
+  });
+});
 
 server.listen(PORT, HOST, () => {
   const tokenConfigured =

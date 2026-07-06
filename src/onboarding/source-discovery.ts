@@ -72,6 +72,17 @@ export async function discoverSources(
     throw new Error('Serper.dev API key not configured. Go to Onboarding Settings to add it.');
   }
 
+  // A brand is required: without it we have no domain to search and
+  // every Serper.dev call is wasted credits. Callers must supply a
+  // brandHint (typically from the spreadsheet's brand column or manual
+  // assignment) before discovery can proceed.
+  if (!brandHint || !String(brandHint).trim()) {
+    throw new Error(
+      'Brand is required before discovery. Assign a brand to this product ' +
+      'so discovery knows which domain to search.',
+    );
+  }
+
   const candidates: InsertSourceData[] = [];
   const seenUrls = new Set<string>();
 

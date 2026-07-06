@@ -24,15 +24,18 @@ import {
   completePromotionStage,
   resetItemsToPending,
   resetItemsToStage,
+  sendItemsToPreviousStage,
   skipItems,
 } from '../../db/repositories/onboarding-item-repo';
 import type { PipelineStage } from '../../shared/schemas/onboarding';
+import { convertToLbs } from '../../shared/weight-converter';
 import {
   listSourcesByItem,
   selectSource
 } from '../../db/repositories/onboarding-source-repo';
 import {
-  getLatestExtraction
+  getLatestExtraction,
+  updateLatestExtractionData
 } from '../../db/repositories/onboarding-extraction-repo';
 import {
   upsertApiKey,
@@ -122,6 +125,7 @@ import {
   validateProfile,
   generateSelectorFromElement,
   pickElement,
+  trustedExtract,
 } from '../extraction-worker-client';
 import { upsertDomainConfig, DomainConfigUpsertSchema } from '../../onboarding/domain-config-service';
 import {
@@ -137,6 +141,7 @@ import { listAllSitemapCaches, insertSitemapCache } from '../../db/repositories/
 import { HTTP_EXTRACTION_HEADERS } from '../../onboarding/page-extractor';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
+import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
 import { recordDecision, recordHistoryEvent, updateProposalReviewValue } from '../../db/repositories/classification-run-repo';
 import { getDb } from '../../db/connection';
@@ -443,6 +448,21 @@ route.post('/onboarding/items/reset-to-stage', async (c) => {
 });
 
 /**
+ * POST /api/onboarding/items/move-to-previous
+ * Sends selected items to their previous pipeline stage, undoing current stage results.
+ * Body: { itemIds: string[] }
+ */
+route.post('/onboarding/items/move-to-previous', async (c) => {
+  const { itemIds } = await c.req.json();
+  if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
+    return c.json({ error: 'itemIds array is required' }, 400);
+  }
+
+  const result = sendItemsToPreviousStage(itemIds);
+  return c.json({ success: true, ...result });
+});
+
+/**
  * POST /api/onboarding/items/skip-bulk
  * Marks items as skipped in their current stage.
  * Body: { itemIds: string[] }
@@ -502,13 +522,6 @@ route.post('/onboarding/batches/:id/promote', async (c) => {
     }
 
     const result = await promoteItems(workspace.id, workspace.workspacePath, batchId, itemIds);
-
-    // Mark promoted items as completed in promotion stage
-    db.transaction(() => {
-      for (const id of itemIds) {
-        completePromotionStage(id, true);
-      }
-    })();
 
     // Archive batch if all items are done
     if (isBatchComplete(batchId)) {
@@ -604,10 +617,18 @@ route.get('/onboarding/items/:id', async (c) => {
   const sources = listSourcesByItem(itemId);
   const extraction = getLatestExtraction(itemId);
 
+  // Prefer user-edited extraction data saved directly on the item record
+  // (onboarding_items.extraction_data_json), falling back to the latest
+  // extraction run record (onboarding_extractions). This ensures edits
+  // like removing an image from extraction results are persisted when
+  // the user re-opens the item.
+  const extractionData = item.extractionData
+    ?? (extraction ? JSON.parse(extraction.extraction_data_json) : null);
+
   return c.json({
     item,
     sources,
-    extraction: extraction ? JSON.parse(extraction.extraction_data_json) : null
+    extraction: extractionData
   });
 });
 
@@ -653,12 +674,18 @@ route.put('/onboarding/items/:id', async (c) => {
       }
     }
     if (body.extraction_data) {
+      const json = JSON.stringify(body.extraction_data);
       db.query('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?').run(
-        JSON.stringify(body.extraction_data),
+        json,
         itemId
       );
+      // Also update the extraction table so both stores stay in sync
+      updateLatestExtractionData(itemId, json);
     }
     if (body.curation_data) {
+      if (body.curation_data.curatedWeight !== undefined) {
+        body.curation_data.curatedWeight = convertToLbs(body.curation_data.curatedWeight);
+      }
       db.query('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?').run(
         JSON.stringify(body.curation_data),
         itemId
@@ -849,11 +876,14 @@ route.post('/onboarding/items/:id/skip', (c) => {
 
 route.get('/onboarding/settings/api-keys', (c) => {
   const keys = listApiKeys();
-  // Redact actual keys for safety
+  // Redact actual keys for safety, except for ollama_vlm whose 'enabled' value
+  // is a boolean flag, not a real secret.
   const redacted = keys.map(k => ({
     id: k.id,
     service: k.service,
-    apiKey: k.api_key ? '••••••••' + k.api_key.slice(-4) : '',
+    apiKey: k.service === 'ollama_vlm'
+      ? (k.api_key || '')
+      : (k.api_key ? '••••••••' + k.api_key.slice(-4) : ''),
     baseUrl: k.base_url,
     model: k.model
   }));
@@ -1088,12 +1118,13 @@ route.get('/onboarding/settings/extractor-profiles', (c) => {
 
 route.post('/onboarding/settings/extractor-profiles', async (c) => {
   try {
-    const { domain, titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector, sitemapProductUrlPattern, customSelectors } = await c.req.json();
+    const { domain, titleSelector, titleOptionalSelectors, priceSelector, descriptionSelector, brandSelector, imagesSelector, sitemapProductUrlPattern, customSelectors } = await c.req.json();
     if (!domain) {
       return c.json({ error: 'domain is required' }, 400);
     }
     const profile = upsertProfile(domain, {
       titleSelector,
+      titleOptionalSelectors: Array.isArray(titleOptionalSelectors) ? titleOptionalSelectors : undefined,
       priceSelector,
       descriptionSelector,
       brandSelector,
@@ -1137,7 +1168,7 @@ route.get('/onboarding/settings/extraction-worker/health', async (c) => {
   if (!health) {
     return c.json({
       ok: false,
-      capabilities: { playwright: false, crawlee: false, stagehand: false },
+      capabilities: { playwright: false, crawlee: false, stagehand: false, camoufox: false },
       version: 'unavailable',
     });
   }
@@ -1550,134 +1581,67 @@ route.post('/onboarding/settings/domain-diagnostics/:domain/generate-profile', a
 });
 
 route.post('/onboarding/extractor-profiles/test', async (c) => {
-  let browser;
   try {
-    const { url, titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector, shopifyJSONPath, variantSelectionStrategy, customSelectors } = await c.req.json();
+    const { url, titleSelector, titleOptionalSelectors, priceSelector, descriptionSelector, brandSelector, imagesSelector, variantSelectionStrategy, customSelectors } = await c.req.json();
     if (!url) {
       return c.json({ error: 'url is required' }, 400);
     }
 
-    const { chromium } = require('playwright');
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    
-    // Quick load (30s timeout)
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    // Wait for JS content
-    await page.waitForTimeout(1500);
+    const testResult = await trustedExtract({
+      profileId: 'draft',
+      profileVersion: 1,
+      sourceUrl: url,
+      expected: {
+        name: 'Test Product',
+        brandHint: null,
+        price: null,
+        spreadsheetHints: {},
+      },
+      profile: {
+        runtime: 'rendered' as const,
+        selectors: {
+          titleSelector: titleSelector || null,
+          priceSelector: priceSelector || null,
+          descriptionSelector: descriptionSelector || null,
+          brandSelector: brandSelector || null,
+          imagesSelector: imagesSelector || null,
+        },
+        titleOptionalSelectors: Array.isArray(titleOptionalSelectors) ? titleOptionalSelectors : [],
+        customSelectors: customSelectors || {},
+        imageRules: {},
+        variantSelectionStrategy: variantSelectionStrategy || null,
+      },
+    });
 
-    const customSelectorsJson = JSON.stringify(customSelectors || {});
-    const extracted = await page.evaluate((sel: any) => {
-      const canonicalImageUrl = (u: string) => { try { return u.split('?')[0].replace(/^https?:/, ''); } catch { return u; } };
-      const res: Record<string, string | string[]> = {};
-      
-      if (sel.titleSelector) {
-        res.title = document.querySelector(sel.titleSelector)?.textContent?.trim() || '';
-      }
-      if (sel.priceSelector) {
-        res.price = document.querySelector(sel.priceSelector)?.textContent?.trim() || '';
-      }
-      if (sel.descriptionSelector) {
-        res.description = document.querySelector(sel.descriptionSelector)?.textContent?.trim() || '';
-      }
-      if (sel.brandSelector) {
-        res.brand = document.querySelector(sel.brandSelector)?.textContent?.trim() || '';
-      }
-      if (sel.imagesSelector) {
-        const parseSrcsetCandidates = (srcset: string | null | undefined): string[] => {
-          if (!srcset) return [];
-          return srcset.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
-        };
-        const isUsableImageSource = (src: string | null | undefined): src is string => {
-          if (!src) return false;
-          const trimmed = src.trim();
-          if (!trimmed) return false;
-          const lower = trimmed.toLowerCase();
-          if (lower.startsWith('data:')) return false;
-          if (lower.split(/[?#]/)[0].endsWith('.svg')) return false;
-          return true;
-        };
-        const imageSourcesForElement = (el: Element): string[] => {
-          const sources: string[] = [];
-          const targets = el instanceof HTMLImageElement || el instanceof HTMLSourceElement
-            ? [el]
-            : Array.from(el.querySelectorAll('img,source'));
-          for (const target of targets) {
-            if (target instanceof HTMLImageElement && isUsableImageSource(target.currentSrc)) sources.push(target.currentSrc.trim());
-            for (const attr of ['src', 'data-src', 'data-lazy-src', 'data-original', 'data-image', 'data-zoom-image']) {
-              const value = target.getAttribute(attr);
-              if (isUsableImageSource(value)) sources.push(value.trim());
-            }
-            for (const attr of ['srcset', 'data-srcset']) {
-              for (const candidate of parseSrcsetCandidates(target.getAttribute(attr))) {
-                if (isUsableImageSource(candidate)) sources.push(candidate.trim());
-              }
-            }
-          }
-          return sources;
-        };
-        const seen = new Set<string>();
-        res.images = Array.from(document.querySelectorAll(sel.imagesSelector))
-          .flatMap(imageSourcesForElement)
-          .filter(src => {
-            const key = canonicalImageUrl(src);
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          })
-          .slice(0, 30);
-      }
-      return res;
-    }, { titleSelector, priceSelector, descriptionSelector, brandSelector, imagesSelector });
-
-    // Custom selectors — extracted separately to avoid Playwright evaluate type issues
-    if (customSelectors) {
-      for (const [fieldName, selector] of Object.entries(customSelectors)) {
-        if (!selector) continue;
-        try {
-          const val = await page.evaluate((sel: string) => {
-            const el = document.querySelector(sel);
-            return el?.textContent?.trim() || '';
-          }, selector);
-          if (val) extracted[fieldName] = val;
-        } catch { /* skip bad selectors */ }
-      }
+    if (!testResult.ok) {
+      return c.json({ error: testResult.error }, 500);
     }
 
-    // Shopify productJSON extraction (when flagged)
-    let shopifyImages: string[] = [];
-    let shopifyVariantOptions: string[] = [];
-    if (shopifyJSONPath) {
-      try {
-        const pj = await page.evaluate(() => {
-          const w = window as any;
-          const data = w.productJSON || w.ShopifyAnalytics?.product || null;
-          if (!data) return null;
-          return {
-            title: data.title || null,
-            images: Array.isArray(data.images) ? data.images.map((i: any) => i.src || i.url || '').filter(Boolean) : [],
-            options: Array.isArray(data.options) ? data.options.flatMap((o: any) => Array.isArray(o.values) ? o.values : []) : [],
-          };
-        });
-        if (pj) {
-          if (pj.title && !extracted.title) extracted.title = pj.title;
-          if (pj.images.length > 0) shopifyImages = pj.images;
-          shopifyVariantOptions = pj.options;
-        }
-      } catch { /* fallback to CSS selectors */ }
+    const response = testResult.data;
+    if (!response.ok || !response.extractionData) {
+      const errorMsg = response.warnings && response.warnings.length > 0
+        ? `Extraction failed: ${response.warnings.join('; ')}`
+        : 'Extraction failed: No data returned from worker';
+      return c.json({ error: errorMsg }, 500);
     }
 
-    const result: Record<string, any> = { ...extracted };
-      if (shopifyVariantOptions.length > 0) result.variantOptions = shopifyVariantOptions;
-      if (shopifyImages.length > 0) result.shopifyImages = shopifyImages;
-      return c.json({ success: true, extracted: result });
+    const ext = response.extractionData;
+    const rawImages = [ext.primaryImage, ...ext.additionalImages].filter(Boolean) as string[];
+    const images = cleanAndDeduplicateImages(rawImages, url);
+
+    const result: Record<string, any> = {
+      title: ext.title || '',
+      price: ext.price || '',
+      description: ext.description || '',
+      brand: ext.brand || '',
+      images,
+      ...ext.customFields,
+    };
+
+    return c.json({ success: true, extracted: result });
   } catch (err) {
     console.error('[OnboardingRoutes] Custom selector test run failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
   }
 });
 

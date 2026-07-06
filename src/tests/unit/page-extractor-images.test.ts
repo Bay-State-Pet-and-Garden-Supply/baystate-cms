@@ -99,6 +99,7 @@ describe('page extractor image scoping', () => {
       id: 'profile-1',
       domain: 'example.com',
       titleSelector: '.custom-title',
+      titleOptionalSelectors: [],
       priceSelector: null,
       descriptionSelector: null,
       brandSelector: null,

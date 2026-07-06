@@ -42,7 +42,12 @@ const server = spawn('bun', ['--watch', 'src/server/index.ts'], {
 // Start extraction worker (Node.js sidecar for Playwright, snapshots, validation)
 const worker = spawn(
   'node',
-  ['--import', 'tsx', '--watch', 'src/extraction-worker/server.ts'],
+  [
+    '--import', './preload/crawlee-storage.mjs',
+    '--import', 'tsx',
+    '--watch',
+    'src/extraction-worker/server.ts',
+  ],
   {
     cwd: root,
     stdio: 'inherit',

@@ -1,6 +1,7 @@
 // fallow-ignore-file unused-export
 
 import { z } from 'zod';
+import { convertToLbs } from '../weight-converter';
 import {
   ClassificationConfigSnapshotRefSchema,
   ClassificationEvidenceSchema,
@@ -40,6 +41,58 @@ export const SpreadsheetRowSchema = z.object({
 
 export type SpreadsheetRow = z.infer<typeof SpreadsheetRowSchema>;
 
+// ─── Packaging OCR Data (VLM-sourced) ───────────────────────────────────────────
+
+/**
+ * Structured attributes extracted from the product's primary packaging image
+ * via local VLM OCR. Populated once before classification, then consumed by
+ * both the curator (title synthesis) and the classification pipeline (evidence).
+ */
+export const PackagingOcrDataSchema = z.object({
+  // Core identity
+  productName: z.string().nullable().default(null),
+  brand: z.string().nullable().default(null),
+  species: z.array(z.string()).default(() => []),
+
+  // Physical / sensory attributes
+  flavorVariety: z.string().nullable().default(null),
+  color: z.string().nullable().default(null),
+  material: z.string().nullable().default(null),
+  size: z.string().nullable().default(null),
+  weight: z.string().nullable().default(null),
+  count: z.string().nullable().default(null),
+
+  // Pet-specific classification targets
+  lifeStage: z.string().nullable().default(null),
+  breedSize: z.string().nullable().default(null),
+  productForm: z.string().nullable().default(null),
+  healthConcernFunction: z.array(z.string()).default(() => []),
+
+  // Label / dietary / ingredient data
+  dietaryLabels: z.array(z.string()).default(() => []),
+  ingredients: z.array(z.string()).default(() => []),
+  ingredientKeywords: z.array(z.string()).default(() => []),
+  claims: z.array(z.string()).default(() => []),
+
+  // Raw visible text from the package (for search / fallback)
+  visibleTextLines: z.array(z.string()).default(() => []),
+
+  // Per-field confidence (0-1)
+  confidenceByField: z.record(z.string(), z.number().min(0).max(1)).default(() => ({})),
+
+  // Processing metadata
+  metadata: z.object({
+    imageSourceUrl: z.string().nullable().default(null),
+    imageLocalPath: z.string().nullable().default(null),
+    model: z.string().nullable().default(null),
+    extractedAt: z.string().nullable().default(null),
+    parser: z.string().nullable().default(null),
+    rawResponseExcerpt: z.string().nullable().default(null),
+  }).nullable().default(null),
+});
+
+export type PackagingOcrData = z.infer<typeof PackagingOcrDataSchema>;
+
 // ─── Extraction Data (structured product output) ────────────────────────────────
 
 export const ExtractionDataSchema = z.object({
@@ -59,6 +112,8 @@ export const ExtractionDataSchema = z.object({
   fieldProvenance: z.record(z.string(), z.string()).default(() => ({})),
   // Tracks where each field came from: 'json-ld', 'meta', 'html', 'ai', 'user'
   packagingTitle: z.string().nullable().default(null),
+  /** Structured OCR output from the primary product image. Populated once before classification. */
+  packagingOcrData: PackagingOcrDataSchema.nullable().default(null),
   customFields: z.record(z.string(), z.string()).default(() => ({})),
 });
 
@@ -68,7 +123,15 @@ export type ExtractionData = z.infer<typeof ExtractionDataSchema>;
 
 export const CurationDataSchema = z.object({
   curatedTitle: z.string().nullable().default(null),
+  /** Search keywords synthesized by the curator from curated title, brand, attributes, and page names. */
+  searchKeywords: z.string().nullable().default(null),
   packagingOcrTitle: z.string().nullable().default(null),
+  curatedWeight: z.preprocess(val => {
+    if (typeof val === 'string') {
+      return convertToLbs(val);
+    }
+    return val;
+  }, z.string().nullable().default(null)),
   titleSource: z.enum(['web', 'ocr', 'llm', 'manual']).default('web'),
   suggestedPages: z.array(z.string()).default(() => []),
   suggestedProductType: z.string().nullable().default(null),
@@ -165,6 +228,7 @@ export const ExtractorProfileSchema = z.object({
   id: z.string(),
   domain: z.string(),
   titleSelector: z.string().nullable().default(null),
+  titleOptionalSelectors: z.array(z.string()).default(() => []),
   priceSelector: z.string().nullable().default(null),
   descriptionSelector: z.string().nullable().default(null),
   brandSelector: z.string().nullable().default(null),
@@ -210,6 +274,8 @@ export const OnboardingItemSchema = z.object({
   departmentHint: z.string().nullable(),
   sourceUrl: z.string().nullable(),
   expectedName: z.string().nullable().optional(),
+  /** Pre-computed coordinated title from cohort LLM call. */
+  coordinatedTitle: z.string().nullable().optional(),
   /** Current pipeline stage for this item. */
   stage: PipelineStageEnum,
   /** Status within the current stage. */

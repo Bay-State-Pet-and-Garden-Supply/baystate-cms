@@ -105,6 +105,13 @@ function getProposalsBySku(productSku: string): ClassificationProposal[] {
   return rows.map(mapProposal);
 }
 
+export function getPendingPageProposals(productSku: string): ClassificationProposal[] {
+  const rows = getDb()
+    .query("SELECT * FROM classification_proposals WHERE product_sku = ? AND proposal_type = ? AND status = ? ORDER BY confidence DESC")
+    .all(productSku, 'category_page', 'pending') as Record<string, any>[];
+  return rows.map(mapProposal);
+}
+
 export function getAcceptedProposals(productSku: string): ClassificationProposal[] {
   const rows = getDb()
     .query('SELECT * FROM classification_proposals WHERE product_sku = ? AND status = ?')

@@ -137,6 +137,16 @@ export async function skipStageItems(itemIds: string[]): Promise<{ success: bool
   });
 }
 
+export async function moveToPreviousStage(
+  itemIds: string[],
+): Promise<{ success: boolean; moved: number; skipped: number }> {
+  return request<{ success: boolean; moved: number; skipped: number }>('/items/move-to-previous', {
+    method: 'POST',
+    body: JSON.stringify({ itemIds }),
+  });
+}
+
+
 async function resetItemsToStage(
   itemIds: string[],
   targetStage: string,
@@ -415,6 +425,7 @@ export interface ExtractorTestResult {
 export async function testExtractorProfile(data: {
   url: string;
   titleSelector?: string | null;
+  titleOptionalSelectors?: string[];
   priceSelector?: string | null;
   descriptionSelector?: string | null;
   brandSelector?: string | null;

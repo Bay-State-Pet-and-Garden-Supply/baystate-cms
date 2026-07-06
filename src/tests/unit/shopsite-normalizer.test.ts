@@ -94,19 +94,19 @@ describe('ShopSite Normalization Preservation', () => {
     const result = parseProductsXml(fixtureXml);
     const workspaceId = 'test-workspace';
 
-    // Verify first product (no additional images)
+    // Verify first product (no additional images — MoreInfoImage tags should not be emitted)
     const { product: dogFood } = normalizeProduct(result.products[0], workspaceId);
     const denorm1 = denormalizeProduct(dogFood);
-    expect(denorm1.xml).toContain('<MoreInfoImage1>none</MoreInfoImage1>');
-    expect(denorm1.xml).toContain('<MoreInfoImage20>none</MoreInfoImage20>');
+    expect(denorm1.xml).not.toContain('<MoreInfoImage1>');
+    expect(denorm1.xml).not.toContain('<MoreInfoImage20>');
 
-    // Verify second product (with additional images)
+    // Verify second product (with additional images — only populated slots emit)
     const { product: catToy } = normalizeProduct(result.products[1], workspaceId);
     const denorm2 = denormalizeProduct(catToy);
     expect(denorm2.xml).toContain('<MoreInfoImage1>media/cat-toy-2.jpg</MoreInfoImage1>');
     expect(denorm2.xml).toContain('<MoreInfoImage2>media/cat-toy-3.jpg</MoreInfoImage2>');
-    expect(denorm2.xml).toContain('<MoreInfoImage3>none</MoreInfoImage3>');
-    expect(denorm2.xml).toContain('<MoreInfoImage20>none</MoreInfoImage20>');
+    expect(denorm2.xml).not.toContain('<MoreInfoImage3>');
+    expect(denorm2.xml).not.toContain('<MoreInfoImage20>');
 
     for (const parsed of result.products) {
       const { product } = normalizeProduct(parsed, workspaceId);
@@ -156,6 +156,51 @@ describe('ShopSite Normalization Preservation', () => {
     expect(pf16!.editable).toBe(true);
   });
 
+  it('should include GTIN tag for numeric SKUs', () => {
+    const customXml = `<Product>
+      <SKU>0123456789012</SKU>
+      <Name>Test Product</Name>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).toContain('<GTIN>0123456789012</GTIN>');
+  });
+
+  it('should include ProductType by default', () => {
+    const customXml = `<Product>
+      <SKU>TYPE-TEST</SKU>
+      <Name>Type Test</Name>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).toContain('<ProductType>Tangible</ProductType>');
+  });
+
+  it('should include MoreInformationText when description is present', () => {
+    const customXml = `<Product>
+      <SKU>DESC-TEST</SKU>
+      <Name>Desc Test</Name>
+      <ProductDescription><![CDATA[Test description here]]></ProductDescription>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).toContain('<MoreInformationText><![CDATA[Test description here]]></MoreInformationText>');
+  });
+
+  it('should omit empty Price tag when price is null', () => {
+    const customXml = `<Product>
+      <SKU>NO-PRICE</SKU>
+      <Name>No Price Product</Name>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).not.toContain('<Price>');
+  });
+
   it('should preserve MoreInformationGraphic when it is different from Graphic', () => {
     const customXml = `<Product>
       <SKU>TEST-123</SKU>
@@ -170,6 +215,19 @@ describe('ShopSite Normalization Preservation', () => {
     const denorm = denormalizeProduct(product);
     expect(denorm.xml).toContain('<Graphic>media/cat-toy.jpg</Graphic>');
     expect(denorm.xml).toContain('<MoreInformationGraphic>media/cat-toy-detail.jpg</MoreInformationGraphic>');
+  });
+
+  it('should serialize QuantityOnHand when present', () => {
+    const customXml = `<Product>
+      <SKU>TEST-QTY</SKU>
+      <QuantityOnHand>42</QuantityOnHand>
+    </Product>`;
+    const parsed = parseProductsXml(customXml).products[0];
+    const { product } = normalizeProduct(parsed, 'test-workspace');
+    expect(product.core.inventory.quantityOnHand).toBe(42);
+    
+    const denorm = denormalizeProduct(product);
+    expect(denorm.xml).toContain('<QuantityOnHand>42</QuantityOnHand>');
   });
 });
 

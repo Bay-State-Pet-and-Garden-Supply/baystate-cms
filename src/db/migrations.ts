@@ -1,6 +1,7 @@
 import { getDb } from './connection';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'node:crypto';
 
 const SCHEMA_PATH = path.resolve(import.meta.dirname, 'schema.sql');
 const ONBOARDING_MIGRATION_PATH = path.resolve(import.meta.dirname, 'onboarding-migration.sql');
@@ -49,6 +50,9 @@ export function runMigrations(): void {
     }
     if (columns.length > 0 && !columns.some(col => col.name === 'expected_name')) {
       db.exec('ALTER TABLE onboarding_items ADD COLUMN expected_name TEXT;');
+    }
+    if (columns.length > 0 && !columns.some(col => col.name === 'coordinated_title')) {
+      db.exec('ALTER TABLE onboarding_items ADD COLUMN coordinated_title TEXT;');
     }
   } catch (e) {
     console.error('Failed to update onboarding_items columns:', e);
@@ -106,6 +110,17 @@ export function runMigrations(): void {
     }
   } catch (e) {
     console.error('Failed to update extractor_profiles columns:', e);
+  }
+
+  // Ensure extractor_profiles has title_optional_selectors_json column
+  try {
+    const cols = db.query('PRAGMA table_info(extractor_profiles)').all() as Array<{ name: string }>;
+    if (cols.length > 0 && !cols.some(col => col.name === 'title_optional_selectors_json')) {
+      db.exec("ALTER TABLE extractor_profiles ADD COLUMN title_optional_selectors_json TEXT DEFAULT '[]';");
+      console.log('[Migrations] Added title_optional_selectors_json column to extractor_profiles.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add title_optional_selectors_json column:', e);
   }
 
   // Ensure domain_status table exists
@@ -279,6 +294,22 @@ export function runMigrations(): void {
     console.error('Failed to create profile_generation_field_decisions table:', e);
   }
 
+  // ── Add page_id to product_pages for stable page identity ────────────────
+  try {
+    const ppCols = db.query('PRAGMA table_info(product_pages)').all() as Array<{ name: string }>;
+    if (ppCols.length > 0 && !ppCols.some(col => col.name === 'page_id')) {
+      db.exec('ALTER TABLE product_pages ADD COLUMN page_id TEXT REFERENCES page_index(id);');
+      console.log('[Migrations] Added page_id column to product_pages.');
+    }
+    const ppIdx = db.query("SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_product_pages_page_id'").get();
+    if (!ppIdx) {
+      db.exec('CREATE INDEX IF NOT EXISTS idx_product_pages_page_id ON product_pages(page_id);');
+      console.log('[Migrations] Created idx_product_pages_page_id index.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add page_id to product_pages:', e);
+  }
+
   // Task-specific LLM routing. Provider credentials (api_keys) hold the
   // secrets; this table only stores which provider/model each AI task
   // should use. Tasks include `product_name_consolidation`,
@@ -350,6 +381,130 @@ export function runMigrations(): void {
     db.exec("INSERT INTO app_meta (key, value) VALUES ('classification_schema_version', '1');");
   }
 
+  // ── Ensure classification_brands table exists (existing DB migration) ───────
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS classification_brands (
+        workspace_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        aliases_json TEXT DEFAULT '[]',
+        old_id_aliases_json TEXT DEFAULT '[]',
+        config_hash TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, id)
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_classification_brands_workspace ON classification_brands(workspace_id);');
+  } catch (e) {
+    console.error('[Migrations] Failed to create classification_brands table:', e);
+  }
+
+  // ── Ensure curation orchestration tables exist (Phase 8A) ─────────────────
+  try {
+    // curation_runs
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS curation_runs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspace(id),
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+        total_items INTEGER NOT NULL DEFAULT 0,
+        completed_items INTEGER NOT NULL DEFAULT 0,
+        failed_items INTEGER NOT NULL DEFAULT 0,
+        progress_json TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        error_message TEXT
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_curation_runs_workspace ON curation_runs(workspace_id);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_curation_runs_status ON curation_runs(status);');
+
+    // curation_run_items
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS curation_run_items (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES curation_runs(id) ON DELETE CASCADE,
+        onboarding_item_id TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        error_message TEXT
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_curation_run_items_run ON curation_run_items(run_id);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_curation_run_items_status ON curation_run_items(status);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_curation_run_items_sku ON curation_run_items(sku);');
+
+    // curation_run_groups
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS curation_run_groups (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES curation_runs(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        group_label TEXT NOT NULL,
+        skus_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_curation_run_groups_run ON curation_run_groups(run_id);');
+
+    // curation_model_calls
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS curation_model_calls (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES curation_runs(id) ON DELETE CASCADE,
+        run_item_id TEXT REFERENCES curation_run_items(id) ON DELETE SET NULL,
+        task TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        prompt_tokens INTEGER,
+        completion_tokens INTEGER,
+        duration_ms INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+        error_message TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_curation_model_calls_run ON curation_model_calls(run_id);');
+  } catch (e) {
+    console.error('[Migrations] Failed to create curation orchestration tables:', e);
+  }
+
+  // ── Migration to expand classification_stage_results CHECK constraint ──────
+  //
+  // The original CHECK constraint included 6 stage names. After adding
+  // name_consolidation, existing databases need the table rebuilt with
+  // the expanded constraint. This runs only when needed.
+  try {
+    const tableInfo = db.query('SELECT sql FROM sqlite_master WHERE type = ? AND name = ?').get('table', 'classification_stage_results') as { sql: string } | undefined;
+    if (tableInfo && tableInfo.sql && !tableInfo.sql.includes('name_consolidation')) {
+      console.log('[Migrations] Expanding classification_stage_results CHECK constraint for name_consolidation...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS classification_stage_results_new (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+          stage_name TEXT NOT NULL CHECK (stage_name IN ('evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
+          output_json TEXT,
+          error_message TEXT,
+          started_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+      `);
+      db.exec('INSERT INTO classification_stage_results_new SELECT * FROM classification_stage_results;');
+      db.exec('DROP TABLE classification_stage_results;');
+      db.exec('ALTER TABLE classification_stage_results_new RENAME TO classification_stage_results;');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_classification_stage_results_run ON classification_stage_results(run_id);');
+      console.log('[Migrations] classification_stage_results CHECK constraint expanded successfully.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to expand classification_stage_results CHECK constraint:', e);
+  }
+
   // Run stage pipeline migration if not already applied
   const stagePipelineVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('stage_pipeline_schema_version') as
     | { value: string }
@@ -359,6 +514,31 @@ export function runMigrations(): void {
     db.exec(stagePipelineSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('stage_pipeline_schema_version', '1');");
   }
+  // ── Seed category_page_assignment LLM task config ───────────────────────
+  //
+  // The category_page_assignment task is used by the LLM-first page assignment
+  // pipeline (page-assignment-llm.ts). It routes to deepseek-v4-pro, matching
+  // the existing category_classification config.
+  try {
+    const catPageSeeded = db.query('SELECT value FROM app_meta WHERE key = ?').get('category_page_assignment_task_seeded') as
+      | { value: string }
+      | undefined;
+    if (!catPageSeeded) {
+      const existing = db.query('SELECT id FROM llm_task_configs WHERE task = ?').get('category_page_assignment') as
+        | { id: string }
+        | undefined;
+      if (!existing) {
+        const now = new Date().toISOString();
+        const id = randomUUID();
+        db.exec(`INSERT INTO llm_task_configs (id, task, provider, model, created_at, updated_at) VALUES ('${id}', 'category_page_assignment', 'deepseek', 'deepseek-v4-pro', '${now}', '${now}')`);
+        console.log('[Migrations] Seeded category_page_assignment task config (deepseek-v4-pro).');
+      }
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('category_page_assignment_task_seeded', '1');");
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to seed category_page_assignment task config:', e);
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

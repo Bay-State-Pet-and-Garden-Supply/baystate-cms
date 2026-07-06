@@ -12,10 +12,12 @@ import {
   selectSource,
   type InsertSourceData,
 } from '../db/repositories/onboarding-source-repo';
+import { resolveVariantUrl } from './variant-resolver';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
-import { curateItem } from './product-curator';
+import { curateItem, curateItemWithPipeline } from './product-curator';
+import { isModularCurationEnabled } from './curation-mode';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
@@ -100,15 +102,21 @@ function manualReviewReasonForDiscovery(
 export class OnboardingWorker {
   private interval: ReturnType<typeof setInterval> | null = null;
   private running = new Map<string, Promise<void>>();
-  private maxConcurrency = 3;
+  // Global concurrency limit across all stages.
+  // Extraction has a separate, lower limit to avoid triggering bot
+  // detection on target websites during concurrent page scrapes.
+  private maxConcurrency = 10;
+  private maxExtractionConcurrency = 3;
+  private extractionRunning = 0;
   private isProcessing = false;
   private workspacePath: string;
   private workspaceId: string;
 
-  constructor(workspaceId: string, workspacePath: string, maxConcurrency = 3) {
+  constructor(workspaceId: string, workspacePath: string, maxConcurrency = 10, maxExtractionConcurrency = 3) {
     this.workspaceId = workspaceId;
     this.workspacePath = workspacePath;
     this.maxConcurrency = maxConcurrency;
+    this.maxExtractionConcurrency = maxExtractionConcurrency;
   }
 
   start(): void {
@@ -147,6 +155,9 @@ export class OnboardingWorker {
       // Process stages in priority order: discovery first, then extraction, then curation
       for (const stage of AUTO_STAGES) {
         if (this.running.size >= this.maxConcurrency) break;
+
+        // Extraction has a separate concurrency limit to avoid bot detection
+        if (stage === 'extraction' && this.extractionRunning >= this.maxExtractionConcurrency) continue;
 
         const available = this.maxConcurrency - this.running.size;
         const pendingItems = getPendingItemsByStage(stage, available, this.workspaceId);
@@ -196,6 +207,22 @@ export class OnboardingWorker {
 
   private async processDiscovery(item: any): Promise<void> {
     console.log(`[OnboardingWorker] Discovery for ${item.name} (${item.upc})`);
+
+    // ── Brand guard: discovery is useless without a brand ──────────────────
+    if (!item.brandHint || !String(item.brandHint).trim()) {
+      console.log(`[OnboardingWorker] ⚠ Skipping discovery for "${item.name}" (${item.upc}): no brand assigned`);
+      updateItemStageStatus(item.id, 'completed', 'needs_review: no brand assigned — set a brand before discovery');
+      onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
+        stage: 'discovery',
+        warning: 'No brand assigned',
+        needsManualReview: true,
+        manualReviewReason: 'no brand assigned — set a brand before discovery',
+        consolidatedName: null,
+        sitemapMatched: false,
+        sitemapCandidateCount: 0,
+      });
+      return;
+    }
 
     try {
       const discovery = await discoverSources(item.upc, item.name, item.brandHint);
@@ -256,13 +283,39 @@ export class OnboardingWorker {
         const shouldAutoSelect = autoSelectedSource !== null;
 
         if (shouldAutoSelect && autoSelectedSource) {
-          setDiscoverySourceUrl(item.id, autoSelectedSource.url);
+          const originalUrl = autoSelectedSource.url;
+          let resolvedUrl = originalUrl;
+          try {
+            const resolved = await resolveVariantUrl(
+              originalUrl,
+              item.name,
+              consolidatedName,
+              item.brandHint,
+            );
+            if (resolved.variantId) {
+              resolvedUrl = resolved.resolvedUrl;
+              console.log(
+                `[OnboardingWorker] ✓ Variant resolved for "${item.name}": ` +
+                `${resolved.resolvedUrl} (variant "${resolved.variantTitle}", ` +
+                `method: ${resolved.method}, confidence: ${(resolved.confidence * 100).toFixed(0)}%)`
+              );
+            } else if (resolved.ambiguous) {
+              console.log(
+                `[OnboardingWorker] ⚠ Variant ambiguous for "${item.name}": ` +
+                `${resolved.totalVariants} variants, could not distinguish — using base URL`
+              );
+            }
+          } catch (err) {
+            console.warn(`[OnboardingWorker] Variant resolution failed for "${item.name}":`, err);
+          }
+
+          setDiscoverySourceUrl(item.id, resolvedUrl);
 
           // Find the inserted counterpart of the auto-selected source
-          // by URL — it may not be at index 0 when the eligible
+          // by the ORIGINAL URL — it may not be at index 0 when the eligible
           // sitemap candidate wins over the top Serper result.
           const autoSelectedIndex = sources.findIndex(
-            s => s.url === autoSelectedSource.url,
+            s => s.url === originalUrl,
           );
           const autoSelectedInserted = autoSelectedIndex >= 0
             ? insertedSources[autoSelectedIndex]
@@ -273,8 +326,11 @@ export class OnboardingWorker {
 
           console.log(
             `[OnboardingWorker] ✓ Auto-selected official source for "${item.name}" (${item.upc}): ` +
-            `${autoSelectedSource.url} (domain ${autoSelectedSource.domain ?? 'n/a'} matches ${officialDomains.join(', ')})`
+            `${resolvedUrl} (domain ${autoSelectedSource.domain ?? 'n/a'} matches ${officialDomains.join(', ')})`
           );
+
+          // Update autoSelectedSource URL for the SSE event below
+          autoSelectedSource.url = resolvedUrl;
         } else {
           const manualReviewReason = manualReviewReasonForDiscovery(
             item,
@@ -339,106 +395,156 @@ export class OnboardingWorker {
   }
 
   private async processExtraction(item: any): Promise<void> {
-    if (!item.sourceUrl) {
-      updateItemStageStatus(item.id, 'failed', 'No confirmed source URL');
-      onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
-        stage: 'extraction',
-        error: 'No confirmed source URL',
-      });
-      return;
-    }
-
-    console.log(`[OnboardingWorker] Extraction for ${item.name} from ${item.sourceUrl}`);
-
-    // Fail-fast: check if the domain has an extractor profile.
-    // If not, fail with a "profile required" error so the PipelineBoard
-    // shows the "⚠ Profile required" badge and "Open Profile Builder →" link.
-    let domain = '';
+    this.extractionRunning++;
+    const done = () => { this.extractionRunning = Math.max(0, this.extractionRunning - 1); };
     try {
-      domain = new URL(item.sourceUrl).hostname.replace(/^www\./, '');
-    } catch { /* skip */ }
-    const profile = domain ? findProfileByDomain(domain) : null;
-    if (!profile) {
-      const errorMsg = `No extractor profile for ${domain} — profile required`;
-      updateItemStageStatus(item.id, 'failed', errorMsg);
-      onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
-        stage: 'extraction',
-        error: errorMsg,
-      });
-      return;
-    }
-
-
-    try {
-      const extractedData = await extractProductData(item.sourceUrl, {
-        name: item.expectedName || item.name,
-        brandHint: item.brandHint,
-        price: item.price,
-      });
-
-      // Inject spreadsheet values into extraction result
-      if (item.brandHint && !extractedData.brand) extractedData.brand = item.brandHint;
-      if (item.price && !extractedData.price) extractedData.price = item.price;
-
-      insertExtraction({
-        itemId: item.id,
-        sourceUrl: item.sourceUrl,
-        extractionDataJson: JSON.stringify(extractedData),
-        extractionMethod: 'crawlee_playwright',
-        confidence: extractedData.confidence,
-        imagesJson: null,
-        rawStructuredDataJson: JSON.stringify(extractedData.fieldProvenance),
-      });
-
-      const db = getDb();
-      db.query('UPDATE onboarding_items SET extraction_data_json = ?, updated_at = ? WHERE id = ?').run(
-        JSON.stringify(extractedData),
-        new Date().toISOString(),
-        item.id,
-      );
-
-      updateItemStageStatus(item.id, 'completed');
-      onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
-        stage: 'extraction',
-        extractedData,
-      });
-
-      console.log(
-        `[OnboardingWorker] ✓ Extraction complete for "${item.name}" (${item.upc}): ` +
-        `title="${extractedData.title || 'N/A'}", brand="${extractedData.brand || 'N/A'}", ` +
-        `price="${extractedData.price || 'N/A'}", confidence=${(extractedData.confidence * 100).toFixed(0)}%, ` +
-        `images=${extractedData.additionalImages ? extractedData.additionalImages.length : 0}`
-      );
-    } catch (err) {
-      console.error(`[OnboardingWorker] Extraction error for ${item.id}:`, err);
-      const retry = incrementRetryCount(item.id);
-      if (retry < 2) {
-        updateItemStageStatus(item.id, 'pending');
-        onboardingEvents.emitItemStatus(item.batchId, item.id, 'pending', {
-          stage: 'extraction',
-          error: String(err),
-        });
-      } else {
-        updateItemStageStatus(item.id, 'failed', String(err));
+      if (!item.sourceUrl) {
+        updateItemStageStatus(item.id, 'failed', 'No confirmed source URL');
         onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
           stage: 'extraction',
-          error: String(err),
+          error: 'No confirmed source URL',
         });
+        done();
+        return;
       }
+
+      console.log(`[OnboardingWorker] Extraction for ${item.name} from ${item.sourceUrl}`);
+
+      let domain = '';
+      try {
+        domain = new URL(item.sourceUrl).hostname.replace(/^www\./, '');
+      } catch {}
+      const profile = domain ? findProfileByDomain(domain) : null;
+      if (!profile) {
+        const errorMsg = `No extractor profile for ${domain} — profile required`;
+        updateItemStageStatus(item.id, 'failed', errorMsg);
+        onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
+          stage: 'extraction',
+          error: errorMsg,
+        });
+        done();
+        return;
+      }
+
+      try {
+        const extractedData = await extractProductData(item.sourceUrl, {
+          name: item.expectedName || item.name,
+          brandHint: item.brandHint,
+          price: item.price,
+        });
+
+        if (item.brandHint && !extractedData.brand) extractedData.brand = item.brandHint;
+        if (item.price && !extractedData.price) extractedData.price = item.price;
+
+        insertExtraction({
+          itemId: item.id,
+          sourceUrl: item.sourceUrl,
+          extractionDataJson: JSON.stringify(extractedData),
+          extractionMethod: 'worker_crawlee_camoufox',
+          confidence: extractedData.confidence,
+          imagesJson: null,
+          rawStructuredDataJson: JSON.stringify(extractedData.fieldProvenance),
+        });
+
+        const db = getDb();
+        db.query('UPDATE onboarding_items SET extraction_data_json = ?, updated_at = ? WHERE id = ?').run(
+          JSON.stringify(extractedData),
+          new Date().toISOString(),
+          item.id,
+        );
+
+        updateItemStageStatus(item.id, 'completed');
+        onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
+          stage: 'extraction',
+          extractedData,
+        });
+
+        console.log(
+          `[OnboardingWorker] ✓ Extraction complete for "${item.name}" (${item.upc}): ` +
+          `title="${extractedData.title || 'N/A'}", brand="${extractedData.brand || 'N/A'}", ` +
+          `price="${extractedData.price || 'N/A'}", confidence=${(extractedData.confidence * 100).toFixed(0)}%, ` +
+          `images=${extractedData.additionalImages ? extractedData.additionalImages.length : 0}`
+        );
+      } catch (err) {
+        console.error(`[OnboardingWorker] Extraction error for ${item.id}:`, err);
+        const retry = incrementRetryCount(item.id);
+        if (retry < 2) {
+          updateItemStageStatus(item.id, 'pending');
+          onboardingEvents.emitItemStatus(item.batchId, item.id, 'pending', {
+            stage: 'extraction',
+            error: String(err),
+          });
+        } else {
+          updateItemStageStatus(item.id, 'failed', String(err));
+          onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
+            stage: 'extraction',
+            error: String(err),
+          });
+        }
+      }
+    } finally {
+      done();
     }
   }
 
   private async processCuration(item: any): Promise<void> {
     console.log(`[OnboardingWorker] Curation for ${item.name} (${item.upc})`);
 
+    const now = new Date().toISOString();
+    let curationData: import('../shared/schemas/onboarding').CurationData;
+
     try {
-      // item is already an OnboardingItem — pass directly, no need for mapRowToItem
-      const curationData = await curateItem(item, this.workspacePath);
+      // ── Cohort name coordination ─────────────────────────────────────
+      // Before running the pipeline, check if this item already has a
+      // pre-computed coordinated title. If not, coordinate the entire
+      // batch's product-line groups in ONE LLM call per group.
+      if (isModularCurationEnabled() && !item.coordinatedTitle) {
+        try {
+          const { listItemsByBatch } = await import('../db/repositories/onboarding-item-repo');
+          const { coordinateCohortItems } = await import('./cohort-name-coordinator');
+
+          const batchItems = listItemsByBatch(item.batchId);
+          const coordinatedTitles = await coordinateCohortItems(batchItems);
+
+          if (coordinatedTitles.size > 0) {
+            const db = getDb();
+            const now = new Date().toISOString();
+            for (const [upc, title] of coordinatedTitles) {
+              db.query(
+                'UPDATE onboarding_items SET coordinated_title = ?, updated_at = ? WHERE upc = ? AND batch_id = ?',
+              ).run(title, now, upc, item.batchId);
+            }
+
+            // Re-read this item's coordinated title
+            const updated = db.query('SELECT coordinated_title FROM onboarding_items WHERE id = ?').get(item.id) as
+              | { coordinated_title: string | null }
+              | undefined;
+            if (updated?.coordinated_title) {
+              item.coordinatedTitle = updated.coordinated_title;
+              console.log(`[OnboardingWorker] Cohort coordinated title for ${item.upc}: "${updated.coordinated_title}"`);
+            }
+          }
+        } catch (err: any) {
+          console.warn(`[OnboardingWorker] Cohort coordination failed for ${item.upc}, falling back to per-item: ${err.message}`);
+        }
+      }
+
+      if (isModularCurationEnabled()) {
+        console.log(`[OnboardingWorker] Using modular curation pipeline for "${item.name}"`);
+        try {
+          curationData = await curateItemWithPipeline(item, this.workspacePath, this.workspaceId);
+        } catch (modularErr) {
+          console.error(`[OnboardingWorker] Modular curation failed for ${item.id}; falling back to legacy:`, modularErr);
+          curationData = await curateItem(item, this.workspacePath);
+        }
+      } else {
+        curationData = await curateItem(item, this.workspacePath);
+      }
 
       const db = getDb();
       db.query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
         JSON.stringify(curationData),
-        new Date().toISOString(),
+        now,
         item.id,
       );
 
@@ -457,20 +563,26 @@ export class OnboardingWorker {
       );
     } catch (err) {
       console.error(`[OnboardingWorker] Curation error for ${item.id}:`, err);
-      // Curation failure is not blocking — populate defaults
+      // Curation failure is not blocking — populate defaults with classification containers
       const defaultCuration = {
         curatedTitle: item.name,
         packagingOcrTitle: null,
         titleSource: 'web' as const,
         suggestedPages: [],
         suggestedProductType: null,
-        curatedAt: new Date().toISOString(),
+        curatedAt: now,
         curationMethod: 'auto' as const,
+        classificationRunId: null,
+        classificationConfigSnapshot: null,
+        classificationEvidence: [] as any[],
+        classificationProposals: [] as any[],
+        classificationDecisions: [] as any[],
+        classificationHistory: [] as any[],
       };
       const db = getDb();
       db.query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
         JSON.stringify(defaultCuration),
-        new Date().toISOString(),
+        now,
         item.id,
       );
 

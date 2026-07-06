@@ -836,89 +836,10 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
                 <span style={{ ...styles.providerBadge, background: '#7c3aed', color: '#fff' }}>Pages</span>
                 <span style={{ fontSize: 12, color: '#6b7280' }}>{curationTargetState.candidates.pages.length} synced pages</span>
               </div>
-              {(() => {
-                const pageTarget = curationTargetsDraft.find(t => t.kind === 'page');
-                const enabled = !!pageTarget?.enabled;
-                return (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
-                    <label style={styles.checkboxLabel}>
-                      <input
-                        type="checkbox"
-                        checked={enabled}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            upsertCurationTarget({
-                              id: pageTarget?.id ?? 'category-pages',
-                              kind: 'page',
-                              label: 'Category Pages',
-                              enabled: true,
-                              selectionMode: pageTarget?.selectionMode ?? 'multiple',
-                              attributeId: null,
-                              catalogField: null,
-                              optionSource: 'live_store',
-                              required: false,
-                              sortOrder: pageTarget?.sortOrder ?? curationTargetsDraft.length,
-                            });
-                          } else {
-                            removeCurationTarget(t => t.kind === 'page');
-                          }
-                        }}
-                      />
-                      Let curator assign ShopSite pages
-                    </label>
-                    <select
-                      style={{ ...styles.select, width: 180 }}
-                      value={pageTarget?.selectionMode ?? 'multiple'}
-                      disabled={!enabled}
-                      onChange={(e) => pageTarget && upsertCurationTarget({ ...pageTarget, selectionMode: e.target.value as 'single' | 'multiple' })}
-                    >
-                      <option value="single">Single select</option>
-                      <option value="multiple">Multi-select</option>
-                    </select>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {curationTargetState.candidates.productTypes.length > 0 && (
-              <div style={styles.subsection}>
-                <div style={styles.subsectionHeader}>
-                  <span style={{ ...styles.providerBadge, background: '#9333ea', color: '#fff' }}>Optional</span>
-                  <span style={{ fontSize: 12, color: '#6b7280' }}>Internal Product Type ({curationTargetState.candidates.productTypes.length} configured)</span>
-                </div>
-                {(() => {
-                  const typeTarget = curationTargetsDraft.find(t => t.kind === 'product_type');
-                  return (
-                    <label style={styles.checkboxLabel}>
-                      <input
-                        type="checkbox"
-                        checked={!!typeTarget?.enabled}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            upsertCurationTarget({
-                              id: typeTarget?.id ?? 'primary-product-type',
-                              kind: 'product_type',
-                              label: 'Product Type',
-                              enabled: true,
-                              selectionMode: 'single',
-                              attributeId: null,
-                              catalogField: null,
-                              optionSource: 'configured',
-                              required: false,
-                              sortOrder: typeTarget?.sortOrder ?? curationTargetsDraft.length,
-                            });
-                          } else {
-                            removeCurationTarget(t => t.kind === 'product_type');
-                          }
-                        }}
-                      />
-                      Also classify the internal Product Type
-                    </label>
-                  );
-                })()}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>Always enabled · Multi-select</span>
               </div>
-            )}
-
+            </div>
             <div style={styles.subsection}>
               <div style={styles.subsectionHeader}>
                 <span style={{ ...styles.providerBadge, background: '#2563eb', color: '#fff' }}>Product Fields</span>
@@ -937,7 +858,9 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
                     </tr>
                   </thead>
                   <tbody>
-                    {curationTargetState.candidates.productFields.map(field => {
+                    {curationTargetState.candidates.productFields
+                      .filter(field => field.catalogField !== 'ProductField16')
+                      .map(field => {
                       const target = targetForField(field.catalogField);
                       const checked = !!target?.enabled;
                       return (
@@ -952,6 +875,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
                                     id: target?.id ?? targetSlug(`target-${field.catalogField}`),
                                     kind: 'product_field',
                                     label: field.label,
+                                    mandatory: target?.mandatory ?? false,
                                     enabled: true,
                                     selectionMode: target?.selectionMode ?? 'single',
                                     attributeId: target?.attributeId ?? field.attributeId ?? targetSlug(`field-${field.catalogField}`),

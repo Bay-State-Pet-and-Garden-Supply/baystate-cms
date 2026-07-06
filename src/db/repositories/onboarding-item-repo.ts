@@ -13,6 +13,7 @@ export interface OnboardingItemRow {
   department_hint: string | null;
   source_url: string | null;
   expected_name: string | null;
+  coordinated_title: string | null;
   /** DEPRECATED — use stage + stage_status. Kept for backward compat during migration. */
   status: string;
   stage: string;
@@ -57,6 +58,7 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
     departmentHint: row.department_hint,
     sourceUrl: row.source_url,
     expectedName: row.expected_name ?? null,
+    coordinatedTitle: row.coordinated_title ?? null,
     stage: (row.stage || 'discovery') as PipelineStage,
     stageStatus: (row.stage_status || 'pending') as StageStatus,
     status: (row.status || 'imported') as ItemStatus,
@@ -265,6 +267,17 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
       }
 
       const nextStage = STAGE_ORDER[currentIdx + 1];
+      if (nextStage === 'review') {
+        const proposals = item.curationData?.classificationProposals || [];
+        const hasPending = proposals.some(
+          (p: any) => p.targetId !== 'product_draft_projection' && p.status !== 'accepted' && p.status !== 'rejected'
+        );
+        if (hasPending) {
+          skipped++;
+          continue;
+        }
+      }
+
       db.query(
         `UPDATE onboarding_items
          SET stage = ?, stage_status = 'pending', error_message = NULL, retry_count = 0, updated_at = ?
@@ -410,6 +423,80 @@ export function resetItemsToStage(
   ).run(targetStage, now, ...itemIds);
   return { reset: itemIds.length };
 }
+
+/**
+ * Send items to their previous stage, undoing results of the current stage.
+ * Target stage is marked as 'completed' so it will not rerun.
+ */
+export function sendItemsToPreviousStage(
+  itemIds: string[],
+): { moved: number; skipped: number } {
+  if (itemIds.length === 0) return { moved: 0, skipped: 0 };
+
+  const db = getDb();
+  const now = new Date().toISOString();
+  let moved = 0;
+  let skipped = 0;
+
+  db.transaction(() => {
+    for (const id of itemIds) {
+      const item = findItemById(id);
+      if (!item) {
+        skipped++;
+        continue;
+      }
+
+      const currentIdx = STAGE_ORDER.indexOf(item.stage);
+      if (currentIdx <= 0) {
+        skipped++;
+        continue;
+      }
+
+      const previousStage = STAGE_ORDER[currentIdx - 1];
+
+      // Undo the current stage's specific outcomes
+      if (item.stage === 'extraction') {
+        db.query('DELETE FROM onboarding_extractions WHERE item_id = ?').run(id);
+        db.query('UPDATE onboarding_items SET extraction_data_json = NULL, status = ? WHERE id = ?').run('source_confirmed', id);
+      } else if (item.stage === 'curation') {
+        db.query('UPDATE onboarding_items SET curation_data_json = NULL WHERE id = ?').run(id);
+      } else if (item.stage === 'review') {
+        db.query(`
+          DELETE FROM classification_proposal_decisions
+          WHERE proposal_id IN (
+            SELECT id FROM classification_proposals
+            WHERE run_id IN (SELECT id FROM classification_runs WHERE onboarding_item_id = ?)
+          )
+        `).run(id);
+        db.query(`
+          UPDATE classification_proposals
+          SET status = 'pending'
+          WHERE run_id IN (SELECT id FROM classification_runs WHERE onboarding_item_id = ?)
+        `).run(id);
+        db.query('UPDATE onboarding_items SET status = ? WHERE id = ?').run('curated', id);
+      } else if (item.stage === 'promotion') {
+        db.query(`
+          DELETE FROM change_set_items
+          WHERE sku = ? AND change_set_id IN (SELECT id FROM change_sets WHERE status = 'draft')
+        `).run(item.upc);
+        db.query('DELETE FROM product_pages WHERE product_sku = ?').run(item.upc);
+        db.query('UPDATE onboarding_items SET status = ? WHERE id = ?').run('ready', id);
+      }
+
+      // Revert the item back to the previous stage, set to completed
+      db.query(
+        `UPDATE onboarding_items
+         SET stage = ?, stage_status = 'completed', error_message = NULL, retry_count = 0, updated_at = ?
+         WHERE id = ?`,
+      ).run(previousStage, now, id);
+
+      moved++;
+    }
+  })();
+
+  return { moved, skipped };
+}
+
 
 // ─── DEPRECATED — kept for backward compat during migration ────────────────────
 function updateItemStatus(

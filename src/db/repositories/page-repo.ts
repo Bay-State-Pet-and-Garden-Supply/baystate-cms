@@ -72,14 +72,37 @@ export function deletePage(id: string): void {
   db.run('DELETE FROM page_index WHERE id = ?', [id]);
 }
 
-// Product-Page Assignments
-export function assignProductToPage(productSku: string, pageName: string): void {
+// ─── Product-Page Assignments (backward-compatible) ─────────────────────────
+
+/**
+ * Assign a product to a page using stable page identity.
+ * Inserts both page_id and page_name for backward compatibility.
+ */
+export function assignProductToPageId(productSku: string, pageId: string, pageName: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.run(
-    'INSERT OR IGNORE INTO product_pages (product_sku, page_name, created_at) VALUES (?, ?, ?)',
-    [productSku, pageName, now]
+    'INSERT OR IGNORE INTO product_pages (product_sku, page_name, page_id, created_at) VALUES (?, ?, ?, ?)',
+    [productSku, pageName, pageId, now]
   );
+}
+
+/**
+ * Assign a product to a page by page name (backward-compatible wrapper).
+ * Resolves page name to id when a matching page exists in page_index.
+ */
+export function assignProductToPage(productSku: string, pageName: string): void {
+  const page = getPageByName(pageName);
+  if (page) {
+    assignProductToPageId(productSku, page.id, pageName);
+  } else {
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      'INSERT OR IGNORE INTO product_pages (product_sku, page_name, created_at) VALUES (?, ?, ?)',
+      [productSku, pageName, now]
+    );
+  }
 }
 
 function unassignProductFromPage(productSku: string, pageName: string): void {
@@ -91,6 +114,15 @@ export function getProductPages(productSku: string): string[] {
   const db = getDb();
   const rows = db.query('SELECT page_name FROM product_pages WHERE product_sku = ?').all(productSku) as Array<{ page_name: string }>;
   return rows.map(r => r.page_name);
+}
+
+/**
+ * Get product page assignments including both page ID and page name.
+ */
+export function getProductPageAssignments(productSku: string): Array<{ pageId: string | null; pageName: string }> {
+  const db = getDb();
+  const rows = db.query('SELECT page_id, page_name FROM product_pages WHERE product_sku = ?').all(productSku) as Array<{ page_id: string | null; page_name: string }>;
+  return rows.map(r => ({ pageId: r.page_id ? String(r.page_id) : null, pageName: String(r.page_name) }));
 }
 
 function getPageProducts(pageName: string): string[] {

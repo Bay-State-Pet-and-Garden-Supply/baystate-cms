@@ -13,6 +13,7 @@ export default defineConfig({
     include: ['src/tests/**/*.test.ts', 'src/tests/**/*.test.tsx'],
     exclude: [
       'node_modules',
+      // DB-backed tests — use bun:sqlite, run under bun test instead of vitest
       'src/tests/unit/db-migration.test.ts',
       'src/tests/unit/catalog-health.test.ts',
       'src/tests/integration/phase2-change-set.test.ts',
@@ -36,7 +37,16 @@ export default defineConfig({
       'src/tests/unit/llm-task-config-repo.test.ts',
       'src/tests/unit/llm-client-task-routing.test.ts',
       'src/tests/unit/profile-governance-service.test.ts',
-      'src/tests/unit/domain-diagnostics-service.test.ts'
+      'src/tests/unit/domain-diagnostics-service.test.ts',
+      'src/tests/unit/packaging-ocr.test.ts',
+      // New Phase 1-8 DB-backed tests
+      'src/tests/unit/brand-integration.test.ts',
+      'src/tests/unit/curation-run-repo.test.ts',
+      'src/tests/unit/detail-enrichment-integration.test.ts',
+      'src/tests/unit/evidence-extraction.test.ts',
+      'src/tests/unit/cloud-vlm-client.test.ts',
+      'src/tests/unit/curation-target-ranker.test.ts',
+      'src/tests/unit/workspace-connection.test.ts',
     ],
   },
 });

@@ -52,6 +52,7 @@ export function parseProductsXml(xmlText: string): ParsedProductList {
     'SearchKeywords', 'Availability',
     'ProductID', 'ProductGUID',
     'GoogleGTIN',
+    'FileName',
   ]);
 
   // Advanced/block-level tags that should be preserved as whole blocks

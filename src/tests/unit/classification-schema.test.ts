@@ -33,6 +33,7 @@ describe('Classification Schema – CurationData backward compatibility', () => 
     // Original fields preserved
     expect(result.curatedTitle).toBe('Test Product');
     expect(result.titleSource).toBe('web');
+    expect(result.curatedWeight).toBeNull();
 
     // New classification fields have empty defaults
     expect(result.classificationRunId).toBeNull();
@@ -41,6 +42,22 @@ describe('Classification Schema – CurationData backward compatibility', () => 
     expect(result.classificationProposals).toEqual([]);
     expect(result.classificationDecisions).toEqual([]);
     expect(result.classificationHistory).toEqual([]);
+  });
+
+  it('parses curation data with curatedWeight', () => {
+    const data = {
+      curatedTitle: 'Test Product',
+      packagingOcrTitle: null,
+      curatedWeight: '15 lbs',
+      titleSource: 'web',
+      suggestedPages: ['/dogs/food'],
+      suggestedProductType: 'dog-food',
+      curatedAt: '2026-06-01T00:00:00.000Z',
+      curationMethod: 'auto',
+    };
+
+    const result = CurationDataSchema.parse(data);
+    expect(result.curatedWeight).toBe('15');
   });
 });
 

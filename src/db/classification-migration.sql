@@ -93,6 +93,22 @@ CREATE TABLE IF NOT EXISTS classification_attribute_mappings (
   PRIMARY KEY (workspace_id, id)
 );
 
+-- Cached brand config entries for deterministic brand resolution.
+CREATE TABLE IF NOT EXISTS classification_brands (
+  workspace_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  aliases_json TEXT DEFAULT '[]',
+  old_id_aliases_json TEXT DEFAULT '[]',
+  config_hash TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_classification_brands_workspace
+  ON classification_brands(workspace_id);
+
 -- Cached catalog manager guidance entries.
 CREATE TABLE IF NOT EXISTS classification_guidance (
   workspace_id TEXT NOT NULL,
@@ -146,7 +162,7 @@ CREATE TABLE IF NOT EXISTS classification_runs (
 CREATE TABLE IF NOT EXISTS classification_stage_results (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
-  stage_name TEXT NOT NULL CHECK (stage_name IN ('evidence_extraction', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
+  stage_name TEXT NOT NULL CHECK (stage_name IN ('evidence_extraction', 'name_consolidation', 'primary_product_type_proposal', 'attribute_applicability', 'product_attribute_proposals', 'category_page_proposals', 'product_draft_projection')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'abstained')),
   output_json TEXT,
   error_message TEXT,
@@ -247,6 +263,64 @@ CREATE TABLE IF NOT EXISTS classification_refresh_deferrals (
 );
 
 -- ════════════════════════════════════════════════════════════════════════════════
+-- Curation Orchestration Tables (Phase 8A — Batch Orchestration)
+-- Provider-agnostic; provider IDs are stored in JSON metadata, not dedicated columns.
+-- ════════════════════════════════════════════════════════════════════════════════
+
+-- Batch-level curation run for a set of onboarding items.
+CREATE TABLE IF NOT EXISTS curation_runs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+  total_items INTEGER NOT NULL DEFAULT 0,
+  completed_items INTEGER NOT NULL DEFAULT 0,
+  failed_items INTEGER NOT NULL DEFAULT 0,
+  progress_json TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  error_message TEXT
+);
+
+-- Individual item within a curation run.
+CREATE TABLE IF NOT EXISTS curation_run_items (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES curation_runs(id) ON DELETE CASCADE,
+  onboarding_item_id TEXT NOT NULL,
+  sku TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  error_message TEXT
+);
+
+-- Product-line group within a curation run.
+CREATE TABLE IF NOT EXISTS curation_run_groups (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES curation_runs(id) ON DELETE CASCADE,
+  group_id TEXT NOT NULL,
+  group_label TEXT NOT NULL,
+  skus_json TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+
+-- Provider-agnostic model call tracking.
+CREATE TABLE IF NOT EXISTS curation_model_calls (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES curation_runs(id) ON DELETE CASCADE,
+  run_item_id TEXT REFERENCES curation_run_items(id) ON DELETE SET NULL,
+  task TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  duration_ms INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('success', 'failed')),
+  error_message TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- ════════════════════════════════════════════════════════════════════════════════
 -- Indexes
 -- ════════════════════════════════════════════════════════════════════════════════
 
@@ -323,3 +397,25 @@ CREATE INDEX IF NOT EXISTS idx_classification_refresh_queue_workspace_status
 
 CREATE INDEX IF NOT EXISTS idx_classification_refresh_queue_status
   ON classification_refresh_queue(status);
+
+-- Curation orchestration indexes
+CREATE INDEX IF NOT EXISTS idx_curation_runs_workspace
+  ON curation_runs(workspace_id);
+
+CREATE INDEX IF NOT EXISTS idx_curation_runs_status
+  ON curation_runs(status);
+
+CREATE INDEX IF NOT EXISTS idx_curation_run_items_run
+  ON curation_run_items(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_curation_run_items_status
+  ON curation_run_items(status);
+
+CREATE INDEX IF NOT EXISTS idx_curation_run_items_sku
+  ON curation_run_items(sku);
+
+CREATE INDEX IF NOT EXISTS idx_curation_run_groups_run
+  ON curation_run_groups(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_curation_model_calls_run
+  ON curation_model_calls(run_id);

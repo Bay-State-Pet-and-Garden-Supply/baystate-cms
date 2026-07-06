@@ -1,6 +1,6 @@
 import { getDb } from '../db/connection';
 import { randomUUID } from 'node:crypto';
-import type { ClassificationStageName, StageDefinition, StageContext, StageInput, StageOutput } from './types';
+import type { ClassificationStageName, StageDefinition, StageContext, StageInput, StageOutput, PipelineRunResult } from './types';
 import type { ClassificationEvidence, ClassificationProposal } from '../shared/types';
 
 const now = () => new Date().toISOString();
@@ -37,11 +37,12 @@ function linkProposalEvidence(proposalId: string, evidenceIds: string[]): void {
   }
 }
 
-export async function runPipeline(stages: StageDefinition[], context: StageContext, input: StageInput): Promise<{ evidence: ClassificationEvidence[]; proposals: ClassificationProposal[] }> {
+export async function runPipeline(stages: StageDefinition[], context: StageContext, input: StageInput): Promise<PipelineRunResult> {
   const order = resolveStageOrder(stages);
   const allEvidence: ClassificationEvidence[] = [...input.evidence];
   const allProposals: ClassificationProposal[] = [...input.allProposals];
   const acceptedProposals: ClassificationProposal[] = [...input.acceptedProposals];
+  const stageOutputs: Partial<Record<ClassificationStageName, StageOutput>> = {};
 
   for (const stageName of order) {
     const stage = stages.find(s => s.name === stageName);
@@ -51,12 +52,17 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
       const result = await stage.execute(stageInput, context);
       if (result.status === 'succeeded') {
         const out = result.output;
+        stageOutputs[stageName] = out;
         try { persistEvidence(context.runId, input.sku, out.evidence, input.onboardingItemId); } catch {}
         try { persistProposals(context.runId, input.sku, out.proposals, context.configSnapshotRef?.hash); } catch {}
         try { for (const p of out.proposals) linkProposalEvidence(p.id, p.evidenceIds ?? []); } catch {}
         allEvidence.push(...out.evidence);
         allProposals.push(...out.proposals);
-        recordStageResult(context.runId, stageName, 'succeeded', JSON.stringify({ ec: out.evidence.length, pc: out.proposals.length }));
+        const outputPayload: Record<string, unknown> = { ec: out.evidence.length, pc: out.proposals.length };
+        if (out.metadata) {
+          outputPayload.metadata = out.metadata;
+        }
+        recordStageResult(context.runId, stageName, 'succeeded', JSON.stringify(outputPayload));
       } else if (result.status === 'abstained') {
         recordStageResult(context.runId, stageName, 'abstained', undefined, result.reason);
         allProposals.push({ id: randomUUID(), runId: context.runId, productSku: input.sku, proposalType: 'reviewable_abstention', targetId: stageName, proposedValue: { reason: result.reason }, confidence: 0, evidenceIds: [], status: 'pending', isBulkAcceptable: false, isStale: false, stalenessReason: null, createdAt: now() });
@@ -67,7 +73,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
       recordStageResult(context.runId, stageName, 'failed', undefined, err instanceof Error ? err.message : String(err));
     }
   }
-  return { evidence: allEvidence, proposals: allProposals };
+  return { evidence: allEvidence, proposals: allProposals, stageOutputs };
 }
 
 function resolveStageOrder(stages: StageDefinition[]): ClassificationStageName[] {

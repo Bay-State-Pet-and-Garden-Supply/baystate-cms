@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import fs from 'fs';
+import path from 'path';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { getChangeSetDetail } from '../services/change-set-service';
 import { createExportPackage } from '../../shopsite/export-package';
@@ -10,7 +12,7 @@ const route = new Hono();
 /**
  * POST /api/export/change-set/:id - Generate export package for an approved change set.
  */
-route.post('/export/change-set/:id', (c) => {
+route.post('/export/change-set/:id', async (c) => {
   const workspace = getCurrentWorkspace();
   if (!workspace) {
     return c.json({ error: 'No workspace loaded.' }, 400);
@@ -44,20 +46,53 @@ route.post('/export/change-set/:id', (c) => {
     return c.json({ error: 'No products in change set to export.' }, 400);
   }
 
-  const exportResult = createExportPackage(
-    workspace.workspacePath,
-    changeSetId,
-    products,
-    { changeSetTitle: changeSet.title },
-  );
+  try {
+    const exportResult = await createExportPackage(
+      workspace.workspacePath,
+      changeSetId,
+      products,
+      { changeSetTitle: changeSet.title },
+    );
 
-  return c.json({
-    success: true,
-    exportDir: exportResult.exportDir,
-    xmlPath: exportResult.xmlPath,
-    manifestPath: exportResult.manifestPath,
-    instructionsPath: exportResult.instructionsPath,
-    productCount: exportResult.productCount,
+    return c.json({
+      success: true,
+      exportDir: exportResult.exportDir,
+      xmlPath: exportResult.xmlPath,
+      manifestPath: exportResult.manifestPath,
+      instructionsPath: exportResult.instructionsPath,
+      zipPath: exportResult.zipPath,
+      productCount: exportResult.productCount,
+    });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : 'Export failed' }, 500);
+  }
+});
+
+/**
+ * GET /api/export/change-set/:id/images-zip - Download the brand-organized images ZIP.
+ */
+route.get('/export/change-set/:id/images-zip', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+
+  const changeSetId = c.req.param('id');
+  const zipPath = path.join(workspace.workspacePath, 'exports', changeSetId, 'shopsite-images.zip');
+
+  if (!fs.existsSync(zipPath)) {
+    return c.json({ error: 'Images ZIP not found. Generate an export package first.' }, 404);
+  }
+
+  const dateStr = new Date().toISOString().split('T')[0];
+  const fileBuffer = fs.readFileSync(zipPath);
+
+  return new Response(fileBuffer, {
+    headers: {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="shopsite-images-${dateStr}.zip"`,
+      'Cache-Control': 'no-store',
+    },
   });
 });
 

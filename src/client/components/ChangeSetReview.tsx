@@ -121,6 +121,8 @@ export function ChangeSetReview() {
       const res = await exportChangeSet(selected);
       if (res.success) {
         setResult(`Export created: ${res.xmlPath}\nManifest: ${res.manifestPath}`);
+        // Trigger images ZIP download
+        window.open(`/api/export/change-set/${selected}/images-zip`, '_blank');
       } else {
         setError('Export failed');
       }
@@ -145,6 +147,8 @@ export function ChangeSetReview() {
         if (res.warnings.length > 0) {
           setResult(r => r + '\nWarnings: ' + res.warnings.join('; '));
         }
+        // Trigger images ZIP download
+        window.open(`/api/export/change-set/${selected}/images-zip`, '_blank');
         await fetch();
       } else {
         setError('Push & Publish failed');
@@ -167,6 +171,8 @@ export function ChangeSetReview() {
       const res = await uploadOnly(selected);
       if (res.success) {
         setResult(`Upload completed! Job: ${res.jobId}, ${res.productCount} product(s). Changes may not be visible until publication.`);
+        // Trigger images ZIP download
+        window.open(`/api/export/change-set/${selected}/images-zip`, '_blank');
         await fetch();
       }
     } catch (err) {

@@ -10,6 +10,7 @@ import type {
   GuidanceConfig,
   ModelPolicyConfig,
   DataSharingConfig,
+  BrandConfig,
 } from '../../shared/types';
 
 const now = () => new Date().toISOString();
@@ -215,6 +216,27 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
     );
     upsertConfigFile(workspaceId, 'model-policies.json', 1, config.modelPolicy);
 
+    // Brands
+    db.run('DELETE FROM classification_brands WHERE workspace_id = ?', [workspaceId]);
+    for (const brand of config.brands) {
+      db.run(
+        `INSERT INTO classification_brands
+         (workspace_id, id, name, aliases_json, old_id_aliases_json, config_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          workspaceId,
+          brand.id,
+          brand.name,
+          JSON.stringify(brand.aliases),
+          JSON.stringify(brand.oldIdAliases),
+          hashString(JSON.stringify(brand)),
+          now(),
+          now(),
+        ],
+      );
+    }
+    upsertConfigFile(workspaceId, 'brands.json', 1, config.brands);
+
     // Data Sharing Policy
     db.run(
       `INSERT INTO classification_data_sharing_policies (workspace_id, policy_json, config_hash, updated_at)
@@ -333,6 +355,18 @@ function getCachedModelPolicy(workspaceId: string): ModelPolicyConfig | null {
     .get(workspaceId) as Record<string, any> | undefined;
   if (!row) return null;
   return JSON.parse(String(row.policy_json)) as ModelPolicyConfig;
+}
+
+export function getCachedBrands(workspaceId: string): BrandConfig[] {
+  const rows = getDb()
+    .query('SELECT * FROM classification_brands WHERE workspace_id = ?')
+    .all(workspaceId) as Record<string, any>[];
+  return rows.map(r => ({
+    id: String(r.id),
+    name: String(r.name),
+    aliases: r.aliases_json ? JSON.parse(String(r.aliases_json)) : [],
+    oldIdAliases: r.old_id_aliases_json ? JSON.parse(String(r.old_id_aliases_json)) : [],
+  }));
 }
 
 export function getCachedDataSharingPolicy(workspaceId: string): DataSharingConfig | null {

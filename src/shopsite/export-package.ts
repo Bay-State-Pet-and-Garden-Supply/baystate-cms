@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { buildProductsXml } from './xml-builder';
 import { deterministicStringify } from '../git/deterministic-json';
+import { createImagesZip } from './zip-generator';
 import type { Product } from '../shared/types';
 
 export interface ExportPackageResult {
@@ -9,6 +10,7 @@ export interface ExportPackageResult {
   xmlPath: string;
   manifestPath: string;
   instructionsPath: string;
+  zipPath: string;
   productCount: number;
 }
 
@@ -16,7 +18,7 @@ export interface ExportPackageResult {
  * Create an export package for a set of changed products.
  * Generates XML, manifest, and upload instructions.
  */
-export function createExportPackage(
+export async function createExportPackage(
   workspacePath: string,
   changeSetId: string,
   products: Product[],
@@ -25,7 +27,7 @@ export function createExportPackage(
     newProductTag?: string;
     changeSetTitle?: string;
   },
-): ExportPackageResult {
+): Promise<ExportPackageResult> {
   const exportDir = path.join(workspacePath, 'exports', changeSetId);
   if (!fs.existsSync(exportDir)) {
     fs.mkdirSync(exportDir, { recursive: true });
@@ -39,6 +41,10 @@ export function createExportPackage(
 
   const xmlPath = path.join(exportDir, 'shopsite-products.xml');
   fs.writeFileSync(xmlPath, xml, 'utf-8');
+
+  // Generate images zip
+  const zipPath = path.join(exportDir, 'shopsite-images.zip');
+  await createImagesZip(workspacePath, products, zipPath);
 
   // Generate manifest
   const manifest = {
@@ -65,6 +71,7 @@ export function createExportPackage(
     xmlPath,
     manifestPath,
     instructionsPath,
+    zipPath,
     productCount: products.length,
   };
 }

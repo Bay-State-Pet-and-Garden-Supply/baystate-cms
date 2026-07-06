@@ -4,6 +4,14 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { getDb } from '../../db/connection';
 import { runMigrations, getSchemaVersion } from '../../db/migrations';
+import {
+  upsertPage,
+  assignProductToPage,
+  assignProductToPageId,
+  getProductPages,
+  getProductPageAssignments,
+  clearProductPages,
+} from '../../db/repositories/page-repo';
 
 describe('SQLite Migration', () => {
   const testDbPath = '/tmp/shopsite-cms-test.db';
@@ -362,6 +370,73 @@ describe('SQLite Migration', () => {
     db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
   });
 
+  it('should insert a classification_stage_results row with name_consolidation stage name', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Create workspace, batch, item, config snapshot, and run
+    const wsId = randomUUID();
+    db.run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at, bootstrap_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [wsId, 'NameConsolidation WS', '/tmp/nc-ws', '/tmp/nc-ws/.git', now, now, 'complete'],
+    );
+
+    const batchId = randomUUID();
+    db.run(
+      `INSERT INTO onboarding_batches (id, workspace_id, name, file_name, status, total_items, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'imported', 1, ?, ?)`,
+      [batchId, wsId, 'NC Batch', 'nc.xlsx', now, now],
+    );
+
+    const itemId = randomUUID();
+    db.run(
+      `INSERT INTO onboarding_items (id, batch_id, upc, name, status, row_number, created_at, updated_at)
+       VALUES (?, ?, 'NC-SKU', 'Name Consolidation Product', 'imported', 1, ?, ?)`,
+      [itemId, batchId, now, now],
+    );
+
+    const snapId = randomUUID();
+    db.run(
+      `INSERT INTO classification_config_snapshots (id, workspace_id, snapshot_hash, config_json, created_at)
+       VALUES (?, ?, 'nc-hash', '{}', ?)`,
+      [snapId, wsId, now],
+    );
+
+    const runId = randomUUID();
+    db.run(
+      `INSERT INTO classification_runs (id, workspace_id, onboarding_item_id, product_sku, config_snapshot_id, config_snapshot_hash, status, started_at)
+       VALUES (?, ?, ?, 'NC-SKU', ?, 'nc-hash', 'completed', ?)`,
+      [runId, wsId, itemId, snapId, now],
+    );
+
+    // Insert a classification_stage_results row with name_consolidation
+    const stageId = randomUUID();
+    expect(() => {
+      db.run(
+        `INSERT INTO classification_stage_results (id, run_id, stage_name, status, output_json, started_at, completed_at)
+         VALUES (?, ?, 'name_consolidation', 'succeeded', '{"result":"ok"}', ?, ?)`,
+        [stageId, runId, now, now],
+      );
+    }).not.toThrow();
+
+    // Verify the row was inserted
+    const row = db.query(
+      'SELECT id, stage_name, status FROM classification_stage_results WHERE id = ?'
+    ).get(stageId) as { id: string; stage_name: string; status: string };
+    expect(row).toBeTruthy();
+    expect(row.stage_name).toBe('name_consolidation');
+    expect(row.status).toBe('succeeded');
+
+    // Clean up
+    db.run('DELETE FROM classification_stage_results WHERE id = ?', [stageId]);
+    db.run('DELETE FROM classification_runs WHERE id = ?', [runId]);
+    db.run('DELETE FROM classification_config_snapshots WHERE id = ?', [snapId]);
+    db.run('DELETE FROM onboarding_items WHERE id = ?', [itemId]);
+    db.run('DELETE FROM onboarding_batches WHERE id = ?', [batchId]);
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+
   it('should enforce FK constraint on classification_proposal_decisions for missing proposal', () => {
     const db = getDb();
     const now = new Date().toISOString();
@@ -445,6 +520,94 @@ describe('SQLite Migration', () => {
       'sitemap-mig.com',
       'sitemap-no-source.com',
     ]);
+  });
+
+  it('assignProductToPageId inserts both page_id and page_name', () => {
+    const db = getDb();
+    const pageId = randomUUID();
+    const pageName = 'Dog Food';
+
+    upsertPage({
+      id: pageId,
+      name: pageName,
+      fileName: 'dog-food.html',
+      parentId: null,
+      pageHash: 'hash-1',
+      lastSyncedAt: null,
+    });
+
+    assignProductToPageId('SKU-PAGEID-1', pageId, pageName);
+
+    const pages = getProductPages('SKU-PAGEID-1');
+    expect(pages).toContain(pageName);
+
+    const assignments = getProductPageAssignments('SKU-PAGEID-1');
+    expect(assignments.length).toBe(1);
+    expect(assignments[0].pageId).toBe(pageId);
+    expect(assignments[0].pageName).toBe(pageName);
+
+    clearProductPages('SKU-PAGEID-1');
+  });
+
+  it('getProductPageAssignments returns both id and name', () => {
+    const pageId1 = randomUUID();
+    const pageId2 = randomUUID();
+
+    upsertPage({ id: pageId1, name: 'Cat Food', fileName: 'cat-food.html', parentId: null, pageHash: 'hash-cat', lastSyncedAt: null });
+    upsertPage({ id: pageId2, name: 'Dog Treats', fileName: 'dog-treats.html', parentId: null, pageHash: 'hash-dog-treats', lastSyncedAt: null });
+
+    assignProductToPageId('SKU-ASSIGN-1', pageId1, 'Cat Food');
+    assignProductToPageId('SKU-ASSIGN-1', pageId2, 'Dog Treats');
+
+    const assignments = getProductPageAssignments('SKU-ASSIGN-1');
+    expect(assignments.length).toBe(2);
+
+    const catAssignment = assignments.find(a => a.pageName === 'Cat Food');
+    expect(catAssignment).toBeDefined();
+    expect(catAssignment!.pageId).toBe(pageId1);
+
+    const dogAssignment = assignments.find(a => a.pageName === 'Dog Treats');
+    expect(dogAssignment).toBeDefined();
+    expect(dogAssignment!.pageId).toBe(pageId2);
+
+    clearProductPages('SKU-ASSIGN-1');
+  });
+
+  it('backward-compatible assignProductToPage resolves name to id', () => {
+    const pageId = randomUUID();
+    const pageName = 'Birds';
+
+    upsertPage({
+      id: pageId,
+      name: pageName,
+      fileName: 'birds.html',
+      parentId: null,
+      pageHash: 'hash-birds',
+      lastSyncedAt: null,
+    });
+
+    assignProductToPage('SKU-BACKCOMPAT-1', pageName);
+
+    const assignments = getProductPageAssignments('SKU-BACKCOMPAT-1');
+    expect(assignments.length).toBe(1);
+    expect(assignments[0].pageId).toBe(pageId);
+    expect(assignments[0].pageName).toBe(pageName);
+
+    clearProductPages('SKU-BACKCOMPAT-1');
+  });
+
+  it('backward-compatible assignProductToPage works without page_index entry', () => {
+    assignProductToPage('SKU-NOINDEX-1', 'Unsynced Page');
+
+    const pages = getProductPages('SKU-NOINDEX-1');
+    expect(pages).toContain('Unsynced Page');
+
+    const assignments = getProductPageAssignments('SKU-NOINDEX-1');
+    expect(assignments.length).toBe(1);
+    expect(assignments[0].pageId).toBeNull();
+    expect(assignments[0].pageName).toBe('Unsynced Page');
+
+    clearProductPages('SKU-NOINDEX-1');
   });
 
   it('should expose the sitemap_product_url_pattern column on extractor_profiles', () => {

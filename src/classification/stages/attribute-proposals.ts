@@ -1,81 +1,24 @@
-import type { ClassificationProposal, ProductAttributeConfig } from '../../shared/schemas/classification';
+/**
+ * Product Attribute Proposals Stage
+ *
+ * Thin wrapper around the shared curation target engine. Processes
+ * only enabled product-field curation targets through the shared
+ * resolver → matcher → ranker → proposal builder pipeline.
+ *
+ * Product Type profile filtering is optional: if Product Type is an
+ * enabled target and a selected proposal exists with a profile, only
+ * product-field targets matching profile attributes are processed.
+ * Otherwise, all enabled product-field targets are processed.
+ *
+ * Dependencies: attribute_applicability stage.
+ */
+import type { ClassificationProposal } from '../../shared/schemas/classification';
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
-import { randomUUID } from 'node:crypto';
-import {
-  getCachedAttributes,
-  getCachedAttributeMappings,
-  getCachedAttributeProfiles,
-} from '../../db/repositories/classification-config-repo';
-import { getLlmConfigForTask, callLlmForTask } from '../../onboarding/llm-client';
 import { loadClassificationConfig } from '../config-loader';
-import {
-  findCurationTargetForAttribute,
-  getExplicitCurationTargets,
-  hasExplicitCurationTargets,
-  resolveAttributeAllowedValues,
-} from '../curation-targets';
-
-const now = () => new Date().toISOString();
-
-function normalizeOption(value: unknown, options: string[]): string | null {
-  const raw = String(value ?? '').trim();
-  if (!raw) return null;
-  return options.find(option => option.toLowerCase() === raw.toLowerCase()) ?? null;
-}
-
-function evidenceText(input: StageInput): string {
-  return input.evidence.map(e => {
-    if (!e.value) return '';
-    if (typeof e.value === 'string') return e.value;
-    return JSON.stringify(e.value);
-  }).join(' ').toLowerCase();
-}
-
-async function llmChooseValues(params: {
-  attribute: ProductAttributeConfig;
-  options: string[];
-  selectionMode: 'single' | 'multiple';
-  text: string;
-}): Promise<{ values: string[]; confidence: number } | null> {
-  if (params.options.length === 0 || params.text.length < 8) return null;
-  const llmConfig = getLlmConfigForTask('category_classification', { allowFallback: true });
-  if (!llmConfig) return null;
-
-  const optionList = params.options.slice(0, 150);
-  const maxValues = params.selectionMode === 'multiple' ? Math.min(10, optionList.length) : 1;
-  const prompt = `Choose ${params.selectionMode === 'multiple' ? `up to ${maxValues}` : 'one'} value(s) for the product field "${params.attribute.name}" from the allowed options only.
-
-Allowed options:
-${JSON.stringify(optionList)}
-
-Product evidence:
-${params.text.slice(0, 3000)}
-
-Return ONLY valid JSON in this shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`;
-
-  try {
-    const response = await callLlmForTask(
-      'category_classification',
-      prompt,
-      'You are a strict catalog classifier. You only return exact values from the allowed options.',
-      { allowFallback: true },
-    );
-    if (!response) return null;
-    const parsed = JSON.parse(response.trim()) as { values?: unknown[]; value?: unknown; confidence?: unknown };
-    const rawValues = Array.isArray(parsed.values) ? parsed.values : parsed.value != null ? [parsed.value] : [];
-    const values = rawValues
-      .map(value => normalizeOption(value, optionList))
-      .filter((value): value is string => value != null)
-      .filter((value, index, arr) => arr.indexOf(value) === index)
-      .slice(0, maxValues);
-    if (values.length === 0) return null;
-    const confidence = Math.max(0.35, Math.min(0.85, Number(parsed.confidence) || 0.55));
-    return { values, confidence };
-  } catch (err: any) {
-    console.warn(`[AttributeProposalStage] LLM option selection failed for ${params.attribute.id}: ${err.message}`);
-    return null;
-  }
-}
+import { resolveEnabledTargets } from '../curation-target-resolver';
+import { processProductFieldTarget } from '../curation-target-processor';
+import { selectPrimaryProductTypeProposal } from '../proposal-selection';
+import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
 
 export const productAttributeProposalsStage: StageDefinition = {
   name: 'product_attribute_proposals',
@@ -83,102 +26,84 @@ export const productAttributeProposalsStage: StageDefinition = {
   evidenceFrom: ['evidence_extraction'],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
     const config = loadClassificationConfig(context.workspacePath);
-    const explicitTargets = hasExplicitCurationTargets(config) ? getExplicitCurationTargets(config) : [];
-    const productFieldTargets = explicitTargets.filter(target => target.kind === 'product_field');
-    if (explicitTargets.length > 0 && productFieldTargets.length === 0) {
-      return { status: 'abstained', reason: 'No product-field curation targets are enabled.' };
+    const resolved = resolveEnabledTargets(config, context.workspaceId);
+
+    // If no enabled product-field targets exist, return succeeded (not abstained)
+    if (resolved.productFields.length === 0) {
+      return {
+        status: 'succeeded',
+        output: {
+          evidence: [],
+          proposals: [],
+          abstained: false,
+          message: 'No product-field curation targets are enabled.',
+        },
+      };
     }
 
-    const allAttributes = getCachedAttributes(context.workspaceId);
-    if (allAttributes.length === 0) return { status: 'abstained', reason: 'No attributes configured.' };
+    // Determine which attribute IDs are profile-filtered.
+    // Only applies when Product Type target is enabled AND a selected
+    // Product Type proposal exists with a profile. Otherwise, all
+    // enabled product-field targets are processed.
+    let profileAttributeIds: Set<string> | null = null;
 
-    const mappings = getCachedAttributeMappings(context.workspaceId);
-    const acceptedType = input.acceptedProposals.find(p => p.proposalType === 'primary_product_type' && p.status === 'accepted');
-    let applicableIds: string[] = [];
-    if (acceptedType?.targetId) {
-      const profiles = getCachedAttributeProfiles(context.workspaceId);
-      const profile = profiles.find(p => p.productTypeId === acceptedType.targetId);
-      if (profile) applicableIds = profile.attributes.map(a => a.attributeId);
-    }
-    if (applicableIds.length === 0) applicableIds = allAttributes.map(a => a.id);
-
-    if (productFieldTargets.length > 0) {
-      const targetAttributeIds = new Set(
-        productFieldTargets.flatMap(target => {
-          const ids: string[] = [];
-          if (target.attributeId) ids.push(target.attributeId);
-          if (target.catalogField) {
-            const mapping = mappings.find(m => m.catalogField === target.catalogField);
-            if (mapping) ids.push(mapping.attributeId);
-          }
-          return ids;
-        }),
-      );
-      applicableIds = applicableIds.filter(id => targetAttributeIds.has(id));
-    }
-
-    const joinedText = evidenceText(input);
-
-    const cardinalityMap: Record<string, 'single' | 'multiple'> = {};
-    if (acceptedType?.targetId) {
-      const profiles = getCachedAttributeProfiles(context.workspaceId);
-      const profile = profiles.find(p => p.productTypeId === acceptedType.targetId);
-      if (profile) {
-        for (const pa of profile.attributes) cardinalityMap[pa.attributeId] = pa.cardinality;
-      }
-    }
-
-    const proposals: ClassificationProposal[] = [];
-    const evidenceIds = input.evidence.map(e => e.id);
-
-    for (const attr of allAttributes) {
-      if (!applicableIds.includes(attr.id)) continue;
-
-      const target = findCurationTargetForAttribute(config, attr.id, mappings);
-      const selectionMode = (target?.selectionMode ?? cardinalityMap[attr.id] ?? 'single') as 'single' | 'multiple';
-      const options = resolveAttributeAllowedValues(config, attr, target);
-      const found: string[] = [];
-
-      for (const v of options) {
-        if (joinedText.includes(v.toLowerCase())) found.push(v);
-      }
-      for (const a of attr.valueAliases) {
-        if (joinedText.includes(a.alias.toLowerCase())) {
-          const mapped = normalizeOption(a.mapsTo, options) ?? a.mapsTo;
-          if (!found.includes(mapped)) found.push(mapped);
+    if (resolved.productTypes.length > 0) {
+      const typeSelection = selectPrimaryProductTypeProposal(input);
+      const selectedType = typeSelection.proposal;
+      if (selectedType?.targetId) {
+        const profiles = getCachedAttributeProfiles(context.workspaceId);
+        const profile = profiles.find(p => p.productTypeId === selectedType.targetId);
+        if (profile && profile.attributes.length > 0) {
+          profileAttributeIds = new Set(profile.attributes.map(a => a.attributeId));
         }
       }
-
-      let values = found.slice(0, selectionMode === 'multiple' ? 10 : 1);
-      let confidence = found.length >= 2 ? 0.75 : found.length === 1 ? 0.6 : 0;
-
-      if (values.length === 0) {
-        const llmChoice = await llmChooseValues({ attribute: attr, options, selectionMode, text: joinedText });
-        if (llmChoice) {
-          values = llmChoice.values;
-          confidence = llmChoice.confidence;
-        }
-      }
-
-      if (values.length > 0) {
-        proposals.push({
-          id: randomUUID(),
-          runId: context.runId,
-          productSku: input.sku,
-          proposalType: 'field_assignment',
-          targetId: attr.id,
-          proposedValue: selectionMode === 'multiple' ? values : values[0],
-          confidence,
-          evidenceIds,
-          status: 'pending',
-          isBulkAcceptable: confidence >= 0.7,
-          isStale: false,
-          stalenessReason: null,
-          createdAt: now(),
-        });
-      }
     }
-    if (proposals.length === 0) return { status: 'abstained', reason: 'No attribute value matches found.' };
-    return { status: 'succeeded', output: { evidence: [], proposals, abstained: false } };
+
+    // Filter resolved fields by profile if applicable
+    const targetsToProcess = profileAttributeIds
+      ? resolved.productFields.filter(t => t.attribute && profileAttributeIds!.has(t.attribute.id))
+      : resolved.productFields;
+
+    if (targetsToProcess.length === 0) {
+      return {
+        status: 'succeeded',
+        output: {
+          evidence: [],
+          proposals: [],
+          abstained: false,
+          message: profileAttributeIds
+            ? 'No enabled product-field targets match the selected Product Type profile.'
+            : 'No enabled product-field targets available.',
+        },
+      };
+    }
+
+    // Process each target through the shared engine
+    const allProposals: ClassificationProposal[] = [];
+    const messages: string[] = [];
+
+    for (const target of targetsToProcess) {
+      const result = await processProductFieldTarget(target, input, context);
+      allProposals.push(...result.proposals);
+      if (result.message) messages.push(result.message);
+    }
+
+    if (allProposals.length === 0) {
+      return {
+        status: 'abstained',
+        reason: messages.length > 0
+          ? `No attribute value matches found: ${messages.join('; ')}`
+          : 'No attribute value matches found from available evidence.',
+      };
+    }
+
+    return {
+      status: 'succeeded',
+      output: {
+        evidence: [],
+        proposals: allProposals,
+        abstained: false,
+      },
+    };
   },
 };

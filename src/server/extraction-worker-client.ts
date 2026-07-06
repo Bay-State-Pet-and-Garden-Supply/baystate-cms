@@ -212,7 +212,7 @@ export async function validateProfile(
  * allowed. If the worker cannot produce trusted product evidence,
  * the caller must fail the item or keep it blocked in Extraction.
  */
-async function trustedExtract(
+export async function trustedExtract(
   request: ExtractRequest,
 ): Promise<{ ok: true; data: ExtractResponse } | { ok: false; error: string }> {
   return workerFetch(ExtractResponseSchema, {

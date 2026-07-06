@@ -85,6 +85,7 @@ export function loadClassificationConfig(workspacePath: string): ClassificationC
   const guidance = readJsonFile<ClassificationConfig['guidance']>(path.join(dir, 'guidance.json')) ?? [];
   const modelPolicy = readJsonFile<ClassificationConfig['modelPolicy']>(path.join(dir, 'model-policies.json'));
   const dataSharing = readJsonFile<ClassificationConfig['dataSharing']>(path.join(dir, 'data-sharing.json'));
+  const brands = readJsonFile<ClassificationConfig['brands']>(path.join(dir, 'brands.json')) ?? [];
 
   const config: ClassificationConfig = {
     manifest: manifest ?? {
@@ -98,6 +99,7 @@ export function loadClassificationConfig(workspacePath: string): ClassificationC
     attributeProfiles: attributeProfiles as ClassificationConfig['attributeProfiles'],
     attributeMappings: attributeMappings as ClassificationConfig['attributeMappings'],
     curationTargets: curationTargets as ClassificationConfig['curationTargets'],
+    brands: brands as ClassificationConfig['brands'],
     guidance: guidance as ClassificationConfig['guidance'],
     modelPolicy: (modelPolicy ?? DEFAULT_MODEL_POLICY) as ClassificationConfig['modelPolicy'],
     dataSharing: (dataSharing ?? DEFAULT_DATA_SHARING) as ClassificationConfig['dataSharing'],
@@ -122,6 +124,7 @@ export function saveClassificationConfig(workspacePath: string, config: Classifi
   writeJsonFile(path.join(dir, 'attribute-profiles.json'), config.attributeProfiles);
   writeJsonFile(path.join(dir, 'mappings.json'), config.attributeMappings);
   writeJsonFile(path.join(dir, 'curation-targets.json'), config.curationTargets);
+  writeJsonFile(path.join(dir, 'brands.json'), config.brands ?? []);
   writeJsonFile(path.join(dir, 'guidance.json'), config.guidance);
   writeJsonFile(path.join(dir, 'model-policies.json'), config.modelPolicy);
   writeJsonFile(path.join(dir, 'data-sharing.json'), config.dataSharing);

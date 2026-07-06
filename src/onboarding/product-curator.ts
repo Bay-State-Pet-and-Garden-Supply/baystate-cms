@@ -1,11 +1,11 @@
-import fs from 'fs';
-import path from 'path';
 import { listPages } from '../db/repositories/page-repo';
+import { convertToLbs } from '../shared/weight-converter';
 import { callLlmForTask, getLlmConfigForTask } from './llm-client';
-import { getVlmConfig, callVlm } from './vlm-client';
+import { extractPackagingOcr } from './packaging-ocr';
+import { getDb } from '../db/connection';
 import { loadClassificationConfig } from '../classification/config-loader';
 import { hasExplicitCurationTargets } from '../classification/curation-targets';
-import { createConfigSnapshot } from '../db/repositories/classification-config-repo';
+import { createConfigSnapshot, syncConfigToCache } from '../db/repositories/classification-config-repo';
 import {
   createRun,
   completeRun,
@@ -16,106 +16,102 @@ import {
 import { runPipeline } from '../classification/pipeline-runner';
 import {
   evidenceExtractionStage,
+  nameConsolidationStage,
   primaryProductTypeStage,
   attributeApplicabilityStage,
   productAttributeProposalsStage,
   categoryPageProposalsStage,
   productDraftProjectionStage,
 } from '../classification';
+import { consolidateProductTitle } from './title-consolidation';
+import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
+import { determineProductGroup } from './product-line-grouper';
 import type { StageDefinition } from '../classification/types';
 import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
 
+// ─── Page Assignment Validation ───────────────────────────────────────────────
+
 /**
- * Downloads/reads the local primary image and performs VLM OCR to find the packaging title.
+ * Validate page assignments against the product's species from VLM OCR evidence.
+ * Cross-species pages (e.g., a Dog product assigned to "Cat Food") are dropped
+ * with a warning. This is a safety net that catches LLM or downstream mistakes.
  */
-async function extractPackagingTitle(
-  imageUrl: string,
-  workspacePath: string
-): Promise<string | null> {
-  const vlmConfig = getVlmConfig();
-  if (!vlmConfig || !vlmConfig.enabled) {
-    console.log('[ProductCurator] VLM is not enabled. Skipping packaging OCR.');
-    return null;
-  }
+function validatePageAssignmentsBySpecies(
+  proposedPages: string[],
+  allEvidence: ClassificationEvidence[],
+): string[] {
+  const speciesEntries = allEvidence.filter(
+    e => e.source === 'visual_product_evidence' && e.sourceField === 'species',
+  );
+  const species = speciesEntries
+    .map(e => (typeof e.value === 'string' ? e.value.toLowerCase() : ''))
+    .filter(Boolean);
 
-  // Resolve relative image path to the workspace root
-  const resolvedPath = path.resolve(workspacePath, imageUrl);
-  if (!fs.existsSync(resolvedPath)) {
-    console.warn(`[ProductCurator] Primary image file does not exist at: ${resolvedPath}`);
-    return null;
-  }
+  if (species.length === 0) return proposedPages;
 
-  try {
-    console.log(`[ProductCurator] Running OCR on packaging image: ${resolvedPath}`);
-    const buffer = fs.readFileSync(resolvedPath);
-    const base64Image = buffer.toString('base64');
+  const primarySpecies = species[0];
 
-    const prompt = 'Identify the main product name or title printed on the product packaging/box/bag in this image. Expand any short product tags if they are printed in full on the package. Return ONLY the product title itself. Do not include weights, counts, notes, markdown formatting, or quotes.';
-    const ocrResult = await callVlm(prompt, base64Image, vlmConfig);
-    
-    if (ocrResult && ocrResult.length > 2) {
-      console.log(`[ProductCurator] Packaging OCR found: "${ocrResult}"`);
-      return ocrResult;
+  const speciesIncompatible: Record<string, string[]> = {
+    dog: ['cat', 'fish', 'bird', 'small animal', 'small pet', 'reptile', 'caged bird', 'wild bird', 'wildlife'],
+    cat: ['dog', 'fish', 'bird', 'small animal', 'small pet', 'reptile', 'caged bird', 'wild bird', 'wildlife'],
+    fish: ['dog', 'cat', 'bird', 'small animal', 'small pet', 'reptile', 'caged bird', 'farm animal', 'horse', 'wildlife'],
+    bird: ['dog', 'cat', 'fish', 'reptile', 'farm animal', 'horse'],
+    reptile: ['dog', 'cat', 'bird', 'farm animal', 'horse'],
+    horse: ['dog', 'cat', 'fish', 'bird', 'small pet', 'reptile'],
+  };
+
+  const incompatibleTerms = speciesIncompatible[primarySpecies] ?? [];
+  if (incompatibleTerms.length === 0) return proposedPages;
+
+  return proposedPages.filter(pageName => {
+    const nameLower = pageName.toLowerCase();
+    const isCompatible = !incompatibleTerms.some(term => nameLower.includes(term));
+    if (!isCompatible) {
+      console.warn(
+        `[ProductCurator] Dropping cross-species page assignment: "${pageName}" for species "${primarySpecies}"`,
+      );
     }
-  } catch (err: any) {
-    console.warn(`[ProductCurator] Packaging OCR failed: ${err.message}`);
-  }
-
-  return null;
+    return isCompatible;
+  });
 }
 
 /**
- * Synthesizes the optimal store product title using all available name signals.
+ * Run VLM OCR on the primary image as a fallback, persisting results back
+ * to the item's extraction_data_json so classification stages can consume
+ * the same data without duplicate VLM calls.
  */
-async function finalizeTitle(signals: {
-  name: string;
-  brandHint?: string | null;
-  webTitle?: string | null;
-  ocrTitle?: string | null;
-}): Promise<{ title: string; source: 'web' | 'ocr' | 'llm' }> {
-  const llmConfig = getLlmConfigForTask('product_curation', { allowFallback: true });
+async function runAndPersistOcrFallback(
+  itemId: string,
+  primaryImage: string,
+  workspacePath: string,
+  ext: Record<string, unknown>,
+): Promise<string | null> {
+  console.log(`[ProductCurator] Running fallback packaging OCR for item ${itemId}`);
+  const ocrData = await extractPackagingOcr({
+    imageUrl: primaryImage,
+    workspacePath,
+    imageSourceUrl: primaryImage,
+  });
 
-  // If LLM is not configured, fall back to simple consensus logic
-  if (!llmConfig) {
-    if (signals.ocrTitle) {
-      return { title: signals.ocrTitle, source: 'ocr' };
+  if (ocrData) {
+    // Persist to the item's extraction_data_json so future runs skip OCR
+    try {
+      const updatedExt = { ...ext, packagingOcrData: ocrData, packagingTitle: ocrData.productName };
+      const db = getDb();
+      const now = new Date().toISOString();
+      db.query(
+        'UPDATE onboarding_items SET extraction_data_json = ?, updated_at = ? WHERE id = ?',
+      ).run(JSON.stringify(updatedExt), now, itemId);
+      console.log(`[ProductCurator] Persisted fallback OCR data for item ${itemId}`);
+    } catch (err: any) {
+      console.warn(`[ProductCurator] Failed to persist fallback OCR: ${err.message}`);
     }
-    if (signals.webTitle) {
-      return { title: signals.webTitle, source: 'web' };
-    }
-    return { title: signals.name, source: 'web' };
+
+    return ocrData.productName;
   }
 
-  try {
-    const prompt = `You are a product cataloging assistant for a premium pet supply store.
-Analyze the following title candidates for a product and consolidate them into a single, clean, store-ready product name.
-
-Inputs:
-- Original Spreadsheet Name: "${signals.name}"
-- Web Extracted Title: "${signals.webTitle || 'N/A'}"
-- OCR Packaging Title: "${signals.ocrTitle || 'N/A'}"
-- Brand Name: "${signals.brandHint || 'N/A'}"
-
-Rules for final product name:
-1. It must be clean, readable, professional, and customer-friendly.
-2. It must align closely with the packaging OCR title if provided and accurate, but should sound like a natural product name.
-3. The Brand Name ("${signals.brandHint || ''}") MUST be included, ideally at the very beginning (e.g. "Dr. Marty Bark Stoppers Digestion Formula").
-4. Strip all internal inventory codes, size codes (like "5CT" or "SM"), and pricing/bulk packaging notes from the end.
-5. Clean up casing issues (e.g. "DR MARTY" -> "Dr. Marty", "YAK DNTL" -> "Yak Dental").
-6. Return ONLY the finalized product name. Do not explain your reasoning or add any quotes or markdown formatting.`;
-
-    const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', { allowFallback: true });
-    if (cleanTitle && cleanTitle.length > 2) {
-      console.log(`[ProductCurator] LLM consolidated title: "${cleanTitle}"`);
-      return { title: cleanTitle, source: 'llm' };
-    }
-  } catch (err: any) {
-    console.warn(`[ProductCurator] LLM title consolidation failed: ${err.message}`);
-  }
-
-  // Fallback
-  return { title: signals.webTitle || signals.name, source: 'web' };
+  return null;
 }
 
 /**
@@ -201,18 +197,20 @@ export async function curateItem(
 
   console.log(`[ProductCurator] Starting curation for: "${item.name}"`);
 
-  // Step 1: Packaging OCR if available
-  let ocrTitle: string | null = null;
-  if (ext.primaryImage) {
-    ocrTitle = await extractPackagingTitle(ext.primaryImage, workspacePath);
+  // Step 1: Packaging OCR — use cached data first, fall back to live OCR
+  let ocrTitle: string | null = ext.packagingOcrData?.productName ?? ext.packagingTitle ?? null;
+  if (!ocrTitle && ext.primaryImage) {
+    ocrTitle = await runAndPersistOcrFallback(item.id, ext.primaryImage, workspacePath, ext as unknown as Record<string, unknown>);
   }
 
-  // Step 2: Title finalization
-  const finalized = await finalizeTitle({
+  // Step 2: Title finalization (uses shared helper)
+  const finalized = await consolidateProductTitle({
     name: item.name,
     brandHint: item.brandHint,
     webTitle: ext.title,
     ocrTitle: ocrTitle,
+    ocrWeight: ext.packagingOcrData?.weight ?? null,
+    ocrSize: ext.packagingOcrData?.size ?? null,
   });
 
   // Step 3: Page & Category Classification. The modular pipeline can disable
@@ -222,9 +220,23 @@ export async function curateItem(
     ? { suggestedPages: [], suggestedProductType: null }
     : await classifyProduct(finalized.title, ext.description);
 
+  // Synthesize search keywords from curated data
+  const searchKeywords = synthesizeSearchKeywords({
+    title: finalized.title,
+    brand: item.brandHint,
+    description: ext.description,
+    suggestedPages: classification.suggestedPages,
+    suggestedProductType: classification.suggestedProductType,
+    species: ext.packagingOcrData?.species,
+    lifeStage: ext.packagingOcrData?.lifeStage,
+    productForm: ext.packagingOcrData?.productForm,
+  });
+
   return {
     curatedTitle: finalized.title,
+    searchKeywords,
     packagingOcrTitle: ocrTitle,
+    curatedWeight: convertToLbs(ext.packagingOcrData?.weight || ext.weight || null),
     titleSource: finalized.source,
     suggestedPages: classification.suggestedPages,
     suggestedProductType: classification.suggestedProductType,
@@ -245,7 +257,12 @@ export async function curateItem(
  * Uses the Classification Configuration from store/classification/
  * to produce structured proposals, evidence, and history records.
  *
- * Falls back to classic curation if no classification config exists.
+ * Does NOT call legacy `curateItem()` — instead runs the full modular
+ * pipeline including the name_consolidation stage for title synthesis.
+ *
+ * Falls back to a minimal compatibility object if no classification
+ * config exists or the pipeline throws, so curation never blocks
+ * the onboarding worker.
  */
 export async function curateItemWithPipeline(
   item: OnboardingItem,
@@ -259,33 +276,75 @@ export async function curateItemWithPipeline(
 
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
 
-  // Check if classification config exists. Page-only target configuration is
-  // valid, so curationTargets also activates the modular path.
+  // Load classification config. The modular pipeline works even without
+  // full product types/attributes — name_consolidation always runs.
   const classConfig = loadClassificationConfig(workspacePath);
-  const hasConfig = classConfig.manifest != null &&
-    (classConfig.productTypes.length > 0 || classConfig.attributes.length > 0 || (classConfig.curationTargets?.length ?? 0) > 0);
 
-  // Step 0: Run classic curation for base fields (title, OCR). If the modular
-  // target list is explicit, skip the old Product Type/Page classifier to avoid
-  // filling fields the manager did not choose.
-  const baseCuration = await curateItem(item, workspacePath, {
-    skipLegacyClassification: hasConfig && hasExplicitCurationTargets(classConfig),
-  });
-
-  if (!hasConfig) {
-    console.log('[ProductCurator] No classification config — returning classic curation only.');
-    return baseCuration;
+  // Sync config to cache so stages can read cached product types/attributes
+  try {
+    syncConfigToCache(workspaceId, classConfig);
+  } catch (err: any) {
+    console.warn(`[ProductCurator] Failed to sync config to cache: ${err.message}`);
   }
 
-  // Step 1: Create a config snapshot for reproducibility
+  // Create a config snapshot for reproducibility
   const snapshotId = createConfigSnapshot(workspaceId, classConfig);
   const snapshotHash = snapshotId;
 
-  // Step 2: Create a classification run
+  // Create a classification run
   const run = createRun(workspaceId, item.upc, snapshotId, snapshotHash, item.id);
 
-  // Step 3: Build the pipeline context
-  const context = {
+  // ── Product-line grouping (internal Curation substage) ────────────────
+  // Determine sibling context before running the pipeline so
+  // name_consolidation can produce consistent titles across variants.
+  let productLineGroup: ReturnType<typeof determineProductGroup> = null;
+  try {
+    const db = getDb();
+    const batchRows = db.query(
+      `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
+    ).all(item.id) as Array<{
+      id: string;
+      upc: string;
+      name: string;
+      brand_hint: string | null;
+      extraction_data_json: string | null;
+    }>;
+
+    const batchItems: OnboardingItem[] = batchRows.map(r => ({
+      id: r.id,
+      batchId: item.batchId,
+      upc: r.upc,
+      name: r.name,
+      price: null,
+      quantity: null,
+      brandHint: r.brand_hint,
+      departmentHint: null,
+      sourceUrl: null,
+      expectedName: null,
+      stage: 'curation' as const,
+      stageStatus: 'pending' as const,
+      rowNumber: 0,
+      isDuplicate: false,
+      existingSku: null,
+      extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
+      curationData: null,
+      status: 'active' as any,
+      errorMessage: null,
+      retryCount: 0,
+      createdAt: '',
+      updatedAt: '',
+    }));
+
+    productLineGroup = determineProductGroup(item, batchItems);
+    if (productLineGroup) {
+      console.log(`[ProductCurator] Product line group "${productLineGroup.groupId}": ${productLineGroup.siblingNames.length} siblings`);
+    }
+  } catch (err: any) {
+    console.warn(`[ProductCurator] Product-line grouping failed (non-blocking): ${err.message}`);
+  }
+
+  // Build the pipeline context
+  const context: import('../classification/types').StageContext = {
     workspacePath,
     workspaceId,
     runId: run.id,
@@ -295,82 +354,31 @@ export async function curateItemWithPipeline(
       sourceCommit: null,
       createdAt: new Date().toISOString(),
     },
+    productLineContext: productLineGroup
+      ? {
+          groupId: productLineGroup.groupId,
+          groupLabel: productLineGroup.groupLabel,
+          siblingNames: productLineGroup.siblingNames,
+          siblingWebTitles: productLineGroup.siblingWebTitles,
+          siblingOcrTitles: productLineGroup.siblingOcrTitles,
+          siblingSkus: productLineGroup.siblingSkus,
+        }
+      : undefined,
+    preComputedTitle: (item as any).coordinatedTitle ?? undefined,
   };
 
-  // Step 4: Build initial evidence from extraction data
-  const initialEvidence: ClassificationEvidence[] = [];
-  if (ext.title) {
-    initialEvidence.push({
-      id: '',
-      runId: run.id,
-      stageName: 'evidence_extraction',
-      productSku: item.upc,
-      attributeId: null,
-      source: 'official_product_page',
-      reliability: 'medium',
-      sourceUrl: ext.sourceUrl ?? null,
-      sourceField: 'title',
-      snippet: ext.title,
-      value: ext.title,
-      metadata: { provenance: 'web_scrape' },
-      capturedAt: new Date().toISOString(),
-    });
-  }
-  if (ext.description) {
-    initialEvidence.push({
-      id: '',
-      runId: run.id,
-      stageName: 'evidence_extraction',
-      productSku: item.upc,
-      attributeId: null,
-      source: 'official_product_page',
-      reliability: 'medium',
-      sourceUrl: ext.sourceUrl ?? null,
-      sourceField: 'description',
-      snippet: ext.description.slice(0, 500),
-      value: ext.description,
-      metadata: { provenance: 'web_scrape' },
-      capturedAt: new Date().toISOString(),
-    });
-  }
-  if (ext.primaryImage) {
-    initialEvidence.push({
-      id: '',
-      runId: run.id,
-      stageName: 'evidence_extraction',
-      productSku: item.upc,
-      attributeId: null,
-      source: 'visual_product_evidence',
-      reliability: 'medium',
-      sourceUrl: null,
-      sourceField: 'primary_image',
-      snippet: ext.primaryImage,
-      value: ext.primaryImage,
-      metadata: { provenance: 'local_image' },
-      capturedAt: new Date().toISOString(),
-    });
-  }
-  if (item.name) {
-    initialEvidence.push({
-      id: '',
-      runId: run.id,
-      stageName: 'evidence_extraction',
-      productSku: item.upc,
-      attributeId: null,
-      source: 'spreadsheet',
-      reliability: 'medium',
-      sourceUrl: null,
-      sourceField: 'name',
-      snippet: item.name,
-      value: item.name,
-      metadata: { provenance: 'spreadsheet_import' },
-      capturedAt: new Date().toISOString(),
-    });
+  if ((item as any).coordinatedTitle) {
+    console.log(`[ProductCurator] Using pre-computed coordinated title for ${item.upc}: "${(item as any).coordinatedTitle}"`);
   }
 
-  // Step 5: Run the pipeline
+  // Initial evidence starts empty — evidence_extraction stage handles
+  // reading the onboarding item's extraction_data_json from the DB
+  // and producing spreadsheet, web, and visual evidence entries.
+
+  // Run the full modular pipeline including name_consolidation
   const stages: StageDefinition[] = [
     evidenceExtractionStage,
+    nameConsolidationStage,
     primaryProductTypeStage,
     attributeApplicabilityStage,
     productAttributeProposalsStage,
@@ -382,7 +390,7 @@ export async function curateItemWithPipeline(
     const result = await runPipeline(stages, context, {
       sku: item.upc,
       onboardingItemId: item.id,
-      evidence: initialEvidence,
+      evidence: [],
       acceptedProposals: [],
       allProposals: [],
     });
@@ -397,8 +405,89 @@ export async function curateItemWithPipeline(
     const allProposals = getProposalsByRun(run.id);
     const stageResults = getStageResults(run.id);
 
+    // Build compatibility CurationData from pipeline outputs
+    // Name consolidation metadata comes from the name_consolidation stage output
+    const nameMeta = result.stageOutputs.name_consolidation?.metadata as Record<string, unknown> | undefined;
+    const curatedTitle = nameMeta?.curatedTitle as string ?? ext.title ?? item.name;
+    const titleSource = (nameMeta?.titleSource as string) ?? 'web';
+    const packagingOcrTitle = (nameMeta?.packagingOcrTitle as string | null) ??
+      ext.packagingOcrData?.productName ?? ext.packagingTitle ?? null;
+
+    // ── Collect and deduplicate page proposals ────────────────────────────
+    const pageProposals = allProposals
+      .filter(p => p.proposalType === 'category_page' && p.targetId)
+      .sort((a, b) => {
+        // Accepted first, then by confidence descending
+        if (a.status === 'accepted' && b.status !== 'accepted') return -1;
+        if (a.status !== 'accepted' && b.status === 'accepted') return 1;
+        return b.confidence - a.confidence;
+      });
+    const seenPages = new Set<string>();
+    const rawSuggestedPages: string[] = [];
+    for (const p of pageProposals) {
+      if (p.targetId && !seenPages.has(p.targetId)) {
+        seenPages.add(p.targetId);
+        rawSuggestedPages.push(p.targetId);
+      }
+    }
+
+    // ── Validate page assignments against species from VLM OCR evidence ───
+    const validatedPages = validatePageAssignmentsBySpecies(rawSuggestedPages, allEvidence);
+
+    // ── Validate that pages actually exist in the page_index (ADR 0005) ────
+    const existingPageNames = new Set(listPages().map(p => p.name));
+    let suggestedPages: string[] = [];
+    for (const pageName of validatedPages) {
+      if (existingPageNames.has(pageName)) {
+        suggestedPages.push(pageName);
+      } else {
+        console.warn(`[ProductCurator] Dropping non-existent page: "${pageName}"`);
+      }
+    }
+    // Limit to top 5 to keep suggestions reasonable
+    suggestedPages.splice(5);
+
+    // Suggested product type from the best available proposal
+    const typeSelection = selectPrimaryProductTypeProposal({
+      sku: item.upc,
+      onboardingItemId: item.id,
+      evidence: allEvidence,
+      acceptedProposals: [],
+      allProposals: allProposals,
+    });
+    const suggestedProductType = typeSelection.proposal?.targetId ?? null;
+
+    // Synthesize search keywords from richer pipeline data
+    const attributeProposals = allProposals.filter(p => p.proposalType === 'field_assignment' && p.status === 'accepted');
+    const attributeKeywords = attributeProposals
+      .map(p => {
+        const v = p.proposedValue;
+        return typeof v === 'string' ? v : Array.isArray(v) ? v.join(', ') : null;
+      })
+      .filter((v): v is string => !!v);
+    const speciesLabels = ext.packagingOcrData?.species ?? [];
+    const searchKeywords = synthesizeSearchKeywords({
+      title: curatedTitle,
+      brand: ext.brand ?? item.brandHint,
+      description: ext.description,
+      suggestedPages,
+      suggestedProductType,
+      species: speciesLabels,
+      lifeStage: ext.packagingOcrData?.lifeStage,
+      productForm: ext.packagingOcrData?.productForm,
+      attributes: attributeKeywords,
+    });
+
     return {
-      ...baseCuration,
+      curatedTitle,
+      searchKeywords,
+      packagingOcrTitle,
+      curatedWeight: convertToLbs(ext.packagingOcrData?.weight || ext.weight || null),
+      titleSource: titleSource as 'web' | 'ocr' | 'llm' | 'manual',
+      suggestedPages,
+      suggestedProductType,
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'auto',
       classificationRunId: run.id,
       classificationConfigSnapshot: context.configSnapshotRef,
       classificationEvidence: allEvidence,
@@ -417,6 +506,126 @@ export async function curateItemWithPipeline(
   } catch (err) {
     console.error(`[ProductCurator] Classification pipeline failed:`, err);
     completeRun(run.id, 'failed', err instanceof Error ? err.message : String(err));
-    return baseCuration;
+
+    // Minimal fallback — built from item data, NOT from legacy curateItem()
+    const fallbackTitle = ext.title ?? item.name ?? 'Unknown Product';
+    const fallbackKeywords = synthesizeSearchKeywords({
+      title: fallbackTitle,
+      brand: ext.brand ?? item.brandHint,
+      description: ext.description,
+    });
+
+    return {
+      curatedTitle: fallbackTitle,
+      searchKeywords: fallbackKeywords,
+      packagingOcrTitle: ext.packagingOcrData?.productName ?? ext.packagingTitle ?? null,
+      curatedWeight: convertToLbs(ext.packagingOcrData?.weight || ext.weight || null),
+      titleSource: 'web',
+      suggestedPages: [],
+      suggestedProductType: null,
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'auto',
+      classificationRunId: run.id,
+      classificationConfigSnapshot: context.configSnapshotRef,
+      classificationEvidence: [],
+      classificationProposals: [],
+      classificationDecisions: [],
+      classificationHistory: [],
+    };
   }
+}
+
+/**
+ * Synthesize search keywords from curated product data for ShopSite SearchKeywords.
+ * Combines title, brand, species/attributes, page names, and product type into
+ * a concise keyword string (capped at 250 chars).
+ */
+function synthesizeSearchKeywords(options: {
+  title: string;
+  brand?: string | null;
+  description?: string | null;
+  suggestedPages?: string[];
+  suggestedProductType?: string | null;
+  species?: string[];
+  lifeStage?: string | null;
+  productForm?: string | null;
+  attributes?: string[];
+}): string {
+  const parts: string[] = [];
+
+  // 1. Title + brand
+  if (options.title) parts.push(options.title);
+  if (options.brand && !options.title.toLowerCase().includes(options.brand.toLowerCase())) {
+    parts.push(options.brand);
+  }
+
+  // 2. Species + life stage + product form (from VLM OCR)
+  if (options.species && options.species.length > 0) {
+    const uniqueSpecies = [...new Set(options.species.map(s => s.toLowerCase()))];
+    for (const s of uniqueSpecies) {
+      if (!parts.some(p => p.toLowerCase().includes(s))) {
+        parts.push(s.charAt(0).toUpperCase() + s.slice(1));
+      }
+    }
+  }
+  if (options.lifeStage && !parts.some(p => p.toLowerCase().includes(options.lifeStage!.toLowerCase()))) {
+    parts.push(options.lifeStage);
+  }
+  if (options.productForm && !parts.some(p => p.toLowerCase().includes(options.productForm!.toLowerCase()))) {
+    parts.push(options.productForm);
+  }
+
+  // 3. Attribute values from classification
+  if (options.attributes && options.attributes.length > 0) {
+    for (const attr of options.attributes) {
+      if (attr && !parts.some(p => p.toLowerCase().includes(attr.toLowerCase()))) {
+        parts.push(attr);
+      }
+    }
+  }
+
+  // 4. Suggested product type
+  if (options.suggestedProductType && !parts.some(p => p.toLowerCase().includes(options.suggestedProductType!.toLowerCase()))) {
+    parts.push(options.suggestedProductType);
+  }
+
+  // 5. Page / category names
+  if (options.suggestedPages && options.suggestedPages.length > 0) {
+    const pageKeywords = options.suggestedPages
+      .filter(p => !parts.some(part => part.toLowerCase().includes(p.toLowerCase())))
+      .slice(0, 3); // limit to top 3 pages to avoid noise
+    parts.push(...pageKeywords);
+  }
+
+  // 6. Key phrases from description (extract noun phrases, limit to one)
+  if (options.description) {
+    const words = options.description.replace(/[<>[\]]/g, '').split(/\s+/).filter(w => w.length > 3);
+    const uniqueWords = [...new Set(words)];
+    const hasDescriptionContent = parts.some(p => {
+      const pWords = p.toLowerCase().split(/\s+/);
+      return pWords.some(w => uniqueWords.some(uw => uw.toLowerCase() === w));
+    });
+    if (!hasDescriptionContent && uniqueWords.length > 0) {
+      // Add up to 3 distinctive keywords from the description not already in parts
+      const allPartLower = parts.join(' ').toLowerCase();
+      const fresh = uniqueWords.filter(w => !allPartLower.includes(w.toLowerCase())).slice(0, 3);
+      parts.push(...fresh);
+    }
+  }
+
+  // Deduplicate and join, capped at 250 chars so it fits ShopSite's practical limit
+  const seen = new Set<string>();
+  const deduped = parts.filter(p => {
+    const key = p.toLowerCase().trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  let result = deduped.join(', ');
+  if (result.length > 250) {
+    result = result.substring(0, 250).replace(/,\s*[^,]*$/, '');
+  }
+
+  return result;
 }

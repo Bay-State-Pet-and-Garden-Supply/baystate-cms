@@ -54,6 +54,12 @@ import { collectImageSourcesFromElement, cleanAndDeduplicateImages, addImageSour
  */
 export interface GeneratedSelectorProfile {
   titleSelector: string | null;
+  /**
+   * Additional CSS selectors whose text content gets appended to the title
+   * with a " — " separator. Used when the product name is split across
+   * multiple elements (e.g. an h1 + a subheading div).
+   */
+  titleOptionalSelectors?: string[];
   descriptionSelector: string | null;
   imagesSelector: string | null;
   shopifyJSONPath: boolean;
@@ -694,9 +700,12 @@ INSTRUCTIONS:
 - If one or more variant/option candidates correspond to the real product variant selectors, propose a "variantSelectionStrategy" object using the most stable "containerSelector" from the variant candidates. Set "optionType" to dropdown|button_group|radio|unknown. Copy the discovered "detectedOptions" and inferred "optionFields". If none is a real variant selector, set "variantSelectionStrategy" to null.
 - An invalid or null "variantSelectionStrategy" does NOT invalidate the rest of the profile.
 
+- If the product title is split across multiple elements (e.g. an h1 and a separate subheading div), set titleSelector to the primary element and add the secondary element selector(s) to titleOptionalSelectors (an array of strings). Their text content will be appended with " — " to form the full title.
+
 Return JSON with exactly these keys:
 {
   "titleSelector": string|null,
+  "titleOptionalSelectors": string[],
   "descriptionSelector": string|null,
   "imagesSelector": string|null,
   "shopifyJSONPath": boolean,
@@ -778,6 +787,17 @@ function shapeFromParsed(parsed: unknown): GeneratedSelectorProfile | null {
     out.shopifyJSONPath = obj.shopifyJSONPath;
   }
 
+  // Parse titleOptionalSelectors (array of CSS selectors appended to the title)
+  const rawOptional = obj.titleOptionalSelectors;
+  if (Array.isArray(rawOptional)) {
+    const valid = (rawOptional as unknown[])
+      .filter((s): s is string => typeof s === 'string' && s.trim().length > 0 && isSupportedSelectorSyntax(s.trim()))
+      .map(s => s.trim());
+    if (valid.length > 0) {
+      out.titleOptionalSelectors = valid;
+    }
+  }
+
   if (!out.titleSelector) return null;
   return out;
 }
@@ -837,7 +857,14 @@ export function buildSeedPreview(
   // Fall back to CSS selectors
   try {
     const $ = cheerio.load(html);
-    const title = profile.titleSelector ? $(profile.titleSelector).first().text().trim() || null : null;
+    let title = profile.titleSelector ? $(profile.titleSelector).first().text().trim() || null : null;
+    if (title && profile.titleOptionalSelectors?.length) {
+      const extras = profile.titleOptionalSelectors
+        .map(sel => $(sel).first().text().trim())
+        .filter(Boolean)
+        .join(' — ');
+      if (extras) title += ' — ' + extras;
+    }
     const description = profile.descriptionSelector ? $(profile.descriptionSelector).first().text().trim().slice(0, 500) || null : null;
     let images: string[] = [];
     if (profile.imagesSelector) {
@@ -997,7 +1024,7 @@ export function validateGeneratedProfile(
   const $ = cheerio.load(html);
 
   // Title (required).
-  const titleText = $(selectors.titleSelector).first().text().trim();
+  let titleText = $(selectors.titleSelector).first().text().trim();
   if (!titleText) {
     return {
       valid: false,
@@ -1008,6 +1035,16 @@ export function validateGeneratedProfile(
       selectors,
       readyForReview: false,
     };
+  }
+  // Concatenate optional title selectors if present
+  if (selectors.titleOptionalSelectors?.length) {
+    const extras = selectors.titleOptionalSelectors
+      .map(sel => $(sel).first().text().trim())
+      .filter(Boolean)
+      .join(' — ');
+    if (extras) {
+      titleText += ' — ' + extras;
+    }
   }
   fieldSamples.title = titleText;
 
