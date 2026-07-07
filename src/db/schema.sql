@@ -196,6 +196,22 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS catalog_health_proposals (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  field TEXT NOT NULL,
+  old_value TEXT NOT NULL,
+  new_value TEXT NOT NULL,
+  affected_skus TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 1.0,
+  source TEXT NOT NULL DEFAULT 'deterministic',
+  status TEXT NOT NULL DEFAULT 'proposed',
+  change_set_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_product_index_sku ON product_index(sku);
 CREATE INDEX IF NOT EXISTS idx_product_index_status ON product_index(status);
 CREATE INDEX IF NOT EXISTS idx_product_index_title ON product_index(title);
@@ -203,6 +219,9 @@ CREATE INDEX IF NOT EXISTS idx_change_set_items_change_set ON change_set_items(c
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_workspace ON sync_jobs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_remote_drift_workspace ON remote_drift(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_workspace ON audit_log(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_health_proposals_ws ON catalog_health_proposals(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_health_proposals_status ON catalog_health_proposals(status);
 
 INSERT OR IGNORE INTO app_meta (key, value) VALUES ('schema_version', '1');
 INSERT OR IGNORE INTO app_meta (key, value) VALUES ('app_version', '0.1.0');
+

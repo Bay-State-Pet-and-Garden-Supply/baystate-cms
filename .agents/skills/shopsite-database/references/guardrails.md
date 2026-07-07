@@ -20,7 +20,9 @@ If the user asks to automate XML uploads for tables outside `products` or `pages
 ### Full schema requests
 If the user asks for a full XML schema, exact required tags, or a page XML root element:
 
-> The crawlable ShopSite XML pages do not publish a full official XML schema for that database. I can give you a documentation-derived starter where one exists, but I can’t label guessed tags or required fields as official.
+> Product field names, types, defaults, and allowed values ARE documented in the `shopsite-product-fields` skill. Page field names, types, defaults, and allowed values ARE documented in the `shopsite-page-fields` skill. However, the exact XML tag names for fields not yet confirmed by the codebase or a real export are **inferred**, not guaranteed. The full DTD content, the page XML root element, and the page DTD name are still unspecified.
+
+> I can give you a documentation-derived starter based on the field catalogs, but I can’t label inferred XML tags as official. Export a real sample from the target store to confirm.
 
 ### Authentication questions
 If the user asks for session cookies, auth headers, login parameters, or a definitive execution recipe:
@@ -76,9 +78,10 @@ Suggested wording:
 ## Safe next-best moves
 
 When the docs run out, recommend one of these grounded next steps:
-- export a product/page sample from the target ShopSite store and treat that as the authoritative XML template
-- confirm environment-specific auth details from the store’s actual setup
-- compare the user’s real upload results/report against the documented workflow
+- consult the `shopsite-product-fields` or `shopsite-page-fields` skill for documented field names, types, defaults, and allowed values
+- export a product/page sample from the target ShopSite store and treat that as the authoritative XML template for confirming tag names
+- confirm environment-specific auth details from the store's actual setup
+- compare the user's real upload results/report against the documented workflow
 - use a safer matching key before attempting a large update
 
 ## Response pattern

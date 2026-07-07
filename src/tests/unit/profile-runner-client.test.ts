@@ -42,10 +42,9 @@ describe('runProfileExtraction image deduplication', () => {
             '//mywoof.com/cdn/shop/files/Woof_Fly-n-Feed_Gallery_1200x1200_3_0a05886a-ca80-4ad5-834b-790a163c0916.png?v=1760192970&width=1200',
             '//mywoof.com/cdn/shop/files/Woof_Fly-n-Feed_Gallery_1200x1200_3_0a05886a-ca80-4ad5-834b-790a163c0916.png?v=1760192970&width=165',
           ],
-          provenance: {},
         },
         warnings: [],
-      },
+      } as any,
     });
 
     const result = await runProfileExtraction({

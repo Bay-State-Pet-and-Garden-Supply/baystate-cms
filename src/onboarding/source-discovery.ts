@@ -40,6 +40,7 @@ import { getCachedSitemapUrls, insertSitemapCache } from '../db/repositories/sit
 import { fetchAndParseSitemap } from './sitemap-fetcher';
 import { matchSitemapUrls, type SitemapMatchResult } from './sitemap-matcher';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
+import { resolveVariantsForCandidates } from './variant-url-resolver';
 
 interface SerperSearchResult {
   title: string;
@@ -66,6 +67,7 @@ export async function discoverSources(
   upc: string,
   name: string,
   brandHint?: string | null,
+  options?: { price?: number | null }
 ): Promise<{ candidates: InsertSourceData[]; consolidatedName: string | null }> {
   const apiKeyRow = getApiKey('serper');
   if (!apiKeyRow) {
@@ -274,8 +276,19 @@ export async function discoverSources(
   // cross-source boost/penalty rules before we sort and cap.
   const merged = mergeSitemapAndSerperCandidates(candidates, sitemapCandidates, primaryDomain);
 
+  // Run variant resolution on top candidates
+  const variantResolved = await resolveVariantsForCandidates({
+    candidates: merged,
+    upc,
+    rawName: name,
+    expectedName: consolidatedName || name,
+    brandHint,
+    brandDomains,
+    price: options?.price,
+  });
+
   // Sort by confidence descending
-  merged.sort((a, b) => b.confidence - a.confidence);
+  variantResolved.sort((a, b) => b.confidence - a.confidence);
 
   // Cap to the top 10 — but guarantee that at least one `serper_name`
   // AND at least one `sitemap_name`/`sitemap_upc` candidate survive
@@ -283,7 +296,7 @@ export async function discoverSources(
   // shows results from every discovery method that produced a hit.
   // Sitemap candidates that the cross-source boost pushed above 1.0
   // are clamped back into [0, 1] here.
-  const topCandidates = selectTopCandidates(merged, 10).map(c => ({
+  const topCandidates = selectTopCandidates(variantResolved, 10).map(c => ({
     ...c,
     confidence: Math.max(0, Math.min(1, c.confidence))
   }));

@@ -493,8 +493,15 @@ async function classificationRequest<T>(path: string, options?: RequestInit): Pr
   return data as T;
 }
 
-async function getClassificationConfig(): Promise<ClassificationConfigResponse> {
+export async function getClassificationConfig(): Promise<ClassificationConfigResponse> {
   return classificationRequest<ClassificationConfigResponse>('/config');
+}
+
+export async function saveClassificationConfig(config: any): Promise<{ success: boolean; config: any }> {
+  return classificationRequest<{ success: boolean; config: any }>('/config', {
+    method: 'PUT',
+    body: JSON.stringify({ config }),
+  });
 }
 
 export async function getCurationTargets(): Promise<CurationTargetsResponse> {

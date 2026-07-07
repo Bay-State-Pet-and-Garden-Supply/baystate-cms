@@ -12,7 +12,6 @@ import {
   selectSource,
   type InsertSourceData,
 } from '../db/repositories/onboarding-source-repo';
-import { resolveVariantUrl } from './variant-resolver';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
@@ -77,10 +76,18 @@ export function getOfficialDomainsForBrand(brandHint: string | null | undefined)
  */
 function manualReviewReasonForDiscovery(
   item: any,
-  bestSource: { domain?: string | null } | undefined,
+  bestSource: any,
   officialDomains: string[],
   sitemapCandidateCount = 0,
 ): string {
+  if (bestSource && bestSource.metadataJson) {
+    try {
+      const meta = JSON.parse(bestSource.metadataJson);
+      if (meta.variantResolution?.status === 'ambiguous') {
+        return `needs_review: variant resolution is ambiguous for base product page: ${meta.variantResolution.variantTitle || 'unknown'}`;
+      }
+    } catch {}
+  }
   if (!item.brandHint || !String(item.brandHint).trim()) {
     return 'needs_review: no brand assigned for official-domain auto-selection';
   }
@@ -225,7 +232,9 @@ export class OnboardingWorker {
     }
 
     try {
-      const discovery = await discoverSources(item.upc, item.name, item.brandHint);
+      const discovery = await discoverSources(item.upc, item.name, item.brandHint, {
+        price: item.price ? parseFloat(item.price) : null
+      });
       const sources = discovery.candidates;
       const consolidatedName = discovery.consolidatedName;
 
@@ -270,56 +279,41 @@ export class OnboardingWorker {
         // independent signal that the URL is the canonical product
         // page). Otherwise fall back to the existing top-source-on-
         // official-domain check. Open-web candidates are still inserted
-        // for manual review either way.
+        // for manual review either way. Exclude ambiguous variant candidates.
+        const isAmbiguous = (s: InsertSourceData) => {
+          if (!s.metadataJson) return false;
+          try {
+            const meta = JSON.parse(s.metadataJson);
+            return meta.variantResolution?.status === 'ambiguous';
+          } catch {
+            return false;
+          }
+        };
+
         const officialDomains = getOfficialDomainsForBrand(item.brandHint);
         const eligibleSitemapSource = sitemapCandidates.find(
-          sc => sc.confidence > 0.7 && officialDomains.some(d => isOfficialDomainMatch(sc.domain, d)),
+          sc => sc.confidence > 0.7 && 
+                officialDomains.some(d => isOfficialDomainMatch(sc.domain, d)) &&
+                !isAmbiguous(sc),
         );
         const autoSelectedSource: InsertSourceData | null =
           eligibleSitemapSource ??
-          (officialDomains.some(d => isOfficialDomainMatch(bestSource.domain, d))
+          (bestSource &&
+           officialDomains.some(d => isOfficialDomainMatch(bestSource.domain, d)) &&
+           !isAmbiguous(bestSource)
             ? bestSource
             : null);
         const shouldAutoSelect = autoSelectedSource !== null;
 
         if (shouldAutoSelect && autoSelectedSource) {
-          const originalUrl = autoSelectedSource.url;
-          let resolvedUrl = originalUrl;
-          try {
-            const resolved = await resolveVariantUrl(
-              originalUrl,
-              item.name,
-              consolidatedName,
-              item.brandHint,
-            );
-            if (resolved.variantId) {
-              resolvedUrl = resolved.resolvedUrl;
-              console.log(
-                `[OnboardingWorker] ✓ Variant resolved for "${item.name}": ` +
-                `${resolved.resolvedUrl} (variant "${resolved.variantTitle}", ` +
-                `method: ${resolved.method}, confidence: ${(resolved.confidence * 100).toFixed(0)}%)`
-              );
-            } else if (resolved.ambiguous) {
-              console.log(
-                `[OnboardingWorker] ⚠ Variant ambiguous for "${item.name}": ` +
-                `${resolved.totalVariants} variants, could not distinguish — using base URL`
-              );
-            }
-          } catch (err) {
-            console.warn(`[OnboardingWorker] Variant resolution failed for "${item.name}":`, err);
-          }
-
+          const resolvedUrl = autoSelectedSource.url;
           setDiscoverySourceUrl(item.id, resolvedUrl);
 
           // Find the inserted counterpart of the auto-selected source
-          // by the ORIGINAL URL — it may not be at index 0 when the eligible
-          // sitemap candidate wins over the top Serper result.
-          const autoSelectedIndex = sources.findIndex(
-            s => s.url === originalUrl,
+          // by URL.
+          const autoSelectedInserted = insertedSources.find(
+            s => s.url === resolvedUrl,
           );
-          const autoSelectedInserted = autoSelectedIndex >= 0
-            ? insertedSources[autoSelectedIndex]
-            : null;
           if (autoSelectedInserted) {
             selectSource(autoSelectedInserted.id);
           }
@@ -328,9 +322,6 @@ export class OnboardingWorker {
             `[OnboardingWorker] ✓ Auto-selected official source for "${item.name}" (${item.upc}): ` +
             `${resolvedUrl} (domain ${autoSelectedSource.domain ?? 'n/a'} matches ${officialDomains.join(', ')})`
           );
-
-          // Update autoSelectedSource URL for the SSE event below
-          autoSelectedSource.url = resolvedUrl;
         } else {
           const manualReviewReason = manualReviewReasonForDiscovery(
             item,

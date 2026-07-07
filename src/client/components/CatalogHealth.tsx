@@ -4,15 +4,25 @@ import {
   getCatalogHealthReport, 
   getHealthConfig, 
   saveHealthConfig, 
+  listFieldRegistry,
+  getStoreManagerInsights,
+  listStoreManagerProposals,
+  generateStoreManagerProposals,
+  applyStoreManagerProposal,
+  dismissStoreManagerProposal,
+  getStoreManagerReport,
   type CatalogHealthReport, 
   type CatalogHealthIssue, 
-  type HealthRuleConfig 
+  type HealthRuleConfig,
+  type CatalogProposal,
+  type ProductFieldAuditReport,
+  type AssistantCleanupReport
 } from '../api';
 
 const STYLE_RULES = `
-  .health-container {
+  .store-manager-container {
     padding: 32px 24px;
-    max-width: 1200px;
+    max-width: 1250px;
     margin: 0 auto;
     color: #1f2937;
     animation: fadeIn 0.4s ease-out;
@@ -21,32 +31,74 @@ const STYLE_RULES = `
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
   }
-  .health-header {
+  
+  .store-manager-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 32px;
+    margin-bottom: 24px;
     gap: 16px;
     flex-wrap: wrap;
   }
-  .health-title-group h1 {
+  
+  .title-group h1 {
     font-size: 28px;
     font-weight: 800;
     color: #111827;
     margin: 0 0 6px 0;
     letter-spacing: -0.6px;
   }
-  .health-title-group p {
+  
+  .title-group p {
     color: #6b7280;
     margin: 0;
     font-size: 14px;
     font-weight: 500;
   }
-  .header-buttons {
+  
+  /* Tabs Navigation */
+  .store-manager-tabs {
     display: flex;
-    gap: 12px;
-    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid #e5e7eb;
+    margin-bottom: 32px;
+    overflow-x: auto;
+    padding-bottom: 1px;
   }
+  
+  .tab-btn {
+    background: none;
+    border: none;
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #4b5563;
+    cursor: pointer;
+    position: relative;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  
+  .tab-btn:hover {
+    color: #111827;
+  }
+  
+  .tab-btn.active {
+    color: #4f46e5;
+  }
+  
+  .tab-btn.active::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: #4f46e5;
+    border-radius: 2px;
+  }
+  
+  /* General Buttons */
   .btn-primary {
     background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
     color: white;
@@ -62,19 +114,23 @@ const STYLE_RULES = `
     align-items: center;
     gap: 8px;
   }
+  
   .btn-primary:hover:not(:disabled) {
     transform: translateY(-1px);
     box-shadow: 0 6px 16px rgba(79, 70, 229, 0.35);
     filter: brightness(1.05);
   }
+  
   .btn-primary:active:not(:disabled) {
     transform: translateY(1px);
   }
+  
   .btn-primary:disabled {
     opacity: 0.6;
     cursor: not-allowed;
     box-shadow: none;
   }
+  
   .btn-secondary {
     background: white;
     color: #374151;
@@ -89,11 +145,13 @@ const STYLE_RULES = `
     align-items: center;
     gap: 8px;
   }
+  
   .btn-secondary:hover:not(:disabled) {
     background: #f9fafb;
     border-color: #cbd5e1;
     color: #111827;
   }
+  
   .btn-secondary.active {
     background: #f5f3ff;
     border-color: #c7d2fe;
@@ -107,6 +165,7 @@ const STYLE_RULES = `
     gap: 20px;
     margin-bottom: 32px;
   }
+  
   .health-kpi-card {
     background: white;
     border: 1px solid #e5e7eb;
@@ -116,11 +175,13 @@ const STYLE_RULES = `
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
     transition: all 0.2s;
   }
+  
   .health-kpi-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 10px 20px rgba(0, 0, 0, 0.03);
     border-color: #cbd5e1;
   }
+  
   .kpi-score-ring {
     position: absolute;
     top: 24px;
@@ -128,14 +189,16 @@ const STYLE_RULES = `
     width: 50px;
     height: 50px;
   }
+  
   .kpi-label {
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     color: #6b7280;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     margin-bottom: 8px;
   }
+  
   .kpi-value {
     font-size: 32px;
     font-weight: 800;
@@ -143,13 +206,14 @@ const STYLE_RULES = `
     line-height: 1.1;
     margin-bottom: 8px;
   }
+  
   .kpi-subtext {
     font-size: 13px;
     color: #6b7280;
     font-weight: 500;
   }
-
-  /* Configuration Panel */
+  
+  /* Settings panel styling */
   .settings-panel {
     background: white;
     border: 1px solid #e5e7eb;
@@ -157,12 +221,8 @@ const STYLE_RULES = `
     padding: 24px;
     margin-bottom: 32px;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03);
-    animation: slideDown 0.25s ease-out;
   }
-  @keyframes slideDown {
-    from { opacity: 0; transform: translateY(-8px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
+  
   .settings-title-row {
     display: flex;
     justify-content: space-between;
@@ -171,22 +231,23 @@ const STYLE_RULES = `
     padding-bottom: 12px;
     border-bottom: 1px solid #f3f4f6;
   }
+  
   .settings-title-row h2 {
     font-size: 18px;
     font-weight: 800;
     color: #111827;
     margin: 0;
-    letter-spacing: -0.4px;
   }
+  
   .rules-grid {
     display: flex;
     flex-direction: column;
     gap: 12px;
     margin-bottom: 24px;
-    max-height: 400px;
+    max-height: 350px;
     overflow-y: auto;
-    padding-right: 8px;
   }
+  
   .rule-config-row {
     display: grid;
     grid-template-columns: 2fr 1fr;
@@ -196,33 +257,20 @@ const STYLE_RULES = `
     border: 1px solid #f3f4f6;
     background: #fafafa;
     border-radius: 10px;
-    transition: all 0.2s;
   }
-  .rule-config-row:hover {
-    border-color: #cbd5e1;
-    background: #f8fafc;
-  }
-  @media (max-width: 640px) {
-    .rule-config-row {
-      grid-template-columns: 1fr;
-      align-items: flex-start;
-      gap: 12px;
-    }
-  }
+  
   .rule-info h4 {
     margin: 0 0 4px 0;
     font-size: 13.5px;
-    font-weight: 700;
     color: #1f2937;
-    display: flex;
-    align-items: center;
-    gap: 8px;
   }
+  
   .rule-info p {
     margin: 0;
     font-size: 12px;
     color: #6b7280;
   }
+  
   .rule-default-badge {
     font-size: 10px;
     background: #e2e8f0;
@@ -230,31 +278,18 @@ const STYLE_RULES = `
     padding: 1px 6px;
     border-radius: 4px;
     font-weight: 500;
+    margin-left: 8px;
   }
-  .severity-select-wrapper {
-    display: flex;
-    justify-content: flex-end;
-    width: 100%;
-  }
+  
   .severity-select {
-    padding: 8px 12px;
+    padding: 6px 12px;
     border: 1px solid #d1d5db;
     border-radius: 6px;
-    background-color: white;
     font-size: 13px;
     font-weight: 600;
-    color: #374151;
-    outline: none;
     cursor: pointer;
-    transition: all 0.15s;
-    width: 100%;
-    max-width: 160px;
-    box-sizing: border-box;
   }
-  .severity-select:focus {
-    border-color: #4f46e5;
-    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
-  }
+  
   .settings-actions {
     display: flex;
     justify-content: flex-end;
@@ -262,8 +297,8 @@ const STYLE_RULES = `
     padding-top: 16px;
     border-top: 1px solid #f3f4f6;
   }
-
-  /* Filters */
+  
+  /* Filter and search bar */
   .filter-section {
     background: white;
     border: 1px solid #e5e7eb;
@@ -276,238 +311,494 @@ const STYLE_RULES = `
     gap: 16px;
     flex-wrap: wrap;
   }
+  
   .search-input-wrapper {
     position: relative;
     flex-grow: 1;
     max-width: 400px;
   }
+  
   .search-input {
     width: 100%;
     padding: 8px 12px 8px 36px;
     border: 1px solid #e5e7eb;
     border-radius: 8px;
     font-size: 14px;
-    transition: all 0.15s;
     outline: none;
     box-sizing: border-box;
   }
-  .search-input:focus {
-    border-color: #4f46e5;
-    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
-  }
+  
   .search-icon {
     position: absolute;
     left: 12px;
     top: 50%;
     transform: translateY(-50%);
     color: #9ca3af;
-    pointer-events: none;
   }
+  
   .filter-tabs {
     display: flex;
     gap: 8px;
   }
+  
   .filter-btn {
-    background: #f3f4f6;
-    border: 1px solid transparent;
-    color: #4b5563;
-    padding: 6px 14px;
+    background: none;
+    border: 1px solid #e5e7eb;
+    padding: 8px 14px;
     border-radius: 6px;
     font-size: 13px;
     font-weight: 600;
+    color: #4b5563;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: all 0.2s;
   }
-  .filter-btn:hover {
-    background: #e5e7eb;
-    color: #1f2937;
-  }
+  
   .filter-btn.active {
-    background: #e0e7ff;
-    color: #4f46e5;
-    border-color: #c7d2fe;
+    background: #f3f4f6;
+    border-color: #d1d5db;
+    color: #111827;
   }
-
-  /* Issue Cards */
-  .issues-list {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
+  
+  /* Issue List Card view */
   .product-issue-card {
     background: white;
     border: 1px solid #e5e7eb;
     border-radius: 12px;
+    margin-bottom: 16px;
     overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.01);
-    transition: all 0.2s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
   }
-  .product-issue-card:hover {
-    border-color: #cbd5e1;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
-  }
+  
   .product-card-header {
-    padding: 16px 20px;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    padding: 16px 20px;
     cursor: pointer;
     background: #fafafa;
     user-select: none;
   }
+  
   .product-card-header:hover {
     background: #f5f5f5;
   }
+  
   .product-title-area {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 16px;
   }
+  
   .product-badge-blocker {
     background: #fef2f2;
-    color: #dc2626;
-    border: 1px solid #fee2e2;
-    padding: 2px 8px;
-    border-radius: 6px;
+    color: #ef4444;
+    padding: 4px 10px;
+    border-radius: 9999px;
     font-size: 11px;
     font-weight: 700;
-    text-transform: uppercase;
+    border: 1px solid #fecaca;
   }
+  
   .product-badge-warning {
     background: #fffbeb;
-    color: #d97706;
+    color: #f59e0b;
+    padding: 4px 10px;
+    border-radius: 9999px;
+    font-size: 11px;
+    font-weight: 700;
     border: 1px solid #fef3c7;
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
   }
+  
   .product-badge-info {
-    background: #f0fdf4;
-    color: #16a34a;
-    border: 1px solid #dcfce7;
-    padding: 2px 8px;
-    border-radius: 6px;
+    background: #ecfdf5;
+    color: #10b981;
+    padding: 4px 10px;
+    border-radius: 9999px;
     font-size: 11px;
     font-weight: 700;
-    text-transform: uppercase;
+    border: 1px solid #a7f3d0;
   }
+  
   .product-meta h3 {
     margin: 0 0 2px 0;
     font-size: 15px;
     font-weight: 700;
     color: #111827;
   }
+  
   .product-meta span {
     font-size: 12px;
     color: #6b7280;
     font-weight: 500;
   }
+  
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 16px;
   }
+  
   .btn-edit-product {
     background: white;
     border: 1px solid #d1d5db;
-    color: #374151;
     padding: 6px 12px;
     border-radius: 6px;
     font-size: 12px;
     font-weight: 600;
+    color: #374151;
     cursor: pointer;
-    transition: all 0.15s;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
+    transition: all 0.2s;
   }
+  
   .btn-edit-product:hover {
     background: #f9fafb;
-    border-color: #cbd5e1;
     color: #111827;
+    border-color: #cbd5e1;
   }
+  
   .chevron-icon {
-    transition: transform 0.2s ease;
-    color: #6b7280;
+    transition: transform 0.2s;
+    color: #9ca3af;
   }
+  
   .chevron-icon.open {
     transform: rotate(180deg);
   }
+  
   .product-card-body {
+    border-top: 1px solid #e5e7eb;
     padding: 16px 20px;
-    border-top: 1px solid #f3f4f6;
     background: white;
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    animation: slideDown 0.2s ease-out;
+    gap: 12px;
   }
+  
   .issue-row {
     display: flex;
     gap: 12px;
-    align-items: flex-start;
-    padding: 8px 12px;
-    border-radius: 6px;
+    padding: 12px;
+    border-radius: 8px;
   }
-  .issue-row.blocker {
-    background: #fff5f5;
-    border-left: 4px solid #f87171;
-  }
-  .issue-row.warning {
-    background: #fffbeb;
-    border-left: 4px solid #fbbf24;
-  }
-  .issue-row.info {
-    background: #f0fdf4;
-    border-left: 4px solid #4ade80;
-  }
-  .issue-icon {
-    margin-top: 2px;
-    flex-shrink: 0;
-  }
-  .issue-text {
-    flex-grow: 1;
-  }
+  
+  .issue-row.blocker { background: #fef2f2; border-left: 4px solid #ef4444; }
+  .issue-row.warning { background: #fffbeb; border-left: 4px solid #f59e0b; }
+  .issue-row.info { background: #ecfdf5; border-left: 4px solid #10b981; }
+  
   .issue-msg {
-    font-size: 13px;
+    margin: 0 0 4px 0;
+    font-size: 13.5px;
     font-weight: 600;
     color: #1f2937;
-    margin: 0 0 2px 0;
   }
+  
   .issue-code {
     font-size: 11px;
-    font-family: monospace;
-    font-weight: 600;
     color: #6b7280;
+    font-weight: 500;
+    display: flex;
+    gap: 12px;
   }
+  
   .issue-field {
-    margin-left: 8px;
-    background: rgba(0, 0, 0, 0.05);
-    padding: 1px 4px;
-    border-radius: 4px;
+    font-weight: 600;
+    color: #4b5563;
   }
-
-  /* Empty state */
+  
   .empty-state {
     text-align: center;
-    padding: 48px 24px;
+    padding: 60px 40px;
     background: white;
-    border: 1px dashed #d1d5db;
-    border-radius: 12px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 16px;
     color: #6b7280;
   }
+  
   .empty-state h3 {
     margin: 0 0 8px 0;
-    color: #111827;
-    font-size: 16px;
-    font-weight: 700;
+    color: #1f2937;
   }
+  
   .empty-state p {
     margin: 0;
     font-size: 14px;
   }
+  
+  /* Audit Report & Cleanup Tab CSS */
+  .cleanup-controls-bar {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  
+  .field-select-group {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  
+  .field-select-label {
+    font-size: 14px;
+    font-weight: 700;
+    color: #374151;
+  }
+  
+  .field-select {
+    padding: 8px 16px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #1f2937;
+    background: white;
+    cursor: pointer;
+    outline: none;
+  }
+  
+  .field-select:focus {
+    border-color: #4f46e5;
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
+  }
+  
+  .cleanup-actions-group {
+    display: flex;
+    gap: 12px;
+  }
+  
+  .audit-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin-bottom: 32px;
+  }
+  
+  .audit-kpi-card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.01);
+  }
+  
+  .cleanup-section-card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 24px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  }
+  
+  .cleanup-section-card h3 {
+    margin: 0 0 16px 0;
+    font-size: 16px;
+    font-weight: 800;
+    color: #111827;
+    border-bottom: 1px solid #f3f4f6;
+    padding-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  .cleanup-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+    text-align: left;
+  }
+  
+  .cleanup-table th {
+    padding: 10px 12px;
+    background: #f8fafc;
+    color: #475569;
+    font-weight: 700;
+    border-bottom: 2px solid #e2e8f0;
+  }
+  
+  .cleanup-table td {
+    padding: 12px;
+    border-bottom: 1px solid #f1f5f9;
+    color: #334155;
+  }
+  
+  .cleanup-table tr:last-child td {
+    border-bottom: none;
+  }
+  
+  .casing-value-item {
+    padding: 4px 8px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 12px;
+    margin-right: 8px;
+    display: inline-block;
+  }
+  
+  /* Proposal card layout */
+  .proposal-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  
+  .proposal-card {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 20px;
+    transition: all 0.2s;
+  }
+  
+  .proposal-card:hover {
+    border-color: #cbd5e1;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+  }
+  
+  .proposal-info {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-grow: 1;
+  }
+  
+  .proposal-field-badge {
+    background: #e0e7ff;
+    color: #4338ca;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-block;
+    align-self: flex-start;
+  }
+  
+  .proposal-source-badge-ai {
+    background: #f5f3ff;
+    color: #6d28d9;
+    border: 1px solid #ddd6fe;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-block;
+    align-self: flex-start;
+  }
+  
+  .proposal-source-badge-det {
+    background: #ecfdf5;
+    color: #047857;
+    border: 1px solid #a7f3d0;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-block;
+    align-self: flex-start;
+  }
+  
+  .proposal-diff-flow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 15px;
+    font-weight: 700;
+    flex-wrap: wrap;
+  }
+  
+  .old-val-text {
+    color: #ef4444;
+    text-decoration: line-through;
+    background: #fef2f2;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  
+  .new-val-text {
+    color: #10b981;
+    background: #ecfdf5;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  
+  .proposal-meta-details {
+    display: flex;
+    gap: 16px;
+    font-size: 12.5px;
+    color: #64748b;
+    font-weight: 500;
+    align-items: center;
+  }
+  
+  .proposal-reason {
+    color: #334155;
+    font-weight: 600;
+  }
+  
+  .proposal-actions {
+    display: flex;
+    gap: 10px;
+  }
+  
+  /* Assistant markdown area */
+  .assistant-report-body {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 16px;
+    padding: 32px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+    line-height: 1.6;
+    color: #334155;
+  }
+  
+  .assistant-status-bar {
+    background: #f5f3ff;
+    border: 1px solid #ddd6fe;
+    padding: 12px 20px;
+    border-radius: 12px;
+    color: #6d28d9;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  /* Loader helper */
+  .tab-loader {
+    text-align: center;
+    padding: 80px 40px;
+  }
+  
+  .spinner-ring {
+    display: inline-block;
+    width: 32px;
+    height: 32px;
+    border: 3px solid #e2e8f0;
+    border-top-color: #4f46e5;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 `;
 
 interface CatalogHealthProps {
@@ -515,12 +806,16 @@ interface CatalogHealthProps {
 }
 
 export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
+  // Navigation / Tabs
+  const [activeTab, setActiveTab] = useState<'overview' | 'cleanup' | 'proposals' | 'assistant'>('overview');
+  
+  // General health report states
   const [report, setReport] = useState<CatalogHealthReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
-  const [filterType, setFilterType] = useState<'all' | 'blockers' | 'warnings' | 'healthy'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'blockers' | 'warnings'>('all');
   const [expandedProducts, setExpandedProducts] = useState<Record<string, boolean>>({});
 
   // Configuration States
@@ -528,6 +823,23 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
   const [rules, setRules] = useState<HealthRuleConfig[]>([]);
   const [savingSettings, setSavingSettings] = useState(false);
 
+  // Store Manager states
+  const [selectedField, setSelectedField] = useState('ProductField24'); // default category
+  const [customFields, setCustomFields] = useState<Array<{ xmlField: string; label: string }>>([]);
+  const [auditReport, setAuditReport] = useState<ProductFieldAuditReport | null>(null);
+  const [proposals, setProposals] = useState<CatalogProposal[]>([]);
+  const [assistantReport, setAssistantReport] = useState<AssistantCleanupReport | null>(null);
+  
+  // Loading sub-states
+  const [loadingAudit, setLoadingAudit] = useState(false);
+  const [loadingProposals, setLoadingProposals] = useState(false);
+  const [loadingAssistant, setLoadingAssistant] = useState(false);
+  const [generatingProposals, setGeneratingProposals] = useState(false);
+  const [applyingProposalId, setApplyingProposalId] = useState<string | null>(null);
+  const [aiScanStatus, setAiScanStatus] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // 1. Initial Load of Health Report & Config
   const fetchReport = async () => {
     try {
       setLoading(true);
@@ -550,11 +862,89 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
     }
   };
 
+  // Load Custom Fields from Field Registry
+  const fetchCustomFields = async () => {
+    try {
+      const res = await listFieldRegistry();
+      // Filter fields that are custom or start with ProductField
+      const fields = (res.entries || [])
+        .filter((f: any) => f.kind === 'custom' || f.xmlField.startsWith('ProductField'))
+        .map((f: any) => ({
+          xmlField: f.xmlField,
+          label: f.label || f.xmlField,
+        }));
+      
+      // Fallback defaults if registry is empty
+      if (fields.length === 0) {
+        fields.push(
+          { xmlField: 'ProductField24', label: 'Category (ProductField24)' },
+          { xmlField: 'ProductField16', label: 'Brand (ProductField16)' }
+        );
+      }
+      setCustomFields(fields);
+    } catch (err) {
+      console.error('Failed to load custom fields registry:', err);
+    }
+  };
+
   useEffect(() => {
     fetchReport();
     fetchConfig();
+    fetchCustomFields();
   }, []);
 
+  // 2. Load tab-specific data when active tab changes
+  useEffect(() => {
+    if (activeTab === 'cleanup') {
+      loadAuditReport(selectedField);
+    } else if (activeTab === 'proposals') {
+      loadProposals();
+    } else if (activeTab === 'assistant') {
+      loadAssistantReport();
+    }
+  }, [activeTab, selectedField]);
+
+  // Tab Load functions
+  const loadAuditReport = async (field: string) => {
+    try {
+      setLoadingAudit(true);
+      const data = await getStoreManagerInsights(field);
+      setAuditReport(data);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load custom field insights');
+    } finally {
+      setLoadingAudit(false);
+    }
+  };
+
+  const loadProposals = async () => {
+    try {
+      setLoadingProposals(true);
+      const res = await listStoreManagerProposals();
+      setProposals(res.proposals || []);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load proposals');
+    } finally {
+      setLoadingProposals(false);
+    }
+  };
+
+  const loadAssistantReport = async () => {
+    try {
+      setLoadingAssistant(true);
+      const data = await getStoreManagerReport();
+      setAssistantReport(data);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate store assistant notes');
+    } finally {
+      setLoadingAssistant(false);
+    }
+  };
+
+  // Actions
   const handleRunScan = async () => {
     setScanning(true);
     setError(null);
@@ -584,7 +974,6 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
     try {
       await saveHealthConfig(rules);
       setShowSettings(false);
-      // Immediately run a catalog health check scan using the new configuration
       await handleRunScan();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save health settings');
@@ -598,27 +987,109 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
   };
 
   const toggleProduct = (sku: string, e: React.MouseEvent) => {
-    // If click is on the "Edit Product" button, don't toggle
     if ((e.target as HTMLElement).closest('.btn-edit-product')) {
       return;
     }
     setExpandedProducts(prev => ({ ...prev, [sku]: !prev[sku] }));
   };
 
+  // Generate proposals action
+  const handleGenerateProposals = async (useAi = false) => {
+    setGeneratingProposals(true);
+    setAiScanStatus(useAi ? 'AI Assistant analyzing catalog taxonomy and duplicates...' : 'Scanning for casing and separator errors...');
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const res = await generateStoreManagerProposals(selectedField, useAi);
+      if (res.success) {
+        setSuccessMessage(`Successfully generated ${res.proposals.length} cleanup proposals for field ${selectedField}!`);
+        // Navigate to proposals tab
+        setActiveTab('proposals');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate proposals');
+    } finally {
+      setGeneratingProposals(false);
+      setAiScanStatus(null);
+    }
+  };
+
+  // Apply proposal
+  const handleApplyProposal = async (id: string) => {
+    setApplyingProposalId(id);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const res = await applyStoreManagerProposal(id);
+      if (res.success) {
+        setSuccessMessage(`Successfully applied proposal changes into Change Set! Staged inside active Change Set ID: ${res.changeSetId}.`);
+        // reload proposals
+        await loadProposals();
+        // reload health report
+        await getCatalogHealthReport().then(setReport);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to apply proposal');
+    } finally {
+      setApplyingProposalId(null);
+    }
+  };
+
+  // Dismiss proposal
+  const handleDismissProposal = async (id: string) => {
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const res = await dismissStoreManagerProposal(id);
+      if (res.success) {
+        setSuccessMessage('Proposal dismissed successfully.');
+        await loadProposals();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to dismiss proposal');
+    }
+  };
+
+  // Helper renderer for Markdown in assistant report
+  const renderMarkdown = (md: string) => {
+    if (!md) return null;
+    return md.split('\n').map((line, idx) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('# ')) {
+        return <h1 key={idx} style={{ fontSize: '22px', fontWeight: 800, color: '#111827', margin: '20px 0 10px', borderBottom: '1px solid #f3f4f6', paddingBottom: '6px' }}>{trimmed.substring(2)}</h1>;
+      }
+      if (trimmed.startsWith('## ')) {
+        return <h2 key={idx} style={{ fontSize: '18px', fontWeight: 700, color: '#1f2937', margin: '16px 0 8px' }}>{trimmed.substring(3)}</h2>;
+      }
+      if (trimmed.startsWith('### ')) {
+        return <h3 key={idx} style={{ fontSize: '15px', fontWeight: 700, color: '#374151', margin: '14px 0 6px' }}>{trimmed.substring(4)}</h3>;
+      }
+      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        return <li key={idx} style={{ marginLeft: '20px', listStyleType: 'disc', margin: '4px 0', fontSize: '14px', color: '#4b5563' }}>{trimmed.substring(2)}</li>;
+      }
+      if (/^\d+\.\s/.test(trimmed)) {
+        const content = trimmed.replace(/^\d+\.\s/, '');
+        return <li key={idx} style={{ marginLeft: '20px', listStyleType: 'decimal', margin: '4px 0', fontSize: '14px', color: '#4b5563' }}>{content}</li>;
+      }
+      if (trimmed === '') {
+        return <div key={idx} style={{ height: '12px' }} />;
+      }
+      return <p key={idx} style={{ margin: '6px 0', fontSize: '14px', color: '#374151', lineHeight: '1.6' }}>{line}</p>;
+    });
+  };
+
+  // Initial loader
   if (loading && !report) {
     return (
       <div style={{ textAlign: 'center', padding: 100 }}>
         <style>{STYLE_RULES}</style>
-        <div style={{ display: 'inline-block', width: 40, height: 40, border: '4px solid #f3f4f6', borderTopColor: '#4f46e5', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
-        <p style={{ marginTop: 16, color: '#6b7280', fontWeight: 600 }}>Loading Catalog Health stats...</p>
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        <div className="spinner-ring" />
+        <p style={{ marginTop: 16, color: '#6b7280', fontWeight: 600 }}>Loading Store Manager...</p>
       </div>
     );
   }
 
   const { totalProducts = 0, healthyProducts = 0, unhealthyProducts = 0, totalErrors = 0, totalWarnings = 0, issues = [] } = report || {};
-
-  // Calculate health score percentage
   const healthScore = totalProducts > 0 ? Math.round((healthyProducts / totalProducts) * 100) : 100;
 
   // Group issues by SKU
@@ -634,7 +1105,6 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
     issuesByProduct[issue.sku].issues.push(issue);
   });
 
-  // Filter products based on search and selected filter tab
   const productSkus = Object.keys(issuesByProduct);
   const filteredProductsList = productSkus
     .map(sku => issuesByProduct[sku])
@@ -653,284 +1123,686 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
     });
 
   return (
-    <div className="health-container">
+    <div className="store-manager-container">
       <style>{STYLE_RULES}</style>
 
       {/* Header */}
-      <header className="health-header">
-        <div className="health-title-group">
-          <h1>Catalog Health Monitor</h1>
-          <p>Analyze catalog integrity, check for missing core fields, and validate custom registry definitions.</p>
+      <header className="store-manager-header">
+        <div className="title-group">
+          <h1>Store Manager AI Assistant</h1>
+          <p>Audit catalog parameters, sanitize registered ProductFields safely, and stage batch cleanups into active Change Sets.</p>
         </div>
         <div className="header-buttons">
-          <button 
-            className={`btn-secondary ${showSettings ? 'active' : ''}`}
-            onClick={() => setShowSettings(!showSettings)}
-            disabled={scanning}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
-            </svg>
-            Configure Rules
-          </button>
-          <button className="btn-primary" onClick={handleRunScan} disabled={scanning || savingSettings}>
-            {scanning ? (
-              <>
-                <span style={{ display: 'inline-block', width: 14, height: 14, border: '2px solid #e5e7eb', borderTopColor: '#374151', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
-                Scanning...
-              </>
-            ) : (
-              <>
+          {activeTab === 'overview' && (
+            <>
+              <button 
+                className={`btn-secondary ${showSettings ? 'active' : ''}`}
+                onClick={() => setShowSettings(!showSettings)}
+                disabled={scanning}
+              >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
                 </svg>
-                Scan Catalog
-              </>
-            )}
-          </button>
+                Configure Rules
+              </button>
+              <button className="btn-primary" onClick={handleRunScan} disabled={scanning || savingSettings}>
+                {scanning ? (
+                  <>
+                    <span className="spinner-ring" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                    Scanning...
+                  </>
+                ) : (
+                  <>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                    </svg>
+                    Scan Catalog
+                  </>
+                )}
+              </button>
+            </>
+          )}
+          {activeTab === 'cleanup' && (
+            <button className="btn-secondary" onClick={() => loadAuditReport(selectedField)} disabled={loadingAudit}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+              </svg>
+              Refresh Report
+            </button>
+          )}
+          {activeTab === 'proposals' && (
+            <button className="btn-secondary" onClick={loadProposals} disabled={loadingProposals}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+              </svg>
+              Refresh Fixes
+            </button>
+          )}
+          {activeTab === 'assistant' && (
+            <button className="btn-primary" onClick={loadAssistantReport} disabled={loadingAssistant}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+              </svg>
+              Regenerate Report
+            </button>
+          )}
         </div>
       </header>
 
-      {/* Rules Config Panel */}
-      {showSettings && (
-        <section className="settings-panel">
-          <div className="settings-title-row">
-            <h2>Configure Catalog Validation Rules</h2>
-            <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: 12 }} onClick={handleRestoreDefaults}>
-              Reset to Defaults
-            </button>
-          </div>
+      {/* Tabs */}
+      <nav className="store-manager-tabs">
+        <button className={`tab-btn ${activeTab === 'overview' ? 'active' : ''}`} onClick={() => setActiveTab('overview')}>
+          Overview & Health
+        </button>
+        <button className={`tab-btn ${activeTab === 'cleanup' ? 'active' : ''}`} onClick={() => setActiveTab('cleanup')}>
+          ProductField Cleanup
+        </button>
+        <button className={`tab-btn ${activeTab === 'proposals' ? 'active' : ''}`} onClick={() => setActiveTab('proposals')}>
+          Proposed Changes {proposals.filter(p => p.status === 'proposed').length > 0 && `(${proposals.filter(p => p.status === 'proposed').length})`}
+        </button>
+        <button className={`tab-btn ${activeTab === 'assistant' ? 'active' : ''}`} onClick={() => setActiveTab('assistant')}>
+          Assistant Notes
+        </button>
+      </nav>
 
-          <div className="rules-grid">
-            {rules.map(rule => (
-              <div key={rule.code} className="rule-config-row">
-                <div className="rule-info">
-                  <h4>
-                    {rule.name}
-                    <span className="rule-default-badge">Default: {rule.defaultSeverity}</span>
-                  </h4>
-                  <p>{rule.description}</p>
-                </div>
-                <div className="severity-select-wrapper">
-                  <select
-                    className="severity-select"
-                    value={rule.severity}
-                    onChange={(e) => handleSeverityChange(rule.code, e.target.value as any)}
-                  >
-                    <option value="blocker">Blocker</option>
-                    <option value="warning">Warning</option>
-                    <option value="info">Info</option>
-                    <option value="disabled">Disabled</option>
-                  </select>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="settings-actions">
-            <button className="btn-secondary" onClick={() => setShowSettings(false)} disabled={savingSettings}>
-              Cancel
-            </button>
-            <button className="btn-primary" onClick={handleSaveConfig} disabled={savingSettings}>
-              {savingSettings ? 'Saving...' : 'Save & Re-Scan'}
-            </button>
-          </div>
-        </section>
-      )}
-
+      {/* Messages */}
       {error && (
         <div style={{ background: '#fef2f2', border: '1px solid #fee2e2', padding: '12px 16px', borderRadius: 8, color: '#991b1b', fontSize: 13, fontWeight: 600, marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{error}</span>
           <button style={{ background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setError(null)}>✕</button>
         </div>
       )}
+      {successMessage && (
+        <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '12px 16px', borderRadius: 8, color: '#166534', fontSize: 13, fontWeight: 600, marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{successMessage}</span>
+          <button style={{ background: 'none', border: 'none', color: '#15803d', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setSuccessMessage(null)}>✕</button>
+        </div>
+      )}
+      {aiScanStatus && (
+        <div className="assistant-status-bar">
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className="spinner-ring" style={{ width: 14, height: 14, borderWidth: 2, borderTopColor: '#6d28d9' }} />
+            {aiScanStatus}
+          </span>
+        </div>
+      )}
 
-      {/* KPI Row */}
-      <section className="health-kpi-grid">
-        <div className="health-kpi-card" style={{ background: 'linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%)' }}>
-          <div className="kpi-label">Health Score</div>
-          <div className="kpi-value" style={{ color: healthScore > 90 ? '#10b981' : healthScore > 75 ? '#f59e0b' : '#dc2626' }}>
-            {healthScore}%
-          </div>
-          <div className="kpi-subtext">
-            {healthScore === 100 ? 'Catalog is fully compliant' : `${healthyProducts} of ${totalProducts} SKUs healthy`}
-          </div>
-          {/* Circular mini badge */}
-          <div className="kpi-score-ring">
-            <svg width="50" height="50" viewBox="0 0 36 36">
-              <circle cx="18" cy="18" r="15.9155" fill="none" stroke="#e2e8f0" strokeWidth="3" />
-              <circle cx="18" cy="18" r="15.9155" fill="none" 
-                      stroke={healthScore > 90 ? '#10b981' : healthScore > 75 ? '#f59e0b' : '#dc2626'} 
-                      strokeWidth="3"
-                      strokeDasharray={`${healthScore} ${100 - healthScore}`}
-                      strokeDashoffset="0"
-                      transform="rotate(-90 18 18)"
+      {/* Overview Tab Content */}
+      {activeTab === 'overview' && (
+        <>
+          {/* Rules Config Panel */}
+          {showSettings && (
+            <section className="settings-panel">
+              <div className="settings-title-row">
+                <h2>Configure Catalog Validation Rules</h2>
+                <button className="btn-secondary" style={{ padding: '4px 10px', fontSize: 12 }} onClick={handleRestoreDefaults}>
+                  Reset to Defaults
+                </button>
+              </div>
+
+              <div className="rules-grid">
+                {rules.map(rule => (
+                  <div key={rule.code} className="rule-config-row">
+                    <div className="rule-info">
+                      <h4>
+                        {rule.name}
+                        <span className="rule-default-badge">Default: {rule.defaultSeverity}</span>
+                      </h4>
+                      <p>{rule.description}</p>
+                    </div>
+                    <div className="severity-select-wrapper">
+                      <select
+                        className="severity-select"
+                        value={rule.severity}
+                        onChange={(e) => handleSeverityChange(rule.code, e.target.value as any)}
+                      >
+                        <option value="blocker">Blocker</option>
+                        <option value="warning">Warning</option>
+                        <option value="info">Info</option>
+                        <option value="disabled">Disabled</option>
+                      </select>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="settings-actions">
+                <button className="btn-secondary" onClick={() => setShowSettings(false)} disabled={savingSettings}>
+                  Cancel
+                </button>
+                <button className="btn-primary" onClick={handleSaveConfig} disabled={savingSettings}>
+                  {savingSettings ? 'Saving...' : 'Save & Re-Scan'}
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* KPI Grid */}
+          <section className="health-kpi-grid">
+            <div className="health-kpi-card" style={{ background: 'linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%)' }}>
+              <div className="kpi-label">Health Score</div>
+              <div className="kpi-value" style={{ color: healthScore > 90 ? '#10b981' : healthScore > 75 ? '#f59e0b' : '#dc2626' }}>
+                {healthScore}%
+              </div>
+              <div className="kpi-subtext">
+                {healthScore === 100 ? 'Catalog is fully compliant' : `${healthyProducts} of ${totalProducts} SKUs healthy`}
+              </div>
+              <div className="kpi-score-ring">
+                <svg width="50" height="50" viewBox="0 0 36 36">
+                  <circle cx="18" cy="18" r="15.9155" fill="none" stroke="#e2e8f0" strokeWidth="3" />
+                  <circle cx="18" cy="18" r="15.9155" fill="none" 
+                          stroke={healthScore > 90 ? '#10b981' : healthScore > 75 ? '#f59e0b' : '#dc2626'} 
+                          strokeWidth="3"
+                          strokeDasharray={`${healthScore} ${100 - healthScore}`}
+                          strokeDashoffset="0"
+                          transform="rotate(-90 18 18)"
+                  />
+                </svg>
+              </div>
+            </div>
+
+            <div className="health-kpi-card">
+              <div className="kpi-label">Total Products</div>
+              <div className="kpi-value">{totalProducts}</div>
+              <div className="kpi-subtext">Active Store Catalog SKUs</div>
+            </div>
+
+            <div className="health-kpi-card" style={totalErrors > 0 ? { borderLeft: '4px solid #ef4444' } : {}}>
+              <div className="kpi-label">Blockers</div>
+              <div className="kpi-value" style={{ color: totalErrors > 0 ? '#ef4444' : '#111827' }}>{totalErrors}</div>
+              <div className="kpi-subtext">Must fix before sync/publish</div>
+            </div>
+
+            <div className="health-kpi-card" style={totalWarnings > 0 ? { borderLeft: '4px solid #f59e0b' } : {}}>
+              <div className="kpi-label">Warnings</div>
+              <div className="kpi-value" style={{ color: totalWarnings > 0 ? '#f59e0b' : '#111827' }}>{totalWarnings}</div>
+              <div className="kpi-subtext">Optimizations & field audits</div>
+            </div>
+          </section>
+
+          {/* Filter Bar */}
+          <section className="filter-section">
+            <div className="search-input-wrapper">
+              <svg className="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <circle cx="11" cy="11" r="8" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
+              <input
+                type="text"
+                className="search-input"
+                placeholder="Search issues by SKU or title..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
               />
-            </svg>
-          </div>
-        </div>
+            </div>
 
-        <div className="health-kpi-card">
-          <div className="kpi-label">Total Products</div>
-          <div className="kpi-value">{totalProducts}</div>
-          <div className="kpi-subtext">Indexed in SQLite database</div>
-        </div>
+            <div className="filter-tabs">
+              <button className={`filter-btn ${filterType === 'all' ? 'active' : ''}`} onClick={() => setFilterType('all')}>
+                All Issues ({productSkus.length})
+              </button>
+              <button className={`filter-btn ${filterType === 'blockers' ? 'active' : ''}`} onClick={() => setFilterType('blockers')}>
+                Blockers Only
+              </button>
+              <button className={`filter-btn ${filterType === 'warnings' ? 'active' : ''}`} onClick={() => setFilterType('warnings')}>
+                Warnings Only
+              </button>
+            </div>
+          </section>
 
-        <div className="health-kpi-card" style={totalErrors > 0 ? { borderLeft: '4px solid #ef4444' } : {}}>
-          <div className="kpi-label">Blockers</div>
-          <div className="kpi-value" style={{ color: totalErrors > 0 ? '#ef4444' : '#111827' }}>{totalErrors}</div>
-          <div className="kpi-subtext">Must fix before sync/publish</div>
-        </div>
+          {/* Issues List */}
+          <section className="issues-list">
+            {filteredProductsList.length > 0 ? (
+              filteredProductsList.map(prod => {
+                const blockersCount = prod.issues.filter(i => i.severity === 'blocker').length;
+                const warningsCount = prod.issues.filter(i => i.severity === 'warning').length;
+                const infosCount = prod.issues.filter(i => i.severity === 'info').length;
+                const isOpen = expandedProducts[prod.sku] ?? false;
 
-        <div className="health-kpi-card" style={totalWarnings > 0 ? { borderLeft: '4px solid #f59e0b' } : {}}>
-          <div className="kpi-label">Warnings</div>
-          <div className="kpi-value" style={{ color: totalWarnings > 0 ? '#f59e0b' : '#111827' }}>{totalWarnings}</div>
-          <div className="kpi-subtext">Optimizations & field audits</div>
-        </div>
-      </section>
+                return (
+                  <div key={prod.sku} className="product-issue-card">
+                    <div className="product-card-header" onClick={(e) => toggleProduct(prod.sku, e)}>
+                      <div className="product-title-area">
+                        {blockersCount > 0 ? (
+                          <span className="product-badge-blocker">{blockersCount} Blockers</span>
+                        ) : warningsCount > 0 ? (
+                          <span className="product-badge-warning">{warningsCount} Warnings</span>
+                        ) : (
+                          <span className="product-badge-info">{infosCount} Infos</span>
+                        )}
+                        <div className="product-meta">
+                          <h3>{prod.title}</h3>
+                          <span>SKU: {prod.sku}</span>
+                        </div>
+                      </div>
 
-      {/* Filter and Search Bar */}
-      <section className="filter-section">
-        <div className="search-input-wrapper">
-          <svg className="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <circle cx="11" cy="11" r="8" />
-            <path d="M21 21l-4.35-4.35" />
-          </svg>
-          <input
-            type="text"
-            className="search-input"
-            placeholder="Search by SKU or name..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            id="health-search-input"
-          />
-        </div>
+                      <div className="header-actions">
+                        <button 
+                          className="btn-edit-product"
+                          onClick={() => onSelectProduct(prod.sku)}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                            <path d="M18.5 2.5a2.121 2.121 0 113 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                          Edit Product
+                        </button>
+                        <svg className={`chevron-icon ${isOpen ? 'open' : ''}`} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </div>
 
-        <div className="filter-tabs">
-          <button 
-            className={`filter-btn ${filterType === 'all' ? 'active' : ''}`}
-            onClick={() => setFilterType('all')}
-          >
-            All Issues ({productSkus.length})
-          </button>
-          <button 
-            className={`filter-btn ${filterType === 'blockers' ? 'active' : ''}`}
-            onClick={() => setFilterType('blockers')}
-            style={{ display: totalErrors > 0 ? 'inline-block' : 'none' }}
-          >
-            Blockers Only
-          </button>
-          <button 
-            className={`filter-btn ${filterType === 'warnings' ? 'active' : ''}`}
-            onClick={() => setFilterType('warnings')}
-            style={{ display: totalWarnings > 0 ? 'inline-block' : 'none' }}
-          >
-            Warnings Only
-          </button>
-        </div>
-      </section>
-
-      {/* Issues List */}
-      <section className="issues-list">
-        {filteredProductsList.length > 0 ? (
-          filteredProductsList.map(prod => {
-            const blockersCount = prod.issues.filter(i => i.severity === 'blocker').length;
-            const warningsCount = prod.issues.filter(i => i.severity === 'warning').length;
-            const infosCount = prod.issues.filter(i => i.severity === 'info').length;
-            const isOpen = expandedProducts[prod.sku] ?? false;
-
-            return (
-              <div key={prod.sku} className="product-issue-card">
-                <div className="product-card-header" onClick={(e) => toggleProduct(prod.sku, e)}>
-                  <div className="product-title-area">
-                    {blockersCount > 0 ? (
-                      <span className="product-badge-blocker">{blockersCount} Blockers</span>
-                    ) : warningsCount > 0 ? (
-                      <span className="product-badge-warning">{warningsCount} Warnings</span>
-                    ) : (
-                      <span className="product-badge-info">{infosCount} Infos</span>
+                    {isOpen && (
+                      <div className="product-card-body">
+                        {prod.issues.map((issue, idx) => (
+                          <div key={idx} className={`issue-row ${issue.severity}`}>
+                            <div className="issue-icon" style={{ marginTop: 2 }}>
+                              {issue.severity === 'blocker' && (
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5">
+                                  <circle cx="12" cy="12" r="10" />
+                                  <line x1="12" y1="8" x2="12" y2="12" />
+                                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                                </svg>
+                              )}
+                              {issue.severity === 'warning' && (
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2.5">
+                                  <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                                  <line x1="12" y1="9" x2="12" y2="13" />
+                                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                                </svg>
+                              )}
+                              {issue.severity === 'info' && (
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.5">
+                                  <circle cx="12" cy="12" r="10" />
+                                  <line x1="12" y1="16" x2="12" y2="12" />
+                                  <line x1="12" y1="9" x2="12.01" y2="9" />
+                                </svg>
+                              )}
+                            </div>
+                            <div className="issue-text">
+                              <p className="issue-msg">{issue.message}</p>
+                              <span className="issue-code">
+                                Code: {issue.code}
+                                {issue.fieldPath && (
+                                  <span className="issue-field">Field: {issue.fieldPath}</span>
+                                )}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     )}
-                    <div className="product-meta">
-                      <h3>{prod.title}</h3>
-                      <span>SKU: {prod.sku}</span>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="empty-state">
+                <h3>No Catalog Health Issues</h3>
+                <p>All products meet target validation rules. Catalog score is 100%!</p>
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
+      {/* ProductField Cleanup Tab */}
+      {activeTab === 'cleanup' && (
+        <>
+          {/* Controls */}
+          <section className="cleanup-controls-bar">
+            <div className="field-select-group">
+              <label className="field-select-label">Select Audit Field:</label>
+              <select
+                className="field-select"
+                value={selectedField}
+                onChange={(e) => setSelectedField(e.target.value)}
+                disabled={loadingAudit || generatingProposals}
+              >
+                {customFields.map(f => (
+                  <option key={f.xmlField} value={f.xmlField}>
+                    {f.label} ({f.xmlField})
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="cleanup-actions-group">
+              <button 
+                className="btn-secondary" 
+                onClick={() => handleGenerateProposals(false)} 
+                disabled={loadingAudit || generatingProposals}
+              >
+                Find Normalization Fixes
+              </button>
+              <button 
+                className="btn-primary" 
+                onClick={() => handleGenerateProposals(true)} 
+                disabled={loadingAudit || generatingProposals}
+                style={{ background: 'linear-gradient(135deg, #6366f1 0%, #a855f7 100%)' }}
+              >
+                🤖 AI Audit & Refactor
+              </button>
+            </div>
+          </section>
+
+          {loadingAudit ? (
+            <div className="tab-loader">
+              <div className="spinner-ring" />
+              <p style={{ marginTop: 12, color: '#6b7280', fontWeight: 500 }}>Generating field audit report...</p>
+            </div>
+          ) : auditReport ? (
+            <>
+              {/* Field Statistics */}
+              <div className="audit-kpi-grid">
+                <div className="audit-kpi-card">
+                  <div className="kpi-label">Audited Field</div>
+                  <div className="kpi-value" style={{ fontSize: '20px', fontWeight: 800, color: '#4f46e5' }}>
+                    {auditReport.label}
+                  </div>
+                  <div className="kpi-subtext">{auditReport.field}</div>
+                </div>
+                
+                <div className="audit-kpi-card">
+                  <div className="kpi-label">Unique Values</div>
+                  <div className="kpi-value">{auditReport.uniqueValueCount}</div>
+                  <div className="kpi-subtext">Count of distinct tags/names</div>
+                </div>
+
+                <div className="audit-kpi-card">
+                  <div className="kpi-label">Missing Rate</div>
+                  <div className="kpi-value" style={{ color: auditReport.emptyRate > 0.3 ? '#f59e0b' : '#111827' }}>
+                    {Math.round(auditReport.emptyRate * 100)}%
+                  </div>
+                  <div className="kpi-subtext">{auditReport.emptyCount} of {auditReport.totalActiveProducts} products empty</div>
+                </div>
+              </div>
+
+              {/* Casing Normalization Report */}
+              <div className="cleanup-section-card">
+                <h3>
+                  Casing Duplicate Groups
+                  <span style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>
+                    {auditReport.casingDuplicates.length} issues found
+                  </span>
+                </h3>
+                {auditReport.casingDuplicates.length > 0 ? (
+                  <table className="cleanup-table">
+                    <thead>
+                      <tr>
+                        <th>Normalized Key</th>
+                        <th>Cased Variations (Frequency)</th>
+                        <th>Recommended Fix</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditReport.casingDuplicates.map((group, idx) => {
+                        const sorted = [...group.values].sort((a,b) => b.frequency - a.frequency);
+                        const canonical = sorted[0].value;
+                        return (
+                          <tr key={idx}>
+                            <td style={{ fontWeight: 'bold' }}>{group.normalized}</td>
+                            <td>
+                              {group.values.map((v, i) => (
+                                <span key={i} className="casing-value-item">
+                                  {v.value} ({v.frequency})
+                                </span>
+                              ))}
+                            </td>
+                            <td>
+                              Propose standardizing all to <span style={{ color: '#10b981', fontWeight: 600 }}>"{canonical}"</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p style={{ margin: 0, fontSize: 13.5, color: '#6b7280' }}>No casing duplicates detected. Capitalization is consistent!</p>
+                )}
+              </div>
+
+              {/* Near Duplicates */}
+              <div className="cleanup-section-card">
+                <h3>
+                  Near-Duplicates & Typos
+                  <span style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>
+                    {auditReport.nearDuplicates.length} candidates
+                  </span>
+                </h3>
+                {auditReport.nearDuplicates.length > 0 ? (
+                  <table className="cleanup-table">
+                    <thead>
+                      <tr>
+                        <th>Value A (Freq)</th>
+                        <th>Value B (Freq)</th>
+                        <th>Rel. Distance</th>
+                        <th>Type</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditReport.nearDuplicates.map((pair, idx) => (
+                        <tr key={idx}>
+                          <td>"{pair.valueA}" ({pair.frequencyA})</td>
+                          <td>"{pair.valueB}" ({pair.frequencyB})</td>
+                          <td>{pair.distance === 0 ? 'Exact match' : `${pair.distance} chars`}</td>
+                          <td>
+                            <span style={{
+                              padding: '2px 8px',
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 700,
+                              background: pair.type === 'alphanumeric' ? '#fffbeb' : '#f1f5f9',
+                              color: pair.type === 'alphanumeric' ? '#b45309' : '#475569',
+                            }}>
+                              {pair.type}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p style={{ margin: 0, fontSize: 13.5, color: '#6b7280' }}>No near duplicates or punctuation differences detected.</p>
+                )}
+              </div>
+
+              {/* Separators */}
+              <div className="cleanup-section-card">
+                <h3>Separator Analysis</h3>
+                {auditReport.separatorInconsistencies.inconsistent ? (
+                  <div>
+                    <div style={{ color: '#b45309', background: '#fffbeb', border: '1px solid #fef3c7', padding: '10px 14px', borderRadius: 8, fontSize: 13, display: 'inline-block', marginBottom: 12, fontWeight: 600 }}>
+                      ⚠️ Separator Inconsistency Detected! Multiple separator symbols are used across product fields.
+                    </div>
+                    <table className="cleanup-table" style={{ maxWidth: 400 }}>
+                      <thead>
+                        <tr>
+                          <th>Separator</th>
+                          <th>Occurrence Count</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditReport.separatorInconsistencies.counts.map(s => (
+                          <tr key={s.separator}>
+                            <td style={{ fontWeight: 'bold', fontFamily: 'monospace', fontSize: 15 }}>{s.separator}</td>
+                            <td>{s.count} values</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p style={{ margin: 0, fontSize: 13.5, color: '#6b7280' }}>
+                    Separators are consistent. Dominant separator: {auditReport.separatorInconsistencies.counts.find(s => s.count > 0)?.separator || 'None used'}
+                  </p>
+                )}
+              </div>
+
+              {/* Suspicious Values */}
+              <div className="cleanup-section-card">
+                <h3>
+                  Suspicious / Invalid Values
+                  <span style={{ fontSize: 12, fontWeight: 500, color: '#6b7280' }}>
+                    {auditReport.suspiciousValues.length} flagged
+                  </span>
+                </h3>
+                {auditReport.suspiciousValues.length > 0 ? (
+                  <table className="cleanup-table">
+                    <thead>
+                      <tr>
+                        <th>Value</th>
+                        <th>Frequency</th>
+                        <th>Reason Flagged</th>
+                        <th>Example SKUs</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditReport.suspiciousValues.map((v, idx) => (
+                        <tr key={idx}>
+                          <td style={{ fontFamily: 'monospace', color: '#b91c1c' }}>"{v.value}"</td>
+                          <td>{v.frequency}</td>
+                          <td>
+                            {v.reasons.map((r, i) => (
+                              <div key={i} style={{ color: '#dc2626', fontSize: 12, fontWeight: 500 }}>• {r}</div>
+                            ))}
+                          </td>
+                          <td style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                            {v.skus.join(', ')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p style={{ margin: 0, fontSize: 13.5, color: '#6b7280' }}>No suspicious values found! All parameters look catalog-ready.</p>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="empty-state">Unable to load audit report. Re-scan health or load workspace again.</p>
+          )}
+        </>
+      )}
+
+      {/* Proposed Changes Tab */}
+      {activeTab === 'proposals' && (
+        <>
+          {loadingProposals ? (
+            <div className="tab-loader">
+              <div className="spinner-ring" />
+              <p style={{ marginTop: 12, color: '#6b7280' }}>Loading staged proposals...</p>
+            </div>
+          ) : proposals.length > 0 ? (
+            <div className="proposal-grid">
+              {proposals.map(prop => (
+                <div key={prop.id} className="proposal-card" style={prop.status !== 'proposed' ? { opacity: 0.6 } : {}}>
+                  <div className="proposal-info">
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span className="proposal-field-badge">{prop.field}</span>
+                      {prop.source === 'ai' ? (
+                        <span className="proposal-source-badge-ai">🤖 AI Suggestion</span>
+                      ) : (
+                        <span className="proposal-source-badge-det">⚙️ Deterministic</span>
+                      )}
+                      <span style={{
+                        fontSize: 11,
+                        fontWeight: 700,
+                        padding: '2px 8px',
+                        borderRadius: 4,
+                        background: prop.status === 'applied' ? '#d1fae5' : prop.status === 'dismissed' ? '#f3f4f6' : '#fef3c7',
+                        color: prop.status === 'applied' ? '#065f46' : prop.status === 'dismissed' ? '#374151' : '#92400e',
+                      }}>
+                        {prop.status.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="proposal-diff-flow">
+                      <span className="old-val-text">"{prop.oldValue}"</span>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="3">
+                        <line x1="5" y1="12" x2="19" y2="12" />
+                        <polyline points="12 5 19 12 12 19" />
+                      </svg>
+                      <span className="new-val-text">"{prop.newValue}"</span>
+                    </div>
+
+                    <div className="proposal-meta-details">
+                      <span>Reason: <span className="proposal-reason">{prop.reason}</span></span>
+                      <span>•</span>
+                      <span>Confidence: <strong>{Math.round(prop.confidence * 100)}%</strong></span>
+                      <span>•</span>
+                      <span>Affected Products: <strong>{prop.affectedSkus.length} SKUs</strong></span>
                     </div>
                   </div>
 
-                  <div className="header-actions">
-                    <button 
-                      className="btn-edit-product"
-                      onClick={() => onSelectProduct(prod.sku)}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-                        <path d="M18.5 2.5a2.121 2.121 0 113 3L12 15l-4 1 1-4 9.5-9.5z" />
-                      </svg>
-                      Edit Product
-                    </button>
-                    <svg 
-                      className={`chevron-icon ${isOpen ? 'open' : ''}`} 
-                      width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                    </svg>
+                  <div className="proposal-actions">
+                    {prop.status === 'proposed' && (
+                      <>
+                        <button
+                          className="btn-secondary"
+                          style={{ padding: '6px 12px', fontSize: 12 }}
+                          onClick={() => handleDismissProposal(prop.id)}
+                          disabled={applyingProposalId !== null}
+                        >
+                          Dismiss
+                        </button>
+                        <button
+                          className="btn-primary"
+                          style={{ padding: '6px 14px', fontSize: 12 }}
+                          onClick={() => handleApplyProposal(prop.id)}
+                          disabled={applyingProposalId !== null}
+                        >
+                          {applyingProposalId === prop.id ? 'Applying...' : 'Stage Fix'}
+                        </button>
+                      </>
+                    )}
+                    {prop.status === 'applied' && prop.changeSetId && (
+                      <span style={{ fontSize: 12, color: '#059669', fontWeight: 600 }}>Staged in CS: {prop.changeSetId.slice(0, 8)}</span>
+                    )}
                   </div>
                 </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <h3>No Staged Proposals Found</h3>
+              <p>Go to the **ProductField Cleanup** tab, pick a field, and click **"Find Normalization Fixes"** or **"AI Audit"** to generate proposed fixes.</p>
+            </div>
+          )}
+        </>
+      )}
 
-                {isOpen && (
-                  <div className="product-card-body">
-                    {prod.issues.map((issue, idx) => (
-                      <div key={idx} className={`issue-row ${issue.severity}`}>
-                        <div className="issue-icon">
-                          {issue.severity === 'blocker' && (
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5">
-                              <circle cx="12" cy="12" r="10" />
-                              <line x1="12" y1="8" x2="12" y2="12" />
-                              <line x1="12" y1="16" x2="12.01" y2="16" />
-                            </svg>
-                          )}
-                          {issue.severity === 'warning' && (
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2.5">
-                              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                              <line x1="12" y1="9" x2="12" y2="13" />
-                              <line x1="12" y1="17" x2="12.01" y2="17" />
-                            </svg>
-                          )}
-                          {issue.severity === 'info' && (
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.5">
-                              <circle cx="12" cy="12" r="10" />
-                              <line x1="12" y1="16" x2="12" y2="12" />
-                              <line x1="12" y1="9" x2="12.01" y2="9" />
-                            </svg>
-                          )}
-                        </div>
-                        <div className="issue-text">
-                          <p className="issue-msg">{issue.message}</p>
-                          <span className="issue-code">
-                            Code: {issue.code}
-                            {issue.fieldPath && (
-                              <span className="issue-field">Field: {issue.fieldPath}</span>
-                            )}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+      {/* Assistant Notes Tab */}
+      {activeTab === 'assistant' && (
+        <>
+          {loadingAssistant ? (
+            <div className="tab-loader">
+              <div className="spinner-ring" />
+              <p style={{ marginTop: 12, color: '#6b7280' }}>Store Manager Assistant is compiling cleanup report...</p>
+            </div>
+          ) : assistantReport ? (
+            <div className="assistant-report-body">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, paddingBottom: 12, borderBottom: '2px solid #e5e7eb' }}>
+                <span style={{ fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.8, color: '#6d28d9' }}>
+                  🤖 Store Manager AI Assistant Report
+                </span>
+                <span style={{ fontSize: 12, color: '#9ca3af', fontWeight: 500 }}>
+                  Active Workspace Status
+                </span>
               </div>
-            );
-          })
-        ) : (
-          <div className="empty-state">
-            <h3>No Catalog Issues Detected</h3>
-            <p>
-              {search 
-                ? "No products matching your search have issues." 
-                : "Your catalog is 100% healthy! All products have their required core and custom fields."}
-            </p>
-          </div>
-        )}
-      </section>
+              <div style={{ padding: '16px 20px', background: '#f5f3ff', borderLeft: '4px solid #8b5cf6', borderRadius: 8, marginBottom: 24, fontSize: 14, color: '#5b21b6', fontWeight: 600 }}>
+                💡 Key Insights: {assistantReport.summary}
+              </div>
+              <div>
+                {renderMarkdown(assistantReport.reportMarkdown)}
+              </div>
+            </div>
+          ) : (
+            <p className="empty-state">No report notes generated. Click regenerate to run analysis.</p>
+          )}
+        </>
+      )}
     </div>
   );
 }
+export default CatalogHealth;

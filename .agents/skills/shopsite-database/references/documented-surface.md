@@ -13,8 +13,25 @@ These are the official ShopSite page titles distilled in the deep research repor
 - `Database Upload - Match Upload Fields`
 - `Database Upload Progress`
 - `Databases Upload Results`
+- `Database Upload/Download Fields` (v15) — product and page field catalogs
+- `Automatic XML Orders Download` — order download flow and parameters
+- `Orders Download XML Format` — order DTD
+- `Custom CGI Interface` — thankyou.cgi/custom.cgi POST fields
 
 When you mention sources, prefer these page titles over vague references.
+
+## Field catalogs
+
+Field names, types, defaults, and allowed values ARE documented for:
+- **Products** — see `shopsite-product-fields` skill (`references/product-field-catalog.md`)
+- **Pages** — see `shopsite-page-fields` skill (`references/page-field-catalog.md`)
+
+What remains **underspecified** for both:
+- Confirmed XML tag names for catalog fields not yet seen in a real `db_xml.cgi` export
+- The full product/page DTD content
+- The page root element and DTD name (inferred from product pattern)
+
+When asked about field details, route to the domain skills. When a field's XML tag is needed for code, recommend confirming from a real export.
 
 ## Supported automated scope
 
@@ -23,6 +40,8 @@ The grounded automated XML workflow is documented for:
 - `pages`
 
 Do **not** assume the same automated XML upload flow is documented for orders, associates, or every other ShopSite table.
+
+Order XML download is covered by a separate skill (`shopsite-orders`).
 
 ## Core workflow
 

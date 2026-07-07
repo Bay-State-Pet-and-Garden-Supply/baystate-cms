@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getProduct, saveDraft, getConnection, listFieldRegistry, type ProductDetail as ProductDetailType } from '../api';
+import type { FieldRegistryEntry } from '../../shared/schemas/field-registry';
 
 function ProductImage({ src, alt, title }: { src: string; alt: string; title: string }) {
   const [error, setError] = useState(false);
@@ -46,7 +47,7 @@ interface Props {
 
 export function ProductDetail({ sku, onBack }: Props) {
   const [data, setData] = useState<ProductDetailType | null>(null);
-  const [registry, setRegistry] = useState<any[]>([]);
+  const [registry, setRegistry] = useState<FieldRegistryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingRegistry, setLoadingRegistry] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -90,7 +91,7 @@ export function ProductDetail({ sku, onBack }: Props) {
     setLoadingRegistry(true);
     listFieldRegistry().then(res => {
       // Filter out non-editable fields and 'SKU' from editable fields list
-      const editableFields = res.entries.filter((e: any) => e.editable && e.xmlField !== 'SKU');
+      const editableFields = res.entries.filter(e => e.editable && e.xmlField !== 'SKU');
       setRegistry(editableFields);
       if (res.entries.length > 0) {
         setWorkspaceId((res.entries[0] as any).workspaceId);
@@ -345,7 +346,7 @@ export function ProductDetail({ sku, onBack }: Props) {
   const descField = pinnedFieldsList.find(e => e.xmlField === 'ProductDescription');
   const otherPinnedFields = pinnedFieldsList.filter(e => e.xmlField !== 'Name' && e.xmlField !== 'ProductDescription');
 
-  const renderFieldInput = (entry: any) => {
+  const renderFieldInput = (entry: FieldRegistryEntry) => {
     const value = fieldValues[entry.xmlField] ?? '';
     const onChange = (val: any) => {
       setFieldValues(prev => ({ ...prev, [entry.xmlField]: val }));
@@ -527,8 +528,8 @@ export function ProductDetail({ sku, onBack }: Props) {
               </div>
               <div style={{ maxHeight: 240, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {registry
-                  .filter((e: any) => e.xmlField !== 'Graphic' && e.xmlField !== 'MoreInformationGraphic')
-                  .map((field: any) => {
+                  .filter(e => e.xmlField !== 'Graphic' && e.xmlField !== 'MoreInformationGraphic')
+                  .map(field => {
                     const isForced = field.xmlField === 'Name' || field.xmlField === 'ProductDescription';
                     const isPinned = isForced || pinnedFields.includes(field.xmlField);
                     return (

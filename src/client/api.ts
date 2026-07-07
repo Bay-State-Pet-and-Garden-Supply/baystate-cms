@@ -1,3 +1,5 @@
+import type { FieldRegistryEntry } from '../shared/schemas/field-registry';
+
 const API_BASE = '/api';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -209,7 +211,15 @@ export function discardChangeSet(id: string) { return request<{ success: boolean
 export function exportChangeSet(id: string) { return request<ExportResult>(`/export/change-set/${id}`, { method: 'POST' }); }
 
 // Field Registry
-export function listFieldRegistry() { return request<{ entries: unknown[] }>('/field-registry'); }
+export function listFieldRegistry() {
+  return request<{ entries: FieldRegistryEntry[] }>('/field-registry');
+}
+export function updateFieldRegistryEntry(id: string, payload: Record<string, unknown>) {
+  return request<{ success: boolean }>(`/field-registry/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
 
 // --- Phase 3: Sync / Push / Publish ---
 export interface SyncJob {
@@ -314,26 +324,26 @@ export interface ProductTypeDetail extends ProductType {
   fields: ProductTypeField[];
 }
 
-function listProductTypes() {
+export function listProductTypes() {
   return request<{ types: ProductType[] }>('/product-types');
 }
 
-function getProductType(id: string) {
+export function getProductType(id: string) {
   return request<{ productType: ProductTypeDetail }>(`/product-types/${id}`);
 }
 
-function createProductType(name: string) {
+export function createProductType(name: string) {
   return request<{ success: boolean; productType: ProductType }>('/product-types', {
     method: 'POST',
     body: JSON.stringify({ name }),
   });
 }
 
-function deleteProductType(id: string) {
+export function deleteProductType(id: string) {
   return request<{ success: boolean }>(`/product-types/${id}`, { method: 'DELETE' });
 }
 
-function upsertProductTypeField(
+export function upsertProductTypeField(
   productTypeId: string,
   xmlField: string,
   label: string,
@@ -347,7 +357,7 @@ function upsertProductTypeField(
   });
 }
 
-function deleteProductTypeField(productTypeId: string, xmlField: string) {
+export function deleteProductTypeField(productTypeId: string, xmlField: string) {
   return request<{ success: boolean }>(`/product-types/${productTypeId}/fields/${encodeURIComponent(xmlField)}`, {
     method: 'DELETE',
   });
@@ -365,26 +375,26 @@ export interface Page {
   updatedAt: string;
 }
 
-function listPages() {
+export function listPages() {
   return request<{ pages: Page[] }>('/pages');
 }
 
-function upsertPage(name: string, fileName?: string | null, parentId?: string | null) {
+export function upsertPage(name: string, fileName?: string | null, parentId?: string | null) {
   return request<{ success: boolean; page: Page }>('/pages', {
     method: 'POST',
     body: JSON.stringify({ name, fileName, parentId }),
   });
 }
 
-function deletePage(id: string) {
+export function deletePage(id: string) {
   return request<{ success: boolean }>(`/pages/${id}`, { method: 'DELETE' });
 }
 
-function getProductPages(sku: string) {
+export function getProductPages(sku: string) {
   return request<{ pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`);
 }
 
-function saveProductPages(sku: string, pages: string[]) {
+export function saveProductPages(sku: string, pages: string[]) {
   return request<{ success: boolean; pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`, {
     method: 'POST',
     body: JSON.stringify({ pages }),
@@ -498,5 +508,142 @@ export function saveHealthConfig(rules: HealthRuleConfig[]) {
   });
 }
 
+// ── Store Manager AI Assistant APIs ──────────────────────────────────────────
 
+export interface CatalogProposal {
+  id: string;
+  workspaceId: string;
+  field: string;
+  oldValue: string;
+  newValue: string;
+  affectedSkus: string[];
+  reason: string;
+  confidence: number;
+  source: 'deterministic' | 'ai';
+  status: 'proposed' | 'applied' | 'dismissed';
+  changeSetId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FieldValueInfo {
+  value: string;
+  frequency: number;
+  skus: string[];
+}
+
+export interface CasingDuplicateGroup {
+  normalized: string;
+  values: { value: string; frequency: number; skus: string[] }[];
+}
+
+export interface NearDuplicatePair {
+  valueA: string;
+  frequencyA: number;
+  valueB: string;
+  frequencyB: number;
+  distance: number;
+  type: 'levenshtein' | 'alphanumeric';
+}
+
+export interface SuspiciousValueInfo {
+  value: string;
+  frequency: number;
+  reasons: string[];
+  skus: string[];
+}
+
+export interface ProductFieldAuditReport {
+  field: string;
+  label: string;
+  totalActiveProducts: number;
+  emptyCount: number;
+  emptyRate: number;
+  uniqueValueCount: number;
+  values: FieldValueInfo[];
+  casingDuplicates: CasingDuplicateGroup[];
+  nearDuplicates: NearDuplicatePair[];
+  separatorInconsistencies: {
+    inconsistent: boolean;
+    counts: { separator: string; count: number }[];
+  };
+  suspiciousValues: SuspiciousValueInfo[];
+}
+
+export interface AssistantCleanupReport {
+  summary: string;
+  reportMarkdown: string;
+}
+
+export function getStoreManagerInsights(field: string) {
+  return request<ProductFieldAuditReport>(`/store-manager/insights?field=${encodeURIComponent(field)}`);
+}
+
+export function listStoreManagerProposals(field?: string, status?: string) {
+  let url = '/store-manager/proposals';
+  const params: string[] = [];
+  if (field) params.push(`field=${encodeURIComponent(field)}`);
+  if (status) params.push(`status=${encodeURIComponent(status)}`);
+  if (params.length > 0) url += `?${params.join('&')}`;
+
+  return request<{ proposals: CatalogProposal[] }>(url);
+}
+
+export function generateStoreManagerProposals(field: string, useAi = false) {
+  return request<{ success: boolean; proposals: CatalogProposal[] }>('/store-manager/proposals/generate', {
+    method: 'POST',
+    body: JSON.stringify({ field, useAi }),
+  });
+}
+
+export function applyStoreManagerProposal(id: string) {
+  return request<{ success: boolean; changeSetId: string }>(`/store-manager/proposals/${id}/apply`, {
+    method: 'POST',
+  });
+}
+
+export function dismissStoreManagerProposal(id: string) {
+  return request<{ success: boolean }>(`/store-manager/proposals/${id}/dismiss`, {
+    method: 'POST',
+  });
+}
+
+export function getStoreManagerReport() {
+  return request<AssistantCleanupReport>('/store-manager/report');
+}
+
+// ── Catalog Schema Workbench APIs ──────────────────────────────────
+
+import type {
+  CatalogSchemaSummary,
+  CatalogFieldSummary,
+  CatalogFieldDetail,
+  CategoryPageNode,
+  AttributeMappingView,
+  CatalogSchemaHealthReport,
+} from './components/catalog-workbench/types';
+
+export function getCatalogSchemaSummary() {
+  return request<CatalogSchemaSummary>('/catalog/schema-summary');
+}
+
+export function listCatalogFields() {
+  return request<{ fields: CatalogFieldSummary[] }>('/catalog/fields');
+}
+
+export function getCatalogFieldDetail(xmlField: string) {
+  return request<CatalogFieldDetail>(`/catalog/fields/${encodeURIComponent(xmlField)}`);
+}
+
+export function getCategoryPageTree() {
+  return request<{ pages: CategoryPageNode[] }>('/catalog/pages/tree');
+}
+
+export function listAttributeMappings() {
+  return request<{ mappings: AttributeMappingView[] }>('/catalog/mappings');
+}
+
+export function getCatalogSchemaHealth() {
+  return request<CatalogSchemaHealthReport>('/catalog/schema-health');
+}
 

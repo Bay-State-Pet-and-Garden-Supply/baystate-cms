@@ -22,11 +22,28 @@ This is **not** a blind execution skill. Do not imply that auth, full XML schema
 
 For any substantive request, read:
 - `references/documented-surface.md` — endpoints, parameters, supported scope, workflow facts
+- `references/mime-upload-format.md` — MIME multipart upload structure and dbmake.cgi callback
+- `references/download-options.md` — back-office download formats, field maps, and field selection
+- `references/upload-options.md` — upload option semantics, uniqueName values, risk confirmations
 
 Also read as needed:
 - `references/guardrails.md` — unsupported targets, undocumented gaps, risk flags, wording to use
 - `references/artifact-recipes.md` — request-building patterns, MIME starter guidance, batch and publish recipes
 - `deep-research-report(1).md` — deeper context if a subtle point needs double-checking
+
+## Route field-detail questions to domain skills
+
+This skill covers the **CGI workflow** (download, upload, publish, MIME). For detailed field-level questions, route to the appropriate domain skill:
+
+| If the user asks about… | Route to… |
+|---|---|
+| Product field names, types, defaults, XML tags, normalizer/denormalizer, adding a new product field | `shopsite-product-fields` |
+| Product Field* entries, field-type system, field defaults and allowed values | `shopsite-product-fields` |
+| Page field names, types, defaults, page XML structure, building page XML support | `shopsite-page-fields` |
+| ShopSite orders, authorize.cgi, order XML DTD, order download parameters | `shopsite-orders` (if installed) |
+| thankyou.cgi, custom.cgi, custom CGI POST fields | `shopsite-custom-cgi` (if installed) |
+
+When routing, direct the user and explain which skill covers their question in more detail.
 
 ## Core operating rules
 
@@ -36,19 +53,23 @@ Also read as needed:
 2. **Support only the documented automated scope.**
    The grounded scope is `products` and `pages` for automated database XML upload/download. Treat requests for orders, associates, or other tables as unsupported unless the user provides additional authoritative documentation.
 
-3. **Do not invent a full XML schema.**
-   The crawlable docs show only a limited product-oriented XML example and do not publish a full page XML example. When asked for exact tags or required fields, explain the gap and recommend exporting a ShopSite-generated sample from the target store.
+3. **Route field-detail questions to domain skills.**
+   Product field names, types, defaults, and allowed values ARE documented in the `shopsite-product-fields` skill. Page fields ARE documented in `shopsite-page-fields`. When asked for field details, route to the appropriate domain skill rather than defaulting to "unspecified."
 
-4. **Do not invent authentication details.**
+4. **Do not invent XML tags the domain skills have not confirmed.**
+   The domain skills distinguish **confirmed** tags (verified against the codebase or a real export) from **inferred** tags (derived from field names). If a field's XML tag is marked as inferred in the domain skill, still recommend confirming against a real export.
+
+5. **Do not invent authentication details.**
    The cited ShopSite pages do not publish a canonical auth mechanism for automated CGI calls. Say auth is environment-specific and unspecified by the docs you are grounded on.
+   Orders downloads use a documented OAuth 1.0-like flow through `authorize.cgi`; for orders auth details, route to the `shopsite-orders` skill.
 
-5. **Call out version-variable options.**
+6. **Call out version-variable options.**
    Treat `checkpoint`, `use_optimizer`, and `sitemap` as version-sensitive or inconsistently documented. Present them as optional/version-variable rather than universal requirements.
 
-6. **Always warn on risky matching choices.**
+7. **Always warn on risky matching choices.**
    If `uniqueName=(none)`, explicitly warn about duplicate risk. If `newRecords=no`, state that unmatched rows are ignored.
 
-7. **Always include post-upload reminders.**
+8. **Always include post-upload reminders.**
    - After a MIME upload, remind the user to pass the returned `return_string` to `dbmake.cgi` exactly as returned.
    - After imports, remind the user to publish/regenerate the store so shoppers can see the changes.
 
@@ -99,9 +120,10 @@ Common fields to collect:
   ```
 
 #### MIME multipart starters
-- For **products**, you may provide a documentation-derived starter based on the product example from the crawlable docs.
-- For **pages**, do **not** invent an official XML structure. Provide only a placeholder plus guidance to export a ShopSite-generated sample.
-- Always remind the user that MIME uploads require a follow-up `dbmake.cgi` call using the returned `return_string`.
+- For **products**, see `references/mime-upload-format.md` for the complete multipart structure, boundary format, and a worked example.
+- For **pages**, use the placeholder from `references/mime-upload-format.md` but confirm root element and DOCTYPE from a real page export.
+- Always remind the user that MIME uploads require a follow-up `dbmake.cgi` call using the returned `return_string` exactly as returned.
+- The `Response` block requiredness is unspecified in the documentation; treat as optional.
 - If useful, generate the starter with:
   ```bash
   python3 scripts/build_shopsite_examples.py mime ...

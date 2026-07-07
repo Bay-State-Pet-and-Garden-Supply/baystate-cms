@@ -9,8 +9,10 @@ import { SyncJobsView } from './components/SyncJobsView';
 import { Dashboard } from './components/Dashboard';
 import { CatalogHealth } from './components/CatalogHealth';
 import { Onboarding } from './components/Onboarding';
+import { StoreManagerAssistant } from './components/StoreManagerAssistant';
+import { Settings } from './components/Settings';
 
-type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding';
+type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings';
 
 function App() {
   const [view, setView] = useState<View>('setup');
@@ -185,6 +187,12 @@ function App() {
               Catalog Health
             </button>
             <button
+              style={view === 'assistant' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('assistant')}
+            >
+              Store Manager
+            </button>
+            <button
               style={view === 'drift' ? styles.navLinkActive : styles.navLink}
               onClick={() => setView('drift')}
             >
@@ -195,6 +203,12 @@ function App() {
               onClick={() => setView('syncjobs')}
             >
               Sync Jobs
+            </button>
+            <button
+              style={view === 'settings' ? styles.navLinkActive : styles.navLink}
+              onClick={() => setView('settings')}
+            >
+              Settings
             </button>
           </>
         )}
@@ -222,7 +236,7 @@ function App() {
         </span>
       </nav>
 
-      <main style={view === 'onboarding' ? { ...styles.main, maxWidth: 'none', margin: 0 } : styles.main}>
+      <main style={(view === 'onboarding' || view === 'assistant' || view === 'changesets') ? { ...styles.main, maxWidth: 'none', margin: 0 } : styles.main}>
         {view === 'setup' && (
           <SetupWizard
             onComplete={handleSetupComplete}
@@ -249,9 +263,15 @@ function App() {
           <CatalogHealth onSelectProduct={handleOpenProduct} />
         )}
 
+        {view === 'assistant' && workspace && (
+          <StoreManagerAssistant onSelectProduct={handleOpenProduct} />
+        )}
+
         {view === 'drift' && <DriftView />}
 
         {view === 'syncjobs' && <SyncJobsView />}
+
+        {view === 'settings' && <Settings />}
       </main>
 
       <style dangerouslySetInnerHTML={{ __html: `

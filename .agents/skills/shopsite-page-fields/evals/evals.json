@@ -1,0 +1,56 @@
+{
+  "evals": [
+    {
+      "id": "page-fields-eval-1",
+      "name": "Build a page XML parser",
+      "description": "Test that the skill guides building a page XML parser, including the need for a real export",
+      "prompt": "I need to build a page XML parser for the CMS so we can round-trip page data with ShopSite. Where do I start?",
+      "expected_output": [
+        "Explains that no page parser exists yet and page XML structure is inferred",
+        "References page-xml-structure.md for the inferred structure and page-codebase-gaps.md for current gaps",
+        "Recommends starting with a real page XML export from the target store",
+        "Outlines the 7 build phases: discovery → parser → schema → normalizer → denormalizer → tests → HTTP client",
+        "Cross-references the product-parser.ts pattern for implementation guidance",
+        "Warns that root element, DTD, field tags, and relationship field encoding must be confirmed from a real export",
+        "Notes the preservation constraints that must be followed"
+      ],
+      "relevant_references": [
+        "references/page-xml-structure.md",
+        "references/page-codebase-gaps.md"
+      ]
+    },
+    {
+      "id": "page-fields-eval-2",
+      "name": "Page layout fields reference",
+      "description": "Test that the skill correctly identifies layout-related page fields",
+      "prompt": "What page fields control the layout and display of products on a ShopSite page?",
+      "expected_output": [
+        "References page-field-catalog.md Layout section",
+        "Lists: Columns, Page Link Columns, Item Alignment, Display column borders?, Page Width, Order, Products Sort Field, Pages Sort Field, Products First, Number Products, Text Wrap, Template",
+        "Gives type and default for each field",
+        "Notes that XML tag names are inferred and recommends confirming from a real export",
+        "Explains what each field does at a high level"
+      ],
+      "relevant_references": [
+        "references/page-field-catalog.md"
+      ]
+    },
+    {
+      "id": "page-fields-eval-3",
+      "name": "ProductOnPages current handling",
+      "description": "Test that the skill explains the current ProductOnPages handling as a preserved-block hack",
+      "prompt": "How is ProductOnPages currently handled in the codebase? What does that mean for page-product relationships?",
+      "expected_output": [
+        "Explains that ProductOnPages is handled as a preserved advanced block in product XML",
+        "References page-codebase-gaps.md for the detailed explanation",
+        "Describes the extractPageNames() function in product-denormalizer.ts that parses page names from <Name>/<PageName>/<PageLink> tags",
+        "Points out that the CMS can round-trip page assignments but cannot list pages, edit page metadata, or manage assignments from the page side",
+        "Notes that Product Links (page-side) is not yet implemented",
+        "Recommends exporting a real page XML sample before implementing page-side support"
+      ],
+      "relevant_references": [
+        "references/page-codebase-gaps.md"
+      ]
+    }
+  ]
+}

@@ -45,10 +45,22 @@ route.put('/field-registry/:id', async (c) => {
     editable: editable ?? true,
     required: required ?? false,
     uiGroup: uiGroup ?? null,
-    sampleValuesJson: null,
+    sampleValuesJson: body.sampleValuesJson ?? null,
     createdAt: now,
     updatedAt: now,
   });
+
+  // Write updated registry back to disk (field-registry.json)
+  try {
+    const entries = listRegistry(workspace.id);
+    const { writeStoreConfig } = await import('../../git/workspace-files');
+    writeStoreConfig(workspace.workspacePath, 'field-registry.json', {
+      schemaVersion: 1,
+      entries,
+    });
+  } catch (err) {
+    console.error('[FieldRegistryRoute] Failed to write field-registry.json:', err);
+  }
 
   return c.json({ success: true });
 });

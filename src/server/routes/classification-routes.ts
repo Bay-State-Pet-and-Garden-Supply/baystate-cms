@@ -30,6 +30,33 @@ router.get('/classification/config', (c) => {
 });
 
 /**
+ * PUT /api/classification/config
+ * Updates the current classification configuration (attributes, mappings, etc.)
+ */
+router.put('/classification/config', async (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  try {
+    const body = await c.req.json();
+    const config = body.config;
+    if (!config) {
+      return c.json({ error: 'Missing configuration payload' }, 400);
+    }
+
+    saveClassificationConfig(ws.workspacePath, config);
+    syncConfigToCache(ws.id, config);
+
+    return c.json({ success: true, config });
+  } catch (err) {
+    console.error('[ClassificationRoutes] Save configuration failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
  * GET /api/classification/curation-targets
  * Returns manager-selected curation targets plus live-store candidates.
  */

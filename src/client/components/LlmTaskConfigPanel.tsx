@@ -39,6 +39,12 @@ const TASK_LABELS: Record<LlmTask, string> = {
   product_curation: 'Product curation',
   category_classification: 'Category classification',
   classification_evidence_extraction: 'Classification evidence extraction',
+  product_type_classification: 'Product type classification',
+  category_page_assignment: 'Category page assignment',
+  attribute_value_classification: 'Attribute value classification',
+  catalog_health_triage: 'Catalog health triage',
+  product_field_refactor: 'Product field refactor',
+  store_manager_assistant: 'Store manager assistant',
 };
 
 const TASK_HINTS: Record<LlmTask, string> = {
@@ -48,6 +54,12 @@ const TASK_HINTS: Record<LlmTask, string> = {
   product_curation: 'Curates product metadata (titles, packaging alignment). May fall back when not configured.',
   category_classification: 'Classifies products into the internal category tree. May fall back when not configured.',
   classification_evidence_extraction: 'Extracts evidence for the classification pipeline. May fall back when not configured.',
+  product_type_classification: 'Classifies products into product types.',
+  category_page_assignment: 'Assigns categories to products.',
+  attribute_value_classification: 'Classifies attribute values.',
+  catalog_health_triage: 'Triages catalog health issues.',
+  product_field_refactor: 'Refactors product custom fields.',
+  store_manager_assistant: 'Powers the chat-based Store Manager AI Assistant.',
 };
 
 const PROVIDERS: ReadonlyArray<LlmProvider> = ['deepseek', 'openai', 'ollama'];

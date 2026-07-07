@@ -76,7 +76,7 @@ describe('LLM Task Config Repository', () => {
     expect(second?.temperature).toBe(0.5);
   });
 
-  test('LLM_TASKS contains all nine planned task identifiers', () => {
+  test('LLM_TASKS contains all planned task identifiers', () => {
     expect(new Set(LLM_TASKS)).toEqual(
       new Set([
         'product_name_consolidation',
@@ -88,6 +88,9 @@ describe('LLM Task Config Repository', () => {
         'product_type_classification',
         'category_page_assignment',
         'attribute_value_classification',
+        'catalog_health_triage',
+        'product_field_refactor',
+        'store_manager_assistant',
       ]),
     );
   });

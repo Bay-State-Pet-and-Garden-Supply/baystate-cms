@@ -255,6 +255,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
     }
   };
 
+
   const targetForField = (catalogField: string) =>
     curationTargetsDraft.find(t => t.kind === 'product_field' && t.catalogField === catalogField);
 
@@ -636,6 +637,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
           { id: 'llm', label: 'LLM Providers' },
           { id: 'curation', label: 'Curation' },
           { id: 'profiles', label: 'Extractor Profiles' },
+          { id: 'fields', label: 'Field Mappings' },
         ].map(tab => (
           <button
             key={tab.id}
@@ -1167,6 +1169,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
           }}
         />
       )}
+
 
       {/* ── Profile Builder Workspace Overlay ── */}
       {workspaceDomain && (

@@ -47,6 +47,10 @@ export default defineConfig({
       'src/tests/unit/cloud-vlm-client.test.ts',
       'src/tests/unit/curation-target-ranker.test.ts',
       'src/tests/unit/workspace-connection.test.ts',
+      'src/tests/unit/product-field-audit-service.test.ts',
+      'src/tests/unit/store-manager-tools.test.ts',
+      'src/tests/unit/store-manager.test.ts',
+      'src/tests/unit/store-manager-chat-history-service.test.ts',
     ],
   },
 });

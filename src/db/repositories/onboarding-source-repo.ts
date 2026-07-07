@@ -12,6 +12,7 @@ export interface OnboardingSourceRow {
   confidence: number;
   is_selected: number;
   source_method: string;
+  metadata_json: string | null;
   created_at: string;
 }
 
@@ -22,6 +23,7 @@ export interface InsertSourceData {
   domain?: string | null;
   confidence: number;
   sourceMethod?: string;
+  metadataJson?: string | null;
 }
 
 function mapRowToSource(row: OnboardingSourceRow): OnboardingSource {
@@ -35,6 +37,7 @@ function mapRowToSource(row: OnboardingSourceRow): OnboardingSource {
     confidence: row.confidence,
     isSelected: row.is_selected === 1,
     sourceMethod: row.source_method,
+    metadataJson: row.metadata_json,
     createdAt: row.created_at,
   };
 }
@@ -44,8 +47,8 @@ export function insertSources(itemId: string, sources: InsertSourceData[]): Onbo
   const now = new Date().toISOString();
   const stmt = db.query(
     `INSERT INTO onboarding_sources
-      (id, item_id, url, title, snippet, domain, confidence, is_selected, source_method, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      (id, item_id, url, title, snippet, domain, confidence, is_selected, source_method, metadata_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
   );
 
   const inserted: OnboardingSource[] = [];
@@ -62,6 +65,7 @@ export function insertSources(itemId: string, sources: InsertSourceData[]): Onbo
         source.domain ?? null,
         source.confidence,
         source.sourceMethod ?? 'serper',
+        source.metadataJson ?? null,
         now,
       );
       inserted.push({
@@ -74,6 +78,7 @@ export function insertSources(itemId: string, sources: InsertSourceData[]): Onbo
         confidence: source.confidence,
         isSelected: false,
         sourceMethod: source.sourceMethod ?? 'serper',
+        metadataJson: source.metadataJson ?? null,
         createdAt: now,
       });
     }

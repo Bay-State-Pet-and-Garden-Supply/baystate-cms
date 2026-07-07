@@ -54,7 +54,7 @@ export function normalizeProduct(
     customFields['GTIN'] = rawLegacyGtin;
   }
   if (rawGtin || rawUnderscoreGtin) {
-    customFields['GoogleGTIN'] = gtin;
+    customFields['GoogleGTIN'] = gtin ?? '';
   }
 
   // Build registry observations

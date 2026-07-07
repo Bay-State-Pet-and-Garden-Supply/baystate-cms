@@ -123,6 +123,17 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to add title_optional_selectors_json column:', e);
   }
 
+  // Ensure onboarding_sources has metadata_json column
+  try {
+    const columns = db.query('PRAGMA table_info(onboarding_sources)').all() as Array<{ name: string }>;
+    if (columns.length > 0 && !columns.some(col => col.name === 'metadata_json')) {
+      db.exec('ALTER TABLE onboarding_sources ADD COLUMN metadata_json TEXT;');
+      console.log('[Migrations] Added metadata_json column to onboarding_sources.');
+    }
+  } catch (e) {
+    console.error('Failed to update onboarding_sources columns:', e);
+  }
+
   // Ensure domain_status table exists
   try {
     db.exec(`
@@ -139,6 +150,36 @@ export function runMigrations(): void {
   } catch (e) {
     console.error('Failed to create domain_status table:', e);
   }
+
+  // Ensure catalog_health_proposals table exists
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS catalog_health_proposals (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspace(id),
+        field TEXT NOT NULL,
+        old_value TEXT NOT NULL,
+        new_value TEXT NOT NULL,
+        affected_skus TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 1.0,
+        source TEXT NOT NULL DEFAULT 'deterministic',
+        status TEXT NOT NULL DEFAULT 'proposed',
+        change_set_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_catalog_health_proposals_ws ON catalog_health_proposals(workspace_id);
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_catalog_health_proposals_status ON catalog_health_proposals(status);
+    `);
+  } catch (e) {
+    console.error('Failed to create catalog_health_proposals table:', e);
+  }
+
 
   // Ensure profile_generations table exists (audit trail for LLM-generated
   // selector profile proposals; one row per generation attempt).
@@ -537,6 +578,42 @@ export function runMigrations(): void {
     }
   } catch (e) {
     console.error('[Migrations] Failed to seed category_page_assignment task config:', e);
+  }
+
+  // Ensure store_manager_chat_history table exists
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_chat_history (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        message_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    
+    // Add columns if they do not exist
+    try {
+      db.exec("ALTER TABLE store_manager_chat_history ADD COLUMN thread_id TEXT;");
+    } catch (e) { /* already exists */ }
+    try {
+      db.exec("ALTER TABLE store_manager_chat_history ADD COLUMN thread_title TEXT;");
+    } catch (e) { /* already exists */ }
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_store_manager_chat_history_ws 
+        ON store_manager_chat_history(workspace_id);
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_store_manager_chat_history_thread 
+        ON store_manager_chat_history(thread_id);
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_store_manager_chat_history_created 
+        ON store_manager_chat_history(created_at);
+    `);
+  } catch (e) {
+    console.error('[Migrations] Failed to create store_manager_chat_history table:', e);
   }
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as

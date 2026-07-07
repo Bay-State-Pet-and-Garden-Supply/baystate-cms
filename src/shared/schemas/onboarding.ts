@@ -307,6 +307,7 @@ export const OnboardingSourceSchema = z.object({
   confidence: z.number(),
   isSelected: z.boolean(),
   sourceMethod: z.string(),
+  metadataJson: z.string().nullable().optional(),
   createdAt: z.string(),
 });
 
@@ -322,6 +323,12 @@ export const LlmTaskEnum = z.enum([
   'product_curation',
   'category_classification',
   'classification_evidence_extraction',
+  'product_type_classification',
+  'category_page_assignment',
+  'attribute_value_classification',
+  'catalog_health_triage',
+  'product_field_refactor',
+  'store_manager_assistant',
 ]);
 export type LlmTask = z.infer<typeof LlmTaskEnum>;
 

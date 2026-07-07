@@ -29,7 +29,10 @@ export type LlmTask =
   | 'classification_evidence_extraction'
   | 'product_type_classification'
   | 'category_page_assignment'
-  | 'attribute_value_classification';
+  | 'attribute_value_classification'
+  | 'catalog_health_triage'
+  | 'product_field_refactor'
+  | 'store_manager_assistant';
 
 export const LLM_TASKS: ReadonlyArray<LlmTask> = [
   'product_name_consolidation',
@@ -41,6 +44,9 @@ export const LLM_TASKS: ReadonlyArray<LlmTask> = [
   'product_type_classification',
   'category_page_assignment',
   'attribute_value_classification',
+  'catalog_health_triage',
+  'product_field_refactor',
+  'store_manager_assistant',
 ];
 
 /**

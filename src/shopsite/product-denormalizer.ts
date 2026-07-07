@@ -234,9 +234,8 @@ function extractPageNames(product: Product): string[] {
 }
 
 function escapeXml(str: string): string {
-
   return str
-    .replace(/&/g, '&amp;')
+    .replace(/&(?!#(?:[0-9]+|x[0-9a-fA-F]+);|[a-zA-Z0-9]+;)/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')

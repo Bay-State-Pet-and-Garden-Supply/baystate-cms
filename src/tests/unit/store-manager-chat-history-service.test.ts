@@ -1,0 +1,111 @@
+import { randomUUID } from 'node:crypto';
+import { unlinkSync, existsSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { initDb, closeDb, resetDb } from '../../db/connection';
+import { runMigrations } from '../../db/migrations';
+import { getDb } from '../../db/connection';
+import {
+  saveChatMessage,
+  getChatHistory,
+  getChatThreads,
+  clearChatHistory,
+  pruneOldChatHistory,
+} from '../../server/services/store-manager-chat-history-service';
+import type { UIMessage } from 'ai';
+
+describe('Store Manager Chat History Service', () => {
+  const testDbPath = './test-chat.db';
+  const workspaceId = randomUUID();
+  const threadId = randomUUID();
+  const threadTitle = 'Test Conversation';
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+    if (existsSync(testDbPath)) {
+      try { unlinkSync(testDbPath); } catch { /* ok */ }
+    }
+  });
+
+  it('should save and load chat history correctly', () => {
+    const messageId1 = randomUUID();
+    const userMessage: UIMessage = {
+      id: messageId1,
+      role: 'user',
+      parts: [{ type: 'text', text: 'Hello, audit custom fields please' }],
+    };
+
+    saveChatMessage(workspaceId, threadId, threadTitle, messageId1, 'user', userMessage);
+
+    const messageId2 = randomUUID();
+    const assistantMessage: UIMessage = {
+      id: messageId2,
+      role: 'assistant',
+      parts: [{ type: 'text', text: 'I am auditing custom fields now' }],
+    };
+
+    saveChatMessage(workspaceId, threadId, threadTitle, messageId2, 'assistant', assistantMessage);
+
+    const history = getChatHistory(workspaceId, threadId);
+    expect(history.length).toBe(2);
+    expect(history[0].id).toBe(messageId1);
+    expect(history[0].role).toBe('user');
+    expect(history[1].id).toBe(messageId2);
+    expect(history[1].role).toBe('assistant');
+
+    const threads = getChatThreads(workspaceId);
+    expect(threads.length).toBe(1);
+    expect(threads[0].id).toBe(threadId);
+    expect(threads[0].title).toBe(threadTitle);
+  });
+
+  it('should clear chat history', () => {
+    const historyBefore = getChatHistory(workspaceId, threadId);
+    expect(historyBefore.length).toBe(2);
+
+    clearChatHistory(workspaceId, threadId);
+
+    const historyAfter = getChatHistory(workspaceId, threadId);
+    expect(historyAfter.length).toBe(0);
+  });
+
+  it('should prune messages older than 1 week (7 days)', () => {
+    const db = getDb();
+    const tId = randomUUID();
+    const idOld = randomUUID();
+    const idNew = randomUUID();
+
+    const oldMsg: UIMessage = {
+      id: idOld,
+      role: 'user',
+      parts: [{ type: 'text', text: 'Old message' }],
+    };
+
+    const newMsg: UIMessage = {
+      id: idNew,
+      role: 'user',
+      parts: [{ type: 'text', text: 'New message' }],
+    };
+
+    // Save both
+    saveChatMessage(workspaceId, tId, 'Pruning Test', idOld, 'user', oldMsg);
+    saveChatMessage(workspaceId, tId, 'Pruning Test', idNew, 'user', newMsg);
+
+    // Explicitly modify the created_at column of the old message to be 8 days ago
+    const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    db.run('UPDATE store_manager_chat_history SET created_at = ? WHERE id = ?', [eightDaysAgo, idOld]);
+
+    // Run pruning
+    pruneOldChatHistory();
+
+    // Verify
+    const history = getChatHistory(workspaceId, tId);
+    expect(history.length).toBe(1);
+    expect(history[0].id).toBe(idNew);
+  });
+});

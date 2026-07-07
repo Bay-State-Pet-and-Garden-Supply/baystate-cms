@@ -1454,6 +1454,14 @@ export function PipelineBoard({
                       // vs the consolidated-name search (Pass 2). Sources are
                       // already sorted by confidence descending in the backend.
                       const methodLabel = (method: string): { short: string; long: string; bg: string; text: string } => {
+                        if (method === 'shopify_variant') {
+                          return {
+                            short: 'Variant',
+                            long: 'Variant resolution',
+                            bg: '#fef3c7',
+                            text: '#92400e',
+                          };
+                        }
                         if (method === 'serper_name') {
                           return {
                             short: 'Name',
@@ -1484,7 +1492,7 @@ export function PipelineBoard({
                         items: OnboardingSource[];
                       };
 
-                      const groupOrder: string[] = ['serper_upc', 'serper_name'];
+                      const groupOrder: string[] = ['shopify_variant', 'serper_upc', 'serper_name'];
                       const groups: SourceGroup[] = [];
                       for (const method of groupOrder) {
                         const items = reviewSources.filter(s => s.sourceMethod === method);
@@ -1571,71 +1579,271 @@ export function PipelineBoard({
                                   padding: 8,
                                   background: '#f9fafb',
                                 }}>
-                                  {group.items.map((src) => {
-                                    const srcLabel = methodLabel(src.sourceMethod);
-                                    return (
-                                      <div
-                                        key={src.id}
-                                        onClick={async () => {
+                                  {(() => {
+                                    type RenderItem =
+                                      | { type: 'standalone'; source: OnboardingSource }
+                                      | { type: 'ambiguous_group'; baseUrl: string; sources: OnboardingSource[] };
+
+                                    const renderItems: RenderItem[] = [];
+                                    const seenBaseUrls = new Set<string>();
+
+                                    for (const src of group.items) {
+                                      let itemBaseUrl = '';
+                                      let isAmb = false;
+                                      if (src.metadataJson) {
+                                        try {
+                                          const meta = JSON.parse(src.metadataJson);
+                                          isAmb = meta.variantResolution?.status === 'ambiguous';
+                                          itemBaseUrl = meta.variantResolution?.baseUrl || '';
+                                        } catch {}
+                                      }
+
+                                      if (isAmb && itemBaseUrl) {
+                                        if (seenBaseUrls.has(itemBaseUrl)) continue;
+                                        seenBaseUrls.add(itemBaseUrl);
+                                        const groupVariants = group.items.filter(x => {
+                                          if (!x.metadataJson) return false;
                                           try {
-                                            await fetch(`/api/onboarding/items/${reviewItem.id}/select-source`, {
-                                              method: 'POST',
-                                              headers: { 'Content-Type': 'application/json' },
-                                              body: JSON.stringify({ sourceId: src.id }),
-                                            });
-                                            setManualUrlInput(src.url);
-                                            const res = await getItemDetail(reviewItem.id);
-                                            setReviewItem(res.item);
-                                            setReviewSources(res.sources);
-                                          } catch (err) {
-                                            alert('Failed to select source: ' + String(err));
+                                            const m = JSON.parse(x.metadataJson);
+                                            return m.variantResolution?.status === 'ambiguous' && m.variantResolution?.baseUrl === itemBaseUrl;
+                                          } catch {
+                                            return false;
                                           }
-                                        }}
-                                        style={{
-                                          border: '1px solid #e5e7eb',
-                                          borderRadius: 6,
-                                          padding: 10,
-                                          background: src.isSelected ? '#f0fdf4' : '#fff',
-                                          borderColor: src.isSelected ? '#16a34a' : '#e5e7eb',
-                                          cursor: 'pointer',
-                                          textAlign: 'left',
-                                          boxShadow: src.isSelected ? '0 1px 3px rgba(22, 163, 74, 0.1)' : '0 1px 2px rgba(0,0,0,0.05)',
-                                          transition: 'all 0.2s ease-in-out',
-                                        }}
-                                      >
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' }}>
-                                          <strong style={{ fontSize: 13, color: src.isSelected ? '#166534' : '#111827' }}>
-                                            {src.title || src.domain}
-                                          </strong>
-                                          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                            <span style={{
-                                              fontSize: 9,
-                                              fontWeight: 700,
-                                              textTransform: 'uppercase',
-                                              letterSpacing: '0.04em',
-                                              padding: '1px 5px',
-                                              borderRadius: 3,
-                                              background: srcLabel.bg,
-                                              color: srcLabel.text,
+                                        });
+                                        renderItems.push({
+                                          type: 'ambiguous_group',
+                                          baseUrl: itemBaseUrl,
+                                          sources: groupVariants
+                                        });
+                                      } else {
+                                        renderItems.push({
+                                          type: 'standalone',
+                                          source: src
+                                        });
+                                      }
+                                    }
+
+                                    const handleSelect = async (sourceId: string, url: string) => {
+                                      try {
+                                        await fetch(`/api/onboarding/items/${reviewItem.id}/select-source`, {
+                                          method: 'POST',
+                                          headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({ sourceId }),
+                                        });
+                                        setManualUrlInput(url);
+                                        const res = await getItemDetail(reviewItem.id);
+                                        setReviewItem(res.item);
+                                        setReviewSources(res.sources);
+                                      } catch (err) {
+                                        alert('Failed to select source: ' + String(err));
+                                      }
+                                    };
+
+                                    return renderItems.map((item, idx) => {
+                                      if (item.type === 'standalone') {
+                                        const src = item.source;
+                                        const srcLabel = methodLabel(src.sourceMethod);
+                                        let isResolved = false;
+                                        let variantTitle = '';
+                                        let matchedSignals: string[] = [];
+                                        if (src.metadataJson) {
+                                          try {
+                                            const meta = JSON.parse(src.metadataJson);
+                                            isResolved = meta.variantResolution?.status === 'resolved';
+                                            variantTitle = meta.variantResolution?.variantTitle || '';
+                                            matchedSignals = meta.variantResolution?.matchedSignals || [];
+                                          } catch {}
+                                        }
+
+                                        return (
+                                          <div
+                                            key={src.id}
+                                            onClick={() => handleSelect(src.id, src.url)}
+                                            style={{
+                                              border: '1px solid #e5e7eb',
+                                              borderRadius: 6,
+                                              padding: 10,
+                                              background: src.isSelected ? '#f0fdf4' : '#fff',
+                                              borderColor: src.isSelected ? '#16a34a' : '#e5e7eb',
+                                              cursor: 'pointer',
+                                              textAlign: 'left',
+                                              boxShadow: src.isSelected ? '0 1px 3px rgba(22, 163, 74, 0.1)' : '0 1px 2px rgba(0,0,0,0.05)',
+                                              transition: 'all 0.2s ease-in-out',
+                                            }}
+                                          >
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' }}>
+                                              <strong style={{ fontSize: 13, color: src.isSelected ? '#166534' : '#111827' }}>
+                                                {src.title || src.domain}
+                                              </strong>
+                                              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                {isResolved && (
+                                                  <span style={{
+                                                    fontSize: 9,
+                                                    fontWeight: 700,
+                                                    background: '#fef3c7',
+                                                    color: '#92400e',
+                                                    padding: '1px 5px',
+                                                    borderRadius: 3,
+                                                  }}>
+                                                    Variant Resolved
+                                                  </span>
+                                                )}
+                                                <span style={{
+                                                  fontSize: 9,
+                                                  fontWeight: 700,
+                                                  textTransform: 'uppercase',
+                                                  letterSpacing: '0.04em',
+                                                  padding: '1px 5px',
+                                                  borderRadius: 3,
+                                                  background: srcLabel.bg,
+                                                  color: srcLabel.text,
+                                                }}>
+                                                  {srcLabel.short}
+                                                </span>
+                                                <span style={{ fontSize: 11, fontWeight: 600, color: '#15803d' }}>
+                                                  {src.isSelected ? '✓ Selected' : `${(src.confidence * 100).toFixed(0)}%`}
+                                                </span>
+                                              </span>
+                                            </div>
+                                            <p style={{ margin: '0 0 4px', fontSize: 11, color: '#6b7280', wordBreak: 'break-all' }}>
+                                              {src.url}
+                                            </p>
+                                            {variantTitle && (
+                                              <p style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 600, color: '#4b5563' }}>
+                                                Variant: <span style={{ color: '#1e3a8a' }}>{variantTitle}</span>
+                                              </p>
+                                            )}
+                                            {matchedSignals.length > 0 && (
+                                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
+                                                {matchedSignals.map(sig => (
+                                                  <span key={sig} style={{ fontSize: 9, background: '#f3f4f6', color: '#4b5563', padding: '1px 4px', borderRadius: 3 }}>
+                                                    {sig}
+                                                  </span>
+                                                ))}
+                                              </div>
+                                            )}
+                                            {src.snippet && (
+                                              <p style={{ margin: 0, fontSize: 11, color: '#4b5563', fontStyle: 'italic' }}>
+                                                &ldquo;{src.snippet.slice(0, 150)}{src.snippet.length > 150 ? '...' : ''}&rdquo;
+                                              </p>
+                                            )}
+                                          </div>
+                                        );
+                                      } else {
+                                        const baseDomain = new URL(item.baseUrl).hostname;
+                                        return (
+                                          <div
+                                            key={`group-${idx}`}
+                                            style={{
+                                              border: '1px solid #cbd5e1',
+                                              borderRadius: 8,
+                                              background: '#f8fafc',
+                                              overflow: 'hidden',
+                                              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                                            }}
+                                          >
+                                            <div style={{
+                                              padding: '8px 12px',
+                                              background: '#f1f5f9',
+                                              borderBottom: '1px solid #e2e8f0',
+                                              display: 'flex',
+                                              justifyContent: 'space-between',
+                                              alignItems: 'center',
                                             }}>
-                                              {srcLabel.short}
-                                            </span>
-                                            <span style={{ fontSize: 11, fontWeight: 600, color: '#15803d' }}>
-                                              {src.isSelected ? '✓ Selected' : `${(src.confidence * 100).toFixed(0)}%`}
-                                            </span>
-                                          </span>
-                                        </div>
-                                        <p style={{ margin: '0 0 4px', fontSize: 11, color: '#6b7280', wordBreak: 'break-all' }}>
-                                          {src.url}
-                                        </p>
-                                        {src.snippet && (
-                                          <p style={{ margin: 0, fontSize: 11, color: '#4b5563', fontStyle: 'italic' }}>
-                                            &ldquo;{src.snippet.slice(0, 150)}{src.snippet.length > 150 ? '...' : ''}&rdquo;
-                                          </p>
-                                        )}
-                                      </div>
-                                    );
-                                  })}
+                                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'left' }}>
+                                                <span style={{ fontSize: 12, fontWeight: 700, color: '#334155' }}>
+                                                  {baseDomain}
+                                                </span>
+                                                <span style={{ fontSize: 10, color: '#64748b', wordBreak: 'break-all' }}>
+                                                  {item.baseUrl}
+                                                </span>
+                                              </div>
+                                              <span style={{
+                                                fontSize: 9,
+                                                fontWeight: 700,
+                                                background: '#fee2e2',
+                                                color: '#b91c1c',
+                                                padding: '2px 6px',
+                                                borderRadius: 4,
+                                              }}>
+                                                Ambiguous Variants ({item.sources.length})
+                                              </span>
+                                            </div>
+                                            <div style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                              {item.sources.map((v) => {
+                                                let vTitle = '';
+                                                let matchedSignals: string[] = [];
+                                                if (v.metadataJson) {
+                                                  try {
+                                                    const meta = JSON.parse(v.metadataJson);
+                                                    vTitle = meta.variantResolution?.variantTitle || '';
+                                                    matchedSignals = meta.variantResolution?.matchedSignals || [];
+                                                  } catch {}
+                                                }
+                                                return (
+                                                  <div
+                                                    key={v.id}
+                                                    onClick={() => handleSelect(v.id, v.url)}
+                                                    style={{
+                                                      border: '1px solid #e2e8f0',
+                                                      borderRadius: 6,
+                                                      padding: 8,
+                                                      background: v.isSelected ? '#f0fdf4' : '#fff',
+                                                      borderColor: v.isSelected ? '#16a34a' : '#e2e8f0',
+                                                      cursor: 'pointer',
+                                                      display: 'flex',
+                                                      justifyContent: 'space-between',
+                                                      alignItems: 'center',
+                                                      boxShadow: v.isSelected ? '0 1px 2px rgba(22, 163, 74, 0.05)' : 'none',
+                                                      transition: 'all 0.15s ease-in-out',
+                                                    }}
+                                                  >
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'left' }}>
+                                                      <span style={{ fontSize: 12, fontWeight: 600, color: v.isSelected ? '#166534' : '#1e293b' }}>
+                                                        {vTitle || v.title}
+                                                      </span>
+                                                      {matchedSignals.length > 0 && (
+                                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+                                                          {matchedSignals.map(sig => (
+                                                            <span key={sig} style={{ fontSize: 8, background: '#f1f5f9', color: '#64748b', padding: '1px 3px', borderRadius: 2 }}>
+                                                              {sig}
+                                                            </span>
+                                                          ))}
+                                                        </div>
+                                                      )}
+                                                    </div>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                      <span style={{ fontSize: 11, fontWeight: 500, color: '#64748b' }}>
+                                                        {(v.confidence * 100).toFixed(0)}%
+                                                      </span>
+                                                      <button
+                                                        onClick={(e) => {
+                                                          e.stopPropagation();
+                                                          handleSelect(v.id, v.url);
+                                                        }}
+                                                        style={{
+                                                          fontSize: 10,
+                                                          fontWeight: 600,
+                                                          padding: '2px 6px',
+                                                          borderRadius: 4,
+                                                          background: v.isSelected ? '#16a34a' : '#2563eb',
+                                                          color: '#fff',
+                                                          border: 'none',
+                                                          cursor: 'pointer',
+                                                        }}
+                                                      >
+                                                        {v.isSelected ? 'Selected' : 'Select'}
+                                                      </button>
+                                                    </div>
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
+                                          </div>
+                                        );
+                                      }
+                                    });
+                                  })()}
                                 </div>
                               </div>
                             );

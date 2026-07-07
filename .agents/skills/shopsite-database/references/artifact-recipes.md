@@ -45,6 +45,10 @@ python3 scripts/build_shopsite_examples.py download --base-url https://store.exa
 
 Use when the user asks for a `dbupload.cgi` example.
 
+For MIME multipart uploads, see `references/mime-upload-format.md` for the exact multipart structure, boundary format, and form-data part ordering.
+
+For upload option semantics (uniqueName, newRecords, defer_linking, restart), see `references/upload-options.md`.
+
 Collect:
 - base CGI URL
 - `dbname`
