@@ -1,6 +1,6 @@
 ---
 name: shopsite-page-fields
-description: Documentation-grounded advisor for ShopSite page field modeling, page XML structure, page-parser, page-normalizer, page denormalizer, and the page database upload/download workflow. Use this skill whenever the user mentions ShopSite pages, page XML, page fields, page upload, page templates, page database, page normalizer, page parser, ShopSitePages, ProductOnPages, page layout, page display settings, or creating page support. Triggers on: "page field", "ShopSite page", "page XML", "page upload fields", "page template", "page database", "page normalizer", "page parser", "page table", "ShopSitePages", "shopSitePages.dtd", "ProductOnPages", "page layout", "page display", "page columns".
+description: 'Documentation-grounded advisor for ShopSite page field modeling, page XML structure, page-parser, page-normalizer, page denormalizer, and the page database upload/download workflow. Use this skill whenever the user mentions ShopSite pages, page XML, page fields, page upload, page templates, page database, page normalizer, page parser, ShopSitePages, ProductOnPages, page layout, page display settings, or creating page support. Triggers on: "page field", "ShopSite page", "page XML", "page upload fields", "page template", "page database", "page normalizer", "page parser", "page table", "ShopSitePages", "shopSitePages.dtd", "ProductOnPages", "page layout", "page display", "page columns".'
 ---
 
 # ShopSite Page Fields
