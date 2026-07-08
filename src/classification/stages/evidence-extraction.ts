@@ -2,7 +2,7 @@ import type { StageDefinition, StageContext, StageInput, StageResult } from '../
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../../db/connection';
 import { getVlmConfig } from '../../onboarding/vlm-client';
-import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
+import { extractPackagingOcr, mergeOcrResults } from '../../onboarding/packaging-ocr';
 import { getLlmConfigForTask, callLlmForTask } from '../../onboarding/llm-client';
 import { getCachedBrands, getCachedDataSharingPolicy } from '../../db/repositories/classification-config-repo';
 import { resolveBrand } from '../brand-resolution';
@@ -284,6 +284,40 @@ function packagingOcrDataToEvidence(
     }
   }
 
+  // ingredients — one entry per ingredient
+  if (ocrData.ingredients?.length) {
+    for (const val of ocrData.ingredients) {
+      if (!val?.trim()) continue;
+      evidence.push({
+        ...base,
+        id: randomUUID(),
+        attributeId: null,
+        reliability: reliability('ingredients', 'medium') as any,
+        sourceField: 'ingredient',
+        snippet: val.slice(0, 300),
+        value: val,
+        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.ingredients ?? null },
+      });
+    }
+  }
+
+  // claims — one entry per claim
+  if (ocrData.claims?.length) {
+    for (const val of ocrData.claims) {
+      if (!val?.trim()) continue;
+      evidence.push({
+        ...base,
+        id: randomUUID(),
+        attributeId: null,
+        reliability: reliability('claims', 'medium') as any,
+        sourceField: 'claim',
+        snippet: val.slice(0, 300),
+        value: val,
+        metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.claims ?? null },
+      });
+    }
+  }
+
   return evidence;
 }
 
@@ -553,41 +587,72 @@ export const evidenceExtractionStage: StageDefinition = {
       }
     }
 
-    // ── Extract visual evidence from product images ───────────────────────
-    // Always run VLM OCR when a primary image exists and local VLM is
-    // enabled, regardless of cached data. Use fresh OCR results; fall
-    // back to cached data only if the VLM call fails.
+    // ── Extract visual evidence from ALL product images ───────────────────
+    // Run VLM OCR on every available product image (primary + additional
+    // gallery images) and merge the results. Gallery images often contain
+    // ingredient panels, guaranteed analysis, feeding guides, and other
+    // rich data that the curator and classification stages need.
     let vlmOcrSucceeded = false;
+    const ocrResults: PackagingOcrData[] = [];
 
-    if (extData.primaryImage && canUseLocalVlm) {
-      try {
-        const ocrResult = await extractPackagingOcr({
-          imageUrl: String(extData.primaryImage),
-          workspacePath: context.workspacePath,
-          imageSourceUrl: String(extData.primaryImage),
-          sku: input.sku,
-        });
-
-        if (ocrResult) {
-          vlmOcrSucceeded = true;
-          // Always update with fresh results
-          extData.packagingOcrData = ocrResult;
-
-          // Persist back to the item's extraction_data_json
-          try {
-            const updatedExt = { ...extData, packagingOcrData: ocrResult, packagingTitle: ocrResult.productName };
-            db.query(
-              'UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?',
-            ).run(JSON.stringify(updatedExt), input.onboardingItemId);
-          } catch (persistErr: any) {
-            console.warn(`[EvidenceExtraction] Failed to persist fresh OCR: ${persistErr.message}`);
+    if (canUseLocalVlm) {
+      // Collect all image URLs to OCR (cap at 10 per product to protect
+      // against extraction bugs that produce hundreds of stray images)
+      const MAX_OCR_IMAGES = 10;
+      const imageUrls: string[] = [];
+      if (extData.primaryImage) imageUrls.push(String(extData.primaryImage));
+      if (extData.additionalImages && Array.isArray(extData.additionalImages)) {
+        for (const img of extData.additionalImages) {
+          if (imageUrls.length >= MAX_OCR_IMAGES) break;
+          if (img && String(img).trim()) {
+            imageUrls.push(String(img));
           }
-
-          console.log(`[EvidenceExtraction] Fresh VLM OCR completed for item ${input.onboardingItemId}`);
         }
-      } catch (err: any) {
-        console.warn(`[EvidenceExtraction] VLM OCR failed for item ${input.onboardingItemId}: ${err.message}`);
-        // Fall back to cached data if available — don't overwrite extData.packagingOcrData
+      }
+
+      if (imageUrls.length > 0) {
+        console.log(`[EvidenceExtraction] Running VLM OCR on ${imageUrls.length} image(s) for item ${input.onboardingItemId}`);
+      }
+
+      for (let i = 0; i < imageUrls.length; i++) {
+        const imgUrl = imageUrls[i];
+        try {
+          const ocrResult = await extractPackagingOcr({
+            imageUrl: imgUrl,
+            workspacePath: context.workspacePath,
+            imageSourceUrl: imgUrl,
+            sku: input.sku,
+          });
+
+          if (ocrResult) {
+            ocrResults.push(ocrResult);
+            console.log(`[EvidenceExtraction] VLM OCR completed for image ${i + 1}/${imageUrls.length} of item ${input.onboardingItemId}`);
+          } else {
+            console.warn(`[EvidenceExtraction] VLM OCR returned no result for image ${i + 1}/${imageUrls.length} of item ${input.onboardingItemId}`);
+          }
+        } catch (err: any) {
+          console.warn(`[EvidenceExtraction] VLM OCR failed for image ${i + 1}/${imageUrls.length} of item ${input.onboardingItemId}: ${err.message}`);
+        }
+      }
+
+      if (ocrResults.length > 0) {
+        vlmOcrSucceeded = true;
+
+        // Merge OCR results from all images
+        const mergedOcr = ocrResults.length === 1 ? ocrResults[0] : mergeOcrResults(ocrResults);
+        extData.packagingOcrData = mergedOcr;
+
+        // Persist merged result back to the item's extraction_data_json
+        try {
+          const updatedExt = { ...extData, packagingOcrData: mergedOcr, packagingTitle: mergedOcr.productName };
+          db.query(
+            'UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?',
+          ).run(JSON.stringify(updatedExt), input.onboardingItemId);
+        } catch (persistErr: any) {
+          console.warn(`[EvidenceExtraction] Failed to persist merged OCR: ${persistErr.message}`);
+        }
+
+        console.log(`[EvidenceExtraction] ✓ VLM OCR complete for ${imageUrls.length} image(s) of item ${input.onboardingItemId}: ${ocrResults.length} succeeded, merged into ${Object.entries(mergedOcr).filter(([k, v]) => k !== 'metadata' && k !== 'confidenceByField' && v !== null && !(Array.isArray(v) && v.length === 0)).length} populated fields`);
       }
     }
 

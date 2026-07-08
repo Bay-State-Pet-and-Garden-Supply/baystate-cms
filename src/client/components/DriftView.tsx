@@ -11,7 +11,7 @@ export function DriftView() {
 
   const fetchDrift = async () => {
     try {
-      const res = await listDrift();
+      const res = await listDrift('open');
       setDrifts(res.drifts);
       setOpenCount(res.openCount);
     } catch (err) {

@@ -1202,15 +1202,16 @@ export function PipelineBoard({
               </div>
 
               <h2 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 600, color: '#111827' }}>
-                Review: {reviewItem.expectedName || reviewItem.name}
+                {reviewItem.name}
               </h2>
+              {reviewItem.expectedName && reviewItem.expectedName !== reviewItem.name && (
+                <p style={{ margin: '0 0 4px', fontSize: 13, color: '#7c3aed', fontWeight: 500 }}>
+                  Expected: {reviewItem.expectedName}
+                </p>
+              )}
               <p style={{ margin: 0, fontSize: 13, color: '#6b7280' }}>
-                Row {reviewItem.rowNumber} · UPC: {reviewItem.upc}
-                {reviewItem.expectedName && reviewItem.expectedName !== reviewItem.name && (
-                  <span style={{ marginLeft: 8, fontSize: 11, background: '#f3e8ff', color: '#7c3aed', padding: '1px 6px', borderRadius: 4 }}>
-                    Raw: {reviewItem.name}
-                  </span>
-                )}
+                UPC: {reviewItem.upc}
+                {reviewItem.price ? <span> · Price: <strong>${(() => { const n = parseFloat(reviewItem.price.replace(/[^0-9.]/g, '')); return isNaN(n) ? reviewItem.price : n.toFixed(2); })()}</strong></span> : null}
               </p>
               {(() => {
                 try {
@@ -1943,6 +1944,57 @@ export function PipelineBoard({
               {/* Extracted product data (shown for extraction+ stages) */}
               {reviewItem && reviewItem.stage !== 'discovery' && (reviewExtraction || curationFields.curatedTitle || classificationProposals.length > 0) && (
                 <>
+                  {/* Raw extraction results — shown in extraction stage */}
+                  {reviewItem?.stage === 'extraction' && reviewExtraction && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 16, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: '#1e293b' }}>
+                        📋 Raw Extraction Results
+                      </h3>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                        <tbody>
+                          {reviewExtraction.title && (
+                            <tr>
+                              <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Title</td>
+                              <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9', wordBreak: 'break-word' }}>{reviewExtraction.title}</td>
+                            </tr>
+                          )}
+                          {reviewExtraction.brand && (
+                            <tr>
+                              <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Brand</td>
+                              <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{reviewExtraction.brand}</td>
+                            </tr>
+                          )}
+                          {reviewExtraction.description && (
+                            <tr>
+                              <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Description</td>
+                              <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9', wordBreak: 'break-word' }}>{reviewExtraction.description.slice(0, 500)}{reviewExtraction.description.length > 500 ? '…' : ''}</td>
+                            </tr>
+                          )}
+                          {reviewExtraction.customFields && Object.keys(reviewExtraction.customFields).length > 0 && (
+                            Object.entries(reviewExtraction.customFields).map(([fieldName, value]) => (
+                              <tr key={fieldName}>
+                                <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>{fieldName}</td>
+                                <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{value}</td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                      {reviewExtraction.fieldProvenance && Object.keys(reviewExtraction.fieldProvenance).length > 0 && (
+                        <details style={{ fontSize: 11, color: '#94a3b8' }}>
+                          <summary style={{ cursor: 'pointer', fontWeight: 500, color: '#64748b' }}>Field provenance (which source each field came from)</summary>
+                          <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {Object.entries(reviewExtraction.fieldProvenance).map(([field, source]) => (
+                              <span key={field} style={{ background: '#f1f5f9', padding: '1px 6px', borderRadius: 4, color: '#64748b' }}>
+                                {field}: <strong>{source}</strong>
+                              </span>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  )}
+
                   {/* Curated Title */}
                   {/* Curated Title — only shown in curation+ stages */}
                   {curationFields.curatedTitle && reviewItem?.stage !== 'extraction' && (
@@ -2226,8 +2278,8 @@ export function PipelineBoard({
                     );
                   })()}
 
-                  {/* Classification Proposals */}
-                  {classificationProposals.filter(p => p.targetId !== 'product_draft_projection').length > 0 && (
+                  {/* Classification Proposals — only shown in curation+ stages */}
+                  {reviewItem?.stage !== 'extraction' && classificationProposals.filter(p => p.targetId !== 'product_draft_projection').length > 0 && (
                     <div style={{ padding: 12, background: '#f5f3ff', borderRadius: 8, border: '1px solid #ddd6fe' }}>
                       <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px', color: '#7c3aed' }}>🤖 AI Proposals</h3>
                       {classificationProposals
@@ -2316,8 +2368,8 @@ export function PipelineBoard({
 
 
 
-                  {/* Product Pages */}
-                  {storePages.length > 0 && (
+                  {/* Product Pages — only shown in curation+ stages */}
+                  {reviewItem?.stage !== 'extraction' && storePages.length > 0 && (
                     <div>
                       <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Product Pages</h3>
                       <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid #d1d5db', borderRadius: 6, padding: 8 }}>

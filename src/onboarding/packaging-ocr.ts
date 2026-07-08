@@ -385,6 +385,83 @@ export async function extractPackagingOcr(
   return result;
 }
 
+// ─── OCR result merging (multi-image support) ────────────────────────────────
+
+/**
+ * Merge multiple PackagingOcrData results from different images of the same
+ * product into a single combined result.
+ *
+ * Strategy:
+ * - **Scalar fields** (productName, brand, flavorVariety, etc.): First non-null
+ *   wins (primary image has priority since it runs first).
+ * - **Array fields** (ingredients, claims, dietaryLabels, species, etc.):
+ *   Unioned across all results, deduplicated, preserving order.
+ * - **confidenceByField**: Per-field, the maximum confidence wins.
+ * - **metadata**: Keeps the primary image's metadata.
+ */
+export function mergeOcrResults(results: PackagingOcrData[]): PackagingOcrData {
+  if (results.length === 0) throw new Error('Cannot merge empty OCR results');
+  if (results.length === 1) return results[0];
+
+  const merged: Record<string, any> = {};
+
+  // Scalar fields — first non-null wins
+  const scalarFields: Array<keyof PackagingOcrData> = [
+    'productName', 'brand', 'flavorVariety', 'color', 'material',
+    'size', 'weight', 'count', 'lifeStage', 'breedSize', 'productForm',
+  ];
+  for (const field of scalarFields) {
+    for (const r of results) {
+      const val = r[field];
+      if (val !== null && val !== undefined) {
+        merged[field] = val;
+        break;
+      }
+    }
+    if (!(field in merged)) merged[field] = null;
+  }
+
+  // Array fields — union, deduplicated
+  const arrayFields: Array<keyof PackagingOcrData> = [
+    'species', 'healthConcernFunction', 'dietaryLabels',
+    'ingredients', 'ingredientKeywords', 'claims', 'visibleTextLines',
+  ];
+  for (const field of arrayFields) {
+    const seen = new Set<string>();
+    const combined: string[] = [];
+    for (const r of results) {
+      const arr = r[field];
+      if (Array.isArray(arr)) {
+        for (const val of arr) {
+          if (val && !seen.has(val.toLowerCase())) {
+            seen.add(val.toLowerCase());
+            combined.push(val);
+          }
+        }
+      }
+    }
+    merged[field] = combined;
+  }
+
+  // confidenceByField — take max per field
+  const mergedConfidence: Record<string, number> = {};
+  for (const r of results) {
+    if (r.confidenceByField) {
+      for (const [field, conf] of Object.entries(r.confidenceByField)) {
+        if (conf !== null && conf !== undefined) {
+          mergedConfidence[field] = Math.max(mergedConfidence[field] ?? 0, conf);
+        }
+      }
+    }
+  }
+  merged.confidenceByField = mergedConfidence;
+
+  // metadata — keep the primary image's (first result)
+  merged.metadata = results[0].metadata;
+
+  return merged as PackagingOcrData;
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 /**

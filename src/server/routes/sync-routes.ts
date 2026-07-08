@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { syncFieldRegistryFromProductIndex } from '../services/workspace-service';
+import { indexProductPageAssignments } from '../../db/repositories/page-repo';
 import { getChangeSetDetail } from '../services/change-set-service';
 import { buildProductsXml } from '../../shopsite/xml-builder';
 import { buildUploadMultipart, extractDbmakeQuery, redactCredentials, isDbmakeSuccessful } from '../../shopsite/multipart-upload';
@@ -411,6 +412,7 @@ route.post('/sync/full-reconcile', (c) => {
 
     // Clear existing index for full rebuild
     getDb().run('DELETE FROM product_index');
+    getDb().run('DELETE FROM product_pages');
 
     if (fs.existsSync(productDir)) {
       const files = fs.readdirSync(productDir);
@@ -451,6 +453,10 @@ route.post('/sync/full-reconcile', (c) => {
               ...fields,
             });
           }
+
+          // Index ProductOnPages into product_pages so category page counts reflect real ShopSite data
+          indexProductPageAssignments(product);
+
           reindexedCount++;
         } catch (err) {
           const msg = `Failed to reindex ${file}: ${err instanceof Error ? err.message : String(err)}`;

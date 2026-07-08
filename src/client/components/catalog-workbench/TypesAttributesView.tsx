@@ -22,7 +22,7 @@ export function TypesAttributesView() {
     return (
       <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>
         <p>Classification configuration not available.</p>
-        <p style={{ fontSize: 12 }}>Sync products from ShopSite and migrate legacy product types to enable this view.</p>
+        <p style={{ fontSize: 12 }}>Sync products from ShopSite to enable this view.</p>
       </div>
     );
   }
@@ -34,17 +34,14 @@ export function TypesAttributesView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
-      {/* Product Types */}
-      <section>
-        <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 8px', color: '#0f172a' }}>
-          Product Types ({productTypes.length})
-        </h3>
-        <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 12px' }}>
-          Product Types define which attributes are relevant for products of that type.
-        </p>
-        {productTypes.length === 0 ? (
-          <p style={{ fontSize: 13, color: '#9ca3af' }}>No product types configured.</p>
-        ) : (
+      {productTypes.length > 0 && (
+        <section>
+          <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 8px', color: '#0f172a' }}>
+            Product Types ({productTypes.length})
+          </h3>
+          <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 12px' }}>
+            Product Types define which attributes are relevant for products of that type.
+          </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {productTypes.map((pt: any) => {
               const profile = attributeProfiles.find((ap: any) => ap.id === pt.attributeProfileId);
@@ -72,8 +69,8 @@ export function TypesAttributesView() {
               );
             })}
           </div>
-        )}
-      </section>
+        </section>
+      )}
 
       {/* Product Attributes */}
       <section>

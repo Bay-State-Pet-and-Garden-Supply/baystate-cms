@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getCatalogFieldDetail } from '../../api';
+import { getCatalogFieldDetail, listFieldRegistry, updateFieldRegistryEntry } from '../../api';
 import type { CatalogFieldDetail, TopValueEntry } from './types';
 
 interface CatalogFieldDrawerProps {
@@ -34,24 +34,118 @@ export function CatalogFieldDrawer({ xmlField, label, onClose, onSelectProduct }
   const [detail, setDetail] = useState<CatalogFieldDetail | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Label editing state
+  const [regEntryId, setRegEntryId] = useState<string | null>(null);
+  const [editableLabel, setEditableLabel] = useState(label);
+  const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
-    getCatalogFieldDetail(xmlField)
-      .then(d => { if (!cancelled) setDetail(d); })
-      .catch(() => {})
-      .finally(() => { if (!cancelled) setLoading(false); });
+    const load = async () => {
+      try {
+        // Fetch both field detail and field registry in parallel
+        const [detailRes, regRes] = await Promise.allSettled([
+          getCatalogFieldDetail(xmlField),
+          listFieldRegistry(),
+        ]);
+
+        if (cancelled) return;
+
+        if (detailRes.status === 'fulfilled') {
+          setDetail(detailRes.value);
+        }
+
+        if (regRes.status === 'fulfilled') {
+          const entry = regRes.value.entries.find((e: any) => e.xmlField === xmlField);
+          if (entry) {
+            setRegEntryId(entry.id);
+            // Use the registry label as the authoritative label (may differ from the prop/field summary)
+            setEditableLabel(entry.label || label);
+          }
+        }
+      } catch {
+        // silent
+      }
+      if (!cancelled) setLoading(false);
+    };
+    load();
     return () => { cancelled = true; };
-  }, [xmlField]);
+  }, [xmlField, label]);
+
+  const handleSaveLabel = async () => {
+    if (!regEntryId) {
+      setSaveMessage('No registry entry found for this field. Sync products first.');
+      return;
+    }
+    setSaving(true);
+    setSaveMessage(null);
+    try {
+      await updateFieldRegistryEntry(regEntryId, { label: editableLabel });
+      setSaveMessage('Label saved.');
+      setTimeout(() => setSaveMessage(null), 2000);
+    } catch (err) {
+      setSaveMessage('Failed to save: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div style={OVERLAY_STYLE} onClick={onClose}>
       <div style={DRAWER_STYLE} onClick={e => e.stopPropagation()}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>{label}</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+          <div style={{ flex: 1, marginRight: 16 }}>
+            {/* Editable label */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <input
+                type="text"
+                value={editableLabel}
+                onChange={(e) => setEditableLabel(e.target.value)}
+                style={{
+                  fontSize: 18,
+                  fontWeight: 600,
+                  border: '1px solid #d1d5db',
+                  borderRadius: 6,
+                  padding: '4px 8px',
+                  width: '100%',
+                  boxSizing: 'border-box' as const,
+                  color: '#111827',
+                }}
+              />
+              {regEntryId && (
+                <button
+                  onClick={handleSaveLabel}
+                  disabled={saving}
+                  style={{
+                    background: '#2563eb',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: 6,
+                    padding: '6px 14px',
+                    cursor: 'pointer',
+                    fontWeight: 600,
+                    fontSize: 13,
+                    whiteSpace: 'nowrap',
+                    opacity: saving ? 0.6 : 1,
+                  }}
+                >
+                  {saving ? 'Saving...' : 'Save Label'}
+                </button>
+              )}
+            </div>
+            {saveMessage && (
+              <div style={{
+                fontSize: 12,
+                color: saveMessage.includes('Failed') ? '#dc2626' : '#059669',
+                marginTop: 2,
+              }}>
+                {saveMessage}
+              </div>
+            )}
             <code style={{ fontSize: 12, color: '#6b7280' }}>{xmlField}</code>
           </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: '#6b7280' }}>×</button>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: '#6b7280', padding: '4px 8px', flexShrink: 0 }}>×</button>
         </div>
 
         {loading ? (

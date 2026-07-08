@@ -466,7 +466,7 @@ Generate a clean, human-readable, and canonical product name.
 Rules:
 1. Evaluate if the search results actually match the catalog product ("${originalName || ''}"). If the search results are completely unrelated (e.g. they represent random items, general retail mismatch, or different products due to a bad barcode lookup), IGNORE the search results and focus on cleaning up the Raw Catalog Name.
 2. When cleaning the Raw Catalog Name, expand common abbreviations to make it natural and readable (e.g. expand "DNTL" to "Dental", "SM" to "Small", "LG" to "Large", "CHKN" or "CKN" to "Chicken", "TRKY" to "Turkey", "BEEF" to "Beef", "PATE" to "Pâté", "WET" to "Wet").
-3. Strip out internal inventory tags, bulk quantities, or sizing codes that do not form a natural part of the name (e.g. "5CT", "2.64OZ", "10.5OZ", "6PK").
+3. PRESERVE variant-distinguishing pack counts and sizes (e.g. "6 Pack", "3 Pack", "Value Pack", "Single", "Small", "Medium", "Large", "X-Large") — these are essential product identifiers that differentiate one variant from another. Only strip truly internal inventory codes like "5CT", "2.64OZ", "10.5OZ" that are clearly dimension-only and do not distinguish the product.
 4. Ensure the brand name is present at the start of the canonical name.
 5. Return ONLY the final product name string. Do not include quotes, explanatory text, bullet points, or markdown.
 

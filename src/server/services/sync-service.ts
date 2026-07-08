@@ -8,6 +8,7 @@ import { hashJson } from '../../git/deterministic-json';
 import { createSyncJob, completeSyncJob, addSyncJobEvent } from '../../db/repositories/sync-job-repo';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import { clearRegistry, upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
+import { indexProductPageAssignments } from '../../db/repositories/page-repo';
 import { updateBootstrapStatus } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
@@ -128,9 +129,10 @@ export function bootstrapFromXml(
       baselineCommit: null,
     });
 
-    // Seed product index and field registry in SQLite
+    // Seed product index, field registry, and product page assignments in SQLite
     clearRegistry(workspaceId);
     getDb().run('DELETE FROM product_index');
+    getDb().run('DELETE FROM product_pages');
 
     for (const entry of uniqueRegistry) {
       if (entry.workspaceId === workspaceId) {
@@ -179,6 +181,9 @@ export function bootstrapFromXml(
         searchKeywords: product.core.seo.searchKeywords,
         customFields: product.customFields,
       });
+
+      // Index ProductOnPages into product_pages so category page counts reflect real ShopSite data
+      indexProductPageAssignments(product);
     }
 
     // Git commit

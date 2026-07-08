@@ -136,6 +136,78 @@ export function clearProductPages(productSku: string): void {
   db.run('DELETE FROM product_pages WHERE product_sku = ?', [productSku]);
 }
 
+/**
+ * Decode common XML entities in a string (e.g. "&amp;" -> "&").
+ */
+function decodeXmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
+}
+
+/**
+ * Extract page names from a product's preserved ProductOnPages blocks
+ * and index them into the product_pages join table.
+ *
+ * Should be called whenever products are indexed or reindexed from
+ * their JSON files, so the Category Pages view shows accurate counts.
+ */
+export function indexProductPageAssignments(product: { shopsite?: { preserved?: { unknownElements?: Record<string, unknown>; advancedBlocks?: Record<string, string> } }; sku: string }): void {
+  const names = new Set<string>();
+  const preserved = product.shopsite?.preserved;
+  if (!preserved) return;
+
+  const tagRegex = /<(?:Name|PageName|PageLink)>([^<]*)<\/(?:Name|PageName|PageLink)>/gi;
+
+  // 1. Check unknownElements (set by draft-promoter)
+  const fromUnknown = preserved.unknownElements?.['ProductOnPages'];
+  if (fromUnknown) {
+    const raw = String(fromUnknown);
+    let m: RegExpExecArray | null;
+    while ((m = tagRegex.exec(raw)) !== null) {
+      const name = decodeXmlEntities(m[1].trim());
+      if (name) names.add(name);
+    }
+  }
+
+  // 2. Check advancedBlocks (from original ShopSite import or promotion)
+  const fromAdvanced = preserved.advancedBlocks?.['ProductOnPages'] ?? preserved.advancedBlocks?.['productOnPages'];
+  if (fromAdvanced) {
+    let m: RegExpExecArray | null;
+    while ((m = tagRegex.exec(fromAdvanced)) !== null) {
+      const name = decodeXmlEntities(m[1].trim());
+      if (name) names.add(name);
+    }
+  }
+
+  if (names.size === 0) return;
+
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  // Clear existing assignments for this SKU and insert fresh
+  db.run('DELETE FROM product_pages WHERE product_sku = ?', [product.sku]);
+
+  for (const pageName of names) {
+    // Resolve page id if a matching page exists
+    const page = getPageByName(pageName);
+    if (page) {
+      db.run(
+        'INSERT OR IGNORE INTO product_pages (product_sku, page_name, page_id, created_at) VALUES (?, ?, ?, ?)',
+        [product.sku, pageName, page.id, now]
+      );
+    } else {
+      db.run(
+        'INSERT OR IGNORE INTO product_pages (product_sku, page_name, created_at) VALUES (?, ?, ?)',
+        [product.sku, pageName, now]
+      );
+    }
+  }
+}
+
 function mapPageRow(row: Record<string, any>): PageRow {
   return {
     id: String(row.id),

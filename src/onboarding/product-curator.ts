@@ -162,22 +162,10 @@ Rules:
     }
   }
 
-  // 2. Classify Product Type
-  try {
-    const prompt = `Classify this product into a single, clean product type (e.g. "Dry Dog Food", "Wet Dog Food", "Dog Treats", "Dog Toys", "Dry Cat Food", "Wet Cat Food", "Cat Treats", "Litter", "Supplements", "Grooming", "Collars & Leashes", "Cages & Crates", etc.).
-Product Name: "${title}"
-Description: "${description || ''}"
-Return ONLY the product type name. Do not add markdown or punctuation.`;
-
-    const typeResponse = await callLlmForTask('category_classification', prompt, 'You are a precise classification assistant.', { allowFallback: true });
-    if (typeResponse == null) {
-      throw new Error('LLM call returned null');
-    }
-    suggestedProductType = typeResponse.replace(/[".]/g, '').trim();
-    console.log(`[ProductCurator] Suggested product type for "${title}": "${suggestedProductType}"`);
-  } catch (err: any) {
-    console.warn(`[ProductCurator] Product type classification failed: ${err.message}`);
-  }
+  // 2. Product Type — not classified here. These are CMS-internal classification
+  //    labels, not ShopSite fields. The modular curation pipeline (when enabled)
+  //    may produce product type proposals, but the legacy path skips this.
+  suggestedProductType = null;
 
   return { suggestedPages, suggestedProductType };
 }
@@ -236,7 +224,9 @@ export async function curateItem(
     curatedTitle: finalized.title,
     searchKeywords,
     packagingOcrTitle: ocrTitle,
-    curatedWeight: convertToLbs(ext.packagingOcrData?.weight || ext.weight || null),
+    curatedWeight: convertToLbs(
+      ext.packagingOcrData?.weight || ext.weight || extractWeightFromName(item.name) || null,
+    ),
     titleSource: finalized.source,
     suggestedPages: classification.suggestedPages,
     suggestedProductType: classification.suggestedProductType,
@@ -447,6 +437,33 @@ export async function curateItemWithPipeline(
     // Limit to top 5 to keep suggestions reasonable
     suggestedPages.splice(5);
 
+    // ── Refresh extraction data from DB ────────────────────────────────
+    // The evidence_extraction stage may have updated the DB with fresh VLM OCR
+    // results during pipeline execution. Re-read the extraction data so that
+    // curatedWeight and other downstream fields use the most recent OCR data.
+    try {
+      const freshRow = getDb().query(
+        'SELECT extraction_data_json FROM onboarding_items WHERE id = ?',
+      ).get(item.id) as { extraction_data_json: string | null } | undefined;
+      if (freshRow?.extraction_data_json) {
+        const freshExt = JSON.parse(freshRow.extraction_data_json);
+        if (freshExt && typeof freshExt === 'object') {
+          // Merge fresh VLM/OCR data into the ext reference
+          if (freshExt.packagingOcrData) {
+            ext.packagingOcrData = freshExt.packagingOcrData;
+          }
+          if (freshExt.packagingTitle) {
+            ext.packagingTitle = freshExt.packagingTitle;
+          }
+          if (freshExt.weight !== undefined) {
+            ext.weight = freshExt.weight;
+          }
+        }
+      }
+    } catch (refreshErr: any) {
+      console.warn(`[ProductCurator] Failed to refresh extraction data: ${refreshErr.message}`);
+    }
+
     // Suggested product type from the best available proposal
     const typeSelection = selectPrimaryProductTypeProposal({
       sku: item.upc,
@@ -482,7 +499,9 @@ export async function curateItemWithPipeline(
       curatedTitle,
       searchKeywords,
       packagingOcrTitle,
-      curatedWeight: convertToLbs(ext.packagingOcrData?.weight || ext.weight || null),
+      curatedWeight: convertToLbs(
+        ext.packagingOcrData?.weight || ext.weight || extractWeightFromName(item.name) || null,
+      ),
       titleSource: titleSource as 'web' | 'ocr' | 'llm' | 'manual',
       suggestedPages,
       suggestedProductType,
@@ -519,7 +538,9 @@ export async function curateItemWithPipeline(
       curatedTitle: fallbackTitle,
       searchKeywords: fallbackKeywords,
       packagingOcrTitle: ext.packagingOcrData?.productName ?? ext.packagingTitle ?? null,
-      curatedWeight: convertToLbs(ext.packagingOcrData?.weight || ext.weight || null),
+      curatedWeight: convertToLbs(
+        ext.packagingOcrData?.weight || extractWeightFromName(item.name) || null,
+      ),
       titleSource: 'web',
       suggestedPages: [],
       suggestedProductType: null,
@@ -533,6 +554,24 @@ export async function curateItemWithPipeline(
       classificationHistory: [],
     };
   }
+}
+
+/**
+ * Extract a weight string from a product's spreadsheet import name.
+ *
+ * Handles common patterns like "6OZ", "16OZ", "48OZ", "23 OZ", "5LB", "2kg"
+ * that appear embedded in distributor product names. Avoids false matches
+ * on non-weight suffixes like "MD2CT" (2-count), "SM5CT" (5-count), "30PK"
+ * (30-pack), or ordinals like "4TH".
+ *
+ * Returns the normalised weight string (e.g. "6 oz") or null.
+ */
+function extractWeightFromName(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const match = /(\d+(?:\.\d+)?)\s*(OZ|OZS?|LB|LBS?|OUNCE|OUNCES|GRAM|GRAMS|G|KG)\b/i.exec(name);
+  if (!match) return null;
+  // Normalise unit to lowercase
+  return `${match[1]} ${match[2].toLowerCase()}`;
 }
 
 /**
