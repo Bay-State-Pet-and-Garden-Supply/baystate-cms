@@ -82,37 +82,11 @@ export const GenerateSelectorResponseSchema = z.object({
 });
 export type GenerateSelectorResponse = z.infer<typeof GenerateSelectorResponseSchema>;
 
-// ─── Pick Element (Visual Picker) ────────────────────────────────────────────
-
-export const PickElementRequestSchema = z.object({
-  /** The URL of the product page to open in the headful browser. */
-  url: z.string().url(),
-  /** Which field the user is selecting: title, description, or images. */
-  field: z.string(),
-  /** Whether to allow selecting a parent container (for image galleries). */
-  allowParentContainer: z.boolean().default(true),
-});
-export type PickElementRequest = z.infer<typeof PickElementRequestSchema>;
-
-export const PickElementResponseSchema = z.object({
-  /** The generated CSS selector. */
-  selector: z.string(),
-  /** Stability of the generated selector. */
-  stability: z.enum(['high', 'medium', 'low']),
-  /** Text content extracted by the selector (for title/description). */
-  extractedText: z.string().nullable().default(null),
-  /** Image URLs extracted by the selector (for images). */
-  extractedImages: z.array(z.string()).default(() => []),
-  /** How many elements the selector matches (uniqueness check). */
-  matchCount: z.number().int(),
-  /** The outerHTML of the element the user clicked (for confirmation). */
-  outerHTML: z.string().nullable().default(null),
-  /** Reference path to a confirmation screenshot. */
-  screenshotRef: z.string().nullable().default(null),
-  /** Warnings (e.g., element not unique, headful browser unavailable). */
-  warnings: z.array(z.string()).default(() => []),
-});
-export type PickElementResponse = z.infer<typeof PickElementResponseSchema>;
+// ─── Pick Element (Visual Picker) — DEPRECATED AND REMOVED ───────────────────
+// The visual element picker feature has been removed due to reliability issues.
+// PickElementRequestSchema, PickElementResponseSchema, and their associated
+// types (PickElementRequest, PickElementResponse) were previously defined here.
+// The paste-HTML generate-selector feature remains available.
 
 // ─── Profile Proposal ──────────────────────────────────────────────────────────
 

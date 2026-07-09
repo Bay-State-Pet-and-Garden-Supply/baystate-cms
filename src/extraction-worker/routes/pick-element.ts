@@ -1,28 +1,64 @@
 /**
- * Pick Element route — POST /profile-tooling/pick-element
+ * @deprecated Visual element picker — removed due to reliability issues.
+ * This file is kept as a stub so the worker doesn't break if the route
+ * is still registered elsewhere. The paste-HTML selector generator
+ * (generate-selector.ts) remains available.
  *
- * Launches a headful Playwright Chromium, injects a click-to-select
- * overlay, and generates a stable CSS selector for the element the
- * user clicks on.
+ * Originally: POST /profile-tooling/pick-element
  *
- * This enables the "visual picker" flow where an operator can
- * visually select product title, description, or image elements
- * directly from the live page.
+ * Launched a headful Playwright Chromium, injected a click-to-select
+ * overlay, and generated a stable CSS selector for the element the
+ * user clicked on.
  */
+
+// ─── Inline types (previously imported from shared schemas — removed) ───────
+// This stub now carries local type definitions so the file remains valid.
+
+interface LocalPickElementRequest {
+  url: string;
+  field: string;
+  allowParentContainer: boolean;
+}
+
+interface LocalPickElementResponse {
+  selector: string;
+  stability: 'high' | 'medium' | 'low';
+  extractedText: string | null;
+  extractedImages: string[];
+  matchCount: number;
+  outerHTML: string | null;
+  screenshotRef: string | null;
+  warnings: string[];
+}
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
-import {
-  PickElementRequestSchema,
-  PickElementResponseSchema,
-} from '../../shared/schemas/extraction-worker';
-import type { PickElementResponse } from '../../shared/schemas/extraction-worker';
+import { z } from 'zod';
 import {
   buildStableSelector,
   isSupportedSelectorSyntax,
 } from '../../shared/selector-utils';
 import { resolveArtifactDir, writeArtifact, generateJobId, extractDomainFromUrl } from '../artifacts';
+
+// ─── Local schemas (mirrors of removed shared schemas) ─────────────────────────
+
+const LocalPickElementRequestSchema = z.object({
+  url: z.string().url(),
+  field: z.string(),
+  allowParentContainer: z.boolean().default(true),
+});
+
+const LocalPickElementResponseSchema = z.object({
+  selector: z.string(),
+  stability: z.enum(['high', 'medium', 'low']),
+  extractedText: z.string().nullable().default(null),
+  extractedImages: z.array(z.string()).default(() => []),
+  matchCount: z.number().int(),
+  outerHTML: z.string().nullable().default(null),
+  screenshotRef: z.string().nullable().default(null),
+  warnings: z.array(z.string()).default(() => []),
+});
 
 // ─── Image source helpers (inlined — same as generate-selector.ts) ────────────
 
@@ -95,7 +131,7 @@ async function pickElement(
   allowParentContainer: boolean,
   domain: string,
   jobId: string,
-): Promise<PickElementResponse> {
+): Promise<LocalPickElementResponse> {
   const warnings: string[] = [];
   const artifactDir = resolveArtifactDir(domain, jobId);
   let browser;
@@ -387,7 +423,7 @@ export function handlePickElement(
         return;
       }
 
-      const validation = PickElementRequestSchema.safeParse(parsed);
+      const validation = LocalPickElementRequestSchema.safeParse(parsed);
       if (!validation.success) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(
@@ -419,7 +455,7 @@ export function handlePickElement(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`[pick-element] Uncaught error: ${msg}\n`);
-      const fallback = PickElementResponseSchema.parse({
+      const fallback = LocalPickElementResponseSchema.parse({
         selector: '',
         stability: 'low',
         extractedText: null,

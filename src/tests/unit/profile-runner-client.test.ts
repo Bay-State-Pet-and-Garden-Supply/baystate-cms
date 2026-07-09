@@ -22,6 +22,9 @@ describe('runProfileExtraction image deduplication', () => {
       sitemapProductUrlPattern: null,
       shopifyJSONPath: false,
       customSelectors: {},
+      variantSelectionStrategy: null,
+      customSelectorMetadata: {},
+      runtime: 'rendered',
       createdAt: '2026-07-04T00:00:00Z',
       updatedAt: '2026-07-04T00:00:00Z',
     };

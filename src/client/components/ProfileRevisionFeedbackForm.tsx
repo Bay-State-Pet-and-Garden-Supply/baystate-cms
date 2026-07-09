@@ -16,20 +16,38 @@
  * Phase 4 (UI) consumer.
  */
 
-import React, { useState } from 'react';
-import type { StructuredFeedback, SelectorField } from '../../shared/schemas/onboarding';
+import React, { useState, useEffect } from 'react';
+import type { StructuredFeedback } from '../../shared/schemas/onboarding';
 import { ImagePreviewGrid, type ImagePreview } from './ImagePreviewGrid';
 import { generateSelectorFromElement, fetchPageHtml } from '../onboarding-api';
+import { normalizeFieldLabel } from '../profile-review-utils';
 
-const TEXT_FIELDS: SelectorField[] = [
-  'titleSelector',
-  'descriptionSelector',
-  'brandSelector',
-  'priceSelector',
-];
+/** Fields whose selectors typically target a price-like value. */
+const PRICE_LIKE_FIELDS = new Set(['priceSelector', 'price', 'salePrice', 'cost']);
+
+/** Fields whose selectors typically target image-containing elements. */
+const IMAGE_LIKE_FIELDS = new Set(['imagesSelector', 'imageSelector', 'gallerySelector', 'mediaSelector']);
+
+/** Detect if a field key looks like an image-type field. */
+function isImageField(field: string): boolean {
+  return IMAGE_LIKE_FIELDS.has(field) || field.toLowerCase().includes('image') || field.toLowerCase().includes('gallery') || field.toLowerCase().includes('media');
+}
+
+/** Detect if a field key looks like a price-type field. */
+function isPriceField(field: string): boolean {
+  return PRICE_LIKE_FIELDS.has(field) || field.toLowerCase().includes('price') || field.toLowerCase().includes('cost') || field.toLowerCase().includes('sale');
+}
 
 interface ProfileRevisionFeedbackFormProps {
-  field: SelectorField;
+  field: string;
+  /** Human-readable label for this field (from normalizeFieldLabel). */
+  fieldLabel?: string;
+  /** Field category for context. */
+  fieldCategory?: string;
+  /** Value type hint: 'text', 'image', 'numeric', etc. */
+  fieldValueType?: string;
+  /** Latest extracted sample value for this field (pre-fills the correction input). */
+  sampleValue?: string | null;
   /** Current extracted value, shown for context. */
   currentValue: string | null;
   /** For image fields: the previews to mark correct/exclude. */
@@ -47,9 +65,10 @@ interface ProfileRevisionFeedbackFormProps {
 export function ProfileRevisionFeedbackForm(
   props: ProfileRevisionFeedbackFormProps,
 ): React.ReactElement {
-  const { field, currentValue, currentImages, onSubmit, defaultNotes, busy, sourcePageUrl } = props;
-  const isImage = field === 'imagesSelector';
-  const isPrice = field === 'priceSelector';
+  const { field, fieldLabel, fieldCategory, fieldValueType, sampleValue, currentValue, currentImages, onSubmit, defaultNotes, busy, sourcePageUrl } = props;
+  const isImage = isImageField(field) || fieldValueType === 'image';
+  const isPrice = isPriceField(field) || fieldValueType === 'price';
+  const displayLabel = fieldLabel || normalizeFieldLabel(field);
 
   const [textCorrect, setTextCorrect] = useState<boolean>(true);
   const [expectedValue, setExpectedValue] = useState<string>('');
@@ -69,6 +88,13 @@ export function ProfileRevisionFeedbackForm(
   const [generatedMatchCount, setGeneratedMatchCount] = useState<number>(0);
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState('');
+
+  // ── Pre-fill expected value with sampleValue when field changes ───────────
+  useEffect(() => {
+    if (sampleValue && !textCorrect && !expectedValue) {
+      setExpectedValue(sampleValue);
+    }
+  }, [field, sampleValue]);
 
   // ── Paste-element handler ──────────────────────────────────────────────
   const handleGenerateSelector = async () => {
@@ -187,16 +213,24 @@ export function ProfileRevisionFeedbackForm(
       {!isImage && !isPrice && (
         <div>
           <p style={{ fontSize: 12, color: '#4b5563', margin: '0 0 8px' }}>
-            Current extracted value:
+            Current extracted {displayLabel} value:
             <code style={{ marginLeft: 6, padding: '2px 6px', background: '#f3f4f6', borderRadius: 3 }}>
               {currentValue || '(empty)'}
             </code>
           </p>
+          {sampleValue && sampleValue !== currentValue && (
+            <p style={{ fontSize: 11, color: '#d97706', margin: '0 0 6px' }}>
+              Latest sample: <em>{sampleValue.slice(0, 120)}</em>
+            </p>
+          )}
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#4b5563', marginBottom: 6 }}>
             <input
               type="checkbox"
               checked={textCorrect}
-              onChange={(e) => setTextCorrect(e.target.checked)}
+              onChange={(e) => {
+                setTextCorrect(e.target.checked);
+                if (e.target.checked) setExpectedValue('');
+              }}
               disabled={busy}
             />
             <span>This extracted value is correct</span>
@@ -211,7 +245,7 @@ export function ProfileRevisionFeedbackForm(
                 value={expectedValue}
                 onChange={(e) => setExpectedValue(e.target.value)}
                 disabled={busy}
-                placeholder="e.g. WOOF Pupsicle Lavender Small"
+                placeholder={`e.g. WOOF Pupsicle Lavender Small`}
                 style={{
                   width: '100%',
                   padding: '6px 10px',

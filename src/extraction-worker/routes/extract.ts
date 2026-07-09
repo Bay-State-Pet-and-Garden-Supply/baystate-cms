@@ -343,7 +343,6 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   const warnings: string[] = [];
   const { sourceUrl, expected, profile } = request;
   const selectors = profile.selectors || {};
-  const renderedCustomFields: Record<string, string> = {};
 
   // ── Fetch page ─────────────────────────────────────────────────────────
   let response: Response;
@@ -586,8 +585,8 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
   }, sourceUrl, expected.name);
 
   // Merge custom fields into result
-  if (Object.keys(renderedCustomFields).length > 0) {
-    data.customFields = renderedCustomFields;
+  if (Object.keys(customFields).length > 0) {
+    data.customFields = customFields;
   }
 
   return { data, warnings };
@@ -621,6 +620,80 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       // This allows JS-rendered content to appear and improves
       // Cloudflare pass-through by simulating real user behavior.
       await page.waitForTimeout(dwellMs);
+
+      // ── Apply variant selection strategy if present ──────────────
+      // Before extracting fields, try to select the correct variant
+      // matching expected product hints (name/upc). This must be
+      // deterministic — never guess.
+      const variantStrategy = request.profile.variantSelectionStrategy;
+      if (variantStrategy && variantStrategy.containerSelector) {
+        let variantSelected = false;
+        const strategyDesc = `${variantStrategy.optionType} on ${variantStrategy.containerSelector}`;
+        const expectedName = request.expected?.name?.toLowerCase() || '';
+        const expectedUpc = request.expected?.upc?.toLowerCase() || '';
+        const hints = [expectedName, expectedUpc].filter(Boolean);
+        const hintText = hints.join(' ');
+        try {
+
+          if (variantStrategy.optionType === 'dropdown') {
+            // For dropdown select: find option whose text matches expected name
+            const selected = await page.evaluate(
+              `((containerSel, hint) => {
+                const container = document.querySelector(containerSel);
+                if (!container) return false;
+                const selects = container.tagName === 'SELECT'
+                  ? [container]
+                  : Array.from(container.querySelectorAll('select'));
+                if (selects.length === 0) return false;
+                const select = selects[0];
+                for (const opt of Array.from(select.options)) {
+                  const txt = (opt.textContent || '').trim().toLowerCase();
+                  if (hint && (txt.includes(hint) || hint.includes(txt))) {
+                    select.value = opt.value;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                  }
+                }
+                return false;
+              })(${JSON.stringify(variantStrategy.containerSelector)}, ${JSON.stringify(hintText)})`
+            );
+            if (selected) {
+              variantSelected = true;
+              await page.waitForTimeout(300);
+            }
+          } else if (variantStrategy.optionType === 'button_group' || variantStrategy.optionType === 'radio') {
+            // For button/radio group: click the button whose text matches expected name
+            const selected = await page.evaluate(
+              `((containerSel, hint) => {
+                const container = document.querySelector(containerSel);
+                if (!container) return false;
+                const buttons = container.querySelectorAll('button, [role="button"], [role="radio"], input[type="radio"] + label');
+                for (const btn of buttons) {
+                  const txt = (btn.textContent || '').trim().toLowerCase();
+                  if (hint && (txt.includes(hint) || hint.includes(txt))) {
+                    if (btn.tagName === 'INPUT' && btn.type === 'radio') {
+                      btn.checked = true;
+                    } else {
+                      (btn).click();
+                    }
+                    return true;
+                  }
+                }
+                return false;
+              })(${JSON.stringify(variantStrategy.containerSelector)}, ${JSON.stringify(hintText)})`
+            );
+            if (selected) {
+              variantSelected = true;
+              await page.waitForTimeout(300);
+            }
+          }
+        } catch (err) {
+          warnings.push(`Variant selection via ${strategyDesc} encountered an error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        if (!variantSelected && hints.length > 0) {
+          warnings.push(`Variant selection via ${strategyDesc} did not match any option for expected "${hints.join(', ')}" — using default variant`);
+        }
+      }
 
       // ── Detect Cloudflare / WAF challenge pages early ────────────────
       const pageTitle = await page.title();

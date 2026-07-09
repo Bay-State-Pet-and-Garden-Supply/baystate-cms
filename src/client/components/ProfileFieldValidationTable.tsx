@@ -4,6 +4,10 @@
  * ProfileFieldValidationTable.tsx — per-field validation table for
  * the governance review surface.
  *
+ * @deprecated Use ProfileReviewFieldCard + ProfileReviewFieldGroup instead.
+ * This component only handles the three fixed SELECTOR_FIELDS and does not
+ * support dynamic/custom fields, price/brand, or variant strategy.
+ *
  * For each of the five selector fields, renders:
  *  - the current active selector (from `extractor_profiles`)
  *  - the proposed selector (from the revision under review)

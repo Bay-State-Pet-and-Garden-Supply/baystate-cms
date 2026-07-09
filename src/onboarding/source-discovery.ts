@@ -41,6 +41,7 @@ import { fetchAndParseSitemap } from './sitemap-fetcher';
 import { matchSitemapUrls, type SitemapMatchResult } from './sitemap-matcher';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { resolveVariantsForCandidates } from './variant-url-resolver';
+import { isOfficialDomainMatch } from './domain-utils';
 
 interface SerperSearchResult {
   title: string;
@@ -395,14 +396,26 @@ export function scoreResult(
 
   // ── Positive signals ──────────────────────────────────────────────────
 
-  // Domain is a known brand site
-  if (knownBrandDomains.some(d => domain.includes(d))) {
+  // Domain is a known brand site (strict exact-or-subdomain match —
+  // one domain matching policy shared with the auto-selection logic).
+  if (knownBrandDomains.some(d => isOfficialDomainMatch(domain, d))) {
     score += 0.35;
   }
 
-  // Brand name appears in domain (e.g., "nylabone" in "nylabone.com")
-  if (brandHint && domain.includes(brandHint.toLowerCase().replace(/\s+/g, ''))) {
-    score += 0.15;
+  // Brand name appears in domain (e.g., "nylabone" in "nylabone.com",
+  // or "woof" in "mywoof.com"). Check that any domain segment contains
+  // the brand slug as a substring. The loose check is acceptable here
+  // because SERP ranking is pre-verification — the page verifier and
+  // auto-selection policy later use strict isOfficialDomainMatch for
+  // the actual gating decision. False positives like "notmywoof.com"
+  // matching brand "woof" are scored low by other signals.
+  if (brandHint) {
+    const brandSlug = brandHint.toLowerCase().replace(/\s+/g, '');
+    const normalizedDomain = domain.toLowerCase().replace(/^www\./, '');
+    const segments = normalizedDomain.split('.');
+    if (segments.some(s => s.includes(brandSlug))) {
+      score += 0.15;
+    }
   }
 
   // UPC appears in snippet or title: strong relevance signal

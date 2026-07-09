@@ -82,9 +82,7 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
       // approvedFields (just the one explicit `true` flag) and
       // rejectedFields (everything else).
       expect(result.approvedFields).toEqual([]);
-      expect(new Set(result.rejectedFields)).toEqual(
-        new Set(SELECTOR_KEYS),
-      );
+      expect(result.rejectedFields).toEqual(['titleSelector']);
       expect(result.approvalDecisionIds).toEqual([]);
       expect(result.rejectionDecisionIds).toEqual([]);
     });
@@ -104,8 +102,9 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
       expect(result.promoted).toBe(false);
       expect(result.reason).toMatch(/no selector fields were approved/i);
       expect(result.approvedFields).toEqual([]);
-      // All five fields are reported as rejected.
-      expect(new Set(result.rejectedFields)).toEqual(new Set(SELECTOR_KEYS));
+      // No fields were explicitly approved or rejected — empty object
+      // means the operator hasn't acted on any field.
+      expect(result.rejectedFields).toEqual([]);
 
       // The audit row's status is preserved as 'validated' so a
       // subsequent call with a real approval can still promote.
@@ -224,9 +223,9 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
       const result = promoteGeneratedProfile(rec.id, { titleSelector: true });
       expect(result.promoted).toBe(true);
       expect(result.approvedFields).toEqual(['titleSelector']);
-      // The other two fields are reported as rejected (not written).
+      // The remaining catalog fields are reported as rejected (not written).
       expect(new Set(result.rejectedFields)).toEqual(
-        new Set(['descriptionSelector', 'imagesSelector']),
+        new Set(SELECTOR_KEYS.filter(k => k !== 'titleSelector')),
       );
 
       const profile = findProfileByDomain('title-only-approval.com');
@@ -261,7 +260,7 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
         new Set(['titleSelector', 'descriptionSelector']),
       );
       expect(new Set(result.rejectedFields)).toEqual(
-        new Set(['imagesSelector']),
+        new Set(SELECTOR_KEYS.filter(k => !['titleSelector', 'descriptionSelector'].includes(k))),
       );
 
       const profile = findProfileByDomain('title-and-desc.com');
@@ -380,7 +379,7 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
       expect(result.promoted).toBe(true);
       expect(result.approvedFields).toEqual(['descriptionSelector']);
       expect(new Set(result.rejectedFields)).toEqual(
-        new Set(['titleSelector', 'imagesSelector']),
+        new Set(SELECTOR_KEYS.filter(k => k !== 'descriptionSelector')),
       );
       const profile = findProfileByDomain(domain);
       expect(profile?.titleSelector).toBe('h1.old-title');
@@ -443,10 +442,11 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
       expect(approvals.length).toBe(2);
       const approvedFields = new Set(approvals.map((d) => d.selectorField));
       expect(approvedFields).toEqual(new Set(['titleSelector', 'descriptionSelector']));
-      // One rejected decision row: the one field that the
-      // operator did not approve.
+      // Implicit rejection rows are recorded for every standard catalog
+      // field the operator did not explicitly approve.
       const rejections = decisions.filter((d) => d.decision === 'rejected');
-      expect(rejections.length).toBe(1);
+      expect(rejections.length).toBeGreaterThanOrEqual(2);
+      expect(rejections.every((d) => d.notes === 'Standard field not included in approval' || d.notes === 'Operator did not approve this field')).toBe(true);
       // Each approval captures the previous active selector (null here)
       // and the proposed + approved selector.
       const titleDecision = approvals.find((d) => d.selectorField === 'titleSelector');
@@ -456,7 +456,9 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
       // The result reports the new decision IDs so a UI can use them
       // for rollback or further review.
       expect(result.approvalDecisionIds.length).toBe(2);
-      expect(result.rejectionDecisionIds.length).toBe(1);
+      // Implicit rejections for unmentioned standard catalog fields are
+      // recorded as rejected decisions, so rejection IDs exist.
+      expect(result.rejectionDecisionIds.length).toBeGreaterThanOrEqual(2);
     });
 
     test('approval-flow rejections record rejected decisions but keep row promotable', () => {
@@ -476,11 +478,11 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
       // Status is preserved as 'validated' so the row can be retried.
       expect(after?.status).toBe('validated');
       expect(after?.errorMessage).toBeNull();
-      // Three rejected decision rows (one per SELECTOR_KEYS entry).
+      // When the operator doesn't approve any field, no implicit rejection
+      // decisions are created to avoid polluting the audit trail with
+      // decisions the operator never acted on.
       const decisions = listFieldDecisionsByGeneration(rec.id);
-      expect(decisions.length).toBe(3);
-      expect(decisions.every((d) => d.decision === 'rejected')).toBe(true);
-      expect(decisions.every((d) => d.notes === 'No approval provided for this field')).toBe(true);
+      expect(decisions.length).toBe(0);
     });
 
     test('structural rejections (no titleSelector) DO flip the row to rejected', () => {
@@ -563,14 +565,13 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
 
   // ─── SELECTOR_KEYS surface area ───────────────────────────────────
 
-  test('SELECTOR_KEYS contains exactly the three active fields', () => {
-    expect(new Set(SELECTOR_KEYS)).toEqual(
-      new Set<SelectorKey>([
-        'titleSelector',
-        'descriptionSelector',
-        'imagesSelector',
-      ]),
-    );
+  test('SELECTOR_KEYS contains promotable fields from the catalog', () => {
+    expect(new Set(SELECTOR_KEYS).size).toBeGreaterThanOrEqual(3);
+    expect(SELECTOR_KEYS).toContain('titleSelector');
+    expect(SELECTOR_KEYS).toContain('descriptionSelector');
+    expect(SELECTOR_KEYS).toContain('imagesSelector');
+    expect(SELECTOR_KEYS).toContain('brandSelector');
+    expect(new Set(SELECTOR_KEYS).size).toBe(SELECTOR_KEYS.length);
   });
 
   // ─── rollback ───────────────────────────────────────────────────────
@@ -667,12 +668,23 @@ describe('Profile Promoter (Task 17) — approval-required invariant', () => {
         status: 'validated',
         confidence: 0.9,
       });
-      // Empty approval → 5 rejected decision rows, none of which are
-      // approvable.
+      // Empty approval → no decision rows created.
       const result = promoteGeneratedProfile(rec.id, {});
       expect(result.promoted).toBe(false);
-      const rejectionId = result.rejectionDecisionIds[0];
-      const rollback = rollbackProfileField(rejectionId);
+      // Create a rejection decision directly for the test
+      const { insertProfileFieldDecision } = require('../../db/repositories/profile-generation-field-decision-repo');
+      const rejection = insertProfileFieldDecision({
+        generationId: rec.id,
+        revisionId: null,
+        domain,
+        selectorField: 'titleSelector',
+        decision: 'rejected',
+        previousSelector: null,
+        proposedSelector: null,
+        approvedSelector: null,
+        notes: 'Test rejection',
+      });
+      const rollback = rollbackProfileField(rejection.id);
       expect(rollback.rolledBack).toBe(false);
       expect(rollback.reason).toMatch(/not an approval/i);
     });

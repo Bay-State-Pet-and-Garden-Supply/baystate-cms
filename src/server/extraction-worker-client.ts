@@ -38,8 +38,6 @@ import type {
   WorkerJobResult,
   GenerateSelectorRequest,
   GenerateSelectorResponse,
-  PickElementRequest,
-  PickElementResponse,
 } from '../shared/schemas/extraction-worker';
 import {
   WorkerHealthResponseSchema,
@@ -49,7 +47,6 @@ import {
   ExtractResponseSchema,
   WorkerJobResultSchema,
   GenerateSelectorResponseSchema,
-  PickElementResponseSchema,
 } from '../shared/schemas/extraction-worker';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -238,22 +235,6 @@ export async function generateSelectorFromElement(
   });
 }
 
-/**
- * Launch a headful browser for the user to click on an element and
- * generate a stable CSS selector. Proxies to the extraction worker's
- * pick-element endpoint. Has a long timeout (120s) because the user
- * is interacting with the browser.
- */
-export async function pickElement(
-  request: PickElementRequest,
-): Promise<{ ok: true; data: PickElementResponse } | { ok: false; error: string }> {
-  return workerFetch(PickElementResponseSchema, {
-    method: 'POST',
-    path: '/profile-tooling/pick-element',
-    body: request,
-    timeoutMs: 120_000,
-  });
-}
 
 /**
  * Submit a queued job to the worker (profile proposal run or

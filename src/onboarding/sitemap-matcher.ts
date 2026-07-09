@@ -41,6 +41,26 @@ export interface SitemapMatchResult {
   matchType: 'upc_exact' | 'llm_selected' | 'token_overlap';
 }
 
+/**
+ * Optional extra context for the LLM sitemap selector.
+ * When available, the prompt becomes much more specific about
+ * the product identity, helping the LLM reject near-misses.
+ */
+export interface SitemapLlmContext {
+  /** Raw register/row name (pre-consolidation). */
+  itemName?: string;
+  /** Brand hint from the spreadsheet / assignment. */
+  brandHint?: string;
+  /** Product UPC. */
+  upc?: string;
+  /** Expected price (when known from the spreadsheet). */
+  price?: number | null;
+  /** For each candidate URL, the token-overlap ratio [0-1]. */
+  candidateOverlaps?: Map<string, number>;
+  /** Known variant tokens extracted from the product name. */
+  variantTokens?: string[];
+}
+
 // ── Stop words ──────────────────────────────────────────────────────────────
 // Compact stop-word set tuned for product catalog matching. We do NOT want
 // filler words (the, of, with) to dominate the token-overlap signal.
@@ -160,7 +180,14 @@ export async function matchSitemapUrls(
   }
 
   // Try LLM selection first (when 2+ candidates and an LLM is configured).
-  const selectedUrl = await selectWithLlm(scored.map(c => c.url), matchName);
+  // Build rich context from the available product info so the LLM can make
+  // a more informed decision and reject non-product pages.
+  const llmContext: SitemapLlmContext = {
+    itemName,
+    upc,
+    candidateOverlaps: new Map(scored.map(c => [c.url, c.overlap.ratio])),
+  };
+  const selectedUrl = await selectWithLlm(scored.map(c => c.url), matchName, llmContext);
 
   if (selectedUrl) {
     console.log(`[SitemapMatcher] LLM selected ${selectedUrl} for UPC ${upc}.`);
@@ -354,16 +381,25 @@ function computeTokenOverlap(
 /**
  * Ask the LLM to pick the best URL from a short list.
  * Returns the picked URL (must be in the input list), or `null` when
- * the LLM is unconfigured / the call fails / the response is unparseable.
+ * the LLM is unconfigured / the call fails / the response is unparseable
+ * / the LLM explicitly says "null" (no good match).
  *
  * Uses the `product_name_consolidation` task config (which is a
  * non-profile task and therefore permits fallback to the generic
  * LLM config). Falls back silently to the top token-overlap candidate
  * upstream so a missing LLM should never throw.
+ *
+ * @param candidates  The candidate URLs (up to 10).
+ * @param productName The consolidated (or fallback) product name.
+ * @param context     Optional extra identity context (brand, UPC, price,
+ *                    token overlap data, variant tokens). When provided,
+ *                    the prompt becomes a more specific matching question
+ *                    with explicit reject rules.
  */
 async function selectWithLlm(
   candidates: string[],
   productName: string,
+  context?: SitemapLlmContext,
 ): Promise<string | null> {
   if (candidates.length < 2) {
     // With 0 or 1 candidate, there is nothing to disambiguate.
@@ -390,14 +426,61 @@ async function selectWithLlm(
     return null;
   }
 
-  const numbered = candidates.map((u, i) => `${i + 1}. ${u}`).join('\n');
+  const numbered = candidates
+    .map((u, i) => {
+      const overlap = context?.candidateOverlaps?.get(u);
+      const overlapNote =
+        overlap !== undefined
+          ? ` (name-token overlap: ${(overlap * 100).toFixed(0)}%)`
+          : '';
+      return `${i + 1}. ${u}${overlapNote}`;
+    })
+    .join('\n');
+
+  // Build a richer product identity section when context is provided.
+  const productDetailLines: string[] = [];
+  if (context?.itemName) {
+    productDetailLines.push(`Register name: "${context.itemName}"`);
+  }
+  productDetailLines.push(`Consolidated name: "${productName}"`);
+  if (context?.brandHint) {
+    productDetailLines.push(`Brand: "${context.brandHint}"`);
+  }
+  if (context?.upc) {
+    productDetailLines.push(`UPC: ${context.upc}`);
+  }
+  if (context?.price !== undefined && context.price !== null) {
+    productDetailLines.push(`Expected price: $${context.price}`);
+  }
+  if (context?.variantTokens && context.variantTokens.length > 0) {
+    productDetailLines.push(
+      `Known variant tokens (size/color/flavor): ${context.variantTokens.join(', ')}`,
+    );
+  }
+  const productDetail = productDetailLines.join('\n');
+
   const prompt =
-    `Given this product: ${productName}\n\n` +
-    `Which URL is the correct product page? Return ONLY the URL (no explanation, no numbering).\n\n` +
+    `You must select the correct product page URL from the list below, or return "null" if none matches exactly.` +
+    `\n\n` +
+    `--- PRODUCT IDENTITY ---\n` +
+    `${productDetail}\n` +
+    `\n` +
+    `--- RULES ---\n` +
+    `1. Choose ONLY a product detail page. NEVER choose a category listing, collection, search result, blog post, information page, or homepage.` +
+    `\n` +
+    `2. The URL must be the exact product page for the product described above, not a similar or related product.` +
+    `\n` +
+    `3. If none of the URLs looks like the exact product page, return the literal string "null". Do NOT guess.` +
+    `\n` +
+    `4. Return ONLY one of: the exact URL (no numbering, no explanation) or the literal string "null".` +
+    `\n` +
+    `--- CANDIDATE URLs (with name-token overlap % as a hint) ---\n` +
     `${numbered}`;
 
   const systemPrompt =
-    'You are a precise product cataloging assistant. Choose the single URL that best matches the product name.';
+    'You are a precise product cataloging assistant. Your job is to pick the SINGLE correct product page URL ' +
+    'for the described product from the list, or say "null" if no URL is the exact product. ' +
+    'Never guess. Never pick a category, collection, search results, or blog page.';
 
   let raw: string | null;
   try {
@@ -414,6 +497,15 @@ async function selectWithLlm(
   }
 
   if (!raw) return null;
+
+  // Handle explicit "null" response — the LLM says none of the URLs match.
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === 'null' || trimmed === '"null"' || trimmed === "'null'") {
+    console.log(
+      `[SitemapMatcher] LLM explicitly returned null for "${productName}" — no URL is the exact product page.`,
+    );
+    return null;
+  }
 
   // Normalize the LLM response: strip whitespace, trailing punctuation,
   // and matching surrounding quotes.

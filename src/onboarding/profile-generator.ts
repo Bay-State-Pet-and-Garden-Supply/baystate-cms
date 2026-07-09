@@ -61,7 +61,9 @@ export interface GeneratedSelectorProfile {
    */
   titleOptionalSelectors?: string[];
   descriptionSelector: string | null;
+  brandSelector: string | null;
   imagesSelector: string | null;
+  sitemapProductUrlPattern?: string | null;
   shopifyJSONPath: boolean;
   /** Custom field selectors (user-defined via visual picker), keyed by field name. */
   customSelectors?: Record<string, string>;
@@ -623,9 +625,11 @@ function buildVariantOptionCandidates(html: string, baseUrl?: string): VariantOp
 
 // ─── LLM integration (Task 9) ──────────────────────────────────────────────
 
+// priceSelector is NOT generated — user explicitly stated "never scrape price".
 const SELECTOR_PROFILE_KEYS = [
   'titleSelector',
   'descriptionSelector',
+  'brandSelector',
   'imagesSelector',
   'shopifyJSONPath',
 ] as const;
@@ -696,19 +700,24 @@ INSTRUCTIONS:
 - For each field, write the single most accurate selector. Set a field to null only if you genuinely cannot identify a good selector for it.
 - titleSelector is required (return null for the whole object if no good title selector exists).
 - imagesSelector should target the container that wraps ALL gallery images (multiple <img>), not a single hero image, when a gallery exists. If the DOM shows a Shopify media wrapper (e.g. .product__media-wrapper, .product-single__media, [data-product-media]), target it.
+- brandSelector should target an element that contains the brand/vendor/manufacturer name.
 - If you can see a Shopify product object embedded in a <script> (window.productJSON / productJSON / *_product_data / var meta = { product: ... }), set "shopifyJSONPath" to true and prefer that object for title/description/images; still provide CSS selectors as fallback.
 - If one or more variant/option candidates correspond to the real product variant selectors, propose a "variantSelectionStrategy" object using the most stable "containerSelector" from the variant candidates. Set "optionType" to dropdown|button_group|radio|unknown. Copy the discovered "detectedOptions" and inferred "optionFields". If none is a real variant selector, set "variantSelectionStrategy" to null.
 - An invalid or null "variantSelectionStrategy" does NOT invalidate the rest of the profile.
-
 - If the product title is split across multiple elements (e.g. an h1 and a separate subheading div), set titleSelector to the primary element and add the secondary element selector(s) to titleOptionalSelectors (an array of strings). Their text content will be appended with " — " to form the full title.
+- Look for additional product data in the DOM: ingredients list, nutrition table (guaranteed analysis), calorie content, weight/size, flavor/variety, SKU, dietary labels, life stage, and feeding guidelines. For any such data you can find a reliable CSS selector, propose a custom field in the "customSelectors" object with a normalized key name (e.g. "ingredients", "guaranteedAnalysis", "calories", "weight", "flavor", "sku", "dietaryLabels", "lifeStage", "feedingGuidelines").
+- If the URL structure shows a consistent product page pattern (e.g., /products/product-name, /product/sku, /p/id), infer a sitemapProductUrlPattern regex string.
 
 Return JSON with exactly these keys:
 {
   "titleSelector": string|null,
   "titleOptionalSelectors": string[],
+  "brandSelector": string|null,
   "descriptionSelector": string|null,
   "imagesSelector": string|null,
   "shopifyJSONPath": boolean,
+  "sitemapProductUrlPattern": string|null,
+  "customSelectors": object|null,
   "variantSelectionStrategy": {
     "containerSelector": string|null,
     "optionType": "dropdown"|"button_group"|"radio"|"unknown",
@@ -728,7 +737,9 @@ function shapeFromParsed(parsed: unknown): GeneratedSelectorProfile | null {
   const out: GeneratedSelectorProfile = {
     titleSelector: null,
     descriptionSelector: null,
+    brandSelector: null,
     imagesSelector: null,
+    sitemapProductUrlPattern: null,
     shopifyJSONPath: false,
   };
   for (const key of SELECTOR_PROFILE_KEYS) {
@@ -795,6 +806,25 @@ function shapeFromParsed(parsed: unknown): GeneratedSelectorProfile | null {
       .map(s => s.trim());
     if (valid.length > 0) {
       out.titleOptionalSelectors = valid;
+    }
+  }
+
+  // Parse sitemapProductUrlPattern
+  if (typeof obj.sitemapProductUrlPattern === 'string' && obj.sitemapProductUrlPattern.trim()) {
+    out.sitemapProductUrlPattern = obj.sitemapProductUrlPattern.trim();
+  }
+
+  // Parse customSelectors (record of string -> string)
+  const rawCustom = obj.customSelectors;
+  if (rawCustom && typeof rawCustom === 'object' && !Array.isArray(rawCustom)) {
+    const parsedCustom: Record<string, string> = {};
+    for (const [key, value] of Object.entries(rawCustom)) {
+      if (typeof value === 'string' && value.trim() && isSupportedSelectorSyntax(value.trim())) {
+        parsedCustom[key] = value.trim();
+      }
+    }
+    if (Object.keys(parsedCustom).length > 0) {
+      out.customSelectors = parsedCustom;
     }
   }
 
@@ -920,11 +950,15 @@ export async function generateExtractorProfile(
     config = getLlmConfigForTask('profile_generation', { allowFallback: false });
   } catch (err) {
     if (err instanceof MissingLlmTaskConfigError) {
+      console.warn('[ProfileGenerator] No LLM config for profile_generation task');
       return null;
     }
     throw err;
   }
-  if (!config) return null;
+  if (!config) {
+    console.warn('[ProfileGenerator] LLM config resolved to null for profile_generation');
+    return null;
+  }
 
   // Build minimized DOM once, used for both candidate extraction and LLM prompt
   let minimized = '';
@@ -961,19 +995,28 @@ export async function generateExtractorProfile(
   let raw: string | null;
   try {
     raw = await callLlmForTask('profile_generation', prompt, SYSTEM_PROMPT, { allowFallback: false });
-  } catch {
+  } catch (err) {
+    console.warn('[ProfileGenerator] LLM call failed:', err instanceof Error ? err.message : String(err));
     return null;
   }
-  if (raw == null) return null;
+  if (raw == null) {
+    console.warn('[ProfileGenerator] LLM returned null (no error thrown)');
+    return null;
+  }
 
   const cleaned = stripCodeFences(raw);
   let parsed: unknown;
   try {
     parsed = JSON.parse(cleaned);
-  } catch {
+  } catch (parseErr) {
+    console.warn('[ProfileGenerator] Failed to parse LLM response as JSON:', cleaned.slice(0, 500));
     return null;
   }
-  return shapeFromParsed(parsed);
+  const shaped = shapeFromParsed(parsed);
+  if (!shaped) {
+    console.warn('[ProfileGenerator] shapeFromParsed returned null — LLM response missing/invalid titleSelector');
+  }
+  return shaped;
 }
 
 // ─── Validation (Task 10) ──────────────────────────────────────────────────

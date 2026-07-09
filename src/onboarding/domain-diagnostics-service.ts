@@ -30,13 +30,13 @@ import {
   listProfileGenerationDomainSummaries,
   type ProfileGenerationDomainSummary,
 } from '../db/repositories/profile-generation-repo';
+import type { ExtractorProfile } from '../db/repositories/extractor-profile-repo';
 import type {
   BrandSite,
   DomainDiagnosticsBrandAssociation,
   DomainDiagnosticsEntry,
   DomainDiagnosticsResponse,
   DomainHealthStatus,
-  ExtractorProfile,
 } from '../shared/schemas/onboarding';
 
 // ─── Staleness rules ──────────────────────────────────────────────────────────

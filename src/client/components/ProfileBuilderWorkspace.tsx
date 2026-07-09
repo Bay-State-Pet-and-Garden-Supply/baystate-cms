@@ -30,7 +30,7 @@ import type {
   SnapshotResponse,
 } from '../../shared/schemas/extraction-worker';
 import { ProfileGenerationReview } from './ProfileGenerationReview';
-import { ElementPickerButton } from './ElementPickerButton';
+
 import { ImagePreviewGrid } from './ImagePreviewGrid';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ interface ProfileBuilderWorkspaceProps {
   diagnostics?: DomainDiagnosticsEntry | null;
 }
 
-type TabId = 'build' | 'review' | 'advanced';
+type TabId = 'build' | 'advanced';
 
 type RuntimeMode = 'static' | 'rendered';
 
@@ -423,9 +423,9 @@ export function ProfileBuilderWorkspace(
         await reload();
       }
     } catch (err) {
-      setGovernanceError(
-        err instanceof Error ? err.message : String(err),
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[ProfileBuilder] Generate proposal failed:', msg);
+      setGovernanceError(msg);
     } finally {
       setProposalGenerating(false);
     }
@@ -555,7 +555,6 @@ export function ProfileBuilderWorkspace(
       {(
         [
           ['build', 'Build'],
-          ['review', 'Review'],
           ['advanced', 'Advanced'],
         ] as [TabId, string][]
       ).map(([id, label]) => (
@@ -685,38 +684,27 @@ export function ProfileBuilderWorkspace(
             >
               Go to Build Tab
             </button>
+            {activeProfile && (
+              <button
+                type="button"
+                style={s.dangerBtn}
+                onClick={async () => {
+                  if (!window.confirm(`Delete the active extractor profile for ${domain}? This cannot be undone.`)) return;
+                  try {
+                    await fetch(`/api/onboarding/settings/extractor-profiles/${activeProfile.id}`, { method: 'DELETE' });
+                    window.location.reload();
+                  } catch (err) {
+                    alert('Failed to delete profile: ' + (err instanceof Error ? err.message : String(err)));
+                  }
+                }}
+              >
+                Delete Profile
+              </button>
+            )}
           </div>
         </div>
 
-        {/* AI Proposal — deprecated, tucked at bottom */}
-        <details style={{ marginTop: 24, fontSize: 13, color: '#6b7280' }}>
-          <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#9ca3af' }}>Advanced: AI-Generated Proposal (deprecated)</summary>
-          <div style={{ marginTop: 12, padding: 16, background: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb' }}>
-            <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px' }}>
-              The AI proposal generator is unreliable for complex page structures.
-              Use the <strong>Build</strong> tab to visually select elements instead.
-            </p>
-            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                style={{ ...s.secondaryBtn, fontSize: 12, padding: '4px 10px' }}
-                onClick={handleGenerateProposal}
-                disabled={proposalGenerating}
-              >
-                {proposalGenerating ? 'Generating…' : 'Generate AI Proposal'}
-              </button>
-            </div>
-            {generationResult && (
-              <div style={generationResult.success ? s.successBox : s.errorBox}>
-                {generationResult.success
-                  ? generationResult.existing
-                    ? 'Existing open proposal found.'
-                    : `Proposal generated${generationResult.anchorUrl ? ` from ${generationResult.anchorUrl}` : ''}.`
-                  : 'Generation returned no proposal.'}
-              </div>
-            )}
-          </div>
-        </details>
+
       </div>
     );
   };
@@ -725,6 +713,108 @@ export function ProfileBuilderWorkspace(
 
     const renderBuild = () => (
     <div>
+      {/* ─── AI Proposal Section ─── */}
+      <div style={{ ...s.section, marginBottom: 16, padding: 16, background: '#f0f9f4', borderRadius: 8, border: '1px solid #86efac' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>AI Proposal</h3>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="text"
+              value={proposalUrl}
+              onChange={(e) => setProposalUrl(e.target.value)}
+              placeholder="https://example.com/products/... (optional)"
+              style={{
+                padding: '4px 10px',
+                fontSize: 12,
+                border: '1px solid #d1d5db',
+                borderRadius: 6,
+                outline: 'none',
+                width: 300,
+              }}
+            />
+            <button
+              type="button"
+              onClick={handleGenerateProposal}
+              disabled={proposalGenerating}
+              style={{
+                background: '#16a34a',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 6,
+                padding: '6px 14px',
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: proposalGenerating ? 'not-allowed' : 'pointer',
+                opacity: proposalGenerating ? 0.6 : 1,
+              }}
+            >
+              {proposalGenerating ? 'Generating…' : 'Generate AI Proposal'}
+            </button>
+          </div>
+        </div>
+        {generationResult && (
+          <div style={generationResult.success ? { fontSize: 12, color: '#166534', marginBottom: 8 } : { fontSize: 12, color: '#dc2626', marginBottom: 8 }}>
+            {generationResult.success
+              ? `Proposal ${generationResult.existing ? 'already exists' : 'generated'} for ${domain}.`
+              : 'Generation returned no proposal.'}
+          </div>
+        )}
+        {governance?.generations && governance.generations.length > 0 && !selectedGenerationId && (
+          <div>
+            <p style={{ fontSize: 12, color: '#4b5563', margin: '0 0 8px' }}>
+              {governance.generations.length} proposal(s) exist.
+            </p>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {governance.generations
+                .slice()
+                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                .map((g) => (
+                  <button
+                    key={g.id}
+                    type="button"
+                    onClick={() => setSelectedGenerationId(g.id)}
+                    style={{
+                      background: '#fff',
+                      border: '1px solid #d1d5db',
+                      borderRadius: 6,
+                      padding: '4px 10px',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    #{g.id.slice(0, 8)} — {g.status} ({new Date(g.createdAt).toLocaleDateString()})
+                  </button>
+                ))}
+            </div>
+          </div>
+        )}
+        {selectedGenerationId && (
+          <div style={{ marginTop: 12, borderTop: '1px solid #bbf7d0', paddingTop: 12 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => setSelectedGenerationId(null)}
+                style={{
+                  background: 'none',
+                  border: '1px solid #d1d5db',
+                  borderRadius: 4,
+                  padding: '4px 10px',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                }}
+              >
+                ← Collapse
+              </button>
+            </div>
+            <ProfileGenerationReview
+              generationId={selectedGenerationId}
+              governance={governance}
+              onChange={() => void reload()}
+              onClose={() => setSelectedGenerationId(null)}
+            />
+          </div>
+        )}
+      </div>
       {/* ─── Hero: URL Input ─── */}
       
       {/* ─── Current Active Profile ─── */}
@@ -831,14 +921,6 @@ export function ProfileBuilderWorkspace(
                             style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
                           />
                         </div>
-                <ElementPickerButton
-                  field="title"
-                  url={snapshotResult.finalUrl || snapshotResult.url}
-                  onPicked={(result) => {
-                    setPickedSelectors((prev) => ({ ...prev, title: { selector: result.selector, stability: result.stability } }));
-                  }}
-                  onCancel={() => {}}
-                />
                 {pickedSelectors.title && (
                   <div style={{ marginTop: 8, padding: 8, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0' }}>
                     <code style={{ fontSize: 11, background: '#fff', padding: '1px 4px', borderRadius: 3 }}>
@@ -922,14 +1004,6 @@ export function ProfileBuilderWorkspace(
                             style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
                           />
                         </div>
-                <ElementPickerButton
-                  field="description"
-                  url={snapshotResult.finalUrl || snapshotResult.url}
-                  onPicked={(result) => {
-                    setPickedSelectors((prev) => ({ ...prev, description: { selector: result.selector, stability: result.stability } }));
-                  }}
-                  onCancel={() => {}}
-                />
                 {pickedSelectors.description && (
                   <div style={{ marginTop: 8, padding: 8, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0' }}>
                     <code style={{ fontSize: 11, background: '#fff', padding: '1px 4px', borderRadius: 3 }}>
@@ -973,14 +1047,6 @@ export function ProfileBuilderWorkspace(
                             style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
                           />
                         </div>
-                <ElementPickerButton
-                  field="images"
-                  url={snapshotResult.finalUrl || snapshotResult.url}
-                  onPicked={(result) => {
-                    setPickedSelectors((prev) => ({ ...prev, images: { selector: result.selector, stability: result.stability } }));
-                  }}
-                  onCancel={() => {}}
-                />
                 {pickedSelectors.images && (
                   <div style={{ marginTop: 8, padding: 8, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0' }}>
                     <code style={{ fontSize: 11, background: '#fff', padding: '1px 4px', borderRadius: 3 }}>
@@ -1070,14 +1136,6 @@ export function ProfileBuilderWorkspace(
                             style={{ flex: 1, padding: '4px 8px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12, fontFamily: 'monospace' }}
                           />
                         </div>
-                        <ElementPickerButton
-                          field={fieldName}
-                          url={snapshotResult.finalUrl || snapshotResult.url}
-                          onPicked={(result) => {
-                            setCustomPickedFields((prev) => ({ ...prev, [fieldName]: { selector: result.selector, stability: result.stability } }));
-                          }}
-                          onCancel={() => {}}
-                        />
                         {value.selector && (
                           <div style={{ marginTop: 6, padding: 6, background: '#f0fdf4', borderRadius: 4, border: '1px solid #bbf7d0', fontSize: 12 }}>
                             <code style={{ fontSize: 11 }}>{value.selector}</code>
@@ -1236,6 +1294,22 @@ export function ProfileBuilderWorkspace(
   const renderReview = () => {
     if (governanceLoading) {
       return <p style={{ color: '#6b7280' }}>Loading generations…</p>;
+    }
+
+    // Show governance errors in the Review tab
+    if (governanceError) {
+      return (
+        <div>
+          <div style={s.errorBox}>{governanceError}</div>
+          <button
+            type="button"
+            style={{ ...s.secondaryBtn, marginTop: 12 }}
+            onClick={() => setGovernanceError('')}
+          >
+            Dismiss
+          </button>
+        </div>
+      );
     }
 
     // If a specific generation is selected, show the review component
@@ -1431,7 +1505,6 @@ export function ProfileBuilderWorkspace(
         {/* Body */}
         <div style={s.body}>
           {activeTab === 'build' && renderBuild()}
-          {activeTab === 'review' && renderReview()}
           {activeTab === 'advanced' && renderAdvanced()}
         </div>
       </div>

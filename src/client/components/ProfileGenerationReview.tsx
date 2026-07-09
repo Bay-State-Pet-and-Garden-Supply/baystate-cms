@@ -1,14 +1,19 @@
 /**
- * ProfileGenerationReview.tsx — single generation / revision review.
+ * ProfileGenerationReview.tsx — dynamic field-catalog-driven review workspace.
  *
- * Preview-driven review flow with state machine:
- *   previewing → validating → validated → promoting → promoted
- *   feedback branches from previewing or validated
+ * Replaces the old static 3-field state machine with a per-field approval
+ * flow that supports all standard and custom fields from the profile catalog.
  *
- * Phase 4 (UI) consumer.
+ * Phases:
+ *   reviewing  → default, shows field cards with approve/reject toggles
+ *   validating → spinner during validation
+ *   validated  → validation results shown in field cards, promote active
+ *   promoting  → spinner during promotion
+ *   promoted   → success with list of approved fields
+ *   feedback   → feedback form for a specific field
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   getProfileGenerationDetail,
   validateRevision,
@@ -16,67 +21,179 @@ import {
   createRevisionFromFeedback,
   rollbackProfileField,
   deleteProfileGeneration,
-  testExtractorProfile,
 } from '../onboarding-api';
 import type {
   ProfileGenerationGeneration,
   ProfileGenerationRevision,
   ProfileGenerationFieldDecision,
-  SelectorField,
   StructuredFeedback,
   DomainProfileGovernance,
 } from '../../shared/schemas/onboarding';
 import type { ValidationRunSummary } from '../onboarding-api';
-import { SELECTOR_FIELDS } from '../../shared/schemas/onboarding';
-import { ProfileExtractionPreview } from './ProfileExtractionPreview';
+import {
+  buildReviewFields,
+  buildConfigRows,
+  diffRevisionSelectors,
+  normalizeFieldLabel,
+  getCategoryLabel,
+  getCategoryOrder,
+  type ReviewFieldRow,
+  type ConfigReviewRow,
+  type RevisionDiffEntry,
+} from '../profile-review-utils';
+import { ProfileReviewFieldGroup } from './ProfileReviewFieldGroup';
+import { ProfileConfigReviewCard } from './ProfileConfigReviewCard';
+import { ProfileRevisionDiff } from './ProfileRevisionDiff';
 import { ProfileRevisionFeedbackForm } from './ProfileRevisionFeedbackForm';
+import { ProfileExtractionPreview } from './ProfileExtractionPreview';
 
 // ─── Props ─────────────────────────────────────────────────────────────────
 
 interface ProfileGenerationReviewProps {
   generationId: string;
-  /** Optional governance summary for showing the active profile selectors. */
   governance?: DomainProfileGovernance | null;
   onChange?: () => void;
   onClose?: () => void;
 }
 
-// ─── State machine ─────────────────────────────────────────────────────────
+// ─── States ────────────────────────────────────────────────────────────────
 
-type ReviewState =
-  | 'previewing'
-  | 'validating'
-  | 'validated'
-  | 'promoting'
-  | 'promoted'
-  | 'feedback';
+type ReviewPhase = 'reviewing' | 'validating' | 'validated' | 'promoting' | 'promoted' | 'feedback';
 
-// ─── Component ─────────────────────────────────────────────────────────────
+// ─── Inline styles ──────────────────────────────────────────────────────────
+
+const s: Record<string, React.CSSProperties> = {
+  container: { display: 'flex', flexDirection: 'column', gap: 16 },
+  headerRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' },
+  headerTitle: { margin: 0, fontSize: 16, fontWeight: 600 },
+  headerSubtitle: { margin: '4px 0 0', fontSize: 12, color: '#6b7280' },
+  headerActions: { display: 'flex', gap: 8 },
+  closeBtn: {
+    background: 'none',
+    border: '1px solid #d1d5db',
+    borderRadius: 6,
+    padding: '4px 12px',
+    fontSize: 12,
+    cursor: 'pointer',
+    color: '#374151',
+  },
+  deleteBtn: {
+    background: 'none',
+    border: '1px solid #dc2626',
+    color: '#dc2626',
+    borderRadius: 6,
+    padding: '4px 12px',
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  errorBanner: {
+    color: '#dc2626',
+    fontSize: 13,
+    background: '#fef2f2',
+    padding: 8,
+    borderRadius: 4,
+  },
+  validateBtn: {
+    background: '#2563eb',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 6,
+    padding: '10px 20px',
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  promoteBtn: {
+    background: '#16a34a',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 6,
+    padding: '10px 20px',
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  secondaryBtn: {
+    background: '#6b7280',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 6,
+    padding: '8px 16px',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  spinnerBox: {
+    padding: 12,
+    background: '#f3f4f6',
+    borderRadius: 6,
+    fontSize: 13,
+    color: '#6b7280',
+    margin: 0,
+  },
+  successBanner: {
+    background: '#f0fdf4',
+    border: '1px solid #86efac',
+    borderRadius: 8,
+    padding: 16,
+  },
+  successText: { color: '#166534', fontWeight: 600, margin: 0 },
+  sectionTitle: { margin: '0 0 8px', fontSize: 14, fontWeight: 600 },
+  emptyText: { fontSize: 12, color: '#9ca3af', fontStyle: 'italic', margin: 0 },
+  collapseToggle: {
+    background: 'none',
+    border: 'none',
+    color: '#2563eb',
+    fontSize: 12,
+    cursor: 'pointer',
+    padding: 0,
+    textDecoration: 'underline',
+  },
+  smallBtn: {
+    padding: '2px 8px',
+    fontSize: 11,
+    border: '1px solid #d1d5db',
+    borderRadius: 4,
+    background: '#fff',
+    cursor: 'pointer',
+    color: '#374151',
+  },
+};
+
+// ─── Component ──────────────────────────────────────────────────────────────
 
 export function ProfileGenerationReview(
   props: ProfileGenerationReviewProps,
 ): React.ReactElement {
   const { generationId, onChange, onClose } = props;
+
+  // ── Data state ──────────────────────────────────────────────────────────
   const [generation, setGeneration] = useState<ProfileGenerationGeneration | null>(null);
   const [revisions, setRevisions] = useState<ProfileGenerationRevision[]>([]);
   const [decisions, setDecisions] = useState<ProfileGenerationFieldDecision[]>([]);
   const [latestRevision, setLatestRevision] = useState<ProfileGenerationRevision | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [busy, setBusy] = useState<boolean>(false);
-  const [error, setError] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  // State machine
-  const [reviewState, setReviewState] = useState<ReviewState>('previewing');
+  // ── Review phase & UI state ─────────────────────────────────────────────
+  const [phase, setPhase] = useState<ReviewPhase>('reviewing');
   const [validationResult, setValidationResult] = useState<ValidationRunSummary | null>(null);
   const [validationBusy, setValidationBusy] = useState(false);
   const [promoteBusy, setPromoteBusy] = useState(false);
+  const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [imagePreviewsReviewed, setImagePreviewsReviewed] = useState(false);
-  const [onDemandPreview, setOnDemandPreview] = useState<any>(null);
-  const [feedbackField, setFeedbackField] = useState<SelectorField | null>(null);
+  const [feedbackField, setFeedbackField] = useState<string | null>(null);
+  const [showDiff, setShowDiff] = useState(false);
+  const [showDecisions, setShowDecisions] = useState(false);
 
-  // ── Data loading ──────────────────────────────────────────────────────
+  // ── Per-field approval state ────────────────────────────────────────────
+  // key → 'approved' | 'rejected' | null (no decision yet)
+  const [approvals, setApprovals] = useState<Record<string, 'approved' | 'rejected' | null>>({});
+  // Local editing overrides for selectors (key → new selector string)
+  const [localEdits, setLocalEdits] = useState<Record<string, string | null>>({});
 
-  const load = async () => {
+  // ── Data loading ────────────────────────────────────────────────────────
+  const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
@@ -84,58 +201,157 @@ export function ProfileGenerationReview(
       setGeneration(detail.generation);
       setRevisions(detail.revisions);
       setDecisions(detail.fieldDecisions);
-      const latest =
-        detail.revisions
-          .slice()
-          .sort((a, b) => b.revisionNumber - a.revisionNumber)[0] ?? null;
+      const latest = detail.revisions
+        .slice()
+        .sort((a, b) => b.revisionNumber - a.revisionNumber)[0] ?? null;
       setLatestRevision(latest);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  };
+  }, [generationId]);
 
   useEffect(() => {
     load();
-  }, [generationId]);
+  }, [load]);
 
-  // ── On-demand preview fetch ───────────────────────────────────────────
-
+  // Reset approvals when revision changes
   useEffect(() => {
-    const seedPreview = (latestRevision as any)?.fieldSamples?.seedPreview;
-    if (!seedPreview && generation?.sourceUrl && latestRevision) {
-      const proposed = (latestRevision.selectors ?? {}) as Record<string, string | null>;
-      testExtractorProfile({
-        url: generation.sourceUrl,
-        titleSelector: proposed.titleSelector ?? null,
-        descriptionSelector: proposed.descriptionSelector ?? null,
-        imagesSelector: proposed.imagesSelector ?? null,
-        shopifyJSONPath: (generation as any)?.selectors?.shopifyJSONPath ?? false,
-      })
-        .then((res) => {
-          if (res?.extracted) setOnDemandPreview(res.extracted);
-        })
-        .catch(() => {});
+    setApprovals({});
+    setLocalEdits({});
+    setValidationResult(null);
+    setPhase('reviewing');
+  }, [latestRevision?.id]);
+
+  // ── Derive review rows ─────────────────────────────────────────────────
+  const activeProfile = props.governance?.activeProfile ?? null;
+  const revisionSelectors = (latestRevision?.selectors ?? {}) as Record<string, unknown>;
+  const fieldSamples = (latestRevision?.fieldSamples ?? null) as Record<string, unknown> | null;
+  const validationSamples = validationResult?.samples ?? [];
+  const byFieldTally = validationResult?.byField ?? {};
+
+  const activeSelectorRecord: Record<string, string | null> = activeProfile
+    ? {
+        titleSelector: activeProfile.titleSelector ?? null,
+        priceSelector: (activeProfile as any).priceSelector ?? null,
+        descriptionSelector: activeProfile.descriptionSelector ?? null,
+        brandSelector: (activeProfile as any).brandSelector ?? null,
+        imagesSelector: activeProfile.imagesSelector ?? null,
+      }
+    : {};
+  const activeCustomSelectors = activeProfile?.customSelectors ?? {};
+  const proposedCustomSelectors = (revisionSelectors.customSelectors ?? {}) as Record<string, string>;
+
+  const reviewFields = buildReviewFields({
+    revisionSelectors,
+    activeProfileSelectors: activeSelectorRecord,
+    fieldSamples,
+    validationResults: validationSamples.map((s) => ({
+      selectorField: s.field,
+      status: s.status,
+      extractedValue: s.extractedText,
+      extractedImages: s.extractedImages,
+      warnings: s.warnings,
+      sampleUrl: s.sampleUrl,
+    })),
+    byFieldTally,
+    activeCustomSelectors,
+    proposedCustomSelectors,
+  });
+
+  // Apply local edits to proposed selectors
+  const editedFields = reviewFields.map((row) => {
+    const override = localEdits[row.key];
+    if (override !== undefined) {
+      return { ...row, proposedSelector: override, changed: override !== row.activeSelector };
     }
-  }, [latestRevision?.id, generation?.sourceUrl]);
+    return row;
+  });
 
-  // ── State machine actions ─────────────────────────────────────────────
+  const configRows = buildConfigRows(revisionSelectors, activeProfile as unknown as Record<string, unknown> | null);
 
-  const handleLooksCorrect = async () => {
+  // Revision diff
+  const parentRevision = latestRevision?.parentRevisionId
+    ? revisions.find((r) => r.id === latestRevision.parentRevisionId) ?? null
+    : null;
+  const parentSelectors = parentRevision?.selectors as Record<string, unknown> | null ?? null;
+  const diffEntries: RevisionDiffEntry[] = parentSelectors
+    ? diffRevisionSelectors(parentSelectors, revisionSelectors)
+    : [];
+
+  // ── Group fields by category ───────────────────────────────────────────
+  const groupedFields: Record<string, ReviewFieldRow[]> = {};
+  for (const row of editedFields) {
+    const cat = row.category;
+    if (!groupedFields[cat]) groupedFields[cat] = [];
+    groupedFields[cat].push(row);
+  }
+
+  // Sort category keys
+  const sortedCategories = Object.keys(groupedFields).sort((a, b) => {
+    return getCategoryOrder(a) - getCategoryOrder(b);
+  });
+
+  // Derived boolean records from the ternary approvals state
+const approvedFields: Record<string, boolean> = {};
+const rejectedFields: Record<string, boolean> = {};
+for (const [key, value] of Object.entries(approvals)) {
+  if (value === 'approved') approvedFields[key] = true;
+  else if (value === 'rejected') rejectedFields[key] = true;
+}
+
+const approvedCount = Object.keys(approvedFields).length;
+  const hasApprovedFields = approvedCount > 0;
+
+  // ── Seed preview from latest revision ──────────────────────────────────
+  const seedPreview = fieldSamples?.seedPreview as {
+  title: string | null;
+  description: string | null;
+  images: string[];
+  variantOptions: string[];
+  strategy: 'shopify-json' | 'css';
+  variantSelectionStrategy: {
+    containerSelector: string | null;
+    optionType: string | null;
+    detectedOptions: string[];
+    optionFields: string[];
+  } | null;
+} | null ?? null;
+
+  // Build field values for extraction preview
+  const fieldValuesForPreview: Record<string, unknown> = {};
+  for (const row of editedFields) {
+    if (row.sampleValue) fieldValuesForPreview[row.key] = row.sampleValue;
+  }
+
+  // ── Handlers ──────────────────────────────────────────────────────────
+
+  const handleToggleApprove = (key: string, approve: boolean) => {
+    setApprovals((prev) => ({
+      ...prev,
+      [key]: approve ? 'approved' : 'rejected',
+    }));
+  };
+
+  const handleEditSelector = (key: string, selector: string) => {
+    setLocalEdits((prev) => ({ ...prev, [key]: selector }));
+  };
+
+  const handleValidate = async () => {
     if (!latestRevision) return;
-    setReviewState('validating');
+    setPhase('validating');
     setValidationBusy(true);
     setError('');
     try {
       const res = await validateRevision(generationId, latestRevision.id, { sampleLimit: 5 });
       setValidationResult(res.result);
-      setReviewState('validated');
+      setPhase('validated');
       await load();
       onChange?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setReviewState('previewing');
+      setPhase('reviewing');
     } finally {
       setValidationBusy(false);
     }
@@ -143,55 +359,53 @@ export function ProfileGenerationReview(
 
   const handlePromote = async () => {
     if (!latestRevision || !validationResult) return;
-    setReviewState('promoting');
+    setPhase('promoting');
     setPromoteBusy(true);
     setError('');
     try {
-      const approvedFields: Record<SelectorField, boolean> = {
-        titleSelector: true,
-        descriptionSelector: true,
-        imagesSelector: true,
-        priceSelector: false,
-        brandSelector: false,
-      };
+      const approvedFields: Record<string, boolean> = {};
+      let hasImageApproval = false;
+      for (const [key, value] of Object.entries(approvals)) {
+        if (value === 'approved') {
+          approvedFields[key] = true;
+          if (key === 'imagesSelector') hasImageApproval = true;
+        }
+      }
+
       const res = await approveRevisionFields(generationId, latestRevision.id, {
         approvedFields,
-        imagePreviewsReviewed,
+        imagePreviewsReviewed: hasImageApproval ? imagePreviewsReviewed : undefined,
       });
-      if (!res.imageApprovalAccepted) {
+
+      if (hasImageApproval && !res.imageApprovalAccepted) {
         throw new Error(
           'Image approval requires at least 2 validated samples AND the "I reviewed the image previews" checkbox.',
         );
       }
-      setReviewState('promoted');
+      setPhase('promoted');
       await load();
       onChange?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setReviewState('validated');
+      setPhase('validated');
     } finally {
       setPromoteBusy(false);
     }
   };
 
-  const handleSomethingWrong = () => {
-    setFeedbackField('titleSelector');
-    setReviewState('feedback');
+  const handleStartFeedback = (key: string) => {
+    setFeedbackField(key);
+    setPhase('feedback');
   };
 
-  const cancelFeedback = () => {
+  const handleCancelFeedback = () => {
     setFeedbackField(null);
-    setReviewState('previewing');
+    setPhase('reviewing');
   };
 
-  // ── Existing handlers ─────────────────────────────────────────────────
-
-  const submitFeedback = async (feedback: StructuredFeedback) => {
+  const handleSubmitFeedback = async (feedback: StructuredFeedback) => {
     if (!latestRevision) return;
-    if (feedback.kind !== 'images' && feedback.kind !== 'price') {
-      if (!feedback.field) return;
-    }
-    setBusy(true);
+    setFeedbackBusy(true);
     setError('');
     try {
       await createRevisionFromFeedback(generationId, {
@@ -199,19 +413,18 @@ export function ProfileGenerationReview(
         feedback,
       });
       setFeedbackField(null);
-      setReviewState('previewing');
+      setPhase('reviewing');
       await load();
       onChange?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      setFeedbackBusy(false);
     }
   };
 
   const handleRollback = async (decision: ProfileGenerationFieldDecision) => {
     if (!confirm(`Roll back ${decision.selectorField} on ${decision.domain}?`)) return;
-    setBusy(true);
     setError('');
     try {
       await rollbackProfileField(decision.id, { notes: 'Rolled back from review UI' });
@@ -219,8 +432,6 @@ export function ProfileGenerationReview(
       onChange?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -231,7 +442,6 @@ export function ProfileGenerationReview(
       )
     )
       return;
-    setBusy(true);
     setError('');
     try {
       await deleteProfileGeneration(generationId);
@@ -239,74 +449,55 @@ export function ProfileGenerationReview(
       onClose?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      setBusy(false);
     }
   };
 
-  // ── Early return / loading ────────────────────────────────────────────
+  // ── Early returns ──────────────────────────────────────────────────────
 
   if (loading) {
-    return <p style={{ color: '#6b7280' }}>Loading…</p>;
+    return <p style={{ color: '#6b7280' }}>Loading review…</p>;
   }
   if (!generation) {
     return <p style={{ color: '#dc2626' }}>Generation not found.</p>;
   }
+  if (!latestRevision) {
+    return (
+      <div style={s.container}>
+        <p style={s.emptyText}>No revision available to review.</p>
+      </div>
+    );
+  }
 
-  // ── Derived values ────────────────────────────────────────────────────
+  const reviewedField = feedbackField
+    ? editedFields.find((r) => r.key === feedbackField) ?? null
+    : null;
 
-  const seedPreview = (latestRevision as any)?.fieldSamples?.seedPreview ?? null;
-  const hasLatestRevision = latestRevision != null;
-
-  // ── Render ────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div style={s.container}>
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={s.headerRow}>
         <div>
-          <h3 style={{ margin: 0, fontSize: 16 }}>
-            Generation Review
-            <span style={{ marginLeft: 8, fontSize: 12, color: '#6b7280' }}>
-              {generation.id}
+          <h3 style={s.headerTitle}>
+            Profile Review
+            <span style={{ marginLeft: 8, fontSize: 12, color: '#6b7280', fontWeight: 400 }}>
+              {generationId.slice(0, 8)}
             </span>
           </h3>
-          <p style={{ margin: '4px 0 0', fontSize: 12, color: '#6b7280' }}>
-            {generation.domain} · {generation.sourceUrl}
+          <p style={s.headerSubtitle}>
+            {generation.domain} · {generation.sourceUrl?.slice(0, 80)}
             {generation.expectedName && (
               <span> · expected: {generation.expectedName}</span>
             )}
           </p>
         </div>
         {onClose && (
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              type="button"
-              onClick={onClose}
-              style={{
-                background: 'none',
-                border: '1px solid #d1d5db',
-                borderRadius: 6,
-                padding: '4px 12px',
-                fontSize: 12,
-                cursor: 'pointer',
-              }}
-            >
+          <div style={s.headerActions}>
+            <button type="button" onClick={onClose} style={s.closeBtn}>
               Close
             </button>
-            <button
-              type="button"
-              onClick={handleDelete}
-              disabled={busy}
-              style={{
-                background: 'none',
-                border: '1px solid #dc2626',
-                color: '#dc2626',
-                borderRadius: 6,
-                padding: '4px 12px',
-                fontSize: 12,
-                cursor: 'pointer',
-              }}
-            >
+            <button type="button" onClick={handleDelete} style={s.deleteBtn}>
               Delete
             </button>
           </div>
@@ -314,249 +505,153 @@ export function ProfileGenerationReview(
       </div>
 
       {/* ── Error banner ──────────────────────────────────────────────── */}
-      {error && (
-        <p
-          style={{
-            color: '#dc2626',
-            fontSize: 13,
-            background: '#fef2f2',
-            padding: 8,
-            borderRadius: 4,
-          }}
-        >
-          {error}
-        </p>
-      )}
+      {error && <p style={s.errorBanner}>{error}</p>}
 
-      {/* ── Extraction Preview ────────────────────────────────────────── */}
+      {/* ── Extraction preview ────────────────────────────────────────── */}
       <ProfileExtractionPreview
         seedPreview={seedPreview}
-        sourceUrl={generation.sourceUrl}
-        onDemandResult={
-          onDemandPreview
-            ? {
-                title: (onDemandPreview as any).title,
-                description: (onDemandPreview as any).description,
-                images: (onDemandPreview as any).images ?? [],
-                variantOptions: [],
-              }
-            : null
-        }
+        sourceUrl={generation.sourceUrl ?? ''}
         busy={loading}
       />
 
-      {/* ── Action Area (state machine) ─────────────────────────────────── */}
-
-      {/* previewing state */}
-      {reviewState === 'previewing' && (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {hasLatestRevision ? (
-            <>
-              <button
-                type="button"
-                onClick={handleLooksCorrect}
-                disabled={validationBusy}
-                style={{
-                  background: '#16a34a',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: 6,
-                  padding: '8px 16px',
-                  fontSize: 14,
-                  fontWeight: 600,
-                  cursor: validationBusy ? 'not-allowed' : 'pointer',
-                  opacity: validationBusy ? 0.6 : 1,
-                }}
-              >
-                Looks correct
-              </button>
-              <button
-                type="button"
-                onClick={handleSomethingWrong}
-                disabled={validationBusy}
-                style={{
-                  background: '#6b7280',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: 6,
-                  padding: '8px 16px',
-                  fontSize: 14,
-                  fontWeight: 600,
-                  cursor: validationBusy ? 'not-allowed' : 'pointer',
-                  opacity: validationBusy ? 0.6 : 1,
-                }}
-              >
-                Something's wrong
-              </button>
-            </>
-          ) : (
-            <p style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>
-              No revision available to review.
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* validating state */}
-      {reviewState === 'validating' && (
-        <div style={{ padding: 12, background: '#f3f4f6', borderRadius: 6 }}>
-          <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>
-            Validating across confirmed samples…
-          </p>
-        </div>
-      )}
-
-      {/* validated state */}
-      {reviewState === 'validated' && validationResult && (
+      {/* ── FEEDBACK PHASE ──────────────────────────────────────────────── */}
+      {phase === 'feedback' && reviewedField && (
         <div
           style={{
-            border: '1px solid #e5e7eb',
+            border: '1px solid #fde68a',
             borderRadius: 8,
             padding: 16,
-            background: '#fafafa',
+            background: '#fffbeb',
           }}
         >
-          <h4 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600 }}>
-            Validation Summary
+          <h4 style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 600 }}>
+            Feedback: {reviewedField.label}
           </h4>
-
-          {/* Per-field summary */}
-          {SELECTOR_FIELDS.map((field) => {
-            const tally = validationResult.byField[field];
-            if (!tally) return null;
-            const total = tally.passing + tally.warning + tally.failing;
-            return (
-              <div
-                key={field}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  marginBottom: 6,
-                  fontSize: 13,
-                }}
-              >
-                <span style={{ fontWeight: 500, minWidth: 140 }}>{field}:</span>
-                <span style={{ color: '#16a34a' }}>{tally.passing} pass</span>
-                {tally.warning > 0 && (
-                  <span style={{ color: '#d97706' }}>{tally.warning} warn</span>
-                )}
-                {tally.failing > 0 && (
-                  <span style={{ color: '#dc2626' }}>{tally.failing} fail</span>
-                )}
-                {total === 0 && (
-                  <span style={{ color: '#9ca3af' }}>no samples</span>
-                )}
-              </div>
-            );
-          })}
-
-          {/* Image approval gate */}
-          {validationResult.byField.imagesSelector &&
-            validationResult.byField.imagesSelector.passing >= 2 && (
-              <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  fontSize: 12,
-                  color: '#4b5563',
-                  marginTop: 8,
-                  padding: 8,
-                  background: '#fff',
-                  border: '1px solid #e5e7eb',
-                  borderRadius: 4,
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={imagePreviewsReviewed}
-                  onChange={(e) => setImagePreviewsReviewed(e.target.checked)}
-                />
-                <span>
-                  I reviewed the image previews — images are correct and show
-                  the actual product
-                </span>
-              </label>
-            )}
-
-          {/* Buttons */}
-          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button
-              type="button"
-              onClick={handlePromote}
-              disabled={
-                promoteBusy ||
-                (validationResult.byField.imagesSelector?.passing >= 2 &&
-                  !imagePreviewsReviewed)
-              }
-              style={{
-                background: '#2563eb',
-                color: '#fff',
-                border: 'none',
-                borderRadius: 6,
-                padding: '8px 16px',
-                fontSize: 14,
-                fontWeight: 600,
-                cursor:
-                  promoteBusy ||
-                  (validationResult.byField.imagesSelector?.passing >= 2 &&
-                    !imagePreviewsReviewed)
-                    ? 'not-allowed'
-                    : 'pointer',
-                opacity:
-                  promoteBusy ||
-                  (validationResult.byField.imagesSelector?.passing >= 2 &&
-                    !imagePreviewsReviewed)
-                    ? 0.6
-                    : 1,
-              }}
-            >
-              {promoteBusy ? 'Promoting…' : 'Promote'}
-            </button>
-            <button
-              type="button"
-              onClick={handleSomethingWrong}
-              disabled={promoteBusy}
-              style={{
-                background: '#6b7280',
-                color: '#fff',
-                border: 'none',
-                borderRadius: 6,
-                padding: '8px 16px',
-                fontSize: 14,
-                fontWeight: 600,
-                cursor: promoteBusy ? 'not-allowed' : 'pointer',
-                opacity: promoteBusy ? 0.6 : 1,
-              }}
-            >
-              Something's wrong
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* promoting state */}
-      {reviewState === 'promoting' && (
-        <div style={{ padding: 12, background: '#f3f4f6', borderRadius: 6 }}>
-          <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>
-            Promoting selectors to extractor profile…
+          <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px' }}>
+            What's wrong with the {reviewedField.label.toLowerCase()} selector?
           </p>
+          <ProfileRevisionFeedbackForm
+            field={reviewedField.key}
+            currentValue={reviewedField.proposedSelector}
+            sourcePageUrl={generation.sourceUrl ?? ''}
+            onSubmit={handleSubmitFeedback}
+            busy={feedbackBusy}
+          />
+          <button
+            type="button"
+            onClick={handleCancelFeedback}
+            disabled={feedbackBusy}
+            style={{ ...s.smallBtn, marginTop: 12 }}
+          >
+            Cancel
+          </button>
         </div>
       )}
 
-      {/* promoted state */}
-      {reviewState === 'promoted' && (
-        <div
-          style={{
-            background: '#f0fdf4',
-            border: '1px solid #86efac',
-            borderRadius: 8,
-            padding: 16,
-          }}
-        >
-          <p style={{ color: '#166534', fontWeight: 600, margin: 0 }}>
-            ✓ Generation promoted successfully. Selectors have been written to{' '}
+      {/* ── REVIEW / VALIDATION PHASES ──────────────────────────────────── */}
+      {(phase === 'reviewing' || phase === 'validating' || phase === 'validated') && (
+        <>
+          {/* Config rows */}
+          {configRows.length > 0 && (
+            <ProfileConfigReviewCard
+              rows={configRows}
+              approvedFields={approvedFields}
+              onToggleApprove={
+                phase === 'validated' ? undefined : (key, _approve) => handleToggleApprove(key, _approve)
+              }
+              disabled={phase !== 'reviewing'}
+            />
+          )}
+
+          {/* Field groups */}
+          {sortedCategories.length === 0 ? (
+            <p style={s.emptyText}>No selector fields found in this revision.</p>
+          ) : (
+            sortedCategories.map((cat) => (
+              <ProfileReviewFieldGroup
+                key={cat}
+                category={cat}
+                rows={groupedFields[cat]}
+                approvedFields={approvedFields}
+                rejectedFields={rejectedFields}
+                onToggleApprove={handleToggleApprove}
+                onFeedback={handleStartFeedback}
+                onEditSelector={handleEditSelector}
+                disabled={phase !== 'reviewing'}
+                imagePreviewsReviewed={imagePreviewsReviewed}
+                onImageReviewToggle={setImagePreviewsReviewed}
+                defaultExpanded={true}
+              />
+            ))
+          )}
+
+          {/* Validation / Promote actions */}
+          {phase === 'reviewing' && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={handleValidate}
+                disabled={validationBusy}
+                style={{
+                  ...s.validateBtn,
+                  opacity: validationBusy ? 0.6 : 1,
+                  cursor: validationBusy ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {validationBusy ? 'Validating…' : 'Validate Across Samples'}
+              </button>
+            </div>
+          )}
+
+          {phase === 'validated' && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={handlePromote}
+                disabled={promoteBusy || !hasApprovedFields}
+                style={{
+                  ...s.promoteBtn,
+                  opacity: promoteBusy || !hasApprovedFields ? 0.6 : 1,
+                  cursor: promoteBusy || !hasApprovedFields ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {promoteBusy
+                  ? 'Promoting…'
+                  : `Promote ${approvedCount} Field${approvedCount !== 1 ? 's' : ''}`}
+              </button>
+              <button
+                type="button"
+                onClick={handleValidate}
+                disabled={validationBusy}
+                style={{ ...s.secondaryBtn, opacity: validationBusy ? 0.6 : 1 }}
+              >
+                Re-validate
+              </button>
+              <span style={{ fontSize: 12, color: '#6b7280' }}>
+                {!hasApprovedFields
+                  ? 'Approve at least one field to enable promotion'
+                  : `${approvedCount} field${approvedCount !== 1 ? 's' : ''} ready to promote`}
+              </span>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── VALIDATING PHASE ──────────────────────────────────────────────── */}
+      {phase === 'validating' && (
+        <p style={s.spinnerBox}>Validating across confirmed samples…</p>
+      )}
+
+      {/* ── PROMOTING PHASE ──────────────────────────────────────────────── */}
+      {phase === 'promoting' && (
+        <p style={s.spinnerBox}>Promoting selectors to extractor profile…</p>
+      )}
+
+      {/* ── PROMOTED PHASE ──────────────────────────────────────────────── */}
+      {phase === 'promoted' && (
+        <div style={s.successBanner}>
+          <p style={s.successText}>
+            ✓ Generation promoted successfully. {approvedCount} field{approvedCount !== 1 ? 's were' : ' was'} written to{' '}
             <code>extractor_profiles</code>.
           </p>
           {onClose && (
@@ -581,106 +676,31 @@ export function ProfileGenerationReview(
         </div>
       )}
 
-      {/* feedback state */}
-      {reviewState === 'feedback' && (
-        <div
-          style={{
-            border: '1px solid #e5e7eb',
-            borderRadius: 8,
-            padding: 16,
-            background: '#fffbeb',
-          }}
-        >
-          <h4 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 600 }}>
-            What's wrong? Provide feedback
-          </h4>
-          <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 8px' }}>
-            Select the field that needs revision and describe what's incorrect.
-          </p>
-          <div
-            style={{
-              display: 'flex',
-              gap: 8,
-              flexWrap: 'wrap',
-              marginBottom: 12,
-            }}
-          >
-            {SELECTOR_FIELDS.map((field) => (
-              <button
-                key={field}
-                type="button"
-                onClick={() => setFeedbackField(field)}
-                style={{
-                  background: feedbackField === field ? '#2563eb' : '#fff',
-                  color: feedbackField === field ? '#fff' : '#2563eb',
-                  border: '1px solid #2563eb',
-                  borderRadius: 4,
-                  padding: '4px 10px',
-                  fontSize: 12,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-              >
-                Revise {field}
-              </button>
-            ))}
-          </div>
-          {feedbackField && latestRevision && (
-            <ProfileRevisionFeedbackForm
-              field={feedbackField}
-              currentValue={
-                (latestRevision.selectors as Record<string, string | null>)[
-                  feedbackField
-                ] ?? null
-              }
-              currentImages={
-                feedbackField === 'imagesSelector'
-                  ? validationResult?.samples
-                      .filter((s) => s.field === 'imagesSelector')
-                      .flatMap((s) =>
-                        s.extractedImages.map((url) => ({
-                          url,
-                          sampleUrl: s.sampleUrl,
-                          expectedName: s.expectedName,
-                          brandHint: s.brandHint,
-                          warnings: s.warnings,
-                        })),
-                      )
-                  : undefined
-              }
-              sourcePageUrl={generation?.sourceUrl ?? ''}
-              onSubmit={submitFeedback}
-              busy={busy}
-            />
-          )}
+      {/* ── BELOW THE FOLD ────────────────────────────────────────────────── */}
+
+      {/* Revision diff */}
+      {diffEntries.length > 0 && (
+        <div>
           <button
             type="button"
-            onClick={cancelFeedback}
-            disabled={busy}
-            style={{
-              marginTop: 8,
-              background: 'none',
-              border: '1px solid #d1d5db',
-              borderRadius: 6,
-              padding: '6px 14px',
-              fontSize: 13,
-              cursor: 'pointer',
-            }}
+            onClick={() => setShowDiff(!showDiff)}
+            style={s.collapseToggle}
           >
-            Cancel
+            {showDiff ? 'Hide revision changes' : `Show revision changes (${diffEntries.filter((e) => e.changeType !== 'unchanged').length} changes)`}
           </button>
+          {showDiff && (
+            <div style={{ marginTop: 8 }}>
+              <ProfileRevisionDiff entries={diffEntries} />
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Below the fold ────────────────────────────────────────────────── */}
-
       {/* Revision history */}
       <div>
-        <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>Revision history</h4>
+        <h4 style={s.sectionTitle}>Revision history</h4>
         {revisions.length === 0 ? (
-          <p style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>
-            No revisions yet.
-          </p>
+          <p style={s.emptyText}>No revisions yet.</p>
         ) : (
           <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
             {revisions
@@ -700,7 +720,7 @@ export function ProfileGenerationReview(
                   <strong>#{r.revisionNumber}</strong> · {r.source} · {r.status}
                   {' · '}
                   {new Date(r.createdAt).toLocaleString()}
-                  {r.confidence ? (
+                  {r.confidence != null && r.confidence > 0 ? (
                     <span> · conf {r.confidence.toFixed(2)}</span>
                   ) : null}
                 </li>
@@ -711,95 +731,92 @@ export function ProfileGenerationReview(
 
       {/* Field decisions & rollback */}
       <div>
-        <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>
-          Field decisions &amp; rollback
-        </h4>
-        {decisions.length === 0 ? (
-          <p style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>
-            No field decisions yet.
-          </p>
-        ) : (
-          <ul style={{ margin: 0, padding: 0, listStyle: 'none' }}>
-            {decisions
-              .slice()
-              .sort(
-                (a, b) =>
-                  new Date(b.decidedAt).getTime() -
-                  new Date(a.decidedAt).getTime(),
-              )
-              .map((d) => (
-                <li
-                  key={d.id}
-                  style={{
-                    borderLeft: '3px solid #e5e7eb',
-                    paddingLeft: 12,
-                    marginBottom: 6,
-                    fontSize: 12,
-                    color: '#4b5563',
-                    display: 'flex',
-                    gap: 8,
-                    alignItems: 'center',
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: 10,
-                      fontWeight: 600,
-                      textTransform: 'uppercase',
-                      background:
-                        d.decision === 'approved'
-                          ? '#dcfce7'
-                          : d.decision === 'rejected'
-                            ? '#fee2e2'
-                            : '#e0e7ff',
-                      color:
-                        d.decision === 'approved'
-                          ? '#16a34a'
-                          : d.decision === 'rejected'
-                            ? '#dc2626'
-                            : '#4338ca',
-                      padding: '2px 6px',
-                      borderRadius: 3,
-                    }}
-                  >
-                    {d.decision}
-                  </span>
-                  <span>{d.selectorField}</span>
-                  {d.previousSelector && (
-                    <span style={{ color: '#9ca3af' }}>
-                      was: <code>{d.previousSelector}</code>
-                    </span>
-                  )}
-                  {d.approvedSelector && (
-                    <span>
-                      now: <code>{d.approvedSelector}</code>
-                    </span>
-                  )}
-                  <span style={{ color: '#9ca3af' }}>
-                    · {new Date(d.decidedAt).toLocaleString()}
-                  </span>
-                  {d.decision === 'approved' && (
-                    <button
-                      type="button"
-                      onClick={() => handleRollback(d)}
-                      disabled={busy}
+        <button
+          type="button"
+          onClick={() => setShowDecisions(!showDecisions)}
+          style={s.collapseToggle}
+        >
+          {showDecisions ? 'Hide' : 'Show'} field decisions ({decisions.length})
+        </button>
+        {showDecisions && (
+          <>
+            {decisions.length === 0 ? (
+              <p style={{ ...s.emptyText, marginTop: 8 }}>No field decisions yet.</p>
+            ) : (
+              <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
+                {decisions
+                  .slice()
+                  .sort(
+                    (a, b) =>
+                      new Date(b.decidedAt).getTime() - new Date(a.decidedAt).getTime(),
+                  )
+                  .map((d) => (
+                    <li
+                      key={d.id}
                       style={{
-                        background: 'none',
-                        border: '1px solid #d1d5db',
-                        color: '#6b7280',
-                        borderRadius: 4,
-                        padding: '2px 8px',
-                        fontSize: 11,
-                        cursor: busy ? 'not-allowed' : 'pointer',
-                        marginLeft: 'auto',
+                        borderLeft: '3px solid #e5e7eb',
+                        paddingLeft: 12,
+                        marginBottom: 6,
+                        fontSize: 12,
+                        color: '#4b5563',
+                        display: 'flex',
+                        gap: 8,
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
                       }}
                     >
-                      Rollback
-                    </button>
-                  )}
-                </li>
-              ))}
-          </ul>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 600,
+                          textTransform: 'uppercase',
+                          background:
+                            d.decision === 'approved'
+                              ? '#dcfce7'
+                              : d.decision === 'rejected'
+                                ? '#fee2e2'
+                                : '#e0e7ff',
+                          color:
+                            d.decision === 'approved'
+                              ? '#16a34a'
+                              : d.decision === 'rejected'
+                                ? '#dc2626'
+                                : '#4338ca',
+                          padding: '2px 6px',
+                          borderRadius: 3,
+                        }}
+                      >
+                        {d.decision}
+                      </span>
+                      <span style={{ fontWeight: 500 }}>{normalizeFieldLabel(d.selectorField)}</span>
+                      <span style={{ color: '#9ca3af', fontSize: 11 }}>{d.selectorField}</span>
+                      {d.previousSelector && (
+                        <span style={{ color: '#9ca3af', fontSize: 11 }}>
+                          was: <code>{d.previousSelector.slice(0, 40)}</code>
+                        </span>
+                      )}
+                      {d.approvedSelector && (
+                        <span style={{ fontSize: 11 }}>
+                          now: <code>{d.approvedSelector.slice(0, 40)}</code>
+                        </span>
+                      )}
+                      <span style={{ color: '#9ca3af', fontSize: 11 }}>
+                        · {new Date(d.decidedAt).toLocaleString()}
+                      </span>
+                      {d.decision === 'approved' && (
+                        <button
+                          type="button"
+                          onClick={() => handleRollback(d)}
+                          style={s.smallBtn}
+                        >
+                          Rollback
+                        </button>
+                      )}
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </>
         )}
       </div>
     </div>

@@ -11,6 +11,7 @@
 import { trustedExtract } from '../server/extraction-worker-client';
 import type { ExtractorProfile } from '../db/repositories/extractor-profile-repo';
 import type { ExtractionData } from '../shared/schemas/onboarding';
+import type { VariantSelectionStrategy } from '../shared/schemas/extraction-worker';
 import { cleanAndDeduplicateImages } from './image-utils';
 
 export interface ProfileRunnerOptions {
@@ -60,7 +61,7 @@ export async function runProfileExtraction(
       spreadsheetHints: {},
     },
     profile: {
-      runtime: 'rendered' as const,
+      runtime: profile.runtime ?? 'rendered',
       selectors: {
         titleSelector: profile.titleSelector,
         priceSelector: profile.priceSelector,
@@ -71,7 +72,7 @@ export async function runProfileExtraction(
       titleOptionalSelectors: profile.titleOptionalSelectors ?? [],
       customSelectors: profile.customSelectors ?? {},
       imageRules: {},
-      variantSelectionStrategy: null,
+      variantSelectionStrategy: profile.variantSelectionStrategy as VariantSelectionStrategy | null ?? null,
     },
   };
 

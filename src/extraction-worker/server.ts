@@ -20,7 +20,7 @@ import { handleSnapshot } from './routes/snapshot';
 import { handleValidate } from './routes/validate';
 import { handleExtract } from './routes/extract';
 import { handleGenerateSelector } from './routes/generate-selector';
-import { handlePickElement } from './routes/pick-element';
+
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
@@ -64,11 +64,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
 
-  // ── Pick Element (Visual Picker) ────────────────────────────────────────
-  if (method === 'POST' && url === '/profile-tooling/pick-element') {
-    handlePickElement(req, res);
-    return;
-  }
 
   // ── Trusted Extraction ──────────────────────────────────────────────────
   if (method === 'POST' && url === '/profile-runner/extract') {

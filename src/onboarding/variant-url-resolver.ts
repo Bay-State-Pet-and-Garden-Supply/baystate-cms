@@ -342,6 +342,7 @@ export async function resolveVariantsForCandidates(options: {
         confidence: Math.max(0, Math.min(1, resolved.confidence)),
         sourceMethod: 'shopify_variant',
         metadataJson: JSON.stringify({
+          originalSourceMethod: c.sourceMethod ?? null,
           variantResolution: {
             status: 'resolved',
             platform: 'shopify',
@@ -362,6 +363,7 @@ export async function resolveVariantsForCandidates(options: {
           confidence: Math.max(0, Math.min(1, v.score / 100)),
           sourceMethod: 'shopify_variant',
           metadataJson: JSON.stringify({
+            originalSourceMethod: c.sourceMethod ?? null,
             variantResolution: {
               status: 'ambiguous',
               platform: 'shopify',

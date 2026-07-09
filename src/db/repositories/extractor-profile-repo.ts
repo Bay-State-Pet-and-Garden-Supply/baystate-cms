@@ -13,6 +13,9 @@ export interface ExtractorProfile {
   customSelectors: Record<string, string>;
   sitemapProductUrlPattern: string | null;
   shopifyJSONPath: boolean;
+  variantSelectionStrategy: Record<string, unknown> | null;
+  customSelectorMetadata: Record<string, unknown>;
+  runtime: 'static' | 'rendered';
   createdAt: string;
   updatedAt: string;
 }
@@ -29,6 +32,9 @@ interface DbProfile {
   custom_selectors_json: string | null;
   sitemap_product_url_pattern: string | null;
   shopify_json_path: number;
+  variant_selection_strategy_json: string | null;
+  custom_selector_metadata_json: string | null;
+  runtime: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -46,6 +52,9 @@ function mapToProfile(db: DbProfile): ExtractorProfile {
     customSelectors: db.custom_selectors_json ? JSON.parse(db.custom_selectors_json) : {},
     sitemapProductUrlPattern: db.sitemap_product_url_pattern,
     shopifyJSONPath: !!db.shopify_json_path,
+    variantSelectionStrategy: db.variant_selection_strategy_json ? JSON.parse(db.variant_selection_strategy_json) : null,
+    customSelectorMetadata: db.custom_selector_metadata_json ? JSON.parse(db.custom_selector_metadata_json) : {},
+    runtime: db.runtime === 'static' ? 'static' : 'rendered',
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };
@@ -89,6 +98,9 @@ export function upsertProfile(
     customSelectors?: Record<string, string>;
     sitemapProductUrlPattern?: string | null;
     shopifyJSONPath?: boolean;
+    variantSelectionStrategy?: Record<string, unknown> | null;
+    customSelectorMetadata?: Record<string, unknown>;
+    runtime?: 'static' | 'rendered';
   },
 ): ExtractorProfile {
   const db = getDb();
@@ -119,13 +131,29 @@ export function upsertProfile(
     : (existing?.custom_selectors_json ? JSON.parse(existing.custom_selectors_json) : {});
   const sSel = resolve(existing?.sitemap_product_url_pattern ?? null, selectors.sitemapProductUrlPattern);
   const shopifyJSONPath = existing ? (selectors.shopifyJSONPath ?? !!existing.shopify_json_path) : (selectors.shopifyJSONPath ?? false);
+  // variantSelectionStrategy: undefined = preserve existing; explicit null = clear; explicit object = replace
+  const vsSel = existing
+    ? (selectors.variantSelectionStrategy === undefined
+        ? (existing.variant_selection_strategy_json ? JSON.parse(existing.variant_selection_strategy_json) : null)
+        : selectors.variantSelectionStrategy)
+    : (selectors.variantSelectionStrategy ?? null);
+  // customSelectorMetadata: undefined = preserve existing; explicit object = replace
+  const csmSel = existing
+    ? (selectors.customSelectorMetadata !== undefined
+        ? selectors.customSelectorMetadata
+        : (existing.custom_selector_metadata_json ? JSON.parse(existing.custom_selector_metadata_json) : {}))
+    : (selectors.customSelectorMetadata ?? {});
+  // runtime: undefined = preserve existing; explicit value = replace
+  const runSel = existing
+    ? (selectors.runtime ?? (existing.runtime as 'static' | 'rendered' | null) ?? 'rendered')
+    : (selectors.runtime ?? 'rendered');
 
   if (existing) {
     db.query(`
       UPDATE extractor_profiles
-      SET title_selector = ?, title_optional_selectors_json = ?, price_selector = ?, description_selector = ?, brand_selector = ?, images_selector = ?, custom_selectors_json = ?, sitemap_product_url_pattern = ?, shopify_json_path = ?, updated_at = ?
+      SET title_selector = ?, title_optional_selectors_json = ?, price_selector = ?, description_selector = ?, brand_selector = ?, images_selector = ?, custom_selectors_json = ?, sitemap_product_url_pattern = ?, shopify_json_path = ?, variant_selection_strategy_json = ?, custom_selector_metadata_json = ?, runtime = ?, updated_at = ?
       WHERE domain = ?
-    `).run(tSel, JSON.stringify(toSel), pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, now, normalizedDomain);
+    `).run(tSel, JSON.stringify(toSel), pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, vsSel ? JSON.stringify(vsSel) : null, JSON.stringify(csmSel), runSel, now, normalizedDomain);
 
     return mapToProfile({
       ...existing,
@@ -138,15 +166,18 @@ export function upsertProfile(
       custom_selectors_json: JSON.stringify(cSel),
       sitemap_product_url_pattern: sSel,
       shopify_json_path: shopifyJSONPath ? 1 : 0,
+      variant_selection_strategy_json: vsSel ? JSON.stringify(vsSel) : null,
+      custom_selector_metadata_json: JSON.stringify(csmSel),
+      runtime: runSel,
       updated_at: now,
     });
   }
 
   const id = randomUUID();
   db.query(`
-    INSERT INTO extractor_profiles (id, domain, title_selector, title_optional_selectors_json, price_selector, description_selector, brand_selector, images_selector, custom_selectors_json, sitemap_product_url_pattern, shopify_json_path, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, normalizedDomain, tSel, JSON.stringify(toSel), pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, now, now);
+    INSERT INTO extractor_profiles (id, domain, title_selector, title_optional_selectors_json, price_selector, description_selector, brand_selector, images_selector, custom_selectors_json, sitemap_product_url_pattern, shopify_json_path, variant_selection_strategy_json, custom_selector_metadata_json, runtime, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, normalizedDomain, tSel, JSON.stringify(toSel), pSel, dSel, bSel, iSel, JSON.stringify(cSel), sSel, shopifyJSONPath ? 1 : 0, vsSel ? JSON.stringify(vsSel) : null, JSON.stringify(csmSel), runSel, now, now);
 
   return {
     id,
@@ -160,6 +191,9 @@ export function upsertProfile(
     customSelectors: cSel,
     sitemapProductUrlPattern: sSel,
     shopifyJSONPath,
+    variantSelectionStrategy: vsSel,
+    customSelectorMetadata: csmSel,
+    runtime: runSel as 'static' | 'rendered',
     createdAt: now,
     updatedAt: now,
   };

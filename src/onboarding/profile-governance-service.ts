@@ -390,7 +390,7 @@ export interface ValidationRunResult {
   passingSamples: number;
   failingSamples: number;
   warningSamples: number;
-  byField: Record<SelectorKey, { passing: number; failing: number; warning: number }>;
+  byField: Record<string, { passing: number; failing: number; warning: number }>;
   /** Map of field -> per-sample selector samples (used by the UI to
    *  render the per-field validation table and image previews). */
   samples: SelectorSample[];
@@ -404,18 +404,17 @@ export interface ValidationRunResult {
   textFieldsHaveLimitedEvidence: boolean;
 }
 
-const EMPTY_FIELD_TALLY: ValidationRunResult['byField'][SelectorKey] = {
+const EMPTY_FIELD_TALLY = {
   passing: 0,
   failing: 0,
   warning: 0,
 };
 
 function tally(): ValidationRunResult['byField'] {
-  return {
-    titleSelector: { ...EMPTY_FIELD_TALLY },
-    descriptionSelector: { ...EMPTY_FIELD_TALLY },
-    imagesSelector: { ...EMPTY_FIELD_TALLY },
-  };
+  // Dynamic: build from the canonical field catalog.
+  // Returns a flat map of fieldKey -> tally for all promotable fields.
+  // The caller adds custom field entries as needed.
+  return {};
 }
 
 /**
@@ -463,9 +462,20 @@ export async function validateRevisionAcrossConfirmedSamples(
     };
   }
 
-  const selectors = (revision.selectors ?? {}) as unknown as GeneratedSelectorProfile;
+  const selectors = (revision.selectors ?? {}) as Record<string, unknown>;
   const fieldSamples: SelectorSample[] = [];
   const results: ValidationRunResult['byField'] = tally();
+
+  // Build the set of fields to validate: use revision's actual selectors
+  // so dynamic/custom fields are included automatically.
+  const fieldsToValidate = new Set<string>();
+  for (const key of Object.keys(selectors)) {
+    const val = selectors[key];
+    if (val !== null && val !== undefined && !['shopifyJSONPath', 'variantSelectionStrategy'].includes(key)) {
+      fieldsToValidate.add(key);
+    }
+  }
+
   let passingSamples = 0;
   let failingSamples = 0;
   let warningSamples = 0;
@@ -474,7 +484,8 @@ export async function validateRevisionAcrossConfirmedSamples(
     const html = await fetchSampleHtml(sample.url);
     if (!html) {
       failingSamples++;
-      for (const field of SELECTOR_KEYS) {
+      for (const field of fieldsToValidate) {
+        if (!results[field]) results[field] = { passing: 0, failing: 0, warning: 0 };
         results[field].failing++;
         fieldSamples.push({
           field,
@@ -491,10 +502,12 @@ export async function validateRevisionAcrossConfirmedSamples(
       continue;
     }
 
-    for (const field of SELECTOR_KEYS) {
+    for (const field of fieldsToValidate) {
+      if (!results[field]) results[field] = { passing: 0, failing: 0, warning: 0 };
+      const selectorValue = typeof selectors[field] === 'string' ? selectors[field] as string : null;
       const result = await evaluateSelectorOnSample(
         field,
-        selectors[field] ?? null,
+        selectorValue,
         html,
         sample.url,
         sample.itemId,
@@ -508,7 +521,13 @@ export async function validateRevisionAcrossConfirmedSamples(
     }
   }
 
-  for (const field of SELECTOR_KEYS) {
+  // Use SELECTOR_KEYS for the broad classification; add custom field keys
+  const allKeySet = new Set([...SELECTOR_KEYS, ...fieldsToValidate]);
+  for (const field of allKeySet) {
+    if (!results[field]) {
+      results[field] = { passing: 0, failing: 0, warning: 0 };
+      continue;
+    }
     const tally = results[field];
     if (tally.passing > 0 && tally.failing === 0 && tally.warning === 0) passingSamples++;
     else if (tally.failing > 0) failingSamples++;

@@ -79,6 +79,16 @@ export const nameConsolidationStage: StageDefinition = {
       evidenceValue(input.evidence, 'expected_name', 'spreadsheet') ??
       evidenceValue(input.evidence, 'name', 'spreadsheet');
 
+    // Always also capture the raw register name (the original unabbreviated
+    // name from the spreadsheet import) so the title consolidation LLM has
+    // the authoritative source of truth for size/weight/count/flavor tokens
+    // that the expected_name might have lost.
+    const rawRegisterName = evidenceValue(input.evidence, 'name', 'spreadsheet');
+    // Log when the expected name dropped tokens the raw name had
+    if (rawRegisterName && spreadsheetName && rawRegisterName !== spreadsheetName) {
+      console.log(`[NameConsolidation] Raw register name differs from expected_name. Raw: "${rawRegisterName}", expected: "${spreadsheetName}"`);
+    }
+
     const webTitle = evidenceValue(input.evidence, 'title', 'official_product_page');
     const ocrTitle = evidenceValue(input.evidence, 'name', 'visual_product_evidence');
     const ocrWeight = evidenceValue(input.evidence, 'weight', 'visual_product_evidence');
@@ -111,6 +121,7 @@ export const nameConsolidationStage: StageDefinition = {
     try {
       const result = await consolidateProductTitle({
         name: spreadsheetName ?? fallbackName,
+        rawRegisterName: rawRegisterName ?? undefined,
         brandHint: brandHint ?? undefined,
         webTitle: webTitle ?? undefined,
         ocrTitle: ocrTitle ?? undefined,
@@ -135,6 +146,7 @@ export const nameConsolidationStage: StageDefinition = {
             packagingOcrTitle: ocrTitle ?? null,
             signalsUsed: {
               spreadsheetName: spreadsheetName ?? null,
+              rawRegisterName: rawRegisterName ?? null,
               webTitle: webTitle ?? null,
               ocrTitle: ocrTitle ?? null,
               ocrWeight: ocrWeight ?? null,
@@ -169,6 +181,7 @@ export const nameConsolidationStage: StageDefinition = {
             packagingOcrTitle: ocrTitle ?? null,
             signalsUsed: {
               spreadsheetName: spreadsheetName ?? null,
+              rawRegisterName: rawRegisterName ?? null,
               webTitle: webTitle ?? null,
               ocrTitle: ocrTitle ?? null,
               ocrWeight: ocrWeight ?? null,

@@ -253,13 +253,13 @@ describe('generateExtractorProfile', () => {
     // The `profile_generation` task uses these (per Phase 2 routing).
     (llmClient.getLlmConfigForTask as any).mockReturnValue(testConfig);
     (llmClient.callLlmForTask as any).mockResolvedValue(
-      '{"titleSelector":"h1","priceSelector":".price"}',
+      '{"titleSelector":"h1"}',
     );
     // Legacy fallbacks kept for completeness; no profile task should
     // hit them in these tests.
     (llmClient.getLlmConfigForTask as any).mockReturnValue(testConfig);
     (llmClient.callLlmForTask as any).mockResolvedValue(
-      '{"titleSelector":"h1","priceSelector":".price"}',
+      '{"titleSelector":"h1"}',
     );
   });
 
@@ -293,7 +293,7 @@ describe('generateExtractorProfile', () => {
 
   it('parses plain JSON and returns a profile', async () => {
     (llmClient.callLlmForTask as any).mockResolvedValue(
-      '{"titleSelector":"h1.product-title","priceSelector":".product-price","descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
+      '{"titleSelector":"h1.product-title","descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
     );
     const result = await generateExtractorProfile(
       'https://example.com/p',
@@ -306,7 +306,7 @@ describe('generateExtractorProfile', () => {
 
   it('parses fenced JSON in markdown code blocks', async () => {
     (llmClient.callLlmForTask as any).mockResolvedValue(
-      '```json\n{"titleSelector":"h1","priceSelector":null,"descriptionSelector":null,"brandSelector":null,"imagesSelector":null}\n```',
+      '```json\n{"titleSelector":"h1","descriptionSelector":null,"brandSelector":null,"imagesSelector":null}\n```',
     );
     const result = await generateExtractorProfile(
       'https://example.com/p',
@@ -327,7 +327,7 @@ describe('generateExtractorProfile', () => {
 
   it('returns null when titleSelector is missing in the response', async () => {
     (llmClient.callLlmForTask as any).mockResolvedValue(
-      '{"titleSelector":null,"priceSelector":".price","descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
+      '{"titleSelector":null,"descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
     );
     const result = await generateExtractorProfile(
       'https://example.com/p',
@@ -347,7 +347,7 @@ describe('generateExtractorProfile', () => {
 
   it('rejects selectors with XPath syntax', async () => {
     (llmClient.callLlmForTask as any).mockResolvedValue(
-      '{"titleSelector":"//h1","priceSelector":null,"descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
+      '{"titleSelector":"//h1","descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
     );
     const result = await generateExtractorProfile(
       'https://example.com/p',
@@ -358,7 +358,7 @@ describe('generateExtractorProfile', () => {
 
   it('rejects selectors with browser-only pseudo-selectors', async () => {
     (llmClient.callLlmForTask as any).mockResolvedValue(
-      '{"titleSelector":"h1:has(span)","priceSelector":null,"descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
+      '{"titleSelector":"h1:has(span)","descriptionSelector":null,"brandSelector":null,"imagesSelector":null}',
     );
     const result = await generateExtractorProfile(
       'https://example.com/p',
@@ -385,6 +385,7 @@ describe('validateGeneratedProfile', () => {
     descriptionSelector: '.product-description',
     imagesSelector: '.product-gallery img',
     shopifyJSONPath: false,
+    brandSelector: null,
   };
 
   it('fails when titleSelector is missing', () => {
@@ -419,6 +420,7 @@ describe('validateGeneratedProfile', () => {
       descriptionSelector: null,
       imagesSelector: null,
       shopifyJSONPath: false,
+    brandSelector: null,
     };
     const result = validateGeneratedProfile(blockedHtml, profile, {
       name: 'Some Product',
@@ -438,6 +440,7 @@ describe('validateGeneratedProfile', () => {
         descriptionSelector: null,
         imagesSelector: null,
         shopifyJSONPath: false,
+    brandSelector: null,
       },
       { name: 'X', sourceUrl: 'https://example.com/p' },
     );
@@ -454,6 +457,7 @@ describe('validateGeneratedProfile', () => {
         descriptionSelector: null,
         imagesSelector: null,
         shopifyJSONPath: false,
+    brandSelector: null,
       },
       { name: 'Woof Poomergency Dog Food', sourceUrl: 'https://pricepower.com/06863' },
     );
@@ -478,6 +482,7 @@ describe('validateGeneratedProfile', () => {
       descriptionSelector: null,
       imagesSelector: null,
       shopifyJSONPath: false,
+    brandSelector: null,
     };
     const result = validateGeneratedProfile(SAMPLE_PRODUCT_HTML, profile);
     // Even with high confidence, low-stability selector disqualifies
@@ -688,6 +693,7 @@ describe('validateProfileAcrossSamples', () => {
     descriptionSelector: '.product-description',
     imagesSelector: null,
     shopifyJSONPath: false,
+    brandSelector: null,
   };
 
   it('reports 0 passed and not ready for review when given no samples', () => {

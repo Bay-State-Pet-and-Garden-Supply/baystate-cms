@@ -14,6 +14,8 @@ import { ImagePreviewGrid } from './ImagePreviewGrid';
 interface SeedPreviewData {
   title: string | null;
   description: string | null;
+  brand?: string | null;
+  price?: string | null;
   images: string[];
   variantOptions: string[];
   strategy: 'shopify-json' | 'css';
@@ -31,10 +33,17 @@ interface ProfileExtractionPreviewProps {
   onDemandResult?: {
     title?: string | null;
     description?: string | null;
+    brand?: string | null;
+    price?: string | null;
     images?: string[];
+    customFields?: Record<string, string>;
     variantOptions?: string[];
   } | null;
   busy?: boolean;
+  /** Optional expanded field values for the full extraction preview section. */
+  fieldValues?: Record<string, string | null>;
+  /** Optional custom field key-value pairs. */
+  customFields?: Record<string, string>;
 }
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
@@ -213,14 +222,32 @@ export function ProfileExtractionPreview(
   }
 
   // ── Resolve data (seedPreview first, onDemandResult fallback) ──────────
+  // ── Resolve data ────────────────────────────────────────────────────
   const resolvedTitle =
     seedPreview?.title ?? onDemandResult?.title ?? null;
   const resolvedDescription =
     seedPreview?.description ?? onDemandResult?.description ?? null;
+  const resolvedBrand =
+    seedPreview?.brand ?? onDemandResult?.brand ?? null;
+  const resolvedPrice =
+    seedPreview?.price ?? onDemandResult?.price ?? null;
   const resolvedImages =
     seedPreview && seedPreview.images.length > 0
       ? seedPreview.images
       : onDemandResult?.images ?? [];
+
+  // Resolve custom fields: from props first, then onDemandResult
+  const resolvedCustomFields: Record<string, string> = {};
+  if (props.customFields && Object.keys(props.customFields).length > 0) {
+    Object.assign(resolvedCustomFields, props.customFields);
+  }
+  if (onDemandResult?.customFields) {
+    for (const [k, v] of Object.entries(onDemandResult.customFields)) {
+      if (v && !resolvedCustomFields[k]) {
+        resolvedCustomFields[k] = v;
+      }
+    }
+  }
 
   // Resolve variant options: seedPreview.variantOptions →
   // seedPreview.variantSelectionStrategy.detectedOptions →
@@ -259,13 +286,25 @@ export function ProfileExtractionPreview(
         <span style={strategyBadgeStyle}>{strategyLabel}</span>
       )}
 
-      {/* Title */}
+      {/* Title + Brand + Price row */}
       <div style={s.section}>
         {resolvedTitle ? (
           <h2 style={s.title}>{resolvedTitle}</h2>
         ) : (
           <h2 style={{ ...s.title, ...s.titleEmpty }}>—</h2>
         )}
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
+          {resolvedBrand && (
+            <span style={{ fontSize: 13, color: '#6b7280' }}>
+              {resolvedBrand}
+            </span>
+          )}
+          {resolvedPrice && (
+            <span style={{ fontSize: 16, fontWeight: 700, color: '#16a34a' }}>
+              {resolvedPrice}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Description */}
@@ -305,6 +344,42 @@ export function ProfileExtractionPreview(
                 {opt}
               </span>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Custom fields table */}
+      {Object.keys(resolvedCustomFields).length > 0 && (
+        <div style={s.section}>
+          <div style={s.sectionHeader}>Custom Fields</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 13 }}>
+            {Object.entries(resolvedCustomFields).map(([key, value]) => (
+              <React.Fragment key={key}>
+                <span style={{ fontWeight: 500, color: '#4b5563' }}>
+                  {key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^[a-z]/, (c) => c.toUpperCase())}
+                </span>
+                <span style={{ color: '#6b7280' }}>{value}</span>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Full extraction preview table (when fieldValues is provided) */}
+      {props.fieldValues && Object.keys(props.fieldValues).length > 0 && (
+        <div style={{ ...s.section, borderTop: '1px solid #e5e7eb', paddingTop: 12, marginTop: 12 }}>
+          <div style={s.sectionHeader}>Full extraction preview</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px', fontSize: 13, fontFamily: 'monospace' }}>
+            {Object.entries(props.fieldValues)
+              .filter(([, v]) => v != null && v !== '')
+              .map(([key, value]) => (
+                <React.Fragment key={key}>
+                  <span style={{ fontWeight: 500, color: '#4b5563', paddingRight: 8 }}>
+                    {key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^[a-z]/, (c) => c.toUpperCase())}
+                  </span>
+                  <span style={{ color: '#374151', wordBreak: 'break-word' }}>{value}</span>
+                </React.Fragment>
+              ))}
           </div>
         </div>
       )}

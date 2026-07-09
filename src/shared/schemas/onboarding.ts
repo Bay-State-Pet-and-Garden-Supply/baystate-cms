@@ -224,6 +224,24 @@ export const ApiKeyConfigSchema = z.object({
 
 export type ApiKeyConfig = z.infer<typeof ApiKeyConfigSchema>;
 
+export const VariantSelectionStrategySchema = z.object({
+  containerSelector: z.string().nullable().default(null),
+  optionType: z.enum(['dropdown', 'button_group', 'radio', 'unknown']).default('unknown'),
+  detectedOptions: z.array(z.string()).default(() => []),
+  optionFields: z.array(z.string()).default(() => []),
+  optionSelector: z.string().nullable().default(null),
+  optionTextAttribute: z.string().nullable().default(null),
+}).nullable().default(null);
+
+export type VariantSelectionStrategy = z.infer<typeof VariantSelectionStrategySchema>;
+
+/**
+ * Runtime representation of variant selection strategy (DB-serialized).
+ * This matches VariantSelectionStrategySchema but allows loose JSON
+ * for repo-level compatibility.
+ */
+export type VariantSelectionStrategyRecord = Record<string, unknown> | null;
+
 export const ExtractorProfileSchema = z.object({
   id: z.string(),
   domain: z.string(),
@@ -236,6 +254,9 @@ export const ExtractorProfileSchema = z.object({
   customSelectors: z.record(z.string(), z.string()).default(() => ({})),
   sitemapProductUrlPattern: z.string().nullable().default(null),
   shopifyJSONPath: z.boolean().default(false),
+  variantSelectionStrategy: z.record(z.string(), z.unknown()).nullable().default(null),
+  customSelectorMetadata: z.record(z.string(), z.unknown()).default(() => ({})),
+  runtime: z.enum(['static', 'rendered']).default('rendered'),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -355,7 +376,12 @@ export const LlmTaskConfigUpsertSchema = z.object({
   temperature: z.number().min(0).max(2).nullable().optional(),
 });
 
-/** The full set of selector fields (including historical ones). */
+/**
+ * The full set of standard selector fields.
+ *
+ * For runtime validation of arbitrary/custom field names, use
+ * `SelectorFieldOrString` or `z.string()` directly.
+ */
 export const SelectorFieldEnum = z.enum([
   'titleSelector',
   'priceSelector',
@@ -366,14 +392,25 @@ export const SelectorFieldEnum = z.enum([
 export type SelectorField = z.infer<typeof SelectorFieldEnum>;
 
 /**
- * Active selector fields managed in review and approval. The
- * SelectorFieldEnum also includes priceSelector and brandSelector
- * for historical compatibility.
+ * A selector field that is either a known standard field or an
+ * arbitrary string (for custom/dynamic fields).
  */
-export const SELECTOR_FIELDS: ReadonlyArray<SelectorField> = [
+export const SelectorFieldOrString = z.union([SelectorFieldEnum, z.string()]);
+export type SelectorFieldOrString = z.infer<typeof SelectorFieldOrString>;
+
+/**
+ * Active selector fields managed in review and approval.
+ *
+ * This list is kept as the core subset for backward compatibility.
+ * The canonical full list lives in `src/shared/profile-fields.ts`
+ * as `PROMOTABLE_PROFILE_KEYS`.
+ */
+export const SELECTOR_FIELDS: readonly string[] = [
   'titleSelector',
   'descriptionSelector',
   'imagesSelector',
+  'priceSelector',
+  'brandSelector',
 ];
 
 /** Profile generation audit status values. */
@@ -460,7 +497,7 @@ export type ProfileGenerationRevision = z.infer<typeof ProfileGenerationRevision
 export const ProfileGenerationValidationResultSchema = z.object({
   id: z.string(),
   revisionId: z.string(),
-  selectorField: SelectorFieldEnum,
+  selectorField: SelectorFieldOrString,
   sampleUrl: z.string(),
   itemId: z.string().nullable().default(null),
   expectedName: z.string().nullable().default(null),
@@ -478,7 +515,7 @@ export const ProfileGenerationFieldDecisionSchema = z.object({
   generationId: z.string(),
   revisionId: z.string().nullable().default(null),
   domain: z.string(),
-  selectorField: SelectorFieldEnum,
+  selectorField: SelectorFieldOrString,
   decision: ProfileFieldDecisionTypeEnum,
   previousSelector: z.string().nullable().default(null),
   proposedSelector: z.string().nullable().default(null),
@@ -497,7 +534,7 @@ export type ProfileGenerationFieldDecision = z.infer<typeof ProfileGenerationFie
  *  feedback. */
 export const StructuredFeedbackTextSchema = z.object({
   kind: z.literal('text'),
-  field: SelectorFieldEnum,
+  field: SelectorFieldOrString,
   /** Whether the operator thinks the currently-extracted value is correct. */
   currentValueCorrect: z.boolean().optional(),
   /** The expected/correct value, when not correct. */
@@ -532,9 +569,12 @@ export const StructuredFeedbackSchema = z.union([
 export type StructuredFeedback = z.infer<typeof StructuredFeedbackSchema>;
 
 /** Per-field approval payload sent by the operator. Only `true`
- *  fields are written to `extractor_profiles`. */
+ *  fields are written to `extractor_profiles`.
+ *
+ * Accepts both standard fields (SelectorFieldEnum) and arbitrary
+ * custom field names (strings). At least one field must be `true`. */
 export const ApprovedSelectorFieldsSchema = z
-  .record(SelectorFieldEnum, z.boolean())
+  .record(z.union([SelectorFieldEnum, z.string()]), z.boolean())
   .refine(
     (v) => Object.values(v).some((x) => x === true),
     { message: 'At least one selector field must be set to true' },
@@ -553,7 +593,7 @@ export const ApproveRevisionFieldsRequestSchema = z.object({
 
 /** Rejection request body for a single revision. */
 export const RejectRevisionFieldsRequestSchema = z.object({
-  rejectedFields: z.array(SelectorFieldEnum).min(1),
+  rejectedFields: z.array(z.union([SelectorFieldEnum, z.string()])).min(1),
   reason: z.string().nullable().optional(),
   feedback: z.record(z.string(), z.unknown()).nullable().optional(),
   notes: z.string().nullable().optional(),

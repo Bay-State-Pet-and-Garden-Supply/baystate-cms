@@ -11,7 +11,6 @@ import type {
   LlmTask,
   LlmProvider,
   LlmTaskConfig,
-  SelectorField,
   StructuredFeedback,
   ProfileGenerationGeneration,
   ProfileGenerationRevision,
@@ -30,8 +29,7 @@ import type {
   ValidateResponse,
   GenerateSelectorRequest,
   GenerateSelectorResponse,
-  PickElementRequest,
-  PickElementResponse,
+
 } from '../shared/schemas/extraction-worker';
 import type { CurationTargetConfig } from '../shared/schemas/classification';
 
@@ -420,6 +418,7 @@ export interface ExtractorTestResult {
   description?: string;
   brand?: string;
   images?: string[];
+  customFields?: Record<string, string>;
 }
 
 export async function testExtractorProfile(data: {
@@ -668,11 +667,11 @@ export interface ValidationRunSummary {
   failingSamples: number;
   warningSamples: number;
   byField: Record<
-    SelectorField,
+    string,
     { passing: number; failing: number; warning: number }
   >;
   samples: Array<{
-    field: SelectorField;
+    field: string;
     sampleUrl: string;
     itemId: string | null;
     expectedName: string | null;
@@ -709,8 +708,8 @@ export interface ApproveRevisionFieldsResponse {
     reason: string;
     domain: string;
     generationId: string;
-    approvedFields: SelectorField[];
-    rejectedFields: SelectorField[];
+    approvedFields: string[];
+    rejectedFields: string[];
     approvalDecisionIds: string[];
     rejectionDecisionIds: string[];
   };
@@ -720,7 +719,7 @@ export async function approveRevisionFields(
   generationId: string,
   revisionId: string,
   data: {
-    approvedFields: Record<SelectorField, boolean>;
+    approvedFields: Record<string, boolean>;
     notes?: string | null;
     decidedBy?: string | null;
     imagePreviewsReviewed?: boolean;
@@ -737,7 +736,7 @@ export async function approveRevisionFields(
 
 export interface RejectRevisionFieldsResponse {
   success: boolean;
-  rejectedFields: SelectorField[];
+  rejectedFields: string[];
   decisionIds: string[];
 }
 
@@ -745,7 +744,7 @@ export async function rejectRevisionFields(
   generationId: string,
   revisionId: string,
   data: {
-    rejectedFields: SelectorField[];
+    rejectedFields: string[];
     reason?: string | null;
     notes?: string | null;
     decidedBy?: string | null;
@@ -816,19 +815,6 @@ export async function fetchPageHtml(
   });
 }
 
-/**
- * Launch a headful browser for the user to click on an element and
- * generate a stable CSS selector. Calls the Bun proxy route which
- * forwards to the extraction worker's pick-element endpoint.
- */
-export async function pickElementVisually(
-  req: PickElementRequest,
-): Promise<{ ok: boolean; data?: PickElementResponse; error?: string }> {
-  return request('/settings/profile-tooling/pick-element', {
-    method: 'POST',
-    body: JSON.stringify(req),
-  });
-}
 
 async function validateProfileDraft(
   req: ValidateRequest,

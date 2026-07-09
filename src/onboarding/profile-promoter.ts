@@ -44,16 +44,20 @@ import {
   type ProfileGenerationFieldDecision,
   type ProfileGenerationFieldDecisionType,
 } from '../db/repositories/profile-generation-field-decision-repo';
+import { PROMOTABLE_PROFILE_KEYS, getFieldByKey, hasDedicatedColumn } from '../shared/profile-fields';
 import type { GeneratedSelectorProfile } from './profile-generator';
 
-/** The set of selector fields that can be approved or rejected. */
-export const SELECTOR_KEYS = [
-  'titleSelector',
-  'descriptionSelector',
-  'imagesSelector',
-] as const;
+/**
+ * The set of selector field keys that can be approved or rejected.
+ *
+ * This replaces the legacy SELECTOR_KEYS with the canonical field
+ * catalog from src/shared/profile-fields.ts. It includes both
+ * dedicated-column fields (titleSelector, priceSelector, etc.) and
+ * custom-selector fields (ingredientsSelector, flavorSelector, etc.).
+ */
+export const SELECTOR_KEYS: readonly string[] = PROMOTABLE_PROFILE_KEYS;
 
-export type SelectorKey = (typeof SELECTOR_KEYS)[number];
+export type SelectorKey = string;
 
 /**
  * Per-selector-field approval. A value of `true` means the operator
@@ -68,7 +72,7 @@ export type SelectorKey = (typeof SELECTOR_KEYS)[number];
  * Example:
  *   { titleSelector: true, descriptionSelector: true, imagesSelector: false, Size: true, Flavor: false }
  */
-export type ApprovedSelectorFields = Partial<Record<SelectorKey | string, boolean>>;
+export type ApprovedSelectorFields = Partial<Record<string, boolean>>;
 
 /** Result of a `promoteGeneratedProfile` call. */
 export interface PromotionResult {
@@ -101,6 +105,21 @@ function pickString(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Dedicated DB column keys that have first-class storage in extractor_profiles.
+ * All other standard fields are stored in custom_selectors_json.
+ */
+const DEDICATED_COLUMN_KEYS = [
+  'titleSelector',
+  'titleOptionalSelectors',
+  'priceSelector',
+  'descriptionSelector',
+  'brandSelector',
+  'imagesSelector',
+  'sitemapProductUrlPattern',
+  'shopifyJSONPath',
+];
+
 function selectorsFromRevision(
   revision: ProfileGenerationRevision | null,
   fallback: Record<string, unknown> | null,
@@ -109,8 +128,7 @@ function selectorsFromRevision(
   const customSelectors: Record<string, string> = {};
   // Extract any keys that are not standard selector fields
   for (const [key, value] of Object.entries(source)) {
-    const SK = SELECTOR_KEYS as readonly string[];
-    if (!SK.includes(key) && key !== 'shopifyJSONPath' && key !== 'variantSelectionStrategy') {
+    if (!DEDICATED_COLUMN_KEYS.includes(key) && key !== 'variantSelectionStrategy') {
       const v = pickString(value);
       if (v) customSelectors[key] = v;
     }
@@ -118,8 +136,13 @@ function selectorsFromRevision(
   return {
     titleSelector: pickString(source.titleSelector),
     descriptionSelector: pickString(source.descriptionSelector),
+    brandSelector: pickString(source.brandSelector),
     imagesSelector: pickString(source.imagesSelector),
+    sitemapProductUrlPattern: pickString(source.sitemapProductUrlPattern),
     shopifyJSONPath: (source.shopifyJSONPath as boolean) ?? false,
+    variantSelectionStrategy: source.variantSelectionStrategy !== undefined
+      ? (source.variantSelectionStrategy as unknown as GeneratedSelectorProfile['variantSelectionStrategy'])
+      : null,
     customSelectors,
   };
 }
@@ -177,38 +200,64 @@ export function promoteGeneratedProfile(
   // Normalize the approval object up front. We do this BEFORE any DB
   // lookup so a malformed call cannot pollute the audit log with a
   // misleading rejection.
-  const normalizedApproval: Record<SelectorKey, boolean> = {
-    titleSelector: false,
-    descriptionSelector: false,
-    imagesSelector: false,
-  };
   const requestedApproved: SelectorKey[] = [];
   const requestedRejected: SelectorKey[] = [];
+  /** Implicit rejections: standard catalog fields the operator did not
+   *  mention in the approval payload. These are recorded in the audit
+   *  trail but NOT reported in `rejectedFields` (which only contains
+   *  explicitly-rejected fields). */
+  const implicitRejected: string[] = [];
+
+  /** Build the public rejectedFields list by excluding implicit rejections. */
+  const publicRejected = (arr: string[]): string[] =>
+    arr.filter(k => !implicitRejected.includes(k));
   const approvedCustom: string[] = [];
   const rejectedCustom: string[] = [];
 
   if (approvedFields && typeof approvedFields === 'object') {
-    for (const key of SELECTOR_KEYS) {
-      const v = (approvedFields as Record<SelectorKey, unknown>)[key];
-      if (v === true) {
-        normalizedApproval[key] = true;
-        requestedApproved.push(key);
-      } else {
-        requestedRejected.push(key);
-      }
-    }
-    // Collect custom field approvals (keys not in SELECTOR_KEYS)
+    // First pass: classify all explicitly mentioned keys
     for (const [key, v] of Object.entries(approvedFields)) {
-      if (!(SELECTOR_KEYS as readonly string[]).includes(key)) {
-        if (v === true) {
+      if (v === true) {
+        // Check if it looks like a standard known field or a custom field
+        if (getFieldByKey(key) && hasDedicatedColumn(key)) {
+          requestedApproved.push(key);
+        } else if (key === 'titleOptionalSelectors' || key === 'sitemapProductUrlPattern') {
+          requestedApproved.push(key);
+        } else {
           approvedCustom.push(key);
+        }
+      } else {
+        if (getFieldByKey(key) || key === 'titleOptionalSelectors' || key === 'sitemapProductUrlPattern') {
+          requestedRejected.push(key);
         } else {
           rejectedCustom.push(key);
         }
       }
     }
-  } else {
-    for (const key of SELECTOR_KEYS) requestedRejected.push(key);
+    // When the operator explicitly approved at least one field, add
+    // unmentioned standard fields as implicit rejections so the audit
+    // trail records that they were considered and not approved.
+    // If the operator didn't approve anything, we skip implicit rejections
+    // to avoid polluting the audit with hundreds of decisions the operator
+    // never acted on.
+    const hasExplicitApproval = Object.values(approvedFields).some(v => v === true);
+    if (hasExplicitApproval) {
+      for (const key of PROMOTABLE_PROFILE_KEYS) {
+        if (!(key in approvedFields)) {
+          requestedRejected.push(key);
+          implicitRejected.push(key);
+        }
+      }
+      // Also add sitemapProductUrlPattern and titleOptionalSelectors if not mentioned
+      if (!('sitemapProductUrlPattern' in approvedFields)) {
+        requestedRejected.push('sitemapProductUrlPattern');
+        implicitRejected.push('sitemapProductUrlPattern');
+      }
+      if (!('titleOptionalSelectors' in approvedFields)) {
+        requestedRejected.push('titleOptionalSelectors');
+        implicitRejected.push('titleOptionalSelectors');
+      }
+    }
   }
 
   const generation = findProfileGenerationById(generationId);
@@ -219,7 +268,7 @@ export function promoteGeneratedProfile(
       domain: '',
       generationId,
       approvedFields: [],
-      rejectedFields: requestedApproved.concat(requestedRejected),
+      rejectedFields: requestedApproved.concat(publicRejected(requestedRejected)),
       approvalDecisionIds: [],
       rejectionDecisionIds: [],
     };
@@ -261,7 +310,7 @@ export function promoteGeneratedProfile(
       domain: generation.domain,
       generationId,
       approvedFields: requestedApproved,
-      rejectedFields: requestedRejected,
+      rejectedFields: publicRejected(requestedRejected),
       approvalDecisionIds: [],
       rejectionDecisionIds: [],
     };
@@ -294,7 +343,7 @@ export function promoteGeneratedProfile(
       domain: generation.domain,
       generationId,
       approvedFields: [],
-      rejectedFields: requestedRejected,
+      rejectedFields: publicRejected(requestedRejected),
       approvalDecisionIds: [],
       rejectionDecisionIds: rejectionIds,
     };
@@ -326,7 +375,7 @@ export function promoteGeneratedProfile(
       domain: generation.domain,
       generationId,
       approvedFields: requestedApproved,
-      rejectedFields: requestedRejected,
+      rejectedFields: publicRejected(requestedRejected),
       approvalDecisionIds: [],
       rejectionDecisionIds: rejectionIds,
     };
@@ -351,21 +400,56 @@ export function promoteGeneratedProfile(
 
   // Handle standard fixed-key approvals
   for (const key of requestedApproved) {
-    const proposed = selectors[key];
-    if (proposed) {
-      (writeSelectors as Record<string, string | null>)[key] = proposed;
-      approvedFieldsWritten.push(key);
+    if (key === 'titleOptionalSelectors') {
+      const proposed = selectors.titleOptionalSelectors ?? [];
+      if (proposed.length > 0) {
+        writeSelectors.titleOptionalSelectors = proposed;
+        approvedFieldsWritten.push(key);
+      } else {
+        fieldDecisions.push({
+          selectorField: key,
+          decision: 'rejected',
+          previousSelector: previousActive ? JSON.stringify(previousActive.titleOptionalSelectors) : null,
+          proposedSelector: null,
+          approvedSelector: null,
+          notes: 'Title optional selectors approved but proposal produced empty array',
+        });
+      }
+    } else if (key === 'sitemapProductUrlPattern') {
+      const proposed = selectors.sitemapProductUrlPattern ?? null;
+      if (proposed) {
+        writeSelectors.sitemapProductUrlPattern = proposed;
+        approvedFieldsWritten.push(key);
+      } else {
+        fieldDecisions.push({
+          selectorField: key,
+          decision: 'rejected',
+          previousSelector: previousActive?.sitemapProductUrlPattern ?? null,
+          proposedSelector: null,
+          approvedSelector: null,
+          notes: 'Sitemap pattern approved but proposal did not produce a value',
+        });
+      }
     } else {
-      fieldDecisions.push({
-        selectorField: key,
-        decision: 'rejected',
-        previousSelector: previousActive
-          ? (previousActive[key] ?? null)
-          : null,
-        proposedSelector: null,
-        approvedSelector: null,
-        notes: 'Operator approved the field but the proposal did not produce a value',
-      });
+      const selectorsRecord = selectors as unknown as Record<string, string | null>;
+      const proposed = selectorsRecord[key];
+      if (proposed) {
+        // Use a type-safe approach: cast writeSelectors to a general record
+        const writeRecord = writeSelectors as unknown as Record<string, string | string[] | boolean | null | undefined>;
+        writeRecord[key] = proposed;
+        approvedFieldsWritten.push(key);
+      } else {
+        fieldDecisions.push({
+          selectorField: key,
+          decision: 'rejected',
+          previousSelector: previousActive
+            ? (previousActive as unknown as Record<string, string | null>)[key] ?? null
+            : null,
+          proposedSelector: null,
+          approvedSelector: null,
+          notes: 'Operator approved the field but the proposal did not produce a value',
+        });
+      }
     }
   }
 
@@ -407,13 +491,16 @@ export function promoteGeneratedProfile(
     writeSelectors.customSelectors = customSelectorsAccum;
   }
 
-  // Also record explicit "false" rejections for the fixed fields the operator
-  // did not approve.
+  // Record explicit rejections (fields the operator explicitly set to false)
+  // AND implicit rejections (catalog fields not mentioned). Both are written
+  // only when we actually wrote at least one field (to avoid polluting the
+  // audit trail for empty approvals).
   for (const key of requestedRejected) {
+    const isImplicit = implicitRejected.includes(key);
     fieldDecisions.push({
       selectorField: key,
       decision: 'rejected',
-      previousSelector: previousActive ? (previousActive[key] ?? null) : null,
+      previousSelector: previousActive ? ((previousActive as unknown as Record<string, string | null>)[key] ?? null) : null,
       proposedSelector: null,
       approvedSelector: null,
       notes: 'Operator did not approve this field',
@@ -435,7 +522,7 @@ export function promoteGeneratedProfile(
       domain: generation.domain,
       generationId,
       approvedFields: [],
-      rejectedFields: SELECTOR_KEYS.slice(),
+      rejectedFields: publicRejected(SELECTOR_KEYS.slice()),
       approvalDecisionIds: [],
       rejectionDecisionIds: ids,
     };
@@ -462,7 +549,7 @@ export function promoteGeneratedProfile(
       domain: generation.domain,
       generationId,
       approvedFields: [],
-      rejectedFields: SELECTOR_KEYS.slice(),
+      rejectedFields: publicRejected(SELECTOR_KEYS.slice()),
       approvalDecisionIds: [],
       rejectionDecisionIds: ids,
     };
@@ -475,9 +562,9 @@ export function promoteGeneratedProfile(
   const approvalDecisions = approvedFieldsWritten.map((field) => ({
     selectorField: field,
     decision: 'approved' as const,
-    previousSelector: previousActive ? (previousActive[field] ?? null) : null,
-    proposedSelector: selectors[field],
-    approvedSelector: selectors[field],
+    previousSelector: previousActive ? ((previousActive as unknown as Record<string, string | null>)[field] ?? null) : null,
+    proposedSelector: (selectors as unknown as Record<string, string | null>)[field],
+    approvedSelector: (selectors as unknown as Record<string, string | null>)[field],
   }));
   const allIds = recordFieldDecisions({
     generation,
@@ -519,7 +606,12 @@ function currentSelectorForField(
 ): string | null {
   const profile = findProfileByDomain(domain);
   if (!profile) return null;
-  return profile[selectorField] ?? null;
+  // Handle custom selectors (stored under customSelectors)
+  if (getFieldByKey(selectorField) && !hasDedicatedColumn(selectorField)) {
+    return profile.customSelectors[selectorField] ?? null;
+  }
+  // Handle dedicated column fields
+  return (profile as unknown as Record<string, unknown>)[selectorField] as string | null ?? null;
 }
 
 /**

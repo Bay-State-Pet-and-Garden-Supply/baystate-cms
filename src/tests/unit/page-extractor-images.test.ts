@@ -106,7 +106,10 @@ describe('page extractor image scoping', () => {
       imagesSelector: '.custom-media picture',
       sitemapProductUrlPattern: null,
       shopifyJSONPath: false,
-        customSelectors: {},
+      customSelectors: {},
+      variantSelectionStrategy: null,
+      customSelectorMetadata: {},
+      runtime: 'rendered',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };

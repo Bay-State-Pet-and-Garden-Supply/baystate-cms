@@ -12,6 +12,7 @@ import {
   selectSource,
   type InsertSourceData,
 } from '../db/repositories/onboarding-source-repo';
+import { verifyTopCandidates, type VerificationResult } from './page-verifier';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
@@ -30,26 +31,8 @@ const AUTO_STAGES: PipelineStage[] = ['curation', 'extraction', 'discovery'];
  * Normalize a domain for comparison: lowercase, trim, strip leading `www.`.
  * Returns an empty string for null/undefined/whitespace input.
  */
-export function normalizeDiscoveryDomain(domain: string | null | undefined): string {
-  if (!domain) return '';
-  return domain.toLowerCase().trim().replace(/^www\./, '');
-}
-
-/**
- * True when the candidate domain matches an official mapped brand domain
- * via exact equality or a subdomain suffix (e.g. `us.mywoof.com` matches
- * `mywoof.com`). Broad `includes()` matching is intentionally NOT used to
- * avoid unrelated domains such as `notmywoof.com` matching `mywoof.com`.
- */
-export function isOfficialDomainMatch(
-  candidateDomain: string | null | undefined,
-  officialDomain: string | null | undefined,
-): boolean {
-  const candidate = normalizeDiscoveryDomain(candidateDomain);
-  const official = normalizeDiscoveryDomain(officialDomain);
-  if (!candidate || !official) return false;
-  return candidate === official || candidate.endsWith('.' + official);
-}
+import { normalizeDiscoveryDomain, isOfficialDomainMatch } from './domain-utils';
+export { normalizeDiscoveryDomain, isOfficialDomainMatch };
 
 /**
  * Return the list of normalized official domains mapped to a brand.
@@ -243,9 +226,20 @@ export class OnboardingWorker {
       // starting with 'sitemap_'). Used by the auto-selection policy below
       // and surfaced to the UI via the SSE event so reviewers can see when
       // the sitemap pass produced hits.
-      const sitemapCandidates = sources.filter(
-        s => (s.sourceMethod ?? '').startsWith('sitemap_'),
-      );
+      // Count sitemap-derived candidates, including those whose sourceMethod
+      // was rewritten to 'shopify_variant' but carry originalSourceMethod in
+      // their metadataJson (preserving correct reporting).
+      const sitemapCandidates = sources.filter(s => {
+        const method = s.sourceMethod ?? '';
+        if (method.startsWith('sitemap_')) return true;
+        if (method === 'shopify_variant' && s.metadataJson) {
+          try {
+            const meta = JSON.parse(s.metadataJson);
+            return (meta.originalSourceMethod ?? '').startsWith('sitemap_');
+          } catch { /* corrupt metadata — skip */ }
+        }
+        return false;
+      });
       const sitemapCandidateCount = sitemapCandidates.length;
       const sitemapMatched = sitemapCandidateCount > 0;
 
@@ -274,12 +268,36 @@ export class OnboardingWorker {
         const insertedSources: OnboardingSource[] = insertSources(item.id, sources);
         const bestSource = sources[0];
 
-        // Auto-selection policy: prefer a sitemap candidate with
-        // confidence > 0.7 on an official brand domain (a strong
-        // independent signal that the URL is the canonical product
-        // page). Otherwise fall back to the existing top-source-on-
-        // official-domain check. Open-web candidates are still inserted
-        // for manual review either way. Exclude ambiguous variant candidates.
+        // ── Candidate verification pass ──────────────────────────────
+        // Fetch and score the top candidates' page content for
+        // product-identity signals BEFORE auto-selection. This prevents
+        // confidently saving the wrong URL just because its slug looked
+        // tasty on a high-confidence domain.
+        const officialDomains = getOfficialDomainsForBrand(item.brandHint);
+        const verificationResults: VerificationResult[] = sources.length > 0
+          ? await verifyTopCandidates(sources, {
+              upc: item.upc,
+              expectedName: consolidatedName || item.name,
+              brandHint: item.brandHint,
+              price: item.price ? parseFloat(item.price) : null,
+              officialDomains,
+            })
+          : [];
+
+        // Log verification outcomes for diagnostics.
+        for (const vr of verificationResults) {
+          console.log(
+            `[OnboardingWorker] Verification for ${item.upc}: ${vr.decisionReason} ` +
+            `(url: ${vr.candidate.url})`,
+          );
+        }
+
+        // ── Auto-selection policy (tightened with verification) ──────
+        // A candidate may be auto-selected ONLY when the page verifier
+        // finds strong proof of product identity. The old threshold-
+        // based logic (sitemap > 0.7 on official domain) is replaced
+        // by evidence-gated selection: UPC match, Shopify variant
+        // resolution, or verified JSON-LD/title match.
         const isAmbiguous = (s: InsertSourceData) => {
           if (!s.metadataJson) return false;
           try {
@@ -290,19 +308,13 @@ export class OnboardingWorker {
           }
         };
 
-        const officialDomains = getOfficialDomainsForBrand(item.brandHint);
-        const eligibleSitemapSource = sitemapCandidates.find(
-          sc => sc.confidence > 0.7 && 
-                officialDomains.some(d => isOfficialDomainMatch(sc.domain, d)) &&
-                !isAmbiguous(sc),
-        );
-        const autoSelectedSource: InsertSourceData | null =
-          eligibleSitemapSource ??
-          (bestSource &&
-           officialDomains.some(d => isOfficialDomainMatch(bestSource.domain, d)) &&
-           !isAmbiguous(bestSource)
-            ? bestSource
-            : null);
+        const verifiedStrong = verificationResults
+          .filter(vr => vr.hasStrongProof && !isAmbiguous(vr.candidate));
+
+        const autoSelectedResult = verifiedStrong.length > 0
+          ? verifiedStrong[0]
+          : null;
+        const autoSelectedSource = autoSelectedResult?.candidate ?? null;
         const shouldAutoSelect = autoSelectedSource !== null;
 
         if (shouldAutoSelect && autoSelectedSource) {
@@ -319,24 +331,27 @@ export class OnboardingWorker {
           }
 
           console.log(
-            `[OnboardingWorker] ✓ Auto-selected official source for "${item.name}" (${item.upc}): ` +
-            `${resolvedUrl} (domain ${autoSelectedSource.domain ?? 'n/a'} matches ${officialDomains.join(', ')})`
+            `[OnboardingWorker] ✓ Auto-selected verified source for "${item.name}" (${item.upc}): ` +
+            `${resolvedUrl} (${autoSelectedResult?.decisionReason})`
           );
         } else {
-          const manualReviewReason = manualReviewReasonForDiscovery(
-            item,
-            bestSource,
-            officialDomains,
-            sitemapCandidateCount,
-          );
+          // Build a detailed reason that includes verification signals
+          // so the reviewer knows WHY auto-selection was skipped.
+          const topVerification = verificationResults[0];
+          const verificationDetail = topVerification
+            ? ` | verification: ${topVerification.decisionReason}`
+            : '';
+          const manualReviewReason =
+            `needs_review: no candidate passed verification${verificationDetail}`;
           updateItemStageStatus(item.id, 'completed', manualReviewReason);
 
           console.log(
             `[OnboardingWorker] ⚠ Discovery needs manual review for "${item.name}" (${item.upc}): ` +
-            `${manualReviewReason}. Top candidate: ${bestSource.url} (${(bestSource.confidence * 100).toFixed(0)}% confidence)`
+            `${manualReviewReason}`
           );
         }
 
+        const topVerificationForEvent = verificationResults[0];
         onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
           stage: 'discovery',
           sourceUrl: shouldAutoSelect && autoSelectedSource ? autoSelectedSource.url : null,
@@ -344,7 +359,8 @@ export class OnboardingWorker {
           needsManualReview: !shouldAutoSelect,
           manualReviewReason: shouldAutoSelect
             ? null
-            : manualReviewReasonForDiscovery(item, bestSource, officialDomains, sitemapCandidateCount),
+            : `needs_review: no candidate passed verification` +
+              (topVerificationForEvent ? ` | ${topVerificationForEvent.decisionReason}` : ''),
           bestCandidateUrl: bestSource.url,
           bestCandidateDomain: bestSource.domain ?? null,
           officialDomains,
@@ -353,6 +369,13 @@ export class OnboardingWorker {
           topConfidence: bestSource.confidence,
           sitemapMatched,
           sitemapCandidateCount,
+          verificationResults: verificationResults.map(vr => ({
+            url: vr.candidate.url,
+            score: vr.verificationScore,
+            hasStrongProof: vr.hasStrongProof,
+            decisionReason: vr.decisionReason,
+            signals: vr.signals,
+          })),
         });
       } else {
         updateItemStageStatus(item.id, 'completed', 'No matching product pages found');

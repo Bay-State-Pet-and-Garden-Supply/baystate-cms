@@ -123,6 +123,39 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to add title_optional_selectors_json column:', e);
   }
 
+  // Ensure extractor_profiles has variant_selection_strategy_json column
+  try {
+    const cols = db.query('PRAGMA table_info(extractor_profiles)').all() as Array<{ name: string }>;
+    if (cols.length > 0 && !cols.some(col => col.name === 'variant_selection_strategy_json')) {
+      db.exec('ALTER TABLE extractor_profiles ADD COLUMN variant_selection_strategy_json TEXT;');
+      console.log('[Migrations] Added variant_selection_strategy_json column to extractor_profiles.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add variant_selection_strategy_json column:', e);
+  }
+
+  // Ensure extractor_profiles has custom_selector_metadata_json column
+  try {
+    const cols = db.query('PRAGMA table_info(extractor_profiles)').all() as Array<{ name: string }>;
+    if (cols.length > 0 && !cols.some(col => col.name === 'custom_selector_metadata_json')) {
+      db.exec("ALTER TABLE extractor_profiles ADD COLUMN custom_selector_metadata_json TEXT DEFAULT '{}';");
+      console.log('[Migrations] Added custom_selector_metadata_json column to extractor_profiles.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add custom_selector_metadata_json column:', e);
+  }
+
+  // Ensure extractor_profiles has runtime column
+  try {
+    const cols = db.query('PRAGMA table_info(extractor_profiles)').all() as Array<{ name: string }>;
+    if (cols.length > 0 && !cols.some(col => col.name === 'runtime')) {
+      db.exec("ALTER TABLE extractor_profiles ADD COLUMN runtime TEXT NOT NULL DEFAULT 'rendered';");
+      console.log('[Migrations] Added runtime column to extractor_profiles.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add runtime column:', e);
+  }
+
   // Ensure onboarding_sources has metadata_json column
   try {
     const columns = db.query('PRAGMA table_info(onboarding_sources)').all() as Array<{ name: string }>;

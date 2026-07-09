@@ -417,6 +417,135 @@ export async function callLlm(
  * continue to work even before a task-specific config has been
  * created.
  */
+
+/**
+ * Extract protected size/weight/count/volume tokens from a raw product name.
+ * These are identity-bearing details that must survive expected name generation
+ * (brand, size, flavor, variant, count, weight, etc.).
+ *
+ * Exported for testing.
+ */
+export function extractProtectedTokens(rawName: string): string[] {
+  const tokens: string[] = [];
+  const lower = rawName;
+
+  // Match weight/size: number followed by unit (with optional space)
+  // e.g. "2.64OZ", "10.5 OZ", "5LB", "6 oz", "100G", "16OZ"
+  const weightPattern = /(\d+(?:\.\d+)?)\s*(OZ|OZS?|LB|LBS?|OUNCE|OUNCES|GRAM|GRAMS|G|KG|ML|GAL|QT|LTR)\b/gi;
+  let match;
+  while ((match = weightPattern.exec(lower)) !== null) {
+    tokens.push(match[0].trim());
+  }
+
+  // Match count/pack: number followed by PK, CT, COUNT, etc.
+  // e.g. "3PK", "6 Pack", "12CT", "5COUNT"
+  const countPattern = /(\d+)\s*(PK|CT|COUNT|PACK|CAN|BAG|PC|PCS|PIECE|PIECES)\b/gi;
+  while ((match = countPattern.exec(lower)) !== null) {
+    tokens.push(match[0].trim());
+  }
+
+  // Match variant size abbreviations that stand alone
+  const sizeAbbrPattern = /\b(SM|MD|LG|XL|XXL|XS)\b/g;
+  while ((match = sizeAbbrPattern.exec(lower)) !== null) {
+    tokens.push(match[0].trim());
+  }
+
+  return tokens;
+}
+
+/**
+ * Normalize a raw protected token to its expected display form.
+ * E.g. "2.64OZ" → "2.64 oz", "3PK" → "3-Pack", "SM" → "Small"
+ *
+ * Exported for testing.
+ */
+export function normalizeProtectedToken(token: string): string {
+  const t = token.trim();
+
+  // Weight/volume: normalize unit
+  const weightMatch = /^(\d+(?:\.\d+)?)\s*(OZ|OZS?|LB|LBS?|OUNCE|OUNCES|GRAM|GRAMS|G|KG|ML|GAL|QT|LTR)$/i.exec(t);
+  if (weightMatch) {
+    const num = weightMatch[1];
+    const unit = weightMatch[2].toLowerCase();
+    const unitMap: Record<string, string> = {
+      ozs: 'oz', lbs: 'lb', ounce: 'oz', ounces: 'oz',
+      gram: 'g', grams: 'g',
+      gallon: 'gal', quarts: 'qt', quart: 'qt', liter: 'ltr',
+    };
+    return `${num} ${unitMap[unit] ?? unit}`;
+  }
+
+  // Count/pack
+  const countMatch = /^(\d+)\s*(PK|CT|COUNT|PACK|CAN|BAG|PC|PCS|PIECE|PIECES)$/i.exec(t);
+  if (countMatch) {
+    const num = countMatch[1];
+    const type = countMatch[2].toUpperCase();
+    if (type === 'PK' || type === 'PACK') return `${num}-Pack`;
+    if (type === 'CT' || type === 'COUNT') return `${num} ct`;
+    if (type === 'PC' || type === 'PCS') return `${num} pc`;
+    if (type === 'CAN') return `${num} Can`;
+    if (type === 'BAG') return `${num} Bag`;
+    if (type === 'PIECE' || type === 'PIECES') return `${num}-Piece`;
+  }
+
+  // Size abbreviations
+  const sizeMap: Record<string, string> = {
+    SM: 'Small', MD: 'Medium', LG: 'Large',
+    XL: 'X-Large', XXL: 'XX-Large', XS: 'X-Small',
+  };
+  const upper = t.toUpperCase();
+  if (sizeMap[upper]) return sizeMap[upper];
+
+  return t;
+}
+
+/**
+ * Verify that all protected tokens from the raw register name survived
+ * in the LLM-generated expected name. If any are missing, append them
+ * in normalized form so identity-bearing details are never lost.
+ *
+ * Exported for testing.
+ */
+export function verifyAndRestoreProtectedTokens(expectedName: string, rawName: string): string {
+  const protectedTokens = extractProtectedTokens(rawName);
+  if (protectedTokens.length === 0) return expectedName;
+
+  const expectedLower = expectedName.toLowerCase();
+  const missing: string[] = [];
+
+  for (const token of protectedTokens) {
+    const normalized = normalizeProtectedToken(token);
+    // Check if the token's core content (number + significant chars) appears
+    // in the expected name. Use loose matching so "2.64 oz" matches
+    // against expected name containing "2.64"
+    const tokenNumber = token.match(/\d+(?:\.\d+)?/)?.[0];
+    if (tokenNumber && !expectedLower.includes(tokenNumber)) {
+      missing.push(normalized);
+    } else if (!tokenNumber && !expectedLower.includes(token.toLowerCase())) {
+      missing.push(normalized);
+    }
+  }
+
+  if (missing.length > 0) {
+    const restored = `${expectedName.trim()} ${missing.join(' ')}`;
+    console.log(`[LLMClient] Restored missing protected tokens: "${missing.join(', ')}" → "${restored}"`);
+    return restored;
+  }
+
+  return expectedName;
+}
+
+/**
+ * Apply protected-token preservation to LCS fallback output.
+ * If the raw register name contains size/weight/count tokens that the
+ * LCS consensus omitted, append them.
+ */
+function lcsWithTokenGuard(titles: string[], originalName: string | undefined): string | null {
+  const consensus = extractConsensusName(titles);
+  if (!consensus || !originalName) return consensus;
+  return verifyAndRestoreProtectedTokens(consensus, originalName);
+}
+
 export async function consolidateProductName(
   upc: string,
   searchResults: Array<{ title: string; snippet: string }>,
@@ -424,6 +553,13 @@ export async function consolidateProductName(
   brandHint?: string | null,
 ): Promise<string | null> {
   if (searchResults.length === 0 && !originalName) return null;
+
+  // Extract protected tokens from the raw register name BEFORE any LLM call
+  // so we can verify they survive.
+  const protectedTokens = originalName ? extractProtectedTokens(originalName) : [];
+  if (protectedTokens.length > 0) {
+    console.log(`[LLMClient] Protected tokens from raw name "${originalName}": [${protectedTokens.join(', ')}]`);
+  }
 
   try {
     let useTaskConfig = true;
@@ -440,7 +576,7 @@ export async function consolidateProductName(
       console.log('[LLMClient] No LLM config found, falling back to LCS name extraction');
       const titles = searchResults.map(r => r.title);
       if (originalName) titles.push(originalName);
-      return extractConsensusName(titles);
+      return lcsWithTokenGuard(titles, originalName);
     }
 
     const itemsText = searchResults.length > 0
@@ -450,10 +586,10 @@ export async function consolidateProductName(
           .join('\n\n')
       : 'No search results found.';
 
-    const systemPrompt = 'You are a precise product cataloging assistant. Your job is to extract or clean up a clean, canonical product name.';
+    const systemPrompt = 'You are a precise product cataloging assistant. Your job is to generate a register-aligned expected product name from the raw catalog name and search hints.';
 
     const prompt = `We have a product in our catalog with the following metadata:
-- Raw Catalog Name: "${originalName || 'Unknown'}"
+- Raw Catalog Name (authoritative): "${originalName || 'Unknown'}"
 - Brand Hint: "${brandHint || 'Unknown'}"
 - UPC/Barcode: "${upc}"
 
@@ -461,16 +597,29 @@ We searched Google for the UPC and got these top results:
 ${itemsText}
 
 Task:
-Generate a clean, human-readable, and canonical product name.
+Generate a register-aligned expected product name. The Raw Catalog Name is the AUTHORITATIVE identity of the exact SKU we are adding. Search results are enrichment hints only.
 
 Rules:
-1. Evaluate if the search results actually match the catalog product ("${originalName || ''}"). If the search results are completely unrelated (e.g. they represent random items, general retail mismatch, or different products due to a bad barcode lookup), IGNORE the search results and focus on cleaning up the Raw Catalog Name.
-2. When cleaning the Raw Catalog Name, expand common abbreviations to make it natural and readable (e.g. expand "DNTL" to "Dental", "SM" to "Small", "LG" to "Large", "CHKN" or "CKN" to "Chicken", "TRKY" to "Turkey", "BEEF" to "Beef", "PATE" to "Pâté", "WET" to "Wet").
-3. PRESERVE variant-distinguishing pack counts and sizes (e.g. "6 Pack", "3 Pack", "Value Pack", "Single", "Small", "Medium", "Large", "X-Large") — these are essential product identifiers that differentiate one variant from another. Only strip truly internal inventory codes like "5CT", "2.64OZ", "10.5OZ" that are clearly dimension-only and do not distinguish the product.
-4. Ensure the brand name is present at the start of the canonical name.
-5. Return ONLY the final product name string. Do not include quotes, explanatory text, bullet points, or markdown.
+1. The Raw Catalog Name is authoritative. If search results are completely unrelated (e.g. random items, retail mismatch, bad barcode lookup), IGNORE them and focus on expanding the Raw Catalog Name.
+2. Use search results to expand abbreviations, improve casing, add accents (e.g. "PATE" → "Pâté"), and confirm product-line wording — but NEVER remove or contradict identity-bearing details from the Raw Catalog Name.
+3. PRESERVE ALL size, weight, count, volume, flavor, and variant tokens from the Raw Catalog Name as-is or normalized. These ARE product identifiers, NOT internal codes. Examples:
+   - "2.64OZ" → "2.64 oz"
+   - "10.5OZ" → "10.5 oz"
+   - "5LB" → "5 lb"
+   - "3PK" → "3-Pack"
+   - "5CT" → "5 ct"
+   - "SM" → "Small"
+   - "LG" → "Large"
+   - "XL" → "X-Large"
+   - "6OZ" → "6 oz"
+   - "48OZ" → "48 oz"
+   - "30PK" → "30-Pack"
+   Never drop these tokens. If a token from the Raw Catalog Name can be normalized, do so — but never remove it.
+4. Expand common abbreviations naturally: "DNTL" → "Dental", "CHKN" or "CKN" → "Chicken", "TRKY" → "Turkey", "BEEF" → "Beef", "PATE" → "Pâté", "WET" → "Wet", "SLMN" → "Salmon".
+5. Ensure the brand name is present at the start of the expected name.
+6. Return ONLY the final expected name string. No quotes, explanations, bullet points, or markdown.
 
-Clean Canonical Product Name:`;
+Register-Aligned Expected Name:`;
 
     console.log(`[LLMClient] Calling LLM (${config.provider}:${config.model}) for UPC ${upc}`);
     const name = useTaskConfig
@@ -483,14 +632,18 @@ Clean Canonical Product Name:`;
     // Clean up potential quotes or markdown return structures from the LLM
     const cleaned = name.replace(/^['"`\s]+|['"`\s]+$/g, '').trim();
     if (cleaned.length > 5) {
-      return cleaned;
+      // Verify all protected tokens from the raw name survived
+      const restored = originalName
+        ? verifyAndRestoreProtectedTokens(cleaned, originalName)
+        : cleaned;
+      return restored;
     }
   } catch (err) {
     console.error('[LLMClient] LLM name consolidation failed, falling back to LCS:', err);
   }
 
-  // Fallback to LCS
+  // Fallback to LCS with token guard
   const titles = searchResults.map(r => r.title);
   if (originalName) titles.push(originalName);
-  return extractConsensusName(titles);
+  return lcsWithTokenGuard(titles, originalName);
 }

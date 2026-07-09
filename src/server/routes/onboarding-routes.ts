@@ -113,7 +113,6 @@ import {
   SnapshotRequestSchema,
   ValidateRequestSchema,
   GenerateSelectorRequestSchema,
-  PickElementRequestSchema,
 } from '../../shared/schemas/extraction-worker';
 import { parseSpreadsheet, detectColumnMapping, applyColumnMapping } from '../../onboarding/spreadsheet-parser';
 import { matchExistingBrand } from '../../shared/brand-matcher';
@@ -124,7 +123,6 @@ import {
   snapshotPage,
   validateProfile,
   generateSelectorFromElement,
-  pickElement,
   trustedExtract,
 } from '../extraction-worker-client';
 import { upsertDomainConfig, DomainConfigUpsertSchema } from '../../onboarding/domain-config-service';
@@ -1298,34 +1296,6 @@ route.post('/onboarding/settings/profile-tooling/fetch-html', async (c) => {
   }
 });
 
-/**
- * POST /api/onboarding/settings/profile-tooling/pick-element
- * Launches a headful browser for the user to click on an element.
- * Returns the generated selector + extracted preview.
- */
-route.post('/onboarding/settings/profile-tooling/pick-element', async (c) => {
-  let body: unknown;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ ok: false, error: 'Invalid JSON body' }, 400);
-  }
-
-  const parsed = PickElementRequestSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({
-      ok: false,
-      error: 'Invalid request body',
-      details: parsed.error.flatten(),
-    }, 400);
-  }
-
-  const result = await pickElement(parsed.data);
-  if (!result.ok) {
-    return c.json({ ok: false, error: result.error });
-  }
-  return c.json({ ok: true, data: result.data });
-});
 
 /**
  * POST /api/onboarding/settings/profile-tooling/validate
@@ -1514,35 +1484,70 @@ route.post('/onboarding/settings/domain-diagnostics/:domain/generate-profile', a
     resolvedUrl = validUrls[0];
   }
 
+  // Use the extraction worker's rendered snapshot to fetch the page.
+  // This ensures profile generation sees the same rendered DOM as
+  // actual extraction (JS-rendered content, JSON-LD, images, etc.),
+  // rather than a static HTTP fetch that may miss dynamic content.
+  const snapshotResult = await snapshotPage({
+    url: resolvedUrl,
+    runtime: 'rendered',
+    captureScreenshot: false,
+    captureNetwork: false,
+  });
+
+  if (!snapshotResult.ok) {
+    return c.json({
+      error: `Extraction worker is unavailable. Profile generation requires the worker to be running (\`bun run worker:dev\`). Worker error: ${snapshotResult.error}`,
+    }, 503);
+  }
+
+  const snapshot = snapshotResult.data;
+  if (!snapshot.htmlRef) {
+    return c.json({
+      error: `Worker snapshot completed but returned no HTML for ${snapshot.finalUrl || resolvedUrl}. The page may be blocked or require authentication.`,
+    }, 502);
+  }
+
+  // Read the HTML from the worker's artifact file
+  const htmlPath = path.resolve(process.cwd(), snapshot.htmlRef);
+  let html: string;
   try {
-    const response = await fetch(resolvedUrl, {
-      headers: HTTP_EXTRACTION_HEADERS,
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!response.ok) {
-      return c.json({
-        error: `Failed to fetch ${resolvedUrl}: HTTP ${response.status}`,
-      }, 502);
-    }
-    const html = await response.text();
-    const generated = await generateExtractorProfile(resolvedUrl, html, {
+    html = fs.readFileSync(htmlPath, 'utf-8');
+  } catch (readErr) {
+    const msg = readErr instanceof Error ? readErr.message : String(readErr);
+    return c.json({
+      error: `Failed to read snapshot artifact at ${snapshot.htmlRef}: ${msg}`,
+    }, 500);
+  }
+
+  if (!html || html.trim().length === 0) {
+    return c.json({
+      error: `Worker snapshot returned empty HTML for ${snapshot.finalUrl || resolvedUrl}. The page may be blocked or require authentication.`,
+    }, 502);
+  }
+
+  // Use the final URL from the snapshot (accounts for redirects)
+  const pageUrl = snapshot.finalUrl || resolvedUrl;
+
+  try {
+    const generated = await generateExtractorProfile(pageUrl, html, {
       domain: normalizedDomain,
-      sourceUrl: resolvedUrl,
+      sourceUrl: pageUrl,
     });
     if (!generated) {
       return c.json({
-        error: `Profile generation returned null for ${resolvedUrl}. Check that the LLM is configured (Settings → AI Model Routing → profile_generation) and the page HTML is accessible.`,
+        error: `Profile generation returned null for ${pageUrl}. Check that the LLM is configured (Settings → AI Model Routing → profile_generation) and the page HTML is accessible.`,
       }, 500);
     }
 
     const validation = validateGeneratedProfile(html, generated, {
       domain: normalizedDomain,
-      sourceUrl: resolvedUrl,
+      sourceUrl: pageUrl,
     });
-    const seedPreview = buildSeedPreview(html, generated, resolvedUrl);
+    const seedPreview = buildSeedPreview(html, generated, pageUrl);
     const rec = insertProfileGeneration({
       domain: normalizedDomain,
-      sourceUrl: resolvedUrl,
+      sourceUrl: pageUrl,
       expectedName: null,
       brandHint: null,
       selectors: generated as unknown as Record<string, unknown>,
@@ -1569,11 +1574,11 @@ route.post('/onboarding/settings/domain-diagnostics/:domain/generate-profile', a
       generationId: rec.id,
       existing: false,
       domain: normalizedDomain,
-      anchorUrl: resolvedUrl,
+      anchorUrl: pageUrl,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[GenerateProfile] Failed for ${resolvedUrl}:`, msg);
+    console.warn(`[GenerateProfile] Failed for ${pageUrl}:`, msg);
     return c.json({
       error: `Profile generation failed: ${msg}`,
     }, 500);
