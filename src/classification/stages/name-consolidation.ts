@@ -83,6 +83,7 @@ export const nameConsolidationStage: StageDefinition = {
     const ocrTitle = evidenceValue(input.evidence, 'name', 'visual_product_evidence');
     const ocrWeight = evidenceValue(input.evidence, 'weight', 'visual_product_evidence');
     const ocrSize = evidenceValue(input.evidence, 'size', 'visual_product_evidence');
+    const ocrCount = evidenceValue(input.evidence, 'count', 'visual_product_evidence');
     const brandHint = evidenceValue(input.evidence, 'brand', 'spreadsheet') ??
       evidenceValue(input.evidence, 'brand', 'official_product_page');
 
@@ -115,6 +116,7 @@ export const nameConsolidationStage: StageDefinition = {
         ocrTitle: ocrTitle ?? undefined,
         ocrWeight: ocrWeight ?? undefined,
         ocrSize: ocrSize ?? undefined,
+        ocrCount: ocrCount ?? undefined,
         siblingContext,
       });
 
@@ -137,6 +139,7 @@ export const nameConsolidationStage: StageDefinition = {
               ocrTitle: ocrTitle ?? null,
               ocrWeight: ocrWeight ?? null,
               ocrSize: ocrSize ?? null,
+              ocrCount: ocrCount ?? null,
               brandHint: brandHint ?? null,
               groupId: productLine?.groupId ?? null,
               siblingCount: productLine?.siblingNames.length ?? 0,
@@ -170,6 +173,7 @@ export const nameConsolidationStage: StageDefinition = {
               ocrTitle: ocrTitle ?? null,
               ocrWeight: ocrWeight ?? null,
               ocrSize: ocrSize ?? null,
+              ocrCount: ocrCount ?? null,
               brandHint: brandHint ?? null,
               groupId: productLine?.groupId ?? null,
               siblingCount: productLine?.siblingNames.length ?? 0,
