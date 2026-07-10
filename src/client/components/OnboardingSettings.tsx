@@ -6,32 +6,15 @@ import {
   getDeepseekModels,
   getOllamaModels,
   getOpenaiModels,
-  getExtractorProfiles,
-  testExtractorProfile,
-  getDomainDiagnostics,
-  generateProfileForDomain,
-  saveDomainConfig,
-  getLatestProposalForDomain,
-  getProfileGenerationDetail,
   getCurationTargets,
   saveCurationTargets,
 
   type ApiKeyDisplay,
-  type DomainConfigPayload,
   type CurationTargetsResponse,
 } from '../onboarding-api';
-import type {
-  DomainDiagnosticsEntry,
-  DomainHealthStatus,
-  ExtractorProfile,
-
-  ProfileGenerationGeneration,
-} from '../../shared/schemas/onboarding';
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
 import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
-import { ProfileProposalDrawer } from './ProfileProposalDrawer';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
-import { ProfileRetryPreview } from './ProfileRetryPreview';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
 
@@ -39,85 +22,13 @@ interface OnboardingSettingsProps {
   onBack: () => void;
 }
 
-
-
-// ─── Domain diagnostics helpers ───────────────────────────────────────────────
-
-const DOMAIN_HEALTH_BADGE_COLORS: Record<DomainHealthStatus, { bg: string; fg: string; border: string }> = {
-  ok: { bg: '#dcfce7', fg: '#166534', border: '#16a34a' },
-  blocked: { bg: '#fee2e2', fg: '#991b1b', border: '#dc2626' },
-  offline: { bg: '#e5e7eb', fg: '#374151', border: '#6b7280' },
-  mismatch: { bg: '#fef3c7', fg: '#92400e', border: '#f59e0b' },
-  unknown: { bg: '#f3f4f6', fg: '#6b7280', border: '#d1d5db' },
-};
-
-function domainHealthBadgeStyle(status: DomainHealthStatus): React.CSSProperties {
-  const palette = DOMAIN_HEALTH_BADGE_COLORS[status];
-  return {
-    display: 'inline-block',
-    fontSize: 11,
-    fontWeight: 700,
-    padding: '2px 10px',
-    borderRadius: 999,
-    textTransform: 'uppercase' as const,
-    background: palette.bg,
-    color: palette.fg,
-    border: `1px solid ${palette.border}`,
-    letterSpacing: 0.4,
-  };
-}
-
-function formatOptionalIsoDate(iso: string | null): string {
-  if (!iso) return '—';
-  const parsed = Date.parse(iso);
-  if (Number.isNaN(parsed)) return '—';
-  return new Date(parsed).toISOString().slice(0, 10);
-}
-
 function targetSlug(value: string): string {
   const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   return /^[a-z]/.test(slug) ? slug : `target-${slug || 'field'}`;
 }
 
-function deriveProfileHealth(entry: DomainDiagnosticsEntry): { label: string; color: string } {
-  if (entry.hasActiveProfile && entry.latestGenerationStatus !== 'rejected' && entry.latestGenerationStatus !== 'failed') {
-    return { label: 'Healthy', color: '#28a745' };
-  }
-  if (entry.hasActiveProfile && (entry.latestGenerationStatus === 'rejected' || entry.latestGenerationStatus === 'failed')) {
-    return { label: 'Needs review', color: '#ffc107' };
-  }
-  if (!entry.hasActiveProfile && (entry.latestGenerationStatus === 'proposed' || entry.latestGenerationStatus === 'validated')) {
-    return { label: 'Proposed', color: '#17a2b8' };
-  }
-  return { label: 'None', color: '#6c757d' };
-}
-
 export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
   const [keys, setKeys] = useState<ApiKeyDisplay[]>([]);
-  // Accordion / editing state for unified domain table
-  // Cached extractor profiles (keyed by domain) for pre-populating
-  // selector fields when expanding a domain that has an active profile.
-  const [profiles, setProfiles] = useState<Record<string, ExtractorProfile>>({});
-  const [expandedDomain, setExpandedDomain] = useState<string | null>(null);
-  const [editingDomainData, setEditingDomainData] = useState<Record<string, {
-    titleSelector: string | null;
-    priceSelector: string | null;
-    descriptionSelector: string | null;
-    brandSelector: string | null;
-    imagesSelector: string | null;
-    sitemapProductUrlPattern: string | null;
-    brands: Array<{
-      id?: string;
-      brandName: string;
-      urlPattern?: string | null;
-      successCount?: number;
-    }>;
-    sampleTestUrl: string;
-  }>>({});
-  const [domainSaving, setDomainSaving] = useState<string | null>(null);
-  const [domainTesting, setDomainTesting] = useState<string | null>(null);
-  const [domainTestResults, setDomainTestResults] = useState<Record<string, any>>({});
-  const [domainTestErrors, setDomainTestErrors] = useState<Record<string, string>>({});
   const [_loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -145,34 +56,17 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
   const [vlmEnabled, setVlmEnabled] = useState(false);
   const [vlmModel, setVlmModel] = useState('qwen2.5vl:latest');
 
-  // Domain diagnostics state (read-only snapshot of every known domain).
-  const [domainDiagnostics, setDomainDiagnostics] = useState<DomainDiagnosticsEntry[]>([]);
-  const [domainDiagnosticsGeneratedAt, setDomainDiagnosticsGeneratedAt] = useState<string | null>(null);
-  const [domainDiagnosticsLoading, setDomainDiagnosticsLoading] = useState(false);
-
   // Manager-selected curation classification targets.
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [curationTargetsDraft, setCurationTargetsDraft] = useState<CurationTargetConfig[]>([]);
   const [curationTargetsLoading, setCurationTargetsLoading] = useState(false);
   const [curationTargetsSaving, setCurationTargetsSaving] = useState(false);
 
-  // On-demand AI profile generation state.
-  const [generatingProfileDomain, setGeneratingProfileDomain] = useState<string | null>(null);
-
-  // Profile proposal drawer state
-  const [drawerState, setDrawerState] = useState<{
-    domain: string;
-    proposal: ProfileGenerationGeneration;
-    revisionId: string | null;
-    testUrl: string;
-  } | null>(null);
-
   // Worker health & profile builder overlay state
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthResponse | null>(null);
   const [workspaceDomain, setWorkspaceDomain] = useState<string | null>(null);
 
-  // Profile Retry Preview overlay state
-  const [retryPreviewDomain, setRetryPreviewDomain] = useState<string | null>(null);
+  const [localDomain, setLocalDomain] = useState('');
   const [settingsTab, setSettingsTab] = useState<'general' | 'llm' | 'curation' | 'profiles'>('general');
 
   // ─── Model fetchers ─────────────────────────────────────────────────────
@@ -229,19 +123,6 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
 
   // ─── Data loading ───────────────────────────────────────────────────────
 
-  const loadDomainDiagnostics = async () => {
-    setDomainDiagnosticsLoading(true);
-    try {
-      const res = await getDomainDiagnostics();
-      setDomainDiagnostics(res.entries);
-      setDomainDiagnosticsGeneratedAt(res.generatedAt);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDomainDiagnosticsLoading(false);
-    }
-  };
-
   const loadCurationTargets = async () => {
     setCurationTargetsLoading(true);
     try {
@@ -254,7 +135,6 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
       setCurationTargetsLoading(false);
     }
   };
-
 
   const targetForField = (catalogField: string) =>
     curationTargetsDraft.find(t => t.kind === 'product_field' && t.catalogField === catalogField);
@@ -288,29 +168,6 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
     }
   };
 
-  const handleGenerateProfile = async (domain: string) => {
-    setGeneratingProfileDomain(domain);
-    setError('');
-    try {
-      const result = await generateProfileForDomain(domain);
-      if (result.success && result.generationId) {
-        const note = result.existing
-          ? `An existing open proposal was found for ${domain}.`
-          : `Profile proposal generated for ${domain} from ${result.anchorUrl ?? 'sitemap sample'}.`;
-        alert(`${note} You can now preview and approve it in the domain configuration panel below.`);
-        void loadDomainDiagnostics();
-      } else {
-        setError(
-          `Profile generation for ${domain} returned no proposal. Check that the LLM is configured (Settings → AI Model Routing → profile_generation).`,
-        );
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setGeneratingProfileDomain(null);
-    }
-  };
-
   const fetchData = async () => {
     setLoading(true);
     setError('');
@@ -319,20 +176,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
 
       setKeys(keysRes.keys);
 
-      // Pull diagnostics, curation targets, and extractor profiles in parallel.
-      // These run alongside the other reads and never block the page
-      // on their own failures.
-      void loadDomainDiagnostics();
       void loadCurationTargets();
-      getExtractorProfiles()
-        .then(res => {
-          const map: Record<string, ExtractorProfile> = {};
-          for (const p of res.extractorProfiles) {
-            map[p.domain] = p;
-          }
-          setProfiles(map);
-        })
-        .catch(() => {});
 
       // Populate form fields from DB
       const serper = keysRes.keys.find(k => k.service === 'serper');
@@ -416,74 +260,6 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  };
-
-  const handleSaveDomain = async (domain: string) => {
-    const data = editingDomainData[domain];
-    if (!data) return;
-    setDomainSaving(domain);
-    try {
-      await saveDomainConfig(domain, {
-        titleSelector: data.titleSelector || null,
-        priceSelector: data.priceSelector || null,
-        descriptionSelector: data.descriptionSelector || null,
-        brandSelector: data.brandSelector || null,
-        imagesSelector: data.imagesSelector || null,
-        sitemapProductUrlPattern: data.sitemapProductUrlPattern || null,
-        brands: data.brands,
-      });
-      await loadDomainDiagnostics();
-      setExpandedDomain(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDomainSaving(null);
-    }
-  };
-
-  const updateDomainField = (domain: string, field: string, value: string) => {
-    setEditingDomainData(prev => ({
-      ...prev,
-      [domain]: { ...prev[domain], [field]: value },
-    }));
-  };
-
-  const handleBrandFieldChange = (domain: string, brandIndex: number, field: string, value: string | number) => {
-    setEditingDomainData(prev => {
-      const current = prev[domain];
-      if (!current) return prev;
-      const newBrands = [...(current.brands || [])];
-      newBrands[brandIndex] = { ...newBrands[brandIndex], [field]: value };
-      return { ...prev, [domain]: { ...current, brands: newBrands } };
-    });
-  };
-
-  const handleAddBrand = (domain: string) => {
-    setEditingDomainData(prev => {
-      const current = prev[domain];
-      if (!current) return prev;
-      return {
-        ...prev,
-        [domain]: {
-          ...current,
-          brands: [...current.brands, { brandName: '', successCount: 0 }],
-        },
-      };
-    });
-  };
-
-  const handleDeleteBrand = (domain: string, brandIndex: number) => {
-    setEditingDomainData(prev => {
-      const current = prev[domain];
-      if (!current) return prev;
-      return {
-        ...prev,
-        [domain]: {
-          ...current,
-          brands: (current.brands || []).filter((_, i) => i !== brandIndex),
-        },
-      };
-    });
   };
 
   // ─── Shared styles ──────────────────────────────────────────────────────
@@ -637,7 +413,6 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
           { id: 'llm', label: 'LLM Providers' },
           { id: 'curation', label: 'Curation' },
           { id: 'profiles', label: 'Extractor Profiles' },
-          { id: 'fields', label: 'Field Mappings' },
         ].map(tab => (
           <button
             key={tab.id}
@@ -927,227 +702,54 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
       </div>
 
       <div style={{ display: settingsTab === 'profiles' ? 'block' : 'none' }}>
-      {/* ─── DOMAIN CONFIGURATION ─── */}
-      <div id="domain-configuration" style={styles.section}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <h2 style={{ ...styles.sectionTitle, margin: 0 }}>
-            Domain Configuration ({domainDiagnostics.length})
-          </h2>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              type="button"
-              style={styles.secondaryBtn}
-              onClick={loadDomainDiagnostics}
-              disabled={domainDiagnosticsLoading}
-            >
-              {domainDiagnosticsLoading ? 'Refreshing…' : 'Refresh'}
-            </button>
-            <button
-              type="button"
-              style={styles.primaryBtn}
-              onClick={() => {
-                const d = prompt('Enter domain (e.g. example.com):');
-                if (d) {
-                  const normalizedDomain = d.toLowerCase().replace(/^www\./, '').trim();
-                  if (normalizedDomain) {
-                    setEditingDomainData(prev => ({
-                      ...prev,
-                      [normalizedDomain]: {
-                        titleSelector: null,
-                        priceSelector: null,
-                        descriptionSelector: null,
-                        brandSelector: null,
-                        imagesSelector: null,
-                        sitemapProductUrlPattern: null,
-                        brands: [],
-                        sampleTestUrl: '',
-                      },
-                    }));
-                    setExpandedDomain(normalizedDomain);
-                  }
-                }
-              }}
-            >
-              + Add Domain
-            </button>
-          </div>
-        </div>
-        <p style={styles.hint}>
-          Manage extractor profiles, brand associations, sitemaps, and domain health in one place.
+      {/* ── Profile Builder Landing ── */}
+      <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 24 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 600, margin: '0 0 8px', color: '#111827' }}>
+          Profile Builder
+        </h2>
+        <p style={{ fontSize: 14, color: '#6b7280', margin: '0 0 20px', lineHeight: 1.5 }}>
+          Build a domain extractor profile by entering a product URL and assigning CSS selectors.
+          The profile defines how product data is extracted from a specific e-commerce domain.
         </p>
-
-        {/* Extraction worker health indicator */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, padding: '8px 12px', background: '#f8f9fa', borderRadius: 8 }}>
-          <span style={{ width: 10, height: 10, borderRadius: '50%', background: workerHealth?.ok ? '#28a745' : '#dc3545', display: 'inline-block' }} />
-          <span style={{ fontSize: 13, fontWeight: 600 }}>Extraction Worker</span>
-          <span style={{ fontSize: 12, color: '#666' }}>{workerHealth?.ok ? `v${workerHealth.version}` : 'Unavailable'}</span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            type="text"
+            value={localDomain}
+            onChange={(e) => setLocalDomain(e.target.value)}
+            placeholder="Enter domain (e.g. acmepet.com)"
+            style={{
+              flex: 1,
+              maxWidth: 400,
+              padding: '8px 12px',
+              border: '1px solid #d1d5db',
+              borderRadius: 6,
+              fontSize: 14,
+              fontFamily: 'monospace',
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              if (localDomain.trim()) {
+                setWorkspaceDomain(localDomain.trim().toLowerCase().replace(/^www\\./, ''));
+              }
+            }}
+            disabled={!localDomain.trim()}
+            style={{
+              background: '#2563eb',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              padding: '8px 20px',
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: localDomain.trim() ? 'pointer' : 'not-allowed',
+              opacity: localDomain.trim() ? 1 : 0.6,
+            }}
+          >
+            Open Profile Builder
+          </button>
         </div>
-
-        {domainDiagnostics.length === 0 ? (
-          <p style={styles.empty}>No domains configured yet. Click "+ Add Domain" to get started.</p>
-        ) : (
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Domain</th>
-                <th style={styles.th}>Health</th>
-                <th style={styles.th}>Profile</th>
-                <th style={styles.th}>Profile Health</th>
-                <th style={styles.th}>Brands</th>
-                <th style={styles.th}>Sitemap</th>
-                <th style={styles.th}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {domainDiagnostics.map((entry) => {
-                const isExpanded = expandedDomain === entry.domain;
-                const brandLabel = entry.brandAssociations.length === 0
-                  ? '—'
-                  : entry.brandAssociations.length === 1
-                    ? entry.brandAssociations[0].brandName.toUpperCase()
-                    : `${entry.brandAssociations.length} brands · ${entry.brandAssociations[0].brandName.toUpperCase()}`;
-                const sitemapLabel = entry.sitemapFetchedAt
-                  ? `${entry.sitemapUrlsCount} URLs · ${entry.sitemapStale ? 'stale' : 'valid'}`
-                  : '—';
-
-                return (
-                  <React.Fragment key={entry.domain}>
-                    {/* Collapsed row */}
-                    <tr
-                      onClick={() => {
-                        setDrawerState(null);
-                        setWorkspaceDomain(entry.domain);
-                      }}
-                      style={{ cursor: 'pointer', background: isExpanded ? '#f0f7ff' : undefined }}
-                    >
-                      <td style={styles.td}>
-                        <strong>{entry.domain}</strong>
-                        <span style={{ fontSize: 11, color: '#6b7280', marginLeft: 8 }}>
-                          {isExpanded ? '▲' : '▼'}
-                        </span>
-                      </td>
-                      <td style={styles.td}>
-                        <span style={domainHealthBadgeStyle(entry.healthStatus)}>
-                          {entry.healthStatus}
-                        </span>
-                      </td>
-                      <td style={styles.td}>
-                        {entry.hasActiveProfile ? (
-                          <span style={{ ...styles.providerBadge, background: '#dcfce7', color: '#166534' }}>Active</span>
-                        ) : (
-                          <span style={styles.empty}>No profile</span>
-                        )}
-                      </td>
-                      <td style={styles.td}>{brandLabel}</td>
-                      <td style={styles.td}>
-                        <span style={{
-                          fontSize: 13,
-                          color: entry.sitemapStale ? '#dc2626' : entry.sitemapFetchedAt ? '#16a34a' : '#9ca3af',
-                        }}>
-                          {sitemapLabel}
-                        </span>
-                      </td>
-                      {/* Profile Health column */}
-                      <td style={styles.td}>
-                        <span style={{
-                          display: 'inline-block',
-                          fontSize: 11,
-                          fontWeight: 700,
-                          padding: '2px 10px',
-                          borderRadius: 999,
-                          textTransform: 'uppercase' as const,
-                          background: (() => { const h = deriveProfileHealth(entry); return h.color === '#28a745' ? '#dcfce7' : h.color === '#ffc107' ? '#fef3c7' : h.color === '#17a2b8' ? '#e0f2fe' : '#f3f4f6'; })(),
-                          color: deriveProfileHealth(entry).color,
-                          letterSpacing: 0.4,
-                        }}>
-                          {deriveProfileHealth(entry).label}
-                        </span>
-                      </td>
-                      {/* Actions column */}
-                      <td style={styles.td}>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setDrawerState(null); setWorkspaceDomain(entry.domain); setSettingsTab('profiles'); }}
-                          style={{ padding: '4px 8px', fontSize: 12, cursor: 'pointer', border: '1px solid #007bff', borderRadius: 4, color: '#007bff', background: '#fff' }}
-                        >
-                          Open Profile Builder
-                        </button>
-                      </td>
-                    </tr>
-
-                    {/* Expanded accordion detail panel */}
-                    {isExpanded && (
-                      <tr>
-                        <td colSpan={7} style={{ background: '#f9fafb', padding: 20, borderBottom: '2px solid #2563eb' }}>
-                          <DomainDetailPanel
-                            entry={entry}
-                            editingData={editingDomainData[entry.domain]}
-                            saving={domainSaving === entry.domain}
-                            testing={domainTesting === entry.domain}
-                            testResults={domainTestResults[entry.domain]}
-                            testError={domainTestErrors[entry.domain]}
-                            generatingProfile={generatingProfileDomain === entry.domain}
-                            onFieldChange={(field, value) => updateDomainField(entry.domain, field, value)}
-                            onBrandFieldChange={(brandIndex, field, value) => handleBrandFieldChange(entry.domain, brandIndex, field, value)}
-                            onTest={async () => {
-                              const data = editingDomainData[entry.domain];
-                              if (!data?.sampleTestUrl) {
-                                setDomainTestErrors(prev => ({ ...prev, [entry.domain]: 'Enter a sample URL to test' }));
-                                return;
-                              }
-                              setDomainTesting(entry.domain);
-                              setDomainTestErrors(prev => ({ ...prev, [entry.domain]: '' }));
-                              try {
-                                const res = await testExtractorProfile({
-                                  url: data.sampleTestUrl,
-                                  titleSelector: data.titleSelector,
-                                  priceSelector: data.priceSelector,
-                                  descriptionSelector: data.descriptionSelector,
-                                  brandSelector: data.brandSelector,
-                                  imagesSelector: data.imagesSelector,
-                                });
-                                if (res.success) {
-                                  setDomainTestResults(prev => ({ ...prev, [entry.domain]: res.extracted }));
-                                }
-                              } catch (err) {
-                                setDomainTestErrors(prev => ({ ...prev, [entry.domain]: err instanceof Error ? err.message : String(err) }));
-                              } finally {
-                                setDomainTesting(null);
-                              }
-                            }}
-                            onSave={() => handleSaveDomain(entry.domain)}
-                            onGenerateProfile={() => handleGenerateProfile(entry.domain)}
-                            onAddBrand={() => handleAddBrand(entry.domain)}
-                            onDeleteBrand={(brandIndex) => handleDeleteBrand(entry.domain, brandIndex)}
-                            onReviewProposal={(proposal, revisionId) => {
-                              setDrawerState({
-                                domain: entry.domain,
-                                proposal,
-                                revisionId,
-                                testUrl: (editingDomainData[entry.domain]?.sampleTestUrl || '') as string,
-                              });
-                              setWorkspaceDomain(null);
-                            }}
-                            onCancel={() => setExpandedDomain(null)}
-                            onShowRetryPreview={() => { setDrawerState(null); setWorkspaceDomain(null); setRetryPreviewDomain(entry.domain); }}
-                          />
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-
-        {domainDiagnosticsGeneratedAt && (
-          <p style={{ ...styles.savedHint, marginTop: 12 }}>
-            Snapshot generated at {formatOptionalIsoDate(domainDiagnosticsGeneratedAt)}
-            {domainDiagnosticsGeneratedAt.includes('T')
-              ? ` ${domainDiagnosticsGeneratedAt.slice(11, 19)}`
-              : ''}
-          </p>
-        )}
       </div>
       </div>
 
@@ -1158,424 +760,9 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
             mode="inline"
             initialDomain={workspaceDomain}
             onCancel={() => setWorkspaceDomain(null)}
-            onSaved={() => { loadDomainDiagnostics(); }}
           />
         </div>
       )}
-
-      {/* ── Profile Proposal Drawer ── */}
-      {drawerState && (
-        <ProfileProposalDrawer
-          domain={drawerState.domain}
-          proposal={drawerState.proposal}
-          revisionId={drawerState.revisionId}
-          testUrl={drawerState.testUrl}
-          activeProfile={profiles[drawerState.domain] ?? null}
-          onClose={() => setDrawerState(null)}
-          onTestUrlChange={(url) => {
-            updateDomainField(drawerState.domain, 'sampleTestUrl', url);
-          }}
-          onChange={() => {
-            setDrawerState(null);
-            loadDomainDiagnostics();
-          }}
-        />
-      )}
-
-
-      {/* ── Profile Retry Preview Overlay ── */}
-      {retryPreviewDomain && (
-        <ProfileRetryPreview
-          domain={retryPreviewDomain}
-          onClose={() => setRetryPreviewDomain(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ─── Domain Detail Panel Subcomponent ──────────────────────────────────────────
-
-
-
-interface DomainDetailPanelProps {
-  entry: DomainDiagnosticsEntry;
-  editingData: (DomainConfigPayload & { sampleTestUrl: string }) | undefined;
-  saving: boolean;
-  testing: boolean;
-  testResults: any;
-  testError: string;
-  generatingProfile: boolean;
-  onFieldChange: (field: string, value: string) => void;
-  onBrandFieldChange: (brandIndex: number, field: string, value: string | number) => void;
-  onTest: () => void;
-  onSave: () => void;
-  onGenerateProfile: () => void;
-  onAddBrand: () => void;
-  onDeleteBrand: (index: number) => void;
-  onCancel: () => void;
-  onReviewProposal?: (proposal: ProfileGenerationGeneration, revisionId: string | null) => void;
-  onShowRetryPreview?: () => void;
-}
-
-function DomainDetailPanel(props: DomainDetailPanelProps) {
-  const {
-    entry,
-    editingData,
-    saving,
-    testing,
-    testResults: _testResults,
-    testError,
-    generatingProfile,
-    onFieldChange,
-    onBrandFieldChange,
-    onTest,
-    onSave,
-    onGenerateProfile,
-    onAddBrand,
-    onDeleteBrand,
-    onCancel,
-    onReviewProposal,
-    onShowRetryPreview,
-  } = props;
-
-  // ── AI Proposal fetch (for compact summary) ───────────────────────────
-  const [proposal, setProposal] = useState<ProfileGenerationGeneration | null>(null);
-  const [proposalRevisionId, setProposalRevisionId] = useState<string | null>(null);
-  const [proposalLoading, setProposalLoading] = useState<boolean>(true);
-
-  // Fetch the latest open proposal for this domain on mount.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setProposalLoading(true);
-      try {
-        const p = await getLatestProposalForDomain(entry.domain);
-        if (!cancelled) {
-          setProposal(p);
-          if (p) {
-            try {
-              const detail = await getProfileGenerationDetail(p.id);
-              if (!cancelled) {
-                const revs = detail.revisions.slice().sort(
-                  (a, b) => b.revisionNumber - a.revisionNumber,
-                );
-                setProposalRevisionId(revs.length > 0 ? revs[0].id : null);
-              }
-            } catch {
-              // Non-critical; revision fetching failure is ignored.
-            }
-          }
-        }
-      } catch {
-        if (!cancelled) setProposal(null);
-      } finally {
-        if (!cancelled) setProposalLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [entry.domain]);
-
-  const panelStyles = {
-    sectionLabel: { fontSize: 14, fontWeight: 600, color: '#111827', margin: '0 0 8px 0' } as React.CSSProperties,
-    fieldRow: { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 12, alignItems: 'center', marginBottom: 8 } as React.CSSProperties,
-    fieldLabel: { fontSize: 13, fontWeight: 500, color: '#4b5563' } as React.CSSProperties,
-    fieldInput: { width: '100%', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 13, boxSizing: 'border-box' as const },
-    divider: { borderTop: '1px solid #e5e7eb', margin: '12px 0' } as React.CSSProperties,
-  };
-
-  const brandData = editingData?.brands || [];
-
-
-  return (
-    <div>
-      {/* ── Sitemap & Health summary ── */}
-      <div style={{ display: 'flex', gap: 24, marginBottom: 16, fontSize: 13, color: '#4b5563', flexWrap: 'wrap' }}>
-        <div>
-          <strong>Sitemap:</strong>{' '}
-          {entry.sitemapFetchedAt
-            ? `${entry.sitemapUrlsCount} URLs · fetched ${formatOptionalIsoDate(entry.sitemapFetchedAt)} · ` +
-              (entry.sitemapStale
-                ? <span style={{ color: '#dc2626', fontWeight: 600 }}>stale</span>
-                : <span style={{ color: '#16a34a', fontWeight: 600 }}>valid</span>)
-            : 'Never cached'}
-        </div>
-        <div>
-          <strong>Health:</strong>{' '}
-          <span style={domainHealthBadgeStyle(entry.healthStatus)}>{entry.healthStatus}</span>
-          {entry.healthCheckedAt && ` · checked ${formatOptionalIsoDate(entry.healthCheckedAt)}`}
-        </div>
-        {entry.generationCount > 0 && (
-          <div>
-            <strong>AI Profiles:</strong> {entry.generationCount} generation{entry.generationCount > 1 ? 's' : ''}
-            {entry.latestGenerationStatus && ` · ${entry.latestGenerationStatus}`}
-          </div>
-        )}
-      </div>
-
-      {/* ── Brand Associations ── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <h3 style={panelStyles.sectionLabel}>Brand Associations</h3>
-        <button
-          type="button"
-          style={{ background: 'none', border: '1px solid #2563eb', color: '#2563eb', borderRadius: 4, padding: '2px 10px', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
-          onClick={onAddBrand}
-        >
-          + Add Brand
-        </button>
-      </div>
-
-      {brandData.length === 0 ? (
-        <p style={{ fontSize: 13, color: '#9ca3af', fontStyle: 'italic' }}>No brand associations for this domain.</p>
-      ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, marginBottom: 12 }}>
-          <thead>
-            <tr>
-              <th style={{ borderBottom: '2px solid #e5e7eb', textAlign: 'left', padding: '4px 8px', color: '#4b5563', fontWeight: 600 }}>Brand Name</th>
-              <th style={{ borderBottom: '2px solid #e5e7eb', textAlign: 'left', padding: '4px 8px', color: '#4b5563', fontWeight: 600 }}>Hits</th>
-              <th style={{ borderBottom: '2px solid #e5e7eb', textAlign: 'left', padding: '4px 8px', color: '#4b5563', fontWeight: 600 }}>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {brandData.map((brand, idx) => (
-              <tr key={idx}>
-                <td style={{ borderBottom: '1px solid #e5e7eb', padding: '4px 8px' }}>
-                  <input
-                    type="text"
-                    style={panelStyles.fieldInput}
-                    value={brand.brandName}
-                    onChange={(e) => onBrandFieldChange(idx, 'brandName', e.target.value)}
-                    placeholder="Brand name"
-                  />
-                </td>
-                <td style={{ borderBottom: '1px solid #e5e7eb', padding: '4px 8px' }}>
-                  <input
-                    type="number"
-                    style={{ ...panelStyles.fieldInput, width: 60 }}
-                    value={brand.successCount || 0}
-                    onChange={(e) => onBrandFieldChange(idx, 'successCount', parseInt(e.target.value) || 0)}
-                  />
-                </td>
-                <td style={{ borderBottom: '1px solid #e5e7eb', padding: '4px 8px' }}>
-                  <button
-                    type="button"
-                    style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontWeight: 600, fontSize: 12 }}
-                    onClick={() => onDeleteBrand(idx)}
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      <div style={panelStyles.divider} />
-
-      {/* ── Profile Selectors ── */}
-      <h3 style={panelStyles.sectionLabel}>Extractor Profile Selectors</h3>
-      <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px' }}>
-        CSS selectors for extracting product details. Empty fields fall back to default heuristics.
-      </p>
-      {[
-        ['titleSelector', 'Title'],
-        ['priceSelector', 'Price'],
-        ['descriptionSelector', 'Description'],
-        ['brandSelector', 'Brand'],
-        ['imagesSelector', 'Images'],
-        ['sitemapProductUrlPattern', 'Sitemap URL Pattern'],
-      ].map(([field, label]) => (
-        <div key={field} style={panelStyles.fieldRow}>
-          <label style={panelStyles.fieldLabel}>{label}</label>
-          <input
-            type="text"
-            style={panelStyles.fieldInput}
-            value={(editingData as any)?.[field] || ''}
-            onChange={(e) => onFieldChange(field, e.target.value)}
-            placeholder={field === 'titleSelector' ? 'h1.product-title' : field === 'priceSelector' ? '.price-current' : ''}
-          />
-        </div>
-      ))}
-
-      {/* Test selectors */}
-      <div style={{ ...panelStyles.fieldRow, marginTop: 12 }}>
-        <label style={panelStyles.fieldLabel}>Test URL</label>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            type="text"
-            style={{ ...panelStyles.fieldInput, flex: 1 }}
-            value={editingData?.sampleTestUrl || ''}
-            onChange={(e) => onFieldChange('sampleTestUrl', e.target.value)}
-            placeholder="https://example.com/product/123"
-          />
-          <button
-            type="button"
-            style={{
-              background: '#6b7280',
-              color: '#fff',
-              border: 'none',
-              borderRadius: 4,
-              padding: '6px 12px',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
-            }}
-            onClick={onTest}
-            disabled={testing}
-          >
-            {testing ? 'Testing…' : 'Test Selectors'}
-          </button>
-
-        </div>
-      </div>
-
-      {testError && (
-        <div style={{ color: '#dc2626', fontSize: 12, marginTop: 4, marginLeft: 172 }}>{testError}</div>
-      )}
-
-
-
-      {/* ── Compact AI Proposal summary ── */}
-      <div style={panelStyles.divider} />
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-        <h3 style={{ ...panelStyles.sectionLabel, margin: 0 }}>
-          🤖 AI Proposal
-        </h3>
-        {proposalLoading ? (
-          <span style={{ fontSize: 12, color: '#9ca3af' }}>Loading…</span>
-        ) : proposal ? (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span
-              style={{
-                display: 'inline-block',
-                fontSize: 10,
-                fontWeight: 700,
-                padding: '2px 8px',
-                borderRadius: 999,
-                textTransform: 'uppercase',
-                background:
-                  proposal.status === 'validated' || proposal.status === 'promoted'
-                    ? '#dcfce7'
-                    : proposal.status === 'rejected'
-                      ? '#fee2e2'
-                      : '#fef3c7',
-                color:
-                  proposal.status === 'validated' || proposal.status === 'promoted'
-                    ? '#16a34a'
-                    : proposal.status === 'rejected'
-                      ? '#dc2626'
-                      : '#d97706',
-              }}
-            >
-              {proposal.status}
-            </span>
-            <span style={{ fontSize: 12, color: '#6b7280' }}>
-              confidence {proposal.confidence.toFixed(2)} ·{' '}
-              {proposal.sourceUrl.slice(0, 60)}…
-            </span>
-            <button
-              type="button"
-              onClick={() => onReviewProposal?.(proposal, proposalRevisionId)}
-              style={{
-                background: '#9333ea',
-                color: '#fff',
-                border: 'none',
-                borderRadius: 4,
-                padding: '6px 14px',
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              Review Proposal →
-            </button>
-          </div>
-        ) : (
-          <span style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>
-            No AI proposal yet. Click "🤖 Generate Profile" above to create one.
-          </span>
-        )}
-      </div>
-
-      <div style={panelStyles.divider} />
-
-      <div style={panelStyles.divider} />
-
-      {/* ── Actions ── */}
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button
-          type="button"
-          style={{
-            background: '#2563eb',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 6,
-            padding: '8px 20px',
-            cursor: 'pointer',
-            fontWeight: 600,
-            fontSize: 14,
-          }}
-          onClick={onSave}
-          disabled={saving}
-        >
-          {saving ? 'Saving…' : 'Save Domain'}
-        </button>
-        <button
-          type="button"
-          style={{
-            background: 'none',
-            border: '1px solid #d1d5db',
-            borderRadius: 6,
-            padding: '8px 16px',
-            cursor: 'pointer',
-            fontSize: 13,
-          }}
-          onClick={onCancel}
-        >
-          Cancel
-        </button>
-        <div style={{ flex: 1 }} />
-        {onShowRetryPreview && (
-          <button
-            type="button"
-            onClick={onShowRetryPreview}
-            style={{
-              background: '#f59e0b',
-              color: '#fff',
-              border: 'none',
-              borderRadius: 6,
-              padding: '8px 16px',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-            title="Show items blocked in Extraction due to profile issues"
-          >
-            Show Blocked Items
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={onGenerateProfile}
-          disabled={generatingProfile}
-          style={{
-            background: generatingProfile ? '#dbeafe' : (entry.sitemapUrlsCount > 0 ? '#2563eb' : '#9ca3af'),
-            color: generatingProfile ? '#1e40af' : '#fff',
-            border: 'none',
-            borderRadius: 6,
-            padding: '8px 16px',
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: generatingProfile ? 'not-allowed' : (entry.sitemapUrlsCount > 0 ? 'pointer' : 'not-allowed'),
-          }}
-          title={entry.sitemapUrlsCount > 0 ? 'Generate AI profile for this domain' : 'No cached sitemap URLs — run discovery first'}
-        >
-          {generatingProfile ? 'Generating…' : '🤖 Generate Profile'}
-        </button>
-      </div>
     </div>
   );
 }

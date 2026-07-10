@@ -397,18 +397,8 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
         }
       }
     } else {
-      // Fall back to JSON-LD or meta
-      title =
-        (jsonLd?.name as string) ||
-        metaTags['og:title'] ||
-        metaTags['page:title'] ||
-        null;
-      if (title) {
-        titleProvenance = title === jsonLd?.name ? 'json-ld' : 'meta';
-        warnings.push(`titleSelector "${titleSelector}" returned empty; fell back to ${titleProvenance}`);
-      } else {
-        warnings.push(`titleSelector "${titleSelector}" returned empty and no JSON-LD/meta fallback available`);
-      }
+      warnings.push(`titleSelector "${titleSelector}" returned empty — failing extraction`);
+      return buildFailedResult(request, warnings);
     }
   } else {
     // No selector configured — try JSON-LD / meta
@@ -463,9 +453,11 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
     description = $(descriptionSelector).first().text().trim() || null;
     if (description) {
       descriptionProvenance = 'profile-selector';
+    } else {
+      warnings.push(`descriptionSelector "${descriptionSelector}" returned empty — failing extraction`);
+      return buildFailedResult(request, warnings);
     }
-  }
-  if (!description) {
+  } else {
     description =
       (jsonLd?.description as string) ||
       metaTags['og:description'] ||
@@ -491,9 +483,11 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       if (match) {
         price = match[0];
       }
+    } else {
+      warnings.push(`priceSelector "${priceSelector}" returned empty — failing extraction`);
+      return buildFailedResult(request, warnings);
     }
-  }
-  if (!price) {
+  } else {
     const jsonLdOffers = jsonLd?.offers as Record<string, unknown> | undefined;
     const priceFromJsonLd =
       jsonLdOffers?.price as string | undefined;
@@ -514,33 +508,36 @@ async function doStaticExtract(request: ExtractRequest): Promise<{
       primaryImage = rawImages[0];
       additionalImages.push(...rawImages.slice(1));
       imageProvenance = 'profile-selector';
+    } else {
+      warnings.push(`imagesSelector "${imagesSelector}" returned empty — failing extraction`);
+      return buildFailedResult(request, warnings);
     }
-  }
-
-  // If no images from selector, try JSON-LD
-  if (!primaryImage && jsonLd?.image) {
-    const jsonLdImage = jsonLd.image as string | string[];
-    const imgUrl = Array.isArray(jsonLdImage) ? jsonLdImage[0] : jsonLdImage;
-    const resolved = resolveUrl(imgUrl, finalUrl);
-    if (resolved) {
-      primaryImage = resolved;
-      imageProvenance = 'json-ld';
+  } else {
+    // If no images from selector, try JSON-LD
+    if (!primaryImage && jsonLd?.image) {
+      const jsonLdImage = jsonLd.image as string | string[];
+      const imgUrl = Array.isArray(jsonLdImage) ? jsonLdImage[0] : jsonLdImage;
+      const resolved = resolveUrl(imgUrl, finalUrl);
+      if (resolved) {
+        primaryImage = resolved;
+        imageProvenance = 'json-ld';
+      }
     }
-  }
 
-  if (!primaryImage && metaTags['og:image']) {
-    const resolved = resolveUrl(metaTags['og:image'], finalUrl);
-    if (resolved) {
-      primaryImage = resolved;
-      imageProvenance = 'meta';
+    if (!primaryImage && metaTags['og:image']) {
+      const resolved = resolveUrl(metaTags['og:image'], finalUrl);
+      if (resolved) {
+        primaryImage = resolved;
+        imageProvenance = 'meta';
+      }
     }
-  }
 
-  if (!primaryImage && microdata.image) {
-    const resolved = resolveUrl(microdata.image, finalUrl);
-    if (resolved) {
-      primaryImage = resolved;
-      imageProvenance = 'microdata';
+    if (!primaryImage && microdata.image) {
+      const resolved = resolveUrl(microdata.image, finalUrl);
+      if (resolved) {
+        primaryImage = resolved;
+        imageProvenance = 'microdata';
+      }
     }
   }
 
@@ -691,7 +688,8 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
           warnings.push(`Variant selection via ${strategyDesc} encountered an error: ${err instanceof Error ? err.message : String(err)}`);
         }
         if (!variantSelected && hints.length > 0) {
-          warnings.push(`Variant selection via ${strategyDesc} did not match any option for expected "${hints.join(', ')}" — using default variant`);
+          warnings.push(`Variant selection via ${strategyDesc} did not match any option for expected "${hints.join(', ')}" — failing extraction`);
+          return buildFailedResult(request, warnings);
         }
       }
 
@@ -798,9 +796,11 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
               }
             }
           }
+        } else {
+          warnings.push(`titleSelector "${titleSelector}" returned empty — failing extraction`);
+          return buildFailedResult(request, warnings);
         }
-      }
-      if (!title) {
+      } else {
         title =
           (jsonLd?.name as string) ||
           metaTags['og:title'] ||
@@ -809,9 +809,6 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
         if (title) {
           const src = title === jsonLd?.name ? 'json-ld' : 'meta';
           titleProvenance.push(src);
-          if (titleSelector) {
-            warnings.push(`titleSelector "${titleSelector}" empty; fell back to ${src}`);
-          }
         }
       }
 
@@ -833,9 +830,13 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
       let descriptionProvenance = '';
       if (descriptionSelector) {
         description = await evalText(descriptionSelector);
-        if (description) descriptionProvenance = 'profile-selector';
-      }
-      if (!description) {
+        if (description) {
+          descriptionProvenance = 'profile-selector';
+        } else {
+          warnings.push(`descriptionSelector "${descriptionSelector}" returned empty — failing extraction`);
+          return buildFailedResult(request, warnings);
+        }
+      } else {
         description =
           (jsonLd?.description as string) ||
           metaTags['og:description'] ||
@@ -856,9 +857,11 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
           priceProvenance = 'profile-selector';
           const m = price.match(/\$?(\d+\.?\d*)/);
           if (m) price = m[0];
+        } else {
+          warnings.push(`priceSelector "${priceSelector}" returned empty — failing extraction`);
+          return buildFailedResult(request, warnings);
         }
-      }
-      if (!price) {
+      } else {
         const offers = jsonLd?.offers as Record<string, unknown> | undefined;
         price = (offers?.price as string) || metaTags['product:price:amount'] || null;
         if (price) priceProvenance = offers?.price ? 'json-ld' : 'meta';
@@ -926,20 +929,26 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
             primaryImage = rawImages[0];
             additionalImages.push(...rawImages.slice(1).slice(0, 29));
             imageProvenance = 'profile-selector';
+          } else {
+            warnings.push(`imagesSelector "${imagesSelector}" returned empty — failing extraction`);
+            return buildFailedResult(request, warnings);
           }
-        } catch { /* ignore */ }
-      }
-
-      // Fallback images from JSON-LD / meta
-      if (!primaryImage && jsonLd?.image) {
-        const img = jsonLd.image as string | string[];
-        const url = Array.isArray(img) ? img[0] : img;
-        const resolved = resolveUrl(url, finalUrl);
-        if (resolved) { primaryImage = resolved; imageProvenance = 'json-ld'; }
-      }
-      if (!primaryImage && metaTags['og:image']) {
-        const resolved = resolveUrl(metaTags['og:image'], finalUrl);
-        if (resolved) { primaryImage = resolved; imageProvenance = 'meta'; }
+        } catch (err: any) {
+          warnings.push(`imagesSelector "${imagesSelector}" evaluation failed: ${err.message} — failing extraction`);
+          return buildFailedResult(request, warnings);
+        }
+      } else {
+        // Fallback images from JSON-LD / meta
+        if (!primaryImage && jsonLd?.image) {
+          const img = jsonLd.image as string | string[];
+          const url = Array.isArray(img) ? img[0] : img;
+          const resolved = resolveUrl(url, finalUrl);
+          if (resolved) { primaryImage = resolved; imageProvenance = 'json-ld'; }
+        }
+        if (!primaryImage && metaTags['og:image']) {
+          const resolved = resolveUrl(metaTags['og:image'], finalUrl);
+          if (resolved) { primaryImage = resolved; imageProvenance = 'meta'; }
+        }
       }
 
       // ── Custom selectors ────────────────────────────────────────────

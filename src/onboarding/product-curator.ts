@@ -525,34 +525,7 @@ export async function curateItemWithPipeline(
   } catch (err) {
     console.error(`[ProductCurator] Classification pipeline failed:`, err);
     completeRun(run.id, 'failed', err instanceof Error ? err.message : String(err));
-
-    // Minimal fallback — built from item data, NOT from legacy curateItem()
-    const fallbackTitle = ext.title ?? item.name ?? 'Unknown Product';
-    const fallbackKeywords = synthesizeSearchKeywords({
-      title: fallbackTitle,
-      brand: ext.brand ?? item.brandHint,
-      description: ext.description,
-    });
-
-    return {
-      curatedTitle: fallbackTitle,
-      searchKeywords: fallbackKeywords,
-      packagingOcrTitle: ext.packagingOcrData?.productName ?? ext.packagingTitle ?? null,
-      curatedWeight: convertToLbs(
-        ext.packagingOcrData?.weight || extractWeightFromName(item.name) || null,
-      ),
-      titleSource: 'web',
-      suggestedPages: [],
-      suggestedProductType: null,
-      curatedAt: new Date().toISOString(),
-      curationMethod: 'auto',
-      classificationRunId: run.id,
-      classificationConfigSnapshot: context.configSnapshotRef,
-      classificationEvidence: [],
-      classificationProposals: [],
-      classificationDecisions: [],
-      classificationHistory: [],
-    };
+    throw err;
   }
 }
 

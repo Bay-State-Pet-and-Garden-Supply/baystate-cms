@@ -155,6 +155,11 @@ export class OnboardingWorker {
         for (const item of pendingItems) {
           if (this.running.has(item.id)) continue;
 
+          // Re-check extraction concurrency limit in loop since processItem increments it synchronously
+          if (stage === 'extraction' && this.extractionRunning >= this.maxExtractionConcurrency) {
+            break;
+          }
+
           const promise = this.processItem(item, stage);
           this.running.set(item.id, promise);
           promise.finally(() => this.running.delete(item.id));
@@ -418,7 +423,6 @@ export class OnboardingWorker {
           stage: 'extraction',
           error: 'No confirmed source URL',
         });
-        done();
         return;
       }
 
@@ -436,7 +440,6 @@ export class OnboardingWorker {
           stage: 'extraction',
           error: errorMsg,
         });
-        done();
         return;
       }
 
@@ -577,33 +580,10 @@ export class OnboardingWorker {
       );
     } catch (err) {
       console.error(`[OnboardingWorker] Curation error for ${item.id}:`, err);
-      // Curation failure is not blocking — populate defaults with classification containers
-      const defaultCuration = {
-        curatedTitle: item.name,
-        packagingOcrTitle: null,
-        titleSource: 'web' as const,
-        suggestedPages: [],
-        suggestedProductType: null,
-        curatedAt: now,
-        curationMethod: 'auto' as const,
-        classificationRunId: null,
-        classificationConfigSnapshot: null,
-        classificationEvidence: [] as any[],
-        classificationProposals: [] as any[],
-        classificationDecisions: [] as any[],
-        classificationHistory: [] as any[],
-      };
-      const db = getDb();
-      db.query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
-        JSON.stringify(defaultCuration),
-        now,
-        item.id,
-      );
-
-      updateItemStageStatus(item.id, 'completed');
-      onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
+      updateItemStageStatus(item.id, 'failed', String(err));
+      onboardingEvents.emitItemStatus(item.batchId, item.id, 'failed', {
         stage: 'curation',
-        curationData: defaultCuration,
+        error: String(err),
       });
     }
   }

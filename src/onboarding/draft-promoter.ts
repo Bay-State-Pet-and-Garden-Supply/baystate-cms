@@ -307,22 +307,18 @@ export async function promoteItems(
               acceptedProductType = String(proposal.targetId);
             }
           }
-        } else {
-          // Fallback: use pending (highest-confidence) category_page proposals
-          // when no proposals have been manually accepted yet.
-          const pendingPages = getPendingPageProposals(item.upc);
-          for (const proposal of pendingPages) {
-            const pv = proposal.proposedValue as Record<string, unknown> | undefined;
-            const pageId = pv?.pageId ? String(pv.pageId) : null;
-            const pageName = pv?.pageName ? String(pv.pageName) : String(proposal.targetId);
-            if (!classificationPageNames.includes(proposal.targetId!)) {
-              classificationPageNames.push(proposal.targetId!);
-              classificationPageProposals.push({ pageId, pageName });
-            }
-          }
         }
       } catch (err) {
         console.warn('[DraftPromoter] Failed to read classification proposals:', err);
+      }
+
+      // Check if we have accepted page proposals. If not, refuse to promote.
+      if (classificationPageProposals.length === 0) {
+        const errMsg = 'No accepted category page proposals exist for this item';
+        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+        completePromotionStage(item.id, false, errMsg);
+        failures.push({ itemId: item.id, error: errMsg });
+        continue;
       }
 
       // Merge classification custom fields with any existing custom fields
@@ -422,12 +418,6 @@ export async function promoteItems(
         }
       }
 
-      if (pageNames.length === 0 && item.curationData?.suggestedPages?.length) {
-        for (const p of item.curationData.suggestedPages) {
-          if (!pageNames.includes(p)) pageNames.push(p);
-        }
-      }
-
       if (pageNames.length === 0) {
         try {
           const dbPages = getProductPageAssignments(item.upc);
@@ -458,24 +448,16 @@ export async function promoteItems(
         draftHash,
       });
 
-      // Assign product to pages from classification proposals (preferred) or curated suggested pages
-      const finalPages = classificationPageNames.length > 0
-        ? classificationPageNames
-        : (item.curationData?.suggestedPages ?? []);
+      // Assign product to pages from classification proposals
+      const finalPages = classificationPageNames;
       if (finalPages.length > 0) {
         clearProductPages(item.upc);
 
-        if (classificationPageProposals.length > 0) {
-          for (const pp of classificationPageProposals) {
-            if (pp.pageId) {
-              assignProductToPageId(item.upc, pp.pageId, pp.pageName);
-            } else {
-              assignProductToPage(item.upc, pp.pageName);
-            }
-          }
-        } else {
-          for (const pageName of finalPages) {
-            assignProductToPage(item.upc, pageName);
+        for (const pp of classificationPageProposals) {
+          if (pp.pageId) {
+            assignProductToPageId(item.upc, pp.pageId, pp.pageName);
+          } else {
+            assignProductToPage(item.upc, pp.pageName);
           }
         }
       }

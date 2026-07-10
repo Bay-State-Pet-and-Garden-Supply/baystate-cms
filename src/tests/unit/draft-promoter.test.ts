@@ -38,6 +38,30 @@ describe('Draft Promoter Service', () => {
     try { rmSync(tempWorkspaceDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
+  function seedAcceptedCategoryProposal(db: any, sku: string, pageName: string) {
+    const runId = `run-${sku}`;
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO classification_runs (id, workspace_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [runId, wsId, sku, 'completed', now]
+    );
+
+    const pageId = `page-${pageName.replace(/\s+/g, '-').toLowerCase()}`;
+    db.run(
+      `INSERT OR IGNORE INTO page_index (id, name, file_name, page_hash, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [pageId, pageName, `${pageName.replace(/\s+/g, '-').toLowerCase()}.html`, 'dummy-hash', now, now]
+    );
+
+    const proposalId = `prop-${sku}-${pageName.replace(/\s+/g, '-').toLowerCase()}`;
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [proposalId, runId, sku, 'category_page', pageName, JSON.stringify({ pageId, pageName }), 1.0, 'accepted', now]
+    );
+  }
+
   it('should successfully build product drafts and promote them to a change set', async () => {
     const batch = createBatch({
       workspaceId: wsId,
@@ -105,6 +129,8 @@ describe('Draft Promoter Service', () => {
       metadata: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), archivedAt: null },
     };
     writeFileSync(path.join(productFileDir, '123456123456.json'), JSON.stringify(existingProduct));
+
+    seedAcceptedCategoryProposal(db, '123456123456', 'Shoes');
 
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
@@ -204,6 +230,8 @@ describe('Draft Promoter Service', () => {
     };
     writeFileSync(path.join(productFileDir, '987654321098.json'), JSON.stringify(existingProduct));
 
+    seedAcceptedCategoryProposal(db2, '987654321098', 'Dog Food');
+
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
 
@@ -268,6 +296,8 @@ describe('Draft Promoter Service', () => {
       item.id
     );
 
+    seedAcceptedCategoryProposal(db, '888888888888', 'Cat Food');
+
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
@@ -330,6 +360,8 @@ describe('Draft Promoter Service', () => {
       item.id
     );
 
+    seedAcceptedCategoryProposal(db, '777777777777', 'Dog Treats');
+
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
@@ -390,6 +422,8 @@ describe('Draft Promoter Service', () => {
       JSON.stringify(curationData),
       item.id
     );
+
+    seedAcceptedCategoryProposal(db, '555555555555', 'Some Page');
 
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(0);
@@ -456,6 +490,8 @@ describe('Draft Promoter Service', () => {
       item.id
     );
 
+    seedAcceptedCategoryProposal(db, '444444444444', 'Toys');
+
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
@@ -471,5 +507,66 @@ describe('Draft Promoter Service', () => {
     const expectedField1Value = `new${mm}${dd}${yy}`;
     
     expect(draftProduct.customFields['ProductField1']).toBe(expectedField1Value);
+  });
+
+  it('should fail promotion if no accepted category proposals exist', async () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Onboard Promo Fail',
+      fileName: 'promo_fail.xlsx',
+      totalItems: 1
+    });
+
+    const extractionData: ExtractionData = {
+      title: 'No Proposals Product',
+      brand: 'ToyCo',
+      description: 'Brand new toy.',
+      bulletPoints: [],
+      primaryImage: 'products/333333333333/images/primary.jpg',
+      additionalImages: [],
+      price: '$9.99',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: 'https://toyco.com/toy-fail',
+      confidence: 0.9,
+      fieldProvenance: { title: 'json-ld' }
+    };
+
+    const items = insertItems(batch.id, [{
+      upc: '333333333333',
+      name: 'No Proposals Product',
+      price: '$9.99',
+      brandHint: 'ToyCo',
+      rowNumber: 2
+    }]);
+
+    const item = items[0];
+    const curationData = {
+      curatedTitle: 'No Proposals Product',
+      titleSource: 'web',
+      suggestedPages: ['Toys'],
+      suggestedProductType: 'Toy',
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'auto',
+    };
+
+    const db = getDb();
+    db.query("UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(
+      JSON.stringify(extractionData),
+      JSON.stringify(curationData),
+      item.id
+    );
+
+    // We do NOT seed any accepted category proposals here.
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].itemId).toBe(item.id);
+    expect(promoteRes.failures[0].error).toContain('No accepted category page proposals exist');
   });
 });

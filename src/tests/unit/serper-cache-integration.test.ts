@@ -33,8 +33,9 @@ describe('Serper Caching Integration', () => {
 
     // Mock fetch
     global.fetch = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
-      fetchCount++;
+      console.log('FETCH CALLED FOR URL:', url);
       if (url === 'https://google.serper.dev/search') {
+        fetchCount++;
         const body = JSON.parse(init?.body as string);
         return {
           ok: true,
