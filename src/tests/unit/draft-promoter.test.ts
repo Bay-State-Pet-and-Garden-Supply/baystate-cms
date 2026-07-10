@@ -7,6 +7,7 @@ import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { listChangeSets, listChangeSetItems } from '../../db/repositories/change-set-repo';
+import { getProductPageAssignments } from '../../db/repositories/page-repo';
 import type { ExtractionData } from '../../shared/schemas/onboarding';
 
 describe('Draft Promoter Service', () => {
@@ -549,7 +550,7 @@ describe('Draft Promoter Service', () => {
     const curationData = {
       curatedTitle: 'No Proposals Product',
       titleSource: 'web',
-      suggestedPages: ['Toys'],
+      suggestedPages: [],
       suggestedProductType: 'Toy',
       curatedAt: new Date().toISOString(),
       curationMethod: 'auto',
@@ -562,11 +563,83 @@ describe('Draft Promoter Service', () => {
       item.id
     );
 
+    const initialCsCount = listChangeSets(wsId).length;
+
     // We do NOT seed any accepted category proposals here.
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
     expect(promoteRes.failures[0].itemId).toBe(item.id);
-    expect(promoteRes.failures[0].error).toContain('No accepted category page proposals exist');
+    expect(promoteRes.failures[0].error).toContain('No accepted product page proposals or manual page assignments exist');
+    expect(promoteRes.changeSetId).toBeNull();
+
+    // Verify no change set was created in the database
+    const csList = listChangeSets(wsId);
+    expect(csList.length).toBe(initialCsCount);
+  });
+
+  it('promotes successfully using curationData.suggestedPages fallback when no proposals exist', async () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Onboard Promo Fallback',
+      fileName: 'promo_fallback.xlsx',
+      totalItems: 1
+    });
+
+    // Seed the page 'Toys' in page_index so it resolves via getPageByName
+    const db = getDb();
+    db.run(
+      "INSERT OR IGNORE INTO page_index (id, name, file_name, parent_id, page_hash, last_synced_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      ['toy-page-id', 'Toys', 'toys.html', null, 'hash', null, new Date().toISOString(), new Date().toISOString()]
+    );
+
+    const extractionData = {
+      title: 'Manual Page Product',
+      primaryImage: 'products/999999999999/images/primary.jpg',
+      additionalImages: [],
+      price: '$9.99',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: 'https://toyco.com/toy-success',
+      confidence: 0.9,
+      fieldProvenance: { title: 'json-ld' }
+    };
+
+    const items = insertItems(batch.id, [{
+      upc: '999999999999',
+      name: 'Manual Page Product',
+      price: '$9.99',
+      brandHint: 'ToyCo',
+      rowNumber: 3
+    }]);
+
+    const item = items[0];
+    const curationData = {
+      curatedTitle: 'Manual Page Product',
+      titleSource: 'web',
+      suggestedPages: ['Toys'],
+      suggestedProductType: 'Toy',
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'auto',
+    };
+
+    db.query("UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(
+      JSON.stringify(extractionData),
+      JSON.stringify(curationData),
+      item.id
+    );
+
+    const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(promoteRes.failures.length).toBe(0);
+    expect(promoteRes.count).toBe(1);
+
+    // Verify it assigned the product to the page
+    const pageAssignments = getProductPageAssignments('999999999999');
+    expect(pageAssignments.some(p => p.pageName === 'Toys')).toBe(true);
   });
 });

@@ -71,11 +71,9 @@ describe('createInitialState', () => {
     const s = createInitialState();
     expect(s.fields['titleSelector']).toBeDefined();
     expect(s.fields['titleOptionalSelectors']).toBeDefined();
-    expect(s.fields['brandSelector']).toBeDefined();
     expect(s.fields['descriptionSelector']).toBeDefined();
     expect(s.fields['imagesSelector']).toBeDefined();
-    expect(s.fields['priceSelector']).toBeDefined();
-    expect(Object.keys(s.fields)).toHaveLength(6);
+    expect(Object.keys(s.fields)).toHaveLength(4);
   });
 
   it('collapses nutrition, details, variants by default', () => {

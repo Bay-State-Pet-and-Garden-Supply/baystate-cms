@@ -14,6 +14,7 @@ import {
   STANDARD_CUSTOM_FIELDS,
   FIELD_GROUP_ORDER,
   getFieldDefinition,
+  createArbitraryCustomField,
 } from './fieldCatalog';
 import type { FieldDefinition } from './fieldCatalog';
 import { DomainBar } from './components/DomainBar';
@@ -24,6 +25,7 @@ import { ExtractionPreview } from './components/ExtractionPreview';
 import { ValidationSamplesPanel } from './components/ValidationSamplesPanel';
 import { ValidationMatrix } from './components/ValidationMatrix';
 import { SaveBar } from './components/SaveBar';
+import { GeneratedCustomFieldsPanel } from './components/GeneratedCustomFieldsPanel';
 import type { ProfileBuilderProps, FieldCategory } from './profileBuilderTypes';
 import type { ExtractorProfile } from './profileBuilderTypes';
 
@@ -121,7 +123,7 @@ export function ProfileBuilder(props: ProfileBuilderProps) {
 
   // Build custom FieldDefinitions for arbitrary custom fields.
   const customFieldDefs: FieldDefinition[] = state.customFieldOrder
-    .map((key) => getFieldDefinition(key))
+    .map((key) => getFieldDefinition(key) ?? createArbitraryCustomField(key))
     .filter((d): d is FieldDefinition => d !== null);
 
   // Collect into "Custom" group (details category).
@@ -129,6 +131,34 @@ export function ProfileBuilder(props: ProfileBuilderProps) {
     <div style={workspaceStyle}>
       <DomainBar state={state} controller={controller} />
       <SnapshotPanel state={state} controller={controller} />
+
+      {/* ── Generate Selectors ── */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <button
+          type="button"
+          disabled={!state.snapshot || state.generation.status === 'generating'}
+          onClick={() => controller.generateSelectors()}
+          style={{
+            background: state.snapshot && state.generation.status !== 'generating' ? '#2563eb' : '#9ca3af',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 6,
+            padding: '8px 20px',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: state.snapshot && state.generation.status !== 'generating' ? 'pointer' : 'not-allowed',
+          }}
+        >
+          {state.generation.status === 'generating' ? 'Generating...' : state.generation.status === 'failed' ? 'Retry Generate Selectors' : 'Generate Selectors'}
+        </button>
+      </div>
+      {state.generation.error && (
+        <div style={{
+          padding: '6px 10px', background: '#fee2e2', borderRadius: 6, color: '#991b1b', fontSize: 12,
+        }}>
+          {state.generation.error.message}
+        </div>
+      )}
 
       <div style={mainGridStyle}>
         <div style={leftColumnStyle}>
@@ -159,6 +189,9 @@ export function ProfileBuilder(props: ProfileBuilderProps) {
 
           {/* Add custom field */}
           <AddCustomFieldInput controller={controller} />
+
+          {/* Generated custom field suggestions */}
+          <GeneratedCustomFieldsPanel state={state} controller={controller} />
         </div>
 
         <div style={rightRailStyle}>

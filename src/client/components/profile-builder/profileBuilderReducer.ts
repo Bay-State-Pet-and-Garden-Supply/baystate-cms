@@ -24,6 +24,7 @@ import type {
   GenerateSelectorResponse,
   ValidateResponse,
   ExtractorTestResult,
+  GenerateSelectorsResponse,
 } from './profileBuilderTypes';
 import type { FieldCategory } from './profileBuilderTypes';
 import type {
@@ -33,11 +34,24 @@ import type {
   SelectorFieldState,
   FieldStatus,
   RequestState,
+  SelectorGenerationState,
+  FieldSuggestionState,
+  GenerationStatus,
 } from './profileBuilderTypes';
 import type { SelectorEvaluationResult } from './selectorEvaluation';
+import type { SelectorWarning } from '../../../shared/schemas/selector-generation';
 import { createEmptyDraft } from './profileBuilderMapping';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function createInitialGenerationState(): SelectorGenerationState {
+  return {
+    status: 'idle',
+    fieldSuggestions: {},
+    customFieldSuggestions: [],
+    warnings: [],
+  };
+}
 
 function initialRequestState(): RequestState {
   return { loading: false, error: null, success: undefined };
@@ -51,10 +65,8 @@ function buildInitialFields(): Record<string, SelectorFieldState> {
   const fieldKeys = [
     'titleSelector',
     'titleOptionalSelectors',
-    'brandSelector',
     'descriptionSelector',
     'imagesSelector',
-    'priceSelector',
   ];
   const fields: Record<string, SelectorFieldState> = {};
   for (const k of fieldKeys) {
@@ -86,6 +98,7 @@ export function createInitialState(args?: {
       details: true,
       variants: true,
     },
+    generation: createInitialGenerationState(),
     snapshot: null,
     pageHtml: null,
     samples: [],
@@ -169,6 +182,16 @@ export type ProfileBuilderAction =
   | { type: 'save/succeeded'; profile: ExtractorProfile }
   | { type: 'save/failed'; error: string }
 
+  // Selector generation
+  | { type: 'selectorGenerationStarted'; payload: { htmlRef: string; requestedFieldKeys: string[] } }
+  | { type: 'selectorGenerationSucceeded'; payload: GenerateSelectorsResponse }
+  | { type: 'selectorGenerationFailed'; payload: { code: string; message: string; retryable: boolean } }
+  | { type: 'selectorSuggestionAccepted'; payload: { fieldKey: string } }
+  | { type: 'selectorSuggestionRejected'; payload: { fieldKey: string } }
+  | { type: 'customFieldSuggestionAccepted'; payload: { key: string } }
+  | { type: 'customFieldSuggestionRejected'; payload: { key: string } }
+  | { type: 'selectorSuggestionsCleared'; payload?: { reason: 'new_snapshot' | 'manual_clear' | 'profile_reset' } }
+
   // UI state
   | { type: 'category/toggle'; category: FieldCategory };
 
@@ -240,9 +263,50 @@ export function profileBuilderReducer(
         variantSelectionStrategy: p.variantSelectionStrategy,
         customSelectorMetadata: p.customSelectorMetadata ?? {},
       };
+
+      // Rebuild fields mapping from the hydrated selectors
+      const fields = buildInitialFields();
+
+      if (p.titleSelector) {
+        fields['titleSelector'] = {
+          ...fields['titleSelector'],
+          selector: p.titleSelector,
+          status: 'assigned',
+        };
+      }
+      if (p.descriptionSelector) {
+        fields['descriptionSelector'] = {
+          ...fields['descriptionSelector'],
+          selector: p.descriptionSelector,
+          status: 'assigned',
+        };
+      }
+      if (p.imagesSelector) {
+        fields['imagesSelector'] = {
+          ...fields['imagesSelector'],
+          selector: p.imagesSelector,
+          status: 'assigned',
+        };
+      }
+
+      // Add custom fields
+      const customFieldOrder: string[] = [];
+      if (p.customSelectors) {
+        for (const [key, selector] of Object.entries(p.customSelectors)) {
+          customFieldOrder.push(key);
+          fields[key] = {
+            ...(fields[key] ?? createEmptyFieldState(key)),
+            selector: selector || '',
+            status: selector ? 'assigned' : 'unassigned',
+          };
+        }
+      }
+
       return {
         ...state,
         draft,
+        fields,
+        customFieldOrder,
         dirty: false,
       };
     }
@@ -309,6 +373,13 @@ export function profileBuilderReducer(
       return {
         ...state,
         snapshot: action.snapshot,
+        // Clear pending suggestions when a new snapshot is captured
+        generation: {
+          ...state.generation,
+          status: 'idle',
+          fieldSuggestions: {},
+          customFieldSuggestions: [],
+        },
         requests: {
           ...state.requests,
           snapshot: { loading: false, error: null, success: true },
@@ -323,6 +394,191 @@ export function profileBuilderReducer(
           snapshot: { loading: false, error: action.error, success: false },
         },
       };
+
+    // ── Selector Generation ───────────────────────────────────────────────
+    case 'selectorGenerationStarted': {
+      return {
+        ...state,
+        generation: {
+          ...state.generation,
+          status: 'generating',
+          snapshotRef: action.payload.htmlRef,
+          startedAt: Date.now(),
+          error: undefined,
+        },
+      };
+    }
+
+    case 'selectorGenerationSucceeded': {
+      const resp = action.payload;
+      const fieldSuggestions: Record<string, FieldSuggestionState> = {};
+      for (const [fieldKey, suggestion] of Object.entries(resp.fields)) {
+        fieldSuggestions[fieldKey] = {
+          fieldKey,
+          selector: suggestion.selector,
+          resultStatus: suggestion.status,
+          decision: 'pending',
+          quality: suggestion.quality,
+          validation: suggestion.validation,
+          warnings: suggestion.warnings,
+          explanation: suggestion.explanation,
+          preview: suggestion.preview,
+        };
+      }
+      const customFieldSuggestions = (resp.customFields ?? []).map((cf) => ({
+        fieldKey: cf.fieldKey,
+        key: cf.key,
+        label: cf.label,
+        valueType: cf.valueType,
+        selector: cf.selector,
+        resultStatus: cf.status,
+        decision: 'pending' as const,
+        quality: cf.quality,
+        validation: cf.validation,
+        warnings: cf.warnings,
+        explanation: cf.explanation,
+        preview: cf.preview,
+        addedToDraft: false,
+      }));
+      return {
+        ...state,
+        generation: {
+          ...state.generation,
+          status: 'completed',
+          requestId: resp.requestId,
+          completedAt: Date.now(),
+          fieldSuggestions,
+          customFieldSuggestions,
+          warnings: resp.warnings,
+          error: undefined,
+        },
+      };
+    }
+
+    case 'selectorGenerationFailed': {
+      return {
+        ...state,
+        generation: {
+          ...state.generation,
+          status: 'failed',
+          error: action.payload,
+        },
+      };
+    }
+
+    case 'selectorSuggestionAccepted': {
+      const { fieldKey } = action.payload;
+      const suggestion = state.generation.fieldSuggestions[fieldKey];
+      if (!suggestion || suggestion.resultStatus !== 'suggested' || !suggestion.selector) {
+        return state;
+      }
+      const updatedFields = {
+        ...state.fields,
+        [fieldKey]: {
+          ...(state.fields[fieldKey] ?? createEmptyFieldState(fieldKey)),
+          selector: suggestion.selector,
+          status: 'assigned' as const,
+          warnings: [],
+          error: undefined,
+          lastTestedAt: undefined,
+        },
+      };
+      return {
+        ...state,
+        draft: updateDraftSelector(state.draft, fieldKey, suggestion.selector),
+        fields: updatedFields,
+        generation: {
+          ...state.generation,
+          fieldSuggestions: {
+            ...state.generation.fieldSuggestions,
+            [fieldKey]: { ...suggestion, decision: 'accepted' },
+          },
+        },
+        dirty: true,
+      };
+    }
+
+    case 'selectorSuggestionRejected': {
+      const { fieldKey } = action.payload;
+      const suggestion = state.generation.fieldSuggestions[fieldKey];
+      if (!suggestion) return state;
+      return {
+        ...state,
+        generation: {
+          ...state.generation,
+          fieldSuggestions: {
+            ...state.generation.fieldSuggestions,
+            [fieldKey]: { ...suggestion, decision: 'rejected' },
+          },
+        },
+      };
+    }
+
+    case 'customFieldSuggestionAccepted': {
+      const { key } = action.payload;
+      const suggestion = state.generation.customFieldSuggestions.find((s) => s.key === key);
+      if (!suggestion || suggestion.resultStatus !== 'suggested' || !suggestion.selector) {
+        return state;
+      }
+      if (state.customFieldOrder.includes(suggestion.key)) {
+        return state;
+      }
+      const updatedFields = {
+        ...state.fields,
+        [suggestion.key]: {
+          ...(state.fields[suggestion.key] ?? createEmptyFieldState(suggestion.key)),
+          selector: suggestion.selector,
+          status: 'assigned' as const,
+          warnings: [],
+          error: undefined,
+          lastTestedAt: undefined,
+        },
+      };
+      return {
+        ...state,
+        customFieldOrder: [...state.customFieldOrder, suggestion.key],
+        draft: {
+          ...state.draft,
+          customSelectors: {
+            ...state.draft.customSelectors,
+            [suggestion.key]: suggestion.selector,
+          },
+        },
+        fields: updatedFields,
+        generation: {
+          ...state.generation,
+          customFieldSuggestions: state.generation.customFieldSuggestions.map(
+            (s) => s.key === key ? { ...s, decision: 'accepted' as const, addedToDraft: true } : s,
+          ),
+        },
+        dirty: true,
+      };
+    }
+
+    case 'customFieldSuggestionRejected': {
+      const { key } = action.payload;
+      return {
+        ...state,
+        generation: {
+          ...state.generation,
+          customFieldSuggestions: state.generation.customFieldSuggestions.map(
+            (s) => s.key === key ? { ...s, decision: 'rejected' as const } : s,
+          ),
+        },
+      };
+    }
+
+    case 'selectorSuggestionsCleared': {
+      return {
+        ...state,
+        generation: {
+          ...state.generation,
+          status: 'idle',
+          fieldSuggestions: {},
+          customFieldSuggestions: [],
+        },
+      };
+    }
 
     // ── Page HTML ────────────────────────────────────────────────────────
     case 'pageHtml/set':
@@ -497,6 +753,10 @@ export function profileBuilderReducer(
             ...state.draft.customSelectors,
             [key]: '',
           },
+        },
+        fields: {
+          ...state.fields,
+          [key]: createEmptyFieldState(key),
         },
         dirty: true,
       };
@@ -724,8 +984,10 @@ export function deriveFieldStatus(args: {
   previewResult?: ExtractorTestResult | null;
   validation?: ValidateResponse | null;
   fieldKey: string;
+  /** Pending generation suggestion state, if any */
+  generationSuggestion?: FieldSuggestionState | null;
 }): FieldStatus {
-  const { selector, localResult, previewResult, validation, fieldKey } = args;
+  const { selector, localResult, previewResult, validation, fieldKey, generationSuggestion } = args;
 
   // 1. Empty selector.
   if (!selector || !selector.trim()) {
@@ -756,6 +1018,13 @@ export function deriveFieldStatus(args: {
     // Check if this specific field has a value in the preview.
     const hasPreviewValue = fieldHasPreviewValue(previewResult, fieldKey);
     if (hasPreviewValue) return 'tested';
+  }
+
+  // 7b. Pending suggestion — only when field has no existing selector.
+  if (generationSuggestion && generationSuggestion.decision === 'pending' && generationSuggestion.resultStatus === 'suggested') {
+    if (!selector || !selector.trim()) {
+      return 'suggested';
+    }
   }
 
   // 8. Fallback.

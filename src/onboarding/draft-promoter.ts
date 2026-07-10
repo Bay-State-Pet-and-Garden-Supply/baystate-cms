@@ -8,7 +8,7 @@ import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { clearProductPages, assignProductToPage, assignProductToPageId, getProductPageAssignments } from '../db/repositories/page-repo';
+import { clearProductPages, assignProductToPage, assignProductToPageId, getProductPageAssignments, getPageByName } from '../db/repositories/page-repo';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
 import { getAcceptedProposals, getPendingPageProposals, recordHistoryEvent } from '../db/repositories/classification-run-repo';
@@ -154,7 +154,7 @@ export async function promoteItems(
   workspacePath: string,
   batchId: string,
   itemIds: string[],
-): Promise<{ changeSetId: string; count: number; failures: Array<{ itemId: string; error: string }> }> {
+): Promise<{ changeSetId: string | null; count: number; failures: Array<{ itemId: string; error: string }> }> {
   const db = getDb();
 
   const batch = findBatchById(batchId);
@@ -165,15 +165,7 @@ export async function promoteItems(
   const workspace = findWorkspace();
   const baseCommit = workspace?.baselineCommit ?? 'unknown';
 
-  // 1. Create a new change set
-  const dateStr = new Date().toLocaleDateString();
-  const changeSetTitle = `Onboarding: ${batch.name} (${dateStr})`;
-  const changeSet = createChangeSet({
-    workspaceId,
-    title: changeSetTitle,
-    description: `Imported products from batch "${batch.name}" (${batch.fileName})`,
-    baseCommit,
-  });
+  let changeSetId: string | null = null;
 
   let promotedCount = 0;
   const failures: Array<{ itemId: string; error: string }> = [];
@@ -312,9 +304,31 @@ export async function promoteItems(
         console.warn('[DraftPromoter] Failed to read classification proposals:', err);
       }
 
-      // Check if we have accepted page proposals. If not, refuse to promote.
+      // Fallback: if no accepted page proposals exist, check curation data manual page assignments
+      // or existing database page assignments.
       if (classificationPageProposals.length === 0) {
-        const errMsg = 'No accepted category page proposals exist for this item';
+        if (item.curationData?.suggestedPages && item.curationData.suggestedPages.length > 0) {
+          for (const pageName of item.curationData.suggestedPages) {
+            const page = getPageByName(pageName);
+            classificationPageNames.push(pageName);
+            classificationPageProposals.push({ pageId: page?.id || null, pageName });
+          }
+        } else {
+          try {
+            const dbPages = getProductPageAssignments(item.upc);
+            for (const p of dbPages) {
+              if (p.pageName) {
+                classificationPageNames.push(p.pageName);
+                classificationPageProposals.push({ pageId: p.pageId || null, pageName: p.pageName });
+              }
+            }
+          } catch { /* ignore */ }
+        }
+      }
+
+      // Check if we have accepted page proposals or manual page assignments. If not, refuse to promote.
+      if (classificationPageProposals.length === 0) {
+        const errMsg = 'No accepted product page proposals or manual page assignments exist for this item';
         console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
         completePromotionStage(item.id, false, errMsg);
         failures.push({ itemId: item.id, error: errMsg });
@@ -439,8 +453,20 @@ export async function promoteItems(
       const operation = existingApproved ? 'update' : 'create';
 
       // Insert/upsert Change Set Item
+      if (!changeSetId) {
+        const dateStr = new Date().toLocaleDateString();
+        const changeSetTitle = `Onboarding: ${batch.name} (${dateStr})`;
+        const changeSet = createChangeSet({
+          workspaceId,
+          title: changeSetTitle,
+          description: `Imported products from batch "${batch.name}" (${batch.fileName})`,
+          baseCommit,
+        });
+        changeSetId = changeSet.id;
+      }
+
       upsertChangeSetItem({
-        changeSetId: changeSet.id,
+        changeSetId,
         sku: item.upc,
         operation,
         draftJson: draftJsonStr,
@@ -487,7 +513,7 @@ export async function promoteItems(
   })();
 
   return {
-    changeSetId: changeSet.id,
+    changeSetId,
     count: promotedCount,
     failures,
   };

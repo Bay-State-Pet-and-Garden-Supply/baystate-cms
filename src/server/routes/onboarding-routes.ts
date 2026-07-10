@@ -118,6 +118,8 @@ import { parseSpreadsheet, detectColumnMapping, applyColumnMapping } from '../..
 import { matchExistingBrand } from '../../shared/brand-matcher';
 import { OnboardingWorker } from '../../onboarding/job-queue';
 import { getDomainDiagnosticsResponse } from '../../onboarding/domain-diagnostics-service';
+import { generateSelectors } from '../services/profile-builder/generateSelectorsService';
+import { GenerateSelectorsRequestSchema } from '../../shared/schemas/selector-generation';
 import {
   getWorkerHealth,
   snapshotPage,
@@ -1332,6 +1334,149 @@ route.post('/onboarding/settings/profile-tooling/validate', async (c) => {
     });
   }
   return c.json({ ok: true, data: result.data });
+});
+
+/**
+ * POST /api/onboarding/settings/profile-tooling/generate-selectors
+ * One-shot LLM selector generation for the Profile Builder.
+ *
+ * Accepts a snapshot htmlRef + field catalog + optional snapshot context.
+ * Returns validated selector suggestions for all requested fields.
+ *
+ * Rate-limited: 3 requests per authenticated user per rolling minute.
+ */
+const generationRateLimiter = new Map<string, number[]>();
+const activeGenerations = new Map<string, boolean>();
+
+route.post('/onboarding/settings/profile-tooling/generate-selectors', async (c) => {
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const parsed = GenerateSelectorsRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({
+      error: 'Invalid request body',
+      details: parsed.error.flatten(),
+    }, 400);
+  }
+
+  // Use IP + user-agent as a best-effort user identifier for rate limiting
+  const userId =
+    c.req.header('x-forwarded-for') ||
+    c.req.header('x-real-ip') ||
+    'anonymous';
+  const now = Date.now();
+  const windowMs = 60_000;
+
+  // Rate limiting: 3 requests per rolling minute per user
+  const userTimestamps = generationRateLimiter.get(userId) ?? [];
+  const recent = userTimestamps.filter((t) => now - t < windowMs);
+  if (recent.length >= 3) {
+    return c.json({
+      requestId: '',
+      error: {
+        code: 'LLM_RATE_LIMITED',
+        message: 'Rate limit exceeded. Maximum 3 generation requests per minute.',
+        retryable: true,
+      },
+    }, 429);
+  }
+
+  // Rate limiting: 1 concurrent generation per user
+  if (activeGenerations.get(userId)) {
+    return c.json({
+      requestId: '',
+      error: {
+        code: 'LLM_RATE_LIMITED',
+        message: 'A generation request is already in progress for this user.',
+        retryable: true,
+      },
+    }, 429);
+  }
+
+  activeGenerations.set(userId, true);
+  recent.push(now);
+  generationRateLimiter.set(userId, recent.slice(-10));
+
+  const requestId = crypto.randomUUID();
+
+  try {
+    const result = await generateSelectors(parsed.data, { userId, requestId });
+    return c.json(result, 200);
+  } catch (err) {
+    // Map known errors to standardized error responses
+    if (
+      (err as any)?.constructor?.name === 'InvalidArtifactReferenceError'
+    ) {
+      return c.json({
+        requestId,
+        error: { code: 'INVALID_ARTIFACT_REFERENCE', message: (err as Error).message, retryable: false },
+      }, 400);
+    }
+    if (err instanceof Error && err.name === 'SnapshotNotFoundError') {
+      return c.json({
+        requestId,
+        error: { code: 'SNAPSHOT_NOT_FOUND', message: (err as Error).message, retryable: false },
+      }, 404);
+    }
+    if (err instanceof Error && err.name === 'SnapshotTooLargeError') {
+      return c.json({
+        requestId,
+        error: { code: 'SNAPSHOT_TOO_LARGE', message: (err as Error).message, retryable: false },
+      }, 413);
+    }
+    if (err instanceof Error && err.name === 'UnusableSnapshotError') {
+      return c.json({
+        requestId,
+        error: { code: 'UNUSABLE_SNAPSHOT', message: (err as Error).message, retryable: false },
+      }, 422);
+    }
+    if (err instanceof Error && err.name === 'LlmNotConfiguredError') {
+      return c.json({
+        requestId,
+        error: { code: 'LLM_NOT_CONFIGURED', message: (err as Error).message, retryable: false },
+      }, 503);
+    }
+    if (err instanceof Error && err.name === 'LlmProviderError') {
+      const providerErr = err as any;
+      const isTimeout = providerErr?.code === 'LLM_RATE_LIMITED';
+      if (isTimeout) {
+        return c.json({
+          requestId,
+          error: { code: 'LLM_RATE_LIMITED', message: err.message, retryable: providerErr.retryable },
+        }, 429);
+      }
+      if (providerErr.retryable) {
+        return c.json({
+          requestId,
+          error: { code: 'LLM_UNAVAILABLE', message: err.message, retryable: true },
+        }, 503);
+      }
+      return c.json({
+        requestId,
+        error: { code: 'INTERNAL_ERROR', message: err.message, retryable: false },
+      }, 500);
+    }
+    if (err instanceof Error && err.name === 'InvalidLlmResponseError') {
+      return c.json({
+        requestId,
+        error: { code: 'INVALID_LLM_RESPONSE', message: (err as Error).message, retryable: true },
+      }, 502);
+    }
+
+    // Unknown errors → internal
+    console.error('[SelectorGen] Unhandled error:', err);
+    return c.json({
+      requestId,
+      error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred.', retryable: false },
+    }, 500);
+  } finally {
+    activeGenerations.delete(userId);
+  }
 });
 
 /**

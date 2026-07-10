@@ -32,6 +32,11 @@ import type {
 
 } from '../shared/schemas/extraction-worker';
 import type { CurationTargetConfig } from '../shared/schemas/classification';
+import type {
+  GenerateSelectorsResponse,
+  GenerateSelectorsRequest,
+  SnapshotContext,
+} from '../shared/schemas/selector-generation';
 
 const API_BASE = '/api/onboarding';
 
@@ -45,7 +50,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error((data as any).error || `HTTP ${res.status}`);
+    const errorObj = (data as any).error;
+    const errMsg = typeof errorObj === 'object' && errorObj && 'message' in errorObj
+      ? errorObj.message
+      : errorObj || `HTTP ${res.status}`;
+    throw new Error(errMsg);
   }
   return data as T;
 }
@@ -208,8 +217,8 @@ export async function bulkRetryItems(batchId: string, itemIds: string[]): Promis
 export async function promoteBatchItems(
   batchId: string,
   itemIds: string[],
-): Promise<{ changeSetId: string; count: number }> {
-  return request<{ changeSetId: string; count: number }>(`/batches/${batchId}/promote`, {
+): Promise<{ changeSetId: string | null; count: number }> {
+  return request<{ changeSetId: string | null; count: number }>(`/batches/${batchId}/promote`, {
     method: 'POST',
     body: JSON.stringify({ itemIds }),
   });
@@ -845,6 +854,34 @@ export async function getProfileRetryPreview(
   domain: string,
 ): Promise<{ items: ProfileBlockedItem[] }> {
   return request(`/settings/profile-retry-preview/${encodeURIComponent(domain)}`);
+}
+
+export async function generateSelectors(
+  req: GenerateSelectorsRequest & { signal?: AbortSignal },
+): Promise<{ ok: true; data: GenerateSelectorsResponse } | { ok: false; error: { code: string; message: string; retryable: boolean } }> {
+  try {
+    const data = await request<GenerateSelectorsResponse>('/settings/profile-tooling/generate-selectors', {
+      method: 'POST',
+      body: JSON.stringify({
+        htmlRef: req.htmlRef,
+        sourceUrl: req.sourceUrl,
+        runtime: req.runtime,
+        fields: req.fields,
+        snapshotContext: req.snapshotContext,
+      }),
+      signal: (req as any).signal,
+    });
+    return { ok: true, data };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: err instanceof Error ? err.message : String(err),
+        retryable: true,
+      },
+    };
+  }
 }
 
 export async function retryProfileBlockedItems(

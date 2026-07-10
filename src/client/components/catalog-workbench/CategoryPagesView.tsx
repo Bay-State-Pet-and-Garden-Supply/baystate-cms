@@ -39,18 +39,18 @@ export function CategoryPagesView() {
   }, []);
 
   if (loading) {
-    return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading category pages...</div>;
+    return <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading product pages...</div>;
   }
 
   return (
     <div>
       <p style={{ fontSize: 12, color: '#64748b', marginBottom: 16 }}>
-        Category Pages are customer-facing store pages. Assignments validated by page ID (per ADR 0005).
+        Product Pages are customer-facing store pages. Assignments validated by page ID (per ADR 0005).
         Pages without a stable <code>page_id</code> are flagged as name-only assignments.
       </p>
 
       {tree.length === 0 ? (
-        <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>No category pages found. Sync from ShopSite first.</div>
+        <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>No product pages found. Sync from ShopSite first.</div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 16 }}>
           {tree.map(node => (

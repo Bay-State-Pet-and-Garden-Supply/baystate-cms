@@ -11,6 +11,7 @@ import { GenerateSelectorPopover } from './GenerateSelectorPopover';
 import type { ProfileBuilderState, ProfileBuilderController } from '../profileBuilderTypes';
 import type { SelectorFieldState } from '../profileBuilderTypes';
 import type { FieldDefinition } from '../fieldCatalog';
+import type { FieldSuggestionState } from '../profileBuilderTypes';
 
 interface FieldCardProps {
   field: FieldDefinition;
@@ -187,6 +188,9 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
       )}
       {error && <div style={s.err}>{error}</div>}
 
+      {/* ── Suggestion display ── */}
+      {renderFieldSuggestion(field.key, state.generation.fieldSuggestions[field.key], controller)}
+
       <div style={s.actions}>
         {selector && (
           <button type="button" style={s.clearBtn} onClick={() => controller.updateSelector(key, '')}>
@@ -204,6 +208,141 @@ export function FieldCard({ field, selectorState, state, controller }: FieldCard
       </div>
     </div>
   );
+}
+
+// ─── Field Suggestion Renderer ────────────────────────────────────────────
+
+const sug: Record<string, React.CSSProperties> = {
+  wrapper: {
+    marginTop: 8,
+    padding: '8px 10px',
+    background: '#f8fafc',
+    borderRadius: 6,
+    border: '1px solid #e2e8f0',
+  },
+  header: { fontSize: 11, fontWeight: 700, color: '#475569', marginBottom: 4, textTransform: 'uppercase' as const },
+  selector: { fontSize: 13, fontFamily: 'monospace', color: '#1e293b', wordBreak: 'break-all', marginBottom: 4 },
+  meta: { fontSize: 11, color: '#6b7280', marginBottom: 4, display: 'flex', gap: 6, flexWrap: 'wrap' },
+  preview: { fontSize: 12, color: '#374151', marginBottom: 4, fontStyle: 'italic', wordBreak: 'break-all' },
+  warn: { fontSize: 11, color: '#92400e', background: '#fef3c7', padding: '3px 8px', borderRadius: 4, marginBottom: 4 },
+  err: { fontSize: 11, color: '#991b1b', background: '#fee2e2', padding: '3px 8px', borderRadius: 4, marginBottom: 4 },
+  actions: { display: 'flex', gap: 6, marginTop: 4 },
+  acceptBtn: {
+    background: '#2563eb', color: '#fff', border: 'none', borderRadius: 4,
+    padding: '3px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+  },
+  acceptLowBtn: {
+    background: '#f59e0b', color: '#fff', border: 'none', borderRadius: 4,
+    padding: '3px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+  },
+  rejectBtn: {
+    background: 'none', color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 4,
+    padding: '3px 10px', fontSize: 12, fontWeight: 500, cursor: 'pointer',
+  },
+  dismissBtn: {
+    background: 'none', color: '#6b7280', border: '1px solid #d1d5db', borderRadius: 4,
+    padding: '2px 8px', fontSize: 11, cursor: 'pointer',
+  },
+  qualityBadge: { fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 999, textTransform: 'uppercase' as const },
+  noSel: { fontSize: 12, color: '#6b7280', fontStyle: 'italic', marginBottom: 4 },
+};
+
+function qualityBadgeStyle(quality: string): React.CSSProperties {
+  switch (quality) {
+    case 'high': return { ...sug.qualityBadge, background: '#dcfce7', color: '#166534' };
+    case 'medium': return { ...sug.qualityBadge, background: '#dbeafe', color: '#1e40af' };
+    case 'low': return { ...sug.qualityBadge, background: '#fef3c7', color: '#92400e' };
+    default: return { ...sug.qualityBadge, background: '#fee2e2', color: '#991b1b' };
+  }
+}
+
+function renderFieldSuggestion(
+  fieldKey: string,
+  suggestion: FieldSuggestionState | undefined,
+  controller: ProfileBuilderController,
+): React.ReactNode {
+  if (!suggestion || suggestion.decision !== 'pending') return null;
+
+  const { resultStatus, selector, quality, validation, warnings, explanation, preview } = suggestion;
+
+  // ── not_found ──
+  if (resultStatus === 'not_found') {
+    return (
+      <div style={sug.wrapper}>
+        <div style={sug.header}>Generated</div>
+        <div style={sug.noSel}>No reliable selector was found for this field.</div>
+      </div>
+    );
+  }
+
+  // ── invalid ──
+  if (resultStatus === 'invalid') {
+    return (
+      <div style={sug.wrapper}>
+        <div style={sug.header}>Generated selector could not be used</div>
+        {selector && <div style={{ ...sug.err, wordBreak: 'break-all' }}>{selector}</div>}
+        <div style={sug.err}>Invalid CSS selector syntax.</div>
+        <div style={sug.actions}>
+          <button type="button" style={sug.dismissBtn} onClick={() => controller.rejectSelectorSuggestion(fieldKey)}>
+            Dismiss
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── suggested ──
+  if (resultStatus === 'suggested' && selector) {
+    const isLowQuality = quality === 'low' || quality === 'unusable';
+    const warnList = warnings || [];
+
+    return (
+      <div style={sug.wrapper}>
+        <div style={sug.header}>Suggested selector</div>
+        <div style={sug.selector}>{selector}</div>
+        <div style={sug.meta}>
+          <span style={qualityBadgeStyle(quality)}>{quality}</span>
+          <span>{validation.matchedCount} match{validation.matchedCount !== 1 ? 'es' : ''}</span>
+          {validation.visibleMatchedCount != null && (
+            <span>{validation.visibleMatchedCount} visible</span>
+          )}
+          {explanation && <span style={{ color: '#6b7280' }}>· {explanation}</span>}
+        </div>
+        {preview?.text && <div style={sug.preview}>Preview: {preview.text}</div>}
+        {preview?.values && preview.values.length > 0 && (
+          <div style={sug.preview}>Values: {preview.values.slice(0, 3).join(', ')}{preview.values.length > 3 ? ` +${preview.values.length - 3} more` : ''}</div>
+        )}
+        {preview?.imageUrls && preview.imageUrls.length > 0 && (
+          <div style={sug.preview}>Images: {preview.imageUrls.length} found</div>
+        )}
+        {warnList.length > 0 && (
+          <div style={sug.warn}>
+            {warnList.map((w, i) => (
+              <div key={i}>{w.message}</div>
+            ))}
+          </div>
+        )}
+        <div style={sug.actions}>
+          <button
+            type="button"
+            style={isLowQuality ? sug.acceptLowBtn : sug.acceptBtn}
+            onClick={() => controller.acceptSelectorSuggestion(fieldKey)}
+          >
+            {isLowQuality ? 'Accept anyway' : 'Accept ✓'}
+          </button>
+          <button
+            type="button"
+            style={sug.rejectBtn}
+            onClick={() => controller.rejectSelectorSuggestion(fieldKey)}
+          >
+            Reject ✗
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 // ─── Title Optional Sub-component ──────────────────────────────────────────

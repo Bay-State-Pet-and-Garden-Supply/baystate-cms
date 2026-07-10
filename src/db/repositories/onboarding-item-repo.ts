@@ -379,12 +379,25 @@ export function resetItemsToPending(itemIds: string[]): void {
   if (itemIds.length === 0) return;
   const db = getDb();
   const now = new Date().toISOString();
-  const placeholders = itemIds.map(() => '?').join(', ');
-  db.query(
-    `UPDATE onboarding_items
-     SET stage_status = 'pending', error_message = NULL, retry_count = 0, curation_data_json = NULL, updated_at = ?
-     WHERE id IN (${placeholders})`,
-  ).run(now, ...itemIds);
+  db.transaction(() => {
+    for (const id of itemIds) {
+      const item = findItemById(id);
+      if (!item) continue;
+      if (item.stage === 'review' || item.stage === 'promotion') {
+        db.query(
+          `UPDATE onboarding_items
+           SET stage_status = 'pending', error_message = NULL, retry_count = 0, updated_at = ?
+           WHERE id = ?`,
+        ).run(now, id);
+      } else {
+        db.query(
+          `UPDATE onboarding_items
+           SET stage_status = 'pending', error_message = NULL, retry_count = 0, curation_data_json = NULL, updated_at = ?
+           WHERE id = ?`,
+        ).run(now, id);
+      }
+    }
+  })();
 }
 
 /**

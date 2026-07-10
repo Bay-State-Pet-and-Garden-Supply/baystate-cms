@@ -34,17 +34,9 @@ describe('CORE_FIELDS', () => {
     expect(field!.cardinality).toBe('multiple');
   });
 
-  it('includes brandSelector, descriptionSelector, imagesSelector', () => {
-    expect(CORE_FIELDS.find((f) => f.key === 'brandSelector')).toBeDefined();
+  it('includes descriptionSelector, imagesSelector', () => {
     expect(CORE_FIELDS.find((f) => f.key === 'descriptionSelector')).toBeDefined();
     expect(CORE_FIELDS.find((f) => f.key === 'imagesSelector')).toBeDefined();
-  });
-
-  it('includes priceSelector as deprecated', () => {
-    const field = CORE_FIELDS.find((f) => f.key === 'priceSelector');
-    expect(field).toBeDefined();
-    expect(field!.deprecated).toBe(true);
-    expect(field!.category).toBe('details');
   });
 
   it('has all core fields with outputTarget core', () => {
@@ -53,8 +45,8 @@ describe('CORE_FIELDS', () => {
     }
   });
 
-  it('has 6 core fields', () => {
-    expect(CORE_FIELDS).toHaveLength(6);
+  it('has 4 core fields', () => {
+    expect(CORE_FIELDS).toHaveLength(4);
   });
 });
 

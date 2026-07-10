@@ -8,7 +8,7 @@
  * The Bun server owns profile health decisions.
  *
  * Supports two runtimes from profileDraft.runtime:
- *   - **static**:  Plain HTTP fetch + regex-based selector extraction (no browser).
+ *   - **static**:  Plain HTTP fetch + Cheerio-based CSS selector evaluation (no browser).
  *   - **rendered**: Headless Playwright Chromium with JS execution for selector extraction.
  *
  * Artifact files are written under:
@@ -19,6 +19,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { chromium } from 'playwright';
+import * as cheerio from 'cheerio';
 import {
   ValidateRequestSchema,
   ValidateResponseSchema,
@@ -49,109 +50,67 @@ const RENDERED_DWELL_MS = 2_000;
 // ─── HTML text extraction by CSS selector ──────────────────────────────────────
 
 /**
- * Escape special regex characters in a string.
+ * Evaluate a CSS selector against HTML using Cheerio and extract text content
+ * from the first matched element. Handles compound selectors, custom elements,
+ * combinators, and pseudo-classes that the old regex approach could not.
+ * Returns null for zero matches or invalid/unparseable CSS.
  */
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Strip HTML tags and decode common entities from a text fragment.
- */
-function stripHtmlAndTrim(text: string): string {
-  return text
-    .replace(/<[^>]*>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * Attempt to extract text content from HTML for a given CSS selector.
- *
- * Supports class (`.foo`), ID (`#bar`), tag (`div`), and simple attribute
- * (`[data-x]`, `[data-x="y"]`) selectors. For more complex selectors falls
- * back to matching the selector string as a substring within element attributes.
- */
-function extractTextBySelector(html: string, selector: string): string | null {
-  const sel = selector.trim();
+function evaluateSelectorText(html: string, selector: string): string | null {
+  const sel = selector?.trim();
   if (!sel) return null;
-
-  // ── Class selector ─────────────────────────────────────────────────────────
-  if (sel.startsWith('.')) {
-    const className = sel.slice(1);
-    const pattern = new RegExp(
-      `<([a-zA-Z0-9]+)[^>]*class\\s*=\\s*["'][^"']*\\b${escapeRegex(className)}\\b[^"']*["'][^>]*>([\\s\\S]*?)<\\/\\1>`,
-      'i',
-    );
-    const match = html.match(pattern);
-    if (match) return stripHtmlAndTrim(match[2]);
-
-    // Broader match: just look for the class name anywhere in the tag
-    const broad = new RegExp(
-      `<([a-zA-Z0-9]+)[^>]*\\b${escapeRegex(className)}\\b[^>]*>([\\s\\S]*?)<\\/\\1>`,
-      'i',
-    );
-    const broadMatch = html.match(broad);
-    if (broadMatch) return stripHtmlAndTrim(broadMatch[2]);
+  try {
+    const $ = cheerio.load(html);
+    const els = $(sel);
+    if (els.length === 0) return null;
+    const text = $(els[0]).text().replace(/\s+/g, ' ').trim();
+    return text || null;
+  } catch {
+    return null;
   }
+}
 
-  // ── ID selector ────────────────────────────────────────────────────────────
-  if (sel.startsWith('#')) {
-    const id = escapeRegex(sel.slice(1));
-    const pattern = new RegExp(
-      `<([a-zA-Z0-9]+)[^>]*id\\s*=\\s*["']${id}["'][^>]*>([\\s\\S]*?)<\\/\\1>`,
-      'i',
-    );
-    const match = html.match(pattern);
-    if (match) return stripHtmlAndTrim(match[2]);
+/**
+ * Evaluate a CSS selector against HTML using Cheerio and collect usable image
+ * source URLs from matched elements and their descendant `<img>` elements.
+ * Returns an empty array for zero matches, invalid CSS, or no images found.
+ */
+function evaluateSelectorImageUrls(html: string, selector: string): string[] {
+  const sel = selector?.trim();
+  if (!sel) return [];
+  try {
+    const $ = cheerio.load(html);
+    const els = $(sel);
+    const seen = new Set<string>();
+    const urls: string[] = [];
+    els.each((_idx, el) => {
+      const $el = $(el);
+      const imgs = $el.is('img') ? $el : $el.find('img');
+      imgs.each((__, imgEl) => {
+        const $img = $(imgEl);
+        for (const attr of ['src', 'data-src', 'data-original', 'data-lazy-src']) {
+          const val = $img.attr(attr);
+          if (val && isUsableImageUrl(val) && !seen.has(val)) {
+            seen.add(val);
+            urls.push(val);
+            break;
+          }
+        }
+        const srcset = $img.attr('srcset') || $img.attr('data-srcset');
+        if (srcset) {
+          for (const part of srcset.split(',')) {
+            const url = part.trim().split(/\s+/)[0];
+            if (url && isUsableImageUrl(url) && !seen.has(url)) {
+              seen.add(url);
+              urls.push(url);
+            }
+          }
+        }
+      });
+    });
+    return urls;
+  } catch {
+    return [];
   }
-
-  // ── Attribute selector [attr] or [attr="value"] ────────────────────────────
-  const attrMatch = sel.match(/\[([^\]=]+)(?:=(["']?)([^\]]*?)\2)?\]/);
-  if (attrMatch) {
-    const attrName = escapeRegex(attrMatch[1]);
-    const attrValue = attrMatch[3];
-    const tagPart = sel.split('[')[0] || '[a-zA-Z0-9]+';
-
-    const attrPattern =
-      attrValue !== undefined
-        ? `${attrName}\\s*=\\s*["']?${escapeRegex(attrValue)}["']?`
-        : attrName;
-
-    const pattern = new RegExp(
-      `<(${tagPart})[^>]*${attrPattern}[^>]*>([\\s\\S]*?)<\\/\\1>`,
-      'i',
-    );
-    const match = html.match(pattern);
-    if (match) return stripHtmlAndTrim(match[2]);
-  }
-
-  // ── Tag-only selector (e.g. "h1", "div") ──────────────────────────────────
-  if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(sel)) {
-    const pattern = new RegExp(
-      `<(${escapeRegex(sel)})[^>]*>([\\s\\S]*?)<\\/\\1>`,
-      'i',
-    );
-    const match = html.match(pattern);
-    if (match) return stripHtmlAndTrim(match[2]);
-  }
-
-  // ── Fallback: match selector text as substring in element attributes ──────
-  const generic = new RegExp(
-    `<([a-zA-Z0-9]+)[^>]*${escapeRegex(sel)}[^>]*>([\\s\\S]*?)<\\/\\1>`,
-    'i',
-  );
-  const genericMatch = html.match(generic);
-  if (genericMatch) return stripHtmlAndTrim(genericMatch[2]);
-
-  return null;
 }
 
 // ─── Image URL extraction helpers ──────────────────────────────────────────────
@@ -285,13 +244,35 @@ function validateSample(input: SampleValidationInput): ValidationSampleResult {
     }
 
     try {
-      const extracted = extractTextBySelector(html, selector);
+      // ── Images field: evaluate selector for image sources ────────────
+      const isImages =
+        fieldName === 'imagesSelector' ||
+        fieldName === 'images' ||
+        fieldName === 'imageSelector' ||
+        fieldName === 'image';
+
+      if (isImages) {
+        const imageUrls = evaluateSelectorImageUrls(html, selector);
+        const warnings: string[] = [];
+        if (imageUrls.length === 0) {
+          warnings.push(`Selector "${selector}" matched no images`);
+        }
+        fieldResults[fieldName] = {
+          status: warnings.length > 0 ? 'fail' : 'pass',
+          extractedValue: `${imageUrls.length} images found`,
+          warnings,
+        };
+        continue;
+      }
+
+      // ── Text field: evaluate selector for text content ─────────────
+      const extracted = evaluateSelectorText(html, selector);
 
       if (!extracted) {
         fieldResults[fieldName] = {
           status: 'fail',
           extractedValue: null,
-          warnings: [`Selector "${selector}" returned no value`],
+          warnings: [`Selector "${selector}" matched no elements`],
         };
         continue;
       }
@@ -324,26 +305,6 @@ function validateSample(input: SampleValidationInput): ValidationSampleResult {
         if (!hasNumericPrice) {
           warnings.push('Extracted price does not contain numeric value');
         }
-      }
-
-      // ── Images field: count images from the selector ─────────────────
-      const isImages =
-        fieldName === 'imagesSelector' ||
-        fieldName === 'images' ||
-        fieldName === 'imageSelector' ||
-        fieldName === 'image';
-
-      if (isImages) {
-        const imageUrls = extractAllImageSources(html);
-        if (imageUrls.length === 0) {
-          warnings.push('Image selector returned no images');
-        }
-        fieldResults[fieldName] = {
-          status: warnings.length > 0 ? 'warning' : 'pass',
-          extractedValue: `${imageUrls.length} images found`,
-          warnings,
-        };
-        continue;
       }
 
       // ── Default text field ──────────────────────────────────────────
@@ -405,7 +366,7 @@ function validateSample(input: SampleValidationInput): ValidationSampleResult {
   if (!variantSelectionStrategy || !variantSelectionStrategy.containerSelector) {
     variantResult = null;
   } else {
-    const containerEl = extractTextBySelector(html, variantSelectionStrategy.containerSelector);
+    const containerEl = evaluateSelectorText(html, variantSelectionStrategy.containerSelector);
     const containerFound = containerEl !== null && containerEl !== '';
     const hasOptions = variantSelectionStrategy.detectedOptions.length > 0;
     const strategyValid = containerFound && hasOptions;
@@ -811,3 +772,7 @@ export function handleValidate(req: IncomingMessage, res: ServerResponse): void 
     res.end(JSON.stringify(fallback));
   });
 }
+
+// ─── Exports for testing ────────────────────────────────────────────────────────
+
+export { evaluateSelectorText, evaluateSelectorImageUrls };

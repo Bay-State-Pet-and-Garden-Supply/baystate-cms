@@ -63,14 +63,7 @@ export const CORE_FIELDS: readonly FieldDefinition[] = [
     cardinality: 'multiple',
     category: 'identity',
   },
-  {
-    key: 'brandSelector',
-    label: 'Brand',
-    outputTarget: 'core',
-    valueType: 'text',
-    cardinality: 'single',
-    category: 'identity',
-  },
+
   {
     key: 'descriptionSelector',
     label: 'Description',
@@ -88,15 +81,6 @@ export const CORE_FIELDS: readonly FieldDefinition[] = [
     cardinality: 'multiple',
     category: 'media',
     validationHints: { minMatchCount: 1 },
-  },
-  {
-    key: 'priceSelector',
-    label: 'Price',
-    outputTarget: 'core',
-    valueType: 'text',
-    cardinality: 'single',
-    category: 'details',
-    deprecated: true,
   },
 ];
 

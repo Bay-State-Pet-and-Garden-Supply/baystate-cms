@@ -52,6 +52,18 @@ export function SaveBar({ state, controller }: SaveBarProps) {
     warnings.push('Runtime is "static" — dynamic content may not be captured.');
   }
 
+  // Count warnings from accepted generated selectors
+  const acceptedFieldWarnings = Object.values(state.generation.fieldSuggestions)
+    .filter((s) => s.decision === 'accepted' && s.warnings.length > 0)
+    .reduce((sum, s) => sum + s.warnings.length, 0);
+  const acceptedCustomFieldWarnings = state.generation.customFieldSuggestions
+    .filter((s) => s.addedToDraft && s.warnings.length > 0)
+    .reduce((sum, s) => sum + s.warnings.length, 0);
+  const totalSuggestionWarnings = acceptedFieldWarnings + acceptedCustomFieldWarnings;
+  if (totalSuggestionWarnings > 0) {
+    warnings.push(`${totalSuggestionWarnings} warning${totalSuggestionWarnings !== 1 ? 's' : ''} from generated selectors should be reviewed before saving.`);
+  }
+
   const canSave = blockingErrors.length === 0 && !isSaving && dirty;
 
   const handleSave = () => { if (canSave) controller.saveProfile(); };

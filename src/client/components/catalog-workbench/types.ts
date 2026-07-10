@@ -91,7 +91,7 @@ export const WORKBENCH_TABS: WorkbenchTab[] = [
   { id: 'products', label: 'Products' },
   { id: 'fields', label: 'Catalog Fields' },
   { id: 'types', label: 'Types & Attributes' },
-  { id: 'pages', label: 'Category Pages' },
+  { id: 'pages', label: 'Product Pages' },
   { id: 'mappings', label: 'Mappings' },
   { id: 'health', label: 'Schema Health' },
 ];

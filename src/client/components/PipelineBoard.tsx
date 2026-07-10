@@ -99,8 +99,10 @@ export function PipelineBoard({
   const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [manualUrlInput, setManualUrlInput] = useState('');
+  const [manualImageUrl, setManualImageUrl] = useState('');
   const [showEditUrl, setShowEditUrl] = useState(false);
   const [storePages, setStorePages] = useState<string[]>([]);
+  const [pageSearchQuery, setPageSearchQuery] = useState('');
   const [_drawerBrandName, setDrawerBrandName] = useState('');
   const [_drawerBrandDomain, setDrawerBrandDomain] = useState('');
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -422,6 +424,7 @@ export function PipelineBoard({
     reviewItemRef.current = item.id;
     setReviewItem(item);
     setManualUrlInput(item.sourceUrl || '');
+    setManualImageUrl('');
     setShowEditUrl(false);
     setDrawerBrandName(item.brandHint || '');
     setSaveStatus('idle');
@@ -476,10 +479,12 @@ export function PipelineBoard({
     setReviewExtraction(null);
     setEditFields({});
     setCurationFields({});
+    setManualImageUrl('');
     setClassificationProposals([]);
     setClassificationEvidence([]);
     setSaveStatus('idle');
     setSaveError(null);
+    setPageSearchQuery('');
     await fetchStaged();
   };
 
@@ -738,7 +743,7 @@ export function PipelineBoard({
                           ⚠ Profile required
                         </span>
                         {onOpenProfileBuilder && (
-                          <a href="#" onClick={(e) => { e.preventDefault(); onOpenProfileBuilder(itemDomain, item); }} style={{ fontSize: 10, color: '#2563eb', fontWeight: 600, textDecoration: 'underline' }}>
+                          <a href="#" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onOpenProfileBuilder(itemDomain, item); }} style={{ fontSize: 10, color: '#2563eb', fontWeight: 600, textDecoration: 'underline' }}>
                             Open Profile Builder →
                           </a>
                         )}
@@ -2061,17 +2066,11 @@ export function PipelineBoard({
                       ...additionalImages.map(img => ({ url: img, isPrimary: false }))
                     ];
 
-                    if (allImages.length === 0) return null;
-
-                    // Ensure indices are within bounds
-                    const activeIndex = Math.min(activeImageIdx, Math.max(0, allImages.length - 1));
-                    const activeImage = allImages[activeIndex];
-
-                    if (!activeImage) return null;
-
-                    const activeImgSrc = activeImage.url.startsWith('products/')
-                      ? `/api/onboarding/${activeImage.url}`
-                      : activeImage.url;
+                    const activeIndex = allImages.length > 0 ? Math.min(activeImageIdx, Math.max(0, allImages.length - 1)) : -1;
+                    const activeImage = activeIndex !== -1 ? allImages[activeIndex] : null;
+                    const activeImgSrc = activeImage
+                      ? (activeImage.url.startsWith('products/') ? `/api/onboarding/${activeImage.url}` : activeImage.url)
+                      : '';
 
                     return (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
@@ -2082,197 +2081,295 @@ export function PipelineBoard({
                           </p>
                         </div>
 
-                        {/* Main Focused Image View */}
-                        <div
-                          style={{
-                            position: 'relative',
-                            width: '100%',
-                            height: 320,
-                            border: `1px solid ${activeImage.isPrimary ? '#10b981' : '#e5e7eb'}`,
-                            borderRadius: 12,
-                            background: activeImage.isPrimary ? '#f0fdf4' : '#f9fafb',
-                            display: 'flex',
-                            justifyContent: 'center',
-                            alignItems: 'center',
-                            boxShadow: activeImage.isPrimary
-                              ? '0 4px 12px rgba(16, 185, 129, 0.08)'
-                              : '0 2px 8px rgba(0,0,0,0.03)',
-                            padding: 16,
-                            boxSizing: 'border-box',
-                          }}
-                        >
-                          <img
-                            src={activeImgSrc}
-                            alt="Active product view"
+                        {allImages.length === 0 ? (
+                          <div
                             style={{
-                              maxWidth: '100%',
-                              maxHeight: '100%',
-                              objectFit: 'contain',
-                              borderRadius: 8,
-                            }}
-                          />
-                          
-                          {/* Image Status Pill overlay */}
-                          <span
-                            style={{
-                              position: 'absolute',
-                              top: 12,
-                              left: 12,
-                              fontSize: 11,
-                              fontWeight: 700,
-                              color: activeImage.isPrimary ? '#065f46' : '#374151',
-                              background: activeImage.isPrimary ? '#d1fae5' : '#e5e7eb',
-                              padding: '4px 10px',
-                              borderRadius: 20,
-                              boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+                              position: 'relative',
+                              width: '100%',
+                              height: 120,
+                              border: '1px dashed #d1d5db',
+                              borderRadius: 12,
+                              background: '#f9fafb',
+                              display: 'flex',
+                              justifyContent: 'center',
+                              alignItems: 'center',
+                              boxSizing: 'border-box',
+                              padding: 16,
+                              color: '#6b7280',
+                              fontSize: 13,
                             }}
                           >
-                            {activeImage.isPrimary ? '★ Primary Image' : 'Variant Image'}
-                          </span>
-                        </div>
+                            No images available. Add an image URL below to get started.
+                          </div>
+                        ) : (
+                          <>
+                            {/* Main Focused Image View */}
+                            <div
+                              style={{
+                                position: 'relative',
+                                width: '100%',
+                                height: 320,
+                                border: `1px solid ${activeImage?.isPrimary ? '#10b981' : '#e5e7eb'}`,
+                                borderRadius: 12,
+                                background: activeImage?.isPrimary ? '#f0fdf4' : '#f9fafb',
+                                display: 'flex',
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                boxShadow: activeImage?.isPrimary
+                                  ? '0 4px 12px rgba(16, 185, 129, 0.08)'
+                                  : '0 2px 8px rgba(0,0,0,0.03)',
+                                padding: 16,
+                                boxSizing: 'border-box',
+                              }}
+                            >
+                              {activeImage && (
+                                <img
+                                  src={activeImgSrc}
+                                  alt="Active product view"
+                                  style={{
+                                    maxWidth: '100%',
+                                    maxHeight: '100%',
+                                    objectFit: 'contain',
+                                    borderRadius: 8,
+                                  }}
+                                />
+                              )}
+                              
+                              {/* Image Status Pill overlay */}
+                              {activeImage && (
+                                <span
+                                  style={{
+                                    position: 'absolute',
+                                    top: 12,
+                                    left: 12,
+                                    fontSize: 11,
+                                    fontWeight: 700,
+                                    color: activeImage.isPrimary ? '#065f46' : '#374151',
+                                    background: activeImage.isPrimary ? '#d1fae5' : '#e5e7eb',
+                                    padding: '4px 10px',
+                                    borderRadius: 20,
+                                    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
+                                  }}
+                                >
+                                  {activeImage.isPrimary ? '★ Primary Image' : 'Variant Image'}
+                                </span>
+                              )}
+                            </div>
 
-                        {/* Active Image Action Controls */}
-                        <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
-                          {!activeImage.isPrimary && (
+                            {/* Active Image Action Controls */}
+                            {activeImage && (
+                              <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                                {!activeImage.isPrimary && (
+                                  <button
+                                    onClick={() => {
+                                      const newPrimary = activeImage.url;
+                                      const oldPrimary = editFields.primaryImage;
+                                      const newAdditional = [
+                                        ...(oldPrimary ? [oldPrimary] : []),
+                                        ...additionalImages.filter(x => x !== newPrimary)
+                                      ];
+                                      const nextEdit = {
+                                        ...editFields,
+                                        primaryImage: newPrimary,
+                                        additionalImages: newAdditional
+                                      };
+                                      setEditFields(nextEdit);
+                                      saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
+                                    }}
+                                    style={{
+                                      padding: '6px 16px',
+                                      fontSize: 12,
+                                      fontWeight: 600,
+                                      background: '#10b981',
+                                      color: '#fff',
+                                      border: 'none',
+                                      borderRadius: 6,
+                                      cursor: 'pointer',
+                                      transition: 'all 0.15s',
+                                      boxShadow: '0 2px 4px rgba(16, 185, 129, 0.2)',
+                                    }}
+                                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#059669'; }}
+                                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#10b981'; }}
+                                  >
+                                    Set as Primary Image
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => {
+                                    let nextEdit;
+                                    if (activeImage.isPrimary) {
+                                      const newPrimary = additionalImages[0] || null;
+                                      const newAdditional = additionalImages.slice(1);
+                                      nextEdit = {
+                                        ...editFields,
+                                        primaryImage: newPrimary,
+                                        additionalImages: newAdditional
+                                      };
+                                    } else {
+                                      nextEdit = {
+                                        ...editFields,
+                                        additionalImages: additionalImages.filter(x => x !== activeImage.url)
+                                      };
+                                    }
+                                    setEditFields(nextEdit);
+                                    saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
+                                    setActiveImageIdx(prev => Math.max(0, prev - 1));
+                                  }}
+                                  style={{
+                                    padding: '6px 16px',
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    background: '#fff',
+                                    border: '1px solid #fca5a5',
+                                    color: '#dc2626',
+                                    borderRadius: 6,
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s',
+                                  }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#fee2e2'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff'; }}
+                                >
+                                  Remove This Image
+                                </button>
+                              </div>
+                            )}
+
+                            {/* Thumbnails strip below */}
+                            <div
+                              style={{
+                                display: 'flex',
+                                gap: 10,
+                                overflowX: 'auto',
+                                padding: '4px 2px 8px 2px',
+                                borderTop: '1px solid #f3f4f6',
+                                scrollbarWidth: 'thin',
+                              }}
+                            >
+                              {allImages.map((img, idx) => {
+                                const isCurrent = idx === activeIndex;
+                                const imgSrc = img.url.startsWith('products/') ? `/api/onboarding/${img.url}` : img.url;
+                                return (
+                                  <div
+                                    key={idx}
+                                    onClick={() => setActiveImageIdx(idx)}
+                                    style={{
+                                      position: 'relative',
+                                      width: 64,
+                                      height: 64,
+                                      flexShrink: 0,
+                                      border: isCurrent
+                                        ? '2px solid #7c3aed'
+                                        : img.isPrimary
+                                        ? '2px solid #10b981'
+                                        : '1px solid #e5e7eb',
+                                      borderRadius: 8,
+                                      padding: 2,
+                                      background: '#fff',
+                                      cursor: 'pointer',
+                                      transition: 'all 0.15s',
+                                      boxSizing: 'border-box',
+                                      opacity: isCurrent ? 1 : 0.75,
+                                    }}
+                                    onMouseEnter={(e) => { if (!isCurrent) e.currentTarget.style.opacity = '1'; }}
+                                    onMouseLeave={(e) => { if (!isCurrent) e.currentTarget.style.opacity = '0.75'; }}
+                                  >
+                                    <img
+                                      src={imgSrc}
+                                      alt={`Thumbnail ${idx + 1}`}
+                                      style={{
+                                        width: '100%',
+                                        height: '100%',
+                                        objectFit: 'contain',
+                                        borderRadius: 6,
+                                      }}
+                                    />
+                                    {img.isPrimary && (
+                                      <div
+                                        style={{
+                                          position: 'absolute',
+                                          bottom: -2,
+                                          right: -2,
+                                          width: 12,
+                                          height: 12,
+                                          borderRadius: '50%',
+                                          background: '#10b981',
+                                          border: '2px solid #fff',
+                                        }}
+                                      />
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </>
+                        )}
+
+                        {/* Add Image URL Manually */}
+                        <div style={{ marginTop: 6, borderTop: '1px solid #f3f4f6', paddingTop: 12 }}>
+                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563', display: 'block', marginBottom: 6 }}>
+                            Add Image URL Manually
+                          </label>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <input
+                              type="text"
+                              placeholder="https://example.com/image.jpg"
+                              value={manualImageUrl}
+                              onChange={(e) => setManualImageUrl(e.target.value)}
+                              style={{
+                                flex: 1,
+                                padding: '8px 12px',
+                                border: '1px solid #d1d5db',
+                                borderRadius: 6,
+                                fontSize: 13,
+                                boxSizing: 'border-box',
+                              }}
+                            />
                             <button
                               onClick={() => {
-                                const newPrimary = activeImage.url;
-                                const oldPrimary = editFields.primaryImage;
-                                const newAdditional = [
-                                  ...(oldPrimary ? [oldPrimary] : []),
-                                  ...additionalImages.filter(x => x !== newPrimary)
-                                ];
-                                const nextEdit = {
-                                  ...editFields,
-                                  primaryImage: newPrimary,
-                                  additionalImages: newAdditional
-                                };
+                                if (!manualImageUrl.trim()) return;
+                                const url = manualImageUrl.trim();
+                                let nextEdit;
+                                if (!editFields.primaryImage) {
+                                  nextEdit = {
+                                    ...editFields,
+                                    primaryImage: url,
+                                  };
+                                  setActiveImageIdx(0);
+                                } else {
+                                  const additional = editFields.additionalImages || [];
+                                  if (!additional.includes(url) && editFields.primaryImage !== url) {
+                                    nextEdit = {
+                                      ...editFields,
+                                      additionalImages: [...additional, url],
+                                    };
+                                    setActiveImageIdx((editFields.primaryImage ? 1 : 0) + additional.length);
+                                  } else {
+                                    nextEdit = editFields;
+                                  }
+                                }
                                 setEditFields(nextEdit);
-                                saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
+                                if (reviewItem) {
+                                  saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
+                                }
+                                setManualImageUrl('');
                               }}
                               style={{
-                                padding: '6px 16px',
-                                fontSize: 12,
+                                padding: '8px 16px',
+                                fontSize: 13,
                                 fontWeight: 600,
-                                background: '#10b981',
+                                background: '#7c3aed',
                                 color: '#fff',
                                 border: 'none',
                                 borderRadius: 6,
                                 cursor: 'pointer',
-                                transition: 'all 0.15s',
-                                boxShadow: '0 2px 4px rgba(16, 185, 129, 0.2)',
+                                transition: 'background-color 0.15s',
                               }}
-                              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#059669'; }}
-                              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#10b981'; }}
+                              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#6d28d9'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#7c3aed'; }}
                             >
-                              Set as Primary Image
+                              Add URL
                             </button>
-                          )}
-                          <button
-                            onClick={() => {
-                              let nextEdit;
-                              if (activeImage.isPrimary) {
-                                const newPrimary = additionalImages[0] || null;
-                                const newAdditional = additionalImages.slice(1);
-                                nextEdit = {
-                                  ...editFields,
-                                  primaryImage: newPrimary,
-                                  additionalImages: newAdditional
-                                };
-                              } else {
-                                nextEdit = {
-                                  ...editFields,
-                                  additionalImages: additionalImages.filter(x => x !== activeImage.url)
-                                };
-                              }
-                              setEditFields(nextEdit);
-                              saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
-                              setActiveImageIdx(prev => Math.max(0, prev - 1));
-                            }}
-                            style={{
-                              padding: '6px 16px',
-                              fontSize: 12,
-                              fontWeight: 600,
-                              background: '#fff',
-                              border: '1px solid #fca5a5',
-                              color: '#dc2626',
-                              borderRadius: 6,
-                              cursor: 'pointer',
-                              transition: 'all 0.15s',
-                            }}
-                            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#fee2e2'; }}
-                            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff'; }}
-                          >
-                            Remove This Image
-                          </button>
-                        </div>
-
-                        {/* Thumbnails strip below */}
-                        <div
-                          style={{
-                            display: 'flex',
-                            gap: 10,
-                            overflowX: 'auto',
-                            padding: '4px 2px 8px 2px',
-                            borderTop: '1px solid #f3f4f6',
-                            scrollbarWidth: 'thin',
-                          }}
-                        >
-                          {allImages.map((img, idx) => {
-                            const isCurrent = idx === activeIndex;
-                            const imgSrc = img.url.startsWith('products/') ? `/api/onboarding/${img.url}` : img.url;
-                            return (
-                              <div
-                                key={idx}
-                                onClick={() => setActiveImageIdx(idx)}
-                                style={{
-                                  position: 'relative',
-                                  width: 64,
-                                  height: 64,
-                                  flexShrink: 0,
-                                  border: isCurrent
-                                    ? '2px solid #7c3aed'
-                                    : img.isPrimary
-                                    ? '2px solid #10b981'
-                                    : '1px solid #e5e7eb',
-                                  borderRadius: 8,
-                                  padding: 2,
-                                  background: '#fff',
-                                  cursor: 'pointer',
-                                  transition: 'all 0.15s',
-                                  boxSizing: 'border-box',
-                                  opacity: isCurrent ? 1 : 0.75,
-                                }}
-                                onMouseEnter={(e) => { if (!isCurrent) e.currentTarget.style.opacity = '1'; }}
-                                onMouseLeave={(e) => { if (!isCurrent) e.currentTarget.style.opacity = '0.75'; }}
-                              >
-                                <img
-                                  src={imgSrc}
-                                  alt={`Thumbnail ${idx + 1}`}
-                                  style={{
-                                    width: '100%',
-                                    height: '100%',
-                                    objectFit: 'contain',
-                                    borderRadius: 6,
-                                  }}
-                                />
-                                {img.isPrimary && (
-                                  <div
-                                    style={{
-                                      position: 'absolute',
-                                      bottom: -2,
-                                      right: -2,
-                                      width: 12,
-                                      height: 12,
-                                      borderRadius: '50%',
-                                      background: '#10b981',
-                                      border: '2px solid #fff',
-                                    }}
-                                  />
-                                )}
-                              </div>
-                            );
-                          })}
+                          </div>
                         </div>
                       </div>
                     );
@@ -2370,28 +2467,95 @@ export function PipelineBoard({
 
                   {/* Product Pages — only shown in curation+ stages */}
                   {reviewItem?.stage !== 'extraction' && storePages.length > 0 && (
-                    <div>
+                    <div style={{ marginTop: 16 }}>
                       <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Product Pages</h3>
-                      <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid #d1d5db', borderRadius: 6, padding: 8 }}>
-                        {storePages.map((pageName) => {
-                          const isAssigned = curationFields.suggestedPages?.includes(pageName) ?? false;
-                          return (
-                            <label key={pageName} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', fontSize: 12, cursor: 'pointer' }}>
-                              <input type="checkbox" checked={isAssigned} onChange={(e) => {
-                                let nextPages;
-                                if (e.target.checked) {
-                                  nextPages = [...(curationFields.suggestedPages || []), pageName];
-                                } else {
-                                  nextPages = (curationFields.suggestedPages || []).filter((n: string) => n !== pageName);
-                                }
-                                const nextCuration = { ...curationFields, suggestedPages: nextPages };
-                                setCurationFields(nextCuration);
-                                saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
-                              }} />
+                      
+                      {/* Selected Pages Area */}
+                      {curationFields.suggestedPages && curationFields.suggestedPages.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                          {curationFields.suggestedPages.map((pageName) => (
+                            <span 
+                              key={pageName} 
+                              style={{ 
+                                display: 'inline-flex', 
+                                alignItems: 'center', 
+                                gap: 4, 
+                                background: '#f3e8ff', 
+                                border: '1px solid #d8b4fe', 
+                                color: '#6b21a8', 
+                                padding: '2px 8px', 
+                                borderRadius: 16, 
+                                fontSize: 12, 
+                                fontWeight: 500 
+                              }}
+                            >
                               {pageName}
-                            </label>
-                          );
-                        })}
+                              <button 
+                                type="button"
+                                onClick={() => {
+                                  const nextPages = (curationFields.suggestedPages || []).filter((n: string) => n !== pageName);
+                                  const nextCuration = { ...curationFields, suggestedPages: nextPages };
+                                  setCurationFields(nextCuration);
+                                  saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
+                                }}
+                                style={{ 
+                                  background: 'none', 
+                                  border: 'none', 
+                                  color: '#a855f7', 
+                                  cursor: 'pointer', 
+                                  padding: 0, 
+                                  fontSize: 10,
+                                  fontWeight: 'bold',
+                                  lineHeight: 1
+                                }}
+                              >
+                                ✕
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Page Search Input */}
+                      <input 
+                        type="text" 
+                        placeholder="Search pages..." 
+                        value={pageSearchQuery} 
+                        onChange={(e) => setPageSearchQuery(e.target.value)} 
+                        style={{ 
+                          width: '100%', 
+                          padding: '6px 10px', 
+                          border: '1px solid #d1d5db', 
+                          borderRadius: 6, 
+                          fontSize: 12, 
+                          marginBottom: 8, 
+                          boxSizing: 'border-box' 
+                        }} 
+                      />
+
+                      {/* Page List Container */}
+                      <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid #d1d5db', borderRadius: 6, padding: 8 }}>
+                        {storePages
+                          .filter(pageName => pageName.toLowerCase().includes(pageSearchQuery.toLowerCase()))
+                          .map((pageName) => {
+                            const isAssigned = curationFields.suggestedPages?.includes(pageName) ?? false;
+                            return (
+                              <label key={pageName} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', fontSize: 12, cursor: 'pointer' }}>
+                                <input type="checkbox" checked={isAssigned} onChange={(e) => {
+                                  let nextPages;
+                                  if (e.target.checked) {
+                                    nextPages = [...(curationFields.suggestedPages || []), pageName];
+                                  } else {
+                                    nextPages = (curationFields.suggestedPages || []).filter((n: string) => n !== pageName);
+                                  }
+                                  const nextCuration = { ...curationFields, suggestedPages: nextPages };
+                                  setCurationFields(nextCuration);
+                                  saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
+                                }} />
+                                {pageName}
+                              </label>
+                            );
+                          })}
                       </div>
                     </div>
                   )}

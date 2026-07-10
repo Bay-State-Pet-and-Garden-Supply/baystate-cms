@@ -63,11 +63,20 @@ export function ValidationMatrix({ state }: ValidationMatrixProps) {
   return (
     <div style={s.panel}>
       <h4 style={s.title}>Validation Results</h4>
+      <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 8px' }}>
+        Each cell shows whether the selector matched elements on the sample page.
+        Click a cell to expand the extracted value and warnings.
+        {validation.results[0]?.sampleUrl && validation.results[0].sampleUrl.includes('instinctpetfood') && (
+          <span style={{ color: '#2563eb' }}>
+            {' — '}Using {draft.runtime ?? 'rendered'} runtime for extraction.
+          </span>
+        )}
+      </p>
       <table style={s.table}>
         <thead>
           <tr>
             <th style={s.th}>Sample URL</th>
-            {displayKeys.map(key => <th key={key} style={s.th}>{fieldLabel(key)}</th>)}
+            {displayKeys.map(key => <th key={key} style={{ ...s.th, minWidth: 100 }}>{fieldLabel(key)}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -81,22 +90,36 @@ export function ValidationMatrix({ state }: ValidationMatrixProps) {
                 const status: string = fieldRes?.status ?? 'not-run';
                 const cellId = `${ri}-${key}`;
                 const isExpanded = expandedCell === cellId;
+                const extracted = fieldRes?.extractedValue;
+                const warns = fieldRes?.warnings;
                 return (
                   <td key={key} style={s.td}>
-                    <span style={cellBadgeStyle(status)} onClick={() => setExpandedCell(isExpanded ? null : cellId)} title={fieldRes?.extractedValue ?? ''}>
+                    <span style={cellBadgeStyle(status)} onClick={() => setExpandedCell(isExpanded ? null : cellId)} title={extracted ?? ''}>
                       {CELL_META[status]?.icon ?? CELL_META['not-run'].icon} {status}
                     </span>
-                    {fieldRes?.warnings && fieldRes.warnings.length > 0 && (
-                      <span style={{ fontSize: 10, color: '#92400e', marginLeft: 4 }}>({fieldRes.warnings.length} warn)</span>
+                    {/* Always show extracted value if available */}
+                    {extracted && (
+                      <div style={{ fontSize: 10, color: '#374151', marginTop: 2, wordBreak: 'break-word' }}>
+                        {extracted}
+                      </div>
                     )}
-                    {isExpanded && fieldRes?.extractedValue && (
+                    {/* Always show first warning */}
+                    {warns && warns.length > 0 && (
+                      <div style={{ fontSize: 10, color: '#92400e', marginTop: 2, wordBreak: 'break-word' }}>
+                        ⚠ {warns.join(' • ')}
+                      </div>
+                    )}
+                    {/* Expand on click for full details */}
+                    {isExpanded && (
                       <div style={s.expanded}>
-                        {fieldRes.extractedValue}
-                        {fieldRes.warnings && fieldRes.warnings.length > 0 && (
+                        {extracted && <div><strong>Extracted:</strong> {extracted}</div>}
+                        {warns && warns.length > 0 && (
                           <div style={{ marginTop: 4, color: '#92400e' }}>
-                            {fieldRes.warnings.map((w: string, i: number) => <div key={i}>⚠ {w}</div>)}
+                            <strong>Warnings:</strong>
+                            {warns.map((w: string, i: number) => <div key={i}>• {w}</div>)}
                           </div>
                         )}
+                        {!extracted && !(warns?.length) && <div style={{ color: '#9ca3af' }}>No extracted value or warnings.</div>}
                       </div>
                     )}
                   </td>

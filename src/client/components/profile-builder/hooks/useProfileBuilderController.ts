@@ -19,7 +19,7 @@ import {
   evaluateSelectorLocally,
   evaluateTitleOptionalSelectors,
 } from '../selectorEvaluation';
-import { getFieldDefinition, ALL_STANDARD_FIELDS } from '../fieldCatalog';
+import { getFieldDefinition, ALL_STANDARD_FIELDS, CORE_FIELDS, STANDARD_CUSTOM_FIELDS } from '../fieldCatalog';
 import type { FieldDefinition } from '../fieldCatalog';
 import {
   profileToDraft,
@@ -35,6 +35,7 @@ import {
   generateSelectorFromElement,
   fetchPageHtml,
   validateProfileDraft,
+  generateSelectors as generateSelectorsApi,
 } from '../../../onboarding-api';
 import type { ProfileBuilderProps, ProfileBuilderController, ValidationSample } from '../profileBuilderTypes';
 
@@ -350,7 +351,7 @@ export function useProfileBuilderController(
             previewResult: state.extractionPreview,
             validation: result.data,
             fieldKey,
-          });
+          }) as 'unassigned' | 'assigned' | 'tested' | 'warning' | 'failed' | 'validated';
           dispatch({
             type: 'field/selectorEvaluated',
             key: fieldKey,
@@ -408,6 +409,92 @@ export function useProfileBuilderController(
     dispatch({ type: 'draft/reset' });
   }, []);
 
+  // ── Selector Generation ────────────────────────────────────────────────
+  const generateSelectors = useCallback(async () => {
+    const snapshot = state.snapshot;
+    if (!snapshot || !state.snapshot) return;
+    const htmlRef = (state.snapshot as any).htmlRef;
+    if (!htmlRef) return;
+
+    // Build the field list from CORE_FIELDS, STANDARD_CUSTOM_FIELDS, and custom fields
+    const fields: Array<{
+      key: string;
+      label: string;
+      origin: 'core' | 'standard_custom' | 'draft_custom';
+      valueType: 'text' | 'html' | 'url' | 'image' | 'list';
+      multiple: boolean;
+      description: string | null;
+    }> = [];
+    const allFieldDefs = CORE_FIELDS.concat(STANDARD_CUSTOM_FIELDS);
+    for (const f of allFieldDefs) {
+      const origin = f.outputTarget === 'core' ? 'core' : 'standard_custom';
+      // Map fieldCatalog value types to the Zod-accepted generation value types
+      const valueType = f.valueType === 'image' ? 'image' : f.valueType === 'array' ? 'list' : 'text';
+      fields.push({
+        key: f.key,
+        label: f.label,
+        origin,
+        valueType,
+        multiple: f.cardinality === 'multiple',
+        description: null,
+      });
+    }
+
+    dispatch({
+      type: 'selectorGenerationStarted',
+      payload: { htmlRef, requestedFieldKeys: fields.map((f) => f.key) },
+    });
+
+    try {
+      const result = await generateSelectorsApi({
+        htmlRef,
+        sourceUrl: state.draft.productUrl,
+        runtime: state.draft.runtime,
+        fields,
+        snapshotContext: {
+          jsonLd: snapshot.jsonLd ?? [],
+          embeddedProductData: snapshot.embeddedProductData ?? [],
+          imageCandidates: ((snapshot as any).imageCandidates ?? []).map((url: string) => ({ url })),
+          pageStructureSignals: [],
+          warnings: snapshot.warnings ?? [],
+        },
+      });
+
+      if (result.ok) {
+        dispatch({ type: 'selectorGenerationSucceeded', payload: result.data });
+      } else {
+        dispatch({ type: 'selectorGenerationFailed', payload: result.error });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Generation failed';
+      console.error('[ProfileBuilder] Generate selectors error:', msg);
+      dispatch({
+        type: 'selectorGenerationFailed',
+        payload: {
+          code: 'INTERNAL_ERROR',
+          message: msg,
+          retryable: true,
+        },
+      });
+    }
+  }, [state.snapshot, state.draft.productUrl, state.draft.runtime]);
+
+  const acceptSelectorSuggestion = useCallback((fieldKey: string) => {
+    dispatch({ type: 'selectorSuggestionAccepted', payload: { fieldKey } });
+  }, []);
+
+  const rejectSelectorSuggestion = useCallback((fieldKey: string) => {
+    dispatch({ type: 'selectorSuggestionRejected', payload: { fieldKey } });
+  }, []);
+
+  const acceptCustomFieldSuggestion = useCallback((key: string) => {
+    dispatch({ type: 'customFieldSuggestionAccepted', payload: { key } });
+  }, []);
+
+  const rejectCustomFieldSuggestion = useCallback((key: string) => {
+    dispatch({ type: 'customFieldSuggestionRejected', payload: { key } });
+  }, []);
+
   // ── Category toggle ────────────────────────────────────────────────────
   const toggleCategory = useCallback((category: any) => {
     dispatch({ type: 'category/toggle', category });
@@ -437,6 +524,11 @@ export function useProfileBuilderController(
       runValidation,
       saveProfile,
       resetDraft,
+      generateSelectors,
+      acceptSelectorSuggestion,
+      rejectSelectorSuggestion,
+      acceptCustomFieldSuggestion,
+      rejectCustomFieldSuggestion,
       toggleCategory,
     }),
     [
@@ -460,6 +552,11 @@ export function useProfileBuilderController(
       runValidation,
       saveProfile,
       resetDraft,
+      generateSelectors,
+      acceptSelectorSuggestion,
+      rejectSelectorSuggestion,
+      acceptCustomFieldSuggestion,
+      rejectCustomFieldSuggestion,
       toggleCategory,
     ],
   );

@@ -72,7 +72,7 @@ export function OverviewView() {
       {/* KPI Cards */}
       <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 28 }}>
         <KpiCard value={summary?.productCount ?? 0} label="Products" />
-        <KpiCard value={summary?.categoryPageCount ?? 0} label="Category Pages" />
+        <KpiCard value={summary?.categoryPageCount ?? 0} label="Product Pages" />
         <KpiCard value={summary?.catalogFieldCount ?? 0} label="Catalog Fields" warn={summary?.unlabeledFieldCount ?? 0} />
         <KpiCard value={summary?.unmappedAttributeCount ?? 0} label="Unmapped Attributes" warn={summary?.unmappedAttributeCount ?? 0} />
         <KpiCard value={summary?.staleMappingCount ?? 0} label="Stale Mappings" warn={summary?.staleMappingCount ?? 0} />
@@ -104,7 +104,7 @@ export function OverviewView() {
           <h3 style={{ margin: '0 0 8px', fontSize: 16, fontWeight: 600, color: '#0f172a' }}>Schema Summary</h3>
           <div style={{ fontSize: 13, color: '#475569', lineHeight: 1.8 }}>
             {summary.lastPullAt && <div>📡 Last ShopSite pull: {new Date(summary.lastPullAt).toLocaleString()}</div>}
-            <div>📦 {summary.productCount} products, {summary.categoryPageCount} category pages</div>
+            <div>📦 {summary.productCount} products, {summary.categoryPageCount} product pages</div>
             <div>🏷️ {summary.catalogFieldCount} catalog fields ({summary.unlabeledFieldCount} unlabeled)</div>
             <div>🔗 {summary.unmappedAttributeCount} product attributes without a Catalog Field mapping</div>
             <div>⚠️ {summary.staleMappingCount} stale attribute mappings (field absent from latest pull)</div>

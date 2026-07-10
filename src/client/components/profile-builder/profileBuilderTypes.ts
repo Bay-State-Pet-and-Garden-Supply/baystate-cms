@@ -20,6 +20,9 @@ import type {
   TestExtractorProfileRequest,
 } from '../../onboarding-api';
 
+import type { SelectorWarning } from '../../../shared/schemas/selector-generation';
+import type { GenerateSelectorsResponse } from '../../../shared/schemas/selector-generation';
+
 export type {
   ExtractorProfile,
   SnapshotResponse,
@@ -29,6 +32,8 @@ export type {
   ExtractorTestResult,
   SaveExtractorProfilePayload,
   TestExtractorProfileRequest,
+  SelectorWarning,
+  GenerateSelectorsResponse,
 };
 
 // ─── Field Categories ───────────────────────────────────────────────────────
@@ -45,6 +50,7 @@ export type FieldCategory =
 
 export type FieldStatus =
   | 'unassigned'
+  | 'suggested'
   | 'assigned'
   | 'tested'
   | 'warning'
@@ -101,6 +107,41 @@ export interface RequestState {
   success?: boolean;
 }
 
+// ─── Selector Generation State ────────────────────────────────────────────
+
+export type GenerationStatus = 'idle' | 'generating' | 'completed' | 'failed';
+
+export interface FieldSuggestionState {
+  fieldKey: string;
+  selector: string | null;
+  resultStatus: 'suggested' | 'not_found' | 'invalid';
+  decision: 'pending' | 'accepted' | 'rejected';
+  quality: 'high' | 'medium' | 'low' | 'unusable';
+  validation: { syntaxValid: boolean; matchedCount: number; visibleMatchedCount?: number | null; unique: boolean };
+  warnings: SelectorWarning[];
+  explanation?: string | null;
+  preview?: { text?: string | null; values?: string[] | null; imageUrls?: string[] | null } | null;
+}
+
+export interface CustomFieldSuggestionState extends FieldSuggestionState {
+  key: string;
+  label: string;
+  valueType: 'text' | 'html' | 'url' | 'image' | 'list';
+  addedToDraft: boolean;
+}
+
+export interface SelectorGenerationState {
+  status: GenerationStatus;
+  requestId?: string;
+  snapshotRef?: string;
+  startedAt?: number;
+  completedAt?: number;
+  fieldSuggestions: Record<string, FieldSuggestionState>;
+  customFieldSuggestions: CustomFieldSuggestionState[];
+  warnings: SelectorWarning[];
+  error?: { code: string; message: string; retryable: boolean };
+}
+
 // ─── Full Builder State ─────────────────────────────────────────────────────
 
 export interface ProfileBuilderState {
@@ -115,6 +156,7 @@ export interface ProfileBuilderState {
   samples: ValidationSample[];
   validation: ValidateResponse | null;
   extractionPreview: ExtractorTestResult | null;
+  generation: SelectorGenerationState;
   dirty: boolean;
   lastSavedProfileId: string | null;
   requests: {
@@ -174,6 +216,12 @@ export interface ProfileBuilderController {
   updateSample(id: string, patch: Partial<ValidationSample>): void;
   removeSample(id: string): void;
   runValidation(): Promise<void>;
+
+  generateSelectors(): Promise<void>;
+  acceptSelectorSuggestion(fieldKey: string): void;
+  rejectSelectorSuggestion(fieldKey: string): void;
+  acceptCustomFieldSuggestion(key: string): void;
+  rejectCustomFieldSuggestion(key: string): void;
 
   saveProfile(): Promise<void>;
   resetDraft(): void;

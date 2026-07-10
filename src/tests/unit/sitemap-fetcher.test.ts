@@ -1,9 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { gzipSync } from 'node:zlib';
-
-vi.mock('../../db/repositories/domain-status-repo', () => ({
-  recordDomainStatus: vi.fn(),
-}));
+import { unlinkSync } from 'node:fs';
+import { initDb, closeDb, resetDb } from '../../db/connection';
+import { runMigrations } from '../../db/migrations';
 
 import { fetchAndParseSitemap } from '../../onboarding/sitemap-fetcher';
 
@@ -75,7 +74,19 @@ function stubFetch(handlers: Array<{
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('sitemap-fetcher.fetchAndParseSitemap', () => {
+  const testDbPath = 'src/tests/unit/sitemap-fetcher-test.db';
   let originalFetch: typeof fetch;
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
