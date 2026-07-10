@@ -37,7 +37,11 @@ const ISSUE3_HTML = `<!DOCTYPE html>
     <!-- Media gallery: compound descendant target -->
     <div class="media-gallery">
       <div class="product-media__image">
-        <img src="https://example.com/dog-food-main.jpg" alt="Premium Dog Food" />
+        <img
+          src="https://example.com/dog-food-main.jpg?width=1200"
+          srcset="https://example.com/dog-food-main.jpg?width=320 320w, https://example.com/dog-food-main.jpg?width=640 640w, https://example.com/dog-food-main.jpg?width=1200 1200w"
+          alt="Premium Dog Food"
+        />
       </div>
       <div class="product-media__image">
         <img src="https://example.com/dog-food-alt1.jpg" alt="Premium Dog Food Alt" />
@@ -155,7 +159,7 @@ describe('evaluateSelectorImageUrls', () => {
     expect(urls).not.toContain('https://example.com/footer-bg.jpg');
     expect(urls).not.toContain('https://example.com/unrelated-icon.svg');
     // Should include the gallery images
-    expect(urls).toContain('https://example.com/dog-food-main.jpg');
+    expect(urls.some(url => url.startsWith('https://example.com/dog-food-main.jpg'))).toBe(true);
     expect(urls).toContain('https://example.com/dog-food-alt1.jpg');
     expect(urls).toContain('https://example.com/dog-food-alt2.jpg');
     expect(urls).toContain('https://example.com/dog-food-template.jpg');
@@ -170,6 +174,39 @@ describe('evaluateSelectorImageUrls', () => {
     const urls = evaluateSelectorImageUrls(ISSUE3_HTML, '.media-gallery .product-media__image img');
     expect(urls.length).toBe(4);
     expect(urls[0]).toContain('dog-food-main');
+  });
+
+  it('deduplicates responsive srcset widths like Extraction Preview', () => {
+    const html = `
+      <media-gallery>
+        <img
+          class="product-media__image"
+          src="//cdn.shopify.com/s/files/1/001/products/main.png?v=7&width=400"
+          srcset="//cdn.shopify.com/s/files/1/001/products/main.png?v=7&width=200 200w,
+                  //cdn.shopify.com/s/files/1/001/products/main.png?v=7&width=800 800w,
+                  //cdn.shopify.com/s/files/1/001/products/main.png?v=7&width=1600 1600w"
+        />
+      </media-gallery>`;
+
+    const urls = evaluateSelectorImageUrls(
+      html,
+      'media-gallery .product-media__image',
+      'https://shop.example/products/test',
+    );
+
+    expect(urls).toEqual([
+      'https://cdn.shopify.com/s/files/1/001/products/main.png?v=7&width=1200',
+    ]);
+  });
+
+  it('resolves relative image URLs using the sample URL', () => {
+    const urls = evaluateSelectorImageUrls(
+      '<main><img class="product-image" src="/media/product.jpg?width=400" srcset="/media/product.jpg?width=800 800w"></main>',
+      '.product-image',
+      'https://shop.example/products/test',
+    );
+
+    expect(urls).toEqual(['https://shop.example/media/product.jpg?width=400']);
   });
 
   it('returns empty array for zero matches', () => {

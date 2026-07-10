@@ -29,6 +29,10 @@ import {
   type VariantSelectionStrategy,
 } from '../../shared/schemas/extraction-worker';
 import { resolveArtifactDir, writeArtifact, generateJobId, extractDomainFromUrl } from '../artifacts';
+import {
+  cleanAndDeduplicateImages,
+  collectImageSourcesFromElement,
+} from '../../onboarding/image-utils';
 
 // ─── HTTP constants (sourced from page-extractor.ts) ──────────────────────────
 
@@ -74,40 +78,24 @@ function evaluateSelectorText(html: string, selector: string): string | null {
  * source URLs from matched elements and their descendant `<img>` elements.
  * Returns an empty array for zero matches, invalid CSS, or no images found.
  */
-function evaluateSelectorImageUrls(html: string, selector: string): string[] {
+function evaluateSelectorImageUrls(
+  html: string,
+  selector: string,
+  baseUrl?: string,
+): string[] {
   const sel = selector?.trim();
   if (!sel) return [];
   try {
     const $ = cheerio.load(html);
-    const els = $(sel);
-    const seen = new Set<string>();
-    const urls: string[] = [];
-    els.each((_idx, el) => {
-      const $el = $(el);
-      const imgs = $el.is('img') ? $el : $el.find('img');
-      imgs.each((__, imgEl) => {
-        const $img = $(imgEl);
-        for (const attr of ['src', 'data-src', 'data-original', 'data-lazy-src']) {
-          const val = $img.attr(attr);
-          if (val && isUsableImageUrl(val) && !seen.has(val)) {
-            seen.add(val);
-            urls.push(val);
-            break;
-          }
-        }
-        const srcset = $img.attr('srcset') || $img.attr('data-srcset');
-        if (srcset) {
-          for (const part of srcset.split(',')) {
-            const url = part.trim().split(/\s+/)[0];
-            if (url && isUsableImageUrl(url) && !seen.has(url)) {
-              seen.add(url);
-              urls.push(url);
-            }
-          }
-        }
-      });
+    const rawUrls: string[] = [];
+    $(sel).each((_idx, el) => {
+      rawUrls.push(...collectImageSourcesFromElement($, el));
     });
-    return urls;
+
+    // Extraction Preview canonicalizes responsive src/srcset variants by
+    // host + pathname before presenting images. Use the same normalization
+    // here so validation reports product images, not every responsive width.
+    return cleanAndDeduplicateImages(rawUrls, baseUrl);
   } catch {
     return [];
   }
@@ -222,6 +210,7 @@ function validateSample(input: SampleValidationInput): ValidationSampleResult {
     confirmed,
     expectedName,
     html,
+    baseUrl,
     selectors,
     imageRules,
     variantSelectionStrategy,
@@ -252,7 +241,7 @@ function validateSample(input: SampleValidationInput): ValidationSampleResult {
         fieldName === 'image';
 
       if (isImages) {
-        const imageUrls = evaluateSelectorImageUrls(html, selector);
+        const imageUrls = evaluateSelectorImageUrls(html, selector, baseUrl);
         const warnings: string[] = [];
         if (imageUrls.length === 0) {
           warnings.push(`Selector "${selector}" matched no images`);
@@ -361,7 +350,7 @@ function validateSample(input: SampleValidationInput): ValidationSampleResult {
     detectedOptions: string[];
     optionFields: string[];
     strategyValid: boolean;
-  } | null = null;
+  } | null;
 
   if (!variantSelectionStrategy || !variantSelectionStrategy.containerSelector) {
     variantResult = null;
@@ -427,7 +416,7 @@ async function validateSampleStatic(
 
   process.stderr.write(`[validate] static fetch: ${sample.url}\n`);
 
-  let html = '';
+  let html: string;
   try {
     const response = await fetch(sample.url, {
       headers: HTTP_EXTRACTION_HEADERS,

@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import {
   buildStableSelector,
   isLikelyGeneratedId,
@@ -169,7 +170,7 @@ describe('snippetOf', () => {
 // ─── Helper for tests ───────────────────────────────────────────────────────
 
 /** Get the first element from a Cheerio selection, asserting it's a tag element. */
-function el($: cheerio.CheerioAPI, selector: string): cheerio.Element {
+function el($: cheerio.CheerioAPI, selector: string): Element {
   const node = $(selector).get(0);
   if (!node || node.type !== 'tag') throw new Error(`Expected element for selector: ${selector}`);
   return node;

@@ -20,6 +20,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as cheerio from 'cheerio';
+import type { Element, AnyNode } from 'domhandler';
 import { runRenderedPage } from '../browser/rendered-page-runner';
 import { loadWorkerBrowserConfig } from '../browser/config';
 import {
@@ -93,10 +94,10 @@ function parseSrcsetCandidates(srcset: string | null | undefined): string[] {
  */
 function collectImageSourcesFromElement(
   $: cheerio.CheerioAPI,
-  el: cheerio.Element | unknown,
+  el: Element | unknown,
 ): string[] {
   const sources: string[] = [];
-  const $el = $(el as cheerio.AnyNode);
+  const $el = $(el as AnyNode);
   const targets = $el.is('img,source') ? $el : $el.find('img,source');
   if (targets.length === 0) return sources;
 
@@ -996,6 +997,10 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
 
   const extracted = result.data;
 
+  if ('data' in extracted) {
+    return extracted;
+  }
+
   // ── Cloudflare block detection ───────────────────────────────────────
   if (extracted.blocked) {
     warnings.push('Page appears to be blocked by Cloudflare or WAF');
@@ -1003,14 +1008,15 @@ async function doRenderedExtract(request: ExtractRequest): Promise<{
   }
 
   // ── Hard fail when no title extracted ────────────────────────────────
-  if (!extracted.title) {
+  const title = extracted.title;
+  if (!title) {
     warnings.push('Title could not be extracted — returning ok: false');
     return buildFailedResult(request, warnings);
   }
 
   const data = buildExtractionData(
     {
-      title: extracted.title,
+      title,
       brand: extracted.brand,
       description: extracted.description,
       price: extracted.price,

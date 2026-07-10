@@ -17,6 +17,7 @@
  */
 
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import { buildStableSelector, type Stability } from '../shared/selector-utils';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -290,7 +291,7 @@ function extractMicrodataFields($: cheerio.CheerioAPI): DiscoveredField[] {
 
     if (!content) return;
 
-    const { selector, stability } = buildStableSelector($, el);
+    const { selector, stability } = buildStableSelector($, el as Element);
     const matchCount = $(selector).length;
 
     // Avoid duplicates with meta/og fields
@@ -333,7 +334,7 @@ function extractSemanticHtmlFields($: cheerio.CheerioAPI): DiscoveredField[] {
       const text = $(el).text().trim();
       if (!text || text.length < 3) return;
 
-      const { selector, stability } = buildStableSelector($, el);
+      const { selector, stability } = buildStableSelector($, el as Element);
       if (seenSelectors.has(selector)) return;
       seenSelectors.add(selector);
 
@@ -350,7 +351,7 @@ function extractSemanticHtmlFields($: cheerio.CheerioAPI): DiscoveredField[] {
     const text = $(el).text().trim();
     if (!text || text.length < 3) return;
     if (fields.some(f => f.fieldKey === 'title')) return;
-    const { selector, stability } = buildStableSelector($, el);
+    const { selector, stability } = buildStableSelector($, el as Element);
     if (seenSelectors.has(selector)) return;
     seenSelectors.add(selector);
     fields.push({
@@ -377,7 +378,7 @@ function extractSemanticHtmlFields($: cheerio.CheerioAPI): DiscoveredField[] {
     if (!text) continue;
     const el = $el.get(0) as any | undefined;
     if (!el) continue;
-    const { selector, stability } = buildStableSelector($, el);
+    const { selector, stability } = buildStableSelector($, el as Element);
     if (seenSelectors.has(selector)) continue;
     seenSelectors.add(selector);
     fields.push({

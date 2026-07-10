@@ -29,6 +29,7 @@
  */
 
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import { getLlmConfig, callLlm, callLlmForTask, getLlmConfigForTask, MissingLlmTaskConfigError, type LlmConfig } from './llm-client';
 import {
   buildStableSelector,
@@ -286,7 +287,7 @@ const CANDIDATE_LIMIT = 100;
 /** Find label-like text near the element (preceding siblings, parent labels). */
 function nearbyLabelsOf(
   $: cheerio.CheerioAPI,
-  el: cheerio.Element,
+  el: Element,
 ): string[] {
   const labels: string[] = [];
   const node = $(el);
@@ -332,7 +333,7 @@ const PLAIN_NUMERIC_PRICE = /^\s*[\$€£¥]?\s?\d{1,5}(?:[.,]\d{2})?\s*$/;
 /** Decide which "kind" hints apply to an element. */
 function kindHintsFor(
   $: cheerio.CheerioAPI,
-  el: cheerio.Element,
+  el: Element,
   text: string,
   classAndIdLower: string,
 ): string[] {
@@ -373,7 +374,7 @@ export function buildSelectorCandidates(html: string, baseUrl?: string): Selecto
   const candidates: SelectorCandidate[] = [];
 
   function addCandidate(
-    el: cheerio.Element,
+    el: Element,
     forcedHints: string[] = [],
   ): void {
     if (candidates.length >= CANDIDATE_LIMIT) return;
@@ -489,7 +490,7 @@ function buildVariantOptionCandidates(html: string, baseUrl?: string): VariantOp
   const seenContainers = new Set<string>();
 
   function addVariantCandidate(
-    containerEl: cheerio.Element,
+    containerEl: Element,
     optionType: VariantOptionCandidate['optionType'],
     labels: string[],
     fields: string[],
@@ -538,7 +539,7 @@ function buildVariantOptionCandidates(html: string, baseUrl?: string): VariantOp
   // 2. Button groups inside variant containers
   $('[class*="option"i] button, [class*="variant"i] button, [class*="swatch"i] button, [class*="size"i] button, [class*="color"i] button, [role="radiogroup"][class*="option"i] button, [role="radiogroup"][class*="variant"i] button').each((_, el) => {
     const $parent = $(el).parent();
-    const parentEl = $parent.get(0) as cheerio.Element | undefined;
+    const parentEl = $parent.get(0) as Element | undefined;
     if (!parentEl) return;
     const { selector: parentSel } = buildStableSelector($, parentEl);
     if (seenContainers.has(parentSel)) return;
@@ -565,7 +566,7 @@ function buildVariantOptionCandidates(html: string, baseUrl?: string): VariantOp
     if ($radios.length < 2) return;
     const $container = $el.closest('fieldset, div[class*="option"i], div[class*="variant"i], div[class*="swatch"i]');
     if ($container.length === 0) return;
-    const containerEl = $container.get(0) as cheerio.Element | undefined;
+    const containerEl = $container.get(0) as Element | undefined;
     if (!containerEl) return;
     const { selector: containerSel } = buildStableSelector($, containerEl);
     if (seenContainers.has(containerSel)) return;
@@ -584,7 +585,7 @@ function buildVariantOptionCandidates(html: string, baseUrl?: string): VariantOp
   $('[data-variant], [data-option], [data-swatch]').each((_, el) => {
     const $el = $(el);
     const $container = $el.closest('div[class*="option"i], div[class*="variant"i], div[class*="swatch"i], [class*="selector"i]');
-    const containerEl: cheerio.Element = $container.length > 0 ? $container.get(0) as cheerio.Element : el;
+    const containerEl: Element = $container.length > 0 ? $container.get(0) as Element : el;
     const { selector: containerSel } = buildStableSelector($, containerEl);
     if (seenContainers.has(containerSel)) return;
     const labels: string[] = [];

@@ -9,6 +9,7 @@
  */
 
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 
 // ─── srcset parsing ────────────────────────────────────────────────────────
 
@@ -63,7 +64,7 @@ export function isUsableImageSource(
  */
 export function collectImageSourcesFromElement(
   $: cheerio.CheerioAPI,
-  el: cheerio.Element | any,
+  el: Element | any,
 ): string[] {
   const sources: string[] = [];
   const $el = $(el);

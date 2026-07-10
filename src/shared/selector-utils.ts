@@ -10,6 +10,7 @@
  */
 
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -95,7 +96,7 @@ export function attrSelector(attr: string, value: string): string {
  */
 export function buildStableSelector(
   $: cheerio.CheerioAPI,
-  el: cheerio.Element,
+  el: Element,
 ): BuildStableSelectorResult {
   const node = $(el);
   // `el.name` is the canonical tag name on domhandler Elements.
@@ -225,7 +226,7 @@ export function isSupportedSelectorSyntax(sel: string): boolean {
 /** Snippet-safe text from a Cheerio element (trimmed and length-capped). */
 export function snippetOf(
   $: cheerio.CheerioAPI,
-  el: cheerio.Element,
+  el: Element,
   max = 120,
 ): string {
   const text = $(el).text().replace(/\s+/g, ' ').trim();

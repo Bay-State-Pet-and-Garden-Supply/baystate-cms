@@ -34,6 +34,7 @@ interface LocalPickElementResponse {
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import { z } from 'zod';
 import {
   buildStableSelector,
@@ -221,7 +222,7 @@ async function pickElement(
     const $ = cheerio.load(pageHtml);
 
     // Find the clicked element in the Cheerio DOM
-    let matchedEl: cheerio.Element | null = null;
+    let matchedEl: Element | null = null;
 
     const tag = (pickedData.tag as string) ?? '';
     const attrs = (pickedData.attributes as Record<string, string>) ?? {};
@@ -230,7 +231,7 @@ async function pickElement(
     if (attrs.id && !attrs.id.startsWith('_')) {
       const safeId = attrs.id.replace(/(["'\\\s\[\]:.])/g, '\\$1');
       const byId = $(`#${safeId}`);
-      if (byId.length === 1) matchedEl = byId.get(0) as cheerio.Element;
+      if (byId.length === 1) matchedEl = byId.get(0) as Element;
     }
 
     // Strategy 2: match by stable data-* attributes
@@ -242,14 +243,14 @@ async function pickElement(
         const sel = `${tag}[${attr}="${value.replace(/"/g, '\\"')}"]`;
         const matches = $(sel);
         if (matches.length === 1) {
-          matchedEl = matches.get(0) as cheerio.Element;
+          matchedEl = matches.get(0) as Element;
           break;
         }
         if (matches.length > 1 && attrs.class) {
           const cls = attrs.class.split(/\s+/).filter(Boolean).join('.');
           const narrowed = $(`${sel}.${cls}`);
           if (narrowed.length === 1) {
-            matchedEl = narrowed.get(0) as cheerio.Element;
+            matchedEl = narrowed.get(0) as Element;
             break;
           }
         }
@@ -260,13 +261,13 @@ async function pickElement(
     if (!matchedEl && attrs.class) {
       const cls = attrs.class.split(/\s+/).filter(Boolean).join('.');
       const byClass = $(`${tag}.${cls}`);
-      if (byClass.length >= 1) matchedEl = byClass.get(0) as cheerio.Element;
+      if (byClass.length >= 1) matchedEl = byClass.get(0) as Element;
     }
 
     // Strategy 4: first element with same tag (weakest)
     if (!matchedEl) {
       const byTag = $(tag);
-      if (byTag.length > 0) matchedEl = byTag.get(0) as cheerio.Element;
+      if (byTag.length > 0) matchedEl = byTag.get(0) as Element;
     }
 
     // Handle the image gallery case: if user clicked an <img>, try finding parent
@@ -275,14 +276,14 @@ async function pickElement(
       if (imgEl.length > 0) {
         const parent = imgEl.parent();
         if (parent.length > 0 && parent.find('img').length > 1) {
-          matchedEl = parent.get(0) as cheerio.Element;
+          matchedEl = parent.get(0) as Element;
           warnings.push(
             'Clicked a single image; used parent container (contains ' +
               parent.find('img').length +
               ' images)',
           );
         } else if (parent.length > 0) {
-          matchedEl = imgEl.get(0) as cheerio.Element;
+          matchedEl = imgEl.get(0) as Element;
         }
       }
     }
@@ -292,7 +293,7 @@ async function pickElement(
       const el$ = cheerio.load(outerHTML);
       const root = el$.root().contents().first().get(0);
       if (root) {
-        const fallbackResult = buildStableSelector(el$, root as cheerio.Element);
+        const fallbackResult = buildStableSelector(el$, root as Element);
         const text = el$(root).text().replace(/\s+/g, ' ').trim();
         const images = collectImageSourcesFromHtml(outerHTML);
         warnings.push(

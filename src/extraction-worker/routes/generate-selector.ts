@@ -13,6 +13,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as cheerio from 'cheerio';
+import type { Element } from 'domhandler';
 import {
   GenerateSelectorRequestSchema,
   GenerateSelectorResponseSchema,
@@ -44,7 +45,7 @@ function isUsableImageSource(src: string | null | undefined): src is string {
  */
 function collectImageSourcesFromElement(
   $: cheerio.CheerioAPI,
-  el: cheerio.Element,
+  el: Element,
 ): string[] {
   const sources: string[] = [];
   const node = $(el);
@@ -100,22 +101,22 @@ function collectImageSourcesFromElement(
 function findElementByOuterHTML(
   $: cheerio.CheerioAPI,
   outerHTML: string,
-): cheerio.Element | null {
+): Element | null {
   // Parse the outerHTML in a separate Cheerio instance.
   const el$ = cheerio.load(outerHTML);
   const contents = el$.root().contents();
   const first = contents.first();
   const rootAny = first.get(0);
   if (!rootAny || rootAny.type !== 'tag') return null;
-  const rootEl = rootAny as cheerio.Element;
+  const rootEl = rootAny as Element;
 
   const tag = rootEl.name ?? 'div';
   const rootNode = el$(rootEl);
 
   /** Helper: return the first element from a Cheerio selection, or null. */
-  const firstEl = (sel: ReturnType<typeof $>): cheerio.Element | null => {
+  const firstEl = (sel: ReturnType<typeof $>): Element | null => {
     const n = sel.get(0);
-    return n && n.type === 'tag' ? (n as cheerio.Element) : null;
+    return n && n.type === 'tag' ? (n as Element) : null;
   };
 
   // Strategy 1: match by id.
@@ -280,7 +281,7 @@ async function generateSelector(
         warnings: ['Could not find the pasted element in the page HTML'],
       };
     }
-    const rootEl = rootAny as cheerio.Element;
+    const rootEl = rootAny as Element;
     const fallbackResult = buildStableSelector(el$, rootEl);
     warnings.push(
       'Could not match element in full page DOM. Selector generated from pasted HTML alone — uniqueness not verified.',

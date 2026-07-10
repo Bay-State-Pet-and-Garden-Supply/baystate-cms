@@ -144,7 +144,7 @@ describe('Draft Promoter Service', () => {
     expect(csList[0].title).toContain('Onboarding: Onboard Promo A');
 
     // Check Change Set Items
-    const csItems = listChangeSetItems(promoteRes.changeSetId);
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
     expect(csItems.length).toBe(1);
     expect(csItems[0].sku).toBe('123456123456');
     // Pre-existing product file causes an 'update' operation
@@ -236,7 +236,7 @@ describe('Draft Promoter Service', () => {
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(promoteRes.count).toBe(1);
 
-    const csItems = listChangeSetItems(promoteRes.changeSetId);
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
     const itemMatch = csItems.find(ci => ci.sku === '987654321098');
     expect(itemMatch).toBeDefined();
 
@@ -303,7 +303,7 @@ describe('Draft Promoter Service', () => {
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
 
-    const csItems = listChangeSetItems(promoteRes.changeSetId);
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
     const draftProduct = JSON.parse(csItems[0].draftJson);
     expect(draftProduct.core.price).toBe('19999.95'); // cleaned price
   });
@@ -367,7 +367,7 @@ describe('Draft Promoter Service', () => {
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
 
-    const csItems = listChangeSetItems(promoteRes.changeSetId);
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
     const draftProduct = JSON.parse(csItems[0].draftJson);
     expect(draftProduct.core.price).toBe('12.50'); // fallback to cleaned extracted price
   });
@@ -497,7 +497,7 @@ describe('Draft Promoter Service', () => {
     expect(promoteRes.count).toBe(1);
     expect(promoteRes.failures.length).toBe(0);
 
-    const csItems = listChangeSetItems(promoteRes.changeSetId);
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
     const draftProduct = JSON.parse(csItems[0].draftJson);
     
     // Format today's date in MMDDYY format

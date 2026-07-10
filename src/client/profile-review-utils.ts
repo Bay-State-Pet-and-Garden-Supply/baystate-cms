@@ -7,7 +7,6 @@
 
 import {
   getFieldByKey,
-  type ProfileFieldCategory,
   type ProfileFieldValueType,
 } from '../shared/profile-fields';
 
@@ -78,7 +77,7 @@ export interface RevisionDiffEntry {
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /** Category ordering for the review UI. */
-const CATEGORY_ORDER: ProfileFieldCategory[] = [
+const CATEGORY_ORDER: string[] = [
   'identity',
   'pricing',
   'media',
@@ -149,7 +148,7 @@ export function getCategoryLabel(category: string): string {
  * Get the sort order for a category.
  */
 export function getCategoryOrder(category: string): number {
-  const idx = CATEGORY_ORDER.indexOf(category as ProfileFieldCategory);
+  const idx = CATEGORY_ORDER.indexOf(category);
   return idx >= 0 ? idx : CATEGORY_ORDER.length;
 }
 
