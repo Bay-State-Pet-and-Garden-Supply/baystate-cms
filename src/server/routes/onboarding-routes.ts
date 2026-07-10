@@ -1116,7 +1116,7 @@ route.get('/onboarding/settings/extractor-profiles', (c) => {
 
 route.post('/onboarding/settings/extractor-profiles', async (c) => {
   try {
-    const { domain, titleSelector, titleOptionalSelectors, priceSelector, descriptionSelector, brandSelector, imagesSelector, sitemapProductUrlPattern, customSelectors } = await c.req.json();
+    const { domain, titleSelector, titleOptionalSelectors, priceSelector, descriptionSelector, brandSelector, imagesSelector, sitemapProductUrlPattern, customSelectors, runtime, shopifyJSONPath, variantSelectionStrategy, customSelectorMetadata } = await c.req.json();
     if (!domain) {
       return c.json({ error: 'domain is required' }, 400);
     }
@@ -1129,6 +1129,10 @@ route.post('/onboarding/settings/extractor-profiles', async (c) => {
       imagesSelector,
       sitemapProductUrlPattern,
       customSelectors,
+      runtime: runtime === 'static' ? 'static' : runtime === 'rendered' ? 'rendered' : undefined,
+      shopifyJSONPath: typeof shopifyJSONPath === 'boolean' ? shopifyJSONPath : undefined,
+      variantSelectionStrategy: variantSelectionStrategy ?? undefined,
+      customSelectorMetadata: customSelectorMetadata ?? undefined,
     });
     return c.json({ success: true, profile });
   } catch (err) {

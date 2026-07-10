@@ -25,7 +25,7 @@ import {
 } from '../onboarding-api';
 import { OnboardingSettings } from './OnboardingSettings';
 import { PipelineBoard } from './PipelineBoard';
-import { ProfileBuilderWorkspace } from './ProfileBuilderWorkspace';
+import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
 import type { ClassificationProposal, ClassificationEvidence } from '../../shared/schemas/classification';
 import { matchExistingBrand } from '../../shared/brand-matcher';
@@ -1169,11 +1169,11 @@ export function Onboarding() {
           }}
         />
         {profileBuilderDomain && (
-          <ProfileBuilderWorkspace
-            domain={profileBuilderDomain}
-            onClose={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}
-            seedSampleUrl={profileBuilderSeed?.url}
-            seedItem={profileBuilderSeed?.item}
+          <ProfileBuilder
+            mode="modal"
+            initialDomain={profileBuilderDomain}
+            initialProductUrl={profileBuilderSeed?.url}
+            onCancel={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}
           />
         )}
       </>

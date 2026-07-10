@@ -340,15 +340,23 @@ export async function getExtractorProfiles(): Promise<{ extractorProfiles: Extra
   return request<{ extractorProfiles: ExtractorProfile[] }>('/settings/extractor-profiles');
 }
 
-async function saveExtractorProfile(data: {
+export interface SaveExtractorProfilePayload {
   domain: string;
   titleSelector?: string | null;
+  titleOptionalSelectors?: string[];
   priceSelector?: string | null;
   descriptionSelector?: string | null;
   brandSelector?: string | null;
   imagesSelector?: string | null;
+  customSelectors?: Record<string, string>;
   sitemapProductUrlPattern?: string | null;
-}): Promise<{ success: boolean; profile: ExtractorProfile }> {
+  shopifyJSONPath?: boolean;
+  variantSelectionStrategy?: Record<string, unknown> | null;
+  customSelectorMetadata?: Record<string, unknown>;
+  runtime?: 'static' | 'rendered';
+}
+
+export async function saveExtractorProfile(data: SaveExtractorProfilePayload): Promise<{ success: boolean; profile: ExtractorProfile }> {
   return request<{ success: boolean; profile: ExtractorProfile }>('/settings/extractor-profiles', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -421,7 +429,7 @@ export interface ExtractorTestResult {
   customFields?: Record<string, string>;
 }
 
-export async function testExtractorProfile(data: {
+export interface TestExtractorProfileRequest {
   url: string;
   titleSelector?: string | null;
   titleOptionalSelectors?: string[];
@@ -432,7 +440,9 @@ export async function testExtractorProfile(data: {
   shopifyJSONPath?: boolean;
   variantSelectionStrategy?: any;
   customSelectors?: Record<string, string>;
-}): Promise<{ success: boolean; extracted: Record<string, any> }> {
+}
+
+export async function testExtractorProfile(data: TestExtractorProfileRequest): Promise<{ success: boolean; extracted: ExtractorTestResult }> {
   return request<{ success: boolean; extracted: ExtractorTestResult }>('/extractor-profiles/test', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -816,7 +826,7 @@ export async function fetchPageHtml(
 }
 
 
-async function validateProfileDraft(
+export async function validateProfileDraft(
   req: ValidateRequest,
 ): Promise<{ ok: boolean; data?: ValidateResponse; error?: string }> {
   return request('/settings/profile-tooling/validate', {

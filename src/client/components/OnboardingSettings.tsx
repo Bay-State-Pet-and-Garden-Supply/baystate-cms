@@ -30,7 +30,7 @@ import type {
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
 import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
 import { ProfileProposalDrawer } from './ProfileProposalDrawer';
-import { ProfileBuilderWorkspace } from './ProfileBuilderWorkspace';
+import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { ProfileRetryPreview } from './ProfileRetryPreview';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
@@ -1066,7 +1066,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
                       {/* Actions column */}
                       <td style={styles.td}>
                         <button
-                          onClick={(e) => { e.stopPropagation(); setDrawerState(null); setWorkspaceDomain(entry.domain); }}
+                          onClick={(e) => { e.stopPropagation(); setDrawerState(null); setWorkspaceDomain(entry.domain); setSettingsTab('profiles'); }}
                           style={{ padding: '4px 8px', fontSize: 12, cursor: 'pointer', border: '1px solid #007bff', borderRadius: 4, color: '#007bff', background: '#fff' }}
                         >
                           Open Profile Builder
@@ -1151,6 +1151,18 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
       </div>
       </div>
 
+      {/* ── Profile Builder (inline) ── */}
+      {workspaceDomain && (
+        <div style={{ marginBottom: 24, background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 20 }}>
+          <ProfileBuilder
+            mode="inline"
+            initialDomain={workspaceDomain}
+            onCancel={() => setWorkspaceDomain(null)}
+            onSaved={() => { loadDomainDiagnostics(); }}
+          />
+        </div>
+      )}
+
       {/* ── Profile Proposal Drawer ── */}
       {drawerState && (
         <ProfileProposalDrawer
@@ -1170,14 +1182,6 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
         />
       )}
 
-
-      {/* ── Profile Builder Workspace Overlay ── */}
-      {workspaceDomain && (
-        <ProfileBuilderWorkspace
-          domain={workspaceDomain}
-          onClose={() => setWorkspaceDomain(null)}
-        />
-      )}
 
       {/* ── Profile Retry Preview Overlay ── */}
       {retryPreviewDomain && (
