@@ -1,23 +1,29 @@
 import {
-  getPendingItemsByStage,
+  claimItemsForProcessing,
+  requeueStaleInProgressItems,
   updateItemStageStatus,
   incrementRetryCount,
   setDiscoverySourceUrl,
   updateItemExpectedName,
+  updateItemBrandHint,
+  listItemsByBatch,
 } from '../db/repositories/onboarding-item-repo';
+import { randomUUID } from 'node:crypto';
 import { discoverSources } from './source-discovery';
 import {
   insertSources,
   deleteSourcesByItem,
   selectSource,
+  listSourcesByItem,
   type InsertSourceData,
 } from '../db/repositories/onboarding-source-repo';
 import { verifyTopCandidates, type VerificationResult } from './page-verifier';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
-import { curateItem, curateItemWithPipeline } from './product-curator';
-import { isModularCurationEnabled } from './curation-mode';
+import { curateItemWithPipeline } from './product-curator';
+import { determineProductGroup } from './product-line-grouper';
+import { validateSiblingConsistency } from '../classification/consistency-validator';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
@@ -51,40 +57,6 @@ export function getOfficialDomainsForBrand(brandHint: string | null | undefined)
 }
 
 /**
- * Build a human-readable reason string for why auto-selection was skipped.
- * Returned strings are prefixed with `needs_review:` so the UI can
- * distinguish them from other error messages. When sitemap candidates
- * were discovered but none cleared the auto-select threshold, the
- * reason notes that explicitly so reviewers know to look at them.
- */
-function manualReviewReasonForDiscovery(
-  item: any,
-  bestSource: any,
-  officialDomains: string[],
-  sitemapCandidateCount = 0,
-): string {
-  if (bestSource && bestSource.metadataJson) {
-    try {
-      const meta = JSON.parse(bestSource.metadataJson);
-      if (meta.variantResolution?.status === 'ambiguous') {
-        return `needs_review: variant resolution is ambiguous for base product page: ${meta.variantResolution.variantTitle || 'unknown'}`;
-      }
-    } catch {}
-  }
-  if (!item.brandHint || !String(item.brandHint).trim()) {
-    return 'needs_review: no brand assigned for official-domain auto-selection';
-  }
-  if (officialDomains.length === 0) {
-    return `needs_review: no official domain mapped for brand "${String(item.brandHint).trim()}"`;
-  }
-  const candidateDomain = bestSource?.domain ? String(bestSource.domain) : '(none)';
-  const sitemapNote = sitemapCandidateCount > 0
-    ? `; ${sitemapCandidateCount} sitemap candidate(s) found but none above the auto-select threshold`
-    : '';
-  return `needs_review: top candidate domain "${candidateDomain}" does not match official domain(s): ${officialDomains.join(', ')}${sitemapNote}`;
-}
-
-/**
  * Stage-based worker. Polls for items with stage_status = 'pending' across
  * all active batches. Processes items within their current stage but NEVER
  * auto-transitions to the next stage — advancement is always manual.
@@ -101,28 +73,26 @@ export class OnboardingWorker {
   private isProcessing = false;
   private workspacePath: string;
   private workspaceId: string;
+  private workerId: string;
 
   constructor(workspaceId: string, workspacePath: string, maxConcurrency = 10, maxExtractionConcurrency = 3) {
     this.workspaceId = workspaceId;
     this.workspacePath = workspacePath;
     this.maxConcurrency = maxConcurrency;
     this.maxExtractionConcurrency = maxExtractionConcurrency;
+    this.workerId = randomUUID();
   }
 
   start(): void {
     if (this.interval) return;
 
-    // Reset any stuck in_progress items back to pending for this workspace upon starting
+    // Requeue only items whose claim has gone stale (older than 5 minutes).
+    // A live worker's in_progress items are left alone.
     try {
-      const db = getDb();
-      const result = db.query(
-        "UPDATE onboarding_items SET stage_status = 'pending' WHERE stage_status = 'in_progress' AND batch_id IN (SELECT id FROM onboarding_batches WHERE workspace_id = ?)"
-      ).run(this.workspaceId);
-      if (result.changes > 0) {
-        console.log(`[OnboardingWorker] Reset ${result.changes} stuck in_progress items to pending for workspace ${this.workspaceId}`);
-      }
+      const staleBefore = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      requeueStaleInProgressItems(this.workspaceId, staleBefore);
     } catch (err) {
-      console.error('[OnboardingWorker] Failed to reset stuck in_progress items:', err);
+      console.error('[OnboardingWorker] Failed to requeue stale in_progress items:', err);
     }
 
     this.interval = setInterval(() => this.poll(), 2000);
@@ -150,9 +120,9 @@ export class OnboardingWorker {
         if (stage === 'extraction' && this.extractionRunning >= this.maxExtractionConcurrency) continue;
 
         const available = this.maxConcurrency - this.running.size;
-        const pendingItems = getPendingItemsByStage(stage, available, this.workspaceId);
+        const claimedItems = claimItemsForProcessing(stage, available, this.workspaceId, this.workerId);
 
-        for (const item of pendingItems) {
+        for (const item of claimedItems) {
           if (this.running.has(item.id)) continue;
 
           // Re-check extraction concurrency limit in loop since processItem increments it synchronously
@@ -175,10 +145,8 @@ export class OnboardingWorker {
   }
 
   private async processItem(item: any, stage: PipelineStage): Promise<void> {
-    console.log(`[OnboardingWorker] Processing ${item.name} (${item.upc}) in stage: ${stage}`);
+    console.log(`[OnboardingWorker] Processing ${item.name} (${item.upc}) in stage: ${stage} (claimed by ${this.workerId})`);
 
-    // Set to in_progress
-    updateItemStageStatus(item.id, 'in_progress');
     onboardingEvents.emitItemStatus(item.batchId, item.id, 'in_progress', { stage });
 
     try {
@@ -203,28 +171,49 @@ export class OnboardingWorker {
   private async processDiscovery(item: any): Promise<void> {
     console.log(`[OnboardingWorker] Discovery for ${item.name} (${item.upc})`);
 
-    // ── Brand guard: discovery is useless without a brand ──────────────────
-    if (!item.brandHint || !String(item.brandHint).trim()) {
-      console.log(`[OnboardingWorker] ⚠ Skipping discovery for "${item.name}" (${item.upc}): no brand assigned`);
-      updateItemStageStatus(item.id, 'completed', 'needs_review: no brand assigned — set a brand before discovery');
-      onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
-        stage: 'discovery',
-        warning: 'No brand assigned',
-        needsManualReview: true,
-        manualReviewReason: 'no brand assigned — set a brand before discovery',
-        consolidatedName: null,
-        sitemapMatched: false,
-        sitemapCandidateCount: 0,
-      });
-      return;
-    }
-
     try {
+      const existingSources = listSourcesByItem(item.id);
+      const upcSources = existingSources.filter(s => s.sourceMethod === 'serper_upc');
+
       const discovery = await discoverSources(item.upc, item.name, item.brandHint, {
-        price: item.price ? parseFloat(item.price) : null
+        price: item.price ? parseFloat(item.price) : null,
+        existingExpectedName: item.expectedName,
+        existingUpcCandidates: upcSources.length > 0 ? upcSources : null,
       });
       const sources = discovery.candidates;
       const consolidatedName = discovery.consolidatedName;
+      const inferredBrand = discovery.inferredBrand;
+
+      // ── Persist the inferred brand if discovery inferred one ────────────
+      let activeBrandHint = item.brandHint;
+      if (inferredBrand) {
+        console.log(`[OnboardingWorker] ✓ Persisted inferred brand for ${item.upc}: "${inferredBrand.brand}"`);
+        updateItemBrandHint(item.id, inferredBrand.brand);
+        activeBrandHint = inferredBrand.brand;
+      }
+
+      // ── Hold on discovery if brand has no domain ───────────────────────
+      if (discovery.noDomainMapped) {
+        console.log(`[OnboardingWorker] ⚠ Brand "${activeBrandHint}" has no official domain configured. Parking item in Discovery stage.`);
+        deleteSourcesByItem(item.id);
+        if (sources.length > 0) {
+          insertSources(item.id, sources);
+        }
+
+        const reviewReason = `needs_review: no domain mapped for brand "${activeBrandHint}" — map a domain in Settings to complete discovery`;
+        updateItemStageStatus(item.id, 'completed', reviewReason);
+
+        onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
+          stage: 'discovery',
+          needsManualReview: true,
+          manualReviewReason: reviewReason,
+          inferredBrand: inferredBrand || null,
+          sourcesCount: sources.length,
+          sitemapMatched: false,
+          sitemapCandidateCount: 0,
+        });
+        return;
+      }
 
       // ── Sitemap signals ──────────────────────────────────────────────
       // Sitemap candidates come from the brand's own sitemap (sourceMethod
@@ -278,12 +267,12 @@ export class OnboardingWorker {
         // product-identity signals BEFORE auto-selection. This prevents
         // confidently saving the wrong URL just because its slug looked
         // tasty on a high-confidence domain.
-        const officialDomains = getOfficialDomainsForBrand(item.brandHint);
+        const officialDomains = getOfficialDomainsForBrand(activeBrandHint);
         const verificationResults: VerificationResult[] = sources.length > 0
           ? await verifyTopCandidates(sources, {
               upc: item.upc,
               expectedName: consolidatedName || item.name,
-              brandHint: item.brandHint,
+              brandHint: activeBrandHint,
               price: item.price ? parseFloat(item.price) : null,
               officialDomains,
             })
@@ -316,9 +305,23 @@ export class OnboardingWorker {
         const verifiedStrong = verificationResults
           .filter(vr => vr.hasStrongProof && !isAmbiguous(vr.candidate));
 
-        const autoSelectedResult = verifiedStrong.length > 0
-          ? verifiedStrong[0]
-          : null;
+        // Prefer any valid product page candidate on the official brand domain
+        // (even with relaxed verification thresholds) over retailer pages, to ensure
+        // consistent image and details sourcing from the brand's official site.
+        const officialDomainResult = verificationResults.find(vr => {
+          const sig = vr.signals;
+          return (
+            sig.domainOfficial &&
+            !sig.isListingOrSearchPage &&
+            !sig.isBlogOrCmsPage &&
+            (sig.titleSimilarity >= 0.25 || sig.titleNameOverlap >= 0.25 || sig.skuInPage) &&
+            !isAmbiguous(vr.candidate)
+          );
+        });
+
+        const autoSelectedResult = officialDomainResult
+          ? officialDomainResult
+          : (verifiedStrong.length > 0 ? verifiedStrong[0] : null);
         const autoSelectedSource = autoSelectedResult?.candidate ?? null;
         const shouldAutoSelect = autoSelectedSource !== null;
 
@@ -370,6 +373,7 @@ export class OnboardingWorker {
           bestCandidateDomain: bestSource.domain ?? null,
           officialDomains,
           consolidatedName: consolidatedName || null,
+          inferredBrand: inferredBrand || null,
           sourcesCount: sources.length,
           topConfidence: bestSource.confidence,
           sitemapMatched,
@@ -390,6 +394,7 @@ export class OnboardingWorker {
           needsManualReview: true,
           manualReviewReason: 'No sources found',
           consolidatedName: consolidatedName || null,
+          inferredBrand: inferredBrand || null,
           sitemapMatched: false,
           sitemapCandidateCount: 0,
         });
@@ -431,7 +436,9 @@ export class OnboardingWorker {
       let domain = '';
       try {
         domain = new URL(item.sourceUrl).hostname.replace(/^www\./, '');
-      } catch {}
+      } catch {
+        // Keep the empty domain so the missing-profile failure below remains explicit.
+      }
       const profile = domain ? findProfileByDomain(domain) : null;
       if (!profile) {
         const errorMsg = `No extractor profile for ${domain} — profile required`;
@@ -508,55 +515,29 @@ export class OnboardingWorker {
     console.log(`[OnboardingWorker] Curation for ${item.name} (${item.upc})`);
 
     const now = new Date().toISOString();
-    let curationData: import('../shared/schemas/onboarding').CurationData;
+
+    // ── Sibling context for family-aware curation ────────────────────────
+    // Before running the pipeline, determine product-line groups so the
+    // name_consolidation and page-assignment stages receive sibling INPUT
+    // context (names, web titles, OCR titles, SKUs) as read-only hints.
+    // listItemsByBatch returns full OnboardingItem objects (camelCase).
+    let siblingGroup: ReturnType<typeof determineProductGroup> | null = null;
+    try {
+      const batchItems = listItemsByBatch(item.batchId);
+      siblingGroup = determineProductGroup(item as any, batchItems as any);
+      if (siblingGroup) {
+        console.log(`[OnboardingWorker] Sibling context for ${item.upc}: group "${siblingGroup.groupId}", ${siblingGroup.siblingNames.length} sibling(s)`);
+      }
+    } catch (err: any) {
+      console.warn(`[OnboardingWorker] Sibling context discovery failed (non-blocking): ${err.message}`);
+    }
+
+    // Pass sibling context through to the pipeline as read-only input.
+    // product-curator.ts checks this first and falls back to its own internal query.
+    (item as any).siblingGroup = siblingGroup;
 
     try {
-      // ── Cohort name coordination ─────────────────────────────────────
-      // Before running the pipeline, check if this item already has a
-      // pre-computed coordinated title. If not, coordinate the entire
-      // batch's product-line groups in ONE LLM call per group.
-      if (isModularCurationEnabled() && !item.coordinatedTitle) {
-        try {
-          const { listItemsByBatch } = await import('../db/repositories/onboarding-item-repo');
-          const { coordinateCohortItems } = await import('./cohort-name-coordinator');
-
-          const batchItems = listItemsByBatch(item.batchId);
-          const coordinatedTitles = await coordinateCohortItems(batchItems);
-
-          if (coordinatedTitles.size > 0) {
-            const db = getDb();
-            const now = new Date().toISOString();
-            for (const [upc, title] of coordinatedTitles) {
-              db.query(
-                'UPDATE onboarding_items SET coordinated_title = ?, updated_at = ? WHERE upc = ? AND batch_id = ?',
-              ).run(title, now, upc, item.batchId);
-            }
-
-            // Re-read this item's coordinated title
-            const updated = db.query('SELECT coordinated_title FROM onboarding_items WHERE id = ?').get(item.id) as
-              | { coordinated_title: string | null }
-              | undefined;
-            if (updated?.coordinated_title) {
-              item.coordinatedTitle = updated.coordinated_title;
-              console.log(`[OnboardingWorker] Cohort coordinated title for ${item.upc}: "${updated.coordinated_title}"`);
-            }
-          }
-        } catch (err: any) {
-          console.warn(`[OnboardingWorker] Cohort coordination failed for ${item.upc}, falling back to per-item: ${err.message}`);
-        }
-      }
-
-      if (isModularCurationEnabled()) {
-        console.log(`[OnboardingWorker] Using modular curation pipeline for "${item.name}"`);
-        try {
-          curationData = await curateItemWithPipeline(item, this.workspacePath, this.workspaceId);
-        } catch (modularErr) {
-          console.error(`[OnboardingWorker] Modular curation failed for ${item.id}; falling back to legacy:`, modularErr);
-          curationData = await curateItem(item, this.workspacePath);
-        }
-      } else {
-        curationData = await curateItem(item, this.workspacePath);
-      }
+      const curationData = await curateItemWithPipeline(item, this.workspacePath, this.workspaceId);
 
       const db = getDb();
       db.query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
@@ -566,9 +547,28 @@ export class OnboardingWorker {
       );
 
       updateItemStageStatus(item.id, 'completed');
+
+      // Run cross-sibling consistency check and include warnings in SSE event
+      let consistencyWarnings: Array<{ field: string; message: string }> = [];
+      try {
+        const allWarnings = validateSiblingConsistency(item.batchId);
+        consistencyWarnings = allWarnings
+          .filter(w => {
+            // w.values is Record<sku, string[]> — check if this item's SKU is a key
+            return Object.prototype.hasOwnProperty.call(w.values, item.upc);
+          })
+          .map(w => ({ field: w.field, message: w.message }));
+        if (consistencyWarnings.length > 0) {
+          console.warn(`[OnboardingWorker] Consistency warnings for ${item.upc}:`, JSON.stringify(consistencyWarnings));
+        }
+      } catch (err: any) {
+        console.warn(`[OnboardingWorker] Consistency check failed (non-blocking): ${err.message}`);
+      }
+
       onboardingEvents.emitItemStatus(item.batchId, item.id, 'completed', {
         stage: 'curation',
         curationData,
+        consistencyWarnings: consistencyWarnings.length > 0 ? consistencyWarnings : undefined,
       });
 
       console.log(

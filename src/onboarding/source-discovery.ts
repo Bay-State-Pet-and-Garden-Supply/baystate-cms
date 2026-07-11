@@ -42,6 +42,8 @@ import { matchSitemapUrls, type SitemapMatchResult } from './sitemap-matcher';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { resolveVariantsForCandidates } from './variant-url-resolver';
 import { isOfficialDomainMatch } from './domain-utils';
+import { inferBrandFromSearchResults, type BrandInferenceResult } from './brand-inferrer';
+import type { OnboardingSource } from '../shared/schemas/onboarding';
 
 interface SerperSearchResult {
   title: string;
@@ -68,174 +70,154 @@ export async function discoverSources(
   upc: string,
   name: string,
   brandHint?: string | null,
-  options?: { price?: number | null }
-): Promise<{ candidates: InsertSourceData[]; consolidatedName: string | null }> {
+  options?: {
+    price?: number | null;
+    existingExpectedName?: string | null;
+    existingUpcCandidates?: OnboardingSource[] | null;
+  }
+): Promise<{
+  candidates: InsertSourceData[];
+  consolidatedName: string | null;
+  inferredBrand?: BrandInferenceResult | null;
+  noDomainMapped?: boolean;
+}> {
   const apiKeyRow = getApiKey('serper');
   if (!apiKeyRow) {
     throw new Error('Serper.dev API key not configured. Go to Onboarding Settings to add it.');
-  }
-
-  // A brand is required: without it we have no domain to search and
-  // every Serper.dev call is wasted credits. Callers must supply a
-  // brandHint (typically from the spreadsheet's brand column or manual
-  // assignment) before discovery can proceed.
-  if (!brandHint || !String(brandHint).trim()) {
-    throw new Error(
-      'Brand is required before discovery. Assign a brand to this product ' +
-      'so discovery knows which domain to search.',
-    );
   }
 
   const candidates: InsertSourceData[] = [];
   const seenUrls = new Set<string>();
 
   // Retrieve pre-mapped brand domains from database
-  const brandDomains: string[] = [];
-  if (brandHint) {
-    const knownSites = findBrandSites(brandHint);
+  let activeBrandHint = brandHint;
+  const activeBrandDomains: string[] = [];
+  if (activeBrandHint) {
+    const knownSites = findBrandSites(activeBrandHint);
     for (const site of knownSites) {
-      brandDomains.push(site.domain);
+      const bareDomain = cleanDomainString(site.domain);
+      if (bareDomain && !activeBrandDomains.includes(bareDomain)) {
+        activeBrandDomains.push(bareDomain);
+      }
     }
   }
 
-  // Kick off the sitemap fetch (URLs only, no matching yet) in parallel
-  // with the Pass 1 UPC search. The matching step is deferred until the
-  // consolidated name is available from the LLM/LCS pass below, so we
-  // don't burn an LLM call on the raw item name. Sitemap failures are
-  // swallowed inside `fetchSitemapForDiscovery` and surface as `null`,
-  // so the parallel promise can never reject.
-  const primaryDomain: string | null = brandDomains[0] ?? null;
-  const sitemapFetchPromise: Promise<SitemapFetched | null> = primaryDomain
+  // Kick off sitemap fetch in parallel if we have a domain initially.
+  // Otherwise, we'll kick it off dynamically after brand/domain inference.
+  let primaryDomain: string | null = activeBrandDomains[0] ?? null;
+  let sitemapFetchPromise: Promise<SitemapFetched | null> = primaryDomain
     ? fetchSitemapForDiscovery(primaryDomain)
     : Promise.resolve(null);
 
   // ── Pass 1: Bare UPC search ───────────────────────────────────────────
   // Gather initial context about the product from retailers and marketplaces.
   let upcResults: SerperSearchResult[] = [];
-  try {
-    upcResults = await searchSerper(apiKeyRow.api_key, upc);
-    for (const result of upcResults) {
-      if (seenUrls.has(result.link)) continue;
-      seenUrls.add(result.link);
-
-      const resultDomain = extractDomain(result.link);
-      const domainStatus = getDomainStatus(resultDomain);
-      if (domainStatus && (domainStatus.status === 'blocked' || domainStatus.status === 'offline')) {
-        console.log(`[SourceDiscovery] Skipping candidate ${result.link} because domain ${resultDomain} is marked ${domainStatus.status}`);
-        continue;
-      }
-
-      const confidence = scoreResult(result, upc, name, brandHint, resultDomain, brandDomains);
-
-      candidates.push({
-        url: result.link,
-        title: result.title,
-        snippet: result.snippet,
-        domain: resultDomain,
-        confidence,
-        sourceMethod: 'serper_upc',
-      });
+  if (options?.existingUpcCandidates && options.existingUpcCandidates.length > 0) {
+    console.log(`[SourceDiscovery] Resuming discovery: using ${options.existingUpcCandidates.length} cached UPC search candidates.`);
+    upcResults = options.existingUpcCandidates.map(c => ({
+      title: c.title || '',
+      snippet: c.snippet || '',
+      link: c.url,
+      position: 1,
+    }));
+  } else {
+    try {
+      upcResults = await searchSerper(apiKeyRow.api_key, upc);
+    } catch (err) {
+      console.error(`[SourceDiscovery] Pass 1 UPC search failed:`, err);
     }
-  } catch (err) {
-    console.error(`[SourceDiscovery] Pass 1 UPC search failed:`, err);
   }
 
-  // ── Pass 2: Consolidated-name search ──────────────────────────────────
-  // Consolidate search titles using LLM (or LCS fallback), then run an
-  // **unconditional** unrestricted Google search on the consolidated name.
-  // Mapped brand-domain searches and original-name fallbacks are layered
-  // on top — but the consolidated-name search fires regardless of how
-  // many UPC candidates we already collected.
-  const consolidatedName = await consolidateProductName(
-    upc,
-    upcResults.map(r => ({ title: r.title, snippet: r.snippet })),
-    name,
-    brandHint,
-  );
+  // ── Brand Inference (when brandHint is missing) ───────────────────────
+  let inferredBrand: BrandInferenceResult | null = null;
+  if ((!activeBrandHint || !String(activeBrandHint).trim()) && upcResults.length > 0) {
+    console.log(`[SourceDiscovery] Brand hint missing for UPC ${upc}. Attempting to infer brand from search results...`);
+    inferredBrand = await inferBrandFromSearchResults(upc, upcResults.map(r => ({
+      title: r.title,
+      snippet: r.snippet,
+      link: r.link
+    })));
+    if (inferredBrand) {
+      console.log(`[SourceDiscovery] ✓ Inferred brand for UPC ${upc}: "${inferredBrand.brand}" with confidence ${inferredBrand.confidence.toFixed(2)} (source: ${inferredBrand.source})`);
+      activeBrandHint = inferredBrand.brand;
 
-  const searchName = consolidatedName || name;
-  // Clean the search name so the LLM-returned phrase works inside a query
-  // (e.g. strip stray double quotes that some models include).
-  const cleanSearchName = searchName ? searchName.replace(/"/g, '').trim() : '';
-  const searchNameChanged = !!(name && cleanSearchName && cleanSearchName.toLowerCase() !== name.toLowerCase());
-
-  if (cleanSearchName && cleanSearchName.length > 3) {
-    // Query descriptors: `mandatory` queries are NOT skipped by the 15-candidate
-    // pre-query cap so the operator always gets a Pass 2 chance at the
-    // official product page.
-    type Pass2Query = { query: string; mandatory?: boolean };
-    const secondPassQueries: Pass2Query[] = [];
-    const seenSecondPass = new Set<string>();
-    const addSecondPassQuery = (query: string, mandatory = false) => {
-      const normalized = query.trim();
-      if (!normalized) return;
-      if (seenSecondPass.has(normalized)) return;
-      seenSecondPass.add(normalized);
-      secondPassQueries.push({ query: normalized, mandatory });
-    };
-
-    // Mandatory unrestricted consolidated-name search — always fires when
-    // we have a usable name. This is the search the operator relies on for
-    // finding the official brand/product page even when brand sites are
-    // not pre-mapped or the UPC pass already returned 10 retailer results.
-    addSecondPassQuery(`${cleanSearchName} product page`, true);
-
-    // Prioritize searching the consolidated product name on mapped brand
-    // domains (best signal for official pages).
-    for (const domain of brandDomains.slice(0, 2)) {
-      addSecondPassQuery(`${cleanSearchName} site:${domain}`);
-      // Fallback: Search using the original spreadsheet name to bypass bad
-      // UPC-based LLM name consolidations.
-      if (searchNameChanged) {
-        addSecondPassQuery(`${name} site:${domain}`);
-      }
-    }
-
-    // Low-candidate fallback: if Pass 1 produced almost nothing, also
-    // search the original spreadsheet name in case the LLM consolidation
-    // drifted from the real product.
-    if (candidates.length < 5 && searchNameChanged) {
-      addSecondPassQuery(`${name} product page`);
-    }
-
-    // Execute follow-up queries. Mandatory queries ignore the 15-candidate
-    // pre-query cap; non-mandatory ones still respect it.
-    for (const q of secondPassQueries) {
-      if (!q.mandatory && candidates.length >= 15) break;
-
-      console.log(`[SourceDiscovery] Pass 2 search for UPC ${upc}: "${q.query}"`);
-
-      try {
-        // Sleep slightly to avoid Serper rate-limiting
-        await new Promise(r => setTimeout(r, 200));
-
-        const results = await searchSerper(apiKeyRow.api_key, q.query);
-        for (const result of results) {
-          if (seenUrls.has(result.link)) continue;
-          seenUrls.add(result.link);
-
-          const resultDomain = extractDomain(result.link);
-          const domainStatus = getDomainStatus(resultDomain);
-          if (domainStatus && (domainStatus.status === 'blocked' || domainStatus.status === 'offline')) {
-            console.log(`[SourceDiscovery] Skipping candidate ${result.link} because domain ${resultDomain} is marked ${domainStatus.status}`);
-            continue;
-          }
-
-          const confidence = scoreResult(result, upc, name, brandHint, resultDomain, brandDomains);
-
-          candidates.push({
-            url: result.link,
-            title: result.title,
-            snippet: result.snippet,
-            domain: resultDomain,
-            confidence,
-            sourceMethod: 'serper_name',
-          });
+      // An inferred domain is a run-local discovery hint, never a durable
+      // brand-site mapping. Candidates found through it still require normal
+      // human source review before the pipeline advances.
+      if (inferredBrand.inferredDomain) {
+        const inferredDomain = cleanDomainString(inferredBrand.inferredDomain);
+        if (inferredDomain && !activeBrandDomains.includes(inferredDomain)) {
+          activeBrandDomains.push(inferredDomain);
+          console.log(
+            `[SourceDiscovery] Using inferred domain "${inferredDomain}" for this discovery run only; no brand mapping was persisted.`,
+          );
         }
-      } catch (err) {
-        console.error(`[SourceDiscovery] Pass 2 query failed (${q.query}):`, err);
       }
+
+      // Existing reviewed brand mappings remain valid discovery inputs.
+      const knownSites = findBrandSites(activeBrandHint);
+      for (const site of knownSites) {
+        const bareDomain = cleanDomainString(site.domain);
+        if (bareDomain && !activeBrandDomains.includes(bareDomain)) {
+          activeBrandDomains.push(bareDomain);
+        }
+      }
+
+      // If we now have a domain, fetch sitemap in parallel
+      primaryDomain = activeBrandDomains[0] ?? null;
+      if (primaryDomain) {
+        sitemapFetchPromise = fetchSitemapForDiscovery(primaryDomain);
+      }
+    } else {
+      console.log(`[SourceDiscovery] ✗ Could not infer brand for UPC ${upc}. Proceeding without brand.`);
     }
+  }
+
+  // Process Pass 1 candidates (now that activeBrandHint and activeBrandDomains are finalized)
+  for (const result of upcResults) {
+    if (seenUrls.has(result.link)) continue;
+    seenUrls.add(result.link);
+
+    const resultDomain = extractDomain(result.link);
+    const domainStatus = getDomainStatus(resultDomain);
+    if (domainStatus && (domainStatus.status === 'blocked' || domainStatus.status === 'offline')) {
+      console.log(`[SourceDiscovery] Skipping candidate ${result.link} because domain ${resultDomain} is marked ${domainStatus.status}`);
+      continue;
+    }
+
+    const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
+
+    candidates.push({
+      url: result.link,
+      title: result.title,
+      snippet: result.snippet,
+      domain: resultDomain,
+      confidence,
+      sourceMethod: 'serper_upc',
+    });
+  }
+
+  // If a brand is assigned (either originally or inferred) but has no domain site mapped
+  // in the database, we halt discovery. This prevents wasting search credits and holds
+  // the item until the operator configures a domain.
+  if (activeBrandHint && activeBrandHint.trim() && activeBrandDomains.length === 0) {
+    console.log(`[SourceDiscovery] Brand "${activeBrandHint}" has no official domain configured. Halting discovery before Pass 2.`);
+    return {
+      candidates,
+      consolidatedName: null,
+      inferredBrand: inferredBrand || null,
+      noDomainMapped: true,
+    };
+  }
+
+  let consolidatedName = options?.existingExpectedName ?? null;
+  if (!consolidatedName) {
+    consolidatedName = await consolidateProductName(
+      upc,
+      upcResults.map(r => ({ title: r.title, snippet: r.snippet })),
+      name,
+      activeBrandHint,
+    );
   }
 
   // ── Sitemap pass (deferred matching) ──────────────────────────────────
@@ -273,6 +255,105 @@ export async function discoverSources(
     }
   }
 
+  // Determine if sitemap produced a high-confidence match (confidence >= 0.85).
+  // If so, we bypass Pass 2 follow-up Serper searches, saving search credits!
+  const hasHighConfidenceSitemapMatch = sitemapCandidates.some(c => c.confidence >= 0.85);
+
+  if (hasHighConfidenceSitemapMatch) {
+    console.log(`[SourceDiscovery] ✓ High confidence sitemap match found (confidence >= 0.85). Skipping Pass 2 Google Searches.`);
+  } else {
+    // ── Pass 2: Consolidated-name search ──────────────────────────────────
+    // Consolidate search titles using LLM (or LCS fallback), then run an
+    // **unconditional** unrestricted Google search on the consolidated name.
+    // Mapped brand-domain searches and original-name fallbacks are layered
+    // on top — but the consolidated-name search fires regardless of how
+    // many UPC candidates we already collected.
+    const searchName = consolidatedName || name;
+    // Clean the search name so the LLM-returned phrase works inside a query
+    // (e.g. strip stray double quotes that some models include).
+    const cleanSearchName = searchName ? searchName.replace(/"/g, '').trim() : '';
+    const searchNameChanged = !!(name && cleanSearchName && cleanSearchName.toLowerCase() !== name.toLowerCase());
+
+    if (cleanSearchName && cleanSearchName.length > 3) {
+      // Query descriptors: `mandatory` queries are NOT skipped by the 15-candidate
+      // pre-query cap so the operator always gets a Pass 2 chance at the
+      // official product page.
+      type Pass2Query = { query: string; mandatory?: boolean };
+      const secondPassQueries: Pass2Query[] = [];
+      const seenSecondPass = new Set<string>();
+      const addSecondPassQuery = (query: string, mandatory = false) => {
+        const normalized = query.trim();
+        if (!normalized) return;
+        if (seenSecondPass.has(normalized)) return;
+        seenSecondPass.add(normalized);
+        secondPassQueries.push({ query: normalized, mandatory });
+      };
+
+      // Mandatory unrestricted consolidated-name search — always fires when
+      // we have a usable name. This is the search the operator relies on for
+      // finding the official brand/product page even when brand sites are
+      // not pre-mapped or the UPC pass already returned 10 retailer results.
+      addSecondPassQuery(`${cleanSearchName} product page`, true);
+
+      // Prioritize searching the consolidated product name on mapped brand
+      // domains (best signal for official pages).
+      for (const domain of activeBrandDomains.slice(0, 2)) {
+        addSecondPassQuery(`${cleanSearchName} site:${domain}`);
+        // Fallback: Search using the original spreadsheet name to bypass bad
+        // UPC-based LLM name consolidations.
+        if (searchNameChanged) {
+          addSecondPassQuery(`${name} site:${domain}`);
+        }
+      }
+
+      // Low-candidate fallback: if Pass 1 produced almost nothing, also
+      // search the original spreadsheet name in case the LLM consolidation
+      // drifted from the real product.
+      if (candidates.length < 5 && searchNameChanged) {
+        addSecondPassQuery(`${name} product page`);
+      }
+
+      // Execute follow-up queries. Mandatory queries ignore the 15-candidate
+      // pre-query cap; non-mandatory ones still respect it.
+      for (const q of secondPassQueries) {
+        if (!q.mandatory && candidates.length >= 15) break;
+
+        console.log(`[SourceDiscovery] Pass 2 search for UPC ${upc}: "${q.query}"`);
+
+        try {
+          // Sleep slightly to avoid Serper rate-limiting
+          await new Promise(r => setTimeout(r, 200));
+
+          const results = await searchSerper(apiKeyRow.api_key, q.query);
+          for (const result of results) {
+            if (seenUrls.has(result.link)) continue;
+            seenUrls.add(result.link);
+
+            const resultDomain = extractDomain(result.link);
+            const domainStatus = getDomainStatus(resultDomain);
+            if (domainStatus && (domainStatus.status === 'blocked' || domainStatus.status === 'offline')) {
+              console.log(`[SourceDiscovery] Skipping candidate ${result.link} because domain ${resultDomain} is marked ${domainStatus.status}`);
+              continue;
+            }
+
+            const confidence = scoreResult(result, upc, name, activeBrandHint, resultDomain, activeBrandDomains);
+
+            candidates.push({
+              url: result.link,
+              title: result.title,
+              snippet: result.snippet,
+              domain: resultDomain,
+              confidence,
+              sourceMethod: 'serper_name',
+            });
+          }
+        } catch (err) {
+          console.error(`[SourceDiscovery] Pass 2 query failed (${q.query}):`, err);
+        }
+      }
+    }
+  }
+
   // Merge sitemap candidates with the Serper pool, applying the
   // cross-source boost/penalty rules before we sort and cap.
   const merged = mergeSitemapAndSerperCandidates(candidates, sitemapCandidates, primaryDomain);
@@ -283,8 +364,8 @@ export async function discoverSources(
     upc,
     rawName: name,
     expectedName: consolidatedName || name,
-    brandHint,
-    brandDomains,
+    brandHint: activeBrandHint ?? null,
+    brandDomains: activeBrandDomains,
     price: options?.price,
   });
 
@@ -320,12 +401,13 @@ export async function discoverSources(
       console.log(`[SourceDiscovery] Runner-up sources for UPC ${upc}:\n${runnersUp.join('\n')}`);
     }
   } else {
-    console.log(`[SourceDiscovery] No matching source URLs found for UPC ${upc}. Search name used: "${searchName}"`);
+    console.log(`[SourceDiscovery] No matching source URLs found for UPC ${upc}. Search name used: "${consolidatedName || name}"`);
   }
 
   return {
     candidates: topCandidates,
-    consolidatedName: consolidatedName || null
+    consolidatedName: consolidatedName || null,
+    inferredBrand: inferredBrand || null
   };
 }
 
@@ -873,5 +955,19 @@ function extractDomain(url: string): string {
     return parsed.hostname.replace(/^www\./, '');
   } catch {
     return '';
+  }
+}
+
+/**
+ * Clean a brand site domain to return only the bare domain name.
+ */
+function cleanDomainString(domainStr: string): string {
+  const cleaned = domainStr.trim().toLowerCase();
+  try {
+    const urlString = cleaned.match(/^https?:\/\//i) ? cleaned : `https://${cleaned}`;
+    const parsed = new URL(urlString);
+    return parsed.hostname.replace(/^www\./, '');
+  } catch {
+    return cleaned.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
   }
 }

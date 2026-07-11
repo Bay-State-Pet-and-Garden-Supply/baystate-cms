@@ -42,10 +42,20 @@ describe('Draft Promoter Service', () => {
   function seedAcceptedCategoryProposal(db: any, sku: string, pageName: string) {
     const runId = `run-${sku}`;
     const now = new Date().toISOString();
+    const item = db.query(
+      'SELECT id, curation_data_json FROM onboarding_items WHERE upc = ? ORDER BY created_at DESC LIMIT 1',
+    ).get(sku) as { id: string; curation_data_json: string | null };
     db.run(
-      `INSERT OR IGNORE INTO classification_runs (id, workspace_id, product_sku, status, started_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [runId, wsId, sku, 'completed', now]
+      `INSERT OR IGNORE INTO classification_runs
+       (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [runId, wsId, item.id, sku, 'completed', now]
+    );
+    const curationData = item.curation_data_json ? JSON.parse(item.curation_data_json) : {};
+    curationData.classificationRunId = runId;
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify(curationData), item.id],
     );
 
     const pageId = `page-${pageName.replace(/\s+/g, '-').toLowerCase()}`;
@@ -578,7 +588,82 @@ describe('Draft Promoter Service', () => {
     expect(csList.length).toBe(initialCsCount);
   });
 
-  it('promotes successfully using curationData.suggestedPages fallback when no proposals exist', async () => {
+  it('does not leak accepted category proposals from a historical run', async () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Historical Proposal Isolation',
+      fileName: 'historical-proposal.xlsx',
+      totalItems: 1,
+    });
+    const item = insertItems(batch.id, [{
+      upc: '222222222222',
+      name: 'Active Run Product',
+      price: '$9.99',
+      brandHint: 'ToyCo',
+      rowNumber: 1,
+    }])[0];
+    const extractionData: ExtractionData = {
+      title: 'Active Run Product',
+      brand: 'ToyCo',
+      description: 'A product whose old run must not leak.',
+      bulletPoints: [],
+      primaryImage: 'products/222222222222/images/primary.jpg',
+      additionalImages: [],
+      price: '$9.99',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: 'https://toyco.example/active-run-product',
+      confidence: 0.9,
+      fieldProvenance: { title: 'json-ld' },
+    };
+    const db = getDb();
+    db.run(
+      `UPDATE onboarding_items
+       SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready'
+       WHERE id = ?`,
+      [JSON.stringify(extractionData), JSON.stringify({
+        curatedTitle: 'Active Run Product',
+        titleSource: 'web',
+        suggestedPages: [],
+        suggestedProductType: null,
+        curatedAt: new Date().toISOString(),
+        curationMethod: 'auto',
+      }), item.id],
+    );
+
+    // Historical run has an accepted page proposal.
+    seedAcceptedCategoryProposal(db, item.upc, 'Toys');
+
+    // The item's current run has no accepted page proposal.
+    const activeRunId = `active-run-${item.upc}`;
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, ?, ?, 'completed', ?, ?)`,
+      [activeRunId, wsId, item.id, item.upc, now, now],
+    );
+    const currentCuration = JSON.parse((db.query(
+      'SELECT curation_data_json FROM onboarding_items WHERE id = ?',
+    ).get(item.id) as { curation_data_json: string }).curation_data_json);
+    currentCuration.classificationRunId = activeRunId;
+    db.run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [
+      JSON.stringify(currentCuration),
+      item.id,
+    ]);
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.count).toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0].error).toContain('No accepted product page proposals');
+  });
+
+  it('fails promotion when only curationData.suggestedPages exist but no accepted proposals', async () => {
     const batch = createBatch({
       workspaceId: wsId,
       name: 'Onboard Promo Fallback',
@@ -635,11 +720,8 @@ describe('Draft Promoter Service', () => {
     );
 
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    expect(promoteRes.failures.length).toBe(0);
-    expect(promoteRes.count).toBe(1);
-
-    // Verify it assigned the product to the page
-    const pageAssignments = getProductPageAssignments('999999999999');
-    expect(pageAssignments.some(p => p.pageName === 'Toys')).toBe(true);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures[0].error).toContain('No accepted product page proposals');
   });
 });

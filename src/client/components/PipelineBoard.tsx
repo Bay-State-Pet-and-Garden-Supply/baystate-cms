@@ -9,8 +9,10 @@ import {
   getItemDetail,
   setItemUrl,
   submitDecisions,
+  completeReviewStage,
   getCurationTargets,
   type CurationTargetsResponse,
+  type ConsistencyWarning,
 } from '../onboarding-api';
 import type {
   OnboardingItem,
@@ -22,6 +24,7 @@ import type {
   BrandSite,
 } from '../../shared/schemas/onboarding';
 import type { ClassificationProposal, ClassificationEvidence, CurationTargetConfig } from '../../shared/schemas/classification';
+import { SearchableBrandSelector } from './SearchableBrandSelector';
 
 const STAGES: PipelineStage[] = ['discovery', 'extraction', 'curation', 'review', 'promotion'];
 
@@ -97,6 +100,7 @@ export function PipelineBoard({
   const [curationFields, setCurationFields] = useState<Partial<CurationData>>({});
   const [classificationProposals, setClassificationProposals] = useState<ClassificationProposal[]>([]);
   const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
+  const [consistencyWarnings, setConsistencyWarnings] = useState<ConsistencyWarning[]>([]);
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [manualUrlInput, setManualUrlInput] = useState('');
   const [manualImageUrl, setManualImageUrl] = useState('');
@@ -184,6 +188,7 @@ export function PipelineBoard({
           if (res.item?.curationData) {
             setCurationFields(res.item.curationData);
           }
+          setConsistencyWarnings(res.consistencyWarnings ?? []);
         }
       } catch (err) {
         console.warn('Failed to parse SSE item:status event:', err);
@@ -429,6 +434,7 @@ export function PipelineBoard({
     setDrawerBrandName(item.brandHint || '');
     setSaveStatus('idle');
     setSaveError(null);
+    setConsistencyWarnings([]);
     const site = cachedBrandSites.find(
       b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim(),
     );
@@ -445,6 +451,7 @@ export function PipelineBoard({
     try {
       const res = await getItemDetail(item.id);
       setReviewSources(res.sources);
+      setConsistencyWarnings(res.consistencyWarnings ?? []);
       // Prefer extraction from the dedicated extractions table, then fall
       // back to extraction_data_json stored on the item itself so the
       // drawer shows data even when the extractions table row is missing.
@@ -482,6 +489,7 @@ export function PipelineBoard({
     setManualImageUrl('');
     setClassificationProposals([]);
     setClassificationEvidence([]);
+    setConsistencyWarnings([]);
     setSaveStatus('idle');
     setSaveError(null);
     setPageSearchQuery('');
@@ -512,6 +520,7 @@ export function PipelineBoard({
       await resetStageItems([reviewItem.id]);
       const res = await getItemDetail(reviewItem.id);
       setReviewItem(res.item);
+      setConsistencyWarnings(res.consistencyWarnings ?? []);
       const extractionData = res.extraction ?? res.item?.extractionData ?? null;
       if (extractionData) {
         setReviewExtraction(extractionData);
@@ -569,7 +578,7 @@ export function PipelineBoard({
             targetId: p.targetId,
           }));
         if (decs.length > 0) {
-          try { await submitDecisions(itemId, decs); } catch (e) { console.warn(e); }
+          await submitDecisions(itemId, decs);
         }
       }
       setSaveStatus('saved');
@@ -593,8 +602,13 @@ export function PipelineBoard({
   const handleApproveReview = async () => {
     if (!reviewItem) return;
 
-    if (!curationFields.suggestedPages || curationFields.suggestedPages.length === 0) {
-      alert('At least one page assignment is required.');
+    const hasClassificationRun = Boolean(curationFields.classificationRunId);
+    const hasAcceptedPageProposal = classificationProposals.some(
+      proposal => proposal.proposalType === 'category_page' && proposal.status === 'accepted',
+    );
+    const hasLegacyPageAssignment = Boolean(curationFields.suggestedPages?.length);
+    if (hasClassificationRun ? !hasAcceptedPageProposal : !hasLegacyPageAssignment) {
+      alert('At least one Category Page proposal must be accepted before review can be completed.');
       return;
     }
 
@@ -622,19 +636,12 @@ export function PipelineBoard({
             targetId: p.targetId,
           }));
         if (decs.length > 0) {
-          try { await submitDecisions(reviewItem.id, decs); } catch (e) { console.warn(e); }
+          await submitDecisions(reviewItem.id, decs);
         }
       }
-      // Complete review stage via stage-based endpoint
-      try {
-        await fetch('/api/onboarding/items/review-complete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ itemIds: [reviewItem.id] }),
-        });
-      } catch (e) {
-        console.warn('Failed to complete review stage:', e);
-      }
+      // The server verifies that every active-run proposal has a durable
+      // decision. Any failure keeps the drawer open and the item in Review.
+      await completeReviewStage([reviewItem.id]);
       setSaveStatus('saved');
       if (nextItem) {
         openReview(nextItem);
@@ -651,7 +658,10 @@ export function PipelineBoard({
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   const renderCard = (item: OnboardingItem) => {
-    const statusStyle = STAGE_STATUS_STYLE[item.stageStatus] || STAGE_STATUS_STYLE.pending;
+    const isNeedsReview = item.stageStatus === 'completed' && item.errorMessage?.startsWith('needs_review:');
+    const statusStyle = isNeedsReview
+      ? { bg: '#ffedd5', text: '#c2410c', icon: '⚠' }
+      : (STAGE_STATUS_STYLE[item.stageStatus] || STAGE_STATUS_STYLE.pending);
     const isSelected = selectedIds.has(item.id);
     const isAutomatedStage = ['discovery', 'extraction', 'curation'].includes(item.stage);
     const isReviewStage = item.stage === 'review';
@@ -715,7 +725,7 @@ export function PipelineBoard({
                 ) : (
                   <span>{statusStyle.icon}</span>
                 )}
-                {item.stageStatus}
+                {isNeedsReview ? 'needs review' : item.stageStatus}
               </span>
             </div>
             <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>
@@ -800,7 +810,8 @@ export function PipelineBoard({
     const items = staged[stage] || [];
     const inProgressCount = items.filter(i => i.stageStatus === 'in_progress').length;
     const pendingCount = items.filter(i => i.stageStatus === 'pending').length;
-    const completedCount = items.filter(i => i.stageStatus === 'completed').length;
+    const completedCount = items.filter(i => i.stageStatus === 'completed' && !i.errorMessage?.startsWith('needs_review:')).length;
+    const needsReviewCount = items.filter(i => i.stageStatus === 'completed' && i.errorMessage?.startsWith('needs_review:')).length;
     const failedCount = items.filter(i => i.stageStatus === 'failed').length;
     const skippedCount = items.filter(i => i.stageStatus === 'skipped').length;
     const columnAllSelected = items.length > 0 && items.every(i => selectedIds.has(i.id));
@@ -840,7 +851,7 @@ export function PipelineBoard({
               </span>
               {items.length > 0 && (
                 <button
-                  onClick={() => selectAllInColumn(stage)}
+                   onClick={() => selectAllInColumn(stage)}
                   style={{
                     background: 'none',
                     border: 'none',
@@ -873,6 +884,7 @@ export function PipelineBoard({
             )}
             {pendingCount > 0 && <span style={{ color: '#4b5563' }}>⏳ {pendingCount} queued</span>}
             {completedCount > 0 && <span style={{ color: '#16a34a' }}>✓ {completedCount} ready</span>}
+            {needsReviewCount > 0 && <span style={{ color: '#c2410c' }}>⚠ {needsReviewCount} review</span>}
             {failedCount > 0 && <span style={{ color: '#dc2626' }}>✗ {failedCount} failed</span>}
             {skippedCount > 0 && <span style={{ color: '#6b7280' }}>⊘ {skippedCount} skipped</span>}
           </div>
@@ -1288,10 +1300,33 @@ export function PipelineBoard({
                 })}
               </div>
 
+              {consistencyWarnings.length > 0 && (
+                <div style={{
+                  padding: '12px 14px',
+                  borderRadius: 8,
+                  border: '1px solid #f59e0b',
+                  background: '#fffbeb',
+                  color: '#92400e',
+                }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
+                    Sibling consistency review required
+                  </div>
+                  {consistencyWarnings.map(warning => (
+                    <div key={`${warning.groupId}:${warning.field}`} style={{ fontSize: 12, marginTop: 4 }}>
+                      <strong>{warning.field.replaceAll('_', ' ')}:</strong> {warning.message}
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 11, marginTop: 8 }}>
+                    This is a warning only. Results were not copied, unioned, or majority-voted across siblings.
+                  </div>
+                </div>
+              )}
+
               {/* Status Banner */}
               {(() => {
                 const currentStageLabel = STAGE_LABELS[reviewItem.stage];
                 const stageStatus = reviewItem.stageStatus;
+                const isNeedsReview = stageStatus === 'completed' && reviewItem.errorMessage?.startsWith('needs_review:');
                 
                 let statusBannerBg = '#f3f4f6';
                 let statusBannerTextColor = '#374151';
@@ -1320,6 +1355,12 @@ export function PipelineBoard({
                   } else {
                     statusDesc = 'Processing in background...';
                   }
+                } else if (isNeedsReview) {
+                  statusBannerBg = '#ffedd5';
+                  statusBannerTextColor = '#c2410c';
+                  statusBannerBorderColor = '#fed7aa';
+                  statusTitle = `${currentStageLabel} needs review`;
+                  statusDesc = reviewItem.errorMessage || 'This item requires manual review.';
                 } else if (stageStatus === 'completed') {
                   statusBannerBg = '#f0fdf4';
                   statusBannerTextColor = '#166534';
@@ -1374,6 +1415,8 @@ export function PipelineBoard({
                           animation: 'spin 0.8s linear infinite',
                           flexShrink: 0,
                         }} />
+                      ) : isNeedsReview ? (
+                        <span style={{ fontWeight: 'bold', color: '#c2410c', flexShrink: 0 }}>⚠</span>
                       ) : stageStatus === 'completed' ? (
                         <span style={{ fontWeight: 'bold', color: '#16a34a', flexShrink: 0 }}>✓</span>
                       ) : stageStatus === 'failed' ? (
@@ -1413,6 +1456,91 @@ export function PipelineBoard({
                   </div>
                 );
               })()}
+
+              {/* Brand Configuration Editor */}
+              {reviewItem && reviewItem.stage === 'discovery' && (
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  background: '#f9fafb',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: 8,
+                  padding: 12,
+                  marginTop: 12,
+                  flexShrink: 0,
+                }}>
+                  <h3 style={{ fontSize: 13, fontWeight: 600, margin: '0 0 10px 0', color: '#374151', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    🏷️ Brand Configuration
+                  </h3>
+                  <SearchableBrandSelector
+                    brandName={_drawerBrandName}
+                    brandDomain={_drawerBrandDomain}
+                    onSelect={(brand, domain) => {
+                      setDrawerBrandName(brand);
+                      if (domain) {
+                        setDrawerBrandDomain(domain);
+                      }
+                    }}
+                    onDomainChange={(domain) => setDrawerBrandDomain(domain)}
+                    cachedBrandSites={cachedBrandSites}
+                    catalogBrands={_catalogBrands || []}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                    <button
+                      onClick={async () => {
+                        setSaveStatus('saving');
+                        try {
+                          const res = await fetch(`/api/onboarding/batches/${reviewItem.batchId}/bulk-brand`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              itemIds: [reviewItem.id],
+                              brandHint: _drawerBrandName.trim(),
+                              brandDomain: _drawerBrandDomain.trim(),
+                            }),
+                          });
+                          if (!res.ok) {
+                            const errBody = await res.json().catch(() => ({}));
+                            throw new Error(errBody.error || `HTTP ${res.status}`);
+                          }
+
+                          if (_onRefreshBrandSites) {
+                            _onRefreshBrandSites();
+                          }
+
+                          const detail = await getItemDetail(reviewItem.id);
+                          setReviewItem(detail.item);
+                          await fetchStaged();
+
+                          setSaveStatus('saved');
+                          setTimeout(() => setSaveStatus('idle'), 2000);
+                        } catch (err) {
+                          setSaveStatus('error');
+                          setSaveError(err instanceof Error ? err.message : String(err));
+                        }
+                      }}
+                      disabled={saveStatus === 'saving'}
+                      style={{
+                        padding: '6px 12px',
+                        background: '#2563eb',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 4,
+                        cursor: 'pointer',
+                        fontSize: 12,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? '✓ Saved!' : 'Save Brand'}
+                    </button>
+                  </div>
+                  {saveStatus === 'error' && saveError && (
+                    <div style={{ color: '#dc2626', fontSize: 11, marginTop: 4 }}>
+                      Failed to save: {saveError}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Source URL */}
               <div style={{

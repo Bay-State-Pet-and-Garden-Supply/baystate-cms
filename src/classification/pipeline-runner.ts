@@ -21,20 +21,56 @@ function persistEvidence(runId: string, sku: string, evidence: ClassificationEvi
 function persistProposals(runId: string, sku: string, proposals: ClassificationProposal[], configSnapshotHash?: string): void {
   if (proposals.length === 0) return;
   const db = getDb();
-  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, now());
+  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, JSON.stringify(p.evidenceIds ?? []), now());
 }
 
 function linkProposalEvidence(proposalId: string, evidenceIds: string[]): void {
   if (evidenceIds.length === 0) return;
   const db = getDb();
-  try {
-    db.run('PRAGMA foreign_keys = OFF');
-    const stmt = db.prepare('INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id) VALUES (?, ?)');
-    for (const evId of evidenceIds) stmt.run(proposalId, evId);
-  } finally {
-    db.run('PRAGMA foreign_keys = ON');
+  // Only link to evidence rows that already exist (FK safety).
+  // Evidence IDs may reference in-memory-only evidence that has not been,
+  // or will not be, persisted — silently skip those links rather than
+  // failing the transaction.
+  const stmt = db.prepare('INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id) VALUES (?, ?)');
+  for (const evId of evidenceIds) {
+    const exists = db.query('SELECT 1 FROM classification_evidence WHERE id = ?').get(evId);
+    if (exists) stmt.run(proposalId, evId);
   }
+}
+
+/**
+ * Persist a successful or abstained stage atomically. A stage result must
+ * never claim success unless all evidence, proposals, and evidence links are
+ * durable in the same transaction.
+ */
+function persistStageCompletion(options: {
+  runId: string;
+  sku: string;
+  stageName: ClassificationStageName;
+  status: 'succeeded' | 'abstained';
+  evidence: ClassificationEvidence[];
+  proposals: ClassificationProposal[];
+  onboardingItemId?: string;
+  configSnapshotHash?: string;
+  outputJson?: string;
+  errorMessage?: string;
+}): void {
+  const db = getDb();
+  db.transaction(() => {
+    persistEvidence(options.runId, options.sku, options.evidence, options.onboardingItemId);
+    persistProposals(options.runId, options.sku, options.proposals, options.configSnapshotHash);
+    for (const proposal of options.proposals) {
+      linkProposalEvidence(proposal.id, proposal.evidenceIds ?? []);
+    }
+    recordStageResult(
+      options.runId,
+      options.stageName,
+      options.status,
+      options.outputJson,
+      options.errorMessage,
+    );
+  })();
 }
 
 export async function runPipeline(stages: StageDefinition[], context: StageContext, input: StageInput): Promise<PipelineRunResult> {
@@ -48,29 +84,77 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
     const stage = stages.find(s => s.name === stageName);
     if (!stage) continue;
     const stageInput: StageInput = { sku: input.sku, onboardingItemId: input.onboardingItemId, evidence: allEvidence, acceptedProposals, allProposals };
+    let failureRecorded = false;
     try {
       const result = await stage.execute(stageInput, context);
       if (result.status === 'succeeded') {
         const out = result.output;
-        stageOutputs[stageName] = out;
-        try { persistEvidence(context.runId, input.sku, out.evidence, input.onboardingItemId); } catch {}
-        try { persistProposals(context.runId, input.sku, out.proposals, context.configSnapshotRef?.hash); } catch {}
-        try { for (const p of out.proposals) linkProposalEvidence(p.id, p.evidenceIds ?? []); } catch {}
+        const outputPayload: Record<string, unknown> = {
+          ec: out.evidence.length,
+          pc: out.proposals.length,
+        };
+        if (out.metadata) outputPayload.metadata = out.metadata;
+
+        persistStageCompletion({
+          runId: context.runId,
+          sku: input.sku,
+          stageName,
+          status: 'succeeded',
+          evidence: out.evidence,
+          proposals: out.proposals,
+          onboardingItemId: input.onboardingItemId,
+          configSnapshotHash: context.configSnapshotRef?.hash,
+          outputJson: JSON.stringify(outputPayload),
+        });
+
+        // Downstream stages only see data after the transaction commits.
         allEvidence.push(...out.evidence);
         allProposals.push(...out.proposals);
-        const outputPayload: Record<string, unknown> = { ec: out.evidence.length, pc: out.proposals.length };
-        if (out.metadata) {
-          outputPayload.metadata = out.metadata;
-        }
-        recordStageResult(context.runId, stageName, 'succeeded', JSON.stringify(outputPayload));
+        stageOutputs[stageName] = out;
       } else if (result.status === 'abstained') {
-        recordStageResult(context.runId, stageName, 'abstained', undefined, result.reason);
-        allProposals.push({ id: randomUUID(), runId: context.runId, productSku: input.sku, proposalType: 'reviewable_abstention', targetId: stageName, proposedValue: { reason: result.reason }, confidence: 0, evidenceIds: [], status: 'pending', isBulkAcceptable: false, isStale: false, stalenessReason: null, createdAt: now() });
+        const abstentionProposal: ClassificationProposal = {
+          id: randomUUID(),
+          runId: context.runId,
+          productSku: input.sku,
+          proposalType: 'reviewable_abstention',
+          targetId: stageName,
+          proposedValue: { reason: result.reason },
+          confidence: 0,
+          evidenceIds: [],
+          status: 'pending',
+          isBulkAcceptable: false,
+          isStale: false,
+          stalenessReason: null,
+          createdAt: now(),
+        };
+        persistStageCompletion({
+          runId: context.runId,
+          sku: input.sku,
+          stageName,
+          status: 'abstained',
+          evidence: [],
+          proposals: [abstentionProposal],
+          onboardingItemId: input.onboardingItemId,
+          configSnapshotHash: context.configSnapshotRef?.hash,
+          errorMessage: result.reason,
+        });
+        allProposals.push(abstentionProposal);
       } else {
         recordStageResult(context.runId, stageName, 'failed', undefined, result.error);
+        failureRecorded = true;
+        throw new Error(`Stage ${stageName} failed: ${result.error}`);
       }
     } catch (err) {
-      recordStageResult(context.runId, stageName, 'failed', undefined, err instanceof Error ? err.message : String(err));
+      if (!failureRecorded) {
+        recordStageResult(
+          context.runId,
+          stageName,
+          'failed',
+          undefined,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      throw err;
     }
   }
   return { evidence: allEvidence, proposals: allProposals, stageOutputs };

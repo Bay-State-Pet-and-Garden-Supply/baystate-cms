@@ -8,6 +8,7 @@
  * name-consolidation classification stage without duplicating LLM prompts.
  */
 import { getLlmConfigForTask, callLlmForTask } from './llm-client';
+import { buildPerItemPrompt } from './title-prompt-template';
 
 export interface TitleSignals {
   /** Original name from the spreadsheet import (always available) */
@@ -73,45 +74,19 @@ export async function consolidateProductTitle(signals: TitleSignals): Promise<Ti
   }
 
   try {
-    // Build sibling context block if available
-    const siblingBlock = signals.siblingContext
-      ? `
-Product Line Context:
-- This product belongs to the product line: "${signals.siblingContext.groupLabel}"
-- Sibling names in this product line (each must get a UNIQUE final name):
-${signals.siblingContext.siblingNames.map(n => `  - "${n}"`).join('\n')}
-`
-      : '';
-
-    const ocrWeightBlock = signals.ocrWeight ? `\n- Packaging OCR Weight: "${signals.ocrWeight}"` : '';
-    const ocrSizeBlock = signals.ocrSize ? `\n- Packaging OCR Size: "${signals.ocrSize}"` : '';
-    const ocrCountBlock = signals.ocrCount ? `\n- Packaging OCR Count: "${signals.ocrCount}"` : '';
-
-    const rawNameBlock = signals.rawRegisterName && signals.rawRegisterName !== signals.name
-      ? `\n- Raw Register Name (authoritative source): "${signals.rawRegisterName}"`
-      : '';
-
-    const prompt = `You are a product cataloging assistant for a premium pet supply store.
-Analyze the following title candidates for a product and consolidate them into a single, clean, store-ready product name.
-
-Inputs:
-- Original Spreadsheet Name: "${signals.name}"${rawNameBlock}
-- Web Extracted Title: "${signals.webTitle || 'N/A'}"
-- OCR Packaging Title: "${signals.ocrTitle || 'N/A'}"${ocrWeightBlock}${ocrSizeBlock}${ocrCountBlock}
-- Brand Name: "${signals.brandHint || 'N/A'}"${siblingBlock}
-Rules for final product name:
-1. It must be clean, readable, professional, and customer-friendly.
-2. It must align closely with the packaging OCR title if provided and accurate, but should sound like a natural product name.
-3. The Brand Name ("${signals.brandHint || ''}") MUST be included at the very beginning, unless the brand is already embedded in the product name.
-4. The product SIZE or WEIGHT from the spreadsheet (e.g. "2OZ", "10.5OZ", "12OZ", "3.5OZ", "30PK") MUST be included at the end of the final name. Expand shorthand: "OZ" → "oz", "PK" → "-Pack", "LB" → "lb", "SM" → "Small", "LG" → "Large", "XL" → "X-Large".
-   IMPORTANT: When the Packaging OCR shows BOTH a weight (e.g. "3.2 OZ") AND a count (e.g. "20-PIECE VALUE PACK", "6 Pack"), prefer the COUNT for the title suffix — a "20 Pack" of small items is a more meaningful product identifier than the per-item weight. Only use the weight suffix when no count is present.
-5. CRITICAL — NEVER USE PARENTHESES: Do not put parentheses anywhere in the final name. Not for flavor, not for size, not for variants. NEVER. Correct examples: "Woof Lavender Pupsicle Large" · "Honest Kitchen Beef Protein Plus 12 oz" · "Woof Green Poomergency" · "Honest Kitchen Cheddar Biscuits 3.5 oz". Wrong examples: "Woof Pupsicle Lavender (Large)" · "Honest Kitchen Protein Plus 12 oz (Beef)" · "Honest Kitchen Protein Plus Grain Free Fish Topper (12 oz)".
-6. The FLAVOR or VARIANT (e.g. "Beef", "Chicken", "Turkey", "Lavender", "Green", "Cheddar", "Gouda", "4th of July") MUST be placed immediately after the brand name, before the product type/name. Structure: Brand → Flavor → Product Type → Size.
-7. DO NOT drop any words from the Original Spreadsheet Name that distinguish this product — preserve the full product identity including descriptors like "Forager", "Flyball", "Pupsicle", "Poomergency", "Butcher Block", "Crunchy", etc.
-8. When sibling context is provided (multiple variants of the same product), use a CONSISTENT format across all siblings. The differentiating attribute (flavor/color/size) should be in the same structural position for every sibling WITHOUT parentheses: flavor/color between brand and product name, size at the very end. Example sibling format: "Woof Lavender Pupsicle Large", "Woof Green Poomergency", "Woof 4th of July Pupsicle Small". Absolutely never put size in parentheses even for siblings.
-9. Clean up casing and spacing issues: "DR MARTY" → "Dr. Marty", "YAK DNTL" → "Yak Dental", "CHKN" or "CKN" → "Chicken", "TRKY" → "Turkey", "C/B" → "Crackers", "FLYBALLORANGE" → "Orange Forager Flyball", "FLYBALLLAVENDER" → "Lavender Forager Flyball", "FLYBALLYELLOW" → "Yellow Forager Flyball", "4TH OF JULYSM" → "4th of July Small", "FLY N FEED" → "Fly n' Feed", "POOMERGENCY" → "Poomergency".
-10. The SIZE or WEIGHT in the Original Spreadsheet Name is AUTHORITATIVE. When the Raw Register Name is provided, always check it for size/weight/count tokens the Original Spreadsheet Name might have lost — the raw register name is the true source of truth. Distributors often list case quantities (e.g. "12/3oz cans" = 36oz total) when the store sells individual units (3oz). Always extract the individual sellable size from the spreadsheet name, not the VLM OCR values.
-11. Return ONLY the finalized product name. No parentheses. No quotes. No markdown. No explanation.`;
+    const prompt = buildPerItemPrompt({
+      name: signals.name,
+      rawRegisterName: signals.rawRegisterName,
+      brandHint: signals.brandHint,
+      webTitle: signals.webTitle,
+      ocrTitle: signals.ocrTitle,
+      ocrWeight: signals.ocrWeight,
+      ocrSize: signals.ocrSize,
+      ocrCount: signals.ocrCount,
+      siblingContext: signals.siblingContext
+        ? { groupLabel: signals.siblingContext.groupLabel, siblingNames: signals.siblingContext.siblingNames }
+        : undefined,
+    });
 
     const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', { allowFallback: true });
     if (cleanTitle && cleanTitle.length > 2) {

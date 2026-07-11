@@ -80,7 +80,25 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     if (!response) return null;
 
     // Parse JSON response with repair for common formatting issues
-    const parsed = parseRankerResponse(response, optionList);
+    let parsed = parseRankerResponse(response);
+
+    // Retry only when parsing failed. A valid empty values array is an
+    // intentional abstention and must not be turned into an invented match.
+    if (!parsed) {
+      try {
+        const retryResponse = await callLlmForTask(
+          taskName as any,
+          `The previous response was not valid JSON. Fix the JSON format:\n\n${response.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
+          'You are a precise JSON fixer. Return only valid JSON matching the requested shape.',
+          { allowFallback: true },
+        );
+        if (retryResponse) {
+          parsed = parseRankerResponse(retryResponse);
+        }
+      } catch {
+        // Retry also failed - fall through to null return below
+      }
+    }
 
     if (!parsed || !parsed.values || parsed.values.length === 0) return null;
 
@@ -114,7 +132,7 @@ interface RawRankerResponse {
  * Parse the LLM JSON response with tolerance for alternative response shapes.
  * Handles `{ values: [...] }`, `{ value: "..." }`, and `{ pages: [...] }` shapes.
  */
-function parseRankerResponse(raw: string, allowedOptions: string[]): RawRankerResponse | null {
+function parseRankerResponse(raw: string): RawRankerResponse | null {
   // Clean up common issues
   let cleaned = raw.trim();
 

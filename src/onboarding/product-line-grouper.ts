@@ -31,7 +31,7 @@ export interface ProductGroup {
 const BRAND_SUFFIXES = /\b(inc|llc|ltd|limited|co|company|brands|group|corporation|corp)\b\.?$/i;
 
 /** Trademark / registered / superscript chars to strip */
-const BRAND_JUNK = /[®™©℠℗\[\]{}()'"]/g;
+const BRAND_JUNK = /[®™©℠℗[\]{}()'"]/g;
 
 /** Size/weight/count patterns to remove from name stem */
 const SIZE_PATTERNS = /\b(\d+(?:\.\d+)?\s*(?:lb|lbs|oz|kg|g|ml|l|gal|count|ct|pk|pack|pound|ounce)s?\.?)\b/gi;
@@ -39,8 +39,24 @@ const SIZE_PATTERNS = /\b(\d+(?:\.\d+)?\s*(?:lb|lbs|oz|kg|g|ml|l|gal|count|ct|pk
 /** Size adjectives to remove from name stem */
 const SIZE_ADJECTIVES = /\b(small|medium|large|x[\s-]?large|giant|jumbo|mini|teeny|petite|standard|trial|value|economy|bulk|multi[\s-]?pack|variety[\s-]?pack|assorted|sm|lg|xl|x[\s-]?l|md|xs|xxl|xx[\s-]?large|pk|ct|oz|lb|kg|ml|gal|count)\b/gi;
 
+/**
+ * Attached size/count/color suffixes that trail a word without a space.
+ * Must be pre-normalised before the stem is computed so siblings with
+ * different attached variant tokens produce the same stem.
+ * Examples: SM5CT (Small 5 Count), MD2CT (Medium 2 Count), 2.64OZ (2.64 oz),
+ * FLYBALLYELLOW (flyball + yellow), FLYBALLLAVENDER (flyball + lavender).
+ *
+ * The ATTACHED_SIZE_COUNT pattern handles forms like SM5CT, MD2CT wherever
+ * they appear (not just end-of-string) since they can occur mid-name.
+ */
+const ATTACHED_SIZE_COUNT = /(?:sm|md|lg|xl|xs)(?:\d+)(?:pk|ct|oz|lb|g|kg|ml|gal)/gi;
+const ATTACHED_COLOR = /(yellow|lavender|orange|green|blue|red|pink|purple|black|white|brown|tan)$/i;
+
+/** Standalone word-boundary color tokens to strip from name stem */
+const STANDALONE_COLORS = /\b(yellow|lavender|orange|green|blue|red|pink|purple|black|white|brown|tan)\b/gi;
+
 /** Flavor/variant words to remove from name stem */
-const FLAVOR_WORDS = /\b(chicken|beef|salmon|lamb|turkey|duck|fish|tuna|shrimp|pork|venison|rabbit|bison|whitefish|ocean\s*fish|mixed|variety|assortment|medley|combo|blend|recipe|formula|adult|puppy|kitten|senior|all[\s-]?life[\s-]?stage)\b/gi;
+const FLAVOR_WORDS = /\b(chicken|chkn|ckn|beef|salmon|slmn|lamb|turkey|trky|duck|fish|tuna|shrimp|pork|venison|rabbit|bison|whitefish|ocean\s*fish|mixed|variety|assortment|medley|combo|blend|recipe|formula|adult|puppy|kitten|senior|all[\s-]?life[\s-]?stage)\b/gi;
 
 /** Common suffixes to strip from name stem */
 const NAME_SUFFIXES = /\b(for\s+(dogs|cats|pets?|adults?|seniors?|puppies?|kittens?))\b/gi;
@@ -70,6 +86,11 @@ export function extractNameStem(name: string | null | undefined): string {
   if (!name) return '';
   return name
     .toLowerCase()
+    // Pre-strip attached size/count suffixes (e.g. SM5CT, MD2CT, LG, XL) and
+    // trailing color tokens so siblings with different variants share a stem.
+    .replace(ATTACHED_SIZE_COUNT, '')
+    .replace(ATTACHED_COLOR, '')
+    .replace(STANDALONE_COLORS, '')
     .replace(SIZE_PATTERNS, '')
     .replace(SIZE_ADJECTIVES, '')
     .replace(FLAVOR_WORDS, '')

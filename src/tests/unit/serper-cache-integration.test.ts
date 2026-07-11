@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { discoverSources } from '../../onboarding/source-discovery';
 import { supplementPrice } from '../../onboarding/price-supplementer';
 import { clearSerperCache } from '../../db/repositories/serper-cache-repo';
@@ -17,8 +18,9 @@ describe('Serper Caching Integration', () => {
     initDb(testDbPath);
     runMigrations();
 
-    // Configure the Serper API key in the DB
+    // Configure the Serper API key and Brand site in the DB
     upsertApiKey('serper', 'test-serper-api-key');
+    upsertBrandSite('Brand', 'example.com');
   });
 
   afterAll(() => {
@@ -94,5 +96,19 @@ describe('Serper Caching Integration', () => {
     expect(fetchCount).toBe(0);
     expect(secondPrice.price).toBe('$19.99');
     expect(secondPrice.sourceUrl).toBe(firstPrice.sourceUrl);
+  });
+
+  it('should halt discovery and set noDomainMapped when the brand has no configured domain', async () => {
+    const upc = '987654321098';
+
+    // Call discoverSources with a brand "UnknownBrand" which has no domain in DB
+    const results = await discoverSources(upc, 'Test Product without Domain', 'UnknownBrand');
+
+    // Check that early halt flag is true and no consolidated name / Pass 2 search was run
+    expect(results.noDomainMapped).toBe(true);
+    expect(results.consolidatedName).toBeNull();
+    // It should only have candidates from Pass 1 (UPC search)
+    expect(results.candidates.length).toBeGreaterThan(0);
+    expect(results.candidates.every(c => c.sourceMethod === 'serper_upc')).toBe(true);
   });
 });

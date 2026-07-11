@@ -256,14 +256,14 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
 /**
  * Creates a point-in-time snapshot of the active config for use in a classification run.
  */
-export function createConfigSnapshot(workspaceId: string, config: ClassificationConfig, sourceCommit?: string): string {
+export function createConfigSnapshot(workspaceId: string, config: ClassificationConfig, sourceCommit?: string): { id: string; hash: string } {
   const snapshotHash = hashString(JSON.stringify(config));
 
   // Return existing snapshot if identical config was already captured
   const existing = getDb()
     .query('SELECT id FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?')
     .get(workspaceId, snapshotHash) as Record<string, any> | undefined;
-  if (existing) return String(existing.id);
+  if (existing) return { id: String(existing.id), hash: snapshotHash };
 
   const id = randomUUID();
   getDb().run(
@@ -273,7 +273,7 @@ export function createConfigSnapshot(workspaceId: string, config: Classification
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, workspaceId, snapshotHash, config.manifest.schemaVersion, config.manifest.compatibilityVersion, sourceCommit ?? null, JSON.stringify(config), now()],
   );
-  return id;
+  return { id, hash: snapshotHash };
 }
 
 // ─── Read back from cache ──────────────────────────────────────────────────────

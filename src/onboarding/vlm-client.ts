@@ -43,23 +43,33 @@ export async function callVlm(
   const url = `${config.baseUrl}/api/chat`;
   console.log(`[VlmClient] Invoking local vision model "${config.model}" at ${url}`);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-          images: [imageBase64],
-        },
-      ],
-      stream: false,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+            images: [imageBase64],
+          },
+        ],
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+  } catch (err: unknown) {
+    const errorName = err instanceof Error ? err.name : '';
+    if (errorName === 'AbortError' || errorName === 'TimeoutError') {
+      throw new Error('VLM request timed out after 120s', { cause: err });
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     const errorText = await response.text();

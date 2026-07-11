@@ -1,10 +1,11 @@
 import { listPages } from '../db/repositories/page-repo';
 import { convertToLbs } from '../shared/weight-converter';
 import { callLlmForTask, getLlmConfigForTask } from './llm-client';
+import { coordinateCohortItemsOnce, formatDeterministicTitle } from './cohort-name-coordinator';
+import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import { extractPackagingOcr } from './packaging-ocr';
 import { getDb } from '../db/connection';
 import { loadClassificationConfig } from '../classification/config-loader';
-import { hasExplicitCurationTargets } from '../classification/curation-targets';
 import { createConfigSnapshot, syncConfigToCache } from '../db/repositories/classification-config-repo';
 import {
   createRun,
@@ -26,7 +27,7 @@ import {
 import { consolidateProductTitle } from './title-consolidation';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
 import { determineProductGroup } from './product-line-grouper';
-import type { StageDefinition } from '../classification/types';
+import type { ProductLineItemSnapshot, StageDefinition } from '../classification/types';
 import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
 
@@ -125,7 +126,7 @@ async function classifyProduct(
   const pages = listPages().map(p => p.name);
 
   let suggestedPages: string[] = [];
-  let suggestedProductType: string | null = null;
+  const suggestedProductType: string | null = null;
 
   if (!llmConfig) {
     return { suggestedPages: [], suggestedProductType: null };
@@ -162,11 +163,8 @@ Rules:
     }
   }
 
-  // 2. Product Type — not classified here. These are CMS-internal classification
-  //    labels, not ShopSite fields. The modular curation pipeline (when enabled)
-  //    may produce product type proposals, but the legacy path skips this.
-  suggestedProductType = null;
-
+  // Product Type is deliberately not classified here. These are CMS-internal
+  // classification labels, not ShopSite fields; the legacy path returns null.
   return { suggestedPages, suggestedProductType };
 }
 
@@ -278,59 +276,123 @@ export async function curateItemWithPipeline(
   }
 
   // Create a config snapshot for reproducibility
-  const snapshotId = createConfigSnapshot(workspaceId, classConfig);
-  const snapshotHash = snapshotId;
+  const { id: snapshotId, hash: snapshotHash } = createConfigSnapshot(workspaceId, classConfig);
 
   // Create a classification run
   const run = createRun(workspaceId, item.upc, snapshotId, snapshotHash, item.id);
 
-  // ── Product-line grouping (internal Curation substage) ────────────────
+  // ── Product-line grouping for family-aware curation ───────────────────
   // Determine sibling context before running the pipeline so
-  // name_consolidation can produce consistent titles across variants.
-  let productLineGroup: ReturnType<typeof determineProductGroup> = null;
-  try {
-    const db = getDb();
-    const batchRows = db.query(
-      `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
-    ).all(item.id) as Array<{
-      id: string;
-      upc: string;
-      name: string;
-      brand_hint: string | null;
-      extraction_data_json: string | null;
-    }>;
+  // name_consolidation and page assignment can produce consistent
+  // results across variants. Prefer context passed from the worker
+  // (item.siblingGroup) to avoid re-querying. Fall back to internal
+  // batch query when set directly (tests, API calls).
+  let productLineGroup: ReturnType<typeof determineProductGroup> | null =
+    (item as any).siblingGroup ?? null;
 
-    const batchItems: OnboardingItem[] = batchRows.map(r => ({
-      id: r.id,
-      batchId: item.batchId,
-      upc: r.upc,
-      name: r.name,
-      price: null,
-      quantity: null,
-      brandHint: r.brand_hint,
-      departmentHint: null,
-      sourceUrl: null,
-      expectedName: null,
-      stage: 'curation' as const,
-      stageStatus: 'pending' as const,
-      rowNumber: 0,
-      isDuplicate: false,
-      existingSku: null,
-      extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
-      curationData: null,
-      status: 'active' as any,
-      errorMessage: null,
-      retryCount: 0,
-      createdAt: '',
-      updatedAt: '',
-    }));
+  if (!productLineGroup) {
+    try {
+      const db = getDb();
+      const batchRows = db.query(
+        `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
+      ).all(item.id) as Array<{
+        id: string;
+        upc: string;
+        name: string;
+        brand_hint: string | null;
+        extraction_data_json: string | null;
+      }>;
 
-    productLineGroup = determineProductGroup(item, batchItems);
-    if (productLineGroup) {
-      console.log(`[ProductCurator] Product line group "${productLineGroup.groupId}": ${productLineGroup.siblingNames.length} siblings`);
+      const batchItems: OnboardingItem[] = batchRows.map(r => ({
+        id: r.id,
+        batchId: item.batchId,
+        upc: r.upc,
+        name: r.name,
+        price: null,
+        quantity: null,
+        brandHint: r.brand_hint,
+        departmentHint: null,
+        sourceUrl: null,
+        expectedName: null,
+        stage: 'curation' as const,
+        stageStatus: 'pending' as const,
+        rowNumber: 0,
+        isDuplicate: false,
+        existingSku: null,
+        extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
+        curationData: null,
+        status: 'active' as any,
+        errorMessage: null,
+        retryCount: 0,
+        createdAt: '',
+        updatedAt: '',
+      }));
+
+      productLineGroup = determineProductGroup(item, batchItems);
+      if (productLineGroup) {
+        console.log(`[ProductCurator] Product line group "${productLineGroup.groupId}": ${productLineGroup.siblingNames.length} siblings`);
+      }
+    } catch (err: any) {
+      console.warn(`[ProductCurator] Product-line grouping failed (non-blocking): ${err.message}`);
     }
-  } catch (err: any) {
-    console.warn(`[ProductCurator] Product-line grouping failed (non-blocking): ${err.message}`);
+  } else {
+    console.log(`[ProductCurator] Using sibling context from worker for ${item.upc}: group "${productLineGroup.groupId}"`);
+  }
+
+  const attachedBatchItems = (item as any).batchItems as OnboardingItem[] | undefined;
+  let batchItemsForCoordination: OnboardingItem[] = attachedBatchItems ?? [];
+  if (productLineGroup && batchItemsForCoordination.length === 0) {
+    try {
+      batchItemsForCoordination = listItemsByBatch(item.batchId);
+    } catch (error) {
+      console.warn(`[ProductCurator] Failed to load batch snapshot for cohort coordination: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const productLineItems: ProductLineItemSnapshot[] | undefined = productLineGroup
+    ? productLineGroup.siblingSkus.map((sku, index) => {
+        const sibling = batchItemsForCoordination.find(candidate => candidate.upc === sku);
+        const extraction = sibling?.extractionData;
+        const ocr = extraction?.packagingOcrData;
+        return {
+          sku,
+          name: sibling?.expectedName ?? sibling?.name ?? productLineGroup!.siblingNames[index] ?? sku,
+          webTitle: extraction?.title ?? productLineGroup!.siblingWebTitles[index] ?? null,
+          brand: extraction?.brand ?? sibling?.brandHint ?? (productLineGroup!.normalizedBrand || null),
+          description: extraction?.description ?? '',
+          species: ocr?.species ?? [],
+          flavor: ocr?.flavorVariety ?? null,
+          lifeStage: ocr?.lifeStage ?? null,
+          productForm: ocr?.productForm ?? null,
+          healthConcern: ocr?.healthConcernFunction ?? [],
+        };
+      })
+    : undefined;
+
+  // Coordinate every title in a multi-item group through one cached,
+  // all-or-nothing cohort decision. No sibling title is written here; each
+  // item's own pipeline persists only its selected title metadata.
+  let preComputedTitle: string | undefined;
+  let preComputedTitleSource: 'llm_cohort' | 'cohort_fallback' | undefined;
+  if ((productLineGroup?.siblingSkus.length ?? 0) >= 2) {
+    try {
+      const coordinated = await coordinateCohortItemsOnce(item.batchId, batchItemsForCoordination);
+      const selected = coordinated.get(item.upc);
+      if (selected) {
+        preComputedTitle = selected.title;
+        preComputedTitleSource = selected.source;
+      } else {
+        // A grouped item must never fall through to an independent title LLM.
+        preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
+        preComputedTitleSource = 'cohort_fallback';
+      }
+    } catch (err) {
+      console.warn(
+        `[ProductCurator] Cohort title coordination failed for ${item.upc}; using deterministic fallback: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
+      preComputedTitleSource = 'cohort_fallback';
+    }
   }
 
   // Build the pipeline context
@@ -354,12 +416,10 @@ export async function curateItemWithPipeline(
           siblingSkus: productLineGroup.siblingSkus,
         }
       : undefined,
-    preComputedTitle: (item as any).coordinatedTitle ?? undefined,
+    productLineItems,
+    preComputedTitle,
+    preComputedTitleSource,
   };
-
-  if ((item as any).coordinatedTitle) {
-    console.log(`[ProductCurator] Using pre-computed coordinated title for ${item.upc}: "${(item as any).coordinatedTitle}"`);
-  }
 
   // Initial evidence starts empty — evidence_extraction stage handles
   // reading the onboarding item's extraction_data_json from the DB
@@ -426,7 +486,7 @@ export async function curateItemWithPipeline(
 
     // ── Validate that pages actually exist in the page_index (ADR 0005) ────
     const existingPageNames = new Set(listPages().map(p => p.name));
-    let suggestedPages: string[] = [];
+    const suggestedPages: string[] = [];
     for (const pageName of validatedPages) {
       if (existingPageNames.has(pageName)) {
         suggestedPages.push(pageName);
@@ -473,7 +533,6 @@ export async function curateItemWithPipeline(
       allProposals: allProposals,
     });
     const suggestedProductType = typeSelection.proposal?.targetId ?? null;
-
     // Synthesize search keywords from richer pipeline data
     const attributeProposals = allProposals.filter(p => p.proposalType === 'field_assignment' && p.status === 'accepted');
     const attributeKeywords = attributeProposals
@@ -502,7 +561,7 @@ export async function curateItemWithPipeline(
       curatedWeight: convertToLbs(
         ext.packagingOcrData?.weight || ext.weight || extractWeightFromName(item.name) || null,
       ),
-      titleSource: titleSource as 'web' | 'ocr' | 'llm' | 'manual',
+      titleSource: titleSource as 'web' | 'ocr' | 'llm' | 'manual' | 'llm_cohort' | 'cohort_fallback',
       suggestedPages,
       suggestedProductType,
       curatedAt: new Date().toISOString(),

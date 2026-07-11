@@ -23,6 +23,8 @@ import {
   completePromotionStage,
   setDiscoverySourceUrl,
   sendItemsToPreviousStage,
+  claimItemsForProcessing,
+  requeueStaleInProgressItems,
 } from '../../db/repositories/onboarding-item-repo';
 import {
   insertSources,
@@ -45,6 +47,7 @@ import {
   findBrandSites,
   updateBrandSiteDomain
 } from '../../db/repositories/brand-site-repo';
+import { validateSiblingConsistency } from '../../classification/consistency-validator';
 
 describe('Onboarding Repositories CRUD', () => {
   const testDbPath = path.resolve(import.meta.dirname, 'onboarding-test.db');
@@ -640,6 +643,155 @@ describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
     selectSource(sourcesC[0].id);
     const samples = listValidationSamplesByDomain('limit-test.com', 2);
     expect(samples.length).toBe(2);
+  });
+
+  it('claimItemsForProcessing claims disjoint items across simulated workers', () => {
+    const claimWsId = 'ws-claim-1';
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run('INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)', [claimWsId, 'Claim WS 1', '/tmp/claim1', '/tmp/claim1/.git', now, now, 'complete']);
+    const batch = createBatch({ workspaceId: claimWsId, name: 'Claim Test Batch', fileName: 'claim.xlsx', totalItems: 4 });
+    const items = insertItems(batch.id, [
+      { upc: 'CLAIM-001', name: 'Claim 1', rowNumber: 1 },
+      { upc: 'CLAIM-002', name: 'Claim 2', rowNumber: 2 },
+      { upc: 'CLAIM-003', name: 'Claim 3', rowNumber: 3 },
+      { upc: 'CLAIM-004', name: 'Claim 4', rowNumber: 4 },
+    ]);
+
+    // Worker A claims 2 items
+    const claimedA = claimItemsForProcessing('discovery', 2, claimWsId, 'worker-a');
+    expect(claimedA).toHaveLength(2);
+    expect(claimedA[0].upc).toBe('CLAIM-001');
+    expect(claimedA[1].upc).toBe('CLAIM-002');
+    expect(claimedA[0].stageStatus).toBe('in_progress');
+
+    // Worker B claims different 2 items (disjoint)
+    const claimedB = claimItemsForProcessing('discovery', 2, claimWsId, 'worker-b');
+    expect(claimedB).toHaveLength(2);
+    expect(claimedB[0].upc).toBe('CLAIM-003');
+    expect(claimedB[1].upc).toBe('CLAIM-004');
+
+    // No more pending items remain
+    const remaining = claimItemsForProcessing('discovery', 2, claimWsId, 'worker-c');
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('claimItemsForProcessing does not claim already-in-progress items', () => {
+    const claimWsId = 'ws-claim-2';
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run('INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)', [claimWsId, 'Claim WS 2', '/tmp/claim2', '/tmp/claim2/.git', now, now, 'complete']);
+    const batch = createBatch({ workspaceId: claimWsId, name: 'Inprog Claim Test Batch', fileName: 'inprog.xlsx', totalItems: 2 });
+    const items = insertItems(batch.id, [
+      { upc: 'INPROG-001', name: 'Inprog 1', rowNumber: 1 },
+      { upc: 'INPROG-002', name: 'Inprog 2', rowNumber: 2 },
+    ]);
+
+    // First worker takes both
+    const first = claimItemsForProcessing('discovery', 5, claimWsId, 'worker-1');
+    expect(first).toHaveLength(2);
+
+    // Second worker gets none (all in_progress, none pending)
+    const second = claimItemsForProcessing('discovery', 5, claimWsId, 'worker-2');
+    expect(second).toHaveLength(0);
+  });
+
+  it('requeueStaleInProgressItems recovers only stale claims', () => {
+    const claimWsId = 'ws-claim-3';
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run('INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)', [claimWsId, 'Claim WS 3', '/tmp/claim3', '/tmp/claim3/.git', now, now, 'complete']);
+    const batch = createBatch({ workspaceId: claimWsId, name: 'Stale Claim Test Batch', fileName: 'stale.xlsx', totalItems: 4 });
+    const items = insertItems(batch.id, [
+      { upc: 'STALE-001', name: 'Stale 1', rowNumber: 1 },
+      { upc: 'STALE-002', name: 'Stale 2', rowNumber: 2 },
+      { upc: 'STALE-003', name: 'Fresh 1', rowNumber: 3 },
+      { upc: 'STALE-004', name: 'Unleased Legacy Item', rowNumber: 4 },
+    ]);
+
+    // Claim items
+    claimItemsForProcessing('discovery', 4, claimWsId, 'worker-stale');
+
+    // Manually age two items to be stale, leave one fresh, and simulate one
+    // pre-lease in_progress row from an older app version with no claim time.
+    const oldTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    db.run('UPDATE onboarding_items SET claimed_at = ? WHERE upc = ?', [oldTime, 'STALE-001']);
+    db.run('UPDATE onboarding_items SET claimed_at = ? WHERE upc = ?', [oldTime, 'STALE-002']);
+    db.run('UPDATE onboarding_items SET claimed_by = NULL, claimed_at = NULL WHERE upc = ?', ['STALE-004']);
+
+    // Requeue stale and unleased legacy rows, but not a fresh live claim.
+    const staleBefore = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const requeued = requeueStaleInProgressItems(claimWsId, staleBefore);
+    expect(requeued).toBe(3);
+
+    // Verify STALE-001 and STALE-002 are pending again
+    const item1 = findItemById(items[0].id);
+    const item2 = findItemById(items[1].id);
+    const item3 = findItemById(items[2].id);
+    const item4 = findItemById(items[3].id);
+    expect(item1!.stageStatus).toBe('pending');
+    expect(item2!.stageStatus).toBe('pending');
+    expect(item4!.stageStatus).toBe('pending');
+    // Fresh item still in_progress
+    expect(item3!.stageStatus).toBe('in_progress');
+  });
+
+  it('surfaces page, Product Type, and title divergence without mutating siblings', () => {
+    const db = getDb();
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Consistency Warning Batch',
+      fileName: 'consistency.xlsx',
+      totalItems: 2,
+    });
+    const items = insertItems(batch.id, [
+      { upc: 'CONSIST-001', name: 'INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ', rowNumber: 1, brandHint: 'Instinct' },
+      { upc: 'CONSIST-002', name: 'INSTINCT CAT PATE SLMN SPLIT CUP 2.64OZ', rowNumber: 2, brandHint: 'Instinct' },
+    ]);
+    db.run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [JSON.stringify({
+      curatedTitle: 'Instinct Cat Pate Chicken Split Cup 2.64 oz',
+      suggestedPages: ['Cat Food Wet', 'Brand - Instinct'],
+      suggestedProductType: 'Wet Cat Food',
+    }), items[0].id]);
+    db.run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [JSON.stringify({
+      curatedTitle: 'Instinct Cat Flake Salmon Split Cup 2.64 oz',
+      suggestedPages: ['Cat Food Wet'],
+      suggestedProductType: null,
+    }), items[1].id]);
+
+    const warnings = validateSiblingConsistency(batch.id);
+    expect(new Set(warnings.map(w => w.field))).toEqual(new Set([
+      'category_page',
+      'primary_product_type',
+      'curated_title',
+    ]));
+    expect(warnings.every(w => Object.keys(w.values).length === 2)).toBe(true);
+  });
+
+  it('updateItemStageStatus clears claim fields on non-in_progress transitions', () => {
+    const claimWsId = 'ws-claim-4';
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run('INSERT OR IGNORE INTO workspace (id,name,workspace_path,git_path,created_at,updated_at,bootstrap_status) VALUES (?,?,?,?,?,?,?)', [claimWsId, 'Claim WS 4', '/tmp/claim4', '/tmp/claim4/.git', now, now, 'complete']);
+    const batch = createBatch({ workspaceId: claimWsId, name: 'Claim Clear Test Batch', fileName: 'clear.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [
+      { upc: 'CLEAR-001', name: 'Clear 1', rowNumber: 1 },
+    ]);
+    const item = items[0];
+
+    // Claim it
+    claimItemsForProcessing('discovery', 1, claimWsId, 'worker-clear');
+    const rawClaimed = db.query('SELECT claimed_by, claimed_at, stage_status FROM onboarding_items WHERE id = ?').get(item.id) as any;
+    expect(rawClaimed).toBeDefined();
+    expect(rawClaimed.claimed_by).toBe('worker-clear');
+    expect(rawClaimed.claimed_at).toBeDefined();
+
+    // Mark completed — claim fields should be cleared
+    updateItemStageStatus(item.id, 'completed');
+    const rawCompleted = db.query('SELECT stage_status, claimed_by, claimed_at FROM onboarding_items WHERE id = ?').get(item.id) as any;
+    expect(rawCompleted.stage_status).toBe('completed');
+    expect(rawCompleted.claimed_by).toBeNull();
+    expect(rawCompleted.claimed_at).toBeNull();
   });
 
   it('matches subdomains of the requested domain', () => {

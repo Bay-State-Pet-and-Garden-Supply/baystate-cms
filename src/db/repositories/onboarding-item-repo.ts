@@ -233,6 +233,89 @@ export function getPendingItemsByStage(
 }
 
 /**
+ * Atomically claim pending items for processing within a workspace.
+ *
+ * Uses a single atomic UPDATE with a subquery to find eligible items and
+ * claim them in one statement. Items with 'in_progress' and a stale claim
+ * (older than 5 minutes) are re-claimable for crash recovery. Newly advanced
+ * or reset items have stage_status='pending' so they are always claimable
+ * regardless of any old claimed_by value (the stale threshold clause only
+ * matches in_progress items that still carry an old claim).
+ *
+ * @param stage - Pipeline stage to claim items from
+ * @param limit - Maximum number of items to claim
+ * @param workspaceId - Workspace to claim items from
+ * @param workerId - Unique worker identifier for the claiming worker
+ * @returns Array of claimed onboarding items (empty if none available)
+ */
+export function claimItemsForProcessing(
+  stage: PipelineStage,
+  limit: number,
+  workspaceId: string,
+  workerId: string,
+): OnboardingItem[] {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  // Atomic UPDATE with subquery. The outer AND stage_status = 'pending'
+  // prevents claiming items already picked up by a concurrent worker.
+  // Eligibility is strictly stage_status = 'pending' — stale in_progress
+  // items are recovered by requeueStaleInProgressItems.
+  const result = db.run(
+    `UPDATE onboarding_items
+     SET stage_status = 'in_progress', claimed_by = ?, claimed_at = ?, updated_at = ?
+     WHERE id IN (
+       SELECT i.id FROM onboarding_items i
+       JOIN onboarding_batches b ON i.batch_id = b.id
+       WHERE b.workspace_id = ? AND b.status = 'active'
+       AND i.stage = ? AND i.stage_status = 'pending'
+       ORDER BY i.row_number
+       LIMIT ?
+     )
+     AND stage_status = 'pending'`,
+    [workerId, now, now, workspaceId, stage, limit],
+  );
+
+  if (result.changes === 0) return [];
+
+  // Read back the claimed items (identified by workerId + timestamp pair)
+  const rows = db.query(
+    `SELECT * FROM onboarding_items
+     WHERE claimed_by = ? AND claimed_at = ?
+     ORDER BY row_number
+     LIMIT ?`,
+  ).all(workerId, now, limit) as OnboardingItemRow[];
+
+  return rows.map(mapRowToItem);
+}
+
+/**
+ * Requeue items in this workspace that are stuck in 'in_progress' with a
+ * stale claim (older than the given threshold). Clears claim fields and
+ * resets stage_status to 'pending'. Used by worker startup to recover
+ * items from a crashed worker without touching items a live worker holds.
+ *
+ * @param workspaceId - Workspace to clean up
+ * @param staleBefore - ISO timestamp; items with claimed_at older than this are reset
+ * @returns Number of items requeued
+ */
+export function requeueStaleInProgressItems(workspaceId: string, staleBefore: string): number {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const result = db.run(
+    `UPDATE onboarding_items
+     SET stage_status = 'pending', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE stage_status = 'in_progress' AND (claimed_at IS NULL OR claimed_at < ?)
+     AND batch_id IN (SELECT id FROM onboarding_batches WHERE workspace_id = ?)`,
+    [now, staleBefore, workspaceId],
+  );
+  if (result.changes > 0) {
+    console.log(`[OnboardingItemRepo] Requeued ${result.changes} stale in_progress items for workspace ${workspaceId}`);
+  }
+  return result.changes;
+}
+
+/**
  * Advance one or more items to the next stage.
  * Only advances items that are 'completed' in their current stage.
  * Sets items to pending in the target stage. Resets retry_count and error_message.
@@ -280,7 +363,7 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
 
       db.query(
         `UPDATE onboarding_items
-         SET stage = ?, stage_status = 'pending', error_message = NULL, retry_count = 0, updated_at = ?
+         SET stage = ?, stage_status = 'pending', error_message = NULL, retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
          WHERE id = ?`,
       ).run(nextStage, now, id);
       advanced++;
@@ -292,6 +375,8 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
 
 /**
  * Update the stage_status of an item (used by worker while processing).
+ * Clears claim fields whenever the item transitions out of in_progress
+ * so it can be claimed again immediately on retry.
  */
 export function updateItemStageStatus(
   id: string,
@@ -300,9 +385,16 @@ export function updateItemStageStatus(
 ): void {
   const db = getDb();
   const now = new Date().toISOString();
-  db.query(
-    'UPDATE onboarding_items SET stage_status = ?, error_message = ?, updated_at = ? WHERE id = ?',
-  ).run(stageStatus, errorMessage ?? null, now, id);
+  // Clear claim fields on any terminal or retryable status transition
+  if (stageStatus !== 'in_progress') {
+    db.query(
+      'UPDATE onboarding_items SET stage_status = ?, error_message = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?',
+    ).run(stageStatus, errorMessage ?? null, now, id);
+  } else {
+    db.query(
+      'UPDATE onboarding_items SET stage_status = ?, error_message = ?, updated_at = ? WHERE id = ?',
+    ).run(stageStatus, errorMessage ?? null, now, id);
+  }
 }
 
 /**
@@ -313,7 +405,7 @@ export function completeReviewStage(id: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.query(
-    "UPDATE onboarding_items SET stage_status = 'completed', updated_at = ? WHERE id = ? AND stage = 'review'",
+    "UPDATE onboarding_items SET stage_status = 'completed', claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND stage = 'review'",
   ).run(now, id);
 }
 
@@ -325,11 +417,11 @@ export function completePromotionStage(id: string, success: boolean, errorMessag
   const now = new Date().toISOString();
   if (success) {
     db.query(
-      "UPDATE onboarding_items SET stage_status = 'completed', error_message = NULL, updated_at = ? WHERE id = ? AND stage = 'promotion'",
+      "UPDATE onboarding_items SET stage_status = 'completed', error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ? AND stage = 'promotion'",
     ).run(now, id);
   } else {
     db.query(
-      'UPDATE onboarding_items SET stage_status = ?, error_message = ?, updated_at = ? WHERE id = ?',
+      'UPDATE onboarding_items SET stage_status = ?, error_message = ?, claimed_by = NULL, claimed_at = NULL, updated_at = ? WHERE id = ?',
     ).run('failed', errorMessage ?? null, now, id);
   }
 }
@@ -386,13 +478,13 @@ export function resetItemsToPending(itemIds: string[]): void {
       if (item.stage === 'review' || item.stage === 'promotion') {
         db.query(
           `UPDATE onboarding_items
-           SET stage_status = 'pending', error_message = NULL, retry_count = 0, updated_at = ?
+           SET stage_status = 'pending', error_message = NULL, retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
            WHERE id = ?`,
         ).run(now, id);
       } else {
         db.query(
           `UPDATE onboarding_items
-           SET stage_status = 'pending', error_message = NULL, retry_count = 0, curation_data_json = NULL, updated_at = ?
+           SET stage_status = 'pending', error_message = NULL, retry_count = 0, curation_data_json = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
            WHERE id = ?`,
         ).run(now, id);
       }
@@ -410,7 +502,7 @@ export function skipItems(itemIds: string[]): void {
   const placeholders = itemIds.map(() => '?').join(', ');
   db.query(
     `UPDATE onboarding_items
-     SET stage_status = 'skipped', updated_at = ?
+     SET stage_status = 'skipped', claimed_by = NULL, claimed_at = NULL, updated_at = ?
      WHERE id IN (${placeholders})`,
   ).run(now, ...itemIds);
 }
@@ -431,7 +523,7 @@ export function resetItemsToStage(
   const placeholders = itemIds.map(() => '?').join(', ');
   db.query(
     `UPDATE onboarding_items
-     SET stage = ?, stage_status = 'completed', updated_at = ?
+     SET stage = ?, stage_status = 'completed', claimed_by = NULL, claimed_at = NULL, updated_at = ?
      WHERE id IN (${placeholders})`,
   ).run(targetStage, now, ...itemIds);
   return { reset: itemIds.length };
@@ -499,7 +591,7 @@ export function sendItemsToPreviousStage(
       // Revert the item back to the previous stage, set to completed
       db.query(
         `UPDATE onboarding_items
-         SET stage = ?, stage_status = 'completed', error_message = NULL, retry_count = 0, updated_at = ?
+         SET stage = ?, stage_status = 'completed', error_message = NULL, retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
          WHERE id = ?`,
       ).run(previousStage, now, id);
 
@@ -556,6 +648,14 @@ export function updateItemExpectedName(id: string, expectedName: string | null):
   db.query(
     'UPDATE onboarding_items SET expected_name = ?, updated_at = ? WHERE id = ?',
   ).run(expectedName, now, id);
+}
+
+export function updateItemBrandHint(id: string, brandHint: string | null): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  db.query(
+    'UPDATE onboarding_items SET brand_hint = ?, updated_at = ? WHERE id = ?',
+  ).run(brandHint, now, id);
 }
 
 export function incrementRetryCount(id: string): number {

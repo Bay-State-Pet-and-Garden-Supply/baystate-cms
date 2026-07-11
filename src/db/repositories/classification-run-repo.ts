@@ -112,10 +112,17 @@ export function getPendingPageProposals(productSku: string): ClassificationPropo
   return rows.map(mapProposal);
 }
 
-export function getAcceptedProposals(productSku: string): ClassificationProposal[] {
+export function getAcceptedProposals(productSku: string, runId?: string): ClassificationProposal[] {
+  if (runId) {
+    const rows = getDb()
+      .query('SELECT * FROM classification_proposals WHERE product_sku = ? AND run_id = ? AND status = ?')
+      .all(productSku, runId, 'accepted') as Record<string, any>[];
+    return rows.map(mapProposal);
+  }
   const rows = getDb()
     .query('SELECT * FROM classification_proposals WHERE product_sku = ? AND status = ?')
     .all(productSku, 'accepted') as Record<string, any>[];
+  console.warn(`[ClassificationRunRepo] getAcceptedProposals called without runId for SKU ${productSku} — results are unscoped and may span multiple runs.`);
   return rows.map(mapProposal);
 }
 
@@ -245,7 +252,7 @@ function mapProposal(row: Record<string, any>): ClassificationProposal {
     targetId: row.target_id ? String(row.target_id) : null,
     proposedValue: row.proposed_value_json ? JSON.parse(String(row.proposed_value_json)) : null,
     confidence: Number(row.confidence),
-    evidenceIds: [],
+    evidenceIds: row.evidence_ids_json ? JSON.parse(String(row.evidence_ids_json)) : [],
     status: String(row.status) as ClassificationProposal['status'],
     isBulkAcceptable: Number(row.is_bulk_acceptable) === 1,
     isStale: Number(row.is_stale) === 1,

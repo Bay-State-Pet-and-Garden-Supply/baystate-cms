@@ -8,14 +8,13 @@ import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { clearProductPages, assignProductToPage, assignProductToPageId, getProductPageAssignments, getPageByName } from '../db/repositories/page-repo';
+import { clearProductPages, assignProductToPage, assignProductToPageId, getProductPageAssignments } from '../db/repositories/page-repo';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
-import { getAcceptedProposals, getPendingPageProposals, recordHistoryEvent } from '../db/repositories/classification-run-repo';
+import { getAcceptedProposals, recordHistoryEvent } from '../db/repositories/classification-run-repo';
 import { getCachedAttributeMappings, getCachedBrands } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from '../classification/brand-resolution';
 import type { Product } from '../shared/types';
-import type { ExtractionData } from '../shared/schemas/onboarding';
 
 function slugify(text: string): string {
   return text
@@ -189,8 +188,8 @@ export async function promoteItems(
         const brands = getCachedBrands(workspace.id);
         const resolved = resolveBrand(item.brandHint, brands);
         brandName = resolved?.brandName ?? item.brandHint;
-      } catch (err: any) {
-        // ignore
+      } catch {
+        // Brand cache is optional; keep the original brand hint.
       }
     }
 
@@ -272,58 +271,52 @@ export async function promoteItems(
       const classificationPageProposals: Array<{ pageId: string | null; pageName: string }> = [];
       let acceptedProductType: string | null = null;
 
-      try {
-        const acceptedProposals = getAcceptedProposals(item.upc);
-        if (acceptedProposals.length > 0) {
-          const mappings = getCachedAttributeMappings(workspaceId);
+      const activeRunId = item.curationData?.classificationRunId ?? null;
+      // Classification proposals are always scoped to the item's active run.
+      // Legacy items without a run do not inherit decisions from historical
+      // runs for the same SKU.
+      const acceptedProposals = activeRunId
+        ? getAcceptedProposals(item.upc, activeRunId)
+        : [];
+      if (acceptedProposals.length > 0) {
+        const mappings = getCachedAttributeMappings(workspaceId);
 
-          for (const proposal of acceptedProposals) {
-            if (proposal.proposalType === 'field_assignment' && proposal.targetId) {
-              const mapping = mappings.find(m => m.attributeId === proposal.targetId);
-              if (mapping && !mapping.isStale && mapping.catalogField) {
-                const value = proposal.proposedValue;
-                const str = typeof value === 'string' ? value :
-                  Array.isArray(value) ? value.join(', ') :
-                  value !== null && value !== undefined ? String(value) : '';
-                if (str) {
-                  classificationCustomFields[mapping.catalogField] = str;
-                }
+        for (const proposal of acceptedProposals) {
+          if (proposal.proposalType === 'field_assignment' && proposal.targetId) {
+            const mapping = mappings.find(m => m.attributeId === proposal.targetId);
+            if (mapping && !mapping.isStale && mapping.catalogField) {
+              const value = proposal.proposedValue;
+              const str = typeof value === 'string' ? value :
+                Array.isArray(value) ? value.join(', ') :
+                value !== null && value !== undefined ? String(value) : '';
+              if (str) {
+                classificationCustomFields[mapping.catalogField] = str;
               }
-            } else if (proposal.proposalType === 'category_page' && proposal.targetId) {
-              const pv = proposal.proposedValue as Record<string, unknown> | undefined;
-              const pageId = pv?.pageId ? String(pv.pageId) : null;
-              const pageName = pv?.pageName ? String(pv.pageName) : String(proposal.targetId);
-              classificationPageNames.push(proposal.targetId);
-              classificationPageProposals.push({ pageId, pageName });
-            } else if (proposal.proposalType === 'primary_product_type' && proposal.targetId) {
-              acceptedProductType = String(proposal.targetId);
             }
+          } else if (proposal.proposalType === 'category_page' && proposal.targetId) {
+            const pv = proposal.proposedValue as Record<string, unknown> | undefined;
+            const pageId = pv?.pageId ? String(pv.pageId) : null;
+            const pageName = pv?.pageName ? String(pv.pageName) : String(proposal.targetId);
+            classificationPageNames.push(proposal.targetId);
+            classificationPageProposals.push({ pageId, pageName });
+          } else if (proposal.proposalType === 'primary_product_type' && proposal.targetId) {
+            acceptedProductType = String(proposal.targetId);
           }
         }
-      } catch (err) {
-        console.warn('[DraftPromoter] Failed to read classification proposals:', err);
       }
 
-      // Fallback: if no accepted page proposals exist, check curation data manual page assignments
-      // or existing database page assignments.
+      // Explicit/manual persisted page assignments are the only fallback.
+      // Unreviewed curation suggestions must never leak into promotion.
       if (classificationPageProposals.length === 0) {
-        if (item.curationData?.suggestedPages && item.curationData.suggestedPages.length > 0) {
-          for (const pageName of item.curationData.suggestedPages) {
-            const page = getPageByName(pageName);
-            classificationPageNames.push(pageName);
-            classificationPageProposals.push({ pageId: page?.id || null, pageName });
-          }
-        } else {
-          try {
-            const dbPages = getProductPageAssignments(item.upc);
-            for (const p of dbPages) {
-              if (p.pageName) {
-                classificationPageNames.push(p.pageName);
-                classificationPageProposals.push({ pageId: p.pageId || null, pageName: p.pageName });
-              }
+        try {
+          const dbPages = getProductPageAssignments(item.upc);
+          for (const p of dbPages) {
+            if (p.pageName) {
+              classificationPageNames.push(p.pageName);
+              classificationPageProposals.push({ pageId: p.pageId || null, pageName: p.pageName });
             }
-          } catch { /* ignore */ }
-        }
+          }
+        } catch { /* ignore */ }
       }
 
       // Check if we have accepted page proposals or manual page assignments. If not, refuse to promote.

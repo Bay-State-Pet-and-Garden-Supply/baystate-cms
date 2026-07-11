@@ -55,6 +55,19 @@ export type StageResult =
 
 // ─── Stage Context ─────────────────────────────────────────────────────────────
 
+export interface ProductLineItemSnapshot {
+  sku: string;
+  name: string;
+  webTitle: string | null;
+  brand: string | null;
+  description: string;
+  species: string[];
+  flavor: string | null;
+  lifeStage: string | null;
+  productForm: string | null;
+  healthConcern: string[];
+}
+
 export interface StageContext {
   workspacePath: string;
   workspaceId: string;
@@ -74,9 +87,13 @@ export interface StageContext {
     siblingOcrTitles: string[];
     siblingSkus: string[];
   };
+  /** Frozen, read-only per-SKU inputs used for cohort page coordination. */
+  productLineItems?: ProductLineItemSnapshot[];
   /** Pre-computed coordinated title from cohort LLM call. When present,
    *  name_consolidation uses this instead of making its own LLM call. */
   preComputedTitle?: string;
+  /** Source of the pre-computed title, required when preComputedTitle is set. */
+  preComputedTitleSource?: 'llm_cohort' | 'cohort_fallback';
 }
 
 // ─── Stage Definition ──────────────────────────────────────────────────────────

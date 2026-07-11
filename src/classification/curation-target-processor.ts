@@ -17,7 +17,6 @@ import {
   buildEvidenceText,
   matchKeywordOptions,
   matchAttributeOptions,
-  normalizeOption,
 } from './curation-target-matcher';
 import { enrichProductDetails } from './detail-enrichment';
 import { llmRankOptions } from './curation-target-ranker';
@@ -26,16 +25,16 @@ import {
   buildFieldAssignmentProposal,
   buildCategoryPageProposal,
 } from './curation-target-proposal';
-import { selectPrimaryProductTypeProposal } from './proposal-selection';
 import {
   buildPageHierarchy,
   extractProductContext,
   llmAssignCategoryPages,
 } from './page-assignment-llm';
+import { coordinateCohortPagesOnce } from './cohort-page-coordinator';
 
 // ─── Shared Target Constants ──────────────────────────────────────────────────
 
-const KEYWORD_MATCH_MIN_CONFIDENCE = 0.5;
+const KEYWORD_MATCH_MIN_CONFIDENCE = 0.7;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -231,23 +230,53 @@ export async function processPageTarget(
   // ── Extract product context from evidence and proposals ────────────────
   const productContext = extractProductContext(input.evidence, input.allProposals);
 
-  // ── Call LLM-first page assignment ─────────────────────────────────────
-  const llmResult = await llmAssignCategoryPages({
-    productName: productContext.productName,
-    productDescription: productContext.productDescription,
-    ocrSummary: productContext.ocrSummary,
-    productType: productContext.productType,
-    pages: pageHierarchy,
-    selectionMode,
-    maxPages,
-  });
+  const groupedSkus = context.productLineContext?.siblingSkus ?? [];
+  const isMultiItemGroup = groupedSkus.length >= 2;
+  let llmResult: { pages: Array<{ pageId: string; pageName: string; confidence: number }> } | null;
+  let assignmentSource = 'LLM';
+
+  if (isMultiItemGroup) {
+    const products = context.productLineItems ?? [];
+    const productSkus = new Set(products.map(product => product.sku));
+    if (products.length !== groupedSkus.length || groupedSkus.some(sku => !productSkus.has(sku))) {
+      return {
+        proposals: [],
+        message: 'Cohort page coordination abstained: the frozen product-line snapshot is incomplete.',
+      };
+    }
+    const coordinated = await coordinateCohortPagesOnce({
+      groupId: context.productLineContext!.groupId,
+      products,
+      pages: pageHierarchy,
+      selectionMode,
+      maxPages,
+    });
+    const member = coordinated.get(input.sku);
+    if (!member || member.status === 'abstained') {
+      return {
+        proposals: [],
+        message: `Cohort page coordination abstained: ${member?.reason ?? `missing result for SKU ${input.sku}`}`,
+      };
+    }
+    llmResult = { pages: member.pages };
+    assignmentSource = 'cohort LLM';
+  } else {
+    llmResult = await llmAssignCategoryPages({
+      productName: productContext.productName,
+      productDescription: productContext.productDescription,
+      ocrSummary: productContext.ocrSummary,
+      productType: productContext.productType,
+      pages: pageHierarchy,
+      selectionMode,
+      maxPages,
+    });
+  }
 
   if (!llmResult || llmResult.pages.length === 0) {
-    // Collect evidenceIds for the empty result message
     const { evidenceIds } = buildEvidenceText(input.evidence);
     return {
       proposals: [],
-      message: `No page assignment from LLM. Evidence length: ${input.evidence.length} records, ${evidenceIds.length} linked.`,
+      message: `No page assignment from ${assignmentSource}. Evidence length: ${input.evidence.length} records, ${evidenceIds.length} linked.`,
     };
   }
 
@@ -267,7 +296,7 @@ export async function processPageTarget(
   const pageNames = llmResult.pages.map(p => p.pageName);
   return {
     proposals,
-    message: `${pageNames.join(', ')} (LLM, ${(llmResult.pages[0].confidence * 100).toFixed(0)}%)`,
+    message: `${pageNames.join(', ')} (${assignmentSource}, ${(llmResult.pages[0].confidence * 100).toFixed(0)}%)`,
   };
 }
 

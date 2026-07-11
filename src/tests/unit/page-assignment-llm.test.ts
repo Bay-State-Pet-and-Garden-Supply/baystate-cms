@@ -29,6 +29,8 @@ import {
   buildPageHierarchy,
   extractProductContext,
   llmAssignCategoryPages,
+  normalizePageAssignments,
+  validatePageResponseEntries,
   type PageAssignmentParams,
 } from '../../classification/page-assignment-llm';
 
@@ -67,6 +69,31 @@ const makeProposal = (overrides: Partial<ClassificationProposal> = {}): Classifi
   createdAt: new Date().toISOString(),
   ...overrides,
 });
+
+/**
+ * Build a page-name → {id,name} map from entries.
+ * The canonical name is used as the key (case-sensitive).
+ */
+function makePageIndex(
+  entries: Array<{ id: string; name: string }>,
+): Map<string, { id: string; name: string }> {
+  const m = new Map<string, { id: string; name: string }>();
+  for (const e of entries) m.set(e.name, { id: e.id, name: e.name });
+  return m;
+}
+
+// Default page index for normalizePageAssignments tests
+const BASIC_PAGE_INDEX = makePageIndex([
+  { id: 'p1', name: 'Dog Food Dry' },
+  { id: 'p2', name: 'Dog Food Shop All' },
+  { id: 'p3', name: 'Cat Food Wet' },
+  { id: 'p4', name: 'Cat Food Shop All' },
+  { id: 'p5', name: 'Dog Treats' },
+  { id: 'p6', name: 'Brand - Acme Pet' },
+  { id: 'p7', name: 'Dog Food Wet' },
+  { id: 'p8', name: 'Brand - Instinct' },
+  { id: 'p9', name: 'Cat Food Dry' },
+]);
 
 // ─── buildPageHierarchy ──────────────────────────────────────────────────────
 
@@ -205,6 +232,344 @@ describe('extractProductContext', () => {
     const result = extractProductContext([], []);
     expect(result.productType).toBeNull();
   });
+
+  // ── Brand resolution priority ──────────────────────────────────────────
+
+  it('resolves brand from resolved_brand evidence first', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'catalog_manager_guidance',
+        sourceField: 'resolved_brand',
+        value: { brandId: 'acme', brandName: 'Acme Pet' },
+        reliability: 'high',
+      }),
+      makeEvidence({
+        source: 'official_product_page',
+        sourceField: 'brand',
+        value: 'Acme Pet Official',
+      }),
+      makeEvidence({
+        source: 'visual_product_evidence',
+        sourceField: 'brand',
+        value: 'Acme OCR',
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.ocrSummary.brand).toBe('Acme Pet');
+  });
+
+  it('falls back to official page brand when resolved_brand absent', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'official_product_page',
+        sourceField: 'brand',
+        value: 'Acme Official',
+      }),
+      makeEvidence({
+        source: 'spreadsheet',
+        sourceField: 'brand',
+        value: 'Acme Spreadsheet',
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.ocrSummary.brand).toBe('Acme Official');
+  });
+
+  it('falls back to spreadsheet brand hint before OCR brand', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'spreadsheet',
+        sourceField: 'brand',
+        value: 'Acme Spreadsheet',
+      }),
+      makeEvidence({
+        source: 'visual_product_evidence',
+        sourceField: 'brand',
+        value: 'Acme OCR',
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.ocrSummary.brand).toBe('Acme Spreadsheet');
+  });
+
+  it('falls back to OCR brand as last resort', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'visual_product_evidence',
+        sourceField: 'brand',
+        value: 'Acme OCR',
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.ocrSummary.brand).toBe('Acme OCR');
+  });
+
+  it('returns null brand when no brand evidence exists', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({ sourceField: 'name', value: 'Only Name' }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.ocrSummary.brand).toBeNull();
+  });
+});
+
+// ─── normalizePageAssignments ────────────────────────────────────────────────
+
+describe('normalizePageAssignments', () => {
+  it('deduplicates by page ID (first occurrence wins)', () => {
+    // Use entries without Shop All to avoid rule-2 interference
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.85 },
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 },
+      { pageId: 'p7', pageName: 'Dog Food Wet', confidence: 0.5 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, null, [], 5);
+    expect(result).toHaveLength(2);
+    expect(result[0].pageId).toBe('p1');
+    expect(result[0].confidence).toBe(0.85);
+    expect(result[1].pageId).toBe('p7');
+  });
+
+  it('removes Shop All when a specific page is present', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.85 },
+      { pageId: 'p2', pageName: 'Dog Food Shop All', confidence: 0.5 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, null, [], 5);
+    expect(result).toHaveLength(1);
+    expect(result[0].pageName).toBe('Dog Food Dry');
+  });
+
+  it('keeps Shop All when no specific page is present', () => {
+    const input = [
+      { pageId: 'p2', pageName: 'Dog Food Shop All', confidence: 0.6 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, null, [], 5);
+    expect(result).toHaveLength(1);
+    expect(result[0].pageName).toBe('Dog Food Shop All');
+  });
+
+  it('includes exact brand page when it exists and is not already present', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.85 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, 'Acme Pet', [], 5);
+    expect(result).toHaveLength(2);
+    expect(result[1].pageName).toBe('Brand - Acme Pet');
+    expect(result[1].confidence).toBe(0.95);
+  });
+
+  it('does not add a second page in single-selection mode', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.85 },
+    ];
+    const result = normalizePageAssignments(
+      input,
+      BASIC_PAGE_INDEX,
+      'Acme Pet',
+      [],
+      1,
+      'single',
+    );
+    expect(result).toEqual(input);
+  });
+
+  it('reserves a slot for an exact brand page when specific pages fill capacity', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 },
+      { pageId: 'p7', pageName: 'Dog Food Wet', confidence: 0.8 },
+      { pageId: 'p5', pageName: 'Dog Treats', confidence: 0.7 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, 'Acme Pet', [], 3);
+    expect(result).toHaveLength(3);
+    expect(result.map(p => p.pageName)).toEqual([
+      'Dog Food Dry',
+      'Dog Food Wet',
+      'Brand - Acme Pet',
+    ]);
+  });
+
+  it('does NOT add brand page when already present', () => {
+    const input = [
+      { pageId: 'p6', pageName: 'Brand - Acme Pet', confidence: 0.9 },
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.85 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, 'Acme Pet', [], 5);
+    expect(result).toHaveLength(2);
+    const brandEntries = result.filter(p => p.pageName === 'Brand - Acme Pet');
+    expect(brandEntries).toHaveLength(1);
+  });
+
+  it('drops Shop All to make room for brand page when at capacity', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.85 },
+      { pageId: 'p7', pageName: 'Dog Food Wet', confidence: 0.8 },
+      { pageId: 'p2', pageName: 'Dog Food Shop All', confidence: 0.5 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, 'Acme Pet', [], 3);
+    // After removing Shop All (2 remain), brand page fits
+    expect(result).toHaveLength(3);
+    expect(result.some(p => p.pageName === 'Brand - Acme Pet')).toBe(true);
+  });
+
+  it('clamps output to maxResults', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 },
+      { pageId: 'p7', pageName: 'Dog Food Wet', confidence: 0.8 },
+      { pageId: 'p5', pageName: 'Dog Treats', confidence: 0.7 },
+      { pageId: 'p2', pageName: 'Dog Food Shop All', confidence: 0.5 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, null, [], 2);
+    // After dedupe (4) and removing Shop All (3 remain), clamped to 2
+    expect(result).toHaveLength(2);
+  });
+
+  it('filters dog pages when only cat species evidence exists', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 },
+      { pageId: 'p3', pageName: 'Cat Food Wet', confidence: 0.8 },
+      { pageId: 'p9', pageName: 'Cat Food Dry', confidence: 0.7 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, null, ['Cat'], 5);
+    expect(result).toHaveLength(2);
+    expect(result.every(p => !p.pageName.toLowerCase().includes('dog'))).toBe(true);
+    expect(result.some(p => p.pageName === 'Cat Food Wet')).toBe(true);
+    expect(result.some(p => p.pageName === 'Cat Food Dry')).toBe(true);
+  });
+
+  it('filters cat pages when only dog species evidence exists', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 },
+      { pageId: 'p3', pageName: 'Cat Food Wet', confidence: 0.8 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, null, ['Dog'], 5);
+    expect(result).toHaveLength(1);
+    expect(result[0].pageName).toBe('Dog Food Dry');
+  });
+
+  it('does not filter when both cat and dog species present', () => {
+    const input = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 },
+      { pageId: 'p3', pageName: 'Cat Food Wet', confidence: 0.8 },
+    ];
+    const result = normalizePageAssignments(input, BASIC_PAGE_INDEX, null, ['Dog', 'Cat'], 5);
+    expect(result).toHaveLength(2);
+  });
+
+  it('returns empty for empty input', () => {
+    const result = normalizePageAssignments([], BASIC_PAGE_INDEX, null, [], 5);
+    expect(result).toHaveLength(0);
+  });
+});
+
+// ─── validatePageResponseEntries ─────────────────────────────────────────────
+
+describe('validatePageResponseEntries', () => {
+  const nameToPage = new Map<string, { id: string; name: string }>();
+  const idToPage = new Map<string, { id: string; name: string }>();
+  for (const [name, info] of BASIC_PAGE_INDEX) {
+    nameToPage.set(name, info);
+    idToPage.set(info.id, info);
+  }
+
+  it('accepts valid ID-bearing entries', () => {
+    const entries = [
+      { pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.85 },
+      { pageId: 'p2', pageName: 'Dog Food Shop All', confidence: 0.6 },
+    ];
+    const result = validatePageResponseEntries(entries, nameToPage, idToPage);
+    expect(result).toHaveLength(2);
+    expect(result[0].pageId).toBe('p1');
+    expect(result[1].pageId).toBe('p2');
+  });
+
+  it('rejects unknown page ID', () => {
+    const entries = [
+      { pageId: 'unknown-id', pageName: 'Dog Food Dry', confidence: 0.85 },
+    ];
+    const result = validatePageResponseEntries(entries, nameToPage, idToPage);
+    expect(result).toHaveLength(0);
+  });
+
+  it('rejects ID/name mismatch with different semantic name', () => {
+    const entries = [
+      { pageId: 'p1', pageName: 'Cat Food Wet', confidence: 0.85 },
+    ];
+    const result = validatePageResponseEntries(entries, nameToPage, idToPage);
+    expect(result).toHaveLength(0);
+  });
+
+  it('accepts ID-bearing entry with pageName omitted', () => {
+    const entries = [
+      { pageId: 'p1', confidence: 0.85 },
+    ];
+    const result = validatePageResponseEntries(entries, nameToPage, idToPage);
+    expect(result).toHaveLength(1);
+    expect(result[0].pageId).toBe('p1');
+    expect(result[0].pageName).toBe('Dog Food Dry');
+  });
+
+  it('accepts valid name-only entry (backward compat, unique name)', () => {
+    const entries = [
+      { pageName: 'Dog Food Dry', confidence: 0.85 },
+    ];
+    const result = validatePageResponseEntries(entries, nameToPage, idToPage);
+    expect(result).toHaveLength(1);
+    expect(result[0].pageId).toBe('p1');
+  });
+
+  /**
+   * Duplicate-name scenario: when two different page IDs have names that
+   * differ only in case (e.g. "Dog Food Dry" and "DOG FOOD DRY"), a name-only
+   * entry for that name is ambiguous and must be rejected.
+   */
+  it('rejects name-only entry when multiple IDs share the same case-insensitive name', () => {
+    const ambiguousNameToPage = new Map<string, { id: string; name: string }>();
+    const ambiguousIdToPage = new Map<string, { id: string; name: string }>();
+    ambiguousNameToPage.set('Dog Food Dry', { id: 'p1', name: 'Dog Food Dry' });
+    ambiguousNameToPage.set('DOG FOOD DRY', { id: 'pX', name: 'DOG FOOD DRY' });
+    ambiguousIdToPage.set('p1', { id: 'p1', name: 'Dog Food Dry' });
+    ambiguousIdToPage.set('pX', { id: 'pX', name: 'DOG FOOD DRY' });
+
+    // Name-only entry matching both case-insensitively
+    const entries = [
+      { pageName: 'dog food dry', confidence: 0.8 },
+    ];
+    const result = validatePageResponseEntries(entries, ambiguousNameToPage, ambiguousIdToPage);
+    expect(result).toHaveLength(0);
+  });
+
+  it('rejects an exact duplicate display name with different IDs', () => {
+    const duplicateNames = new Map<string, { id: string; name: string }>([
+      ['Dog Food Dry', { id: 'p1', name: 'Dog Food Dry' }],
+      ['Dog Food Dry\u0000pX', { id: 'pX', name: 'Dog Food Dry' }],
+    ]);
+    const duplicateIds = new Map<string, { id: string; name: string }>([
+      ['p1', { id: 'p1', name: 'Dog Food Dry' }],
+      ['pX', { id: 'pX', name: 'Dog Food Dry' }],
+    ]);
+    expect(validatePageResponseEntries(
+      [{ pageName: 'Dog Food Dry', confidence: 0.8 }],
+      duplicateNames,
+      duplicateIds,
+    )).toHaveLength(0);
+  });
+
+  it('accepts name-only entry with case-insensitive matching', () => {
+    const entries = [
+      { pageName: 'dog food dry', confidence: 0.85 },
+    ];
+    const result = validatePageResponseEntries(entries, nameToPage, idToPage);
+    expect(result).toHaveLength(1);
+    expect(result[0].pageId).toBe('p1');
+    expect(result[0].pageName).toBe('Dog Food Dry');
+  });
+
+  it('rejects non-object entries', () => {
+    const entries = [null, 'string', 42];
+    const result = validatePageResponseEntries(entries, nameToPage, idToPage);
+    expect(result).toHaveLength(0);
+  });
 });
 
 // ─── llmAssignCategoryPages ──────────────────────────────────────────────────
@@ -291,7 +656,7 @@ describe('llmAssignCategoryPages', () => {
         pages: [
           { pageName: 'Dog Food Dry', confidence: 0.85 },
           { pageName: 'Non Existent Page', confidence: 0.7 },
-          { pageName: 'Dog Treats Shop All', confidence: 0.6 },
+          { pageName: 'Dog Food Wet', confidence: 0.6 },
         ],
       }),
     );
@@ -299,7 +664,7 @@ describe('llmAssignCategoryPages', () => {
     const result = await llmAssignCategoryPages(defaultParams);
     expect(result).not.toBeNull();
     expect(result!.pages).toHaveLength(2);
-    expect(result!.pages.map(p => p.pageName)).toEqual(['Dog Food Dry', 'Dog Treats Shop All']);
+    expect(result!.pages.map(p => p.pageName)).toEqual(['Dog Food Dry', 'Dog Food Wet']);
   });
 
   it('returns null when no returned pages match the provided list', async () => {
@@ -318,15 +683,14 @@ describe('llmAssignCategoryPages', () => {
 
   it('handles {values: [...]} response shape from LLM', async () => {
     asMock(callLlmForTask).mockResolvedValue(
-      JSON.stringify({ values: ['Dog Food Dry', 'Dog Treats Shop All'], confidence: 0.8 }),
+      JSON.stringify({ values: ['Dog Food Dry', 'Dog Food Wet'], confidence: 0.8 }),
     );
 
     const result = await llmAssignCategoryPages(defaultParams);
     expect(result).not.toBeNull();
     expect(result!.pages).toHaveLength(2);
-    // With the values shape, confidence is pulled from the outer confidence
     expect(result!.pages[0].pageName).toBe('Dog Food Dry');
-    expect(result!.pages[1].pageName).toBe('Dog Treats Shop All');
+    expect(result!.pages[1].pageName).toBe('Dog Food Wet');
   });
 
   it('strips markdown code fences from LLM response', async () => {
@@ -355,8 +719,8 @@ describe('llmAssignCategoryPages', () => {
     asMock(callLlmForTask).mockResolvedValue(
       JSON.stringify({
         pages: [
-          { pageName: 'Dog Food Dry', confidence: 0.99 }, // should cap at 0.95
-          { pageName: 'Dog Food Wet', confidence: 0.1 }, // should floor at 0.35
+          { pageName: 'Dog Food Dry', confidence: 0.99 },
+          { pageName: 'Dog Food Wet', confidence: 0.1 },
         ],
       }),
     );
@@ -382,5 +746,58 @@ describe('llmAssignCategoryPages', () => {
     const result = await llmAssignCategoryPages({ ...defaultParams, maxPages: 2 });
     expect(result).not.toBeNull();
     expect(result!.pages).toHaveLength(2);
+  });
+
+  // ── Prompt inspection tests ────────────────────────────────────────────
+
+  it('sibling prompt does not contain "assigned to"', async () => {
+    asMock(callLlmForTask).mockResolvedValue(
+      JSON.stringify({ pages: [{ pageName: 'Dog Food Dry', confidence: 0.8 }] }),
+    );
+
+    const paramsWithSiblings: PageAssignmentParams = {
+      ...defaultParams,
+      siblingProducts: [
+        { sku: 'SKU002', name: 'Honest Kitchen Beef Recipe Chicken' },
+        { sku: 'SKU003', name: 'Honest Kitchen Beef Recipe Lamb' },
+      ],
+    };
+
+    await llmAssignCategoryPages(paramsWithSiblings);
+
+    expect(asMock(callLlmForTask).mock.calls.length).toBe(1);
+    // callLlmForTask signature: (taskName, prompt, systemPrompt, options)
+    const prompt = asMock(callLlmForTask).mock.calls[0][1] as string;
+    expect(prompt).not.toContain('assigned to');
+    expect(prompt).not.toContain('assigned to []');
+    expect(prompt).toContain('SKU002');
+    expect(prompt).toContain('Honest Kitchen Beef Recipe Chicken');
+    expect(prompt).toContain('SIBLING PRODUCTS');
+  });
+
+  it('includes page IDs ([ID:...]) in the prompt listing', async () => {
+    asMock(callLlmForTask).mockResolvedValue(
+      JSON.stringify({ pages: [{ pageName: 'Dog Food Dry', confidence: 0.8 }] }),
+    );
+
+    await llmAssignCategoryPages(defaultParams);
+
+    expect(asMock(callLlmForTask).mock.calls.length).toBe(1);
+    const prompt = asMock(callLlmForTask).mock.calls[0][1] as string;
+    expect(prompt).toContain('[ID:dog-food-dry]');
+    expect(prompt).toContain('[ID:dog-food-wet]');
+  });
+
+  it('prompt instructs LLM to return pageId and pageName', async () => {
+    asMock(callLlmForTask).mockResolvedValue(
+      JSON.stringify({ pages: [{ pageName: 'Dog Food Dry', confidence: 0.8 }] }),
+    );
+
+    await llmAssignCategoryPages(defaultParams);
+
+    expect(asMock(callLlmForTask).mock.calls.length).toBe(1);
+    const prompt = asMock(callLlmForTask).mock.calls[0][1] as string;
+    expect(prompt).toContain('"pageId"');
+    expect(prompt).toContain('"pageName"');
   });
 });

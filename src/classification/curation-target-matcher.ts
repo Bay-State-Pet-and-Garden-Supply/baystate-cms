@@ -151,7 +151,14 @@ export interface AttributeMatchResult {
 }
 
 /**
- * Match attribute values from evidence text using exact substring matching
+ * Escape regex special characters in a string.
+ */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Match attribute values from evidence text using word-boundary matching
  * and configured value aliases.
  *
  * @param attribute - The product attribute config with allowedValues and valueAliases
@@ -172,24 +179,24 @@ export function matchAttributeOptions(
   const found: Array<{ value: string; confidence: number; matchedBy: 'direct' | 'alias' }> = [];
   const seen = new Set<string>();
 
-  // 1. Exact substring match against allowed values (direct)
+  // 1. Word-boundary match against allowed values (direct)
   for (const opt of options) {
     if (seen.has(opt)) continue;
-    if (textLower.includes(opt.toLowerCase())) {
+    if (new RegExp('\\b' + escapeRegex(opt.toLowerCase()) + '\\b', 'i').test(textLower)) {
       found.push({ value: opt, confidence: 0.6, matchedBy: 'direct' });
       seen.add(opt);
       if (selectionMode === 'single') break;
     }
   }
 
-  // 2. Alias matching
+  // 2. Alias matching (also word-boundary)
   if (selectionMode === 'multiple' || found.length === 0) {
     for (const alias of attribute.valueAliases) {
       if (seen.has(alias.mapsTo)) continue;
-      if (textLower.includes(alias.alias.toLowerCase())) {
+      if (new RegExp('\\b' + escapeRegex(alias.alias.toLowerCase()) + '\\b', 'i').test(textLower)) {
         const canonical = normalizeOption(alias.mapsTo, options) ?? alias.mapsTo;
         if (seen.has(canonical)) continue;
-        found.push({ value: canonical, confidence: 0.55, matchedBy: 'alias' });
+        found.push({ value: canonical, confidence: 0.60, matchedBy: 'alias' });
         seen.add(canonical);
         if (selectionMode === 'single') break;
       }

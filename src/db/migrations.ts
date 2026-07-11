@@ -588,6 +588,26 @@ export function runMigrations(): void {
     db.exec(stagePipelineSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('stage_pipeline_schema_version', '1');");
   }
+  // ── Clean up product_draft_projection noise proposals ───────────────────
+  //
+  // The product_draft_projection stage previously emitted a fake
+  // field_assignment proposal with targetId='product_draft_projection'.
+  // These proposals are noise — they are never consumed by promotion or
+  // review, but they pollute the classification_proposals table and
+  // confuse downstream queries. Remove them in a one-time cleanup.
+  try {
+    const draftProjCleanup = db.query('SELECT value FROM app_meta WHERE key = ?').get('product_draft_projection_cleanup') as
+      | { value: string }
+      | undefined;
+    if (!draftProjCleanup) {
+      const deleted = db.query("DELETE FROM classification_proposals WHERE target_id = 'product_draft_projection'").run();
+      console.log(`[Migrations] Cleaned up ${deleted.changes} product_draft_projection proposals.`);
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_draft_projection_cleanup', '1');");
+    }
+  } catch (e) {
+    console.error('[Migrations] product_draft_projection cleanup failed:', e);
+  }
+
   // ── Seed category_page_assignment LLM task config ───────────────────────
   //
   // The category_page_assignment task is used by the LLM-first page assignment
@@ -628,10 +648,10 @@ export function runMigrations(): void {
     // Add columns if they do not exist
     try {
       db.exec("ALTER TABLE store_manager_chat_history ADD COLUMN thread_id TEXT;");
-    } catch (e) { /* already exists */ }
+    } catch { /* already exists */ }
     try {
       db.exec("ALTER TABLE store_manager_chat_history ADD COLUMN thread_title TEXT;");
-    } catch (e) { /* already exists */ }
+    } catch { /* already exists */ }
 
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_store_manager_chat_history_ws 
@@ -648,6 +668,74 @@ export function runMigrations(): void {
   } catch (e) {
     console.error('[Migrations] Failed to create store_manager_chat_history table:', e);
   }
+
+  // ── Run curation V2 migration if not already applied ──────────────────────
+  //
+  // Adds columns for atomic item claims, run-scoped proposal tracking,
+  // cohort snapshots, evidence denormalization, and refresh-staleness columns.
+  // Each ALTER TABLE ADD COLUMN is wrapped in a PRAGMA column-existence guard
+  // so the migration is idempotent in all scenarios.
+  try {
+    const curationV2Version = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_v2_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!curationV2Version) {
+      console.log('[Migrations] Running curation V2 migration...');
+
+      // Helper: add a column only if it does not already exist
+      const cols = (tbl: string) => db.query('PRAGMA table_info(' + tbl + ')').all() as Array<{ name: string }>;
+      const addCol = (tbl: string, col: string, def: string) => {
+        if (!cols(tbl).some((c: { name: string }) => c.name === col)) {
+          db.exec('ALTER TABLE ' + tbl + ' ADD COLUMN ' + col + ' ' + def);
+          console.log('[Migrations] Added ' + tbl + '.' + col);
+        }
+      };
+
+      // 1. onboarding_items — worker claim columns
+      addCol('onboarding_items', 'claimed_by', 'TEXT');
+      addCol('onboarding_items', 'claimed_at', 'TEXT');
+
+      // 2. classification_proposals — evidence denormalization, staleness, metadata
+      addCol('classification_proposals', 'evidence_ids_json', "TEXT DEFAULT '[]'");
+      addCol('classification_proposals', 'stale_at', 'TEXT');
+      addCol('classification_proposals', 'superseded_by_run_id', 'TEXT REFERENCES classification_runs(id)');
+      addCol('classification_proposals', 'metadata_json', "TEXT DEFAULT '{}'");
+
+      // 3. curation_run_items — link to per-SKU ClassificationRun
+      addCol('curation_run_items', 'classification_run_id', 'TEXT REFERENCES classification_runs(id) ON DELETE SET NULL');
+
+      // 4. curation_runs — batch link, curation mode, config snapshot, snapshots
+      addCol('curation_runs', 'batch_id', 'TEXT REFERENCES onboarding_batches(id)');
+      addCol('curation_runs', 'curation_mode', "TEXT NOT NULL DEFAULT 'modular' CHECK (curation_mode IN ('modular', 'legacy'))");
+      addCol('curation_runs', 'config_snapshot_id_v2', 'TEXT REFERENCES classification_config_snapshots(id)');
+      addCol('curation_runs', 'input_snapshot_json', 'TEXT');
+      addCol('curation_runs', 'cohort_snapshot_json', 'TEXT');
+
+      // 5. curation_model_calls — cost observability
+      addCol('curation_model_calls', 'estimated_cost_usd', 'REAL');
+
+      // 6. New indexes (CREATE INDEX IF NOT EXISTS is inherently idempotent)
+      db.exec('CREATE INDEX IF NOT EXISTS idx_classification_proposals_run_sku_status ON classification_proposals(run_id, product_sku, status)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_onboarding_items_stage_status_claimed ON onboarding_items(stage, stage_status, claimed_by)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_curation_runs_batch ON curation_runs(batch_id)');
+
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_v2_schema_version', '1');");
+      console.log('[Migrations] Curation V2 migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Curation V2 migration failed:', e);
+  }
+
+  // Classification is item-centric: at most one live run may own an item.
+  // Keep this outside the version guard so databases that already recorded
+  // curation_v2_schema_version still receive the concurrency constraint.
+  // If historical duplicate running rows exist, index creation fails closed
+  // instead of silently choosing a winner.
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_runs_one_running_item
+    ON classification_runs(onboarding_item_id)
+    WHERE onboarding_item_id IS NOT NULL AND status = 'running'
+  `);
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }

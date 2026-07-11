@@ -19,6 +19,7 @@ import {
   resolveBrandDomains,
   getBrandSites,
   submitDecisions,
+  completeReviewStage,
   bulkAssignBrand,
   bulkSkipItems,
   bulkRetryItems
@@ -481,28 +482,58 @@ export function Onboarding() {
 
   const handleSaveItemEdit = async () => {
     if (!reviewItemId) return;
+
+    // Step 1: Save editable data WITHOUT setting legacy status 'ready'
     try {
-      // Clean provenance field names to match schema update
       await updateItem(reviewItemId, {
-        status: 'ready', // mark ready on save/approve
         extraction_data: editFields,
         curation_data: { ...curationFields, classificationProposals, classificationEvidence }
       });
-      if (classificationProposals.length > 0) {
-        const decs = classificationProposals.filter(p => p.status === 'accepted' || p.status === 'rejected' || p.status === 'deferred').map(p => ({ proposalId: p.id, decision: p.status as 'accepted' | 'rejected' | 'deferred', proposedValue: p.proposedValue, targetId: p.targetId }));
-        if (decs.length > 0) { try { await submitDecisions(reviewItemId, decs); } catch (e) { console.warn(e); } }
-      }
-      alert('Item approved and saved to queue.');
-      
-      // Auto-select this item for promotion
-      if (!selectedItemIds.includes(reviewItemId)) {
-        setSelectedItemIds(prev => [...prev, reviewItemId]);
-      }
-      
-      handleCloseReview();
     } catch (err) {
-      alert('Error updating item: ' + (err instanceof Error ? err.message : String(err)));
+      alert('Error saving item data: ' + (err instanceof Error ? err.message : String(err)));
+      return;
     }
+
+    // Step 2: Submit classification decisions, when this run has proposals.
+    try {
+      if (classificationProposals.length > 0) {
+        const decs = classificationProposals
+          .filter(p => p.status === 'accepted' || p.status === 'rejected' || p.status === 'deferred')
+          .map(p => ({ proposalId: p.id, decision: p.status as 'accepted' | 'rejected' | 'deferred', proposedValue: p.proposedValue, targetId: p.targetId }));
+        if (decs.length > 0) {
+          await submitDecisions(reviewItemId, decs);
+        }
+      }
+    } catch (err) {
+      // Edits are saved; decisions failed. The item remains in review for retry.
+      alert('Item edits were saved, but recording decisions failed: ' + (err instanceof Error ? err.message : String(err)) + ' — item remains in review.');
+      // Keep the drawer open so the user can retry. Refresh the batch list to
+      // reflect any edits that were saved before the decision failure.
+      if (selectedBatchId) {
+        getBatchItems(selectedBatchId).then(res => setItems(res.items));
+      }
+      return;
+    }
+
+    // Step 3: Complete review stage (separate from decisions)
+    try {
+      // Always ask the server to complete review. Classified items with missing
+      // decisions fail closed; legacy items use the server's explicit bypass.
+      await completeReviewStage([reviewItemId]);
+    } catch (err) {
+      alert('Item saved and decisions recorded, but completing review failed: ' +
+        (err instanceof Error ? err.message : String(err)) +
+        ' — use the "Complete Review" action in the pipeline board.');
+      // Fetch latest items to reflect saved changes
+      if (selectedBatchId) {
+        getBatchItems(selectedBatchId).then(res => setItems(res.items));
+      }
+      return;
+    }
+
+    // All three steps succeeded
+    alert('Item approved and saved to queue.');
+    handleCloseReview();
   };
 
   const handleSelectSourceUrl = async (source: OnboardingSource) => {

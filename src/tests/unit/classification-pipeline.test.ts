@@ -15,7 +15,7 @@ import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
 import { syncConfigToCache, getCachedProductTypes, getCachedAttributes, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
-import { createRun, getProposalsByRun, recordDecision, getAcceptedProposals } from '../../db/repositories/classification-run-repo';
+import { createRun, completeRun, getProposalsByRun, getStageResults, getEvidenceByRun, recordDecision, getAcceptedProposals } from '../../db/repositories/classification-run-repo';
 import { runPipeline } from '../../classification/pipeline-runner';
 import { evidenceExtractionStage, nameConsolidationStage, categoryPageProposalsStage, productAttributeProposalsStage, attributeApplicabilityStage, primaryProductTypeStage } from '../../classification';
 import { upsertPage } from '../../db/repositories/page-repo';
@@ -23,6 +23,9 @@ import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
 import { listCurationTargetCandidates } from '../../classification/curation-targets';
 import { getDb } from '../../db/connection';
+import { createBatch } from '../../db/repositories/onboarding-batch-repo';
+import { insertItems } from '../../db/repositories/onboarding-item-repo';
+import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 
 describe('Classification Pipeline Integration', () => {
   let workspacePath: string;
@@ -78,12 +81,12 @@ describe('Classification Pipeline Integration', () => {
   it('runs category page proposals from evidence', async () => {
     upsertPage({ name: 'Dog Food', fileName: 'dog-food.html', parentId: null, pageHash: 'abc', lastSyncedAt: null });
     const config = loadClassificationConfig(workspacePath);
-    const snapId = createConfigSnapshot(workspaceId, config);
-    const run = createRun(workspaceId, 'TEST-SKU-1', snapId, snapId);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-1', snapId, snapHash);
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-1', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Dog Food Chicken', value: 'Dog Food Chicken', metadata: {}, capturedAt: new Date().toISOString() },
     ];
-    const result = await runPipeline([evidenceExtractionStage, categoryPageProposalsStage], { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: new Date().toISOString() } }, { sku: 'TEST-SKU-1', evidence, acceptedProposals: [], allProposals: [] });
+    const result = await runPipeline([evidenceExtractionStage, categoryPageProposalsStage], { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } }, { sku: 'TEST-SKU-1', evidence, acceptedProposals: [], allProposals: [] });
     expect(result.proposals.length).toBeGreaterThanOrEqual(1);
     const persisted = getProposalsByRun(run.id);
     expect(persisted.length).toBeGreaterThanOrEqual(1);
@@ -91,24 +94,24 @@ describe('Classification Pipeline Integration', () => {
 
   it('produces attribute proposals via alias matching', async () => {
     const config = loadClassificationConfig(workspacePath);
-    const snapId = createConfigSnapshot(workspaceId, config);
-    const run = createRun(workspaceId, 'TEST-SKU-2', snapId, snapId);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-2', snapId, snapHash);
     const acceptedType = { id: randomUUID(), runId: run.id, productSku: 'TEST-SKU-2', proposalType: 'primary_product_type' as const, targetId: 'dry-dog-food', proposedValue: {}, confidence: 1, evidenceIds: [], status: 'accepted' as const, isBulkAcceptable: false, isStale: false, stalenessReason: null, createdAt: new Date().toISOString() };
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-2', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Beef Recipe', value: 'Beef Recipe', metadata: {}, capturedAt: new Date().toISOString() },
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-2', attributeId: null, source: 'official_product_page' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'description', snippet: 'Made with Chicken and Lamb', value: 'Made with Chicken and Lamb', metadata: {}, capturedAt: new Date().toISOString() },
     ];
-    const result = await runPipeline([evidenceExtractionStage, primaryProductTypeStage, attributeApplicabilityStage, productAttributeProposalsStage], { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: new Date().toISOString() } }, { sku: 'TEST-SKU-2', evidence, acceptedProposals: [acceptedType], allProposals: [] });
+    const result = await runPipeline([evidenceExtractionStage, primaryProductTypeStage, attributeApplicabilityStage, productAttributeProposalsStage], { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } }, { sku: 'TEST-SKU-2', evidence, acceptedProposals: [acceptedType], allProposals: [] });
     const fieldProposals = result.proposals.filter(p => p.proposalType === 'field_assignment');
     expect(fieldProposals.length).toBeGreaterThan(0);
     recordDecision({ id: randomUUID(), proposalId: fieldProposals[0].id, decision: 'accepted', revisedFromId: null, reviewerId: null, reviewerNote: null, createdAt: new Date().toISOString() });
-    expect(getAcceptedProposals('TEST-SKU-2').length).toBeGreaterThan(0);
+    expect(getAcceptedProposals('TEST-SKU-2', run.id).length).toBeGreaterThan(0);
   });
 
   it('name consolidation stage returns metadata without field_assignment proposals', async () => {
     const config = loadClassificationConfig(workspacePath);
-    const snapId = createConfigSnapshot(workspaceId, config);
-    const run = createRun(workspaceId, 'TEST-SKU-NAME', snapId, snapId);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-NAME', snapId, snapHash);
     const evidence = [
       {
         id: randomUUID(),
@@ -145,7 +148,7 @@ describe('Classification Pipeline Integration', () => {
     // would abstain and create a reviewable_abstention proposal on this test DB)
     const result = await runPipeline(
       [nameConsolidationStage],
-      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: new Date().toISOString() } },
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
       { sku: 'TEST-SKU-NAME', evidence, acceptedProposals: [], allProposals: [] },
     );
 
@@ -163,8 +166,8 @@ describe('Classification Pipeline Integration', () => {
 
   it('produces attribute proposals from provisional Product Type (no accepted proposals)', async () => {
     const config = loadClassificationConfig(workspacePath);
-    const snapId = createConfigSnapshot(workspaceId, config);
-    const run = createRun(workspaceId, 'TEST-SKU-PROV', snapId, snapId);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-PROV', snapId, snapHash);
     const evidence = [
       {
         id: randomUUID(),
@@ -207,7 +210,7 @@ describe('Classification Pipeline Integration', () => {
         attributeApplicabilityStage,
         productAttributeProposalsStage,
       ],
-      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: new Date().toISOString() } },
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
       { sku: 'TEST-SKU-PROV', evidence, acceptedProposals: [], allProposals: [] },
     );
 
@@ -276,15 +279,15 @@ describe('Classification Pipeline Integration', () => {
     syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
 
     const config = loadClassificationConfig(workspacePath);
-    const snapId = createConfigSnapshot(workspaceId, config);
-    const run = createRun(workspaceId, 'TEST-SKU-24', snapId, snapId);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-24', snapId, snapHash);
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-24', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Premium Cat Toys assortment', value: 'Premium Cat Toys assortment', metadata: {}, capturedAt: now },
     ];
 
     const result = await runPipeline(
       [productAttributeProposalsStage],
-      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: now } },
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: now } },
       { sku: 'TEST-SKU-24', evidence, acceptedProposals: [], allProposals: [] },
     );
 
@@ -345,14 +348,14 @@ describe('Classification Pipeline Integration', () => {
     syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
 
     const config = loadClassificationConfig(workspacePath);
-    const snapId = createConfigSnapshot(workspaceId, config);
-    const run = createRun(workspaceId, 'TEST-SKU-NOPT', snapId, snapId);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-NOPT', snapId, snapHash);
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-NOPT', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Dry Dog Food Chicken Recipe', value: 'Dry Dog Food Chicken Recipe', metadata: {}, capturedAt: new Date().toISOString() },
     ];
     const result = await runPipeline(
       [evidenceExtractionStage, primaryProductTypeStage],
-      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: new Date().toISOString() } },
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
       { sku: 'TEST-SKU-NOPT', evidence, acceptedProposals: [], allProposals: [] },
     );
 
@@ -390,19 +393,400 @@ describe('Classification Pipeline Integration', () => {
     syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
 
     const config = loadClassificationConfig(workspacePath);
-    const snapId = createConfigSnapshot(workspaceId, config);
-    const run = createRun(workspaceId, 'TEST-SKU-FIELDONLY', snapId, snapId);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-FIELDONLY', snapId, snapHash);
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-FIELDONLY', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Chicken Recipe Dry Dog Food', value: 'Chicken Recipe Dry Dog Food', metadata: {}, capturedAt: new Date().toISOString() },
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-FIELDONLY', attributeId: null, source: 'official_product_page' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'description', snippet: 'Made with real Chicken', value: 'Made with real Chicken', metadata: {}, capturedAt: new Date().toISOString() },
     ];
     const result = await runPipeline(
       [productAttributeProposalsStage],
-      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapId, sourceCommit: null, createdAt: new Date().toISOString() } },
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
       { sku: 'TEST-SKU-FIELDONLY', evidence: evidence, acceptedProposals: [], allProposals: [] },
     );
 
     const fieldProposals = result.proposals.filter(p => p.proposalType === 'field_assignment');
     expect(fieldProposals.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // ─── Fail-closed tests ─────────────────────────────────────────────────
+
+  it('aborts pipeline when a stage returns failed status; downstream stage is not called', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-FAIL', snapId, snapHash);
+
+    let stage3Called = false;
+
+    const okStage: import('../../classification/types').StageDefinition = {
+      name: 'name_consolidation',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: { evidence: [], proposals: [], abstained: false, metadata: { dummy: true } },
+      }),
+    };
+
+    const failingStage: import('../../classification/types').StageDefinition = {
+      name: 'primary_product_type_proposal',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => ({
+        status: 'failed' as const,
+        error: 'Intentional test failure',
+      }),
+    };
+
+    const spyStage: import('../../classification/types').StageDefinition = {
+      name: 'attribute_applicability',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => {
+        stage3Called = true;
+        return { status: 'succeeded' as const, output: { evidence: [], proposals: [], abstained: false } };
+      },
+    };
+
+    await expect(
+      runPipeline(
+        [okStage, failingStage, spyStage],
+        { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
+        { sku: 'TEST-SKU-FAIL', evidence: [], acceptedProposals: [], allProposals: [] },
+      ),
+    ).rejects.toThrow('Intentional test failure');
+
+    expect(stage3Called).toBe(false);
+
+    // One failed stage result recorded for the failing stage
+    const stageResults = getStageResults(run.id);
+    const failResults = stageResults.filter((sr: any) => sr.stage_name === 'primary_product_type_proposal');
+    expect(failResults.length).toBe(1);
+    expect(failResults[0].status).toBe('failed');
+    expect(failResults[0].error_message).toContain('Intentional test failure');
+
+    // The preceding stage should have a succeeded result
+    const okResults = stageResults.filter((sr: any) => sr.stage_name === 'name_consolidation');
+    expect(okResults.length).toBe(1);
+    expect(okResults[0].status).toBe('succeeded');
+
+    // The spy stage should have no result (never executed)
+    const spyResults = stageResults.filter((sr: any) => sr.stage_name === 'attribute_applicability');
+    expect(spyResults.length).toBe(0);
+  });
+
+  it('aborts pipeline when a stage throws; downstream stage is not called, only one failed result recorded', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-THROW', snapId, snapHash);
+
+    let downstreamCalled = false;
+
+    const throwingStage: import('../../classification/types').StageDefinition = {
+      name: 'name_consolidation',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => {
+        throw new Error('Kaboom from stage');
+      },
+    };
+
+    const spyStage: import('../../classification/types').StageDefinition = {
+      name: 'primary_product_type_proposal',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => {
+        downstreamCalled = true;
+        return { status: 'succeeded' as const, output: { evidence: [], proposals: [], abstained: false } };
+      },
+    };
+
+    await expect(
+      runPipeline(
+        [throwingStage, spyStage],
+        { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
+        { sku: 'TEST-SKU-THROW', evidence: [], acceptedProposals: [], allProposals: [] },
+      ),
+    ).rejects.toThrow('Kaboom from stage');
+
+    expect(downstreamCalled).toBe(false);
+
+    // Exactly one failed result for the throwing stage (no double-record)
+    const stageResults = getStageResults(run.id);
+    const failResults = stageResults.filter((sr: any) => sr.stage_name === 'name_consolidation' && sr.status === 'failed');
+    expect(failResults.length).toBe(1);
+    expect(failResults[0].error_message).toContain('Kaboom from stage');
+
+    // Downstream stage has no result
+    const spyResults = stageResults.filter((sr: any) => sr.stage_name === 'primary_product_type_proposal');
+    expect(spyResults.length).toBe(0);
+  });
+
+  it('abstaining stage persists reviewable_abstention proposal and returns it in-memory', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-ABSTAIN', snapId, snapHash);
+
+    const abstainingStage: import('../../classification/types').StageDefinition = {
+      name: 'name_consolidation',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => ({
+        status: 'abstained' as const,
+        reason: 'No evidence for name consolidation',
+      }),
+    };
+
+    const result = await runPipeline(
+      [abstainingStage],
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
+      { sku: 'TEST-SKU-ABSTAIN', evidence: [], acceptedProposals: [], allProposals: [] },
+    );
+
+    // In-memory result includes the abstention proposal
+    const abstentions = result.proposals.filter(p => p.proposalType === 'reviewable_abstention');
+    expect(abstentions.length).toBe(1);
+    expect(abstentions[0].targetId).toBe('name_consolidation');
+    expect(abstentions[0].proposedValue).toEqual({ reason: 'No evidence for name consolidation' });
+
+    // Stage result recorded as abstained
+    const stageResults = getStageResults(run.id);
+    const abstainedResults = stageResults.filter((sr: any) => sr.stage_name === 'name_consolidation');
+    expect(abstainedResults.length).toBe(1);
+    expect(abstainedResults[0].status).toBe('abstained');
+    expect(abstainedResults[0].error_message).toContain('No evidence for name consolidation');
+
+    // Abstention proposal is persisted to the database
+    const persisted = getProposalsByRun(run.id);
+    const persistedAbstentions = persisted.filter(p => p.proposalType === 'reviewable_abstention');
+    expect(persistedAbstentions.length).toBe(1);
+    expect(persistedAbstentions[0].targetId).toBe('name_consolidation');
+  });
+
+  it('rejects pipeline when evidence/proposal persistence fails due to PK conflict; downstream not called, one failed result', async () => {
+    const CONFLICT_ID = '00000000-0000-0000-0000-0000000000cc';
+
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-PKCONF', snapId, snapHash);
+
+    // Pre-insert a proposal with the hardcoded ID so the stage's persist attempt fails.
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [CONFLICT_ID, run.id, 'TEST-SKU-PKCONF', 'field_assignment', 'flavor', '{}', 0.5, 'pending', 0, 0, null, null, '[]', now],
+    );
+
+    const producingStage: import('../../classification/types').StageDefinition = {
+      name: 'name_consolidation',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [{
+            id: randomUUID(),
+            runId: run.id,
+            stageName: 'name_consolidation' as const,
+            productSku: 'TEST-SKU-PKCONF',
+            attributeId: null,
+            source: 'spreadsheet' as const,
+            reliability: 'medium' as const,
+            sourceUrl: null,
+            sourceField: 'name',
+            snippet: 'Test',
+            value: 'Test',
+            metadata: {},
+            capturedAt: new Date().toISOString(),
+          }],
+          proposals: [{
+            id: CONFLICT_ID,
+            runId: run.id,
+            productSku: 'TEST-SKU-PKCONF',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.9,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: true,
+            isStale: false,
+            stalenessReason: null,
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+          metadata: {},
+        },
+      }),
+    };
+
+    let downstreamCalled = false;
+    const spyStage: import('../../classification/types').StageDefinition = {
+      name: 'primary_product_type_proposal',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => {
+        downstreamCalled = true;
+        return { status: 'succeeded' as const, output: { evidence: [], proposals: [], abstained: false } };
+      },
+    };
+
+    await expect(
+      runPipeline(
+        [producingStage, spyStage],
+        { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
+        { sku: 'TEST-SKU-PKCONF', evidence: [], acceptedProposals: [], allProposals: [] },
+      ),
+    ).rejects.toThrow();
+
+    expect(downstreamCalled).toBe(false);
+
+    // One failed result recorded for the producing stage
+    const stageResults = getStageResults(run.id);
+    const failResults = stageResults.filter((sr: any) => sr.stage_name === 'name_consolidation' && sr.status === 'failed');
+    expect(failResults.length).toBe(1);
+
+    // No succeeded result or stage evidence survived the rolled-back transaction.
+    const succeededResults = stageResults.filter((sr: any) => sr.stage_name === 'name_consolidation' && sr.status === 'succeeded');
+    expect(succeededResults.length).toBe(0);
+    const persistedEvidence = db.query(
+      'SELECT COUNT(*) AS count FROM classification_evidence WHERE run_id = ? AND stage_name = ?',
+    ).get(run.id, 'name_consolidation') as { count: number };
+    expect(persistedEvidence.count).toBe(0);
+
+    // The downstream spy was not called
+    const spyResults = stageResults.filter((sr: any) => sr.stage_name === 'primary_product_type_proposal');
+    expect(spyResults.length).toBe(0);
+  });
+
+  function createReviewGateItem(suffix: string) {
+    const batch = createBatch({
+      workspaceId,
+      name: `Review Gate ${suffix}`,
+      fileName: `${suffix}.xlsx`,
+      totalItems: 1,
+    });
+    return insertItems(batch.id, [{
+      upc: `GATE-${suffix}`,
+      name: `Gate Product ${suffix}`,
+      rowNumber: 1,
+    }])[0];
+  }
+
+  function seedReviewProposal(runId: string, sku: string, status: string = 'pending'): string {
+    const id = randomUUID();
+    getDb().run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, is_bulk_acceptable, is_stale, created_at)
+       VALUES (?, ?, ?, 'category_page', 'Dog Food', ?, 0.8, ?, 1, 0, ?)`,
+      [id, runId, sku, JSON.stringify({ pageName: 'Dog Food' }), status, new Date().toISOString()],
+    );
+    return id;
+  }
+
+  const decide = (proposalId: string, decision: 'accepted' | 'rejected' | 'deferred') => {
+    recordDecision({
+      id: randomUUID(),
+      proposalId,
+      decision,
+      revisedFromId: null,
+      reviewerId: 'test-reviewer',
+      reviewerNote: null,
+      createdAt: new Date().toISOString(),
+    });
+  };
+
+  it('does not let a decision from a historical run satisfy the active-run review gate', () => {
+    const item = createReviewGateItem('HISTORY');
+    const oldRun = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(oldRun.id, 'completed');
+    decide(seedReviewProposal(oldRun.id, item.upc), 'accepted');
+
+    const activeRun = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(activeRun.id, 'completed');
+    seedReviewProposal(activeRun.id, item.upc, 'accepted');
+
+    const gate = validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: item.id,
+      productSku: item.upc,
+      activeRunId: activeRun.id,
+    });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.code).toBe('unresolved_proposals');
+  });
+
+  it('blocks review completion when one of two active-run proposals is pending', () => {
+    const item = createReviewGateItem('PENDING');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    seedReviewProposal(run.id, item.upc, 'pending');
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.code).toBe('unresolved_proposals');
+  });
+
+  it('blocks a proposal status changed without a durable decision row', () => {
+    const item = createReviewGateItem('STATUSONLY');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    seedReviewProposal(run.id, item.upc, 'accepted');
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.code).toBe('unresolved_proposals');
+  });
+
+  it('allows an exact completed active run only after every proposal has a decision', () => {
+    const item = createReviewGateItem('PASS');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed_with_abstentions');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    decide(seedReviewProposal(run.id, item.upc), 'deferred');
+
+    expect(validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: item.id,
+      productSku: item.upc,
+      activeRunId: run.id,
+    })).toEqual({ ok: true, proposalCount: 2 });
+  });
+
+  it('fails closed for null or wrong onboarding item ownership', () => {
+    const item = createReviewGateItem('OWNERSHIP');
+    const db = getDb();
+    const nullRunId = randomUUID();
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, NULL, ?, 'completed', ?, ?)`,
+      [nullRunId, workspaceId, item.upc, new Date().toISOString(), new Date().toISOString()],
+    );
+    const nullGate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: nullRunId });
+    expect(nullGate.ok).toBe(false);
+    if (!nullGate.ok) expect(nullGate.code).toBe('item_mismatch');
+
+    const otherItem = createReviewGateItem('OTHEROWNER');
+    const wrongRun = createRun(workspaceId, item.upc, null, null, otherItem.id);
+    completeRun(wrongRun.id, 'completed');
+    const wrongGate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: wrongRun.id });
+    expect(wrongGate.ok).toBe(false);
+    if (!wrongGate.ok) expect(wrongGate.code).toBe('item_mismatch');
+  });
+
+  it('prevents concurrent running runs but allows a later run after terminal completion', () => {
+    const item = createReviewGateItem('ACTIVEUNIQUE');
+    const first = createRun(workspaceId, item.upc, null, null, item.id);
+    expect(() => createRun(workspaceId, item.upc, null, null, item.id)).toThrow();
+
+    completeRun(first.id, 'failed', 'test failure');
+    const later = createRun(workspaceId, item.upc, null, null, item.id);
+    expect(later.status).toBe('running');
+    completeRun(later.id, 'completed');
   });
 });

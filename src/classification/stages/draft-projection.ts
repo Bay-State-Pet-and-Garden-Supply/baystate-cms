@@ -1,5 +1,4 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
-import { randomUUID } from 'node:crypto';
 import { getCachedAttributeMappings } from '../../db/repositories/classification-config-repo';
 
 /**
@@ -14,10 +13,10 @@ import { getCachedAttributeMappings } from '../../db/repositories/classification
  * This is the final classification stage before product draft creation.
  * No actual product files are modified — this is a preview only.
  *
- * IMPORTANT: The downstream `draft-promoter.ts` still applies only
- * accepted proposals via `getAcceptedProposals()`. This stage merely
- * provides a provisional preview for the Review UI. Pending proposals
- * included here are marked as provisional so Review can distinguish them.
+ * IMPORTANT: This stage does NOT persist proposals. The projection is
+ * returned as stage output metadata and consumed by the Review UI.
+ * The downstream `draft-promoter.ts` reads accepted proposals directly
+ * from the classification_proposals table via `getAcceptedProposals()`.
  */
 export const productDraftProjectionStage: StageDefinition = {
   name: 'product_draft_projection',
@@ -97,39 +96,30 @@ export const productDraftProjectionStage: StageDefinition = {
       }
     }
 
-    const proposalId = randomUUID();
     return {
       status: 'succeeded',
       output: {
         evidence: [],
-        proposals: [
-          {
-            id: proposalId,
-            runId: context.runId,
-            productSku: input.sku,
-            proposalType: 'field_assignment',
-            targetId: 'product_draft_projection',
-            proposedValue: {
-              fieldAssignments,
-              pageAssignments: pendingPageAssignments.length > 0
+        proposals: [],  // No synthetic proposals — projection is metadata-only
+        abstained: false,
+        message: `${Object.keys(fieldAssignments).length} field assignments, ${
+          pendingPageAssignments.length > 0 ? pendingPageAssignments.length : pageAssignments.length
+        } page assignments projected.`,
+        metadata: {
+          projection: {
+            fieldAssignments,
+            pageAssignments:
+              pendingPageAssignments.length > 0
                 ? pendingPageAssignments
                 : pageAssignments,
-              acceptedProposalCount: accepted.length,
-              pendingSupplementCount: pendingSupplement.length,
-              hasAcceptedAssignments: accepted.length > 0,
-              selectionMode: accepted.length > 0 ? 'accepted' : 'provisional_preview',
-              pendingSupplement,
-            },
-            confidence: 1,
-            evidenceIds: [],
-            status: 'pending',
-            isBulkAcceptable: false,
-            isStale: false,
-            stalenessReason: null,
-            createdAt: new Date().toISOString(),
+            acceptedProposalCount: accepted.length,
+            pendingSupplementCount: pendingSupplement.length,
+            hasAcceptedAssignments: accepted.length > 0,
+            selectionMode:
+              accepted.length > 0 ? 'accepted' : 'provisional_preview',
+            pendingSupplement,
           },
-        ],
-        abstained: false,
+        },
       },
     };
   },

@@ -51,22 +51,26 @@ export const nameConsolidationStage: StageDefinition = {
   requires: ['evidence_extraction'],
   evidenceFrom: ['evidence_extraction'],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
-    // ── Cohort coordination short-circuit ────────────────────────────
+    // ── Cohort coordination handling ─────────────────────────────────
     // If a pre-computed coordinated title was set by the cohort
-    // coordinator, use it directly — skip the per-item LLM call.
+    // coordinator, use it directly and skip the per-item LLM call.
+    // The title was already validated and normalized by the coordinator,
+    // including deterministic fallback on LLM failure.
+    // A grouped item must never fall through to independent per-item LLM.
     if (context.preComputedTitle) {
+      const source = context.preComputedTitleSource ?? 'llm_cohort';
       return {
         status: 'succeeded',
         output: {
           evidence: [],
           proposals: [],
           abstained: false,
-          message: `Using pre-computed coordinated title: "${context.preComputedTitle}"`,
+          message: `Using pre-computed coordinated title (${source}): "${context.preComputedTitle}"`,
           metadata: {
             curatedTitle: context.preComputedTitle,
-            titleSource: 'llm',
+            titleSource: source,
             packagingOcrTitle: null,
-            signalsUsed: { source: 'cohort_coordination' },
+            signalsUsed: { source: 'cohort_coordination', sourceType: source },
           },
         },
       };

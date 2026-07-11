@@ -132,7 +132,7 @@ export const CurationDataSchema = z.object({
     }
     return val;
   }, z.string().nullable().default(null)),
-  titleSource: z.enum(['web', 'ocr', 'llm', 'manual']).default('web'),
+  titleSource: z.enum(['web', 'ocr', 'llm', 'manual', 'llm_cohort', 'cohort_fallback']).default('web'),
   suggestedPages: z.array(z.string()).default(() => []),
   suggestedProductType: z.string().nullable().default(null),
   curatedAt: z.string().nullable().default(null),
@@ -339,6 +339,7 @@ export type OnboardingSource = z.infer<typeof OnboardingSourceSchema>;
 /** LLM tasks that can be routed through `llm_task_configs`. */
 export const LlmTaskEnum = z.enum([
   'product_name_consolidation',
+  'brand_inference',
   'profile_generation',
   'profile_revision',
   'product_curation',

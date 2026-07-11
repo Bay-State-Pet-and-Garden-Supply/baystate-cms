@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
 import {
   createBatch,
@@ -144,6 +145,8 @@ import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
 import { recordDecision, recordHistoryEvent, updateProposalReviewValue } from '../../db/repositories/classification-run-repo';
+import { validateSiblingConsistency } from '../../classification/consistency-validator';
+import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { getDb } from '../../db/connection';
 
 const route = new Hono();
@@ -480,18 +483,104 @@ route.post('/onboarding/items/skip-bulk', async (c) => {
 /**
  * POST /api/onboarding/items/review-complete
  * Marks review-stage items as completed (stage_status = 'completed').
+ *
+ * Legacy items (no classificationRunId) bypass validation.
+ *
+ * For classified items:
+ * - Runs a preliminary validation phase across ALL items first.
+ *   If any item fails validation, returns 400 with per-item reasons
+ *   and mutates NONE.
+ * - Each item must reference a run that belongs to the current workspace,
+ *   that exact onboarding item, and that SKU, and be in a
+ *   completed/completed_with_abstentions state.
+ * - The item must be in the 'review' stage.
+ * - Every proposal in that run (excluding product_draft_projection) must
+ *   have status 'accepted', 'rejected', or 'deferred' AND have at least
+ *   one matching row in classification_proposal_decisions.
+ *   Stale, pending, or missing-decision proposals block completion.
+ * - At least one reviewable proposal must be decided.
+ *
  * Body: { itemIds: string[] }
  */
 route.post('/onboarding/items/review-complete', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
   const { itemIds } = await c.req.json();
   if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
     return c.json({ error: 'itemIds array is required' }, 400);
   }
 
-  for (const id of itemIds) {
-    completeReviewStage(id);
+  if (new Set(itemIds).size !== itemIds.length) {
+    return c.json({ error: 'itemIds must not contain duplicates' }, 400);
   }
-  return c.json({ success: true, count: itemIds.length });
+
+  const db = getDb();
+  const failures: Array<{ itemId: string; reason: string }> = [];
+  const legacyIds: string[] = [];
+  const classifiedIds: string[] = [];
+
+  // ── Phase 1: Validate every item ─────────────────────────────────────
+  for (const id of itemIds) {
+    const item = findItemById(id);
+    if (!item) {
+      failures.push({ itemId: id, reason: 'Item not found' });
+      continue;
+    }
+
+    // Must be in review stage
+    if (item.stage !== 'review') {
+      failures.push({ itemId: id, reason: `Item is in stage "${item.stage}", not "review"` });
+      continue;
+    }
+
+    const runId = item.curationData?.classificationRunId;
+    if (!runId) {
+      // Legacy items without classification data pass through
+      legacyIds.push(id);
+      continue;
+    }
+
+    const gate = validateReviewCompletionGate({
+      workspaceId: workspace.id,
+      onboardingItemId: id,
+      productSku: item.upc,
+      activeRunId: runId,
+    });
+    if (!gate.ok) {
+      failures.push({ itemId: id, reason: gate.reason });
+      continue;
+    }
+
+    classifiedIds.push(id);
+  }
+
+  // ── Phase 2: If any item failed, reject all without mutating ─────────
+  if (failures.length > 0) {
+    return c.json({
+      error: 'Some items failed review completion validation. None were mutated.',
+      failures,
+    }, 400);
+  }
+
+  // ── Phase 3: Complete all in a single transaction ────────────────────
+  db.transaction(() => {
+    for (const id of legacyIds) {
+      completeReviewStage(id);
+    }
+    for (const id of classifiedIds) {
+      completeReviewStage(id);
+    }
+  })();
+
+  return c.json({
+    success: true,
+    count: itemIds.length,
+    legacyCount: legacyIds.length,
+    classifiedCount: classifiedIds.length,
+  });
 });
 
 /**
@@ -625,10 +714,17 @@ route.get('/onboarding/items/:id', async (c) => {
   const extractionData = item.extractionData
     ?? (extraction ? JSON.parse(extraction.extraction_data_json) : null);
 
+  const consistencyWarnings = item.curationData
+    ? validateSiblingConsistency(item.batchId).filter(warning =>
+        Object.prototype.hasOwnProperty.call(warning.values, item.upc),
+      )
+    : [];
+
   return c.json({
     item,
     sources,
-    extraction: extractionData
+    extraction: extractionData,
+    consistencyWarnings,
   });
 });
 
@@ -699,6 +795,17 @@ route.put('/onboarding/items/:id', async (c) => {
 /**
  * POST /api/onboarding/items/:id/decisions
  * Record classification proposal decisions for an onboarding item.
+ *
+ * Validates that:
+ * - The item has an active classificationRunId.
+ * - Every proposal ID is unique.
+ * - Every proposal belongs to that exact run, SKU, onboarding item,
+ *   current workspace, and a completed/completed_with_abstentions run.
+ * - Null/mismatched joined run metadata fails closed.
+ *
+ * Decisions are recorded in a single transaction. This endpoint does NOT
+ * mark the review stage as completed — callers must POST to
+ * /onboarding/items/review-complete separately.
  */
 route.post('/onboarding/items/:id/decisions', async (c) => {
   const workspace = findWorkspace();
@@ -714,22 +821,117 @@ route.post('/onboarding/items/:id/decisions', async (c) => {
     return c.json({ error: 'decisions array is required' }, 400);
   }
 
+  if (decisions.length === 0) {
+    return c.json({ error: 'decisions array must not be empty' }, 400);
+  }
+
   const item = findItemById(itemId);
   if (!item) {
     return c.json({ error: 'Item not found' }, 404);
   }
 
+  // ── Require active classification run ────────────────────────────────
+  const activeRunId = item.curationData?.classificationRunId;
+  if (!activeRunId) {
+    return c.json({
+      error: 'Item has no active classification run. Legacy (pre-classification) items cannot accept classification decisions.',
+    }, 400);
+  }
+
   try {
     const db = getDb();
+    const validDecisions = new Set(['accepted', 'rejected', 'deferred']);
+    for (const decision of decisions) {
+      if (!decision || typeof decision.proposalId !== 'string' || !decision.proposalId) {
+        return c.json({ error: 'Every decision requires a non-empty proposalId.' }, 400);
+      }
+      if (!validDecisions.has(decision.decision)) {
+        return c.json({ error: `Invalid decision for proposal ${decision.proposalId}.` }, 400);
+      }
+    }
+    const proposalIds = decisions.map((d: any) => d.proposalId);
 
-    // Bulk validation: only explicit bulk-accept calls require every proposal to
-    // be marked bulk-acceptable. The review drawer submits multiple individual
+    // ── Reject duplicate proposal IDs ────────────────────────────────────
+    if (new Set(proposalIds).size !== proposalIds.length) {
+      return c.json({ error: 'Duplicate proposal IDs in the decisions array.' }, 400);
+    }
+
+    // ── Proposal ownership validation ─────────────────────────────────---
+    // Load all proposals referenced by the decisions together with their run
+    // metadata so we can verify ownership in a small number of queries.
+    const placeholders = proposalIds.map(() => '?').join(',');
+    const proposals = db.query(
+      `SELECT p.id, p.product_sku, p.run_id, p.proposal_type,
+              r.workspace_id, r.status AS run_status,
+              r.onboarding_item_id
+       FROM classification_proposals p
+       LEFT JOIN classification_runs r ON p.run_id = r.id
+       WHERE p.id IN (${placeholders})`
+    ).all(...proposalIds) as Array<{
+      id: string;
+      product_sku: string;
+      run_id: string | null;
+      proposal_type: string;
+      workspace_id: string | null;
+      run_status: string | null;
+      onboarding_item_id: string | null;
+    }>;
+
+    const proposalMap = new Map(proposals.map(p => [p.id, p]));
+
+    for (const d of decisions) {
+      const prop = proposalMap.get(d.proposalId);
+      if (!prop) {
+        return c.json({
+          error: `Proposal ${d.proposalId} not found. It may have been deleted or never existed.`,
+        }, 400);
+      }
+
+      // Verify the proposal's run matches the active run
+      if (prop.run_id !== activeRunId) {
+        return c.json({
+          error: `Proposal ${d.proposalId} belongs to run ${prop.run_id}, not the active run ${activeRunId}. Refresh the classification results and try again.`,
+        }, 400);
+      }
+
+      // Verify the proposal's SKU matches the item's UPC
+      if (prop.product_sku !== item.upc) {
+        return c.json({
+          error: `Proposal ${d.proposalId} belongs to SKU "${prop.product_sku}", not item SKU "${item.upc}".`,
+        }, 400);
+      }
+
+      // Verify the run belongs to the current workspace
+      if (prop.workspace_id !== workspace.id) {
+        return c.json({
+          error: `Proposal ${d.proposalId} belongs to a different workspace.`,
+        }, 400);
+      }
+
+      // Verify the run is linked to this exact onboarding item. Null does
+      // not establish ownership and is rejected.
+      if (prop.onboarding_item_id !== itemId) {
+        return c.json({
+          error: `Proposal ${d.proposalId} does not belong to this exact onboarding item.`,
+        }, 400);
+      }
+
+      // Verify the run is in a terminal state
+      if (prop.run_status !== 'completed' && prop.run_status !== 'completed_with_abstentions') {
+        return c.json({
+          error: `Proposal ${d.proposalId} belongs to a run with status "${prop.run_status}". Only completed runs can be reviewed.`,
+        }, 400);
+      }
+    }
+
+    // ── Bulk validation ─────────────────────────────────────────────────-
+    // Only explicit bulk-accept calls require every proposal to be marked
+    // bulk-acceptable. The review drawer submits multiple individual
     // decisions at once, including manually revised values.
-    if (body.bulk === true && decisions.length > 1) {
-      const proposalIds = decisions.map((d: any) => d.proposalId);
+    if (body.bulk === true) {
       const existing = db.query(
         'SELECT id, is_bulk_acceptable FROM classification_proposals WHERE id IN (' +
-        proposalIds.map(() => '?').join(',') + ')'
+        placeholders + ')'
       ).all(...proposalIds) as Record<string, any>[];
 
       for (const row of existing) {
@@ -741,8 +943,10 @@ route.post('/onboarding/items/:id/decisions', async (c) => {
       }
     }
 
+    // ── Record decisions in a single transaction ─────────────────────────
     db.transaction(() => {
       for (const d of decisions) {
+        const decisionId = d.id || randomUUID();
         if (Object.prototype.hasOwnProperty.call(d, 'proposedValue')) {
           updateProposalReviewValue(
             d.proposalId,
@@ -751,7 +955,7 @@ route.post('/onboarding/items/:id/decisions', async (c) => {
           );
         }
         recordDecision({
-          id: d.id || '',
+          id: decisionId,
           proposalId: d.proposalId,
           decision: d.decision,
           revisedFromId: d.revisedFromId ?? null,
@@ -764,17 +968,15 @@ route.post('/onboarding/items/:id/decisions', async (c) => {
           item.upc,
           'proposal_decision',
           { proposalId: d.proposalId, decision: d.decision, proposedValue: d.proposedValue ?? null, targetId: d.targetId ?? null },
-          undefined,
+          activeRunId,
           d.proposalId,
-          d.id,
+          decisionId,
         );
       }
     })();
 
-    // Mark the review stage as completed (stage-based)
-    db.query(
-      "UPDATE onboarding_items SET status = 'ready', stage_status = 'completed', updated_at = ? WHERE id = ? AND stage = 'review'",
-    ).run(new Date().toISOString(), itemId);
+    // NOTE: This endpoint does NOT mark the review stage as completed.
+    // The caller must POST to /onboarding/items/review-complete separately.
 
     return c.json({ success: true, count: decisions.length });
   } catch (err) {

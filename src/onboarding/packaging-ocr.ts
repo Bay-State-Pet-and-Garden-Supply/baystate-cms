@@ -392,8 +392,8 @@ export async function extractPackagingOcr(
  * product into a single combined result.
  *
  * Strategy:
- * - **Scalar fields** (productName, brand, flavorVariety, etc.): First non-null
- *   wins (primary image has priority since it runs first).
+ * - **Scalar fields** (productName, brand, flavorVariety, etc.): Highest-confidence
+ *   wins (uses confidenceByField; falls back to first non-null when no confidence data).
  * - **Array fields** (ingredients, claims, dietaryLabels, species, etc.):
  *   Unioned across all results, deduplicated, preserving order.
  * - **confidenceByField**: Per-field, the maximum confidence wins.
@@ -405,20 +405,27 @@ export function mergeOcrResults(results: PackagingOcrData[]): PackagingOcrData {
 
   const merged: Record<string, any> = {};
 
-  // Scalar fields — first non-null wins
+  // Scalar fields — highest-confidence wins
+  // For each scalar field, check all results' confidenceByField,
+  // pick the value from the result with the highest confidence.
+  // Falls back to first-non-null when no confidence data exists.
   const scalarFields: Array<keyof PackagingOcrData> = [
     'productName', 'brand', 'flavorVariety', 'color', 'material',
     'size', 'weight', 'count', 'lifeStage', 'breedSize', 'productForm',
   ];
   for (const field of scalarFields) {
+    let bestVal: unknown = null;
+    let bestConf = -1;
     for (const r of results) {
       const val = r[field];
-      if (val !== null && val !== undefined) {
-        merged[field] = val;
-        break;
+      if (val === null || val === undefined) continue;
+      const conf = r.confidenceByField?.[field] ?? -1;
+      if (conf > bestConf || (conf === -1 && bestVal === null)) {
+        bestVal = val;
+        bestConf = conf;
       }
     }
-    if (!(field in merged)) merged[field] = null;
+    merged[field] = bestVal ?? null;
   }
 
   // Array fields — union, deduplicated

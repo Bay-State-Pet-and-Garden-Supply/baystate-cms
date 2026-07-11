@@ -5,9 +5,6 @@
  * LLM call that receives rich product context (VLM OCR data, product type,
  * web description, store page hierarchy) and returns validated page matches.
  *
- * This is the core of Phase 2 of the curation fix: the LLM makes the decision
- * instead of token-overlap keyword matching.
- *
  * @module page-assignment-llm
  */
 
@@ -30,6 +27,7 @@ export interface PageAssignmentParams {
     productForm: string | null;
     healthConcern: string[];
     productName: string | null;
+    /** Best-available resolved brand name (see extractProductContext priority) */
     brand: string | null;
   };
   /** Upstream product type proposal (e.g. "Dry Dog Food") */
@@ -40,6 +38,8 @@ export interface PageAssignmentParams {
   selectionMode: 'single' | 'multiple';
   /** Maximum pages to return (default 5, max 10) */
   maxPages: number;
+  /** Sibling products in the same family — read-only identity hints */
+  siblingProducts?: Array<{ sku: string; name: string }>;
 }
 
 export interface PageAssignmentResult {
@@ -82,6 +82,12 @@ export function buildPageHierarchy(
  * Assembles the best available product name, description, VLM OCR summary,
  * and upstream product type — all used by `llmAssignCategoryPages()` to build
  * a rich prompt.
+ *
+ * Brand resolution priority (highest first):
+ *   1. resolved_brand evidence (value.brandName from brands.json)
+ *   2. Official product page brand evidence
+ *   3. Spreadsheet brand hint evidence
+ *   4. Visual OCR brand evidence
  */
 export function extractProductContext(
   evidence: ClassificationEvidence[],
@@ -131,6 +137,41 @@ export function extractProductContext(
       .filter(Boolean);
   };
 
+  // ── Brand resolution (priority order) ────────────────────────────────────
+  let resolvedBrand: string | null = null;
+
+  // 1. resolved_brand evidence (canonical brand from brands.json)
+  const resolvedBrandEvidence = evidence.find(
+    e => e.source === 'catalog_manager_guidance' && e.sourceField === 'resolved_brand',
+  );
+  if (resolvedBrandEvidence) {
+    const v = resolvedBrandEvidence.value as { brandId?: string; brandName?: string } | null;
+    if (v?.brandName) {
+      resolvedBrand = v.brandName;
+    }
+  }
+
+  // 2. Official product page brand
+  if (!resolvedBrand) {
+    const pageBrand = evidence.find(
+      e => e.source === 'official_product_page' && e.sourceField === 'brand',
+    )?.value as string | undefined;
+    if (pageBrand) resolvedBrand = pageBrand;
+  }
+
+  // 3. Spreadsheet brand hint
+  if (!resolvedBrand) {
+    const spreadsheetBrand = evidence.find(
+      e => e.source === 'spreadsheet' && e.sourceField === 'brand',
+    )?.value as string | undefined;
+    if (spreadsheetBrand) resolvedBrand = spreadsheetBrand;
+  }
+
+  // 4. Visual OCR brand
+  if (!resolvedBrand) {
+    resolvedBrand = getFirst('brand');
+  }
+
   const ocrSummary = {
     species: getAll('species'),
     flavor: getFirst('flavor'),
@@ -138,7 +179,7 @@ export function extractProductContext(
     productForm: getFirst('productForm'),
     healthConcern: getAll('healthConcern'),
     productName: getFirst('name'),
-    brand: getFirst('brand'),
+    brand: resolvedBrand,
   };
 
   // ── Product type from upstream proposals ─────────────────────────────────
@@ -153,7 +194,7 @@ export function extractProductContext(
 // ─── Response Parser ─────────────────────────────────────────────────────────
 
 interface RawPageAssignmentResponse {
-  pages?: Array<{ pageName?: string; confidence?: number }>;
+  pages?: unknown[];
 }
 
 /**
@@ -199,6 +240,233 @@ function parsePageAssignmentResponse(raw: string): RawPageAssignmentResponse | n
   }
 }
 
+// ─── Response Validator ───────────────────────────────────────────────────────
+
+/**
+ * Validate parsed LLM response entries against the known page list.
+ *
+ * Two modes:
+ * 1. ID-bearing: entry has `pageId` that exists in `idToPage` — name is optional
+ *    but if present it must match case-insensitively.
+ * 2. Name-only (backward compat): entry has only `pageName` — must resolve to
+ *    exactly ONE unique page name (case-insensitive). Ambiguous duplicate names
+ *    are discarded.
+ *
+ * Returns validated entries with pageId and pageName resolved.
+ */
+export function validatePageResponseEntries(
+  entries: unknown[],
+  nameToPage: Map<string, { id: string; name: string }>,
+  idToPage: Map<string, { id: string; name: string }>,
+): Array<{ pageId: string; pageName: string; confidence: number }> {
+  const valid: Array<{ pageId: string; pageName: string; confidence: number }> = [];
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue;
+
+    const raw = entry as Record<string, unknown>;
+    const pageIdRaw = raw.pageId;
+    const pageNameRaw = raw.pageName;
+    const confidenceRaw = raw.confidence;
+
+    const confidence =
+      typeof confidenceRaw === 'number'
+        ? Math.max(0.35, Math.min(0.95, confidenceRaw))
+        : 0.55;
+
+    // Mode 1: ID-bearing
+    if (typeof pageIdRaw === 'string' && pageIdRaw.length > 0) {
+      const known = idToPage.get(pageIdRaw);
+      if (!known) continue; // Unknown ID — discard
+
+      // If name is also provided, it must match (case-insensitive)
+      if (typeof pageNameRaw === 'string' && pageNameRaw.length > 0) {
+        if (pageNameRaw.toLowerCase() !== known.name.toLowerCase()) continue; // Mismatch — discard
+      }
+
+      valid.push({ pageId: known.id, pageName: known.name, confidence });
+      continue;
+    }
+
+    // Mode 2: Name-only (backward compat)
+    if (typeof pageNameRaw === 'string' && pageNameRaw.length > 0) {
+      // Resolve case-insensitively — must be EXACTLY one matching page.
+      // Compare values rather than Map keys because duplicate display names
+      // are stored under synthetic keys to preserve their ambiguity.
+      const matches = [...nameToPage.values()].filter(
+        info => info.name.toLowerCase() === pageNameRaw.toLowerCase(),
+      );
+
+      if (matches.length === 1) {
+        const info = matches[0];
+        valid.push({ pageId: info.id, pageName: info.name, confidence });
+      }
+      // Ambiguous (0 or 2+) — discard silently
+    }
+  }
+
+  return valid;
+}
+
+// ─── Page Assignment Normalizer ───────────────────────────────────────────────
+
+/**
+ * Normalize a list of validated page assignments with deterministic rules.
+ *
+ * Rules applied in order:
+ * 1. Deduplicate by page ID (first occurrence wins)
+ * 2. If any specific (non-"Shop All") category is present, remove generic
+ *    pages whose name ends with "Shop All" (case-insensitive).
+ * 3. In multiple-selection mode, if an exact configured brand page named
+ *    "Brand - <resolvedBrand>" exists (case-insensitive), include it
+ *    deterministically without exceeding maxResults. Drop a Shop All first
+ *    if present; otherwise use one slot for the brand page.
+ * 4. Cross-species safety: if the product context includes species evidence
+ *    for a specific non-empty species, remove pages whose name contains
+ *    a conflicting species term (e.g. "Cat Food" for a dog product).
+ * 5. Clamp output to maxResults.
+ *
+ * @param pages - Validated page entries (validated against known page list)
+ * @param pageIndex - Map of page name → { id, name } for all known pages
+ * @param resolvedBrand - The resolved brand name (from extractProductContext)
+ * @param species   - Species evidence strings from OCR/evidence
+ * @param maxResults - Maximum number of pages to return
+ * @returns Normalized page assignment results
+ */
+export function normalizePageAssignments(
+  pages: Array<{ pageId: string; pageName: string; confidence: number }>,
+  pageIndex: Map<string, { id: string; name: string }>,
+  resolvedBrand: string | null,
+  species: string[],
+  maxResults: number,
+  selectionMode: 'single' | 'multiple' = 'multiple',
+): Array<{ pageId: string; pageName: string; confidence: number }> {
+  if (pages.length === 0) return [];
+
+  let result = [...pages];
+
+  // 1. Deduplicate by page ID (first occurrence wins)
+  const seenIds = new Set<string>();
+  result = result.filter(p => {
+    if (seenIds.has(p.pageId)) return false;
+    seenIds.add(p.pageId);
+    return true;
+  });
+
+  if (result.length === 0) return [];
+
+  // 2. If any specific category exists, remove "Shop All" pages.
+  // A brand landing page alone is not a more-specific category.
+  const hasSpecificPage = result.some(p => {
+    const name = p.pageName.toLowerCase();
+    return !name.endsWith('shop all') && !name.startsWith('brand -');
+  });
+  if (hasSpecificPage) {
+    result = result.filter(p => p.pageName.toLowerCase().endsWith('shop all') === false);
+  }
+
+  // 3. Include exact brand page only when multiple selections are allowed.
+  if (selectionMode === 'multiple' && resolvedBrand) {
+    const brandPageName = `Brand - ${resolvedBrand}`;
+    // Check if this brand page exists in the page index
+    let brandPageInfo: { id: string; name: string } | null = null;
+    for (const [, info] of pageIndex) {
+      if (info.name.toLowerCase() === brandPageName.toLowerCase()) {
+        brandPageInfo = info;
+        break;
+      }
+    }
+
+    if (brandPageInfo) {
+      // Only add if not already present
+      const alreadyPresent = result.some(
+        p => p.pageId === brandPageInfo!.id,
+      );
+      if (!alreadyPresent) {
+        // Reserve one slot for the exact brand page. Shop All pages are
+        // discarded first; otherwise drop the lowest-ranked trailing result.
+        if (result.length >= maxResults && maxResults > 0) {
+          const shopAllIdx = result.findIndex(
+            p => p.pageName.toLowerCase().endsWith('shop all'),
+          );
+          if (shopAllIdx !== -1) result.splice(shopAllIdx, 1);
+          if (result.length >= maxResults) {
+            result = result.slice(0, Math.max(0, maxResults - 1));
+          }
+        }
+
+        if (maxResults > 0) {
+          result.push({
+            pageId: brandPageInfo.id,
+            pageName: brandPageInfo.name,
+            confidence: 0.95,
+          });
+        }
+      }
+    }
+  }
+
+  // 4. Cross-species safety
+  // Determine the primary species from evidence
+  const speciesLower = species.map(s => s.toLowerCase());
+  const hasDog = speciesLower.some(s => s.includes('dog'));
+  const hasCat = speciesLower.some(s => s.includes('cat'));
+  const hasFish = speciesLower.some(s => s.includes('fish'));
+  const hasBird = speciesLower.some(s => s.includes('bird'));
+
+  if (hasDog && !hasCat) {
+    result = result.filter(p => {
+      const name = p.pageName.toLowerCase();
+      // Remove pages that are explicitly cat/small-animal/fish/reptile/bird
+      // but keep "Cat" inside words like "Category" or multi-species pages
+      // Check for word-boundary species tokens
+      if (/\bcat\b/.test(name) && !/\bdog\b/.test(name)) return false;
+      if (/\bfish\b/.test(name) && !/\bdog\b/.test(name)) return false;
+      if (/\bbird\b/.test(name) && !/\bdog\b/.test(name)) return false;
+      if (/\bsmall animal\b/.test(name) && !/\bdog\b/.test(name)) return false;
+      if (/\breptile\b/.test(name) && !/\bdog\b/.test(name)) return false;
+      return true;
+    });
+  } else if (hasCat && !hasDog) {
+    result = result.filter(p => {
+      const name = p.pageName.toLowerCase();
+      if (/\bdog\b/.test(name) && !/\bcat\b/.test(name)) return false;
+      if (/\bfish\b/.test(name) && !/\bcat\b/.test(name)) return false;
+      if (/\bbird\b/.test(name) && !/\bcat\b/.test(name)) return false;
+      if (/\bsmall animal\b/.test(name) && !/\bcat\b/.test(name)) return false;
+      if (/\breptile\b/.test(name) && !/\bcat\b/.test(name)) return false;
+      return true;
+    });
+  } else if (hasFish && !hasDog && !hasCat) {
+    result = result.filter(p => {
+      const name = p.pageName.toLowerCase();
+      if (/\bdog\b/.test(name) && !/\bfish\b/.test(name)) return false;
+      if (/\bcat\b/.test(name) && !/\bfish\b/.test(name)) return false;
+      if (/\bbird\b/.test(name) && !/\bfish\b/.test(name)) return false;
+      if (/\bsmall animal\b/.test(name) && !/\bfish\b/.test(name)) return false;
+      if (/\breptile\b/.test(name) && !/\bfish\b/.test(name)) return false;
+      return true;
+    });
+  } else if (hasBird && !hasDog && !hasCat) {
+    result = result.filter(p => {
+      const name = p.pageName.toLowerCase();
+      if (/\bdog\b/.test(name) && !/\bbird\b/.test(name)) return false;
+      if (/\bcat\b/.test(name) && !/\bbird\b/.test(name)) return false;
+      if (/\bfish\b/.test(name) && !/\bbird\b/.test(name)) return false;
+      if (/\bsmall animal\b/.test(name) && !/\bbird\b/.test(name)) return false;
+      if (/\breptile\b/.test(name) && !/\bbird\b/.test(name)) return false;
+      return true;
+    });
+  }
+
+  // 5. Clamp to maxResults
+  if (result.length > maxResults) {
+    result = result.slice(0, maxResults);
+  }
+
+  return result;
+}
+
 // ─── Core LLM Function ───────────────────────────────────────────────────────
 
 /**
@@ -206,7 +474,7 @@ function parsePageAssignmentResponse(raw: string): RawPageAssignmentResponse | n
  *
  * Builds a rich prompt with product identity, VLM OCR summary, store context,
  * and the full page hierarchy. The LLM is constrained to return exact page
- * names from the provided list only.
+ * IDs or names from the provided list only.
  *
  * Returns `null` when:
  * - No pages are provided
@@ -217,7 +485,7 @@ function parsePageAssignmentResponse(raw: string): RawPageAssignmentResponse | n
 export async function llmAssignCategoryPages(
   params: PageAssignmentParams,
 ): Promise<PageAssignmentResult | null> {
-  const { productName, productDescription, ocrSummary, productType, pages, maxPages, selectionMode } = params;
+  const { productName, productDescription, ocrSummary, productType, pages, maxPages, selectionMode, siblingProducts } = params;
 
   if (pages.length === 0) return null;
 
@@ -225,12 +493,23 @@ export async function llmAssignCategoryPages(
   const selectionDesc =
     (selectionMode ?? 'multiple') === 'multiple' ? `up to ${maxResults}` : 'one';
 
-  // Format pages with hierarchy info for the prompt
+  // Build page index maps for validation
+  const nameToPage = new Map<string, { id: string; name: string }>();
+  const idToPage = new Map<string, { id: string; name: string }>();
+  for (const p of pages) {
+    // Preserve duplicate display names so name-only responses can be rejected
+    // as ambiguous instead of silently resolving to the last inserted page.
+    const nameKey = nameToPage.has(p.name) ? `${p.name}\u0000${p.id}` : p.name;
+    nameToPage.set(nameKey, { id: p.id, name: p.name });
+    idToPage.set(p.id, { id: p.id, name: p.name });
+  }
+
+  // Format pages with hierarchy info AND page ID for the prompt
   const pageListStr = pages
     .map(p =>
       p.parentName
-        ? `  - ${p.name} (subcategory of: ${p.parentName})`
-        : `  - ${p.name}`,
+        ? `  - [ID:${p.id}] ${p.name} (subcategory of: ${p.parentName})`
+        : `  - [ID:${p.id}] ${p.name}`,
     )
     .join('\n');
 
@@ -249,6 +528,12 @@ export async function llmAssignCategoryPages(
     'You assign products to the most specific relevant store category pages. ' +
     'You must only choose from the provided page list. Never invent pages.';
 
+  const siblingBlock = siblingProducts && siblingProducts.length > 0
+    ? `\nSIBLING PRODUCTS IN THIS FAMILY (same brand and product line, ${
+        siblingProducts.length + 1
+      } total variants):\n${siblingProducts.map((s, i) => `  ${i + 1}. SKU: ${s.sku}, Name: ${s.name}`).join('\n')}\n`
+    : '';
+
   const prompt = `STORE CONTEXT: This is a pet and garden supply store.
 
 PRODUCT IDENTITY:
@@ -265,23 +550,27 @@ PACKAGING OCR DATA (from product packaging image):
 - Packaging Name: ${ocrSummary.productName ?? 'n/a'}
 
 PRODUCT DESCRIPTION:
-${productDescription || 'No description available.'}
-
+${productDescription || 'No description available.'}${siblingBlock}
 AVAILABLE STORE PAGES (choose from these only):
 ${pageListStr}
 
 TASK: Select ${selectionDesc} most specific category page(s) this product belongs on.
 
 Rules:
-1. Choose only from the pages listed above. Never invent a page name.
-2. Species-matching: If the product species is "Dog" or "dogs", do NOT assign to Cat, Fish, Bird, Small Animal, Reptile, or similar non-dog pages.
-3. If the product species is "Cat" or "cats", do NOT assign to Dog, Fish, Bird, Small Animal, Reptile, or similar non-cat pages.
+1. Choose only from the pages listed above. Never invent a page name or ID.
+2. Species-matching: If the product species is "dog" or "dogs", do NOT assign to Cat, Fish, Bird, Small Animal, Reptile, or similar non-dog pages.
+3. If the product species is "cat" or "cats", do NOT assign to Dog, Fish, Bird, Small Animal, Reptile, or similar non-cat pages.
 4. Prefer the most specific child page over a general parent page (e.g. "Dog Food Dry" over "Dog Food Shop All").
 5. Return 1-${maxResults} pages, ranked by relevance from most to least specific.
 6. If no pages are a good fit, return an empty array.
 7. "Shop All" pages are catch-all pages — only use them as a last resort if no more specific page fits.
+8. If the store has an exact brand page named "Brand - ${brandStr}", include it as a secondary assignment if it makes sense.
+9. Do not infer species or animal type without explicit evidence in the product data provided above.
 
-Return ONLY valid JSON: {"pages":[{"pageName":"exact page name from the list above","confidence":0.0}]}`;
+Return ONLY valid JSON with this exact shape:
+{"pages":[{"pageId":"the ID from the page listing above","pageName":"the exact page name","confidence":0.0}]}
+
+Use the page's ID for the "pageId" field and its exact name for "pageName".`;
 
   try {
     const response = await callLlmForTask(
@@ -297,36 +586,24 @@ Return ONLY valid JSON: {"pages":[{"pageName":"exact page name from the list abo
     const parsed = parsePageAssignmentResponse(response);
     if (!parsed || !parsed.pages || parsed.pages.length === 0) return null;
 
-    // Validate returned page names against the provided list
-    const validPageNames = new Set(pages.map(p => p.name));
-    const nameToId = new Map(pages.map(p => [p.name, p.id]));
+    // Validate entries against known pages
+    const validated = validatePageResponseEntries(parsed.pages, nameToPage, idToPage);
+    if (validated.length === 0) return null;
 
-    const validPages = parsed.pages
-      .filter(p => {
-        // Case-insensitive match against valid page names
-        const match = Array.from(validPageNames).find(
-          n => n.toLowerCase() === (p.pageName ?? '').toLowerCase(),
-        );
-        return match !== undefined;
-      })
-      .map(p => {
-        const matchedName = Array.from(validPageNames).find(
-          n => n.toLowerCase() === (p.pageName ?? '').toLowerCase(),
-        )!;
-        return {
-          pageId: nameToId.get(matchedName) ?? '',
-          pageName: matchedName,
-          confidence:
-            typeof p.confidence === 'number'
-              ? Math.max(0.35, Math.min(0.95, p.confidence))
-              : 0.55,
-        };
-      })
-      .slice(0, maxResults);
+    // Normalize with deterministic rules
+    const species = ocrSummary.species;
+    const normalized = normalizePageAssignments(
+      validated,
+      nameToPage,
+      ocrSummary.brand,
+      species,
+      maxResults,
+      selectionMode,
+    );
 
-    if (validPages.length === 0) return null;
+    if (normalized.length === 0) return null;
 
-    return { pages: validPages };
+    return { pages: normalized };
   } catch (err: any) {
     console.warn(`[PageAssignmentLLM] LLM call failed: ${err.message}`);
     return null;

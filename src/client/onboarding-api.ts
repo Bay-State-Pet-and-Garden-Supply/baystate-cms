@@ -164,8 +164,8 @@ async function resetItemsToStage(
   });
 }
 
-async function completeReviewStage(itemIds: string[]): Promise<{ success: boolean; count: number }> {
-  return request<{ success: boolean; count: number }>('/items/review-complete', {
+export async function completeReviewStage(itemIds: string[]): Promise<{ success: boolean; count: number; legacyCount?: number; classifiedCount?: number }> {
+  return request<{ success: boolean; count: number; legacyCount?: number; classifiedCount?: number }>('/items/review-complete', {
     method: 'POST',
     body: JSON.stringify({ itemIds }),
   });
@@ -236,10 +236,19 @@ export async function bulkAssignBrand(
   });
 }
 
+export interface ConsistencyWarning {
+  groupId: string;
+  groupLabel: string;
+  field: 'category_page' | 'primary_product_type' | 'curated_title';
+  values: Record<string, string[]>;
+  message: string;
+}
+
 export interface ItemDetailResponse {
   item: OnboardingItem;
   sources: OnboardingSource[];
   extraction: ExtractionData | null;
+  consistencyWarnings: ConsistencyWarning[];
 }
 
 export async function getItemDetail(itemId: string): Promise<ItemDetailResponse> {
