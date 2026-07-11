@@ -43,7 +43,6 @@ const TASK_LABELS: Record<LlmTask, string> = {
   product_type_classification: 'Product type classification',
   category_page_assignment: 'Product Page assignment',
   attribute_value_classification: 'Attribute value classification',
-  catalog_health_triage: 'Catalog health triage',
   product_field_refactor: 'Product field refactor',
   store_manager_assistant: 'Store manager assistant',
 };
@@ -59,10 +58,33 @@ const TASK_HINTS: Record<LlmTask, string> = {
   product_type_classification: 'Classifies products into product types.',
   category_page_assignment: 'Assigns products to store pages.',
   attribute_value_classification: 'Classifies attribute values.',
-  catalog_health_triage: 'Triages catalog health issues.',
   product_field_refactor: 'Refactors product custom fields.',
   store_manager_assistant: 'Powers the chat-based Store Manager AI Assistant.',
 };
+
+const TASK_GROUPS: Array<{ label: string; tasks: LlmTask[] }> = [
+  {
+    label: 'Onboarding & Curation',
+    tasks: [
+      'product_name_consolidation',
+      'brand_inference',
+      'product_curation',
+      'category_page_assignment',
+      'category_classification',
+      'classification_evidence_extraction',
+      'product_type_classification',
+      'attribute_value_classification',
+    ],
+  },
+  {
+    label: 'Profile Builder',
+    tasks: ['profile_generation', 'profile_revision'],
+  },
+  {
+    label: 'Store Manager',
+    tasks: ['store_manager_assistant', 'product_field_refactor'],
+  },
+];
 
 const PROVIDERS: ReadonlyArray<LlmProvider> = ['deepseek', 'openai', 'ollama'];
 
@@ -153,21 +175,41 @@ export function LlmTaskConfigPanel(props: LlmTaskConfigPanelProps): React.ReactE
         require an explicit config (the system fails closed if missing).
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {knownTasks.map((task) => (
-          <LlmTaskConfigRow
-            key={task}
-            task={task}
-            config={configs.find((c) => c.task === task) ?? null}
-            onSaved={async () => {
-              await load();
-              onChange?.();
-            }}
-            onCleared={async () => {
-              await load();
-              onChange?.();
-            }}
-          />
-        ))}
+        {TASK_GROUPS.map((group) => {
+          const visibleTasks = group.tasks.filter((t) => knownTasks.includes(t));
+          if (visibleTasks.length === 0) return null;
+          return (
+            <React.Fragment key={group.label}>
+              <h3
+                style={{
+                  fontSize: 14,
+                  fontWeight: 600,
+                  color: '#374151',
+                  margin: '16px 0 4px',
+                  paddingBottom: 4,
+                  borderBottom: '1px solid #e5e7eb',
+                }}
+              >
+                {group.label}
+              </h3>
+              {visibleTasks.map((task) => (
+                <LlmTaskConfigRow
+                  key={task}
+                  task={task}
+                  config={configs.find((c) => c.task === task) ?? null}
+                  onSaved={async () => {
+                    await load();
+                    onChange?.();
+                  }}
+                  onCleared={async () => {
+                    await load();
+                    onChange?.();
+                  }}
+                />
+              ))}
+            </React.Fragment>
+          );
+        })}
       </div>
     </div>
   );

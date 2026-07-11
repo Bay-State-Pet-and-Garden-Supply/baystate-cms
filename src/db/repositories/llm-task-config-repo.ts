@@ -33,7 +33,6 @@ export type LlmTask =
   | 'product_type_classification'
   | 'category_page_assignment'
   | 'attribute_value_classification'
-  | 'catalog_health_triage'
   | 'product_field_refactor'
   | 'store_manager_assistant';
 
@@ -48,7 +47,6 @@ export const LLM_TASKS: ReadonlyArray<LlmTask> = [
   'product_type_classification',
   'category_page_assignment',
   'attribute_value_classification',
-  'catalog_health_triage',
   'product_field_refactor',
   'store_manager_assistant',
 ];
