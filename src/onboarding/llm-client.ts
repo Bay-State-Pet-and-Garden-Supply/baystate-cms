@@ -310,24 +310,29 @@ export async function callLlmForTask(
       : taskConfig?.temperature !== null && taskConfig?.temperature !== undefined
         ? taskConfig.temperature
         : 0.1;
+  const reasoningEffort = taskConfig?.reasoningEffort ?? null;
 
   await acquireLlmSlot(config.provider);
   try {
     const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
+    const requestBody: Record<string, unknown> = {
+      model: config.model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt },
+      ],
+      temperature,
+    };
+    if (reasoningEffort) {
+      requestBody.reasoning_effort = reasoningEffort;
+    }
     const response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt },
-        ],
-        temperature,
-      }),
+      body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(timeoutMs),
     });
 

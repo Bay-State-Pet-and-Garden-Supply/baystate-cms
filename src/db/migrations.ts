@@ -412,6 +412,10 @@ export function runMigrations(): void {
     console.error('Failed to create llm_task_configs table:', e);
   }
 
+  try {
+    db.exec('ALTER TABLE llm_task_configs ADD COLUMN reasoning_effort TEXT');
+  } catch { /* column already exists */ }
+
   // Ensure serper_cache table exists
   try {
     db.exec(`

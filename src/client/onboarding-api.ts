@@ -591,6 +591,7 @@ export async function upsertLlmTaskConfig(
     model: string;
     baseUrlOverride?: string | null;
     temperature?: number | null;
+    reasoningEffort?: string | null;
   },
 ): Promise<{ success: boolean; taskConfig: LlmTaskConfig }> {
   return request<{ success: boolean; taskConfig: LlmTaskConfig }>(

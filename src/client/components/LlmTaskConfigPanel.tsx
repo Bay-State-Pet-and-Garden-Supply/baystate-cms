@@ -187,6 +187,9 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
   const [temperature, setTemperature] = useState<string>(
     config?.temperature !== null && config?.temperature !== undefined ? String(config.temperature) : '',
   );
+  const [reasoningEffort, setReasoningEffort] = useState<string>(
+    (config as any)?.reasoningEffort ?? '',
+  );
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
 
@@ -200,7 +203,8 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
     setTemperature(
       config?.temperature !== null && config?.temperature !== undefined ? String(config.temperature) : '',
     );
-  }, [config?.id, config?.provider, config?.model, config?.temperature]);
+    setReasoningEffort((config as any)?.reasoningEffort ?? '');
+  }, [config?.id, config?.provider, config?.model, config?.temperature, (config as any)?.reasoningEffort]);
 
   // Fetch models when provider changes
   const loadModels = useCallback(async (p: LlmProvider) => {
@@ -245,6 +249,7 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
         model: model.trim(),
         baseUrlOverride: null,
         temperature: temperatureNum,
+        reasoningEffort: reasoningEffort || null,
       });
       await onSaved();
     } catch (err) {
@@ -415,6 +420,28 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
               boxSizing: 'border-box',
             }}
           />
+        </label>
+        <label style={{ fontSize: 12, width: 100 }}>
+          <span style={{ display: 'block', color: '#4b5563', marginBottom: 2 }}>Reasoning</span>
+          <select
+            value={reasoningEffort}
+            onChange={(e) => setReasoningEffort(e.target.value)}
+            disabled={busy}
+            style={{
+              width: '100%',
+              padding: '4px 6px',
+              border: '1px solid #d1d5db',
+              borderRadius: 4,
+              fontSize: 12,
+              boxSizing: 'border-box',
+            }}
+          >
+            <option value="">Default</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="max">Max</option>
+          </select>
         </label>
         <button
           type="button"

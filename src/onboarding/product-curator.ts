@@ -116,63 +116,6 @@ async function runAndPersistOcrFallback(
 }
 
 /**
- * Classifies product into store category pages and determines the product type.
- */
-async function classifyProduct(
-  title: string,
-  description: string | null
-): Promise<{ suggestedPages: string[]; suggestedProductType: string | null }> {
-  const llmConfig = getLlmConfigForTask('category_classification', { allowFallback: true });
-  const pages = listPages().map(p => p.name);
-
-  let suggestedPages: string[] = [];
-  const suggestedProductType: string | null = null;
-
-  if (!llmConfig) {
-    return { suggestedPages: [], suggestedProductType: null };
-  }
-
-  // 1. Suggest Pages (if taxonomy pages exist)
-  if (pages.length > 0) {
-    try {
-      const pageListStr = pages.map(p => `"${p}"`).join(', ');
-      const prompt = `You are a product cataloging assistant for a pet supply store.
-Classify the product "${title}" into one or more of our store categories.
-
-Description: "${description || 'No description available.'}"
-
-Available Categories: [ ${pageListStr} ]
-
-Rules:
-1. Select the most specific category or categories that fit the product.
-2. Return a JSON array of strings containing ONLY matching categories from the Available Categories list.
-3. If no categories match, return an empty array [].
-4. Return ONLY valid JSON and nothing else. Do not wrap in markdown code blocks.`;
-
-      const responseText = await callLlmForTask('category_classification', prompt, 'You are a precise JSON classifier.', { allowFallback: true });
-      if (responseText == null) {
-        throw new Error('LLM call returned null');
-      }
-      const parsed = JSON.parse(responseText.trim());
-      if (Array.isArray(parsed)) {
-        suggestedPages = parsed.filter(p => pages.includes(p));
-        console.log(`[ProductCurator] Suggested pages for "${title}":`, suggestedPages);
-      }
-    } catch (err: any) {
-      console.warn(`[ProductCurator] Page classification failed: ${err.message}`);
-    }
-  }
-
-  // Product Type is deliberately not classified here. These are CMS-internal
-  // classification labels, not ShopSite fields; the legacy path returns null.
-  return { suggestedPages, suggestedProductType };
-}
-
-/**
- * Main curation pipeline orchestrator.
- */
-export async function curateItem(
-  item: OnboardingItem,
   workspacePath: string,
   options: { skipLegacyClassification?: boolean } = {},
 ): Promise<CurationData> {

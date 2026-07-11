@@ -358,6 +358,9 @@ export type LlmTask = z.infer<typeof LlmTaskEnum>;
 export const LlmProviderEnum = z.enum(['deepseek', 'openai', 'ollama']);
 export type LlmProvider = z.infer<typeof LlmProviderEnum>;
 
+export const ReasoningEffortEnum = z.enum(['low', 'medium', 'high', 'max']);
+export type ReasoningEffort = z.infer<typeof ReasoningEffortEnum>;
+
 export const LlmTaskConfigSchema = z.object({
   id: z.string(),
   task: LlmTaskEnum,
@@ -365,6 +368,7 @@ export const LlmTaskConfigSchema = z.object({
   model: z.string().min(1),
   baseUrlOverride: z.string().url().nullable().default(null),
   temperature: z.number().min(0).max(2).nullable().default(null),
+  reasoningEffort: ReasoningEffortEnum.nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -375,6 +379,7 @@ export const LlmTaskConfigUpsertSchema = z.object({
   model: z.string().min(1),
   baseUrlOverride: z.string().url().nullable().optional(),
   temperature: z.number().min(0).max(2).nullable().optional(),
+  reasoningEffort: ReasoningEffortEnum.nullable().optional(),
 });
 
 /**

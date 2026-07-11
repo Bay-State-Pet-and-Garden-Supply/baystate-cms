@@ -2079,6 +2079,7 @@ route.put('/onboarding/settings/llm-task-configs/:task', async (c) => {
     model: parsed.data.model,
     baseUrlOverride: parsed.data.baseUrlOverride ?? null,
     temperature: parsed.data.temperature ?? null,
+    reasoningEffort: parsed.data.reasoningEffort ?? null,
   });
   return c.json({ success: true, taskConfig: row });
 });

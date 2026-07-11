@@ -1,6 +1,8 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
 
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'max';
+
 /**
  * Known LLM provider identifiers accepted by `llm_task_configs`. The
  * `api_keys` table holds credentials under matching service names
@@ -64,6 +66,7 @@ export interface LlmTaskConfig {
   model: string;
   baseUrlOverride: string | null;
   temperature: number | null;
+  reasoningEffort: ReasoningEffort | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -75,6 +78,7 @@ interface DbLlmTaskConfig {
   model: string;
   base_url_override: string | null;
   temperature: number | null;
+  reasoning_effort: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -95,6 +99,7 @@ function mapToConfig(row: DbLlmTaskConfig): LlmTaskConfig {
     model: row.model,
     baseUrlOverride: row.base_url_override,
     temperature: row.temperature,
+    reasoningEffort: row.reasoning_effort as ReasoningEffort | null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -106,6 +111,7 @@ export interface UpsertLlmTaskConfigInput {
   model: string;
   baseUrlOverride?: string | null;
   temperature?: number | null;
+  reasoningEffort?: string | null;
 }
 
 export function upsertLlmTaskConfig(
@@ -119,17 +125,19 @@ export function upsertLlmTaskConfig(
 
   const baseUrlOverride = input.baseUrlOverride ?? null;
   const temperature = input.temperature ?? null;
+  const reasoningEffort = input.reasoningEffort ?? null;
 
   if (existing) {
     db.query(`
       UPDATE llm_task_configs
-      SET provider = ?, model = ?, base_url_override = ?, temperature = ?, updated_at = ?
+      SET provider = ?, model = ?, base_url_override = ?, temperature = ?, reasoning_effort = ?, updated_at = ?
       WHERE task = ?
     `).run(
       input.provider,
       input.model,
       baseUrlOverride,
       temperature,
+      reasoningEffort,
       now,
       input.task,
     );
@@ -139,14 +147,15 @@ export function upsertLlmTaskConfig(
       model: input.model,
       base_url_override: baseUrlOverride,
       temperature,
+      reasoning_effort: reasoningEffort,
       updated_at: now,
     });
   }
 
   const id = randomUUID();
   db.query(`
-    INSERT INTO llm_task_configs (id, task, provider, model, base_url_override, temperature, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO llm_task_configs (id, task, provider, model, base_url_override, temperature, reasoning_effort, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.task,
@@ -154,6 +163,7 @@ export function upsertLlmTaskConfig(
     input.model,
     baseUrlOverride,
     temperature,
+    reasoningEffort,
     now,
     now,
   );
@@ -165,6 +175,7 @@ export function upsertLlmTaskConfig(
     model: input.model,
     baseUrlOverride,
     temperature,
+    reasoningEffort: reasoningEffort as ReasoningEffort | null,
     createdAt: now,
     updatedAt: now,
   };
