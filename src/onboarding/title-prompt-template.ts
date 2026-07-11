@@ -10,13 +10,16 @@
 
 export const FORMAT_RULES = `- NEVER use parentheses around variants, sizes, flavors, or any other attribute.
 - Order: Brand -> Product Line/Product -> Form/Species -> Flavor/Color -> Size/Count
+- Every numeric quantity (size, weight, count) from the original spreadsheet name is MANDATORY in the output title. You MUST include them exactly as they appear in the spreadsheet name input. Never omit a known measurement.
+- Convert attached quantities: 2.64OZ->2.64 oz, 6OZ->6 oz, 16OZ->16 oz, 5CT->5-Count, 6PK->6-Pack. The number AND unit must both appear.
+- When all siblings share the same size/weight (e.g., all are 2.64 oz), include it on every sibling. When sizes differ, each variant gets its own.
+- Position: size/weight/count MUST be the final token(s) in the title, after all descriptive text.
 - Expand abbreviations: SM->Small, MD->Medium, LG->Large, XL->X-Large, XXL->XX-Large, CHKN/CKN->Chicken, SLMN->Salmon, TRKY->Turkey, DNTL->Dental
 - Normalize quantities and units: 5CT->5-Count, 6PK->6-Pack, OZ->oz, LB->lb
 - Clean casing: title case for normal words, preserve configured brand/trademark capitalization
 - Include ALL identity-bearing tokens evidenced by the inputs: brand, product line, product form, species, flavor, color, size, count
 - Include the brand exactly once
 - Never invent a brand, product line, form, species, flavor, color, size, count, or claim not present in the inputs
-- Size, weight, or count always appears at the end of the title
 - Format must be consistent across ALL siblings in a product line (same order, same skeleton)
 - Each sibling must get a unique name reflecting its specific variant attributes
 - Do not include prices, UPCs, distributor codes, marketing fluff, or promotional text

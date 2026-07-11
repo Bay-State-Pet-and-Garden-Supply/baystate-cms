@@ -24,6 +24,7 @@ import {
   clearCohortCoordinationCache,
   formatDeterministicTitle,
 } from '../../onboarding/cohort-name-coordinator';
+import { buildCohortPrompt } from '../../onboarding/title-prompt-template';
 
 vi.mock('../../onboarding/llm-client', () => ({
   getLlmConfigForTask: vi.fn(() => ({
@@ -78,6 +79,21 @@ describe('Cohort Name Coordinator', () => {
     vi.clearAllMocks();
     clearCohortCoordinationCache();
     seqId = 0;
+  });
+
+  // ─── Prompt contract ────────────────────────────────────────────────────
+
+  it('makes every spreadsheet size mandatory for every sibling title', () => {
+    const prompt = buildCohortPrompt([
+      { upc: 'PATE', name: 'INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ', webTitle: null, ocrTitle: null, brand: 'Instinct' },
+      { upc: 'FLAKE', name: 'INSTINCT CAT FLAKE TUNA SPLIT CUP 2.64OZ', webTitle: null, ocrTitle: null, brand: 'Instinct' },
+    ]);
+
+    expect(prompt).toContain('Every numeric quantity (size, weight, count) from the original spreadsheet name is MANDATORY');
+    expect(prompt).toContain('2.64OZ->2.64 oz');
+    expect(prompt).toContain('include it on every sibling');
+    expect(prompt).toContain('size/weight/count MUST be the final token(s)');
+    expect(prompt).toContain('INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ');
   });
 
   // ─── Basic result shape ─────────────────────────────────────────────────
