@@ -221,165 +221,180 @@ export async function curateItemWithPipeline(
   // Create a config snapshot for reproducibility
   const { id: snapshotId, hash: snapshotHash } = createConfigSnapshot(workspaceId, classConfig);
 
+  // Fail any existing running classification runs for this onboarding item to ensure
+  // we do not violate the UNIQUE constraint from a stale run.
+  if (item.id) {
+    try {
+      getDb().run(
+        `UPDATE classification_runs
+         SET status = 'failed', completed_at = ?, error_message = 'Superseded by new run'
+         WHERE onboarding_item_id = ? AND status = 'running'`,
+        [new Date().toISOString(), item.id]
+      );
+    } catch (err: any) {
+      console.warn(`[ProductCurator] Failed to clean up existing running runs: ${err.message}`);
+    }
+  }
+
   // Create a classification run
   const run = createRun(workspaceId, item.upc, snapshotId, snapshotHash, item.id);
 
-  // ── Product-line grouping for family-aware curation ───────────────────
-  // Determine sibling context before running the pipeline so
-  // name_consolidation and page assignment can produce consistent
-  // results across variants. Prefer context passed from the worker
-  // (item.siblingGroup) to avoid re-querying. Fall back to internal
-  // batch query when set directly (tests, API calls).
-  let productLineGroup: ReturnType<typeof determineProductGroup> | null =
-    (item as any).siblingGroup ?? null;
+  try {
+    // ── Product-line grouping for family-aware curation ───────────────────
+    // Determine sibling context before running the pipeline so
+    // name_consolidation and page assignment can produce consistent
+    // results across variants. Prefer context passed from the worker
+    // (item.siblingGroup) to avoid re-querying. Fall back to internal
+    // batch query when set directly (tests, API calls).
+    let productLineGroup: ReturnType<typeof determineProductGroup> | null =
+      (item as any).siblingGroup ?? null;
 
-  if (!productLineGroup) {
-    try {
-      const db = getDb();
-      const batchRows = db.query(
-        `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
-      ).all(item.id) as Array<{
-        id: string;
-        upc: string;
-        name: string;
-        brand_hint: string | null;
-        extraction_data_json: string | null;
-      }>;
+    if (!productLineGroup) {
+      try {
+        const db = getDb();
+        const batchRows = db.query(
+          `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
+        ).all(item.id) as Array<{
+          id: string;
+          upc: string;
+          name: string;
+          brand_hint: string | null;
+          extraction_data_json: string | null;
+        }>;
 
-      const batchItems: OnboardingItem[] = batchRows.map(r => ({
-        id: r.id,
-        batchId: item.batchId,
-        upc: r.upc,
-        name: r.name,
-        price: null,
-        quantity: null,
-        brandHint: r.brand_hint,
-        departmentHint: null,
-        sourceUrl: null,
-        expectedName: null,
-        stage: 'curation' as const,
-        stageStatus: 'pending' as const,
-        rowNumber: 0,
-        isDuplicate: false,
-        existingSku: null,
-        extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
-        curationData: null,
-        status: 'active' as any,
-        errorMessage: null,
-        retryCount: 0,
-        createdAt: '',
-        updatedAt: '',
-      }));
+        const batchItems: OnboardingItem[] = batchRows.map(r => ({
+          id: r.id,
+          batchId: item.batchId,
+          upc: r.upc,
+          name: r.name,
+          price: null,
+          quantity: null,
+          brandHint: r.brand_hint,
+          departmentHint: null,
+          sourceUrl: null,
+          expectedName: null,
+          stage: 'curation' as const,
+          stageStatus: 'pending' as const,
+          rowNumber: 0,
+          isDuplicate: false,
+          existingSku: null,
+          extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
+          curationData: null,
+          status: 'active' as any,
+          errorMessage: null,
+          retryCount: 0,
+          createdAt: '',
+          updatedAt: '',
+        }));
 
-      productLineGroup = determineProductGroup(item, batchItems);
-      if (productLineGroup) {
-        console.log(`[ProductCurator] Product line group "${productLineGroup.groupId}": ${productLineGroup.siblingNames.length} siblings`);
+        productLineGroup = determineProductGroup(item, batchItems);
+        if (productLineGroup) {
+          console.log(`[ProductCurator] Product line group "${productLineGroup.groupId}": ${productLineGroup.siblingNames.length} siblings`);
+        }
+      } catch (err: any) {
+        console.warn(`[ProductCurator] Product-line grouping failed (non-blocking): ${err.message}`);
       }
-    } catch (err: any) {
-      console.warn(`[ProductCurator] Product-line grouping failed (non-blocking): ${err.message}`);
+    } else {
+      console.log(`[ProductCurator] Using sibling context from worker for ${item.upc}: group "${productLineGroup.groupId}"`);
     }
-  } else {
-    console.log(`[ProductCurator] Using sibling context from worker for ${item.upc}: group "${productLineGroup.groupId}"`);
-  }
 
-  const attachedBatchItems = (item as any).batchItems as OnboardingItem[] | undefined;
-  let batchItemsForCoordination: OnboardingItem[] = attachedBatchItems ?? [];
-  if (productLineGroup && batchItemsForCoordination.length === 0) {
-    try {
-      batchItemsForCoordination = listItemsByBatch(item.batchId);
-    } catch (error) {
-      console.warn(`[ProductCurator] Failed to load batch snapshot for cohort coordination: ${error instanceof Error ? error.message : String(error)}`);
+    const attachedBatchItems = (item as any).batchItems as OnboardingItem[] | undefined;
+    let batchItemsForCoordination: OnboardingItem[] = attachedBatchItems ?? [];
+    if (productLineGroup && batchItemsForCoordination.length === 0) {
+      try {
+        batchItemsForCoordination = listItemsByBatch(item.batchId);
+      } catch (error) {
+        console.warn(`[ProductCurator] Failed to load batch snapshot for cohort coordination: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
-  }
 
-  const productLineItems: ProductLineItemSnapshot[] | undefined = productLineGroup
-    ? productLineGroup.siblingSkus.map((sku, index) => {
-        const sibling = batchItemsForCoordination.find(candidate => candidate.upc === sku);
-        const extraction = sibling?.extractionData;
-        const ocr = extraction?.packagingOcrData;
-        return {
-          sku,
-          name: sibling?.expectedName ?? sibling?.name ?? productLineGroup!.siblingNames[index] ?? sku,
-          webTitle: extraction?.title ?? productLineGroup!.siblingWebTitles[index] ?? null,
-          brand: extraction?.brand ?? sibling?.brandHint ?? (productLineGroup!.normalizedBrand || null),
-          description: extraction?.description ?? '',
-          species: ocr?.species ?? [],
-          flavor: ocr?.flavorVariety ?? null,
-          lifeStage: ocr?.lifeStage ?? null,
-          productForm: ocr?.productForm ?? null,
-          healthConcern: ocr?.healthConcernFunction ?? [],
-        };
-      })
-    : undefined;
+    const productLineItems: ProductLineItemSnapshot[] | undefined = productLineGroup
+      ? productLineGroup.siblingSkus.map((sku, index) => {
+          const sibling = batchItemsForCoordination.find(candidate => candidate.upc === sku);
+          const extraction = sibling?.extractionData;
+          const ocr = extraction?.packagingOcrData;
+          return {
+            sku,
+            name: sibling?.expectedName ?? sibling?.name ?? productLineGroup!.siblingNames[index] ?? sku,
+            webTitle: extraction?.title ?? productLineGroup!.siblingWebTitles[index] ?? null,
+            brand: extraction?.brand ?? sibling?.brandHint ?? (productLineGroup!.normalizedBrand || null),
+            description: extraction?.description ?? '',
+            species: ocr?.species ?? [],
+            flavor: ocr?.flavorVariety ?? null,
+            lifeStage: ocr?.lifeStage ?? null,
+            productForm: ocr?.productForm ?? null,
+            healthConcern: ocr?.healthConcernFunction ?? [],
+          };
+        })
+      : undefined;
 
-  // Coordinate every title in a multi-item group through one cached,
-  // all-or-nothing cohort decision. No sibling title is written here; each
-  // item's own pipeline persists only its selected title metadata.
-  let preComputedTitle: string | undefined;
-  let preComputedTitleSource: 'llm_cohort' | 'cohort_fallback' | undefined;
-  if ((productLineGroup?.siblingSkus.length ?? 0) >= 2) {
-    try {
-      const coordinated = await coordinateCohortItemsOnce(item.batchId, batchItemsForCoordination);
-      const selected = coordinated.get(item.upc);
-      if (selected) {
-        preComputedTitle = selected.title;
-        preComputedTitleSource = selected.source;
-      } else {
-        // A grouped item must never fall through to an independent title LLM.
+    // Coordinate every title in a multi-item group through one cached,
+    // all-or-nothing cohort decision. No sibling title is written here; each
+    // item's own pipeline persists only its selected title metadata.
+    let preComputedTitle: string | undefined;
+    let preComputedTitleSource: 'llm_cohort' | 'cohort_fallback' | undefined;
+    if ((productLineGroup?.siblingSkus.length ?? 0) >= 2) {
+      try {
+        const coordinated = await coordinateCohortItemsOnce(item.batchId, batchItemsForCoordination);
+        const selected = coordinated.get(item.upc);
+        if (selected) {
+          preComputedTitle = selected.title;
+          preComputedTitleSource = selected.source;
+        } else {
+          // A grouped item must never fall through to an independent title LLM.
+          preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
+          preComputedTitleSource = 'cohort_fallback';
+        }
+      } catch (err) {
+        console.warn(
+          `[ProductCurator] Cohort title coordination failed for ${item.upc}; using deterministic fallback: ${err instanceof Error ? err.message : String(err)}`,
+        );
         preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
         preComputedTitleSource = 'cohort_fallback';
       }
-    } catch (err) {
-      console.warn(
-        `[ProductCurator] Cohort title coordination failed for ${item.upc}; using deterministic fallback: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
-      preComputedTitleSource = 'cohort_fallback';
     }
-  }
 
-  // Build the pipeline context
-  const context: import('../classification/types').StageContext = {
-    workspacePath,
-    workspaceId,
-    runId: run.id,
-    configSnapshotRef: {
-      id: snapshotId,
-      hash: snapshotHash,
-      sourceCommit: null,
-      createdAt: new Date().toISOString(),
-    },
-    productLineContext: productLineGroup
-      ? {
-          groupId: productLineGroup.groupId,
-          groupLabel: productLineGroup.groupLabel,
-          siblingNames: productLineGroup.siblingNames,
-          siblingWebTitles: productLineGroup.siblingWebTitles,
-          siblingOcrTitles: productLineGroup.siblingOcrTitles,
-          siblingSkus: productLineGroup.siblingSkus,
-        }
-      : undefined,
-    productLineItems,
-    preComputedTitle,
-    preComputedTitleSource,
-  };
+    // Build the pipeline context
+    const context: import('../classification/types').StageContext = {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: {
+        id: snapshotId,
+        hash: snapshotHash,
+        sourceCommit: null,
+        createdAt: new Date().toISOString(),
+      },
+      productLineContext: productLineGroup
+        ? {
+            groupId: productLineGroup.groupId,
+            groupLabel: productLineGroup.groupLabel,
+            siblingNames: productLineGroup.siblingNames,
+            siblingWebTitles: productLineGroup.siblingWebTitles,
+            siblingOcrTitles: productLineGroup.siblingOcrTitles,
+            siblingSkus: productLineGroup.siblingSkus,
+          }
+        : undefined,
+      productLineItems,
+      preComputedTitle,
+      preComputedTitleSource,
+    };
 
-  // Initial evidence starts empty — evidence_extraction stage handles
-  // reading the onboarding item's extraction_data_json from the DB
-  // and producing spreadsheet, web, and visual evidence entries.
+    // Initial evidence starts empty — evidence_extraction stage handles
+    // reading the onboarding item's extraction_data_json from the DB
+    // and producing spreadsheet, web, and visual evidence entries.
 
-  // Run the full modular pipeline including name_consolidation
-  const stages: StageDefinition[] = [
-    evidenceExtractionStage,
-    nameConsolidationStage,
-    primaryProductTypeStage,
-    attributeApplicabilityStage,
-    productAttributeProposalsStage,
-    categoryPageProposalsStage,
-    productDraftProjectionStage,
-  ];
+    // Run the full modular pipeline including name_consolidation
+    const stages: StageDefinition[] = [
+      evidenceExtractionStage,
+      nameConsolidationStage,
+      primaryProductTypeStage,
+      attributeApplicabilityStage,
+      productAttributeProposalsStage,
+      categoryPageProposalsStage,
+      productDraftProjectionStage,
+    ];
 
-  try {
     const result = await runPipeline(stages, context, {
       sku: item.upc,
       onboardingItemId: item.id,

@@ -587,18 +587,19 @@ export const evidenceExtractionStage: StageDefinition = {
       }
     }
 
-    // ── Extract visual evidence from ALL product images ───────────────────
-    // Run VLM OCR on every available product image (primary + additional
-    // gallery images) and merge the results. Gallery images often contain
-    // ingredient panels, guaranteed analysis, feeding guides, and other
-    // rich data that the curator and classification stages need.
+    // ── Extract visual evidence from the first two product images ─────────
+    // Run VLM OCR on the primary and first additional gallery image and
+    // merge the results. The first image usually shows the front of the
+    // package (brand, product name, flavor), while the second frequently
+    // shows the back/side panel with ingredients, guaranteed analysis,
+    // feeding guides — the two most information-dense views.
     let vlmOcrSucceeded = false;
     const ocrResults: PackagingOcrData[] = [];
 
     if (canUseLocalVlm) {
-      // Collect all image URLs to OCR (cap at 10 per product to protect
-      // against extraction bugs that produce hundreds of stray images)
-      const MAX_OCR_IMAGES = 10;
+      // Collect the first two image URLs for OCR (primary + first additional)
+      // to balance rich data extraction against VLM latency and cost.
+      const MAX_OCR_IMAGES = 2;
       const imageUrls: string[] = [];
       if (extData.primaryImage) imageUrls.push(String(extData.primaryImage));
       if (extData.additionalImages && Array.isArray(extData.additionalImages)) {

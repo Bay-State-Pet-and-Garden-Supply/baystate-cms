@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
@@ -829,5 +830,66 @@ describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
     selectSource(sources[0].id);
     const samples = listValidationSamplesByDomain('mywoof.com');
     expect(samples.length).toBe(0);
+  });
+
+  it('resets and requeues active classification runs when items are reset or requeued', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Reset Curation Test Batch',
+      fileName: 'reset_curation.xlsx',
+      totalItems: 2,
+    });
+    const items = insertItems(batch.id, [
+      { upc: 'UPC-RESET-1', name: 'Reset Item 1', rowNumber: 1 },
+      { upc: 'UPC-RESET-2', name: 'Reset Item 2', rowNumber: 2 },
+    ]);
+
+    // Set items to curation stage so they are claimable for curation
+    db.run("UPDATE onboarding_items SET stage = 'curation' WHERE batch_id = ?", [batch.id]);
+
+    // Claim them
+    claimItemsForProcessing('curation', 2, wsId, 'worker-reset');
+
+    const runId1 = randomUUID();
+    const runId2 = randomUUID();
+
+    // Insert active classification runs for these items
+    db.run(
+      `INSERT INTO classification_runs (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, 'running', ?)`,
+      [runId1, wsId, items[0].id, 'UPC-RESET-1', now]
+    );
+    db.run(
+      `INSERT INTO classification_runs (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, 'running', ?)`,
+      [runId2, wsId, items[1].id, 'UPC-RESET-2', now]
+    );
+
+    // 1. Test requeueStaleInProgressItems fails the run
+    // Age item 1 to be stale
+    const oldTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    db.run('UPDATE onboarding_items SET claimed_at = ? WHERE id = ?', [oldTime, items[0].id]);
+    
+    const staleBefore = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    requeueStaleInProgressItems(wsId, staleBefore);
+
+    // Verify run 1 is failed
+    const run1 = db.query('SELECT status, error_message FROM classification_runs WHERE id = ?').get(runId1) as any;
+    expect(run1.status).toBe('failed');
+    expect(run1.error_message).toBe('Worker claim went stale');
+
+    // Run 2 is still running
+    const run2Before = db.query('SELECT status FROM classification_runs WHERE id = ?').get(runId2) as any;
+    expect(run2Before.status).toBe('running');
+
+    // 2. Test resetItemsToPending fails the run
+    resetItemsToPending([items[1].id]);
+
+    // Verify run 2 is failed
+    const run2After = db.query('SELECT status, error_message FROM classification_runs WHERE id = ?').get(runId2) as any;
+    expect(run2After.status).toBe('failed');
+    expect(run2After.error_message).toBe('Superseded by reset');
   });
 });

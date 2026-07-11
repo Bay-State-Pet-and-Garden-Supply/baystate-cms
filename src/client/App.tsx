@@ -21,6 +21,21 @@ function App() {
   const [ready, setReady] = useState(false);
   const hasPushedHistory = useRef(false);
 
+  const handleNavigate = (newView: View, replace = false) => {
+    setView(newView);
+    const url = new URL(window.location.href);
+    if (newView === 'setup') {
+      url.searchParams.delete('view');
+    } else {
+      url.searchParams.set('view', newView);
+    }
+    if (replace) {
+      window.history.replaceState({ view: newView }, '', url.toString());
+    } else {
+      window.history.pushState({ view: newView }, '', url.toString());
+    }
+  };
+
   useEffect(() => {
     getWorkspace().then(res => {
       if (res.workspace) {
@@ -31,12 +46,16 @@ function App() {
         if (needsSetup) {
           setView('setup');
         } else {
-          // Parse product SKU from query param on initial load
+          // Parse view and product SKU from query params on initial load
           const params = new URLSearchParams(window.location.search);
           const sku = params.get('product');
+          const urlView = params.get('view') as View | null;
+          
           if (sku) {
             setSelectedSku(sku);
-            setView('catalog'); // default background view to catalog
+            setView(urlView || 'catalog'); // default background view to catalog
+          } else if (urlView) {
+            setView(urlView);
           } else {
             setView('dashboard');
           }
@@ -53,11 +72,22 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const sku = params.get('product');
       setSelectedSku(sku);
+      
+      const urlView = params.get('view') as View | null;
+      if (urlView) {
+        setView(urlView);
+      } else {
+        if (workspace && (workspace.bootstrapStatus !== 'complete' || !workspace.baselineCommit)) {
+          setView('setup');
+        } else {
+          setView('dashboard');
+        }
+      }
     };
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  }, [workspace]);
 
   useEffect(() => {
     if (selectedSku) {
@@ -107,7 +137,7 @@ function App() {
     getWorkspace().then(res => {
       if (res.workspace) setWorkspace(res.workspace);
     });
-    setView('dashboard');
+    handleNavigate('dashboard', true);
   };
 
   const handleSetupUpdated = () => {
@@ -116,7 +146,7 @@ function App() {
         setWorkspace(res.workspace);
         const needsSetup = res.workspace.bootstrapStatus !== 'complete'
           || !res.workspace.baselineCommit;
-        setView(needsSetup ? 'setup' : 'dashboard');
+        handleNavigate(needsSetup ? 'setup' : 'dashboard', true);
       }
     });
   };
@@ -126,7 +156,7 @@ function App() {
       try {
         await closeWorkspace();
         setWorkspace(null);
-        setView('setup');
+        handleNavigate('setup', true);
       } catch (err) {
         console.error('Failed to close workspace:', err);
         alert('Failed to close workspace: ' + (err instanceof Error ? err.message : String(err)));
@@ -158,55 +188,55 @@ function App() {
           <>
             <button
               style={view === 'dashboard' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('dashboard')}
+              onClick={() => handleNavigate('dashboard')}
             >
               Overview
             </button>
             <button
               style={view === 'catalog' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('catalog')}
+              onClick={() => handleNavigate('catalog')}
             >
               Catalog
             </button>
             <button
               style={view === 'onboarding' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('onboarding')}
+              onClick={() => handleNavigate('onboarding')}
             >
               Onboarding
             </button>
             <button
               style={view === 'changesets' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('changesets')}
+              onClick={() => handleNavigate('changesets')}
             >
               Change Sets
             </button>
             <button
               style={view === 'health' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('health')}
+              onClick={() => handleNavigate('health')}
             >
               Catalog Health
             </button>
             <button
               style={view === 'assistant' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('assistant')}
+              onClick={() => handleNavigate('assistant')}
             >
               Store Manager
             </button>
             <button
               style={view === 'drift' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('drift')}
+              onClick={() => handleNavigate('drift')}
             >
               Drift
             </button>
             <button
               style={view === 'syncjobs' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('syncjobs')}
+              onClick={() => handleNavigate('syncjobs')}
             >
               Sync Jobs
             </button>
             <button
               style={view === 'settings' ? styles.navLinkActive : styles.navLink}
-              onClick={() => setView('settings')}
+              onClick={() => handleNavigate('settings')}
             >
               Settings
             </button>
@@ -245,13 +275,13 @@ function App() {
         )}
 
         {view === 'dashboard' && workspace && (
-          <Dashboard onNavigate={(targetView) => setView(targetView)} />
+          <Dashboard onNavigate={(targetView) => handleNavigate(targetView)} />
         )}
 
         {view === 'catalog' && workspace && (
           <Catalog
             onSelectProduct={handleOpenProduct}
-            onShowChangeSets={() => setView('changesets')}
+            onShowChangeSets={() => handleNavigate('changesets')}
           />
         )}
 

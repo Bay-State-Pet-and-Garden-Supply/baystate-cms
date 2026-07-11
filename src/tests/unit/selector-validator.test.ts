@@ -235,6 +235,19 @@ describe('validateAndRankSelectors', () => {
     expect(result.brandSelector.preview?.text).toBe('Acme Pets');
   });
 
+  it('truncates preview text and preview values to 500 characters', () => {
+    const longHtml = `<html><body><div class="desc">First item: ${'x'.repeat(600)}</div><div class="desc">Second item: ${'y'.repeat(600)}</div></body></html>`;
+    const result = runValidation(longHtml, {
+      descriptionSelector: makeFieldResult({ candidates: [{ selector: '.desc', evidence: 'descriptions' }] }),
+    }, [
+      { key: 'descriptionSelector', valueType: 'text', multiple: true },
+    ]);
+
+    expect(result.descriptionSelector.preview?.text?.length).toBe(500);
+    expect(result.descriptionSelector.preview?.values?.[0].length).toBe(500);
+    expect(result.descriptionSelector.preview?.values?.[1].length).toBe(500);
+  });
+
   it('handles missing field definition gracefully', () => {
     const result = runValidation(SIMPLE_PRODUCT_HTML, {
       unknownField: makeFieldResult({ candidates: [{ selector: 'h1', evidence: 'fallback' }] }),

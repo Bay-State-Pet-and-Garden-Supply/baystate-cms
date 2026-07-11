@@ -465,12 +465,12 @@ function extractPreview(
   const values: string[] = [];
   nodes.each((_idx: number, el: any) => {
     const text = $(el).text().replace(/\s+/g, ' ').trim();
-    if (text) values.push(text);
+    if (text) values.push(text.slice(0, 500));
   });
 
   if (values.length === 0) return;
-  if (values.length === 1) return { text: values[0].slice(0, 500) };
-  return { text: values[0].slice(0, 500), values: values.slice(0, 10) };
+  if (values.length === 1) return { text: values[0] };
+  return { text: values[0], values: values.slice(0, 10) };
 }
 
 // ─── Helper ──────────────────────────────────────────────────────────────────

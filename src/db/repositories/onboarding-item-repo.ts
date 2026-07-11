@@ -302,6 +302,19 @@ export function claimItemsForProcessing(
 export function requeueStaleInProgressItems(workspaceId: string, staleBefore: string): number {
   const db = getDb();
   const now = new Date().toISOString();
+  
+  // Fail any active classification runs for the items we are about to requeue
+  db.run(
+    `UPDATE classification_runs
+     SET status = 'failed', completed_at = ?, error_message = 'Worker claim went stale'
+     WHERE status = 'running' AND onboarding_item_id IN (
+       SELECT id FROM onboarding_items
+       WHERE stage_status = 'in_progress' AND (claimed_at IS NULL OR claimed_at < ?)
+       AND batch_id IN (SELECT id FROM onboarding_batches WHERE workspace_id = ?)
+     )`,
+    [now, staleBefore, workspaceId],
+  );
+
   const result = db.run(
     `UPDATE onboarding_items
      SET stage_status = 'pending', claimed_by = NULL, claimed_at = NULL, updated_at = ?
@@ -475,6 +488,14 @@ export function resetItemsToPending(itemIds: string[]): void {
     for (const id of itemIds) {
       const item = findItemById(id);
       if (!item) continue;
+
+      // Fail any active classification runs for this item
+      db.query(
+        `UPDATE classification_runs
+         SET status = 'failed', completed_at = ?, error_message = 'Superseded by reset'
+         WHERE onboarding_item_id = ? AND status = 'running'`,
+      ).run(now, id);
+
       if (item.stage === 'review' || item.stage === 'promotion') {
         db.query(
           `UPDATE onboarding_items

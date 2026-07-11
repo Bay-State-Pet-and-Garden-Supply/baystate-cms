@@ -43,6 +43,10 @@ vi.mock('../../classification/curation-target-ranker', () => ({
   llmRankOptions: vi.fn(),
 }));
 
+vi.mock('../../classification/cohort-page-coordinator', () => ({
+  coordinateCohortPagesOnce: vi.fn(),
+}));
+
 // Import after mocks
 import { processPageTarget } from '../../classification/curation-target-processor';
 import {
