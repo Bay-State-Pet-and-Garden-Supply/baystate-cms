@@ -20,6 +20,38 @@ const MAX_CUSTOM_FIELDS = 8;
 const RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
+ * Custom field keys and label patterns that should never be suggested
+ * as custom fields. These are e-commerce interface elements or pricing
+ * data that are not product details for our catalog.
+ */
+const BLOCKED_CUSTOM_FIELDS = new Set([
+  'priceSelector',
+  'salePriceSelector',
+  'regularPriceSelector',
+  'pricingSelector',
+  'costSelector',
+  'reviewsSelector',
+  'reviewSelector',
+  'ratingSelector',
+  'ratingsSelector',
+  'starRatingSelector',
+  'customerReviewsSelector',
+]);
+
+/** Label patterns that indicate a blocked field (case-insensitive check). */
+const BLOCKED_LABEL_PATTERNS = [
+  /^price$/i,
+  /^sale price$/i,
+  /^regular price$/i,
+  /^pricing$/i,
+  /^cost$/i,
+  /^reviews?$/i,
+  /^ratings?$/i,
+  /^customer reviews?$/i,
+  /^star ratings?$/i,
+];
+
+/**
  * Semantic aliases that map to existing catalog fields.
  * When a proposed custom field matches any of these aliases for a
  * catalog field, it is considered a duplicate and discarded.
@@ -93,6 +125,15 @@ export function normalizeAndValidateCustomFields(
       continue;
     }
 
+    // ── Step 2b: Reject blocked e-commerce fields ────────────────────
+    if (BLOCKED_CUSTOM_FIELDS.has(normalizedKey) || BLOCKED_CUSTOM_FIELDS.has(rawKeyLower)) {
+      continue;
+    }
+    const labelLower = raw.label?.toLowerCase().trim() ?? '';
+    if (BLOCKED_LABEL_PATTERNS.some((p) => p.test(labelLower))) {
+      continue;
+    }
+
     // ── Step 3: Reject collisions with catalog fields ──────────────────
     if (requestedKeySet.has(normalizedKey)) {
       continue;
@@ -105,7 +146,6 @@ export function normalizeAndValidateCustomFields(
 
     // ── Step 5: Deduplicate by semantic alias (only for catalog
     //    fields that are actively in the request or existing draft) ────
-    const labelLower = raw.label.toLowerCase().trim();
     const keyWithoutSuffix = normalizedKey.replace(/Selector$/i, '').toLowerCase();
     let isDuplicate = false;
 

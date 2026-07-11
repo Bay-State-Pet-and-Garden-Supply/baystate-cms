@@ -268,7 +268,11 @@ Suggest custom fields only when: the field is a meaningful product attribute, it
 
 Good examples: ingredients, dimensions, material, weight, flavor, size, nutrition information, care instructions, SKU, availability, product specifications, feeding instructions, country of origin.
 
-Do not suggest: navigation labels, buttons, breadcrumbs, menu items, recommendation products, recently viewed products, advertisements, cookie notices, account controls, review widgets, social sharing controls, sticky cart content, quick-add controls, modal or drawer content, generic page-interface elements.
+Do not suggest: navigation labels, buttons, breadcrumbs, menu items, recommendation products, recently viewed products, advertisements, cookie notices, account controls, review widgets, review content, customer ratings, star ratings, social sharing controls, sticky cart content, quick-add controls, modal or drawer content, generic page-interface elements.
+
+Never suggest price, sale price, regular price, pricing, cost, or any pricing-related field. Price is handled separately and is not a product detail for this catalog.
+
+Never suggest reviews, ratings, customer reviews, review content, or any social-proof field. These are e-commerce interface elements, not product attributes.
 
 Return no more than 8 custom fields. Each proposedKey must be descriptive camelCase, must not duplicate a requested field key, and should end in Selector.
 
