@@ -51,6 +51,7 @@ export interface NormalizationProposalResult {
 /**
  * Validate that the field name is a conservative custom product field.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function validateFieldName(field: string): void {
   if (!/^ProductField\d+$/.test(field)) {
     throw new Error(`Invalid custom field name: "${field}". Field name must match pattern ^ProductField\\d+$`);

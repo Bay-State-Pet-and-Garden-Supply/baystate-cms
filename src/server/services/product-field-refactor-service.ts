@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../../db/connection';
 import { listProducts } from '../../db/repositories/product-index-repo';
-import { generateProductFieldAuditReport, getLevenshteinDistance } from './catalog-insight-service';
+import { generateProductFieldAuditReport } from './catalog-insight-service';
 import { autosaveDraft, getProductWithDraft } from './product-service';
 import { findActiveChangeSet, createChangeSet } from '../../db/repositories/change-set-repo';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
@@ -25,6 +25,7 @@ export interface CatalogProposal {
 /**
  * Find all active product SKUs that match a specific custom field value exactly.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function findExactSkusWithFieldValue(field: string, value: string): string[] {
   const { products } = listProducts();
   const skus: string[] = [];

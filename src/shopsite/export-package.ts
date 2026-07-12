@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { buildProductsXml } from './xml-builder';
 import { deterministicStringify } from '../git/deterministic-json';
-import { createImagesZip } from './zip-generator';
+import { createImagesZip, assertZipHasImages } from './zip-generator';
 import type { Product } from '../shared/types';
 
 export interface ExportPackageResult {
@@ -45,6 +45,9 @@ export async function createExportPackage(
   // Generate images zip
   const zipPath = path.join(exportDir, 'shopsite-images.zip');
   await createImagesZip(workspacePath, products, zipPath);
+
+  // Fail hard if all referenced images are missing from disk
+  assertZipHasImages(zipPath, products);
 
   // Generate manifest
   const manifest = {

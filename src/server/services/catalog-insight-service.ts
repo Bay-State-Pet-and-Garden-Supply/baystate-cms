@@ -53,6 +53,7 @@ export interface ProductFieldAuditReport {
 /**
  * Calculate the Levenshtein distance between two strings.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getLevenshteinDistance(a: string, b: string): number {
   const matrix: number[][] = [];
   for (let i = 0; i <= b.length; i++) matrix[i] = [i];

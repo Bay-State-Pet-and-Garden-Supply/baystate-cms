@@ -6,6 +6,7 @@ import {
   approveChangeSet, 
   discardChangeSet, 
   exportChangeSet, 
+  repairChangeSetImages, 
   pushPublish, 
   uploadOnly, 
   type ChangeSet, 
@@ -355,6 +356,15 @@ const STYLE_RULES = `
   .cs-btn-secondary:hover:not(:disabled) {
     background: #f8fafc;
     border-color: #94a3b8;
+  }
+
+  .cs-btn-warning {
+    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+    color: #ffffff;
+  }
+  .cs-btn-warning:hover:not(:disabled) {
+    box-shadow: 0 4px 10px rgba(245, 158, 11, 0.2);
+    transform: translateY(-1px);
   }
 
   .cs-btn-purple {
@@ -766,6 +776,27 @@ export function ChangeSetReview() {
     }
   };
 
+  const handleRepairImages = async () => {
+    if (!selected) return;
+    setLoading(true);
+    setActiveAction('repair-images');
+    setError('');
+    setResult('');
+    try {
+      const res = await repairChangeSetImages(selected);
+      setResult(res.summary);
+      if (!res.success) {
+        const failed = res.results.filter(r => r.error);
+        setError(`${failed.length} product(s) failed: ${failed.map(f => `${f.sku}: ${f.error}`).join('; ')}`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+      setActiveAction(null);
+    }
+  };
+
   const handleExport = async () => {
     if (!selected) return;
     setLoading(true);
@@ -1025,6 +1056,14 @@ export function ChangeSetReview() {
                       disabled={loading}
                     >
                       {activeAction === 'export' ? <span className="spinner-sm" /> : '📤 Export Package'}
+                    </button>
+                    <button 
+                      className="cs-button cs-btn-warning" 
+                      onClick={handleRepairImages} 
+                      disabled={loading}
+                      title="Re-download product images from onboarding extraction data"
+                    >
+                      {activeAction === 'repair-images' ? <span className="spinner-sm" /> : '🖼️ Repair Images'}
                     </button>
                     <button 
                       className="cs-button cs-btn-success" 

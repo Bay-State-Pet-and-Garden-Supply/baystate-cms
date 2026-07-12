@@ -98,6 +98,19 @@ describe('Phase 2: Change Sets and Approval', () => {
       if (product.sku) products.push(product);
     }
 
+    // Create placeholder image files at the expected workspace paths so the
+    // ZIP generator can find them and the image-validation assertion passes.
+    const mockImageFiles = [
+      path.join(testDir, 'products', 'images', 'media', 'dog-food.jpg'),
+      path.join(testDir, 'products', 'images', 'media', 'cat-toy.jpg'),
+      path.join(testDir, 'products', 'images', 'media', 'cat-toy-2.jpg'),
+      path.join(testDir, 'products', 'images', 'media', 'cat-toy-3.jpg'),
+    ];
+    for (const filePath of mockImageFiles) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, 'placeholder-image-data');
+    }
+
     const exportResult = await createExportPackage(testDir, 'test-cs-001', products, {
       changeSetTitle: 'Test Export',
     });

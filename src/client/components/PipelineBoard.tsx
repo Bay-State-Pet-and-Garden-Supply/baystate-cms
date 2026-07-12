@@ -602,13 +602,12 @@ export function PipelineBoard({
   const handleApproveReview = async () => {
     if (!reviewItem) return;
 
-    const hasClassificationRun = Boolean(curationFields.classificationRunId);
     const hasAcceptedPageProposal = classificationProposals.some(
       proposal => proposal.proposalType === 'category_page' && proposal.status === 'accepted',
     );
-    const hasLegacyPageAssignment = Boolean(curationFields.suggestedPages?.length);
-    if (hasClassificationRun ? !hasAcceptedPageProposal : !hasLegacyPageAssignment) {
-      alert('At least one Category Page proposal must be accepted before review can be completed.');
+    const hasManualPageAssignment = Boolean(curationFields.suggestedPages?.length);
+    if (!hasAcceptedPageProposal && !hasManualPageAssignment) {
+      alert('At least one Product Page must be selected or accepted before review can be completed.');
       return;
     }
 
