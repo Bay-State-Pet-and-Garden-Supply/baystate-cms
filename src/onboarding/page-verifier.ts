@@ -70,9 +70,11 @@ export interface VerificationSignals {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /** Signals that independently qualify a candidate for auto-selection. */
+// fallow-ignore-next-line unused-export — used by tests
 export const STRONG_PROOF_THRESHOLD = 40;
 
 /** Minimum number of identity signals required for strong proof. */
+// fallow-ignore-next-line unused-export — used by tests
 export const MIN_IDENTITY_SIGNALS = 2;
 
 // ─── Main entry point ────────────────────────────────────────────────────────
@@ -82,6 +84,7 @@ export const MIN_IDENTITY_SIGNALS = 2;
  * product-identity signals. Returns `null` when the page cannot be
  * fetched (network error, timeout, non-200).
  */
+// fallow-ignore-next-line unused-export — used by tests
 export async function verifyCandidate(
   candidate: InsertSourceData,
   context: VerificationContext,

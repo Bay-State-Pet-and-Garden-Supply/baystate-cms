@@ -29,7 +29,7 @@ export type WorkerHealthResponse = z.infer<typeof WorkerHealthResponseSchema>;
 // ─── Artifact Reference ────────────────────────────────────────────────────────
 
 export const ArtifactRefSchema = z.object({
-  type: z.enum(['html', 'html_min', 'screenshot', 'network', 'image_candidates', 'validation_results']),
+  type: z.enum(['html', 'html_min', 'screenshot', 'image_candidates', 'validation_results']),
   path: z.string(),
   sizeBytes: z.number().int().optional(),
 });
@@ -42,7 +42,6 @@ export const SnapshotRequestSchema = z.object({
   url: z.string().url(),
   runtime: z.enum(['static', 'rendered']).default('rendered'),
   captureScreenshot: z.boolean().default(true),
-  captureNetwork: z.boolean().default(true),
 });
 
 export type SnapshotRequest = z.infer<typeof SnapshotRequestSchema>;
@@ -52,7 +51,6 @@ export const SnapshotResponseSchema = z.object({
   finalUrl: z.string(),
   htmlRef: z.string().nullable().default(null),
   screenshotRef: z.string().nullable().default(null),
-  networkRef: z.string().nullable().default(null),
   jsonLd: z.array(z.record(z.string(), z.unknown())).default(() => []),
   embeddedProductData: z.array(z.record(z.string(), z.unknown())).default(() => []),
   imageCandidates: z.array(z.string()).default(() => []),

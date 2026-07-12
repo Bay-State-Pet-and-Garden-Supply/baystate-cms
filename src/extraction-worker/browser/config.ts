@@ -126,6 +126,7 @@ export function loadWorkerBrowserConfig(): WorkerBrowserConfig {
  * Redact credentials from a proxy URL for safe logging.
  * e.g. "http://user:pass@proxy.example.com:8080" → "http://***:***@proxy.example.com:8080"
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function redactProxyUrl(url: string): string {
   try {
     return url.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@');

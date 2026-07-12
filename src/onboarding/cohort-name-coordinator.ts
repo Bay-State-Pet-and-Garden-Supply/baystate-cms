@@ -122,6 +122,7 @@ export function coordinateCohortItemsOnce(
 /**
  * Clear the in-memory cache. Intended for tests.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function clearCohortCoordinationCache(): void {
   cohortCache.clear();
 }
@@ -273,6 +274,7 @@ function validateCohortResponse(
  * @returns Map of UPC → CoordinatedTitle. Only includes items
  *   from multi-item groups. Missing entries fall back to per-item.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export async function coordinateCohortItems(
   items: OnboardingItem[],
 ): Promise<Map<string, CoordinatedTitle>> {

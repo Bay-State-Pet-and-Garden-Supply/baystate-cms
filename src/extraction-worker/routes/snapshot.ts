@@ -476,7 +476,6 @@ async function extractPageStructureSignalsFromPage(
 async function doStaticSnapshot(
   url: string,
   captureScreenshot: boolean,
-  captureNetwork: boolean,
   domain: string,
   jobId: string,
 ): Promise<SnapshotResponse> {
@@ -505,7 +504,6 @@ async function doStaticSnapshot(
       finalUrl: url,
       htmlRef: null,
       screenshotRef: null,
-      networkRef: null,
       jsonLd: [],
       embeddedProductData: [],
       imageCandidates: [],
@@ -543,12 +541,8 @@ async function doStaticSnapshot(
 
   // Static mode cannot capture screenshots or network
   let screenshotRef: string | null = null;
-  let networkRef: string | null = null;
   if (captureScreenshot) {
     warnings.push('Screenshot capture requires rendered runtime, skipping');
-  }
-  if (captureNetwork) {
-    warnings.push('Network capture requires rendered runtime, skipping');
   }
 
   return buildSnapshotResponse({
@@ -556,7 +550,6 @@ async function doStaticSnapshot(
     finalUrl,
     htmlRef,
     screenshotRef,
-    networkRef,
     jsonLd,
     embeddedProductData,
     imageCandidates,
@@ -568,7 +561,6 @@ async function doStaticSnapshot(
 async function doRenderedSnapshot(
   url: string,
   captureScreenshot: boolean,
-  captureNetwork: boolean,
   domain: string,
   jobId: string,
 ): Promise<SnapshotResponse> {
@@ -593,7 +585,6 @@ async function doRenderedSnapshot(
       finalUrl: url,
       htmlRef: null,
       screenshotRef: null,
-      networkRef: null,
       jsonLd: [],
       embeddedProductData: [],
       imageCandidates: [],
@@ -605,7 +596,6 @@ async function doRenderedSnapshot(
   let finalUrl = url;
   let htmlRef: string | null = null;
   let screenshotRef: string | null = null;
-  let networkRef: string | null = null;
   let jsonLd: Record<string, unknown>[] = [];
   let embeddedProductData: Record<string, unknown>[] = [];
   let imageCandidates: string[] = [];
@@ -677,11 +667,6 @@ async function doRenderedSnapshot(
       }
     }
 
-    // Network capture (placeholder — requires CDP tracing, skip for now)
-    if (captureNetwork) {
-      warnings.push('Network capture not yet implemented (CDP tracing needed)');
-    }
-
     // Extraction phases — all via page.evaluate
     try {
       jsonLd = await extractJsonLdFromPage(page);
@@ -725,7 +710,6 @@ async function doRenderedSnapshot(
     finalUrl,
     htmlRef,
     screenshotRef,
-    networkRef,
     jsonLd,
     embeddedProductData,
     imageCandidates,
@@ -741,7 +725,6 @@ interface SnapshotInput {
   finalUrl: string;
   htmlRef: string | null;
   screenshotRef: string | null;
-  networkRef: string | null;
   jsonLd: Record<string, unknown>[];
   embeddedProductData: Record<string, unknown>[];
   imageCandidates: string[];
@@ -759,7 +742,6 @@ function buildSnapshotResponse(input: SnapshotInput): SnapshotResponse {
     finalUrl: input.finalUrl,
     htmlRef: input.htmlRef,
     screenshotRef: input.screenshotRef,
-    networkRef: input.networkRef,
     jsonLd: input.jsonLd,
     embeddedProductData: input.embeddedProductData,
     imageCandidates: input.imageCandidates,
@@ -823,7 +805,6 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
         result = await doStaticSnapshot(
           request.url,
           request.captureScreenshot,
-          request.captureNetwork,
           domain,
           jobId,
         );
@@ -831,7 +812,6 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
         result = await doRenderedSnapshot(
           request.url,
           request.captureScreenshot,
-          request.captureNetwork,
           domain,
           jobId,
         );
@@ -848,7 +828,6 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
         finalUrl: '',
         htmlRef: null,
         screenshotRef: null,
-        networkRef: null,
         jsonLd: [],
         embeddedProductData: [],
         imageCandidates: [],
@@ -867,7 +846,6 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
       finalUrl: '',
       htmlRef: null,
       screenshotRef: null,
-      networkRef: null,
       jsonLd: [],
       embeddedProductData: [],
       imageCandidates: [],

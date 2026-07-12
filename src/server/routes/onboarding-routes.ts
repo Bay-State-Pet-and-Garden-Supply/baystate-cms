@@ -1843,7 +1843,6 @@ route.post('/onboarding/settings/domain-diagnostics/:domain/generate-profile', a
     url: resolvedUrl,
     runtime: 'rendered',
     captureScreenshot: false,
-    captureNetwork: false,
   });
 
   if (!snapshotResult.ok) {

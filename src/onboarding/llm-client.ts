@@ -430,6 +430,7 @@ export async function callLlm(
  *
  * Exported for testing.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function extractProtectedTokens(rawName: string): string[] {
   const tokens: string[] = [];
   const lower = rawName;
@@ -464,6 +465,7 @@ export function extractProtectedTokens(rawName: string): string[] {
  *
  * Exported for testing.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function normalizeProtectedToken(token: string): string {
   const t = token.trim();
 
@@ -511,6 +513,7 @@ export function normalizeProtectedToken(token: string): string {
  *
  * Exported for testing.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function verifyAndRestoreProtectedTokens(expectedName: string, rawName: string): string {
   const protectedTokens = extractProtectedTokens(rawName);
   if (protectedTokens.length === 0) return expectedName;

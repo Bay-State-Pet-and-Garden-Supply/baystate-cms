@@ -39,6 +39,7 @@ function getCrawleeStorageDir(): string {
  * Must be called before any Crawlee module is imported, because Crawlee
  * reads CRAWLEE_STORAGE_DIR at module-load time.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function configureCrawleeStorage(): void {
   const storageDir = getCrawleeStorageDir();
   process.env.CRAWLEE_STORAGE_DIR = storageDir;
@@ -168,6 +169,7 @@ export async function runRenderedPage<T>(
  * Results are returned in input order. Each URL is processed independently;
  * one failure does not cancel the others.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export async function runRenderedPages<T>(
   inputs: RenderedPageInput[],
   extractor: PageExtractor<T>,

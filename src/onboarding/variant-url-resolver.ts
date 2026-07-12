@@ -69,6 +69,7 @@ function buildVariantUrl(baseUrl: string, variantId: string): string {
 /**
  * Score a Shopify variant candidate deterministically against product metadata.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function scoreShopifyVariant(
   v: Omit<ShopifyVariantCandidate, 'url'>,
   context: VariantResolutionContext,
@@ -142,6 +143,7 @@ export function scoreShopifyVariant(
 /**
  * Resolve Shopify variants from raw HTML.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function resolveVariantsFromHtml(
   baseUrl: string,
   html: string,

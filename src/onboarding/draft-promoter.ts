@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import sharp from 'sharp';
 import { getDb } from '../db/connection';
@@ -8,7 +7,7 @@ import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { clearProductPages, assignProductToPage, assignProductToPageId, getProductPageAssignments } from '../db/repositories/page-repo';
+import { clearProductPages, assignProductToPage, assignProductToPageId, getProductPageAssignments, getPageByName } from '../db/repositories/page-repo';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
 import { getAcceptedProposals, recordHistoryEvent } from '../db/repositories/classification-run-repo';
@@ -29,14 +28,14 @@ interface ProcessedImageResult {
 }
 
 async function downloadAndProcessImages(
-  _workspacePath: string,
+  workspacePath: string,
   sku: string,
   brandFolder: string,
   imageStem: string,
   primaryUrl: string | null,
   additionalUrls: string[],
 ): Promise<ProcessedImageResult> {
-  const imagesDir = path.join(os.homedir(), 'Downloads', brandFolder);
+  const imagesDir = path.join(workspacePath, 'products', 'images', brandFolder);
   if (!fs.existsSync(imagesDir)) {
     fs.mkdirSync(imagesDir, { recursive: true });
   }
@@ -81,6 +80,12 @@ async function downloadAndProcessImages(
     const imageSuffix = index === 0 ? '' : `-${index + 1}`;
     const filename = `${finalImageStem}${imageSuffix}.jpg`;
     const destPath = path.join(imagesDir, filename);
+
+    // Path containment: reject paths that escape the images directory
+    if (!path.resolve(destPath).startsWith(path.resolve(imagesDir))) {
+      console.warn(`[DraftPromoter] Skipping image with path traversal: ${filename}`);
+      continue;
+    }
 
     try {
       const response = await fetch(url, {
@@ -305,8 +310,18 @@ export async function promoteItems(
         }
       }
 
-      // Explicit/manual persisted page assignments are the only fallback.
-      // Unreviewed curation suggestions must never leak into promotion.
+      // Integrate manual checklist selections from curation data if not already present.
+      if (item.curationData?.suggestedPages && item.curationData.suggestedPages.length > 0) {
+        for (const pageName of item.curationData.suggestedPages) {
+          if (!classificationPageNames.includes(pageName)) {
+            const page = getPageByName(pageName);
+            classificationPageNames.push(pageName);
+            classificationPageProposals.push({ pageId: page?.id || null, pageName });
+          }
+        }
+      }
+
+      // Explicit/manual persisted page assignments are the fallback if we still have nothing.
       if (classificationPageProposals.length === 0) {
         try {
           const dbPages = getProductPageAssignments(item.upc);

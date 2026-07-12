@@ -663,7 +663,7 @@ describe('Draft Promoter Service', () => {
     expect(result.failures[0].error).toContain('No accepted product page proposals');
   });
 
-  it('fails promotion when only curationData.suggestedPages exist but no accepted proposals', async () => {
+  it('succeeds promotion when only curationData.suggestedPages exist but no accepted proposals', async () => {
     const batch = createBatch({
       workspaceId: wsId,
       name: 'Onboard Promo Fallback',
@@ -720,8 +720,12 @@ describe('Draft Promoter Service', () => {
     );
 
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    expect(promoteRes.failures.length).toBe(1);
-    expect(promoteRes.count).toBe(0);
-    expect(promoteRes.failures[0].error).toContain('No accepted product page proposals');
+    expect(promoteRes.failures.length).toBe(0);
+    expect(promoteRes.count).toBe(1);
+
+    const csItems = listChangeSetItems(promoteRes.changeSetId!);
+    expect(csItems.length).toBe(1);
+    expect(csItems[0].sku).toBe('999999999999');
+    expect(csItems[0].operation).toBe('create');
   });
 });

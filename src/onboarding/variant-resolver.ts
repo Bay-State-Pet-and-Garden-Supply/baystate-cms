@@ -19,6 +19,7 @@ export interface VariantResolutionResult {
   ambiguous: boolean;
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export const SIZE_ALIASES: Record<string, string[]> = {
   xs:        ['x-small', 'xsmall', 'extra small', 'xtra small', 'x small'],
   sm:        ['small', 'sm'],
@@ -37,6 +38,7 @@ export const SIZE_ALIASES: Record<string, string[]> = {
   'extra small': ['x-small', 'xsmall', 'extra small', 'xtra small'],
 };
 
+// fallow-ignore-next-line unused-export — used by tests
 export const COLOR_ALIASES: Record<string, string[]> = {
   lav: ['lavender', 'lav'],
   chkn: ['chicken', 'chkn'],
@@ -46,6 +48,7 @@ export const COLOR_ALIASES: Record<string, string[]> = {
   pkg: ['package', 'pkg'],
 };
 
+// fallow-ignore-next-line unused-export — used by tests
 export function normalizeToken(s: string): string {
   return s.normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -59,6 +62,7 @@ export function tokenSet(s: string): Set<string> {
   return new Set(normalizeToken(s).split(/\s+/).filter(Boolean));
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function variantDescriptor(v: any): { text: string; tokens: Set<string> } {
   const parts: string[] = [];
   if (v?.title) parts.push(String(v.title));
@@ -77,6 +81,7 @@ export function variantDescriptor(v: any): { text: string; tokens: Set<string> }
   return { text, tokens: tokenSet(parts.join(' ')) };
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function expandExpectedNameTokens(expected: string): Set<string> {
   const raw = normalizeToken(expected);
   const words = raw.split(/\s+/).filter(Boolean);
@@ -93,6 +98,7 @@ export function expandExpectedNameTokens(expected: string): Set<string> {
   return expanded;
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function getExpectedSizeAliasForms(expected: string): Set<string> {
   const raw = normalizeToken(expected);
   const words = raw.split(/\s+/).filter(Boolean);
@@ -112,6 +118,7 @@ export function getExpectedSizeAliasForms(expected: string): Set<string> {
 /**
  * Strategy 1: Extract variants from Schema.org JSON-LD hasVariant / ProductGroup
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function extractVariantsFromJsonLd(html: string): VariantCandidate[] {
   const $ = cheerio.load(html);
   const scripts: string[] = [];
@@ -171,6 +178,7 @@ export function extractVariantsFromJsonLd(html: string): VariantCandidate[] {
 /**
  * Strategy 2: Extract variants from Shopify productJSON script embeds
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function extractVariantsFromShopify(html: string): VariantCandidate[] {
   const $ = cheerio.load(html);
   const candidates: VariantCandidate[] = [];
@@ -242,6 +250,7 @@ function mapShopifyVariant(v: any): VariantCandidate {
 /**
  * Strategy 3: Extract variants from WooCommerce data-product_variations attribute
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function extractVariantsFromWooCommerce(html: string): VariantCandidate[] {
   const $ = cheerio.load(html);
   const candidates: VariantCandidate[] = [];
@@ -311,6 +320,7 @@ export function diffRegisterVsExpected(
 /**
  * Score a candidate variant against variant hint tokens
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function scoreVariantCandidate(
   v: VariantCandidate,
   hints: Set<string>
@@ -368,6 +378,7 @@ export function scoreVariantCandidate(
 /**
  * Shared Matching Core
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function matchVariant(
   candidates: VariantCandidate[],
   registerName: string,
@@ -441,6 +452,7 @@ export function matchVariant(
 /**
  * Top-level resolveVariantUrl
  */
+// fallow-ignore-next-line unused-export — used by tests
 export async function resolveVariantUrl(
   baseUrl: string,
   registerName: string,

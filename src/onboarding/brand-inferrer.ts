@@ -223,6 +223,7 @@ function inferBrandViaHeuristics(
 /**
  * Scan search results to identify the official domain for a brand.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function inferDomainForBrand(
   brandName: string,
   searchResults: Array<{ link: string }>
@@ -261,6 +262,7 @@ export function inferDomainForBrand(
 /**
  * Helper to extract domain from a URL string.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function extractDomain(url: string): string {
   try {
     const parsed = new URL(url);

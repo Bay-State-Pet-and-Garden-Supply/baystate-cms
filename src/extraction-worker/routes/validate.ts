@@ -59,7 +59,8 @@ const RENDERED_DWELL_MS = 2_000;
  * combinators, and pseudo-classes that the old regex approach could not.
  * Returns null for zero matches or invalid/unparseable CSS.
  */
-function evaluateSelectorText(html: string, selector: string): string | null {
+// fallow-ignore-next-line unused-export — used by tests
+export function evaluateSelectorText(html: string, selector: string): string | null {
   const sel = selector?.trim();
   if (!sel) return null;
   try {
@@ -78,7 +79,8 @@ function evaluateSelectorText(html: string, selector: string): string | null {
  * source URLs from matched elements and their descendant `<img>` elements.
  * Returns an empty array for zero matches, invalid CSS, or no images found.
  */
-function evaluateSelectorImageUrls(
+// fallow-ignore-next-line unused-export — used by tests
+export function evaluateSelectorImageUrls(
   html: string,
   selector: string,
   baseUrl?: string,
@@ -764,4 +766,3 @@ export function handleValidate(req: IncomingMessage, res: ServerResponse): void 
 
 // ─── Exports for testing ────────────────────────────────────────────────────────
 
-export { evaluateSelectorText, evaluateSelectorImageUrls };

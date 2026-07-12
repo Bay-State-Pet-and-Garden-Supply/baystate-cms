@@ -22,6 +22,7 @@ export interface LaunchContext {
  * Create a launch context using Camoufox (anti-detect Firefox).
  * This is the default and preferred backend.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export async function createCamoufoxLaunchContext(
   config: WorkerBrowserConfig,
 ): Promise<LaunchContext> {
@@ -45,6 +46,7 @@ export async function createCamoufoxLaunchContext(
  * Create a launch context using plain Playwright Chromium.
  * Use this as a documented rollback when Camoufox is unavailable.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export async function createPlainPlaywrightLaunchContext(
   config: WorkerBrowserConfig,
 ): Promise<LaunchContext> {
