@@ -17,7 +17,7 @@ The worker owns browser/crawler execution:
 
 - Playwright page loading and deterministic replay
 - Crawlee sample collection and validation sweeps
-- Screenshots, DOM snapshots, network capture, image previews
+- Screenshots, DOM snapshots, image previews
 - Optional Stagehand/LLM proposal assistance for Profile Builder only
 - Browser pooling/session/proxy concerns
 
@@ -95,8 +95,7 @@ Input:
 {
   "url": "https://brand.com/products/foo",
   "runtime": "static|rendered",
-  "captureScreenshot": true,
-  "captureNetwork": true
+  "captureScreenshot": true
 }
 ```
 
@@ -108,7 +107,6 @@ Output:
   "finalUrl": "https://brand.com/products/foo",
   "htmlRef": "artifact://...",
   "screenshotRef": "artifact://...",
-  "networkRef": "artifact://...",
   "jsonLd": [],
   "embeddedProductData": [],
   "imageCandidates": [],
@@ -340,7 +338,7 @@ Implementation details:
   - **rendered**: Launches headless Playwright Chromium, blocks images/fonts/stylesheets/media/trackers via `page.route()`, navigates with `waitUntil: 'domcontentloaded'` and 25s timeout, dwells 2s for dynamic content. Extracts JSON-LD, embedded product data, image candidates, and page structure signals via `page.evaluate()`. Captures screenshot as PNG if `captureScreenshot` is true.
 - Both paths pass output through `SnapshotResponseSchema.parse()` before returning.
 - Errors are surfaced in the `warnings` array; never throws uncaught errors.
-- Network capture is a placeholder warning (requires CDP tracing).
+- Network capture is not implemented (removed as unused).
 
 ### Phase 4 — profile validation sweeps ✅ DONE
 

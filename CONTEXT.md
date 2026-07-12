@@ -827,3 +827,41 @@ _Avoid_: Table view, item list, batch detail view
 - Generative models could be used where rules already answer the question — resolved: run **Deterministic Classification Stages** first.
 - Low-confidence classifiers could be forced to guess — resolved: use **Stage Abstention** and record the reason instead.
 - Abstentions could clutter review — resolved: surface only important missing proposals as **Reviewable Abstentions**.
+
+## Catalog Product Classification
+
+Catalog Product Classification extends the classification pipeline to existing ShopSite products (not just onboarding pipeline items).
+
+### Key Concepts
+
+**Catalog Classification Run**: A classification run executed against an existing catalog product, identified by `source_kind = 'catalog_product'` and `onboarding_item_id IS NULL`.
+
+**Source Kind**: Discriminates classification runs by their trigger: `onboarding` (from pipeline) or `catalog_product` (from product detail).
+
+**Source Product Hash**: A deterministic SHA-256 hash of the classification-relevant product fields (name, description, weight, customFields, media) used for drift detection at apply time.
+
+### Architecture
+
+**Evidence Extraction**: The catalog adapter (`catalog-product-source.ts`) maps Product fields into a `NormalizedEvidenceInput` and feeds it to the shared evidence extractor (`product-evidence-extractor.ts`). This avoids dependency on the `onboarding_items` table.
+
+**Stage Set**: Catalog runs omit `name_consolidation` (must not rename existing products). The remaining 6 stages run: evidence_extraction, primary_product_type, attribute_applicability, product_attribute_proposals, category_page_proposals, product_draft_projection.
+
+**Draft-Only Application**: Accepted field and page proposals are applied by creating an **update change-set draft**, never by direct write. Source hash and config hash are verified at apply time to prevent clobbering concurrent edits.
+
+### Terms
+
+**Catalog Classification Run**: A `classification_runs` row with `source_kind = 'catalog_product'` and `onboarding_item_id IS NULL`.
+
+**Catalog Evidence Source**: The `'catalog_product'` value in the `classification_evidence.source` CHECK constraint, indicating evidence derived directly from catalog product data.
+
+**Primary Product Type (Catalog)**: Remains local to classification operational state — never written to ShopSite or the canonical product.
+
+**Existing Page Context**: A catalog product's current `product_pages` assignments are surfaced as `'page_context'` evidence during classification so page proposals can be additive only (classification never removes existing assignments).
+
+### Constraints
+
+- At most one running catalog classification run per product SKU per workspace.
+- Applying accepted proposals always creates a change-set draft; never a direct write.
+- Older catalog-run proposals are marked stale (`stale` status) when a newer run completes.
+- Catalog runs cannot rename products or write Primary Product Type to ShopSite.
+- Refresh queue defers catalog classification to the Product Detail Rerun action; auto-refresh for catalog products is deferred to a future release.
