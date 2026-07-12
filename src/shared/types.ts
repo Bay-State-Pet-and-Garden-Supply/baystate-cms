@@ -37,6 +37,11 @@ import type {
   CurationTargetKind,
   CurationTargetOptionSource,
   BrandConfig,
+  ClassificationRunSourceKind,
+  StartCatalogClassificationRunRequest,
+  SubmitCatalogDecisionsRequest,
+  ApplyCatalogClassificationRequest,
+  CatalogClassificationRunDetail,
 } from './schemas/classification';
 
 export type {
@@ -91,6 +96,11 @@ export type {
   CurationTargetKind,
   CurationTargetOptionSource,
   BrandConfig,
+  ClassificationRunSourceKind,
+  StartCatalogClassificationRunRequest,
+  SubmitCatalogDecisionsRequest,
+  ApplyCatalogClassificationRequest,
+  CatalogClassificationRunDetail,
 };
 
 /** Syncable product status for a change set item */

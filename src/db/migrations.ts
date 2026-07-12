@@ -741,6 +741,85 @@ export function runMigrations(): void {
     WHERE onboarding_item_id IS NOT NULL AND status = 'running'
   `);
 
+  // ── Catalog Classification Migration ──────────────────────────────────────
+  //
+  // Adds source_kind and source_product_hash columns to classification_runs,
+  // expands the classification_evidence CHECK constraint to include 'catalog_product',
+  // and creates new indexes for catalog-run concurrency and lookup.
+  try {
+    const catalogClassVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('catalog_classification_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!catalogClassVersion) {
+      console.log('[Migrations] Running catalog classification migration...');
+
+      // Add columns to classification_runs
+      const runCols = db.query('PRAGMA table_info(classification_runs)').all() as Array<{ name: string }>;
+      if (!runCols.some(c => c.name === 'source_kind')) {
+        db.exec("ALTER TABLE classification_runs ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'onboarding' CHECK (source_kind IN ('onboarding', 'catalog_product'))");
+      }
+      if (!runCols.some(c => c.name === 'source_product_hash')) {
+        db.exec('ALTER TABLE classification_runs ADD COLUMN source_product_hash TEXT');
+      }
+
+      // Rebuild classification_evidence to update CHECK constraint for source.
+      // Foreign keys are temporarily disabled so classification_proposal_evidence
+      // (which references classification_evidence) survives the table swap.
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          // Create new table with updated CHECK
+          db.exec(`CREATE TABLE classification_evidence_new (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+          onboarding_item_id TEXT,
+          product_sku TEXT NOT NULL,
+          stage_name TEXT NOT NULL,
+          source TEXT NOT NULL CHECK (source IN ('spreadsheet', 'official_product_page', 'third_party_page', 'visual_product_evidence', 'page_context', 'approved_product_example', 'catalog_manager_guidance', 'catalog_product')),
+          reliability TEXT NOT NULL DEFAULT 'unknown' CHECK (reliability IN ('high', 'medium', 'low', 'conflicting', 'unknown')),
+          attribute_id TEXT,
+          source_url TEXT,
+          source_field TEXT,
+          snippet TEXT,
+          value_json TEXT,
+          metadata_json TEXT,
+          snapshot_json TEXT,
+          retention_expires_at TEXT,
+          created_at TEXT NOT NULL
+        )`);
+          // Copy data
+          db.exec('INSERT INTO classification_evidence_new SELECT * FROM classification_evidence');
+          // Drop old, rename new
+          db.exec('DROP TABLE classification_evidence');
+          db.exec('ALTER TABLE classification_evidence_new RENAME TO classification_evidence');
+          // Recreate indexes
+          db.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_run ON classification_evidence(run_id)');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_product_source ON classification_evidence(product_sku, source)');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_classification_evidence_product ON classification_evidence(product_sku)');
+        })();
+      } finally {
+        // Always restore foreign key enforcement, even if the rebuild fails
+        db.exec('PRAGMA foreign_keys = ON');
+      }
+
+      // Create new indexes
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_runs_one_running_catalog ON classification_runs(workspace_id, product_sku) WHERE source_kind = \'catalog_product\' AND status = \'running\'');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_classification_runs_workspace_sku_source_time ON classification_runs(workspace_id, product_sku, source_kind, started_at DESC)');
+
+      // Verify FK integrity
+      const fkCheck = db.query('PRAGMA foreign_key_check').all();
+      if (fkCheck.length > 0) {
+        console.error('[Migrations] Foreign key check failed after catalog classification migration:', fkCheck);
+        throw new Error('Foreign key integrity violation after catalog classification migration');
+      }
+
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('catalog_classification_schema_version', '1')");
+      console.log('[Migrations] Catalog classification migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Catalog classification migration failed:', e);
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

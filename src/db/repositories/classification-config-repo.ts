@@ -254,6 +254,14 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
 // ─── Config Snapshot (for reproducible runs) ────────────────────────────────────
 
 /**
+ * Compute a stable hash of the classification config without any DB side effects.
+ * Used for drift detection in read-only contexts (GET routes).
+ */
+export function computeConfigHash(config: ClassificationConfig): string {
+  return hashString(JSON.stringify(config));
+}
+
+/**
  * Creates a point-in-time snapshot of the active config for use in a classification run.
  */
 export function createConfigSnapshot(workspaceId: string, config: ClassificationConfig, sourceCommit?: string): { id: string; hash: string } {
@@ -291,6 +299,7 @@ export function getCachedProductTypes(workspaceId: string): ProductTypeConfig[] 
   }));
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function getCachedAttributes(workspaceId: string): ProductAttributeConfig[] {
   const rows = getDb()
     .query('SELECT * FROM classification_attributes WHERE workspace_id = ?')

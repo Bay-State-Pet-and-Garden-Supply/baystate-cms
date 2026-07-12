@@ -10,6 +10,8 @@ export interface ClassificationRunRow {
   id: string;
   workspaceId: string;
   onboardingItemId: string | null;
+  sourceKind: 'onboarding' | 'catalog_product';
+  sourceProductHash: string | null;
   productSku: string;
   configSnapshotId: string | null;
   configSnapshotHash: string | null;
@@ -25,17 +27,51 @@ export function createRun(
   configSnapshotId: string | null,
   configSnapshotHash: string | null,
   onboardingItemId?: string,
+): ClassificationRunRow;
+export function createRun(
+  workspaceId: string,
+  sku: string,
+  configSnapshotId: string | null,
+  configSnapshotHash: string | null,
+  options?: {
+    onboardingItemId?: string;
+    sourceKind?: 'onboarding' | 'catalog_product';
+    sourceProductHash?: string;
+  },
+): ClassificationRunRow;
+export function createRun(
+  workspaceId: string,
+  sku: string,
+  configSnapshotId: string | null,
+  configSnapshotHash: string | null,
+  optionsOrItemId?: string | {
+    onboardingItemId?: string;
+    sourceKind?: 'onboarding' | 'catalog_product';
+    sourceProductHash?: string;
+  },
 ): ClassificationRunRow {
+  let onboardingItemId: string | undefined;
+  let sourceKind: 'onboarding' | 'catalog_product' = 'onboarding';
+  let sourceProductHash: string | null = null;
+
+  if (typeof optionsOrItemId === 'string') {
+    onboardingItemId = optionsOrItemId;
+  } else if (optionsOrItemId) {
+    onboardingItemId = optionsOrItemId.onboardingItemId;
+    sourceKind = optionsOrItemId.sourceKind ?? (optionsOrItemId.onboardingItemId ? 'onboarding' : 'catalog_product');
+    sourceProductHash = optionsOrItemId.sourceProductHash ?? null;
+  }
+
   const id = randomUUID();
   const db = getDb();
   db.run(
     `INSERT INTO classification_runs
-     (id, workspace_id, onboarding_item_id, product_sku, config_snapshot_id, config_snapshot_hash,
-      status, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'running', ?)`,
-    [id, workspaceId, onboardingItemId ?? null, sku, configSnapshotId, configSnapshotHash, now()],
+     (id, workspace_id, onboarding_item_id, source_kind, source_product_hash,
+      product_sku, config_snapshot_id, config_snapshot_hash, status, started_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
+    [id, workspaceId, onboardingItemId ?? null, sourceKind, sourceProductHash, sku, configSnapshotId, configSnapshotHash, now()],
   );
-  return { id, workspaceId, onboardingItemId: onboardingItemId ?? null, productSku: sku, configSnapshotId, configSnapshotHash, status: 'running', startedAt: now(), completedAt: null, errorMessage: null };
+  return { id, workspaceId, onboardingItemId: onboardingItemId ?? null, sourceKind, sourceProductHash, productSku: sku, configSnapshotId, configSnapshotHash, status: 'running', startedAt: now(), completedAt: null, errorMessage: null };
 }
 
 export function completeRun(
@@ -49,7 +85,7 @@ export function completeRun(
   );
 }
 
-function getRecentRun(workspaceId: string, sku: string): ClassificationRunRow | null {
+export function getRecentRun(workspaceId: string, sku: string): ClassificationRunRow | null {
   const row = getDb()
     .query('SELECT * FROM classification_runs WHERE workspace_id = ? AND product_sku = ? ORDER BY started_at DESC LIMIT 1')
     .get(workspaceId, sku) as Record<string, any> | undefined;
@@ -57,12 +93,31 @@ function getRecentRun(workspaceId: string, sku: string): ClassificationRunRow | 
   return mapRun(row);
 }
 
-function getRun(id: string): ClassificationRunRow | null {
+export function getRun(id: string): ClassificationRunRow | null {
   const row = getDb()
     .query('SELECT * FROM classification_runs WHERE id = ?')
     .get(id) as Record<string, any> | undefined;
   if (!row) return null;
   return mapRun(row);
+}
+
+export function getRecentCatalogRun(workspaceId: string, sku: string): ClassificationRunRow | null {
+  const row = getDb()
+    .query("SELECT * FROM classification_runs WHERE workspace_id = ? AND product_sku = ? AND source_kind = 'catalog_product' ORDER BY started_at DESC LIMIT 1")
+    .get(workspaceId, sku) as Record<string, any> | undefined;
+  if (!row) return null;
+  return mapRun(row);
+}
+
+export function supersedeCatalogProposals(workspaceId: string, sku: string, newRunId: string): void {
+  const db = getDb();
+  db.run(
+    `UPDATE classification_proposals SET is_stale = 1, staleness_reason = 'Superseded by newer catalog run ' || ?, status = 'stale'
+     WHERE product_sku = ? AND run_id IN (
+       SELECT id FROM classification_runs WHERE workspace_id = ? AND product_sku = ? AND source_kind = 'catalog_product' AND id != ?
+     )`,
+    [newRunId, sku, workspaceId, sku, newRunId],
+  );
 }
 
 // ─── Stage Results ─────────────────────────────────────────────────────────────
@@ -105,6 +160,7 @@ function getProposalsBySku(productSku: string): ClassificationProposal[] {
   return rows.map(mapProposal);
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function getPendingPageProposals(productSku: string): ClassificationProposal[] {
   const rows = getDb()
     .query("SELECT * FROM classification_proposals WHERE product_sku = ? AND proposal_type = ? AND status = ? ORDER BY confidence DESC")
@@ -215,6 +271,8 @@ function mapRun(row: Record<string, any>): ClassificationRunRow {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
     onboardingItemId: row.onboarding_item_id ? String(row.onboarding_item_id) : null,
+    sourceKind: String(row.source_kind || 'onboarding') as 'onboarding' | 'catalog_product',
+    sourceProductHash: row.source_product_hash ? String(row.source_product_hash) : null,
     productSku: String(row.product_sku),
     configSnapshotId: row.config_snapshot_id ? String(row.config_snapshot_id) : null,
     configSnapshotHash: row.config_snapshot_hash ? String(row.config_snapshot_hash) : null,

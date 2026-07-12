@@ -149,6 +149,8 @@ CREATE TABLE IF NOT EXISTS classification_runs (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
   onboarding_item_id TEXT REFERENCES onboarding_items(id) ON DELETE SET NULL,
+  source_kind TEXT NOT NULL DEFAULT 'onboarding' CHECK (source_kind IN ('onboarding', 'catalog_product')),
+  source_product_hash TEXT,
   product_sku TEXT NOT NULL,
   config_snapshot_id TEXT REFERENCES classification_config_snapshots(id),
   config_snapshot_hash TEXT,
@@ -177,7 +179,7 @@ CREATE TABLE IF NOT EXISTS classification_evidence (
   onboarding_item_id TEXT,
   product_sku TEXT NOT NULL,
   stage_name TEXT NOT NULL,
-  source TEXT NOT NULL CHECK (source IN ('spreadsheet', 'official_product_page', 'third_party_page', 'visual_product_evidence', 'page_context', 'approved_product_example', 'catalog_manager_guidance')),
+  source TEXT NOT NULL CHECK (source IN ('spreadsheet', 'official_product_page', 'third_party_page', 'visual_product_evidence', 'page_context', 'approved_product_example', 'catalog_manager_guidance', 'catalog_product')),
   reliability TEXT NOT NULL DEFAULT 'unknown' CHECK (reliability IN ('high', 'medium', 'low', 'conflicting', 'unknown')),
   attribute_id TEXT,
   source_url TEXT,
@@ -355,6 +357,14 @@ CREATE INDEX IF NOT EXISTS idx_classification_runs_status
 
 CREATE INDEX IF NOT EXISTS idx_classification_runs_workspace
   ON classification_runs(workspace_id);
+
+-- Prevent concurrent catalog classification runs for the same product
+CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_runs_one_running_catalog
+  ON classification_runs(workspace_id, product_sku)
+  WHERE source_kind = 'catalog_product' AND status = 'running';
+
+CREATE INDEX IF NOT EXISTS idx_classification_runs_workspace_sku_source_time
+  ON classification_runs(workspace_id, product_sku, source_kind, started_at DESC);
 
 -- Stage results indexes
 CREATE INDEX IF NOT EXISTS idx_classification_stage_results_run

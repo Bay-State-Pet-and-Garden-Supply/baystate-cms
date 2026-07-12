@@ -12,10 +12,13 @@
     "test:watch": "vitest",
     "test:unit": "vitest run",
     "test:db": "bun test src/tests/unit/db-migration.test.ts",
+    "test:db-catalog": "bun test src/tests/unit/catalog-classification-db.test.ts",
     "worker:dev": "node --import ./preload/crawlee-storage.mjs --import tsx src/extraction-worker/server.ts",
     "worker:start": "node --import ./preload/crawlee-storage.mjs dist/extraction-worker/server.js",
     "lint": "eslint . --ext .ts,.tsx",
-    "typecheck": "tsc --noEmit --skipLibCheck"
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "fallow": "fallow",
+    "fallow:audit": "fallow audit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.8",

@@ -6,6 +6,11 @@ import { curateItemWithPipeline } from '../onboarding/product-curator';
  * For each queued refresh, re-runs the classification pipeline
  * for the affected product SKU. Skips deferred items.
  *
+ * Source awareness:
+ * - Rows without a source_kind (legacy) default to onboarding behavior.
+ * - Catalog config-refresh queuing is deferred for this release.
+ *   Use the Product Detail "Rerun" action for catalog products.
+ *
  * Returns the count of successfully processed refreshes.
  */
 export async function processRefreshQueue(

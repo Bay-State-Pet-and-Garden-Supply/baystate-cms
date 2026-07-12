@@ -336,6 +336,7 @@ export const EvidenceSourceEnum = z.enum([
   'page_context',
   'approved_product_example',
   'catalog_manager_guidance',
+  'catalog_product',
 ]);
 
 export type EvidenceSource = z.infer<typeof EvidenceSourceEnum>;
@@ -451,3 +452,89 @@ export const ClassificationHistoryEventSchema = z.object({
 });
 
 export type ClassificationHistoryEvent = z.infer<typeof ClassificationHistoryEventSchema>;
+
+// ─── Catalog Product Classification ─────────────────────────────────────────────
+
+/**
+ * Discriminates classification runs by their data source.
+ * - onboarding: Run was triggered from an onboarding pipeline item.
+ * - catalog_product: Run was triggered from an existing catalog product.
+ */
+export const ClassificationRunSourceKindEnum = z.enum(['onboarding', 'catalog_product']);
+export type ClassificationRunSourceKind = z.infer<typeof ClassificationRunSourceKindEnum>;
+
+// ─── Catalog Product Classification API Schemas ─────────────────────────────────
+
+/**
+ * Request body to start a classification run for an existing catalog product.
+ */
+export const StartCatalogClassificationRunRequestSchema = z.object({
+  sku: z.string().min(1),
+});
+
+export type StartCatalogClassificationRunRequest = z.infer<typeof StartCatalogClassificationRunRequestSchema>;
+
+/**
+ * Request body to submit proposal decisions for a catalog classification run.
+ */
+export const SubmitCatalogDecisionsRequestSchema = z.object({
+  decisions: z.array(z.object({
+    proposalId: z.string().min(1),
+    decision: DecisionEnum,
+    reviewerNote: z.string().nullable().default(null),
+    revisedValue: z.unknown().optional(),
+  })),
+});
+
+export type SubmitCatalogDecisionsRequest = z.infer<typeof SubmitCatalogDecisionsRequestSchema>;
+
+/**
+ * Request body to apply accepted classification proposals as a change-set draft.
+ */
+export const ApplyCatalogClassificationRequestSchema = z.object({
+  runId: z.string().min(1),
+});
+
+export type ApplyCatalogClassificationRequest = z.infer<typeof ApplyCatalogClassificationRequestSchema>;
+
+/**
+ * Enriched run detail returned by GET /api/products/:sku/classification.
+ */
+export const CatalogClassificationRunDetailSchema = z.object({
+  run: z.object({
+    id: z.string(),
+    sourceKind: ClassificationRunSourceKindEnum,
+    status: ClassificationRunStatusEnum,
+    productSku: z.string(),
+    configSnapshotHash: z.string().nullable(),
+    sourceProductHash: z.string().nullable(),
+    startedAt: z.string(),
+    completedAt: z.string().nullable(),
+    errorMessage: z.string().nullable(),
+  }),
+  configDrift: z.boolean().default(false),
+  sourceDrift: z.boolean().default(false),
+  evidence: z.array(ClassificationEvidenceSchema),
+  proposals: z.array(ClassificationProposalSchema),
+  decisions: z.array(ClassificationProposalDecisionSchema),
+  stageResults: z.array(z.object({
+    stageName: ClassificationStageNameEnum,
+    status: ClassificationStageStatusEnum,
+    errorMessage: z.string().nullable(),
+  })),
+  projection: z.object({
+    fields: z.array(z.object({
+      catalogField: z.string(),
+      currentValue: z.string().nullable(),
+      proposedValue: z.string().nullable(),
+      isOverwrite: z.boolean(),
+      isNoOp: z.boolean(),
+    })),
+    pages: z.object({
+      existing: z.array(z.string()),
+      proposed: z.array(z.string()),
+    }),
+  }).optional(),
+});
+
+export type CatalogClassificationRunDetail = z.infer<typeof CatalogClassificationRunDetailSchema>;

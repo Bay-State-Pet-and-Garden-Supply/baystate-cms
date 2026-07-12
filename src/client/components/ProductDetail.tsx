@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { getProduct, saveDraft, getConnection, listFieldRegistry, type ProductDetail as ProductDetailType } from '../api';
+import { CatalogClassificationPanel } from './CatalogClassificationPanel';
 import type { FieldRegistryEntry } from '../../shared/schemas/field-registry';
 
 function ProductImage({ src, alt, title }: { src: string; alt: string; title: string }) {
@@ -876,6 +877,8 @@ export function ProductDetail({ sku, onBack }: Props) {
             </div>
           )}
         </div>
+
+      <CatalogClassificationPanel sku={sku} onDraftCreated={() => {}} />
       </div>
     </div>
   );

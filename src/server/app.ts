@@ -17,6 +17,7 @@ import onboardingRoutes from './routes/onboarding-routes';
 import classificationRoutes from './routes/classification-routes';
 import storeManagerRoutes from './routes/store-manager-routes';
 import catalogRoutes from './routes/catalog-routes';
+import catalogClassificationRoutes from './routes/catalog-classification-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
@@ -75,6 +76,7 @@ app.route('/api', onboardingRoutes);
 app.route('/api', classificationRoutes);
 app.route('/api', storeManagerRoutes);
 app.route('/api', catalogRoutes);
+app.route('/api', catalogClassificationRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

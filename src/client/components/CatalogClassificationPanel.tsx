@@ -1,0 +1,320 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  getCatalogClassification,
+  runCatalogClassification,
+  submitCatalogDecisions,
+  applyCatalogClassification,
+  type CatalogClassificationDetail,
+} from '../api';
+
+const buttonBase: React.CSSProperties = {
+  padding: '8px 16px',
+  borderRadius: 8,
+  border: 'none',
+  fontSize: 13,
+  fontWeight: 600,
+  cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+};
+
+const primaryButton: React.CSSProperties = {
+  ...buttonBase,
+  background: '#2563eb',
+  color: '#ffffff',
+};
+
+const secondaryButton: React.CSSProperties = {
+  ...buttonBase,
+  background: '#e2e8f0',
+  color: '#1e293b',
+};
+
+const sectionStyle: React.CSSProperties = {
+  marginTop: 32,
+  padding: 24,
+  border: '1px solid #e2e8f0',
+  borderRadius: 16,
+};
+
+const sectionTitle: React.CSSProperties = {
+  fontSize: 16,
+  fontWeight: 600,
+  color: '#0f172a',
+  marginBottom: 4,
+};
+
+interface Props {
+  sku: string;
+  onDraftCreated: () => void;
+}
+
+export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
+  const [detail, setDetail] = useState<CatalogClassificationDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  // Use string map where '' means unset. We filter at submit time.
+  const [decisionMap, setDecisionMap] = useState<Record<string, string>>({});
+  const [changeSetId, setChangeSetId] = useState<string | null>(null);
+
+  const loadClassification = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const result = await getCatalogClassification(sku);
+      setDetail(result);
+      // Restore decision selections
+      if (result.proposals && result.decisions) {
+        const seen = new Set<string>();
+        const map: Record<string, 'accepted' | 'rejected' | 'deferred'> = {};
+        for (const d of result.decisions) {
+          // Only keep the most recent decision per proposal (newest-first order)
+          if (seen.has(d.proposalId)) continue;
+          seen.add(d.proposalId);
+          if (d.decision === 'accepted' || d.decision === 'rejected' || d.decision === 'deferred') {
+            map[d.proposalId] = d.decision;
+          }
+        }
+        setDecisionMap(map);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [sku]);
+
+  useEffect(() => {
+    loadClassification();
+  }, [loadClassification]);
+
+  const handleRun = async () => {
+    setRunning(true);
+    setError('');
+    setMessage('');
+    try {
+      await runCatalogClassification(sku);
+      setMessage('Classification run completed.');
+      await loadClassification();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const handleDecision = (proposalId: string, decision: string) => {
+    setDecisionMap(prev => ({
+      ...prev,
+      [proposalId]: prev[proposalId] === decision ? '' : decision,
+    }));
+  };
+
+  const handleSubmitDecisions = async () => {
+    if (!detail?.run) return;
+    setError('');
+    setMessage('');
+
+    const decisions = Object.entries(decisionMap)
+      .filter(([_, decision]) => decision === 'accepted' || decision === 'rejected' || decision === 'deferred')
+      .map(([proposalId, decision]) => ({ proposalId, decision: decision as 'accepted' | 'rejected' | 'deferred' }));
+
+    if (decisions.length === 0) {
+      setError('No decisions to submit.');
+      return;
+    }
+
+    try {
+      await submitCatalogDecisions(sku, detail.run.id, decisions);
+      setMessage(`Submitted ${decisions.length} decision(s).`);
+      await loadClassification();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleApply = async () => {
+    if (!detail?.run) return;
+    setApplying(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await applyCatalogClassification(sku, detail.run.id);
+      setChangeSetId(result.changeSetId);
+      setMessage(`Created update draft in change set ${result.changeSetId.slice(0, 8)}. ${result.appliedFields.length} field(s), ${result.appliedPages.length} page(s) applied.`);
+      if (result.skipped.length > 0) {
+        setMessage(prev => prev + ` ${result.skipped.length} skipped.`);
+      }
+      onDraftCreated();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const run = detail?.run;
+  const hasActiveRun = run && run.status !== 'failed';
+  const canDecide = run && (run.status === 'completed' || run.status === 'completed_with_abstentions');
+  const pendingProposals = (detail?.proposals || []).filter(p =>
+    p.proposalType !== 'reviewable_abstention'
+  );
+  const hasPendingDecisions = pendingProposals.some(p => p.status === 'pending');
+  const allDecided = pendingProposals.length > 0 && pendingProposals.every(p => p.status !== 'pending');
+  const canApply = canDecide && allDecided;
+
+  return (
+    <div style={sectionStyle}>
+      <h3 style={sectionTitle}>🧠 Classification</h3>
+      <p style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
+        Run AI-powered product classification to propose attributes, category pages, and product types.
+      </p>
+
+      {/* Run status */}
+      {run && (
+        <div style={{ marginBottom: 16, padding: 12, background: '#f8fafc', borderRadius: 8, fontSize: 13 }}>
+          <div><strong>Status:</strong> {run.status}</div>
+          {run.completedAt && <div><strong>Completed:</strong> {new Date(run.completedAt).toLocaleString()}</div>}
+          {run.errorMessage && <div style={{ color: '#dc2626' }}><strong>Error:</strong> {run.errorMessage}</div>}
+          {detail?.sourceDrift && (
+            <div style={{ color: '#d97706', marginTop: 4 }}>⚠ Product has changed since classification was run.</div>
+          )}
+          {detail?.configDrift && (
+            <div style={{ color: '#d97706', marginTop: 4 }}>⚠ Classification config has changed since run.</div>
+          )}
+        </div>
+      )}
+
+      {/* Action buttons */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <button
+          style={primaryButton}
+          onClick={handleRun}
+          disabled={running}
+        >
+          {running ? 'Running...' : hasActiveRun ? 'Rerun' : 'Run Classification'}
+        </button>
+      </div>
+
+      {/* Error / Message */}
+      {error && <div style={{ color: '#dc2626', padding: '8px 12px', background: '#fef2f2', borderRadius: 4, margin: '8px 0', fontSize: 13 }}>{error}</div>}
+      {message && <div style={{ color: '#16a34a', padding: '8px 12px', background: '#f0fdf4', borderRadius: 4, margin: '8px 0', fontSize: 13 }}>{message}</div>}
+      {changeSetId && (
+        <div style={{ color: '#2563eb', padding: '8px 12px', background: '#eff6ff', borderRadius: 4, margin: '8px 0', fontSize: 13 }}>
+          Update draft created in change set <strong>{changeSetId.slice(0, 8)}</strong>. Use the Change Set page to review and approve.
+        </div>
+      )}
+
+      {/* Proposals */}
+      {canDecide && (pendingProposals.length > 0 || (detail?.proposals || []).some(p => p.proposalType === 'reviewable_abstention')) && (
+        <div style={{ marginTop: 16 }}>
+          <h4 style={{ fontSize: 14, fontWeight: 600, color: '#0f172a', marginBottom: 8 }}>Proposals ({pendingProposals.length})</h4>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {pendingProposals.map(p => (
+              <div
+                key={p.id}
+                style={{
+                  padding: 12,
+                  background: '#ffffff',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 8,
+                  fontSize: 13,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <strong style={{ color: '#0f172a' }}>{p.proposalType.replace(/_/g, ' ')}</strong>
+                  <span style={{
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    background: p.confidence > 0.7 ? '#dcfce7' : p.confidence > 0.4 ? '#fef9c3' : '#fee2e2',
+                    color: p.confidence > 0.7 ? '#166534' : p.confidence > 0.4 ? '#92400e' : '#991b1b',
+                  }}>
+                    {Math.round(p.confidence * 100)}%
+                  </span>
+                </div>
+                <div style={{ color: '#334155', marginBottom: 4 }}>
+                  <strong>Target:</strong> {p.targetId || '-'}
+                </div>
+                <div style={{ color: '#475569', fontSize: 12, marginBottom: 8, fontFamily: 'monospace', wordBreak: 'break-word' }}>
+                  <strong>Value:</strong> {typeof p.proposedValue === 'object' ? JSON.stringify(p.proposedValue) : String(p.proposedValue ?? '-')}
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {(['accepted', 'rejected', 'deferred'] as const).map(decision => (
+                    <button
+                      key={decision}
+                      onClick={() => handleDecision(p.id, decision)}
+                      style={{
+                        ...buttonBase,
+                        padding: '4px 10px',
+                        fontSize: 11,
+                        background: decisionMap[p.id] === decision
+                          ? (decision === 'accepted' ? '#16a34a' : decision === 'rejected' ? '#dc2626' : '#d97706')
+                          : '#f1f5f9',
+                        color: decisionMap[p.id] === decision ? '#ffffff' : '#475569',
+                        border: decisionMap[p.id] === decision ? 'none' : '1px solid #cbd5e1',
+                      }}
+                    >
+                      {decision.charAt(0).toUpperCase() + decision.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                  Status: {p.status}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            {hasPendingDecisions && (
+              <button style={primaryButton} onClick={handleSubmitDecisions}>
+                Submit Decisions
+              </button>
+            )}
+            {canApply && (
+              <button
+                style={{ ...primaryButton, background: '#059669' }}
+                onClick={handleApply}
+                disabled={applying || detail?.sourceDrift || detail?.configDrift}
+              >
+                {applying ? 'Applying...' : 'Create Update Draft'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Abstentions (informational — these stages had nothing to propose) */}
+      {canDecide && (detail?.proposals || []).filter(p => p.proposalType === 'reviewable_abstention').length > 0 && (
+        <div style={{ marginTop: 16, padding: 12, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
+          <strong>Stage Abstentions</strong> — these stages could not produce proposals:
+          <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
+            {(detail?.proposals || []).filter(p => p.proposalType === 'reviewable_abstention').map(p => (
+              <li key={p.id}>
+                <strong>{String(p.targetId || 'unknown').replace(/_/g, ' ')}</strong>
+                {p.proposedValue && typeof p.proposedValue === 'object' && (p.proposedValue as any).reason
+                  ? ` — ${(p.proposedValue as any).reason}`
+                  : ''}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* No run state */}
+      {!run && !loading && (
+        <div style={{ color: '#64748b', fontSize: 13, fontStyle: 'italic' }}>
+          No classification run yet. Click "Run Classification" to start.
+        </div>
+      )}
+
+      {loading && <div style={{ color: '#64748b', fontSize: 13 }}>Loading...</div>}
+    </div>
+  );
+}

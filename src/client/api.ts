@@ -200,6 +200,86 @@ export function bulkImportProducts(products: Array<{ sku: string; name: string; 
 }
 
 
+// ─── Catalog Classification ────────────────────────────────────────────────
+
+export interface CatalogClassificationDetail {
+  run: {
+    id: string;
+    sourceKind: string;
+    status: string;
+    productSku: string;
+    configSnapshotHash: string | null;
+    sourceProductHash: string | null;
+    startedAt: string;
+    completedAt: string | null;
+    errorMessage: string | null;
+  } | null;
+  configDrift: boolean;
+  sourceDrift: boolean;
+  evidence: Array<{
+    id: string;
+    source: string;
+    sourceField: string | null;
+    value: unknown;
+    reliability: string;
+  }>;
+  proposals: Array<{
+    id: string;
+    proposalType: string;
+    targetId: string | null;
+    proposedValue: unknown;
+    confidence: number;
+    status: string;
+  }>;
+  decisions: Array<{
+    id: string;
+    proposalId: string;
+    decision: string;
+  }>;
+  stageResults: Array<Record<string, unknown>>;
+}
+
+export function getCatalogClassification(sku: string) {
+  return request<CatalogClassificationDetail>(`/products/${encodeURIComponent(sku)}/classification`);
+}
+
+export function runCatalogClassification(sku: string) {
+  return request<{
+    runId: string;
+    sourceProductHash: string;
+    configSnapshotHash: string;
+    evidence: unknown[];
+    proposals: unknown[];
+    stageResults: unknown[];
+  }>(`/products/${encodeURIComponent(sku)}/classification/runs`, {
+    method: 'POST',
+  });
+}
+
+export function submitCatalogDecisions(
+  sku: string,
+  runId: string,
+  decisions: Array<{ proposalId: string; decision: 'accepted' | 'rejected' | 'deferred'; reviewerNote?: string | null; revisedValue?: unknown }>,
+) {
+  return request<{ ok: boolean; decisions: unknown[] }>(
+    `/products/${encodeURIComponent(sku)}/classification/runs/${encodeURIComponent(runId)}/decisions`,
+    { method: 'POST', body: JSON.stringify({ decisions }) },
+  );
+}
+
+export function applyCatalogClassification(sku: string, runId: string) {
+  return request<{
+    ok: boolean;
+    changeSetId: string;
+    appliedFields: string[];
+    appliedPages: string[];
+    skipped: Array<{ proposalId: string; reason: string }>;
+  }>(`/products/${encodeURIComponent(sku)}/classification/runs/${encodeURIComponent(runId)}/apply`, {
+    method: 'POST',
+  });
+}
+
+
 // Change Sets
 export function listChangeSets() { return request<{ changeSets: ChangeSet[] }>('/change-sets'); }
 export function getChangeSet(id: string) { return request<{ changeSet: ChangeSet; items: ChangeSetItem[] }>(`/change-sets/${id}`); }
@@ -209,6 +289,14 @@ export function discardChangeSet(id: string) { return request<{ success: boolean
 
 // Export
 export function exportChangeSet(id: string) { return request<ExportResult>(`/export/change-set/${id}`, { method: 'POST' }); }
+
+// Repair images for a change set (re-downloads from onboarding extraction data)
+export function repairChangeSetImages(id: string) {
+  return request<{ success: boolean; summary: string; results: Array<{ sku: string; imagesDownloaded: number; error?: string }> }>(
+    `/export/change-set/${id}/repair-images`,
+    { method: 'POST' },
+  );
+}
 
 // Field Registry
 export function listFieldRegistry() {
@@ -315,6 +403,7 @@ export function listPages() {
   return request<{ pages: Page[] }>('/pages');
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function upsertPage(name: string, fileName?: string | null, parentId?: string | null) {
   return request<{ success: boolean; page: Page }>('/pages', {
     method: 'POST',
@@ -322,15 +411,17 @@ export function upsertPage(name: string, fileName?: string | null, parentId?: st
   });
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function deletePage(id: string) {
   return request<{ success: boolean }>(`/pages/${id}`, { method: 'DELETE' });
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function getProductPages(sku: string) {
   return request<{ pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`);
 }
 
-export function saveProductPages(sku: string, pages: string[]) {
+function saveProductPages(sku: string, pages: string[]) {
   return request<{ success: boolean; pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`, {
     method: 'POST',
     body: JSON.stringify({ pages }),

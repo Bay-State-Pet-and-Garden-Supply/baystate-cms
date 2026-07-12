@@ -22,6 +22,8 @@ export interface StageInput {
   sku: string;
   /** The onboarding item ID, if applicable */
   onboardingItemId?: string;
+  /** Source kind of the classification run */
+  sourceKind?: 'onboarding' | 'catalog_product';
   /** Previously extracted evidence from upstream stages */
   evidence: ClassificationEvidence[];
   /** Previously accepted proposals from upstream stages */
@@ -94,6 +96,11 @@ export interface StageContext {
   preComputedTitle?: string;
   /** Source of the pre-computed title, required when preComputedTitle is set. */
   preComputedTitleSource?: 'llm_cohort' | 'cohort_fallback';
+  /** Catalog product classification context. Present only for catalog_product runs. */
+  catalogContext?: {
+    sourceProductHash: string;
+    existingPageIds: Array<{ pageId: string; pageName: string }>;
+  };
 }
 
 // ─── Stage Definition ──────────────────────────────────────────────────────────

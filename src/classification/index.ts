@@ -14,3 +14,13 @@ export { attributeApplicabilityStage } from './stages/attribute-applicability';
 export { productAttributeProposalsStage } from './stages/attribute-proposals';
 export { categoryPageProposalsStage } from './stages/category-page-proposals';
 export { productDraftProjectionStage } from './stages/draft-projection';
+
+// ─── Shared Evidence Extractor ─────────────────────────────────────────────────
+export { extractProductEvidence, packagingOcrDataToEvidence } from './product-evidence-extractor';
+export type { NormalizedEvidenceInput, EvidenceExtractionResult } from './product-evidence-extractor';
+
+// ─── Catalog Product Classification ────────────────────────────────────────────
+export { buildCatalogProductEvidenceInput, computeProductHash } from './catalog-product-source';
+export type { CatalogProductSource } from './catalog-product-source';
+export { createCatalogEvidenceExtractionStage } from './stages/catalog-product-evidence-extraction';
+export { classifyCatalogProduct } from './catalog-product-classifier';
