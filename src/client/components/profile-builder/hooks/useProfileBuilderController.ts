@@ -22,7 +22,6 @@ import {
 import { getFieldDefinition, ALL_STANDARD_FIELDS, CORE_FIELDS, STANDARD_CUSTOM_FIELDS } from '../fieldCatalog';
 import type { FieldDefinition } from '../fieldCatalog';
 import {
-  profileToDraft,
   draftToSavePayload,
   draftToValidatePayload,
   draftToTestPayload,
@@ -151,7 +150,6 @@ export function useProfileBuilderController(
         url,
         runtime: state.draft.runtime,
         captureScreenshot: true,
-        captureNetwork: true,
       });
       if (!result.ok || !result.data) {
         dispatch({

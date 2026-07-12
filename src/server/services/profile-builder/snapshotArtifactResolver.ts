@@ -30,6 +30,7 @@ const DEFAULT_MAX_BYTES = 2_000_000;
 
 // ─── Error classes ──────────────────────────────────────────────────────────
 
+// fallow-ignore-next-line unused-export — used by tests
 export class InvalidArtifactReferenceError extends Error {
   public readonly code = 'INVALID_ARTIFACT_REFERENCE';
   constructor(message: string) {
@@ -38,6 +39,7 @@ export class InvalidArtifactReferenceError extends Error {
   }
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export class SnapshotNotFoundError extends Error {
   public readonly code = 'SNAPSHOT_NOT_FOUND';
   constructor() {
@@ -46,6 +48,7 @@ export class SnapshotNotFoundError extends Error {
   }
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export class SnapshotTooLargeError extends Error {
   public readonly code = 'SNAPSHOT_TOO_LARGE';
   constructor(bytes: number) {
@@ -229,6 +232,7 @@ export function createResolver(options: ArtifactResolverOptions = {}) {
 
 const defaultResolver = createResolver();
 
+// fallow-ignore-next-line unused-export — used by tests
 export const resolveSnapshotArtifact = defaultResolver.resolve.bind(defaultResolver);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -254,6 +254,7 @@ export function normalizeAndValidateCustomFields(
  *   "__proto__"          → __proto__ (rejected by caller)
  *   "SKU Number"         → sKUNumberSelector (heuristic — acceptable for MVP)
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function normalizeCustomFieldKey(input: string): string {
   // Remove characters outside [A-Za-z0-9_ ], preserving spaces and underscores
   let cleaned = input.replace(/[^a-zA-Z0-9_ ]/g, ' ');

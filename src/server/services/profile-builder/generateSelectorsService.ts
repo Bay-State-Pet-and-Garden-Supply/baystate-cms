@@ -25,11 +25,12 @@ import { createResolver } from './snapshotArtifactResolver';
 import { sanitizeSnapshotHtml } from './sanitizeSnapshotHtml';
 import { inspectSnapshot } from './snapshotPreflight';
 import { buildSelectorGenerationPrompt, type PromptField } from './buildSelectorGenerationPrompt';
-import { validateAndRankSelectors, type ValidatedCandidate, hasForbiddenPositionalPseudo, extractBannedPseudo } from './selectorValidator';
+import { validateAndRankSelectors, type ValidatedCandidate } from './selectorValidator';
 import { normalizeAndValidateCustomFields, type NormalizedCustomField } from './customFieldNormalizer';
 
 // ─── Error Classes ──────────────────────────────────────────────────────────
 
+// fallow-ignore-next-line unused-export — used by tests
 export class UnusableSnapshotError extends Error {
   constructor(public readonly reason: string) {
     super(`Snapshot rejected: ${reason}`);
@@ -37,6 +38,7 @@ export class UnusableSnapshotError extends Error {
   }
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export class LlmNotConfiguredError extends Error {
   constructor() {
     super('No LLM task configuration found for selector generation.');
@@ -44,6 +46,7 @@ export class LlmNotConfiguredError extends Error {
   }
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export class LlmProviderError extends Error {
   constructor(
     message: string,
@@ -55,6 +58,7 @@ export class LlmProviderError extends Error {
   }
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export class InvalidLlmResponseError extends Error {
   constructor(message: string) {
     super(`Invalid LLM response: ${message}`);

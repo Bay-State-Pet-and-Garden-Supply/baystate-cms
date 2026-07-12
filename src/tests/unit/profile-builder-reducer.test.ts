@@ -152,7 +152,7 @@ describe('draft/hydrateFromProfile', () => {
 describe('draft/reset', () => {
   it('resets draft to empty, preserves domain, clears derived state', () => {
     const s = filledDraftState();
-    s.snapshot = { url: '', finalUrl: '', htmlRef: null, screenshotRef: null, networkRef: null, jsonLd: [], embeddedProductData: [], imageCandidates: [], pageStructureSignals: [], warnings: [] };
+    s.snapshot = { url: '', finalUrl: '', htmlRef: null, screenshotRef: null, jsonLd: [], embeddedProductData: [], imageCandidates: [], pageStructureSignals: [], warnings: [] };
     s.pageHtml = '<html></html>';
     s.samples = [{ id: 's1', url: 'https://acmepet.com/p/1', confirmed: true }];
     s.validation = { summary: { sampleCount: 0, confirmedSampleCount: 0, passingSamples: 0, failingSamples: 0, variantSamplesPassing: 0 }, results: [] };
@@ -194,7 +194,7 @@ describe('runtime/set', () => {
 describe('productUrl/set', () => {
   it('updates URL, clears snapshot, pageHtml, preview, and validation', () => {
     const s = filledDraftState();
-    s.snapshot = { url: '', finalUrl: '', htmlRef: null, screenshotRef: null, networkRef: null, jsonLd: [], embeddedProductData: [], imageCandidates: [], pageStructureSignals: [], warnings: [] };
+    s.snapshot = { url: '', finalUrl: '', htmlRef: null, screenshotRef: null, jsonLd: [], embeddedProductData: [], imageCandidates: [], pageStructureSignals: [], warnings: [] };
     s.pageHtml = '<html></html>';
     s.extractionPreview = { title: 'test' };
     s.validation = { summary: { sampleCount: 1, confirmedSampleCount: 1, passingSamples: 1, failingSamples: 0, variantSamplesPassing: 0 }, results: [] };
@@ -516,7 +516,7 @@ describe('category/toggle', () => {
 describe('snapshot/succeeded', () => {
   it('stores snapshot response', () => {
     const s = filledDraftState();
-    const snap = { url: 'https://acmepet.com/p/1', finalUrl: 'https://acmepet.com/p/1', htmlRef: null, screenshotRef: null, networkRef: null, jsonLd: [], embeddedProductData: [], imageCandidates: [], pageStructureSignals: [], warnings: [] };
+    const snap = { url: 'https://acmepet.com/p/1', finalUrl: 'https://acmepet.com/p/1', htmlRef: null, screenshotRef: null, jsonLd: [], embeddedProductData: [], imageCandidates: [], pageStructureSignals: [], warnings: [] };
 
     const next = profileBuilderReducer(s, { type: 'snapshot/succeeded', snapshot: snap });
 

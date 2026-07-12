@@ -21,12 +21,14 @@ const FORBIDDEN_POSITIONAL_PSEUDOS = [
   ':nth-of-type', ':nth-last-of-type',
 ];
 
+// fallow-ignore-next-line unused-export — used by tests
 export function hasForbiddenPositionalPseudo(selector: string): boolean {
   return FORBIDDEN_POSITIONAL_PSEUDOS.some((p) =>
     selector.toLowerCase().includes(p)
   );
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function extractBannedPseudo(selector: string): string {
   const lowered = selector.toLowerCase();
   for (const pseudo of FORBIDDEN_POSITIONAL_PSEUDOS) {

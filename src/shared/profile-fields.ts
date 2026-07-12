@@ -86,6 +86,7 @@ export interface ProfileField {
  * When adding new fields, append them to this array and ensure
  * the key follows the `{name}Selector` convention.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export const STANDARD_PROFILE_FIELDS: readonly ProfileField[] = [
   // ── Identity ─────────────────────────────────────────────────────────────
   {
@@ -300,6 +301,7 @@ export const PROMOTABLE_PROFILE_KEYS: readonly string[] = Object.freeze(
  * These are promoted using their own column name rather than
  * being merged into `custom_selectors_json`.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export const CORE_PROFILE_KEYS: readonly string[] = Object.freeze(
   STANDARD_PROFILE_FIELDS
     .filter((f) => f.outputTarget === 'core')
@@ -319,6 +321,7 @@ export function getFieldByKey(key: string): ProfileField | undefined {
 /**
  * Get all field definitions in a given category.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getFieldsByCategory(category: ProfileFieldCategory): ProfileField[] {
   return fieldsByCategory.get(category) ?? [];
 }
@@ -326,6 +329,7 @@ export function getFieldsByCategory(category: ProfileFieldCategory): ProfileFiel
 /**
  * Get all fields whose extracted value lands in `ExtractionData` core fields.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getCoreFields(): ProfileField[] {
   return STANDARD_PROFILE_FIELDS.filter((f) => f.outputTarget === 'core');
 }
@@ -334,6 +338,7 @@ export function getCoreFields(): ProfileField[] {
  * Get all fields whose extracted value lands in `ExtractionData.customFields`.
  * These are the candidates for dynamic custom-selector extraction.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getCustomFieldCandidates(): ProfileField[] {
   return STANDARD_PROFILE_FIELDS.filter((f) => f.outputTarget === 'customFields');
 }
@@ -344,6 +349,7 @@ export function getCustomFieldCandidates(): ProfileField[] {
  * This does NOT check whether the field was actually proposed by a
  * generation — it only checks whether the key is in the canonical catalog.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function isPromotableField(key: string): boolean {
   return fieldByKey.has(key);
 }
@@ -352,6 +358,7 @@ export function isPromotableField(key: string): boolean {
  * Get the `outputTarget` for a given selector key.
  * Returns `'core'` by default for unknown keys (backward compat).
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getOutputTargetForKey(key: string): ProfileFieldOutputTarget {
   return fieldByKey.get(key)?.outputTarget ?? 'core';
 }
@@ -360,6 +367,7 @@ export function getOutputTargetForKey(key: string): ProfileFieldOutputTarget {
  * Get the `valueType` for a given selector key.
  * Returns `'text'` by default for unknown keys (backward compat).
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getValueTypeForKey(key: string): ProfileFieldValueType {
   return fieldByKey.get(key)?.valueType ?? 'text';
 }
@@ -368,6 +376,7 @@ export function getValueTypeForKey(key: string): ProfileFieldValueType {
  * Get the `cardinality` for a given selector key.
  * Returns `'single'` by default for unknown keys (backward compat).
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getCardinalityForKey(key: string): ProfileFieldCardinality {
   return fieldByKey.get(key)?.cardinality ?? 'single';
 }

@@ -103,6 +103,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /** Return true if the key looks like a CSS selector field (ends in "Selector"). */
+// fallow-ignore-next-line unused-export — used by tests
 export function isSelectorKey(key: string): boolean {
   return /Selector$/i.test(key);
 }
@@ -131,6 +132,7 @@ export function normalizeFieldLabel(key: string): string {
  * Get the category for a field key.
  * Uses the catalog if available; otherwise 'uncategorized'.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getFieldCategory(key: string): string {
   const catalog = getFieldByKey(key);
   if (catalog) return catalog.category;
@@ -155,6 +157,7 @@ export function getCategoryOrder(category: string): number {
 /**
  * Get the value type for a key.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function getValueTypeForKey(key: string): ProfileFieldValueType {
   return getFieldByKey(key)?.valueType ?? 'text';
 }
@@ -162,6 +165,7 @@ export function getValueTypeForKey(key: string): ProfileFieldValueType {
 /**
  * Return true if the key is an image field.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function isImageField(key: string): boolean {
   return getFieldByKey(key)?.valueType === 'image';
 }

@@ -1,8 +1,8 @@
 /**
  * Artifact URL resolution helpers for the profile builder.
  *
- * Snapshot responses return artifact refs such as `screenshotRef`, `htmlRef`,
- * and `networkRef`. These may be local filesystem paths under
+ * Snapshot responses return artifact refs such as `screenshotRef` and `htmlRef`.
+ * These may be local filesystem paths under
  * `.shopsite-cms/artifacts/` or URL-like strings. This module provides a
  * default resolver that only returns browser-readable URLs for refs that
  * already look like URLs.

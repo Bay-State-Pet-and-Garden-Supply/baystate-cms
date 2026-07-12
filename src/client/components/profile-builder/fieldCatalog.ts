@@ -118,6 +118,7 @@ export const FIELD_GROUP_ORDER: readonly FieldCategory[] = [
 
 // ─── Label map ──────────────────────────────────────────────────────────────
 
+// fallow-ignore-next-line unused-export — used by tests
 export const FIELD_LABEL_BY_KEY: Record<string, string> = {};
 for (const field of ALL_STANDARD_FIELDS) {
   FIELD_LABEL_BY_KEY[field.key] = field.label;
@@ -147,6 +148,7 @@ export function getFieldDefinition(key: string): FieldDefinition | null {
  *   normalizeCustomFieldKey('SKU Number')     → 'skuNumberSelector'
  *   normalizeCustomFieldKey('')               → 'customFieldSelector'
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function normalizeCustomFieldKey(input: string): string {
   const raw = input.trim();
   if (!raw) return 'customFieldSelector';

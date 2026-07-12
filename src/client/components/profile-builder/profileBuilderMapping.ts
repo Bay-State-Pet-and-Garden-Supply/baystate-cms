@@ -76,6 +76,7 @@ export function createEmptyDraft(args?: {
  * Hydrate a ProfileDraft from an existing ExtractorProfile.
  * Sets productUrl to empty — the operator must enter a URL.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function profileToDraft(profile: ExtractorProfile): ProfileDraft {
   return {
     domain: profile.domain,
@@ -194,6 +195,7 @@ export function draftToTestPayload(draft: ProfileDraft): TestExtractorProfileReq
  * Get a flat `Record<string, string | null>` of all selectors in the
  * draft, including both core and custom fields.
  */
+// fallow-ignore-next-line unused-export — used by tests
 export function draftToSelectorMap(draft: ProfileDraft): Record<string, string | null> {
   return {
     titleSelector: draft.titleSelector,
@@ -209,4 +211,6 @@ export function draftToSelectorMap(draft: ProfileDraft): Record<string, string |
 
 // ─── Test helpers (exported for direct use in reducer/evaluation) ─────────
 
+// fallow-ignore-next-line unused-export — used by tests
 export { emptyToNull, omitEmptyValues };
+

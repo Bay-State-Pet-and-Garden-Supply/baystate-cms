@@ -301,7 +301,6 @@ export function ProfileBuilderWorkspace(
   const [snapshotUrl, setSnapshotUrl] = useState(seedSampleUrl ?? '');
   const [snapshotRuntime, setSnapshotRuntime] = useState<RuntimeMode>('rendered');
   const [snapshotCaptureScreenshot, setSnapshotCaptureScreenshot] = useState(true);
-  const [snapshotCaptureNetwork, setSnapshotCaptureNetwork] = useState(true);
   const [snapshotResult, setSnapshotResult] = useState<SnapshotResponse | null>(null);
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [snapshotError, setSnapshotError] = useState('');
@@ -443,7 +442,6 @@ export function ProfileBuilderWorkspace(
         url: snapshotUrl.trim(),
         runtime: snapshotRuntime,
         captureScreenshot: snapshotCaptureScreenshot,
-        captureNetwork: snapshotCaptureNetwork,
       };
       const res = await snapshotPageForBuilder(req);
       if (res.ok && res.data) {
