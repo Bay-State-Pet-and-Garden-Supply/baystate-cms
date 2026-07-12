@@ -7,6 +7,7 @@ import { runMigrations } from '../../db/migrations';
 import {
   createBatch,
   findBatchById,
+  listBatches,
   setBatchArchived,
 } from '../../db/repositories/onboarding-batch-repo';
 import {
@@ -891,5 +892,50 @@ describe('listValidationSamplesByDomain (Phase 3, task 16)', () => {
     const run2After = db.query('SELECT status, error_message FROM classification_runs WHERE id = ?').get(runId2) as any;
     expect(run2After.status).toBe('failed');
     expect(run2After.error_message).toBe('Superseded by reset');
+  });
+
+  it('should dynamically calculate completed, failed, and skipped items counts for a batch', () => {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Dynamic Progress Batch',
+      fileName: 'dynamic.xlsx',
+      totalItems: 4,
+    });
+
+    const initialDetails = findBatchById(batch.id);
+    expect(initialDetails).toBeDefined();
+    expect(initialDetails?.completedItems).toBe(0);
+    expect(initialDetails?.failedItems).toBe(0);
+    expect(initialDetails?.skippedItems).toBe(0);
+
+    const items = insertItems(batch.id, [
+      { upc: 'UPC-DYN-1', name: 'Item 1', rowNumber: 1 },
+      { upc: 'UPC-DYN-2', name: 'Item 2', rowNumber: 2 },
+      { upc: 'UPC-DYN-3', name: 'Item 3', rowNumber: 3 },
+      { upc: 'UPC-DYN-4', name: 'Item 4', rowNumber: 4 },
+    ]);
+
+    // Update statuses to match the test scenarios
+    // Item 1: fully promoted
+    const db = getDb();
+    db.run("UPDATE onboarding_items SET stage = 'promotion', stage_status = 'completed' WHERE id = ?", [items[0].id]);
+    // Item 2: failed
+    db.run("UPDATE onboarding_items SET stage = 'discovery', stage_status = 'failed' WHERE id = ?", [items[1].id]);
+    // Item 3: skipped
+    db.run("UPDATE onboarding_items SET stage = 'extraction', stage_status = 'skipped' WHERE id = ?", [items[2].id]);
+    // Item 4: pending (remains as discovery/pending from insertion)
+
+    const updatedDetails = findBatchById(batch.id);
+    expect(updatedDetails).toBeDefined();
+    expect(updatedDetails?.completedItems).toBe(1);
+    expect(updatedDetails?.failedItems).toBe(1);
+    expect(updatedDetails?.skippedItems).toBe(1);
+
+    const batchList = listBatches(wsId);
+    const dynamicBatch = batchList.find(b => b.id === batch.id);
+    expect(dynamicBatch).toBeDefined();
+    expect(dynamicBatch?.completedItems).toBe(1);
+    expect(dynamicBatch?.failedItems).toBe(1);
+    expect(dynamicBatch?.skippedItems).toBe(1);
   });
 });

@@ -748,14 +748,12 @@ export function Onboarding() {
     
     let completed = batch.completedItems;
     let failed = batch.failedItems;
-    let skipped = 0;
+    let skipped = batch.skippedItems ?? 0;
     
     if (itemsList && itemsList.length > 0) {
-      completed = itemsList.filter(i => ['source_found', 'needs_review', 'curated', 'ready', 'promoted'].includes(i.status)).length;
-      failed = itemsList.filter(i => i.status === 'failed').length;
-      skipped = itemsList.filter(i => i.status === 'skipped').length;
-    } else if (['review', 'curated', 'completed', 'failed'].includes(batch.status)) {
-      skipped = Math.max(0, batch.totalItems - batch.completedItems - batch.failedItems);
+      completed = itemsList.filter(i => i.stage === 'promotion' && i.stageStatus === 'completed').length;
+      failed = itemsList.filter(i => i.stageStatus === 'failed').length;
+      skipped = itemsList.filter(i => i.stageStatus === 'skipped').length;
     }
     
     const completedPercent = Math.round((completed / total) * 100);

@@ -12,6 +12,7 @@ export interface OnboardingBatchRow {
   total_items: number;
   completed_items: number;
   failed_items: number;
+  skipped_items?: number;
   column_mapping_json: string | null;
   created_at: string;
   updated_at: string;
@@ -25,8 +26,9 @@ function mapRowToBatch(row: OnboardingBatchRow): OnboardingBatch {
     fileName: row.file_name,
     status: (row.status || 'active') as BatchStatus,
     totalItems: row.total_items,
-    completedItems: row.completed_items,
-    failedItems: row.failed_items,
+    completedItems: row.completed_items ?? 0,
+    failedItems: row.failed_items ?? 0,
+    skippedItems: row.skipped_items ?? 0,
     columnMapping: row.column_mapping_json ? JSON.parse(row.column_mapping_json) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -59,6 +61,7 @@ export function createBatch(data: {
     totalItems: data.totalItems,
     completedItems: 0,
     failedItems: 0,
+    skippedItems: 0,
     columnMapping: data.columnMappingJson ? JSON.parse(data.columnMappingJson) : null,
     createdAt: now,
     updatedAt: now,
@@ -67,14 +70,47 @@ export function createBatch(data: {
 
 export function findBatchById(id: string): OnboardingBatch | undefined {
   const db = getDb();
-  const row = db.query('SELECT * FROM onboarding_batches WHERE id = ?').get(id) as OnboardingBatchRow | undefined;
+  const row = db.query(
+    `SELECT 
+       b.*,
+       COALESCE(i.completed_count, 0) as completed_items,
+       COALESCE(i.failed_count, 0) as failed_items,
+       COALESCE(i.skipped_count, 0) as skipped_items
+     FROM onboarding_batches b
+     LEFT JOIN (
+       SELECT 
+         batch_id,
+         SUM(CASE WHEN stage = 'promotion' AND stage_status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+         SUM(CASE WHEN stage_status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+         SUM(CASE WHEN stage_status = 'skipped' THEN 1 ELSE 0 END) as skipped_count
+       FROM onboarding_items
+       GROUP BY batch_id
+     ) i ON b.id = i.batch_id
+     WHERE b.id = ?`,
+  ).get(id) as OnboardingBatchRow | undefined;
   return row ? mapRowToBatch(row) : undefined;
 }
 
 export function listBatches(workspaceId: string): OnboardingBatch[] {
   const db = getDb();
   const rows = db.query(
-    'SELECT * FROM onboarding_batches WHERE workspace_id = ? ORDER BY created_at DESC',
+    `SELECT 
+       b.*,
+       COALESCE(i.completed_count, 0) as completed_items,
+       COALESCE(i.failed_count, 0) as failed_items,
+       COALESCE(i.skipped_count, 0) as skipped_items
+     FROM onboarding_batches b
+     LEFT JOIN (
+       SELECT 
+         batch_id,
+         SUM(CASE WHEN stage = 'promotion' AND stage_status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+         SUM(CASE WHEN stage_status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+         SUM(CASE WHEN stage_status = 'skipped' THEN 1 ELSE 0 END) as skipped_count
+       FROM onboarding_items
+       GROUP BY batch_id
+     ) i ON b.id = i.batch_id
+     WHERE b.workspace_id = ?
+     ORDER BY b.created_at DESC`,
   ).all(workspaceId) as OnboardingBatchRow[];
   return rows.map(mapRowToBatch);
 }

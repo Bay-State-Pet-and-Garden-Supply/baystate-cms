@@ -275,6 +275,7 @@ export const OnboardingBatchSchema = z.object({
   totalItems: z.number().int(),
   completedItems: z.number().int(),
   failedItems: z.number().int(),
+  skippedItems: z.number().int().default(0),
   columnMapping: ColumnMappingSchema.nullable().default(null),
   createdAt: z.string(),
   updatedAt: z.string(),
