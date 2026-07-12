@@ -767,6 +767,36 @@ export function runMigrations(): void {
       // (which references classification_evidence) survives the table swap.
       db.exec('PRAGMA foreign_keys = OFF');
       try {
+        // ── Clean up orphaned rows first ───────────────────────────────
+        // Rows whose run_id doesn't exist in classification_runs are dead
+        // data from prior operations that ran with foreign_keys=OFF.
+        const orphanedEvidence = db.query(
+          "SELECT COUNT(*) as cnt FROM classification_evidence WHERE run_id NOT IN (SELECT id FROM classification_runs)"
+        ).get() as { cnt: number };
+        const orphanedStageResults = db.query(
+          "SELECT COUNT(*) as cnt FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)"
+        ).get() as { cnt: number };
+        const orphanedProposals = db.query(
+          "SELECT COUNT(*) as cnt FROM classification_proposals WHERE run_id NOT IN (SELECT id FROM classification_runs)"
+        ).get() as { cnt: number };
+
+        if (orphanedEvidence.cnt > 0) {
+          db.run('DELETE FROM classification_proposal_evidence WHERE evidence_id IN (SELECT id FROM classification_evidence WHERE run_id NOT IN (SELECT id FROM classification_runs))');
+          db.run('DELETE FROM classification_evidence WHERE run_id NOT IN (SELECT id FROM classification_runs)');
+          console.log(`[Migrations] Cleaned up ${orphanedEvidence.cnt} orphaned classification_evidence row(s).`);
+        }
+        if (orphanedStageResults.cnt > 0) {
+          db.run('DELETE FROM classification_stage_results WHERE run_id NOT IN (SELECT id FROM classification_runs)');
+          console.log(`[Migrations] Cleaned up ${orphanedStageResults.cnt} orphaned classification_stage_results row(s).`);
+        }
+        if (orphanedProposals.cnt > 0) {
+          db.run('DELETE FROM classification_proposal_evidence WHERE proposal_id IN (SELECT id FROM classification_proposals WHERE run_id NOT IN (SELECT id FROM classification_runs))');
+          db.run('DELETE FROM classification_proposal_decisions WHERE proposal_id IN (SELECT id FROM classification_proposals WHERE run_id NOT IN (SELECT id FROM classification_runs))');
+          db.run('DELETE FROM classification_proposals WHERE run_id NOT IN (SELECT id FROM classification_runs)');
+          console.log(`[Migrations] Cleaned up ${orphanedProposals.cnt} orphaned classification_proposals row(s).`);
+        }
+
+        // ── Rebuild evidence table with updated CHECK ──────────────────
         db.transaction(() => {
           // Create new table with updated CHECK
           db.exec(`CREATE TABLE classification_evidence_new (
