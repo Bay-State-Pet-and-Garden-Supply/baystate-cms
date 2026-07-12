@@ -145,10 +145,12 @@ export function getExplicitCurationTargets(config: ClassificationConfig): Curati
     .sort((a, b) => a.sortOrder - b.sortOrder || a.label.localeCompare(b.label));
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function hasExplicitCurationTargets(config: ClassificationConfig): boolean {
   return (config.curationTargets ?? []).length > 0;
 }
 
+// fallow-ignore-next-line unused-export — used by tests
 export function findCurationTargetForAttribute(
   config: ClassificationConfig,
   attributeId: string,
