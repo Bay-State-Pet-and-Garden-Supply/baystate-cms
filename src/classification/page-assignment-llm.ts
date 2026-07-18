@@ -86,8 +86,9 @@ export function buildPageHierarchy(
  * Brand resolution priority (highest first):
  *   1. resolved_brand evidence (value.brandName from brands.json)
  *   2. Official product page brand evidence
- *   3. Spreadsheet brand hint evidence
- *   4. Visual OCR brand evidence
+ *   3. Highest-confidence distributor (third_party_page) brand evidence
+ *   4. Spreadsheet brand hint evidence
+ *   5. Visual OCR brand evidence
  */
 export function extractProductContext(
   evidence: ClassificationEvidence[],
@@ -98,27 +99,92 @@ export function extractProductContext(
   ocrSummary: PageAssignmentParams['ocrSummary'];
   productType: string | null;
 } {
-  // ── Product name: prefer expected_name → web title → OCR name → spreadsheet name ──
-  const spreadsheetName = evidence.find(
-    e => e.source === 'spreadsheet' && e.sourceField === 'name',
-  )?.value as string | undefined;
-  const expectedName = evidence.find(
-    e => e.source === 'spreadsheet' && e.sourceField === 'expected_name',
-  )?.value as string | undefined;
-  const webTitle = evidence.find(
-    e => e.source === 'official_product_page' && e.sourceField === 'title',
-  )?.value as string | undefined;
-  const ocrName = evidence.find(
-    e => e.source === 'visual_product_evidence' && e.sourceField === 'name',
-  )?.value as string | undefined;
+  // ── Safe value extraction helper ──────────────────────────────────────
+  const safeString = (v: unknown): string | undefined => {
+    if (typeof v === 'string' && v.trim().length > 0) return v.trim();
+    if (v != null) return String(v).trim();
+    return undefined;
+  };
 
-  const productName = expectedName ?? webTitle ?? ocrName ?? spreadsheetName ?? 'Unknown Product';
+  // ── Product name: prefer expected_name → official page name/title →
+  //    highest-confidence distributor name/title → OCR name → spreadsheet name
+  const expectedName = safeString(evidence.find(
+    e => e.source === 'spreadsheet' && e.sourceField === 'expected_name',
+  )?.value);
+  const webName = safeString(evidence.find(
+    e => e.source === 'official_product_page' && e.sourceField === 'name',
+  )?.value);
+  const webTitle = safeString(evidence.find(
+    e => e.source === 'official_product_page' && e.sourceField === 'title',
+  )?.value);
+  const officialName = webName ?? webTitle;
+
+  // Best distributor name/title (confidence-ordered, per-attempt preferred)
+  const distNameEvidence = evidence
+    .filter(e => e.source === 'third_party_page' && (e.sourceField === 'name' || e.sourceField === 'title'))
+    .sort((a, b) => {
+      const ca = typeof a.metadata?.confidence === 'number' ? a.metadata.confidence : 0.5;
+      const cb = typeof b.metadata?.confidence === 'number' ? b.metadata.confidence : 0.5;
+      if (cb !== ca) return cb - ca;
+      // Prefer per-attempt over flattened
+      const hasA = a.metadata?.attemptId ? 1 : 0;
+      const hasB = b.metadata?.attemptId ? 1 : 0;
+      return hasB - hasA;
+    });
+  const distName = safeString(distNameEvidence[0]?.value);
+
+  const ocrName = safeString(evidence.find(
+    e => e.source === 'visual_product_evidence' && e.sourceField === 'name',
+  )?.value);
+  const spreadsheetName = safeString(evidence.find(
+    e => e.source === 'spreadsheet' && e.sourceField === 'name',
+  )?.value);
+
+  const productName = expectedName ?? officialName ?? distName ?? ocrName ?? spreadsheetName ?? 'Unknown Product';
 
   // ── Product description ──────────────────────────────────────────────────
-  const description = evidence.find(
+  // Allocate 2,000 characters fairly across official + distributor sources.
+  // Official copy comes first, then each distinct distributor description
+  // labelled with provider provenance.
+  const MAX_DESC_CHARS = 2000;
+  const descParts: string[] = [];
+
+  const officialDesc = safeString(evidence.find(
     e => e.source === 'official_product_page' && e.sourceField === 'description',
-  )?.value as string | undefined;
-  const productDescription = (description ?? '').slice(0, 2000);
+  )?.value);
+  if (officialDesc) {
+    descParts.push(officialDesc);
+  }
+
+  // Collect distinct distributor descriptions, ordered by confidence/provider
+  const seenDistDescs = new Set<string>();
+  const distDescs = evidence
+    .filter(e => e.source === 'third_party_page' && (e.sourceField === 'description'))
+    .sort((a, b) => {
+      const ca = typeof a.metadata?.confidence === 'number' ? a.metadata.confidence : 0.5;
+      const cb = typeof b.metadata?.confidence === 'number' ? b.metadata.confidence : 0.5;
+      return cb - ca;
+    });
+
+  for (const de of distDescs) {
+    const val = safeString(de.value);
+    if (!val) continue;
+    const normalized = val.toLowerCase();
+    // Skip duplicates (same text from multiple rows)
+    if (seenDistDescs.has(normalized)) continue;
+    seenDistDescs.add(normalized);
+    const provider = de.metadata?.providerId as string | undefined;
+    descParts.push(provider ? `[${provider}] ${val}` : val);
+  }
+
+  // Fair allocation: each part gets an equal share of the budget
+  const perPartBudget = descParts.length > 0
+    ? Math.floor(MAX_DESC_CHARS / descParts.length)
+    : MAX_DESC_CHARS;
+  const productDescription = descParts
+    .map(p => p.slice(0, perPartBudget))
+    .join('\n')
+    .slice(0, MAX_DESC_CHARS);
 
   // ── OCR summary from visual_product_evidence ─────────────────────────────
   const visualEvidence = evidence.filter(e => e.source === 'visual_product_evidence');
@@ -126,15 +192,14 @@ export function extractProductContext(
   const getFirst = (field: string): string | null => {
     const entry = visualEvidence.find(e => e.sourceField === field);
     if (!entry) return null;
-    const val = entry.value;
-    return typeof val === 'string' ? val : null;
+    return safeString(entry.value) ?? null;
   };
 
   const getAll = (field: string): string[] => {
     return visualEvidence
       .filter(e => e.sourceField === field)
-      .map(e => (typeof e.value === 'string' ? e.value : ''))
-      .filter(Boolean);
+      .map(e => safeString(e.value))
+      .filter((v): v is string => !!v);
   };
 
   // ── Brand resolution (priority order) ────────────────────────────────────
@@ -153,21 +218,31 @@ export function extractProductContext(
 
   // 2. Official product page brand
   if (!resolvedBrand) {
-    const pageBrand = evidence.find(
+    resolvedBrand = safeString(evidence.find(
       e => e.source === 'official_product_page' && e.sourceField === 'brand',
-    )?.value as string | undefined;
-    if (pageBrand) resolvedBrand = pageBrand;
+    )?.value) ?? null;
   }
 
-  // 3. Spreadsheet brand hint
+  // 3. Highest-confidence distributor brand
   if (!resolvedBrand) {
-    const spreadsheetBrand = evidence.find(
-      e => e.source === 'spreadsheet' && e.sourceField === 'brand',
-    )?.value as string | undefined;
-    if (spreadsheetBrand) resolvedBrand = spreadsheetBrand;
+    const distBrand = evidence
+      .filter(e => e.source === 'third_party_page' && e.sourceField === 'brand')
+      .sort((a, b) => {
+        const ca = typeof a.metadata?.confidence === 'number' ? a.metadata.confidence : 0.5;
+        const cb = typeof b.metadata?.confidence === 'number' ? b.metadata.confidence : 0.5;
+        return cb - ca;
+      });
+    resolvedBrand = safeString(distBrand[0]?.value) ?? null;
   }
 
-  // 4. Visual OCR brand
+  // 4. Spreadsheet brand hint
+  if (!resolvedBrand) {
+    resolvedBrand = safeString(evidence.find(
+      e => e.source === 'spreadsheet' && e.sourceField === 'brand',
+    )?.value) ?? null;
+  }
+
+  // 5. Visual OCR brand
   if (!resolvedBrand) {
     resolvedBrand = getFirst('brand');
   }
