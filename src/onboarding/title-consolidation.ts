@@ -41,6 +41,22 @@ export interface TitleSignals {
     siblingOcrTitles: string[];
     siblingSkus: string[];
   };
+  /** Title signals from distributor evidence, in confidence/provider order. */
+  distributorTitles?: Array<{
+    title: string;
+    providerId: string;
+    attemptId: string;
+    confidence: number;
+  }>;
+  /** Brand signals from distributor evidence, in confidence/provider order.
+   *  Passed alongside distributorTitles so the LLM can cross-reference
+   *  provider-specific brand names. */
+  distributorBrands?: Array<{
+    brand: string;
+    providerId: string;
+    attemptId: string;
+    confidence: number;
+  }>;
 }
 
 export interface TitleResult {
@@ -86,6 +102,8 @@ export async function consolidateProductTitle(signals: TitleSignals): Promise<Ti
       siblingContext: signals.siblingContext
         ? { groupLabel: signals.siblingContext.groupLabel, siblingNames: signals.siblingContext.siblingNames }
         : undefined,
+      distributorTitles: signals.distributorTitles,
+      distributorBrands: signals.distributorBrands,
     });
 
     const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', { allowFallback: true });
