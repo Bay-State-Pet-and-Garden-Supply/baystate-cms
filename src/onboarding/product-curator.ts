@@ -3,6 +3,7 @@ import { convertToLbs } from '../shared/weight-converter';
 import { callLlmForTask, getLlmConfigForTask } from './llm-client';
 import { coordinateCohortItemsOnce, formatDeterministicTitle } from './cohort-name-coordinator';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
+import { getEvidenceAttemptsByIdsForItem } from '../db/repositories/onboarding-evidence-repo';
 import { extractPackagingOcr } from './packaging-ocr';
 import { getDb } from '../db/connection';
 import { loadClassificationConfig } from '../classification/config-loader';
@@ -25,6 +26,7 @@ import {
   productDraftProjectionStage,
 } from '../classification';
 import { consolidateProductTitle } from './title-consolidation';
+import { consolidateDistributorCopy } from './distributor-copy-consolidator';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
 import { determineProductGroup } from './product-line-grouper';
 import type { ProductLineItemSnapshot, StageDefinition } from '../classification/types';
@@ -273,6 +275,10 @@ export async function curateItemWithPipeline(
           departmentHint: null,
           sourceUrl: null,
           expectedName: null,
+          sourceType: 'official_page',
+          acceptedEvidenceAttemptId: null,
+          acceptedEvidenceAttemptIds: [],
+          sourcingDecision: null,
           stage: 'curation' as const,
           stageStatus: 'pending' as const,
           rowNumber: 0,
@@ -500,6 +506,44 @@ export async function curateItemWithPipeline(
       })
       .filter((v): v is string => !!v);
     const speciesLabels = ext.packagingOcrData?.species ?? [];
+
+    // ── Distributor record: consolidate multi-provider copy ───────────────
+    // This runs AFTER the classification pipeline intentionally.
+    // During classification, raw per-provider evidence (from the
+    // evidence_extraction stage and buildClassificationEvidenceFromAttempts)
+    // is consumed by name_consolidation, product-type classification, and
+    // page-assignment stages. Consolidating here creates the final
+    // curatedDescription and source-attempt provenance for draft copy —
+    // it does not feed back into classification.
+    let curatedDescription: string | null = null;
+    let curatedDescriptionSourceAttemptIds: string[] = [];
+    let curationWarnings: string[] = [];
+
+    const distAttemptIds: string[] = Array.isArray(ext.distributorEvidenceAttemptIds)
+      ? ext.distributorEvidenceAttemptIds
+      : [];
+
+    if (distAttemptIds.length > 0) {
+      try {
+        const distAttempts = getEvidenceAttemptsByIdsForItem(
+          item.id,
+          item.upc,
+          distAttemptIds,
+        );
+        const consolidation = await consolidateDistributorCopy(
+          distAttempts,
+          item.name,
+          item.brandHint,
+        );
+        curatedDescription = consolidation.curatedDescription;
+        curatedDescriptionSourceAttemptIds = consolidation.sourceAttemptIds;
+        curationWarnings = consolidation.warnings;
+      } catch (err: any) {
+        console.warn(`[ProductCurator] Distributor copy consolidation failed: ${err.message}`);
+        // Fall through — curatedDescription stays null
+      }
+    }
+
     const searchKeywords = synthesizeSearchKeywords({
       title: curatedTitle,
       brand: ext.brand ?? item.brandHint,
@@ -520,6 +564,8 @@ export async function curateItemWithPipeline(
         ext.packagingOcrData?.weight || ext.weight || extractWeightFromName(item.name) || null,
       ),
       titleSource: titleSource as 'web' | 'ocr' | 'llm' | 'manual' | 'llm_cohort' | 'cohort_fallback',
+      curatedDescription,
+      curatedDescriptionSourceAttemptIds,
       suggestedPages,
       suggestedProductType,
       curatedAt: new Date().toISOString(),

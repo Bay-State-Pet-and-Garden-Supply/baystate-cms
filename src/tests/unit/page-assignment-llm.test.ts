@@ -311,6 +311,158 @@ describe('extractProductContext', () => {
     const ctx = extractProductContext(evidence, []);
     expect(ctx.ocrSummary.brand).toBeNull();
   });
+
+  // ── Distributor context tests ───────────────────────────────────────────
+
+  it('uses distributor name when no official or OCR name is available', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({ source: 'spreadsheet', sourceField: 'name', value: 'Spreadsheet Name' }),
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'name',
+        value: 'Distributor Product Name',
+        metadata: { providerId: 'central_pet', attemptId: 'att-1', confidence: 0.9 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    // Spreadsheet name should be last resort; distributor wins
+    expect(ctx.productName).toBe('Distributor Product Name');
+  });
+
+  it('prefers official name over distributor name', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({ source: 'official_product_page', sourceField: 'name', value: 'Official Product' }),
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'name',
+        value: 'Distributor Name',
+        metadata: { providerId: 'p1', attemptId: 'a1', confidence: 0.95 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.productName).toBe('Official Product');
+  });
+
+  it('includes distributor descriptions in the product description', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'description',
+        value: 'A premium dog food with real chicken.',
+        metadata: { providerId: 'central_pet', attemptId: 'att-1', confidence: 0.9 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.productDescription).toContain('[central_pet] A premium dog food with real chicken.');
+  });
+
+  it('combines official and distributor descriptions with official first', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'official_product_page', sourceField: 'description',
+        value: 'Official product description.',
+      }),
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'description',
+        value: 'Distributor description.',
+        metadata: { providerId: 'p1', attemptId: 'a1', confidence: 0.9 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.productDescription).toContain('Official product description.');
+    expect(ctx.productDescription).toContain('[p1] Distributor description.');
+    // Official should come first
+    expect(ctx.productDescription.indexOf('Official')).toBeLessThan(
+      ctx.productDescription.indexOf('[p1]'),
+    );
+  });
+
+  it('deduplicates identical distributor descriptions', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'description',
+        value: 'Same description text.',
+        metadata: { providerId: 'p1', attemptId: 'a1', confidence: 0.9 },
+      }),
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'description',
+        value: 'Same description text.',
+        metadata: { providerId: 'p2', attemptId: 'a2', confidence: 0.8 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    // Should only appear once
+    const occurrences = (ctx.productDescription.match(/Same description text/g) || []).length;
+    expect(occurrences).toBe(1);
+  });
+
+  it('stays within the 2000-character description budget', () => {
+    const longDesc = 'X'.repeat(1500);
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'description',
+        value: longDesc,
+        metadata: { providerId: 'p1', attemptId: 'a1', confidence: 0.9 },
+      }),
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'description',
+        value: longDesc + 'extra',
+        metadata: { providerId: 'p2', attemptId: 'a2', confidence: 0.8 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.productDescription.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('uses distributor brand when no official or spreadsheet brand exists', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'brand',
+        value: 'Distributor Brand Inc',
+        metadata: { providerId: 'central_pet', attemptId: 'att-1', confidence: 0.95 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.ocrSummary.brand).toBe('Distributor Brand Inc');
+  });
+
+  it('prefers official brand over distributor brand', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({ source: 'official_product_page', sourceField: 'brand', value: 'Official Brand' }),
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'brand',
+        value: 'Distributor Brand',
+        metadata: { providerId: 'p1', attemptId: 'a1', confidence: 0.95 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.ocrSummary.brand).toBe('Official Brand');
+  });
+
+  it('picks the highest-confidence distributor name among multiple providers', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'name',
+        value: 'Low Confidence Name',
+        metadata: { providerId: 'p1', attemptId: 'a1', confidence: 0.5 },
+      }),
+      makeEvidence({
+        source: 'third_party_page', sourceField: 'name',
+        value: 'High Confidence Name',
+        metadata: { providerId: 'p2', attemptId: 'a2', confidence: 0.95 },
+      }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    expect(ctx.productName).toBe('High Confidence Name');
+  });
+
+  it('handles non-string evidence values safely', () => {
+    const evidence: ClassificationEvidence[] = [
+      makeEvidence({ source: 'third_party_page', sourceField: 'name', value: null as unknown as string }),
+      makeEvidence({ source: 'third_party_page', sourceField: 'brand', value: undefined as unknown as string }),
+    ];
+    const ctx = extractProductContext(evidence, []);
+    // Should not crash — falls back to 'Unknown Product'
+    expect(ctx.productName).toBe('Unknown Product');
+    expect(ctx.ocrSummary.brand).toBeNull();
+  });
 });
 
 // ─── normalizePageAssignments ────────────────────────────────────────────────
