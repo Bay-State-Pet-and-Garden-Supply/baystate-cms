@@ -34,6 +34,126 @@ function evidenceValue(
   return null;
 }
 
+// ─── Distributor signal collection ───────────────────────────────────────────
+
+interface DistributorTitleSignal {
+  title: string;
+  providerId: string;
+  attemptId: string;
+  confidence: number;
+}
+
+interface DistributorBrandSignal {
+  brand: string;
+  providerId: string;
+  attemptId: string;
+  confidence: number;
+}
+
+/**
+ * Collect, deduplicate, and confidence-order distributor title and brand
+ * signals from third_party_page evidence.
+ *
+ * Rules:
+ * - Prefer per-attempt evidence (those with metadata.attemptId) over
+ *   flattened ExtractionData-derived evidence to avoid double-counting
+ *   the highest-ranked provider.
+ * - Recognise both sourceField: 'name' and legacy 'title' for titles.
+ * - Deduplicate provider/value pairs, keeping the highest confidence.
+ * - Sort by confidence descending, then providerId, then attemptId.
+ */
+function collectDistributorSignals(evidence: StageInput['evidence']): {
+  titles: DistributorTitleSignal[];
+  brands: DistributorBrandSignal[];
+} {
+  const thirdPartyEvidence = evidence.filter(e => e.source === 'third_party_page');
+
+  // ── Per-attempt titles ────────────────────────────────────────────────
+  const perAttemptTitles: DistributorTitleSignal[] = [];
+  const perAttemptBrands: DistributorBrandSignal[] = [];
+  const seenTitleKeys = new Set<string>();
+  const seenBrandKeys = new Set<string>();
+
+  // Collect per-attempt signals first (they carry immutable provenance)
+  for (const e of thirdPartyEvidence) {
+    const attemptId = e.metadata?.attemptId as string | undefined;
+    if (!attemptId) continue; // skip flattened/legacy rows for now
+
+    const providerId = (e.metadata?.providerId as string) ?? 'unknown';
+    const confidence = typeof e.metadata?.confidence === 'number' ? e.metadata.confidence : 0.5;
+    const val = typeof e.value === 'string' ? e.value.trim() : null;
+    if (!val) continue;
+
+    if (e.sourceField === 'name' || e.sourceField === 'title') {
+      const key = `${providerId}|${val.toLowerCase()}`;
+      if (!seenTitleKeys.has(key)) {
+        seenTitleKeys.add(key);
+        perAttemptTitles.push({ title: val, providerId, attemptId, confidence });
+      }
+    }
+
+    if (e.sourceField === 'brand') {
+      const key = `${providerId}|${val.toLowerCase()}`;
+      if (!seenBrandKeys.has(key)) {
+        seenBrandKeys.add(key);
+        perAttemptBrands.push({ brand: val, providerId, attemptId, confidence });
+      }
+    }
+  }
+
+  // ── Backfill with flattened/legacy evidence when no per-attempt ────────
+  if (perAttemptTitles.length === 0) {
+    for (const e of thirdPartyEvidence) {
+      if (e.sourceField !== 'name' && e.sourceField !== 'title') continue;
+      const val = typeof e.value === 'string' ? e.value.trim() : null;
+      if (!val) continue;
+      const providerId = (e.metadata?.providerId as string) ?? (e.metadata?.distributorProvider as string) ?? 'unknown';
+      const key = `${providerId}|${val.toLowerCase()}`;
+      if (!seenTitleKeys.has(key)) {
+        seenTitleKeys.add(key);
+        perAttemptTitles.push({
+          title: val,
+          providerId,
+          attemptId: '',
+          confidence: 0.5,
+        });
+      }
+    }
+  }
+
+  if (perAttemptBrands.length === 0) {
+    for (const e of thirdPartyEvidence) {
+      if (e.sourceField !== 'brand') continue;
+      const val = typeof e.value === 'string' ? e.value.trim() : null;
+      if (!val) continue;
+      const providerId = (e.metadata?.providerId as string) ?? (e.metadata?.distributorProvider as string) ?? 'unknown';
+      const key = `${providerId}|${val.toLowerCase()}`;
+      if (!seenBrandKeys.has(key)) {
+        seenBrandKeys.add(key);
+        perAttemptBrands.push({
+          brand: val,
+          providerId,
+          attemptId: '',
+          confidence: 0.5,
+        });
+      }
+    }
+  }
+
+  // Sort by confidence descending, then providerId, then attemptId
+  const sortFn = (a: { confidence: number; providerId: string; attemptId: string }, b: { confidence: number; providerId: string; attemptId: string }) => {
+    if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+    if (a.providerId < b.providerId) return -1;
+    if (a.providerId > b.providerId) return 1;
+    return a.attemptId < b.attemptId ? -1 : 1;
+  };
+
+  perAttemptTitles.sort(sortFn);
+  perAttemptBrands.sort(sortFn);
+
+  return { titles: perAttemptTitles, brands: perAttemptBrands };
+}
+
 /**
  * Name Consolidation Stage
  *
@@ -98,15 +218,23 @@ export const nameConsolidationStage: StageDefinition = {
     const ocrWeight = evidenceValue(input.evidence, 'weight', 'visual_product_evidence');
     const ocrSize = evidenceValue(input.evidence, 'size', 'visual_product_evidence');
     const ocrCount = evidenceValue(input.evidence, 'count', 'visual_product_evidence');
+
+    // Collect distributor title and brand signals from third_party_page evidence
+    const distributorSignals = collectDistributorSignals(input.evidence);
+
+    // Brand hint: prefer spreadsheet → official page → highest-confidence distributor brand
     const brandHint = evidenceValue(input.evidence, 'brand', 'spreadsheet') ??
-      evidenceValue(input.evidence, 'brand', 'official_product_page');
+      evidenceValue(input.evidence, 'brand', 'official_product_page') ??
+      distributorSignals.brands[0]?.brand ?? null;
 
     const fallbackName = spreadsheetName ?? webTitle ?? 'Unknown Product';
 
-    if (!spreadsheetName && !webTitle && !ocrTitle) {
+    // Consider distributor titles as valid signals for availability
+    const hasDistributorTitles = distributorSignals.titles.length > 0;
+    if (!spreadsheetName && !webTitle && !ocrTitle && !hasDistributorTitles) {
       return {
         status: 'abstained',
-        reason: 'No title signals available from evidence (no spreadsheet name, web title, or OCR title).',
+        reason: 'No title signals available from evidence (no spreadsheet name, web title, OCR title, or distributor titles).',
       };
     }
 
@@ -133,6 +261,8 @@ export const nameConsolidationStage: StageDefinition = {
         ocrSize: ocrSize ?? undefined,
         ocrCount: ocrCount ?? undefined,
         siblingContext,
+        distributorTitles: distributorSignals.titles.length > 0 ? distributorSignals.titles : undefined,
+        distributorBrands: distributorSignals.brands.length > 0 ? distributorSignals.brands : undefined,
       });
 
       return {
@@ -159,6 +289,8 @@ export const nameConsolidationStage: StageDefinition = {
               brandHint: brandHint ?? null,
               groupId: productLine?.groupId ?? null,
               siblingCount: productLine?.siblingNames.length ?? 0,
+              distributorTitleCount: distributorSignals.titles.length,
+              distributorBrandCount: distributorSignals.brands.length,
             },
           },
         },
@@ -166,9 +298,10 @@ export const nameConsolidationStage: StageDefinition = {
     } catch (err: any) {
       console.error(`[NameConsolidation] Failed to consolidate title: ${err.message}`);
 
-      // Fallback: use best available signal
-      const fallback = ocrTitle ?? webTitle ?? spreadsheetName ?? 'Unknown Product';
-      const fallbackSource = ocrTitle ? 'ocr' : 'web';
+      // Fallback: use best available signal (including distributor titles)
+      const bestDistributorTitle = distributorSignals.titles[0]?.title ?? null;
+      const fallback = ocrTitle ?? webTitle ?? spreadsheetName ?? bestDistributorTitle ?? 'Unknown Product';
+      const fallbackSource = ocrTitle ? 'ocr' : (webTitle ? 'web' : (bestDistributorTitle ? 'web' : 'web'));
 
       return {
         status: 'succeeded',
@@ -194,6 +327,8 @@ export const nameConsolidationStage: StageDefinition = {
               brandHint: brandHint ?? null,
               groupId: productLine?.groupId ?? null,
               siblingCount: productLine?.siblingNames.length ?? 0,
+              distributorTitleCount: distributorSignals.titles.length,
+              distributorBrandCount: distributorSignals.brands.length,
             },
           },
         },
