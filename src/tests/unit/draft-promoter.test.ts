@@ -8,7 +8,7 @@ import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { listChangeSets, listChangeSetItems } from '../../db/repositories/change-set-repo';
 import { getProductPageAssignments } from '../../db/repositories/page-repo';
-import type { ExtractionData } from '../../shared/schemas/onboarding';
+import { type ExtractionData, ExtractionDataSchema } from '../../shared/schemas/onboarding';
 
 describe('Draft Promoter Service', () => {
   const testDbPath = path.resolve(import.meta.dirname, 'promoter-test.db');
@@ -81,7 +81,7 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'Awesome Running Shoes',
       brand: 'RunningCo',
       description: 'Extremely lightweight running shoes.',
@@ -99,7 +99,7 @@ describe('Draft Promoter Service', () => {
       packagingTitle: null,
       packagingOcrData: null,
       customFields: {}
-    };
+    });
 
     const items = insertItems(batch.id, [{
       upc: '123456123456',
@@ -175,7 +175,7 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'Premium Dog Food',
       brand: 'DogCo',
       description: 'Healthy dog food.',
@@ -193,7 +193,7 @@ describe('Draft Promoter Service', () => {
       sourceUrl: 'https://dogco.com/food',
       confidence: 0.9,
       fieldProvenance: { title: 'json-ld' }
-    };
+    });
 
     const items = insertItems(batch.id, [{
       upc: '987654321098',
@@ -262,7 +262,7 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'Premium Cat Food',
       brand: 'CatCo',
       description: 'Healthy cat food.',
@@ -280,7 +280,7 @@ describe('Draft Promoter Service', () => {
       sourceUrl: 'https://catco.com/food',
       confidence: 0.9,
       fieldProvenance: { title: 'json-ld' }
-    };
+    });
 
     const items = insertItems(batch.id, [{
       upc: '888888888888',
@@ -326,7 +326,7 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'Premium Dog Treat',
       brand: 'DogCo',
       description: 'Tasty treat.',
@@ -344,7 +344,7 @@ describe('Draft Promoter Service', () => {
       sourceUrl: 'https://dogco.com/treat',
       confidence: 0.9,
       fieldProvenance: { title: 'json-ld' }
-    };
+    });
 
     const items = insertItems(batch.id, [{
       upc: '777777777777',
@@ -390,7 +390,7 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'Missing Details Product',
       brand: null, // missing brand
       description: null,
@@ -405,10 +405,10 @@ describe('Draft Promoter Service', () => {
       packagingTitle: null,
       packagingOcrData: null,
       customFields: {},
-      sourceUrl: 'https://unknown.com/product',
+      sourceUrl: 'https://missing.com/item',
       confidence: 0.9,
       fieldProvenance: { title: 'json-ld' }
-    };
+    });
 
     const items = insertItems(batch.id, [{
       upc: '555555555555',
@@ -456,7 +456,7 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'New Animal Toy',
       brand: 'ToyCo',
       description: 'Brand new toy.',
@@ -474,7 +474,7 @@ describe('Draft Promoter Service', () => {
       sourceUrl: 'https://toyco.com/toy',
       confidence: 0.9,
       fieldProvenance: { title: 'json-ld' }
-    };
+    });
 
     const items = insertItems(batch.id, [{
       upc: '444444444444',
@@ -528,7 +528,7 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'No Proposals Product',
       brand: 'ToyCo',
       description: 'Brand new toy.',
@@ -546,7 +546,7 @@ describe('Draft Promoter Service', () => {
       sourceUrl: 'https://toyco.com/toy-fail',
       confidence: 0.9,
       fieldProvenance: { title: 'json-ld' }
-    };
+    });
 
     const items = insertItems(batch.id, [{
       upc: '333333333333',
@@ -602,7 +602,7 @@ describe('Draft Promoter Service', () => {
       brandHint: 'ToyCo',
       rowNumber: 1,
     }])[0];
-    const extractionData: ExtractionData = {
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
       title: 'Active Run Product',
       brand: 'ToyCo',
       description: 'A product whose old run must not leak.',
@@ -620,7 +620,7 @@ describe('Draft Promoter Service', () => {
       sourceUrl: 'https://toyco.example/active-run-product',
       confidence: 0.9,
       fieldProvenance: { title: 'json-ld' },
-    };
+    });
     const db = getDb();
     db.run(
       `UPDATE onboarding_items

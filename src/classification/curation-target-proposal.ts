@@ -58,6 +58,8 @@ export interface FieldAssignmentProposalParams {
   evidenceIds: string[];
   /** Single value or array depending on selectionMode */
   isMultiple: boolean;
+  /** Explicit override for bulk acceptance (e.g. false for brand shortcuts until Issue #10) */
+  isBulkAcceptable?: boolean;
 }
 
 /**
@@ -81,7 +83,7 @@ export function buildFieldAssignmentProposal(params: FieldAssignmentProposalPara
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
     status: 'pending',
-    isBulkAcceptable: params.confidence >= 0.7,
+    isBulkAcceptable: params.isBulkAcceptable ?? (params.confidence >= 0.7),
     isStale: false,
     stalenessReason: null,
     createdAt: now(),
@@ -96,6 +98,8 @@ export interface CategoryPageProposalParams {
   pageId?: string;
   confidence: number;
   evidenceIds: string[];
+  /** Explicit override for bulk acceptance */
+  isBulkAcceptable?: boolean;
 }
 
 /**
@@ -114,7 +118,7 @@ export function buildCategoryPageProposal(params: CategoryPageProposalParams): C
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
     status: 'pending',
-    isBulkAcceptable: params.confidence >= 0.7,
+    isBulkAcceptable: params.isBulkAcceptable ?? (params.confidence >= 0.7),
     isStale: false,
     stalenessReason: null,
     createdAt: now(),

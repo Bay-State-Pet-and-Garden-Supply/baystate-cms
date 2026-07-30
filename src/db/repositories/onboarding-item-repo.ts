@@ -42,7 +42,7 @@ export interface InsertItemData {
   existingSku?: string | null;
 }
 
-const STAGE_ORDER: PipelineStage[] = ['discovery', 'extraction', 'curation', 'review', 'promotion'];
+const STAGE_ORDER: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
 const PIPELINE_STAGES = STAGE_ORDER;
 
@@ -59,6 +59,10 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
     sourceUrl: row.source_url,
     expectedName: row.expected_name ?? null,
     coordinatedTitle: row.coordinated_title ?? null,
+    sourceType: (row as any).source_type ?? 'official_page',
+    acceptedEvidenceAttemptIds: (row as any).accepted_evidence_attempt_ids_json ? JSON.parse((row as any).accepted_evidence_attempt_ids_json) : [],
+    acceptedEvidenceAttemptId: (row as any).accepted_evidence_attempt_id ?? null,
+    sourcingDecision: (row as any).sourcing_decision_json ? JSON.parse((row as any).sourcing_decision_json) : null,
     stage: (row.stage || 'discovery') as PipelineStage,
     stageStatus: (row.stage_status || 'pending') as StageStatus,
     status: (row.status || 'imported') as ItemStatus,
@@ -120,6 +124,10 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
         departmentHint: item.departmentHint ?? null,
         sourceUrl: item.sourceUrl ?? null,
         expectedName: null,
+        sourceType: 'official_page',
+        acceptedEvidenceAttemptIds: [],
+        acceptedEvidenceAttemptId: null,
+        sourcingDecision: null,
         stage: 'discovery' as PipelineStage,
         stageStatus: 'pending' as StageStatus,
         status: 'imported' as ItemStatus,
@@ -183,6 +191,7 @@ export function listItemsByBatchStaged(batchId: string): Record<PipelineStage, O
 
   const items = rows.map(mapRowToItem);
   const grouped: Record<PipelineStage, OnboardingItem[]> = {
+    sourcing: [],
     discovery: [],
     extraction: [],
     curation: [],
@@ -461,6 +470,7 @@ export function getStageCounts(batchId: string): Record<PipelineStage, number> {
   ).all(batchId) as Array<{ stage: string; count: number }>;
 
   const counts: Record<PipelineStage, number> = {
+    sourcing: 0,
     discovery: 0,
     extraction: 0,
     curation: 0,

@@ -55,8 +55,8 @@ describe('Brand Inferrer', () => {
       vi.spyOn(llmClient, 'callLlmForTask').mockRejectedValue(new Error('LLM not configured'));
 
       vi.spyOn(brandSiteRepo, 'listAllBrandSites').mockReturnValue([
-        { id: '1', brandName: 'nylabone', domain: 'nylabone.com', successCount: 1, lastUsedAt: null, createdAt: '', urlPattern: null },
-        { id: '2', brandName: 'kong', domain: 'kongcompany.com', successCount: 1, lastUsedAt: null, createdAt: '', urlPattern: null }
+        { id: '1', brandName: 'nylabone', domain: 'nylabone.com', successCount: 1, lastUsedAt: null, createdAt: '', urlPattern: null, sourceStrategy: 'official_first' },
+        { id: '2', brandName: 'kong', domain: 'kongcompany.com', successCount: 1, lastUsedAt: null, createdAt: '', urlPattern: null, sourceStrategy: 'official_first' }
       ]);
 
       const searchResults = [
@@ -135,7 +135,7 @@ describe('Brand Inferrer', () => {
     it('should fall back to heuristics if LLM response is malformed', async () => {
       vi.spyOn(llmClient, 'callLlmForTask').mockResolvedValue('Not JSON');
       vi.spyOn(brandSiteRepo, 'listAllBrandSites').mockReturnValue([
-        { id: '2', brandName: 'kong', domain: 'kongcompany.com', successCount: 1, lastUsedAt: null, createdAt: '', urlPattern: null }
+        { id: '2', brandName: 'kong', domain: 'kongcompany.com', successCount: 1, lastUsedAt: null, createdAt: '', urlPattern: null, sourceStrategy: 'official_first' }
       ]);
 
       const searchResults = [

@@ -6,7 +6,7 @@
 
 import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
-import type { ExtractionData } from '../shared/schemas/onboarding';
+import { type ExtractionData, ExtractionDataSchema } from '../shared/schemas/onboarding';
 import { findProfileByDomain, type ExtractorProfile } from '../db/repositories/extractor-profile-repo';
 import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { recordDomainStatus } from '../db/repositories/domain-status-repo';
@@ -1351,7 +1351,7 @@ function mergeExtractionLayers(
     if (cf && typeof cf === 'object') customFields = cf;
   }
 
-  return {
+  return ExtractionDataSchema.parse({
     title,
     brand,
     description,
@@ -1369,5 +1369,5 @@ function mergeExtractionLayers(
     packagingTitle: null,
     packagingOcrData: null,
     customFields,
-  };
+  });
 }

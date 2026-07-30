@@ -9,6 +9,7 @@ export interface BrandSiteRow {
   url_pattern: string | null;
   success_count: number;
   last_used_at: string | null;
+  source_strategy?: string | null;
   created_at: string;
 }
 
@@ -20,6 +21,7 @@ function mapRowToBrandSite(row: BrandSiteRow): BrandSite {
     urlPattern: row.url_pattern,
     successCount: row.success_count,
     lastUsedAt: row.last_used_at,
+    sourceStrategy: (row.source_strategy as any) ?? 'official_first',
     createdAt: row.created_at,
   };
 }
@@ -50,6 +52,7 @@ export function upsertBrandSite(
       urlPattern: urlPattern ?? existing.url_pattern,
       successCount: existing.success_count + 1,
       lastUsedAt: now,
+      sourceStrategy: (existing.source_strategy as any) ?? 'official_first',
       createdAt: existing.created_at,
     };
   }
@@ -67,6 +70,7 @@ export function upsertBrandSite(
     urlPattern: urlPattern ?? null,
     successCount: 1,
     lastUsedAt: now,
+    sourceStrategy: 'official_first',
     createdAt: now,
   };
 }
@@ -120,6 +124,7 @@ export function updateBrandSiteDomain(brandName: string, domain: string): BrandS
       urlPattern: mainRow.url_pattern,
       successCount: mainRow.success_count + 1,
       lastUsedAt: now,
+      sourceStrategy: (mainRow.source_strategy as any) ?? 'official_first',
       createdAt: mainRow.created_at,
     };
   } else {

@@ -26,9 +26,10 @@ import type {
 import type { ClassificationProposal, ClassificationEvidence, CurationTargetConfig } from '../../shared/schemas/classification';
 import { SearchableBrandSelector } from './SearchableBrandSelector';
 
-const STAGES: PipelineStage[] = ['discovery', 'extraction', 'curation', 'review', 'promotion'];
+const STAGES: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
 const STAGE_LABELS: Record<PipelineStage, string> = {
+  sourcing: 'Sourcing',
   discovery: 'Discovery',
   extraction: 'Extraction',
   curation: 'Curation',
@@ -37,6 +38,7 @@ const STAGE_LABELS: Record<PipelineStage, string> = {
 };
 
 const STAGE_DESCRIPTIONS: Record<PipelineStage, string> = {
+  sourcing: 'Match distributor records',
   discovery: 'Find source URLs',
   extraction: 'Scrape product data',
   curation: 'Synthesize titles & classify',
@@ -47,6 +49,7 @@ const STAGE_DESCRIPTIONS: Record<PipelineStage, string> = {
 const STAGE_STATUS_STYLE: Record<StageStatus, { bg: string; text: string; icon: string }> = {
   pending: { bg: '#f3f4f6', text: '#374151', icon: '○' },
   in_progress: { bg: '#dbeafe', text: '#1e40af', icon: '◌' },
+  needs_input: { bg: '#fef3c7', text: '#92400e', icon: '⚠' },
   completed: { bg: '#f0fdf4', text: '#166534', icon: '✓' },
   failed: { bg: '#fee2e2', text: '#991b1b', icon: '✗' },
   skipped: { bg: '#e5e7eb', text: '#6b7280', icon: '⊘' },
@@ -68,6 +71,7 @@ interface PipelineBoardProps {
   _catalogBrands?: string[];
   onRefreshBrandSites: () => void;
   onOpenProfileBuilder?: (domain: string, item: OnboardingItem) => void;
+  onOpenBrandSetup?: (brandHint?: string | null) => void;
 }
 
 export function PipelineBoard({
@@ -78,8 +82,10 @@ export function PipelineBoard({
   _catalogBrands: _catalogBrands,
   onRefreshBrandSites: _onRefreshBrandSites,
   onOpenProfileBuilder,
+  onOpenBrandSetup: _onOpenBrandSetup,
 }: PipelineBoardProps) {
   const [staged, setStaged] = useState<Record<PipelineStage, OnboardingItem[]>>({
+    sourcing: [],
     discovery: [],
     extraction: [],
     curation: [],

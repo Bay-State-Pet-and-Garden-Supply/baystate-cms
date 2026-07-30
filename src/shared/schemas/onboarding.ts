@@ -93,7 +93,45 @@ export const PackagingOcrDataSchema = z.object({
 
 export type PackagingOcrData = z.infer<typeof PackagingOcrDataSchema>;
 
+// ─── Pipeline Stages ────────────────────────────────────────────────────────────
+
+export const SourceTypeEnum = z.enum(['official_page', 'distributor_record']);
+export type SourceType = z.infer<typeof SourceTypeEnum>;
+
+export const PipelineStageEnum = z.enum([
+  'sourcing',
+  'discovery',
+  'extraction',
+  'curation',
+  'review',
+  'promotion',
+]);
+
+export type PipelineStage = z.infer<typeof PipelineStageEnum>;
+
 // ─── Extraction Data (structured product output) ────────────────────────────────
+
+/**
+ * A distributor-sourced image candidate with provenance tracking.
+ */
+export const DistributorImageCandidateSchema = z.object({
+  url: z.string().url(),
+  sourceAttemptIds: z.array(z.string()),
+  sourceProviderIds: z.array(z.string()),
+});
+export type DistributorImageCandidate = z.infer<typeof DistributorImageCandidateSchema>;
+
+/**
+ * An approved distributor image with rights attestation.
+ */
+export const DistributorImageApprovalSchema = z.object({
+  imageUrl: z.string().url(),
+  sourceAttemptIds: z.array(z.string()),
+  approvedAt: z.string(),
+  rightsAttested: z.literal(true),
+  approvalOrigin: z.enum(['operator_review', 'legacy_explicit_opt_in']).default('operator_review'),
+});
+export type DistributorImageApproval = z.infer<typeof DistributorImageApprovalSchema>;
 
 export const ExtractionDataSchema = z.object({
   title: z.string().nullable().default(null),
@@ -107,6 +145,17 @@ export const ExtractionDataSchema = z.object({
   dimensions: z.string().nullable().default(null),
   seoFileName: z.string().nullable().default(null),
   searchKeywords: z.string().nullable().default(null),
+  sourceType: SourceTypeEnum.optional().default('official_page'),
+  /** The distributor provider ID when this extraction came from a distributor record. */
+  distributorProviderId: z.string().nullable().optional().default(null),
+  /** All distributor evidence attempt IDs that contributed to this extraction (plural). */
+  distributorEvidenceAttemptIds: z.array(z.string()).optional().default(() => []),
+  /** All distributor provider IDs that contributed to this extraction (plural). */
+  distributorProviderIds: z.array(z.string()).optional().default(() => []),
+  /** Image candidates from distributor evidence (not approved unless listed in distributorImageApprovals). */
+  distributorImageCandidates: z.array(DistributorImageCandidateSchema).optional().default(() => []),
+  /** Approved distributor images with rights attestation. */
+  distributorImageApprovals: z.array(DistributorImageApprovalSchema).optional().default(() => []),
   sourceUrl: z.string().nullable().default(null),
   confidence: z.number().min(0).max(1).default(0),
   fieldProvenance: z.record(z.string(), z.string()).default(() => ({})),
@@ -118,6 +167,78 @@ export const ExtractionDataSchema = z.object({
 });
 
 export type ExtractionData = z.infer<typeof ExtractionDataSchema>;
+
+// ─── Sourcing Routing Contracts ─────────────────────────────────────────────────
+
+/**
+ * The automatic routing decision after Sourcing evaluates all provider results.
+ */
+export const SourcingRouteEnum = z.enum([
+  'bundle_to_curation',
+  'fallback_to_discovery',
+  'needs_input_conflict',
+  'retry_provider_errors',
+  'degraded_fallback_to_discovery',
+]);
+export type SourcingRoute = z.infer<typeof SourcingRouteEnum>;
+
+/**
+ * How the Sourcing decision was made.
+ */
+export const SourcingRoutingOriginEnum = z.enum(['automatic_policy', 'operator_override']);
+export type SourcingRoutingOrigin = z.infer<typeof SourcingRoutingOriginEnum>;
+
+/**
+ * A detected conflict between distributor providers for a specific field.
+ */
+export const SourcingConflictSchema = z.object({
+  field: z.string(),
+  providerValues: z.record(z.string(), z.string()),
+  severity: z.enum(['hard', 'soft']),
+});
+export type SourcingConflict = z.infer<typeof SourcingConflictSchema>;
+
+/**
+ * The full Sourcing routing decision, persisted on the item.
+ */
+export const SourcingDecisionSchema = z.object({
+  route: SourcingRouteEnum,
+  origin: SourcingRoutingOriginEnum,
+  acceptedEvidenceAttemptIds: z.array(z.string()),
+  providerIds: z.array(z.string()),
+  conflicts: z.array(SourcingConflictSchema).default(() => []),
+  warnings: z.array(z.string()).default(() => []),
+  decidedAt: z.string(),
+});
+export type SourcingDecision = z.infer<typeof SourcingDecisionSchema>;
+
+// ─── Request Schemas for Sourcing Resolution ───────────────────────────────────
+
+/**
+ * Resolve a Sourcing item by selecting a coherent subset or falling back to Discovery.
+ */
+export const ResolveSourcingUseSelectedBundleSchema = z.object({
+  action: z.literal('use_selected_bundle'),
+  selectedAttemptIds: z.array(z.string()).min(1),
+});
+export const ResolveSourcingFallbackToDiscoverySchema = z.object({
+  action: z.literal('fallback_to_discovery'),
+});
+export const ResolveSourcingRequestSchema = z.discriminatedUnion('action', [
+  ResolveSourcingUseSelectedBundleSchema,
+  ResolveSourcingFallbackToDiscoverySchema,
+]);
+export type ResolveSourcingRequest = z.infer<typeof ResolveSourcingRequestSchema>;
+
+/**
+ * Approve a distributor image for use in a product draft.
+ */
+export const ApproveDistributorImageRequestSchema = z.object({
+  imageUrl: z.string().url(),
+  rightsAttested: z.literal(true),
+  sourceAttemptIds: z.array(z.string()).min(1),
+});
+export type ApproveDistributorImageRequest = z.infer<typeof ApproveDistributorImageRequestSchema>;
 
 // ─── Curation Data (Refined taxonomy and packaging mapping) ─────────────────────
 
@@ -133,6 +254,10 @@ export const CurationDataSchema = z.object({
     return val;
   }, z.string().nullable().default(null)),
   titleSource: z.enum(['web', 'ocr', 'llm', 'manual', 'llm_cohort', 'cohort_fallback']).default('web'),
+  /** Factual consolidated copy from multi-provider distributor bundle. */
+  curatedDescription: z.string().nullable().default(null),
+  /** The evidence attempt IDs whose copy contributed to curatedDescription. */
+  curatedDescriptionSourceAttemptIds: z.array(z.string()).default(() => []),
   suggestedPages: z.array(z.string()).default(() => []),
   suggestedProductType: z.string().nullable().default(null),
   curatedAt: z.string().nullable().default(null),
@@ -158,18 +283,6 @@ export const BatchStatusEnum = z.enum(['active', 'archived']);
 
 export type BatchStatus = z.infer<typeof BatchStatusEnum>;
 
-// ─── Pipeline Stages ────────────────────────────────────────────────────────────
-
-export const PipelineStageEnum = z.enum([
-  'discovery',
-  'extraction',
-  'curation',
-  'review',
-  'promotion',
-]);
-
-export type PipelineStage = z.infer<typeof PipelineStageEnum>;
-
 // ─── Stage Statuses ─────────────────────────────────────────────────────────────
 
 export const StageStatusEnum = z.enum([
@@ -177,9 +290,15 @@ export const StageStatusEnum = z.enum([
   'in_progress',
   'completed',
   'failed',
+  'needs_input',
   'skipped',
 ]);
 
+/**
+ * `needs_input` means processing is paused for an explicit operator action
+ * (like selecting a source URL, resolving ambiguous candidates, or fixing
+ * brand/domain setup). It is NOT a failure and NOT the Review stage.
+ */
 export type StageStatus = z.infer<typeof StageStatusEnum>;
 
 // ─── Item Statuses (DEPRECATED — use stage + stageStatus) ───────────────────────
@@ -257,6 +376,7 @@ export const ExtractorProfileSchema = z.object({
   variantSelectionStrategy: z.record(z.string(), z.unknown()).nullable().default(null),
   customSelectorMetadata: z.record(z.string(), z.unknown()).default(() => ({})),
   runtime: z.enum(['static', 'rendered']).default('rendered'),
+  profileType: z.enum(['brand', 'retailer']).optional().default('brand'),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -298,6 +418,14 @@ export const OnboardingItemSchema = z.object({
   expectedName: z.string().nullable().optional(),
   /** Pre-computed coordinated title from cohort LLM call. */
   coordinatedTitle: z.string().nullable().optional(),
+  /** Whether the source of truth is an official product page or a distributor record. */
+  sourceType: SourceTypeEnum.optional().default('official_page'),
+  /** When sourceType='distributor_record', the accepted evidence attempt IDs (plural). */
+  acceptedEvidenceAttemptIds: z.array(z.string()).default(() => []),
+  /** @deprecated Use acceptedEvidenceAttemptIds instead. Kept for backward compat. */
+  acceptedEvidenceAttemptId: z.string().nullable().default(null),
+  /** The auto-routing decision from Sourcing evaluation. */
+  sourcingDecision: SourcingDecisionSchema.nullable().default(null),
   /** Current pipeline stage for this item. */
   stage: PipelineStageEnum,
   /** Status within the current stage. */
@@ -330,6 +458,14 @@ export const OnboardingSourceSchema = z.object({
   isSelected: z.boolean(),
   sourceMethod: z.string(),
   metadataJson: z.string().nullable().optional(),
+  discoveryRunId: z.string().nullable().optional(),
+  verificationJson: z.string().nullable().optional(),
+  verificationScore: z.number().nullable().optional(),
+  recommendation: z.string().nullable().optional(),
+  reviewStatus: z.string().optional().default('pending'),
+  decisionOrigin: z.string().nullable().optional(),
+  decisionReason: z.string().nullable().optional(),
+  reviewedAt: z.string().nullable().optional(),
   createdAt: z.string(),
 });
 
@@ -646,6 +782,234 @@ export const DomainProfileGovernanceSchema = z.object({
 });
 export type DomainProfileGovernance = z.infer<typeof DomainProfileGovernanceSchema>;
 
+// ── Discovery Run Schemas ──────────────────────────────────────────
+
+export const DiscoveryRunTriggerEnum = z.enum([
+  'automatic',    // initial worker-triggered run
+  'refinement',   // operator-supplied search terms
+  'direct_url',   // operator-supplied URL to verify
+]);
+export type DiscoveryRunTrigger = z.infer<typeof DiscoveryRunTriggerEnum>;
+
+export const DiscoveryRunStatusEnum = z.enum([
+  'queued',       // waiting for worker claim
+  'running',      // worker is executing steps
+  'completed',    // finished with outcome
+  'failed',       // unrecoverable error
+]);
+export type DiscoveryRunStatus = z.infer<typeof DiscoveryRunStatusEnum>;
+
+export const DiscoveryRunStepEnum = z.enum([
+  'preflight',              // validating brand/domain setup
+  'sitemap_fetch',          // fetching/caching official sitemap
+  'sitemap_match',          // matching sitemap URLs to product
+  'official_search',        // searching official domain via Serper
+  'identifier_search',      // bare identifier search for context
+  'name_consolidation',     // LLM name consolidation from search results
+  'name_search',            // consolidated-name Serper search
+  'variant_resolution',     // resolving Shopify/product variants
+  'page_verification',      // fetching and verifying page content
+  'ranking',                // ranking and assigning recommendation tiers
+  'applying_outcome',       // persisting final outcome to item
+]);
+export type DiscoveryRunStep = z.infer<typeof DiscoveryRunStepEnum>;
+
+export const SearchScopeEnum = z.enum([
+  'official_only',   // only search official brand domains
+  'official_first',  // official domains first, unrestricted web fallback
+  'unrestricted',    // full web search
+]);
+export type SearchScope = z.infer<typeof SearchScopeEnum>;
+
+export const DiscoveryOutcomeEnum = z.enum([
+  'auto_selected',             // system auto-confirmed a source
+  'needs_input_candidates',    // candidates available, operator must choose
+  'needs_input_no_candidates', // no candidates found
+  'needs_input_ambiguous',     // ambiguous variant/product family
+  'needs_input_setup',         // brand/domain setup incomplete
+  'failed',                    // unrecoverable error
+]);
+export type DiscoveryOutcome = z.infer<typeof DiscoveryOutcomeEnum>;
+
+export const RecommendationTierEnum = z.enum([
+  'verified_official',     // official domain + exact identifier match
+  'likely_official',       // official domain + strong signals
+  'third_party_evidence',  // non-official domain with identity evidence
+  'not_product',           // page does not appear to be a product page
+]);
+export type RecommendationTier = z.infer<typeof RecommendationTierEnum>;
+
+export const SourceReviewDecisionEnum = z.enum([
+  'accepted',   // operator accepted this candidate as the source
+  'rejected',   // operator rejected this candidate
+  'pending',    // no decision yet
+]);
+export type SourceReviewDecision = z.infer<typeof SourceReviewDecisionEnum>;
+
+/**
+ * A single piece of page-verification evidence for a discovery candidate,
+ * suitable for display in the discovery console UI.
+ */
+export const VerificationEvidenceSchema = z.object({
+  signal: z.string(),
+  present: z.boolean(),
+  detail: z.string().nullable(),
+});
+export type VerificationEvidence = z.infer<typeof VerificationEvidenceSchema>;
+
+// ── Request/Response Schemas ───────────────────────────────────────
+
+export const DiscoveryRunRequestSchema = z.object({
+  trigger: DiscoveryRunTriggerEnum,
+  scope: SearchScopeEnum.optional().default('official_first'),
+  query: z.string().optional(),
+  url: z.string().optional(),
+  options: z.object({
+    skipSitemap: z.boolean().optional(),
+    skipNameConsolidation: z.boolean().optional(),
+    allowThirdParty: z.boolean().optional(),
+  }).optional(),
+});
+
+export const DiscoveryRunSummarySchema = z.object({
+  runId: z.string(),
+  trigger: DiscoveryRunTriggerEnum,
+  status: DiscoveryRunStatusEnum,
+  currentStep: DiscoveryRunStepEnum.nullable(),
+  outcome: DiscoveryOutcomeEnum.nullable(),
+  candidateCount: z.number(),
+  message: z.string().nullable(),
+  topCandidate: z.object({
+    url: z.string(),
+    domain: z.string().nullable(),
+    title: z.string().nullable(),
+    recommendation: RecommendationTierEnum,
+    confidence: z.number(),
+  }).nullable(),
+  createdAt: z.string(),
+  completedAt: z.string().nullable(),
+});
+
+export const DiscoveryCardSummarySchema = z.object({
+  itemId: z.string(),
+  hasSource: z.boolean(),
+  sourceUrl: z.string().nullable(),
+  sourceType: SourceTypeEnum.default('official_page'),
+  stageStatus: StageStatusEnum,
+  latestRun: DiscoveryRunSummarySchema.nullable(),
+  actionableReason: z.string().nullable(),
+  availableActions: z.array(z.enum([
+    'accept_candidate', 'reject_candidate', 'review_all',
+    'search_again', 'verify_url', 'assign_brand', 'assign_domain',
+  ])),
+  brandHint: z.string().nullable(),
+  officialDomains: z.array(z.string()),                                                                                                 });
+
+export const DistributorEvidenceAttemptViewSchema = z.object({
+  id: z.string(),
+  providerId: z.string(),
+  lookupUpc: z.string(),
+  outcome: z.enum(['found', 'not_stocked', 'source_error']),
+  confidence: z.number().min(0).max(1),
+  evidenceUrl: z.string().nullable(),
+  productName: z.string().nullable(),
+  brand: z.string().nullable(),
+  description: z.string().nullable(),
+  imageUrls: z.array(z.string()).default(() => []),
+  warnings: z.array(z.string()).default(() => []),
+  errorMessage: z.string().nullable(),
+  createdAt: z.string(),
+  /** Whether this attempt is accepted in the item's current acceptedEvidenceAttemptIds. */
+  isAccepted: z.boolean().default(false),
+  /** Validated ProductIdentityEvidence parsed from identityJson. */
+  identity: z.record(z.string(), z.unknown()).nullable().default(null),
+});
+export type DistributorEvidenceAttemptView = z.infer<typeof DistributorEvidenceAttemptViewSchema>;
+
+export const AcceptEvidenceRequestSchema = z.object({
+  evidenceAttemptId: z.string().min(1),
+  includeImages: z.boolean().default(false),
+});
+export type AcceptEvidenceRequest = z.infer<typeof AcceptEvidenceRequestSchema>;
+
+export const DiscoveryConsoleDetailSchema = z.object({
+  itemId: z.string(),
+  itemName: z.string(),
+  itemUpc: z.string(),
+  expectedName: z.string().nullable(),
+  brandHint: z.string().nullable(),
+  officialDomains: z.array(z.string()),
+  sourceUrl: z.string().nullable(),
+  sourceType: SourceTypeEnum.default('official_page'),
+  /** sourceConfirmed is true when acceptedEvidenceAttemptIds is non-empty or sourceUrl is set. */
+  sourceConfirmed: z.boolean(),
+  /** @deprecated Use acceptedEvidenceAttemptIds. */
+  acceptedEvidenceAttemptId: z.string().nullable(),
+  acceptedEvidenceAttemptIds: z.array(z.string()).default(() => []),
+  evidenceAttempts: z.array(DistributorEvidenceAttemptViewSchema).default(() => []),
+  latestRun: DiscoveryRunSummarySchema.nullable(),
+  candidates: z.array(z.object({
+    id: z.string(),
+    url: z.string(),
+    title: z.string().nullable(),
+    snippet: z.string().nullable(),
+    domain: z.string().nullable(),
+    confidence: z.number(),
+    recommendation: RecommendationTierEnum,
+    sourceMethod: z.string(),
+    verificationScore: z.number().nullable(),
+    verificationEvidence: z.array(z.object({
+      signal: z.string(), present: z.boolean(), detail: z.string().nullable(),
+    })).nullable(),
+    warnings: z.array(z.string()),
+    reviewStatus: SourceReviewDecisionEnum,
+    isSelected: z.boolean(),
+    metadataJson: z.string().nullable(),
+  })),
+  runs: z.array(DiscoveryRunSummarySchema),
+});
+
+export const DiscoverySearchRequestSchema = z.object({
+  query: z.string().min(1).max(200),
+  scope: SearchScopeEnum.optional().default('official_first'),
+});
+
+export const DiscoveryVerifyUrlRequestSchema = z.object({
+  url: z.string().url(),
+});
+
+export const DiscoveryCandidateDecisionSchema = z.object({
+  decision: z.enum(['accept', 'reject']),
+  allowThirdParty: z.boolean().optional().default(false),
+});
+
+export const SourceStrategyEnum = z.enum(['official_first', 'retailer_preferred', 'any_best_quality']);
+export type SourceStrategy = z.infer<typeof SourceStrategyEnum>;
+
+// ── Batch Setup Schemas ────────────────────────────────────────────
+
+export const BatchBrandAssignmentSchema = z.object({
+  itemId: z.string(),
+  brandHint: z.string().min(1),
+  brandDomain: z.string().min(1),
+  sourceStrategy: SourceStrategyEnum.optional().default('official_first'),
+});
+
+export const BatchDiscoverySetupSchema = z.object({
+  assignments: z.array(BatchBrandAssignmentSchema).min(1).max(1000),
+});
+
+// Type exports for Discovery schemas
+export type DiscoveryRunRequest = z.infer<typeof DiscoveryRunRequestSchema>;
+export type DiscoveryRunSummary = z.infer<typeof DiscoveryRunSummarySchema>;
+export type DiscoveryCardSummary = z.infer<typeof DiscoveryCardSummarySchema>;
+export type DiscoveryConsoleDetail = z.infer<typeof DiscoveryConsoleDetailSchema>;
+export type DiscoverySearchRequest = z.infer<typeof DiscoverySearchRequestSchema>;
+export type DiscoveryVerifyUrlRequest = z.infer<typeof DiscoveryVerifyUrlRequestSchema>;
+export type DiscoveryCandidateDecision = z.infer<typeof DiscoveryCandidateDecisionSchema>;
+export type BatchBrandAssignment = z.infer<typeof BatchBrandAssignmentSchema>;
+export type BatchDiscoverySetup = z.infer<typeof BatchDiscoverySetupSchema>;
+
 // ─── Brand Site ─────────────────────────────────────────────────────────────────
 
 export const BrandSiteSchema = z.object({
@@ -655,6 +1019,7 @@ export const BrandSiteSchema = z.object({
   urlPattern: z.string().nullable(),
   successCount: z.number().int(),
   lastUsedAt: z.string().nullable(),
+  sourceStrategy: SourceStrategyEnum.optional().default('official_first'),
   createdAt: z.string(),
 });
 

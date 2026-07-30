@@ -13,6 +13,10 @@ export interface OnboardingSourceRow {
   is_selected: number;
   source_method: string;
   metadata_json: string | null;
+  review_status?: string | null;
+  decision_origin?: string | null;
+  decision_reason?: string | null;
+  reviewed_at?: string | null;
   created_at: string;
 }
 
@@ -38,6 +42,10 @@ function mapRowToSource(row: OnboardingSourceRow): OnboardingSource {
     isSelected: row.is_selected === 1,
     sourceMethod: row.source_method,
     metadataJson: row.metadata_json,
+    reviewStatus: row.review_status ?? 'pending',
+    decisionOrigin: row.decision_origin ?? null,
+    decisionReason: row.decision_reason ?? null,
+    reviewedAt: row.reviewed_at ?? null,
     createdAt: row.created_at,
   };
 }
@@ -79,6 +87,7 @@ export function insertSources(itemId: string, sources: InsertSourceData[]): Onbo
         isSelected: false,
         sourceMethod: source.sourceMethod ?? 'serper',
         metadataJson: source.metadataJson ?? null,
+        reviewStatus: 'pending',
         createdAt: now,
       });
     }

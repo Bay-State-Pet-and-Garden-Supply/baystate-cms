@@ -8,7 +8,7 @@
  * @module page-assignment-llm
  */
 
-import type { ClassificationEvidence, ClassificationProposal } from '../shared/schemas/classification';
+import { type ClassificationEvidence, type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
 import { callLlmForTask } from '../onboarding/llm-client';
 import { listPages } from '../db/repositories/page-repo';
 
@@ -210,9 +210,10 @@ export function extractProductContext(
     e => e.source === 'catalog_manager_guidance' && e.sourceField === 'resolved_brand',
   );
   if (resolvedBrandEvidence) {
-    const v = resolvedBrandEvidence.value as { brandId?: string; brandName?: string } | null;
-    if (v?.brandName) {
-      resolvedBrand = v.brandName;
+    const parsed = CanonicalBrandEvidenceValueSchema.safeParse(resolvedBrandEvidence.value);
+    const bName = parsed.success ? parsed.data.brandName : ((resolvedBrandEvidence.value as any)?.brandName ?? (resolvedBrandEvidence.value as any)?.name);
+    if (bName) {
+      resolvedBrand = bName;
     }
   }
 

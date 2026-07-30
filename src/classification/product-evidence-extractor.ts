@@ -14,9 +14,19 @@ import { getCachedBrands, getCachedDataSharingPolicy } from '../db/repositories/
 import { resolveBrand } from './brand-resolution';
 import type { StageInput, StageContext } from './types';
 import type { ClassificationEvidence } from '../shared/types';
+import { CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
 
 const now = () => new Date().toISOString();
+
+export interface EvidenceInputField<T = string> {
+  value: T | null;
+  source?: ClassificationEvidence['source'];
+  sourceUrl?: string | null;
+  sourceField?: string | null;
+  reliability?: ClassificationEvidence['reliability'];
+  metadata?: Record<string, unknown>;
+}
 
 // ─── Normalized Evidence Input ────────────────────────────────────────────────
 
@@ -27,19 +37,19 @@ const now = () => new Date().toISOString();
  */
 export interface NormalizedEvidenceInput {
   /** Product name/title */
-  title: string | null;
+  title: string | EvidenceInputField<string> | null;
   /** Product description */
-  description: string | null;
+  description: string | EvidenceInputField<string> | null;
   /** Brand name (free text) */
-  brand: string | null;
+  brand: string | EvidenceInputField<string> | null;
   /** Product weight string */
-  weight: string | null;
+  weight: string | EvidenceInputField<string> | null;
   /** Bullet-point features */
-  bulletPoints: string[];
+  bulletPoints: string[] | EvidenceInputField<string[]>;
   /** SEO / search keywords */
-  searchKeywords: string | null;
+  searchKeywords: string | EvidenceInputField<string> | null;
   /** Custom fields key-value pairs */
-  customFields: Record<string, string>;
+  customFields: Record<string, string | EvidenceInputField<string>>;
   /** Primary product image URL or path */
   primaryImage: string | null;
   /** Additional gallery image URLs or paths */
@@ -50,6 +60,10 @@ export interface NormalizedEvidenceInput {
   existingPageNames: string[];
   /** Workspace path for local file resolution */
   workspacePath: string;
+  /** Override for default text evidence source label */
+  evidenceSourceOverride?: ClassificationEvidence['source'];
+  /** Distributor provider ID for metadata provenance */
+  distributorProviderId?: string | null;
 }
 
 export interface EvidenceExtractionResult {
@@ -370,16 +384,49 @@ export function packagingOcrDataToEvidence(
   return evidence;
 }
 
+function parseFieldInput<T>(
+  fieldInput: T | EvidenceInputField<T> | null | undefined,
+  defaultSource: ClassificationEvidence['source'],
+  defaultUrl: string | null = null,
+): {
+  value: T | null;
+  source: ClassificationEvidence['source'];
+  sourceUrl: string | null;
+  reliability: ClassificationEvidence['reliability'];
+  metadata: Record<string, unknown>;
+} {
+  if (fieldInput == null) {
+    return { value: null, source: defaultSource, sourceUrl: defaultUrl, reliability: 'medium', metadata: {} };
+  }
+  if (typeof fieldInput === 'object' && fieldInput !== null && 'value' in fieldInput) {
+    const inputObj = fieldInput as EvidenceInputField<T>;
+    return {
+      value: inputObj.value,
+      source: inputObj.source ?? defaultSource,
+      sourceUrl: inputObj.sourceUrl !== undefined ? inputObj.sourceUrl : defaultUrl,
+      reliability: inputObj.reliability ?? 'medium',
+      metadata: inputObj.metadata ?? {},
+    };
+  }
+  return {
+    value: fieldInput as T,
+    source: defaultSource,
+    sourceUrl: defaultUrl,
+    reliability: 'medium',
+    metadata: {},
+  };
+}
+
+function hasOcrContent(ocr: PackagingOcrData | undefined | null): boolean {
+  if (!ocr) return false;
+  if (ocr.productName && ocr.productName.trim().length > 0) return true;
+  if (ocr.brand && ocr.brand.trim().length > 0) return true;
+  if (ocr.visibleTextLines && ocr.visibleTextLines.some((b: string) => b && b.trim().length > 0)) return true;
+  return false;
+}
+
 /**
- * Extract product evidence from a normalized input.
- *
- * Produces ClassificationEvidence entries from text fields (title, description,
- * brand, customFields, etc.), runs VLM OCR on product images (up to 2), runs
- * cloud VLM fallback if configured, and performs LLM-based text extraction
- * for richer attribute identification.
- *
- * This function has NO dependency on the onboarding_items table.
- * The caller is responsible for persisting OCR results if needed.
+ * Shared, source-neutral product evidence extractor.
  */
 export async function extractProductEvidence(
   input: NormalizedEvidenceInput,
@@ -390,90 +437,94 @@ export async function extractProductEvidence(
   const sku = stageInput.sku;
   const sourceUrl = input.sourceUrl;
 
-  // ── Emit text evidence from product fields ─────────────────────────────
-  // Source depends on caller: 'spreadsheet' for onboarding, 'catalog_product' for catalog
-  const textSource = stageInput.sourceKind === 'catalog_product'
+  const defaultTextSource = stageInput.sourceKind === 'catalog_product'
     ? ('catalog_product' as const)
-    : ('spreadsheet' as const);
+    : ('official_product_page' as const);
 
-  if (input.title) {
+  // 1. Title
+  const titleInfo = parseFieldInput(input.title, (input.evidenceSourceOverride ?? defaultTextSource), sourceUrl);
+  if (titleInfo.value && typeof titleInfo.value === 'string' && titleInfo.value.trim().length > 0) {
     evidence.push({
       id: randomUUID(),
       runId: context.runId,
       stageName: 'evidence_extraction',
       productSku: sku,
       attributeId: null,
-      source: textSource,
-      reliability: 'medium' as ClassificationEvidence['reliability'],
-      sourceUrl: sourceUrl,
+      source: titleInfo.source,
+      reliability: titleInfo.reliability,
+      sourceUrl: titleInfo.sourceUrl,
       sourceField: 'name',
-      snippet: input.title.slice(0, 300),
-      value: input.title,
-      metadata: { provenance: textSource === 'catalog_product' ? 'catalog_product' : 'spreadsheet_import' },
+      snippet: titleInfo.value.slice(0, 300),
+      value: titleInfo.value,
+      metadata: { provenance: titleInfo.source === 'catalog_product' ? 'catalog_product' : titleInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', ...titleInfo.metadata },
       capturedAt: now(),
     });
   }
 
-  // brand
-  if (input.brand) {
+  // 2. Brand
+  const brandInfo = parseFieldInput(input.brand, (input.evidenceSourceOverride ?? defaultTextSource), sourceUrl);
+  if (brandInfo.value && typeof brandInfo.value === 'string' && brandInfo.value.trim().length > 0) {
     evidence.push({
       id: randomUUID(),
       runId: context.runId,
       stageName: 'evidence_extraction',
       productSku: sku,
       attributeId: null,
-      source: textSource,
-      reliability: 'medium' as ClassificationEvidence['reliability'],
-      sourceUrl: sourceUrl,
+      source: brandInfo.source,
+      reliability: brandInfo.reliability,
+      sourceUrl: brandInfo.sourceUrl,
       sourceField: 'brand',
-      snippet: input.brand.slice(0, 300),
-      value: input.brand,
-      metadata: { provenance: textSource === 'catalog_product' ? 'catalog_product' : 'spreadsheet_import' },
+      snippet: brandInfo.value.slice(0, 300),
+      value: brandInfo.value,
+      metadata: { provenance: brandInfo.source === 'catalog_product' ? 'catalog_product' : brandInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', ...brandInfo.metadata },
       capturedAt: now(),
     });
   }
 
-  // weight
-  if (input.weight) {
+  // 3. Weight
+  const weightInfo = parseFieldInput(input.weight, (input.evidenceSourceOverride ?? defaultTextSource), sourceUrl);
+  if (weightInfo.value && typeof weightInfo.value === 'string' && weightInfo.value.trim().length > 0) {
     evidence.push({
       id: randomUUID(),
       runId: context.runId,
       stageName: 'evidence_extraction',
       productSku: sku,
       attributeId: null,
-      source: textSource,
-      reliability: 'medium' as ClassificationEvidence['reliability'],
-      sourceUrl: sourceUrl,
+      source: weightInfo.source,
+      reliability: weightInfo.reliability,
+      sourceUrl: weightInfo.sourceUrl,
       sourceField: 'weight',
-      snippet: input.weight.slice(0, 300),
-      value: input.weight,
-      metadata: { provenance: textSource === 'catalog_product' ? 'catalog_product' : 'spreadsheet_import' },
+      snippet: weightInfo.value.slice(0, 300),
+      value: weightInfo.value,
+      metadata: { provenance: weightInfo.source === 'catalog_product' ? 'catalog_product' : weightInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', ...weightInfo.metadata },
       capturedAt: now(),
     });
   }
 
-  // description
-  if (input.description) {
+  // 4. Description
+  const descInfo = parseFieldInput(input.description, (input.evidenceSourceOverride ?? 'official_product_page'), sourceUrl);
+  if (descInfo.value && typeof descInfo.value === 'string' && descInfo.value.trim().length > 0) {
     evidence.push({
       id: randomUUID(),
       runId: context.runId,
       stageName: 'evidence_extraction',
       productSku: sku,
       attributeId: null,
-      source: 'official_product_page' as ClassificationEvidence['source'],
-      reliability: 'medium' as ClassificationEvidence['reliability'],
-      sourceUrl: sourceUrl,
+      source: descInfo.source,
+      reliability: descInfo.reliability,
+      sourceUrl: descInfo.sourceUrl,
       sourceField: 'description',
-      snippet: input.description.slice(0, 500),
-      value: input.description,
-      metadata: { provenance: 'product_data', extractedAt: now() },
+      snippet: descInfo.value.slice(0, 500),
+      value: descInfo.value,
+      metadata: { provenance: 'product_data', extractedAt: now(), ...descInfo.metadata },
       capturedAt: now(),
     });
   }
 
-  // bullet points
-  if (input.bulletPoints?.length) {
-    for (const bullet of input.bulletPoints) {
+  // 5. Bullet points
+  const bulletInfo = parseFieldInput(input.bulletPoints, (input.evidenceSourceOverride ?? 'official_product_page'), sourceUrl);
+  if (Array.isArray(bulletInfo.value) && bulletInfo.value.length > 0) {
+    for (const bullet of bulletInfo.value) {
       if (!bullet?.trim()) continue;
       evidence.push({
         id: randomUUID(),
@@ -481,61 +532,63 @@ export async function extractProductEvidence(
         stageName: 'evidence_extraction',
         productSku: sku,
         attributeId: null,
-        source: 'official_product_page' as ClassificationEvidence['source'],
-        reliability: 'medium' as ClassificationEvidence['reliability'],
-        sourceUrl: sourceUrl,
+        source: bulletInfo.source,
+        reliability: bulletInfo.reliability,
+        sourceUrl: bulletInfo.sourceUrl,
         sourceField: 'bullet_point',
         snippet: String(bullet).slice(0, 300),
         value: String(bullet),
-        metadata: { provenance: 'product_data', extractedAt: now() },
+        metadata: { provenance: 'product_data', extractedAt: now(), ...bulletInfo.metadata },
         capturedAt: now(),
       });
     }
   }
 
-  // custom fields
+  // 6. Custom fields
   if (input.customFields && typeof input.customFields === 'object') {
-    for (const [key, value] of Object.entries(input.customFields)) {
-      if (value && String(value).trim().length > 0) {
+    for (const [key, rawVal] of Object.entries(input.customFields)) {
+      const fieldInfo = parseFieldInput(rawVal, (input.evidenceSourceOverride ?? defaultTextSource), sourceUrl);
+      if (fieldInfo.value && String(fieldInfo.value).trim().length > 0) {
         evidence.push({
           id: randomUUID(),
           runId: context.runId,
           stageName: 'evidence_extraction',
           productSku: sku,
           attributeId: null,
-          source: textSource,
-          reliability: 'medium' as ClassificationEvidence['reliability'],
-          sourceUrl: sourceUrl,
+          source: fieldInfo.source,
+          reliability: fieldInfo.reliability,
+          sourceUrl: fieldInfo.sourceUrl,
           sourceField: key,
-          snippet: String(value),
-          value: String(value),
-          metadata: { provenance: textSource === 'catalog_product' ? 'catalog_product' : 'product_data' },
+          snippet: String(fieldInfo.value),
+          value: String(fieldInfo.value),
+          metadata: { provenance: fieldInfo.source === 'catalog_product' ? 'catalog_product' : 'product_data', ...fieldInfo.metadata },
           capturedAt: now(),
         });
       }
     }
   }
 
-  // search keywords
-  if (input.searchKeywords) {
+  // 7. Search keywords
+  const kwInfo = parseFieldInput(input.searchKeywords, (input.evidenceSourceOverride ?? defaultTextSource), sourceUrl);
+  if (kwInfo.value && typeof kwInfo.value === 'string' && kwInfo.value.trim().length > 0) {
     evidence.push({
       id: randomUUID(),
       runId: context.runId,
       stageName: 'evidence_extraction',
       productSku: sku,
       attributeId: null,
-      source: textSource,
+      source: kwInfo.source,
       reliability: 'low' as ClassificationEvidence['reliability'],
-      sourceUrl: sourceUrl,
+      sourceUrl: kwInfo.sourceUrl,
       sourceField: 'search_keywords',
-      snippet: input.searchKeywords.slice(0, 300),
-      value: input.searchKeywords,
-      metadata: { provenance: 'product_data' },
+      snippet: kwInfo.value.slice(0, 300),
+      value: kwInfo.value,
+      metadata: { provenance: 'product_data', ...kwInfo.metadata },
       capturedAt: now(),
     });
   }
 
-  // Existing page context (for catalog products this provides awareness of current pages)
+  // 8. Existing page context
   if (input.existingPageNames?.length) {
     for (const pageName of input.existingPageNames) {
       evidence.push({
@@ -556,35 +609,46 @@ export async function extractProductEvidence(
     }
   }
 
-  // ── Resolve brand to canonical brand evidence ──────────────────────────
-  if (input.brand) {
-    try {
-      const brands = getCachedBrands(context.workspaceId);
-      const resolved = resolveBrand(input.brand, brands);
-      if (resolved) {
-        evidence.push({
-          id: randomUUID(),
-          runId: context.runId,
-          stageName: 'evidence_extraction',
-          productSku: sku,
-          attributeId: null,
-          source: 'catalog_manager_guidance' as ClassificationEvidence['source'],
-          reliability: 'high' as ClassificationEvidence['reliability'],
-          sourceUrl: null,
-          sourceField: 'resolved_brand',
-          snippet: resolved.brandName.slice(0, 300),
-          value: { id: resolved.brandId, name: resolved.brandName, confidence: resolved.confidence },
-          metadata: { provenance: 'brand_resolution', matchedBy: resolved.matchedBy },
-          capturedAt: now(),
-        });
+  // 9. Resolve brand to canonical brand evidence using CanonicalBrandEvidenceValueSchema
+  const rawBrandStr = typeof titleInfo.value === 'string' ? titleInfo.value : (typeof brandInfo.value === 'string' ? brandInfo.value : null);
+  if (rawBrandStr || input.brand) {
+    const brandToResolve = typeof input.brand === 'string' ? input.brand : (typeof input.brand === 'object' && input.brand?.value ? String(input.brand.value) : rawBrandStr);
+    if (brandToResolve) {
+      try {
+        const brands = getCachedBrands(context.workspaceId);
+        const resolved = resolveBrand(brandToResolve, brands);
+        if (resolved) {
+          const brandValue = CanonicalBrandEvidenceValueSchema.parse({
+            brandId: resolved.brandId,
+            brandName: resolved.brandName,
+            confidence: resolved.confidence,
+            matchedBy: resolved.matchedBy,
+          });
+          evidence.push({
+            id: randomUUID(),
+            runId: context.runId,
+            stageName: 'evidence_extraction',
+            productSku: sku,
+            attributeId: null,
+            source: 'catalog_manager_guidance' as ClassificationEvidence['source'],
+            reliability: 'high' as ClassificationEvidence['reliability'],
+            sourceUrl: null,
+            sourceField: 'resolved_brand',
+            snippet: resolved.brandName.slice(0, 300),
+            value: brandValue,
+            metadata: { provenance: 'brand_resolution', matchedBy: resolved.matchedBy },
+            capturedAt: now(),
+          });
+        }
+      } catch (err: any) {
+        console.warn(`[EvidenceExtraction] Brand resolution failed: ${err.message}`);
       }
-    } catch (err: any) {
-      console.warn(`[EvidenceExtraction] Brand resolution failed: ${err.message}`);
     }
   }
 
-  // ── VLM OCR on product images ──────────────────────────────────────────
-  let vlmOcrSucceeded = false;
+  // ── VLM OCR and LLM Enrichment ──────────────────────────────────────────
+  let localOcrSucceeded = false;
+  let packagingOcrData: PackagingOcrData | undefined = undefined;
   const ocrResults: PackagingOcrData[] = [];
 
   const vlmConfig = getVlmConfig();
@@ -595,8 +659,10 @@ export async function extractProductEvidence(
   } catch {
     // Use defaults
   }
-  const canUseCloud = dataPolicy?.textPolicy === 'cloud_allowed';
+  const canUseCloudText = dataPolicy?.textPolicy === 'cloud_allowed';
+  const canUseCloudImages = dataPolicy?.imagePolicy === 'cloud_allowed';
 
+  // 1. Local VLM OCR
   if (canUseLocalVlm) {
     const MAX_OCR_IMAGES = 2;
     const imageUrls: string[] = [];
@@ -624,11 +690,11 @@ export async function extractProductEvidence(
           sku,
         });
 
-        if (ocrResult) {
+        if (ocrResult && hasOcrContent(ocrResult)) {
           ocrResults.push(ocrResult);
           console.log(`[EvidenceExtraction] VLM OCR completed for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
         } else {
-          console.warn(`[EvidenceExtraction] VLM OCR returned no result for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
+          console.warn(`[EvidenceExtraction] VLM OCR returned no text content for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
         }
       } catch (err: any) {
         console.warn(`[EvidenceExtraction] VLM OCR failed for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${err.message}`);
@@ -636,100 +702,94 @@ export async function extractProductEvidence(
     }
 
     if (ocrResults.length > 0) {
-      vlmOcrSucceeded = true;
       const mergedOcr = ocrResults.length === 1 ? ocrResults[0] : mergeOcrResults(ocrResults);
+      if (hasOcrContent(mergedOcr)) {
+        localOcrSucceeded = true;
+        packagingOcrData = mergedOcr;
 
-      const visualEvidence = packagingOcrDataToEvidence(mergedOcr, {
-        runId: context.runId,
-        sku,
-        model: mergedOcr.metadata?.model ?? 'unknown',
-      });
-      evidence.push(...visualEvidence);
-      console.log(`[EvidenceExtraction] Added ${visualEvidence.length} evidence entries from packaging OCR`);
-
-      // Return merged OCR data so the caller can persist if needed (onboarding adapter stores it)
-      const extractionResult: EvidenceExtractionResult = {
-        evidence,
-        packagingOcrData: mergedOcr,
-      };
-
-      // ── Cloud multimodal VLM fallback ────────────────────────────────
-      if (!vlmOcrSucceeded && input.primaryImage) {
-        const canUseCloudImages = dataPolicy?.imagePolicy === 'cloud_allowed';
-        if (canUseCloudImages) {
-          try {
-            const { extractPackagingOcrFromCloud } = await import('../onboarding/cloud-vlm-client');
-            const cloudOcrResult = await extractPackagingOcrFromCloud({
-              imageUrl: String(input.primaryImage),
-            });
-
-            if (cloudOcrResult) {
-              const cloudEvidence = packagingOcrDataToEvidence(cloudOcrResult, {
-                runId: context.runId,
-                sku,
-                model: (cloudOcrResult as any).metadata?.model ?? 'cloud-vision',
-              });
-              evidence.push(...cloudEvidence);
-              console.log(`[EvidenceExtraction] Added ${cloudEvidence.length} evidence entries from cloud packaging OCR`);
-            }
-          } catch (err: any) {
-            console.warn(`[EvidenceExtraction] Cloud packaging OCR failed: ${err.message}`);
-          }
-        }
+        const visualEvidence = packagingOcrDataToEvidence(mergedOcr, {
+          runId: context.runId,
+          sku,
+          model: mergedOcr.metadata?.model ?? 'unknown',
+        });
+        evidence.push(...visualEvidence);
+        console.log(`[EvidenceExtraction] Added ${visualEvidence.length} evidence entries from local packaging OCR`);
       }
-
-      // ── LLM-based text extraction for richer attributes ──────────────
-      if (canUseCloud) {
-        const llmConfig = getLlmConfigForTask('classification_evidence_extraction', { allowFallback: true });
-        if (llmConfig) {
-          const allText = [
-            input.title,
-            input.description,
-            input.bulletPoints?.join(' ') ?? '',
-            input.searchKeywords,
-          ].filter(Boolean).join('\n');
-
-          if (allText.length > 10) {
-            try {
-              const prompt = `Extract the following attributes from this product text. Return ONLY valid JSON with these keys (omit any you cannot determine): {"flavor": "..." | null, "color": "..." | null, "material": "..." | null, "size": "..." | null, "lifeStage": "..." | null, "breedSize": "..." | null, "productForm": "..." | null, "healthConcern": "..." | null, "ingredientKeywords": ["..."]}. Do not guess. Only include values that are explicitly mentioned.\n\nProduct text:\n${allText.slice(0, 3000)}`;
-
-              const response = await callLlmForTask('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', { allowFallback: true });
-              if (response == null) {
-                throw new Error('LLM call returned null');
-              }
-              const parsed = JSON.parse(response.trim());
-              for (const [key, val] of Object.entries(parsed)) {
-                if (val === null || val === undefined) continue;
-                if (Array.isArray(val) && val.length === 0) continue;
-                if (typeof val === 'string' && val.trim().length === 0) continue;
-
-                evidence.push({
-                  id: randomUUID(),
-                  runId: context.runId,
-                  stageName: 'evidence_extraction',
-                  productSku: sku,
-                  attributeId: key,
-                  source: 'official_product_page' as ClassificationEvidence['source'],
-                  reliability: 'medium' as ClassificationEvidence['reliability'],
-                  sourceUrl,
-                  sourceField: `llm_${key}`,
-                  snippet: typeof val === 'string' ? val.slice(0, 300) : JSON.stringify(val).slice(0, 300),
-                  value: val,
-                  metadata: { provenance: 'llm_extraction', model: llmConfig.model },
-                  capturedAt: now(),
-                });
-              }
-            } catch (err: any) {
-              console.warn(`[EvidenceExtraction] LLM extraction failed: ${err.message}`);
-            }
-          }
-        }
-      }
-
-      return { evidence, packagingOcrData: mergedOcr };
     }
   }
 
-  // No VLM OCR ran or all OCR failed — return text-only evidence
-  return { evidence };
+  // 2. Cloud multimodal VLM fallback (runs if local OCR did not succeed and cloud images are allowed)
+  if (!localOcrSucceeded && input.primaryImage && canUseCloudImages) {
+    try {
+      const { extractPackagingOcrFromCloud } = await import('../onboarding/cloud-vlm-client');
+      const cloudOcrResult = await extractPackagingOcrFromCloud({
+        imageUrl: String(input.primaryImage),
+      });
+
+      if (cloudOcrResult && hasOcrContent(cloudOcrResult)) {
+        packagingOcrData = cloudOcrResult;
+        const cloudEvidence = packagingOcrDataToEvidence(cloudOcrResult, {
+          runId: context.runId,
+          sku,
+          model: (cloudOcrResult as any).metadata?.model ?? 'cloud-vision',
+        });
+        evidence.push(...cloudEvidence);
+        console.log(`[EvidenceExtraction] Added ${cloudEvidence.length} evidence entries from cloud packaging OCR`);
+      }
+    } catch (err: any) {
+      console.warn(`[EvidenceExtraction] Cloud packaging OCR failed: ${err.message}`);
+    }
+  }
+
+  // 3. LLM-based text extraction for richer attributes (decoupled from OCR)
+  if (canUseCloudText) {
+    const llmConfig = getLlmConfigForTask('classification_evidence_extraction', { allowFallback: true });
+    if (llmConfig) {
+      const titleStr = typeof titleInfo.value === 'string' ? titleInfo.value : '';
+      const descStr = typeof descInfo.value === 'string' ? descInfo.value : '';
+      const allText = [
+        titleStr,
+        descStr,
+        Array.isArray(bulletInfo.value) ? bulletInfo.value.join(' ') : '',
+        typeof kwInfo.value === 'string' ? kwInfo.value : '',
+      ].filter(Boolean).join('\n');
+
+      if (allText.length > 10) {
+        try {
+          const prompt = `Extract the following attributes from this product text. Return ONLY valid JSON with these keys (omit any you cannot determine): {"flavor": "..." | null, "color": "..." | null, "material": "..." | null, "size": "..." | null, "lifeStage": "..." | null, "breedSize": "..." | null, "productForm": "..." | null, "healthConcern": "..." | null, "ingredientKeywords": ["..."]}. Do not guess. Only include values that are explicitly mentioned.\n\nProduct text:\n${allText.slice(0, 3000)}`;
+
+          const response = await callLlmForTask('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', { allowFallback: true });
+          if (response == null) {
+            throw new Error('LLM call returned null');
+          }
+          const parsed = JSON.parse(response.trim());
+          for (const [key, val] of Object.entries(parsed)) {
+            if (val === null || val === undefined) continue;
+            if (Array.isArray(val) && val.length === 0) continue;
+            if (typeof val === 'string' && val.trim().length === 0) continue;
+
+            evidence.push({
+              id: randomUUID(),
+              runId: context.runId,
+              stageName: 'evidence_extraction',
+              productSku: sku,
+              attributeId: key,
+              source: (input.evidenceSourceOverride ?? 'official_product_page') as ClassificationEvidence['source'],
+              reliability: 'medium' as ClassificationEvidence['reliability'],
+              sourceUrl,
+              sourceField: `llm_${key}`,
+              snippet: typeof val === 'string' ? val.slice(0, 300) : JSON.stringify(val).slice(0, 300),
+              value: val,
+              metadata: { provenance: 'llm_extraction', model: llmConfig.model },
+              capturedAt: now(),
+            });
+          }
+        } catch (err: any) {
+          console.warn(`[EvidenceExtraction] LLM extraction failed: ${err.message}`);
+        }
+      }
+    }
+  }
+
+  return { evidence, packagingOcrData };
 }

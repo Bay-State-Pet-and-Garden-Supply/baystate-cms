@@ -1,7 +1,7 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { getDb } from '../../db/connection';
 import { extractProductEvidence } from '../product-evidence-extractor';
-import type { NormalizedEvidenceInput } from '../product-evidence-extractor';
+import type { NormalizedEvidenceInput, EvidenceInputField } from '../product-evidence-extractor';
 import * as crypto from 'node:crypto';
 
 const now = () => new Date().toISOString();
@@ -42,15 +42,36 @@ export const evidenceExtractionStage: StageDefinition = {
       : {};
     const sourceUrl = itemRow.source_url ? String(itemRow.source_url) : null;
 
-    // Build the normalized input from onboarding data
+    // Build per-field inputs with explicit source provenance
+    const titleField = extData.title
+      ? { value: String(extData.title), source: 'official_product_page' as const, sourceUrl }
+      : (itemRow.name ? { value: String(itemRow.name), source: 'spreadsheet' as const, sourceUrl: null } : null);
+
+    const descriptionField = extData.description
+      ? { value: String(extData.description), source: 'official_product_page' as const, sourceUrl }
+      : null;
+
+    const brandField = extData.brand
+      ? { value: String(extData.brand), source: 'official_product_page' as const, sourceUrl }
+      : (itemRow.brand_hint ? { value: String(itemRow.brand_hint), source: 'spreadsheet' as const, sourceUrl: null } : null);
+
+    const customFieldsMap: Record<string, EvidenceInputField<string>> = {};
+    if (extData.customFields && typeof extData.customFields === 'object') {
+      for (const [k, v] of Object.entries(extData.customFields)) {
+        if (v != null && String(v).trim().length > 0) {
+          customFieldsMap[k] = { value: String(v), source: 'official_product_page', sourceUrl };
+        }
+      }
+    }
+
     const normalizedInput: NormalizedEvidenceInput = {
-      title: extData.title ?? itemRow.name ?? null,
-      description: extData.description ?? null,
-      brand: extData.brand ?? itemRow.brand_hint ?? null,
-      weight: extData.weight ?? null,
+      title: titleField,
+      description: descriptionField,
+      brand: brandField,
+      weight: extData.weight ? String(extData.weight) : null,
       bulletPoints: Array.isArray(extData.bulletPoints) ? extData.bulletPoints : [],
-      searchKeywords: extData.searchKeywords ?? null,
-      customFields: (extData.customFields && typeof extData.customFields === 'object') ? extData.customFields : {},
+      searchKeywords: extData.searchKeywords ? String(extData.searchKeywords) : null,
+      customFields: customFieldsMap,
       primaryImage: extData.primaryImage ?? null,
       additionalImages: Array.isArray(extData.additionalImages) ? extData.additionalImages : [],
       sourceUrl,
@@ -63,12 +84,12 @@ export const evidenceExtractionStage: StageDefinition = {
     const evidence = result.evidence;
 
     // ── Onboarding-specific: emit spreadsheet fields as 'spreadsheet' source ──
-    // These supplement the shared extractor's output with onboarding-specific metadata.
     const spreadsheetName = itemRow.name ? String(itemRow.name) : null;
     const spreadsheetExpectedName = itemRow.expected_name ? String(itemRow.expected_name) : null;
     const spreadsheetBrandHint = itemRow.brand_hint ? String(itemRow.brand_hint) : null;
 
-    if (spreadsheetName) {
+    const hasSpreadsheetNameEvidence = evidence.some(e => e.source === 'spreadsheet' && e.sourceField === 'name');
+    if (spreadsheetName && !hasSpreadsheetNameEvidence) {
       evidence.push({
         id: crypto.randomUUID(),
         runId: context.runId,
@@ -104,7 +125,8 @@ export const evidenceExtractionStage: StageDefinition = {
       });
     }
 
-    if (spreadsheetBrandHint) {
+    const hasSpreadsheetBrandEvidence = evidence.some(e => e.source === 'spreadsheet' && e.sourceField === 'brand');
+    if (spreadsheetBrandHint && !hasSpreadsheetBrandEvidence) {
       evidence.push({
         id: crypto.randomUUID(),
         runId: context.runId,

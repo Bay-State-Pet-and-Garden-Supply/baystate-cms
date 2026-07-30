@@ -207,7 +207,7 @@ export async function promoteItems(
         item.upc,
         brandFolder,
         imageStem,
-        extractionData.primaryImage,
+        extractionData.primaryImage ?? null,
         extractionData.additionalImages || [],
       );
       processedImagesMap.set(item.id, processed);
@@ -219,15 +219,7 @@ export async function promoteItems(
 
   db.transaction(() => {
     for (const item of itemsToPromote) {
-      if (!item.extractionData) {
-        const errMsg = 'Missing extraction data';
-        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
-        completePromotionStage(item.id, false, errMsg);
-        failures.push({ itemId: item.id, error: errMsg });
-        continue;
-      }
-
-      const extractionData = item.extractionData;
+      const extractionData = item.extractionData!;
       
       // Determine if product already exists
       const existingApproved = readProductFile(workspacePath, item.upc);
@@ -255,7 +247,7 @@ export async function promoteItems(
           outOfStockLimit: null,
         },
         availability: 'instock',
-        weight: item.curationData?.curatedWeight || extractionData.weight || null,
+        weight: (typeof item.curationData?.curatedWeight === 'string' ? item.curationData.curatedWeight : null) || extractionData.weight || null,
         taxable: true,
         media: {
           primary: primaryImage,

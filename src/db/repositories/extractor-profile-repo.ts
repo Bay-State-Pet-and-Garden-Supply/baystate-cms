@@ -16,6 +16,7 @@ export interface ExtractorProfile {
   variantSelectionStrategy: Record<string, unknown> | null;
   customSelectorMetadata: Record<string, unknown>;
   runtime: 'static' | 'rendered';
+  profileType?: 'brand' | 'retailer';
   createdAt: string;
   updatedAt: string;
 }
@@ -35,6 +36,7 @@ interface DbProfile {
   variant_selection_strategy_json: string | null;
   custom_selector_metadata_json: string | null;
   runtime: string | null;
+  profile_type?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -55,6 +57,7 @@ function mapToProfile(db: DbProfile): ExtractorProfile {
     variantSelectionStrategy: db.variant_selection_strategy_json ? JSON.parse(db.variant_selection_strategy_json) : null,
     customSelectorMetadata: db.custom_selector_metadata_json ? JSON.parse(db.custom_selector_metadata_json) : {},
     runtime: db.runtime === 'static' ? 'static' : 'rendered',
+    profileType: (db.profile_type === 'retailer' ? 'retailer' : 'brand'),
     createdAt: db.created_at,
     updatedAt: db.updated_at,
   };

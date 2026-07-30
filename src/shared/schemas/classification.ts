@@ -265,6 +265,17 @@ export const BrandConfigSchema = z.object({
 export type BrandConfig = z.infer<typeof BrandConfigSchema>;
 
 /**
+ * Canonical evidence value shape for `resolved_brand` evidence entries.
+ */
+export const CanonicalBrandEvidenceValueSchema = z.object({
+  brandId: z.string(),
+  brandName: z.string(),
+  confidence: z.number().min(0).max(1).default(1),
+  matchedBy: z.string().optional(),
+});
+export type CanonicalBrandEvidenceValue = z.infer<typeof CanonicalBrandEvidenceValueSchema>;
+
+/**
  * Aggregate classification configuration for snapshot validation.
  */
 export const ClassificationConfigSchema = z.object({

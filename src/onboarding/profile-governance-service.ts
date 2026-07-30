@@ -953,7 +953,7 @@ function markGenerationRejected(
 /** Re-export the list of all active profiles for the UI. */
 // fallow-ignore-next-line unused-export
 export function listAllActiveProfiles(): ExtractorProfile[] {
-  return listAllProfiles();
+  return listAllProfiles() as ExtractorProfile[];
 }
 
 /** Re-export the per-generation decision history. */

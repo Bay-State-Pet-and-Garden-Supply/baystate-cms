@@ -1081,7 +1081,7 @@ function buildExtractionData(
     provenance.searchKeywords = 'derived';
   }
 
-  return {
+  return ExtractionDataSchema.parse({
     title,
     brand,
     description,
@@ -1099,7 +1099,7 @@ function buildExtractionData(
     packagingTitle: null,
     packagingOcrData: null,
     customFields: {},
-  };
+  });
 }
 
 // ─── Build failed result (title could not be extracted) ───────────────────────
@@ -1117,7 +1117,7 @@ function buildFailedResult(
   provenance.sourceUrl = 'request';
   provenance.profileRuntime = request.profile.runtime;
 
-  const data: ExtractionData = {
+  const data: ExtractionData = ExtractionDataSchema.parse({
     title: null,
     brand: null,
     description: null,
@@ -1135,7 +1135,7 @@ function buildFailedResult(
     packagingTitle: null,
     packagingOcrData: null,
     customFields: {},
-  };
+  });
 
   return { data, warnings };
 }
@@ -1192,7 +1192,7 @@ export function handleExtract(req: IncomingMessage, res: ServerResponse): void {
         : await doStaticExtract(request);
 
       // ── Build response ────────────────────────────────────────────────
-      const ok = data.title !== null && data.title.length > 0;
+      const ok = data.title != null && data.title.length > 0;
 
       // Build the response payload
       const responsePayload: ExtractResponse = {

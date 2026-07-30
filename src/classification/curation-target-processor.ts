@@ -7,7 +7,7 @@
  * of matching, ranking, or proposal construction logic.
  */
 import type { StageContext, StageInput } from './types';
-import type { ClassificationProposal } from '../shared/schemas/classification';
+import { type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
 import { loadClassificationConfig } from './config-loader';
 import {
   resolveEnabledTargets,
@@ -97,13 +97,14 @@ export async function processProductFieldTarget(
   if (isBrandField) {
     const brandEvidence = input.evidence.find(e => e.sourceField === 'resolved_brand');
     if (brandEvidence) {
-      const resolved = brandEvidence.value as { brandId: string; brandName: string } | null;
-      if (resolved?.brandName) {
+      const parsed = CanonicalBrandEvidenceValueSchema.safeParse(brandEvidence.value);
+      const brandName = parsed.success ? parsed.data.brandName : ((brandEvidence.value as any)?.brandName ?? (brandEvidence.value as any)?.name);
+      if (brandName) {
         // Match the resolved brand name to an allowed option if possible
         const matchedOption = options.find(o =>
-          o.label.toLowerCase() === resolved.brandName.toLowerCase(),
+          o.label.toLowerCase() === brandName.toLowerCase(),
         );
-        const value = matchedOption?.label ?? resolved.brandName;
+        const value = matchedOption?.label ?? brandName;
         const proposal = buildFieldAssignmentProposal({
           runId: context.runId,
           sku: input.sku,
@@ -112,10 +113,11 @@ export async function processProductFieldTarget(
           confidence: 0.9,
           evidenceIds: [brandEvidence.id],
           isMultiple: false,
+          isBulkAcceptable: false, // Guardrail: requires manual review until Issue #10 lands
         });
         return {
           proposals: [proposal],
-          message: `Brand: "${resolved.brandName}" (resolved, 90%)`,
+          message: `Brand: "${brandName}" (resolved, 90%)`,
         };
       }
     }
