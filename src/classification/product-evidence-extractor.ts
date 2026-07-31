@@ -15,7 +15,8 @@ import { resolveBrand } from './brand-resolution';
 import type { StageInput, StageContext } from './types';
 import type { ClassificationEvidence } from '../shared/types';
 import { CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
-import type { PackagingOcrData } from '../shared/schemas/onboarding';
+import type { PackagingOcrData, OcrAttemptOutcome } from '../shared/schemas/onboarding';
+export type { OcrAttemptOutcome };
 
 const now = () => new Date().toISOString();
 
@@ -66,13 +67,7 @@ export interface NormalizedEvidenceInput {
   distributorProviderId?: string | null;
 }
 
-export interface OcrAttemptOutcome {
-  status: 'succeeded' | 'failed' | 'skipped' | 'no_image' | 'disabled';
-  model?: string | null;
-  reason?: string | null;
-  imageCount?: number;
-  error?: string | null;
-}
+
 
 export interface EvidenceExtractionResult {
   /** All evidence collected during extraction */
@@ -548,7 +543,7 @@ export async function extractProductEvidence(
         sourceField: 'bullet_point',
         snippet: String(bullet).slice(0, 300),
         value: String(bullet),
-        metadata: { provenance: 'product_data', extractedAt: now(), ...bulletInfo.metadata },
+        metadata: { provenance: bulletInfo.source === 'catalog_product' ? 'catalog_product' : bulletInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', extractedAt: now(), ...bulletInfo.metadata },
         capturedAt: now(),
       });
     }
@@ -672,38 +667,28 @@ export async function extractProductEvidence(
   const canUseCloudText = dataPolicy?.textPolicy === 'cloud_allowed';
   const canUseCloudImages = dataPolicy?.imagePolicy === 'cloud_allowed';
 
-  let ocrOutcome: OcrAttemptOutcome = {
-    status: canUseLocalVlm ? 'skipped' : 'disabled',
-    reason: canUseLocalVlm ? 'no_images' : 'vlm_disabled',
-  };
+  let localStatus: OcrAttemptOutcome['status'] = canUseLocalVlm ? 'skipped' : 'disabled';
+  let cloudStatus: OcrAttemptOutcome['status'] = canUseCloudImages ? 'skipped' : 'disabled';
+  let llmStatus: OcrAttemptOutcome['llmStatus'] = canUseCloudText ? 'skipped' : 'disabled';
+
+  const imageUrls: string[] = [];
+  if (input.primaryImage) imageUrls.push(input.primaryImage);
+  if (input.additionalImages && Array.isArray(input.additionalImages)) {
+    for (const img of input.additionalImages) {
+      if (imageUrls.length >= 2) break;
+      if (img && String(img).trim()) {
+        imageUrls.push(String(img));
+      }
+    }
+  }
 
   // 1. Local VLM OCR
   if (canUseLocalVlm) {
-    const MAX_OCR_IMAGES = 2;
-    const imageUrls: string[] = [];
-    if (input.primaryImage) imageUrls.push(input.primaryImage);
-    if (input.additionalImages && Array.isArray(input.additionalImages)) {
-      for (const img of input.additionalImages) {
-        if (imageUrls.length >= MAX_OCR_IMAGES) break;
-        if (img && String(img).trim()) {
-          imageUrls.push(String(img));
-        }
-      }
-    }
-
     if (imageUrls.length > 0) {
       console.log(`[EvidenceExtraction] Running VLM OCR on ${imageUrls.length} image(s) for SKU ${sku}`);
-      ocrOutcome = {
-        status: 'failed',
-        reason: 'no_ocr_text_extracted',
-        imageCount: imageUrls.length,
-      };
+      localStatus = 'failed';
     } else {
-      ocrOutcome = {
-        status: 'no_image',
-        reason: 'no_primary_or_additional_image',
-        imageCount: 0,
-      };
+      localStatus = 'no_image';
     }
 
     for (let i = 0; i < imageUrls.length; i++) {
@@ -724,7 +709,6 @@ export async function extractProductEvidence(
         }
       } catch (err: any) {
         console.warn(`[EvidenceExtraction] VLM OCR failed for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${err.message}`);
-        ocrOutcome.error = err.message;
       }
     }
 
@@ -732,12 +716,8 @@ export async function extractProductEvidence(
       const mergedOcr = ocrResults.length === 1 ? ocrResults[0] : mergeOcrResults(ocrResults);
       if (hasOcrContent(mergedOcr)) {
         localOcrSucceeded = true;
+        localStatus = 'succeeded';
         packagingOcrData = mergedOcr;
-        ocrOutcome = {
-          status: 'succeeded',
-          model: mergedOcr.metadata?.model ?? vlmConfig?.model ?? 'vlm',
-          imageCount: imageUrls.length,
-        };
 
         const visualEvidence = packagingOcrDataToEvidence(mergedOcr, {
           runId: context.runId,
@@ -752,6 +732,7 @@ export async function extractProductEvidence(
 
   // 2. Cloud multimodal VLM fallback (runs if local OCR did not succeed and cloud images are allowed)
   if (!localOcrSucceeded && input.primaryImage && canUseCloudImages) {
+    cloudStatus = 'failed';
     try {
       const { extractPackagingOcrFromCloud } = await import('../onboarding/cloud-vlm-client');
       const cloudOcrResult = await extractPackagingOcrFromCloud({
@@ -760,11 +741,7 @@ export async function extractProductEvidence(
 
       if (cloudOcrResult && hasOcrContent(cloudOcrResult)) {
         packagingOcrData = cloudOcrResult;
-        ocrOutcome = {
-          status: 'succeeded',
-          model: (cloudOcrResult as any).metadata?.model ?? 'cloud-vision',
-          reason: 'cloud_fallback',
-        };
+        cloudStatus = 'succeeded';
         const cloudEvidence = packagingOcrDataToEvidence(cloudOcrResult, {
           runId: context.runId,
           sku,
@@ -800,33 +777,57 @@ export async function extractProductEvidence(
             throw new Error('LLM call returned null');
           }
           const parsed = JSON.parse(response.trim());
+          let addedLlmEvidence = false;
           for (const [key, val] of Object.entries(parsed)) {
             if (val === null || val === undefined) continue;
             if (Array.isArray(val) && val.length === 0) continue;
             if (typeof val === 'string' && val.trim().length === 0) continue;
 
+            addedLlmEvidence = true;
             evidence.push({
               id: randomUUID(),
               runId: context.runId,
               stageName: 'evidence_extraction',
               productSku: sku,
               attributeId: key,
-              source: (input.evidenceSourceOverride ?? 'official_product_page') as ClassificationEvidence['source'],
+              source: (input.evidenceSourceOverride ?? defaultTextSource) as ClassificationEvidence['source'],
               reliability: 'medium' as ClassificationEvidence['reliability'],
               sourceUrl,
               sourceField: `llm_${key}`,
               snippet: typeof val === 'string' ? val.slice(0, 300) : JSON.stringify(val).slice(0, 300),
               value: val,
-              metadata: { provenance: 'llm_extraction', model: llmConfig.model },
+              metadata: { provenance: defaultTextSource, model: llmConfig.model },
               capturedAt: now(),
             });
           }
+          llmStatus = addedLlmEvidence ? 'succeeded' : 'failed';
         } catch (err: any) {
+          llmStatus = 'failed';
           console.warn(`[EvidenceExtraction] LLM extraction failed: ${err.message}`);
         }
+      } else {
+        llmStatus = 'no_text';
       }
     }
   }
+
+  const overallStatus: OcrAttemptOutcome['status'] =
+    (localStatus === 'succeeded' || cloudStatus === 'succeeded')
+      ? 'succeeded'
+      : (imageUrls.length === 0)
+        ? 'no_image'
+        : (!canUseLocalVlm && !canUseCloudImages)
+          ? 'disabled'
+          : 'failed';
+
+  const ocrOutcome: OcrAttemptOutcome = {
+    status: overallStatus,
+    localStatus,
+    cloudStatus,
+    llmStatus,
+    model: packagingOcrData?.metadata?.model ?? vlmConfig?.model ?? null,
+    imageCount: imageUrls.length,
+  };
 
   return { evidence, packagingOcrData, ocrOutcome };
 }

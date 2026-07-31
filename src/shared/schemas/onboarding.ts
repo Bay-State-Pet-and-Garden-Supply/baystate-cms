@@ -133,6 +133,21 @@ export const DistributorImageApprovalSchema = z.object({
 });
 export type DistributorImageApproval = z.infer<typeof DistributorImageApprovalSchema>;
 
+export const OcrAttemptOutcomeStatusEnum = z.enum(['succeeded', 'failed', 'skipped', 'no_image', 'disabled']);
+export type OcrAttemptOutcomeStatus = z.infer<typeof OcrAttemptOutcomeStatusEnum>;
+
+export const OcrAttemptOutcomeSchema = z.object({
+  status: OcrAttemptOutcomeStatusEnum,
+  localStatus: OcrAttemptOutcomeStatusEnum.optional(),
+  cloudStatus: OcrAttemptOutcomeStatusEnum.optional(),
+  llmStatus: z.enum(['succeeded', 'failed', 'skipped', 'no_text', 'disabled']).optional(),
+  model: z.string().nullable().optional(),
+  reason: z.string().nullable().optional(),
+  imageCount: z.number().optional(),
+  error: z.string().nullable().optional(),
+});
+export type OcrAttemptOutcome = z.infer<typeof OcrAttemptOutcomeSchema>;
+
 export const ExtractionDataSchema = z.object({
   title: z.string().nullable().default(null),
   brand: z.string().nullable().default(null),
@@ -163,6 +178,8 @@ export const ExtractionDataSchema = z.object({
   packagingTitle: z.string().nullable().default(null),
   /** Structured OCR output from the primary product image. Populated once before classification. */
   packagingOcrData: PackagingOcrDataSchema.nullable().default(null),
+  /** Detailed outcome status and provenance of the OCR extraction attempt */
+  ocrOutcome: OcrAttemptOutcomeSchema.nullable().optional().default(null),
   customFields: z.record(z.string(), z.string()).default(() => ({})),
 });
 

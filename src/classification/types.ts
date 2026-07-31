@@ -53,7 +53,7 @@ export interface StageOutput {
 export type StageResult =
   | { status: 'succeeded'; output: StageOutput }
   | { status: 'failed'; error: string }
-  | { status: 'abstained'; reason: string };
+  | { status: 'abstained'; reason: string; output?: StageOutput };
 
 // ─── Stage Context ─────────────────────────────────────────────────────────────
 

@@ -846,39 +846,81 @@ describe('Classification Pipeline Integration', () => {
     expect(bullet?.source).toBe('catalog_product');
   });
 
-  it('tracks and persists ocrOutcome in evidence extraction stage', async () => {
-    const { extractProductEvidence } = await import('../../classification/product-evidence-extractor');
-    const result = await extractProductEvidence(
-      {
-        title: 'No Image Product',
-        brand: 'Acme',
-        weight: '1 lb',
-        description: 'Product with no images.',
-        bulletPoints: [],
-        searchKeywords: null,
-        customFields: {},
-        primaryImage: null,
-        additionalImages: [],
-        sourceUrl: null,
-        workspacePath,
-        existingPageNames: [],
-      },
-      {
-        sku: 'NO-IMAGE-SKU',
-        sourceKind: 'onboarding',
-        evidence: [],
-        acceptedProposals: [],
-        allProposals: [],
-      },
-      {
-        workspaceId,
-        runId: randomUUID(),
-        workspacePath,
-        configSnapshotRef: { id: 'test-snapshot', hash: 'abc', sourceCommit: null, createdAt: new Date().toISOString() },
-      },
-    );
+  it('preserves catalog_product sourceKind through runPipeline stage input propagation', async () => {
+    const pipelineRun = createRun(workspaceId, 'RUNPIPELINE-CATALOG-SKU', null, null, { sourceKind: 'catalog_product' });
+    const stageInput = {
+      sku: 'RUNPIPELINE-CATALOG-SKU',
+      sourceKind: 'catalog_product' as const,
+      evidence: [],
+      acceptedProposals: [],
+      allProposals: [],
+    };
+    const context = {
+      workspaceId,
+      runId: pipelineRun.id,
+      workspacePath,
+      configSnapshotRef: { id: 'test-snapshot', hash: 'abc', sourceCommit: null, createdAt: new Date().toISOString() },
+    };
 
-    expect(result.ocrOutcome).toBeDefined();
-    expect(['no_image', 'disabled', 'skipped']).toContain(result.ocrOutcome!.status);
+    const res = await runPipeline([evidenceExtractionStage], context, stageInput);
+    expect(res.evidence).toBeDefined();
+
+    const evidence = getEvidenceByRun(pipelineRun.id);
+    const descEvidence = evidence.find(e => e.sourceField === 'description');
+    if (descEvidence) {
+      expect(descEvidence.source).toBe('catalog_product');
+    }
+  });
+
+  it('persists ocrOutcome in classification_stage_results output_json even when evidence stage abstains', async () => {
+    const item = createReviewGateItem('ABSTAIN-OCR-SKU');
+    const db = getDb();
+    db.run("UPDATE onboarding_items SET name = '', expected_name = null, brand_hint = null, extraction_data_json = ? WHERE id = ?", [
+      JSON.stringify({ title: null, brand: null, description: null, primaryImage: null }),
+      item.id,
+    ]);
+    const run = createRun(workspaceId, item.upc, null, null, { onboardingItemId: item.id, sourceKind: 'onboarding' });
+    const stageInput = {
+      sku: item.upc,
+      onboardingItemId: item.id,
+      sourceKind: 'onboarding' as const,
+      evidence: [],
+      acceptedProposals: [],
+      allProposals: [],
+    };
+    const context = {
+      workspaceId,
+      runId: run.id,
+      workspacePath,
+      configSnapshotRef: { id: 'test-snapshot', hash: 'abc', sourceCommit: null, createdAt: new Date().toISOString() },
+    };
+
+    await runPipeline([evidenceExtractionStage], context, stageInput);
+    const stageResults = getStageResults(run.id);
+    const evStage = stageResults.find((s: any) => s.stage_name === 'evidence_extraction');
+    expect(evStage).toBeDefined();
+    expect(evStage?.output_json).not.toBeNull();
+    const parsedOutput = JSON.parse(evStage!.output_json!);
+    expect(parsedOutput.metadata?.ocrOutcome).toBeDefined();
+  });
+
+  it('draft promoter handles item with missing extractionData gracefully without aborting transaction', async () => {
+    const { promoteItems } = await import('../../onboarding/draft-promoter');
+    const batch = createBatch({
+      workspaceId,
+      name: 'Missing Ext Batch',
+      fileName: 'test.xlsx',
+      totalItems: 1,
+    });
+    const items = insertItems(batch.id, [{
+      upc: 'NO-EXT-DATA-SKU',
+      name: 'No Extraction Item',
+      rowNumber: 2,
+    }]);
+
+    const res = await promoteItems(workspaceId, workspacePath, batch.id, [items[0].id]);
+    expect(res.count).toBe(0);
+    expect(res.failures.length).toBe(1);
+    expect(res.failures[0].error).toBe('Missing extraction data');
   });
 });

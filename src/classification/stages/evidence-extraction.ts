@@ -162,7 +162,16 @@ export const evidenceExtractionStage: StageDefinition = {
     }
 
     if (evidence.length === 0) {
-      return { status: 'abstained', reason: 'No new evidence extracted from available sources.' };
+      return {
+        status: 'abstained',
+        reason: 'No new evidence extracted from available sources.',
+        output: {
+          evidence: [],
+          proposals: [],
+          abstained: true,
+          metadata: { ocrOutcome: result.ocrOutcome },
+        },
+      };
     }
 
     return {

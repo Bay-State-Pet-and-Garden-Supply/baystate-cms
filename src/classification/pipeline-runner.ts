@@ -83,7 +83,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
   for (const stageName of order) {
     const stage = stages.find(s => s.name === stageName);
     if (!stage) continue;
-    const stageInput: StageInput = { sku: input.sku, onboardingItemId: input.onboardingItemId, evidence: allEvidence, acceptedProposals, allProposals };
+    const stageInput: StageInput = { sku: input.sku, onboardingItemId: input.onboardingItemId, sourceKind: input.sourceKind, evidence: allEvidence, acceptedProposals, allProposals };
     let failureRecorded = false;
     try {
       const result = await stage.execute(stageInput, context);
@@ -127,6 +127,14 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           stalenessReason: null,
           createdAt: now(),
         };
+        const outputPayload: Record<string, unknown> = {
+          ec: 0,
+          pc: 1,
+          reason: result.reason,
+        };
+        if (result.output?.metadata) {
+          outputPayload.metadata = result.output.metadata;
+        }
         persistStageCompletion({
           runId: context.runId,
           sku: input.sku,
@@ -136,6 +144,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           proposals: [abstentionProposal],
           onboardingItemId: input.onboardingItemId,
           configSnapshotHash: context.configSnapshotRef?.hash,
+          outputJson: JSON.stringify(outputPayload),
           errorMessage: result.reason,
         });
         allProposals.push(abstentionProposal);

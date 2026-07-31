@@ -14,6 +14,7 @@ storage/
 .baystate-cms-dev-token
 .shopsite-cms-dev-token
 .shopsite-cms/
+.shopsite-cms-dev-token-dir/
 .baystate-cms-dev-token-dir/
 .env
 .env.*

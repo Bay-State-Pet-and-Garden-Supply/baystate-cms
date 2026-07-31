@@ -1196,6 +1196,9 @@ export function Onboarding() {
             setProfileBuilderDomain(domain);
             setProfileBuilderSeed({ url: item.sourceUrl ?? undefined, item });
           }}
+          onOpenBrandSetup={() => {
+            setShowSettings(true);
+          }}
         />
         {profileBuilderDomain && (
           <ProfileBuilder
