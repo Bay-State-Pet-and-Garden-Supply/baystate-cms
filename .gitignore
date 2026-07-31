@@ -3,7 +3,7 @@ node_modules/
 coverage/
 *.tsbuildinfo
 .DS_Store
-.shopsite-cms/
+.baystate-cms/
 exports/*.zip
 exports/*.xml
 workspaces/
@@ -11,8 +11,10 @@ workspaces/Bay State
 storage/
 
 # Local development tokens and environment files
+.baystate-cms-dev-token
 .shopsite-cms-dev-token
-.shopsite-cms-dev-token-dir/
+.shopsite-cms/
+.baystate-cms-dev-token-dir/
 .env
 .env.*
 *.db

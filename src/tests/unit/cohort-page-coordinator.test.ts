@@ -94,7 +94,7 @@ describe('cohort page coordinator', () => {
     const result = await coordinateCohortPagesOnce(input);
     expect(result.get('SKU1')).toEqual({ status: 'assigned', pages: [
       { pageId: 'cat-wet', pageName: 'Cat Food Wet', confidence: 0.8 },
-      { pageId: 'brand-acme', pageName: 'Brand - Acme', confidence: 0.95 },
+      { pageId: 'brand-acme', pageName: 'Brand - Acme', confidence: 0.95, isBrandShortcut: true },
     ] });
   });
 

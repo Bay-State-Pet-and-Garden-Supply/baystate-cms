@@ -43,7 +43,7 @@ export interface PageAssignmentParams {
 }
 
 export interface PageAssignmentResult {
-  pages: Array<{ pageId: string; pageName: string; confidence: number }>;
+  pages: Array<{ pageId: string; pageName: string; confidence: number; isBrandShortcut?: boolean }>;
 }
 
 // ─── Page Hierarchy Builder ──────────────────────────────────────────────────
@@ -410,13 +410,13 @@ export function validatePageResponseEntries(
  * @returns Normalized page assignment results
  */
 export function normalizePageAssignments(
-  pages: Array<{ pageId: string; pageName: string; confidence: number }>,
+  pages: Array<{ pageId: string; pageName: string; confidence: number; isBrandShortcut?: boolean }>,
   pageIndex: Map<string, { id: string; name: string }>,
   resolvedBrand: string | null,
   species: string[],
   maxResults: number,
   selectionMode: 'single' | 'multiple' = 'multiple',
-): Array<{ pageId: string; pageName: string; confidence: number }> {
+): Array<{ pageId: string; pageName: string; confidence: number; isBrandShortcut?: boolean }> {
   if (pages.length === 0) return [];
 
   let result = [...pages];
@@ -476,6 +476,7 @@ export function normalizePageAssignments(
             pageId: brandPageInfo.id,
             pageName: brandPageInfo.name,
             confidence: 0.95,
+            isBrandShortcut: true,
           });
         }
       }

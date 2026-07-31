@@ -284,7 +284,7 @@ export async function processPageTarget(
 
   // ── Build proposals from LLM results ───────────────────────────────────
   const { evidenceIds } = buildEvidenceText(input.evidence);
-  const proposals = llmResult.pages.map(p =>
+  const proposals = llmResult.pages.map((p: any) =>
     buildCategoryPageProposal({
       runId: context.runId,
       sku: input.sku,
@@ -292,6 +292,7 @@ export async function processPageTarget(
       pageName: p.pageName,
       confidence: p.confidence,
       evidenceIds,
+      isBulkAcceptable: (p.isBrandShortcut || p.pageName.startsWith('Brand -')) ? false : undefined,
     }),
   );
 

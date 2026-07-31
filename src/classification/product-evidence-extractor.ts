@@ -66,11 +66,21 @@ export interface NormalizedEvidenceInput {
   distributorProviderId?: string | null;
 }
 
+export interface OcrAttemptOutcome {
+  status: 'succeeded' | 'failed' | 'skipped' | 'no_image' | 'disabled';
+  model?: string | null;
+  reason?: string | null;
+  imageCount?: number;
+  error?: string | null;
+}
+
 export interface EvidenceExtractionResult {
   /** All evidence collected during extraction */
   evidence: ClassificationEvidence[];
   /** Optional packaging OCR data (not persisted by this function) */
   packagingOcrData?: PackagingOcrData;
+  /** Detailed outcome status and provenance of the OCR extraction attempt */
+  ocrOutcome?: OcrAttemptOutcome;
 }
 
 // ─── Packaging OCR evidence conversion ────────────────────────────────────────
@@ -502,7 +512,7 @@ export async function extractProductEvidence(
   }
 
   // 4. Description
-  const descInfo = parseFieldInput(input.description, (input.evidenceSourceOverride ?? 'official_product_page'), sourceUrl);
+  const descInfo = parseFieldInput(input.description, (input.evidenceSourceOverride ?? defaultTextSource), sourceUrl);
   if (descInfo.value && typeof descInfo.value === 'string' && descInfo.value.trim().length > 0) {
     evidence.push({
       id: randomUUID(),
@@ -516,13 +526,13 @@ export async function extractProductEvidence(
       sourceField: 'description',
       snippet: descInfo.value.slice(0, 500),
       value: descInfo.value,
-      metadata: { provenance: 'product_data', extractedAt: now(), ...descInfo.metadata },
+      metadata: { provenance: descInfo.source === 'catalog_product' ? 'catalog_product' : descInfo.source === 'spreadsheet' ? 'spreadsheet_import' : 'official_product_page', extractedAt: now(), ...descInfo.metadata },
       capturedAt: now(),
     });
   }
 
   // 5. Bullet points
-  const bulletInfo = parseFieldInput(input.bulletPoints, (input.evidenceSourceOverride ?? 'official_product_page'), sourceUrl);
+  const bulletInfo = parseFieldInput(input.bulletPoints, (input.evidenceSourceOverride ?? defaultTextSource), sourceUrl);
   if (Array.isArray(bulletInfo.value) && bulletInfo.value.length > 0) {
     for (const bullet of bulletInfo.value) {
       if (!bullet?.trim()) continue;
@@ -662,6 +672,11 @@ export async function extractProductEvidence(
   const canUseCloudText = dataPolicy?.textPolicy === 'cloud_allowed';
   const canUseCloudImages = dataPolicy?.imagePolicy === 'cloud_allowed';
 
+  let ocrOutcome: OcrAttemptOutcome = {
+    status: canUseLocalVlm ? 'skipped' : 'disabled',
+    reason: canUseLocalVlm ? 'no_images' : 'vlm_disabled',
+  };
+
   // 1. Local VLM OCR
   if (canUseLocalVlm) {
     const MAX_OCR_IMAGES = 2;
@@ -678,6 +693,17 @@ export async function extractProductEvidence(
 
     if (imageUrls.length > 0) {
       console.log(`[EvidenceExtraction] Running VLM OCR on ${imageUrls.length} image(s) for SKU ${sku}`);
+      ocrOutcome = {
+        status: 'failed',
+        reason: 'no_ocr_text_extracted',
+        imageCount: imageUrls.length,
+      };
+    } else {
+      ocrOutcome = {
+        status: 'no_image',
+        reason: 'no_primary_or_additional_image',
+        imageCount: 0,
+      };
     }
 
     for (let i = 0; i < imageUrls.length; i++) {
@@ -698,6 +724,7 @@ export async function extractProductEvidence(
         }
       } catch (err: any) {
         console.warn(`[EvidenceExtraction] VLM OCR failed for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${err.message}`);
+        ocrOutcome.error = err.message;
       }
     }
 
@@ -706,6 +733,11 @@ export async function extractProductEvidence(
       if (hasOcrContent(mergedOcr)) {
         localOcrSucceeded = true;
         packagingOcrData = mergedOcr;
+        ocrOutcome = {
+          status: 'succeeded',
+          model: mergedOcr.metadata?.model ?? vlmConfig?.model ?? 'vlm',
+          imageCount: imageUrls.length,
+        };
 
         const visualEvidence = packagingOcrDataToEvidence(mergedOcr, {
           runId: context.runId,
@@ -728,6 +760,11 @@ export async function extractProductEvidence(
 
       if (cloudOcrResult && hasOcrContent(cloudOcrResult)) {
         packagingOcrData = cloudOcrResult;
+        ocrOutcome = {
+          status: 'succeeded',
+          model: (cloudOcrResult as any).metadata?.model ?? 'cloud-vision',
+          reason: 'cloud_fallback',
+        };
         const cloudEvidence = packagingOcrDataToEvidence(cloudOcrResult, {
           runId: context.runId,
           sku,
@@ -791,5 +828,5 @@ export async function extractProductEvidence(
     }
   }
 
-  return { evidence, packagingOcrData };
+  return { evidence, packagingOcrData, ocrOutcome };
 }

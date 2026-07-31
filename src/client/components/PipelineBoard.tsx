@@ -82,7 +82,7 @@ export function PipelineBoard({
   _catalogBrands: _catalogBrands,
   onRefreshBrandSites: _onRefreshBrandSites,
   onOpenProfileBuilder,
-  onOpenBrandSetup: _onOpenBrandSetup,
+  onOpenBrandSetup,
 }: PipelineBoardProps) {
   const [staged, setStaged] = useState<Record<PipelineStage, OnboardingItem[]>>({
     sourcing: [],
@@ -735,7 +735,16 @@ export function PipelineBoard({
             </div>
             <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>
               UPC: {item.upc}
-              {item.brandHint && <span> · {item.brandHint}</span>}
+              {item.brandHint && (
+                <span>
+                  {' · '}{item.brandHint}
+                  {onOpenBrandSetup && (
+                    <a href="#" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onOpenBrandSetup(item.brandHint); }} style={{ fontSize: 10, color: '#2563eb', fontWeight: 500, textDecoration: 'underline', marginLeft: 4 }}>
+                      (setup)
+                    </a>
+                  )}
+                </span>
+              )}
             </div>
             {item.sourceUrl && (
               <div style={{ fontSize: 10, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -760,6 +769,11 @@ export function PipelineBoard({
                         {onOpenProfileBuilder && (
                           <a href="#" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onOpenProfileBuilder(itemDomain, item); }} style={{ fontSize: 10, color: '#2563eb', fontWeight: 600, textDecoration: 'underline' }}>
                             Open Profile Builder →
+                          </a>
+                        )}
+                        {onOpenBrandSetup && (
+                          <a href="#" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onOpenBrandSetup(item.brandHint); }} style={{ fontSize: 10, color: '#059669', fontWeight: 600, textDecoration: 'underline', marginLeft: 4 }}>
+                            Setup Brand →
                           </a>
                         )}
                       </>

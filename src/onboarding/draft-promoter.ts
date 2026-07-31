@@ -90,7 +90,7 @@ async function downloadAndProcessImages(
     try {
       const response = await fetch(url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; ShopSiteCMS/1.0)',
+          'User-Agent': 'Mozilla/5.0 (compatible; BaystateCMS/1.0)',
           'Accept': 'image/*',
         },
         redirect: 'follow',
@@ -219,7 +219,14 @@ export async function promoteItems(
 
   db.transaction(() => {
     for (const item of itemsToPromote) {
-      const extractionData = item.extractionData!;
+      if (!item.extractionData) {
+        const errMsg = 'Missing extraction data';
+        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+        completePromotionStage(item.id, false, errMsg);
+        failures.push({ itemId: item.id, error: errMsg });
+        continue;
+      }
+      const extractionData = item.extractionData;
       
       // Determine if product already exists
       const existingApproved = readProductFile(workspacePath, item.upc);

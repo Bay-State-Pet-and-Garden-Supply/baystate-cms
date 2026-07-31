@@ -38,9 +38,9 @@ describe('Classification Pipeline Integration', () => {
 
   beforeAll(() => {
     workspaceId = randomUUID();
-    workspacePath = path.join(os.tmpdir(), `shopsite-cms-class-test-${workspaceId.slice(0, 8)}`);
-    const dbPath = path.join(workspacePath, '.shopsite-cms', 'app.db');
-    fs.mkdirSync(path.join(workspacePath, '.shopsite-cms'), { recursive: true });
+    workspacePath = path.join(os.tmpdir(), `baystate-cms-class-test-${workspaceId.slice(0, 8)}`);
+    const dbPath = path.join(workspacePath, '.baystate-cms', 'app.db');
+    fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
     fs.mkdirSync(path.join(workspacePath, 'store', 'classification'), { recursive: true });
     initDb(dbPath);
     runMigrations();
@@ -788,5 +788,97 @@ describe('Classification Pipeline Integration', () => {
     const later = createRun(workspaceId, item.upc, null, null, item.id);
     expect(later.status).toBe('running');
     completeRun(later.id, 'completed');
+  });
+
+  it('enforces isBulkAcceptable: false on brand shortcut category page proposals', async () => {
+    const { buildCategoryPageProposal } = await import('../../classification/curation-target-proposal');
+
+    const brandProposal = buildCategoryPageProposal({
+      runId: randomUUID(),
+      sku: '12345',
+      pageId: 'brand-acme',
+      pageName: 'Brand - Acme',
+      confidence: 0.95,
+      evidenceIds: [],
+      isBulkAcceptable: false,
+    });
+    expect(brandProposal.isBulkAcceptable).toBe(false);
+  });
+
+  it('inherits catalog_product source for catalog product description and bullet point evidence', async () => {
+    const { extractProductEvidence } = await import('../../classification/product-evidence-extractor');
+    const result = await extractProductEvidence(
+      {
+        title: 'Catalog Kibble',
+        brand: 'Acme',
+        weight: '5 lb',
+        description: 'Rich in protein for adult dogs.',
+        bulletPoints: ['High protein', 'Grain free'],
+        searchKeywords: null,
+        customFields: {},
+        primaryImage: null,
+        additionalImages: [],
+        sourceUrl: null,
+        workspacePath,
+        existingPageNames: [],
+      },
+      {
+        sku: 'CATALOG-SKU-1',
+        sourceKind: 'catalog_product',
+        evidence: [],
+        acceptedProposals: [],
+        allProposals: [],
+      },
+      {
+        workspaceId,
+        runId: randomUUID(),
+        workspacePath,
+        configSnapshotRef: { id: 'test-snapshot', hash: 'abc', sourceCommit: null, createdAt: new Date().toISOString() },
+      },
+    );
+
+    const desc = result.evidence.find(e => e.sourceField === 'description');
+    expect(desc).toBeDefined();
+    expect(desc?.source).toBe('catalog_product');
+
+    const bullet = result.evidence.find(e => e.sourceField === 'bullet_point');
+    expect(bullet).toBeDefined();
+    expect(bullet?.source).toBe('catalog_product');
+  });
+
+  it('tracks and persists ocrOutcome in evidence extraction stage', async () => {
+    const { extractProductEvidence } = await import('../../classification/product-evidence-extractor');
+    const result = await extractProductEvidence(
+      {
+        title: 'No Image Product',
+        brand: 'Acme',
+        weight: '1 lb',
+        description: 'Product with no images.',
+        bulletPoints: [],
+        searchKeywords: null,
+        customFields: {},
+        primaryImage: null,
+        additionalImages: [],
+        sourceUrl: null,
+        workspacePath,
+        existingPageNames: [],
+      },
+      {
+        sku: 'NO-IMAGE-SKU',
+        sourceKind: 'onboarding',
+        evidence: [],
+        acceptedProposals: [],
+        allProposals: [],
+      },
+      {
+        workspaceId,
+        runId: randomUUID(),
+        workspacePath,
+        configSnapshotRef: { id: 'test-snapshot', hash: 'abc', sourceCommit: null, createdAt: new Date().toISOString() },
+      },
+    );
+
+    expect(result.ocrOutcome).toBeDefined();
+    expect(['no_image', 'disabled', 'skipped']).toContain(result.ocrOutcome!.status);
   });
 });

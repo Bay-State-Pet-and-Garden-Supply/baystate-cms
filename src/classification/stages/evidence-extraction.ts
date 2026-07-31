@@ -144,12 +144,15 @@ export const evidenceExtractionStage: StageDefinition = {
       });
     }
 
-    // ── Onboarding-specific: persist OCR data back to extraction_data_json ────
-    if (result.packagingOcrData) {
+    // ── Onboarding-specific: persist OCR data & outcome back to extraction_data_json ────
+    if (result.ocrOutcome || result.packagingOcrData) {
       try {
         const mergedOcr = result.packagingOcrData;
-        extData.packagingOcrData = mergedOcr;
-        const updatedExt = { ...extData, packagingOcrData: mergedOcr, packagingTitle: mergedOcr.productName };
+        const updatedExt = {
+          ...extData,
+          ...(mergedOcr ? { packagingOcrData: mergedOcr, packagingTitle: mergedOcr.productName } : {}),
+          ...(result.ocrOutcome ? { ocrOutcome: result.ocrOutcome } : {}),
+        };
         db.query(
           'UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?',
         ).run(JSON.stringify(updatedExt), input.onboardingItemId);
@@ -162,6 +165,14 @@ export const evidenceExtractionStage: StageDefinition = {
       return { status: 'abstained', reason: 'No new evidence extracted from available sources.' };
     }
 
-    return { status: 'succeeded', output: { evidence, proposals: [], abstained: false } };
+    return {
+      status: 'succeeded',
+      output: {
+        evidence,
+        proposals: [],
+        abstained: false,
+        metadata: { ocrOutcome: result.ocrOutcome },
+      },
+    };
   },
 };
