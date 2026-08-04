@@ -53,6 +53,8 @@ export default defineConfig({
       'src/tests/unit/store-manager-chat-history-service.test.ts',
       'src/tests/unit/name-consolidation-guard.test.ts',
       'src/tests/unit/catalog-classification-db.test.ts',
+      'src/tests/unit/classification-integrity-audit.test.ts',
+      'src/tests/unit/weekly-report.test.ts',
     ],
   },
 });

@@ -65,3 +65,14 @@ The onboarding pipeline processes bulk spreadsheet uploads through five key stag
 - See `CONTEXT.md` for the authoritative domain model and precise terminology for all pipeline stages, entities, and classification concepts.
 - See `docs/adr/` for architectural decision records that document design decisions for the classification system and extraction worker.
 
+
+## Product Intelligence (Agent Lab, PI-1)
+
+The Product Intelligence program (epic #28) introduces Pi as a **bounded research worker** behind the existing CMS. The principle: *the agent researches and proposes; deterministic CMS code validates, reviews, promotes, and publishes.*
+
+- **Execution boundary:** `src/product-intelligence/` — provider-neutral contracts (`contracts.ts`), executor interface + event sink (`executor.ts`), feature flags (`flags.ts`), executor routing (`execution-router.ts`), deterministic fail-closed fallback (`legacy-executor.ts`), and the Pi SDK adapter under `src/product-intelligence/pi/`.
+- **Terminal contract:** agent output only becomes a candidate result via the `submit_product_research` tool, whose payload must validate against `StructuredSubmissionSchema` (zod) and the mirror TypeBox schema (`pi/pi-tool-registry.ts`). Ordinary prose is never authoritative.
+- **Sandboxing:** Pi sessions use `SessionManager.inMemory()`, an approved-extension-only resource loader (no project/global extensions, skills, or context files), an explicit tool allowlist from the immutable policy, and the Pi SDK is imported lazily — onboarding never loads Pi code unless a run starts.
+- **Fail-closed rules:** sessions ending without a valid submission fail with `missing_submission`; unknown allowlisted tools raise `policy_denied`; missing model route raises `model_unavailable`; hard deadlines and caller `AbortSignal`s are enforced; sessions are always disposed.
+- **Feature flags:** `productIntelligence.*` — env `BAYSTATE_CMS_PRODUCT_INTELLIGENCE_ENABLED`, `BAYSTATE_CMS_PI_ENABLED`, `BAYSTATE_CMS_PI_SHADOW_ONLY`, `BAYSTATE_CMS_PI_ALLOW_ONBOARDING_IMPORT`, `BAYSTATE_CMS_PI_ALLOW_BATCH_RUNS` (all default disabled) plus in-memory overrides via `overrideProductIntelligenceFlags()`.
+- **Governance:** model self-reported confidence is recorded but never grants acceptance; taxonomy/Category Page/attribute/ProductField identifiers are never invented by the agent (null/abstain instead); image proposals must carry rights and identity-match provenance. Alignment with governance epic #17 is required before Agent Lab results may enter normal onboarding.
