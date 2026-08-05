@@ -16,7 +16,8 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
  */
-import { PI_EXECUTOR_NAME, ProductResearchContextSchema, ProductResearchInputSchema, type ProductResearchContext, type ProductResearchResult, type StructuredSubmission } from '../contracts';
+import { PI_EXECUTOR_NAME, ProductResearchContextSchema, ProductResearchInputSchema, type ProductResearchContext, type ProductResearchResult, type TerminalResultSubmission } from '../contracts';
+import { terminalDisposition } from '../workflow/bundle';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../executor';
 import { emitExecutionEvent } from '../executor';
 import { buildResearchPrompt } from './pi-prompt-builder';
@@ -43,6 +44,9 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
   private readonly now: () => number;
 
   constructor(options: PiExecutorOptions = {}) {
+    // PI-3 research tools are injected via the session factory (the routes
+    // wire the default tool registry); the executor itself stays lean so it
+    // never pulls onboarding/database modules into its own import graph.
     this.sessionFactory = options.sessionFactory ?? new PiSdkSessionFactory();
     this.now = options.now ?? Date.now;
   }
@@ -108,7 +112,7 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
     // Holder object: TS strict CFA narrows closure-assigned `let` bindings to
     // `never`, so mutable run state lives in this object instead.
     const state: {
-      submission: StructuredSubmission | null;
+      submission: TerminalResultSubmission | null;
       toolCallCount: number;
       sessionEnded: boolean;
       budgetExceeded: boolean;
@@ -130,7 +134,7 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
     };
     composed.addEventListener('abort', onComposedAbort, { once: true });
 
-    const onSubmission = (value: StructuredSubmission): void => {
+    const onSubmission = (value: TerminalResultSubmission): void => {
       state.submission = value;
       emitExecutionEvent(events, 'submission_received', {
         message: 'Terminal submission received and schema-validated',
@@ -269,14 +273,22 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         });
       }
       if (state.submission) {
+        // PI-4 bundle shapes classify via terminalDisposition; the PI-1
+        // envelope abstains via its abstention field.
+        const outcome =
+          'disposition' in state.submission
+            ? terminalDisposition(state.submission)
+            : 'abstention' in state.submission && state.submission.abstention
+              ? 'abstained'
+              : 'submitted';
         emitExecutionEvent(events, 'run_completed', {
-          message: 'Research submitted with a schema-validated evidence bundle',
-          data: { outcome: state.submission.abstention ? 'abstained' : 'submitted' },
+          message: 'Research submitted with a schema-validated terminal submission',
+          data: { outcome },
         });
         return this.buildResult(
           events,
           runId,
-          state.submission.abstention ? 'abstained' : 'submitted',
+          outcome,
           startedAt,
           {
             session: handle,
@@ -343,7 +355,7 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
     parts: {
       session: PiSessionHandle | null;
       configId: string;
-      submission?: StructuredSubmission | null;
+      submission?: TerminalResultSubmission | null;
       failure?: ProductResearchResult['failure'];
     },
   ): ProductResearchResult {

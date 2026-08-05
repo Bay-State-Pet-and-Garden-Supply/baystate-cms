@@ -19,6 +19,8 @@ import path from 'node:path';
 import {
   ProductIntelligencePolicySchema,
   ProductResearchInputSchema,
+  type StructuredSubmission,
+  type TerminalResultSubmission,
   type ProductIntelligenceExecutionEvent,
   type ProductIntelligencePolicy,
   type ProductResearchContext,
@@ -64,6 +66,7 @@ import {
 } from '../db/repositories/product-intelligence-repo';
 import { sha256Hex } from '../shared/stable-id';
 import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
+import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
 
 export const PI_RESULT_SCHEMA_VERSION = 1;
 
@@ -413,8 +416,22 @@ export async function startProductIntelligenceRun(
     switch (result.outcome) {
       case 'submitted':
       case 'abstained': {
-        persistSubmissionArtifacts(run.id, result, bus, sink);
-        const disposition = result.outcome === 'submitted' ? 'submitted' : 'abstained';
+        // Deterministic CMS-side gate: the bundle must satisfy the workflow
+        // rules (evidence on facts, blocked identities, taxonomy ids, image
+        // rights, conflict dispositions). Invalid bundles fail the run.
+        const validation = isWorkflowSubmission(result.submission)
+          ? validateTerminalSubmission(result.submission, parsedInput.gtin, workspace.id)
+          : { valid: true, issues: [] as string[] };
+        if (!validation.valid) {
+          const message = `Terminal submission failed validation: ${validation.issues.join('; ')}`;
+          transitionPiRunStatus(run.id, 'failed', { errorCode: 'validation_error', errorMessage: message });
+          sink.emitDomain('run.failed', { code: 'validation_error', message });
+          return result;
+        }
+        persistSubmissionArtifacts(run.id, result, sink);
+        // Disposition derives from the submission shape (deterministic):
+        // bundles submit; abstentions and identity-conflict submissions abstain.
+        const disposition = submissionDisposition(result.submission!);
         insertPiResult({ runId: run.id, schemaVersion: PI_RESULT_SCHEMA_VERSION, disposition, result });
         const needsReview = submissionNeedsReview(result);
         if (needsReview) {
@@ -467,12 +484,35 @@ export async function startProductIntelligenceRun(
 function persistSubmissionArtifacts(
   runId: string,
   result: ProductResearchResult,
-  bus: RunEventBus,
   sink: PersistingExecutionEventSink,
 ): void {
   const submission = result.submission;
   if (!submission) return;
 
+  // PI-1 envelope: sources + evidence + conflicts rows.
+  if ('evidenceSources' in submission) {
+    persistPi1Artifacts(runId, submission, sink);
+    return;
+  }
+
+  // PI-4 workflow submissions: persist conflicts (tool evidence stays in the
+  // tool-call records and the result JSON; the bundle cites tool evidence ids).
+  if ('disposition' in submission) {
+    for (const conflict of submission.conflicts) {
+      persistConflict(runId, conflict.field, conflict.severity === 'blocking' ? 'high' : conflict.severity, conflict.evidenceIds, sink);
+    }
+    return;
+  }
+  if ('recommendedDisposition' in submission) {
+    for (const conflict of submission.conflicts) {
+      persistConflict(runId, conflict.field, conflict.severity === 'blocking' ? 'high' : conflict.severity, conflict.evidenceIds, sink);
+    }
+    return;
+  }
+  // submit_insufficient_evidence: nothing to persist beyond the result JSON.
+}
+
+function persistPi1Artifacts(runId: string, submission: StructuredSubmission, sink: PersistingExecutionEventSink): void {
   const sourceIdMap = new Map<string, string>();
   for (const source of submission.evidenceSources) {
     const row = insertPiSource({
@@ -504,41 +544,78 @@ function persistSubmissionArtifacts(
   }
 
   for (const conflict of submission.conflicts) {
-    const row = insertPiConflict({
-      runId,
-      field: conflict.category,
-      severity: conflict.severity,
-      evidenceIds: conflict.evidenceIds,
+    persistConflict(runId, conflict.category, conflict.severity, conflict.evidenceIds, sink, {
       resolution: conflict.resolutionProposal ? { proposal: conflict.resolutionProposal } : undefined,
-    });
-    sink.emitDomain('conflict.detected', {
-      conflictId: row.id,
-      field: conflict.category,
-      severity: conflict.severity,
     });
   }
 }
 
+function persistConflict(
+  runId: string,
+  field: string,
+  severity: 'low' | 'medium' | 'high',
+  evidenceIds: string[],
+  sink: PersistingExecutionEventSink,
+  extra: { resolution?: unknown } = {},
+): void {
+  const row = insertPiConflict({
+    runId,
+    field,
+    severity,
+    evidenceIds,
+    resolution: extra.resolution,
+  });
+  sink.emitDomain('conflict.detected', {
+    conflictId: row.id,
+    field,
+    severity,
+  });
+}
+
+function submissionDisposition(submission: TerminalResultSubmission): 'submitted' | 'abstained' {
+  if ('evidenceSources' in submission) return submission.abstention ? 'abstained' : 'submitted';
+  if ('disposition' in submission) return 'submitted';
+  return 'abstained';
+}
+
 function submissionNeedsReview(result: ProductResearchResult): boolean {
-  if (!result.submission) return false;
-  if (result.submission.identity.gtinMatch !== 'exact') return true;
-  if (result.submission.conflicts.some((conflict) => conflict.severity === 'high')) return true;
-  if (result.submission.images.some((image) => image.identityMatch === 'unknown' || image.rightsStatus === 'unknown')) return true;
-  return false;
+  const submission = result.submission;
+  if (!submission) return false;
+  if ('evidenceSources' in submission) {
+    if (submission.identity.gtinMatch !== 'exact') return true;
+    if (submission.conflicts.some((conflict) => conflict.severity === 'high')) return true;
+    return submission.images.some((image) => image.identityMatch === 'unknown' || image.rightsStatus === 'unknown');
+  }
+  if ('disposition' in submission) {
+    if (submission.identity.status !== 'exact_match') return true;
+    if (submission.conflicts.some((conflict) => conflict.severity === 'blocking')) return true;
+    return submission.imageCandidates.some((image) => image.rightsStatus === 'unknown' || !image.exactProductMatch);
+  }
+  if ('recommendedDisposition' in submission) return true; // identity-conflict submission
+  return false; // insufficient-evidence abstention
 }
 
 function reviewReasons(result: ProductResearchResult): string[] {
   const reasons: string[] = [];
-  if (!result.submission) return reasons;
-  if (result.submission.identity.gtinMatch !== 'exact') {
-    reasons.push(`identity.gtinMatch is '${result.submission.identity.gtinMatch}'`);
+  const submission = result.submission;
+  if (!submission) return reasons;
+  if ('evidenceSources' in submission) {
+    if (submission.identity.gtinMatch !== 'exact') reasons.push(`identity.gtinMatch is '${submission.identity.gtinMatch}'`);
+    if (submission.conflicts.some((conflict) => conflict.severity === 'high')) reasons.push('high-severity conflicts present');
+    if (submission.images.some((image) => image.identityMatch === 'unknown' || image.rightsStatus === 'unknown')) {
+      reasons.push('image identity or rights status unknown');
+    }
+    return reasons;
   }
-  if (result.submission.conflicts.some((conflict) => conflict.severity === 'high')) {
-    reasons.push('high-severity conflicts present');
+  if ('disposition' in submission) {
+    if (submission.identity.status !== 'exact_match') reasons.push(`identity.status is '${submission.identity.status}'`);
+    if (submission.conflicts.some((conflict) => conflict.severity === 'blocking')) reasons.push('blocking conflicts present');
+    if (submission.imageCandidates.some((image) => image.rightsStatus === 'unknown' || !image.exactProductMatch)) {
+      reasons.push('image rights or exact-product match unknown');
+    }
+    return reasons;
   }
-  if (result.submission.images.some((image) => image.identityMatch === 'unknown' || image.rightsStatus === 'unknown')) {
-    reasons.push('image identity or rights status unknown');
-  }
+  if ('recommendedDisposition' in submission) reasons.push('identity-conflict submission');
   return reasons;
 }
 
@@ -643,7 +720,11 @@ export function createPiComparison(input: {
 function countFields(result: { resultJson: string }): number {
   try {
     const parsed = JSON.parse(result.resultJson) as ProductResearchResult;
-    return parsed.submission?.productProposal.fields.length ?? 0;
+    const submission = parsed.submission;
+    if (!submission) return 0;
+    if ('evidenceSources' in submission) return submission.productProposal.fields.length;
+    if ('disposition' in submission) return submission.commerceFacts.length;
+    return 0;
   } catch {
     return 0;
   }

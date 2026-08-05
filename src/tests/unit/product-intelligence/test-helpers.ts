@@ -3,6 +3,7 @@
  * No external calls occur: the fake session factory never touches the Pi SDK.
  */
 import type { ProductResearchContext, ProductResearchInput, StructuredSubmission } from '../../../../src/product-intelligence/contracts';
+import type { TerminalResultSubmission } from '../../../../src/product-intelligence/contracts';
 import type { PiSessionFactory, PiSessionHandle, PiSessionLike } from '../../../../src/product-intelligence/pi/pi-session-factory';
 
 export const VALID_GTIN = '085000079585';
@@ -82,6 +83,16 @@ export function validSubmission(overrides: Partial<StructuredSubmission> = {}): 
     confidence: 0.9,
     ...overrides,
   };
+}
+
+/** Narrow a terminal submission to the PI-1 envelope shape (tests). */
+export function asPi1Submission(submission: TerminalResultSubmission | null): StructuredSubmission | null {
+  if (!submission) return null;
+  const candidate = submission as { identity?: { gtinMatch?: unknown } };
+  if (candidate.identity && 'gtinMatch' in candidate.identity) {
+    return submission as unknown as StructuredSubmission;
+  }
+  return null;
 }
 
 export const ABSTENTION_SUBMISSION: StructuredSubmission = {
@@ -185,14 +196,14 @@ export class FakeSessionFactory implements PiSessionFactory {
   created: FakeSession[] = [];
   failWith: Error | null = null;
   /** Latest submission handler passed by the executor (drives the submit tool). */
-  lastSubmissionHandler: ((submission: StructuredSubmission) => void) | null = null;
+  lastSubmissionHandler: ((submission: TerminalResultSubmission) => void) | null = null;
   effectiveTools: string[] = ['read', 'grep', 'find', 'ls', 'submit_product_research'];
   piVersion: string | null = '0.83.0';
 
   async createSession(
     _input: ProductResearchInput,
     _context: ProductResearchContext,
-    onSubmission: (submission: StructuredSubmission) => void,
+    onSubmission: (submission: TerminalResultSubmission) => void,
   ): Promise<PiSessionHandle> {
     if (this.failWith) throw this.failWith;
     this.lastSubmissionHandler = onSubmission;
@@ -209,7 +220,7 @@ export class FakeSessionFactory implements PiSessionFactory {
 }
 
 /** Run a submission through the executor's onSubmission handler like the tool would. */
-export function submitViaTool(factory: FakeSessionFactory, submission: StructuredSubmission): void {
+export function submitViaTool(factory: FakeSessionFactory, submission: TerminalResultSubmission): void {
   if (!factory.lastSubmissionHandler) throw new Error('No submission handler registered');
   factory.lastSubmissionHandler(submission);
 }

@@ -9,7 +9,7 @@ import { LEGACY_EXECUTOR_NAME, PI_EXECUTOR_NAME, type ProductResearchResult } fr
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../../product-intelligence/executor';
 import { createExecutionEventSink } from '../../../product-intelligence/executor';
 import { LegacyProductIntelligenceExecutor } from '../../../product-intelligence/legacy-executor';
-import { TEST_INPUT, testContext, validSubmission } from './test-helpers';
+import { asPi1Submission, TEST_INPUT, testContext, validSubmission } from './test-helpers';
 
 function fakePiExecutor(name = 'pi'): ProductIntelligenceExecutor {
   const calls: Array<{ input: unknown; context: unknown }> = [];
@@ -110,8 +110,9 @@ describe('router integration with a fake executor (no external calls)', () => {
 
     expect(result.outcome).toBe('submitted');
     expect(result.executor).toBe('pi');
-    expect(result.submission?.identity.gtinMatch).toBe('exact');
-    expect(result.submission?.evidenceSources.length).toBeGreaterThan(0);
+    const pi1 = asPi1Submission(result.submission);
+    expect(pi1?.identity.gtinMatch).toBe('exact');
+    expect(pi1?.evidenceSources.length).toBeGreaterThan(0);
     expect(events.snapshot().length).toBe(0); // fake executor emits no events; real executors do
   });
 

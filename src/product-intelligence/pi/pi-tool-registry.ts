@@ -20,11 +20,9 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
  */
 import { Type, type TSchema } from 'typebox';
-import {
-  SUBMISSION_TOOL_NAME,
-  type StructuredSubmission,
-} from '../contracts';
+import { SUBMISSION_TOOL_NAME } from '../contracts';
 import { StructuredSubmissionSchema } from '../contracts';
+import type { TerminalResultSubmission } from '../contracts';
 
 // ---------------------------------------------------------------------------
 // TypeBox schema (mirrors StructuredSubmissionSchema)
@@ -148,7 +146,7 @@ export interface SubmissionToolDeps {
  * agent can correct and retry; the executor decides what happens next.
  */
 export function buildProductResearchSubmissionTool(
-  onSubmission: (submission: StructuredSubmission) => void,
+  onSubmission: (submission: TerminalResultSubmission) => void,
   deps: SubmissionToolDeps = {},
 ): {
   name: string;
@@ -189,7 +187,7 @@ export function buildProductResearchSubmissionTool(
           .join('; ');
         throw new Error(`Invalid submission payload: ${issues}`);
       }
-      onSubmission(parsed.data);
+      onSubmission(parsed.data as unknown as TerminalResultSubmission);
       return {
         content: [
           {

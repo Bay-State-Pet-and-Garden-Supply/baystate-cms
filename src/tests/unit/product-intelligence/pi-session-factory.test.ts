@@ -116,7 +116,16 @@ describe('PiSdkSessionFactory — real SDK (no prompt, no network)', () => {
         const toolNames = session.agent.state.tools.map((tool) => tool.name).sort();
         expect(toolNames).toEqual(['find', 'grep', 'ls', 'read']);
 
-        const expected = ['find', 'grep', 'ls', 'read', SUBMISSION_TOOL_NAME];
+        const expected = [
+          'find',
+          'grep',
+          'ls',
+          'read',
+          SUBMISSION_TOOL_NAME,
+          'submit_product_research_bundle',
+          'submit_insufficient_evidence',
+          'submit_identity_conflict',
+        ];
         expect(handle.effectiveTools.sort()).toEqual(expected.sort());
         expect(handle.piVersion).toMatch(/^\d+\.\d+\.\d+$/);
         expect(handle.extensionVersions).toEqual([]);

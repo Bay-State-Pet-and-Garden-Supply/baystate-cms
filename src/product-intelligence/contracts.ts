@@ -14,6 +14,7 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
  */
 import { z } from 'zod';
+import { TerminalSubmissionSchema } from './workflow/bundle';
 
 // ---------------------------------------------------------------------------
 // Product input
@@ -330,6 +331,14 @@ export type ProductIntelligenceExecutionEvent = z.infer<
 >;
 
 // ---------------------------------------------------------------------------
+// Terminal result submission (PI-1 envelope + PI-4 workflow submissions)
+// ---------------------------------------------------------------------------
+
+/** Any terminal submission the run service persists: the PI-1 evidence bundle or a PI-4 workflow submission. */
+export const TerminalResultSubmissionSchema = z.union([StructuredSubmissionSchema, TerminalSubmissionSchema]);
+export type TerminalResultSubmission = z.infer<typeof TerminalResultSubmissionSchema>;
+
+// ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
 
@@ -384,7 +393,8 @@ export const ProductResearchResultSchema = z.object({
   configId: z.string().min(1),
   /** Wall-clock duration of the run in milliseconds. */
   durationMs: z.number().int().nonnegative(),
-  submission: StructuredSubmissionSchema.nullable().default(null),
+  /** Terminal submission: PI-1 evidence bundle or a PI-4 workflow submission. */
+  submission: TerminalResultSubmissionSchema.nullable().default(null),
   /** Terminal failure details when outcome is 'failed'. */
   failure: ResearchFailureSchema.nullable().default(null),
   /** Normalized execution events (PI-2 persists these durably). */

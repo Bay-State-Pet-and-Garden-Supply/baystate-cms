@@ -19,8 +19,9 @@ import type {
   ProductIntelligencePolicy,
   ProductResearchContext,
   ProductResearchInput,
-  StructuredSubmission,
+  TerminalResultSubmission,
 } from '../contracts';
+import { buildWorkflowTerminalTools } from '../workflow/terminal-tools';
 import { KNOWN_BUILTIN_TOOLS, TERMINAL_TOOLS } from '../contracts';
 import { buildApprovedResourceLoader } from './pi-resource-loader';
 import { buildProductResearchSubmissionTool } from './pi-tool-registry';
@@ -63,7 +64,7 @@ export interface PiSessionFactory {
   createSession(
     input: ProductResearchInput,
     context: ProductResearchContext,
-    onSubmission: (submission: StructuredSubmission) => void,
+    onSubmission: (submission: TerminalResultSubmission) => void,
   ): Promise<PiSessionHandle>;
 }
 
@@ -89,7 +90,7 @@ export class PiSdkSessionFactory implements PiSessionFactory {
   async createSession(
     input: ProductResearchInput,
     context: ProductResearchContext,
-    onSubmission: (submission: StructuredSubmission) => void,
+    onSubmission: (submission: TerminalResultSubmission) => void,
   ): Promise<PiSessionHandle> {
     const sdk = await importSdk();
     const policy = context.policy;
@@ -134,9 +135,10 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       cwd: this.options.cwd ?? process.cwd(),
     });
 
-    // --- Terminal submission tool + bounded research tools ------------------
+    // --- Terminal submission tools (PI-1 envelope + PI-4 workflow) ----------
     const submissionTool = buildProductResearchSubmissionTool(onSubmission);
-    const customToolNames = [submissionTool.name];
+    const workflowTerminalTools = buildWorkflowTerminalTools(onSubmission);
+    const customToolNames = [submissionTool.name, ...workflowTerminalTools.map((t) => t.name)];
 
     // PI-3: research tools from the registry, gated by the policy's
     // researchTools allowlist (empty -> none granted, fail closed).
@@ -163,7 +165,10 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       tools: allowedTools,
       // The submission tool and research tools are added by the SDK's
       // extension runtime, not the built-in allowlist.
-      customTools: researchTools && researchTools.length > 0 ? [submissionTool, ...researchTools] : [submissionTool],
+      customTools:
+        researchTools && researchTools.length > 0
+          ? [submissionTool, ...workflowTerminalTools, ...researchTools]
+          : [submissionTool, ...workflowTerminalTools],
     });
 
     let disposed = false;

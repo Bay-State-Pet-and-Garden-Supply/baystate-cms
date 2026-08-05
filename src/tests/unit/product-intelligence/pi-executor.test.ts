@@ -9,8 +9,10 @@ import { PiProductIntelligenceExecutor } from '../../../product-intelligence/pi/
 import { PiSessionError } from '../../../product-intelligence/pi/pi-session-factory';
 import { createExecutionEventSink } from '../../../product-intelligence/executor';
 import { SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
+import type { TerminalResultSubmission } from '../../../product-intelligence/contracts';
 import {
   ABSTENTION_SUBMISSION,
+  asPi1Submission,
   FakeSessionFactory,
   TEST_INPUT,
   submitViaTool,
@@ -36,7 +38,7 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     const result = await runPromise;
 
     expect(result.outcome).toBe('submitted');
-    expect(result.submission?.identity.gtinMatch).toBe('exact');
+    expect(asPi1Submission(result.submission)?.identity.gtinMatch).toBe('exact');
     expect(result.executor).toBe('pi');
     expect(result.piVersion).toBe('0.83.0');
     expect(result.configId).toBe('config-test-0001');
@@ -59,7 +61,7 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     const result = await runPromise;
 
     expect(result.outcome).toBe('abstained');
-    expect(result.submission?.abstention?.scope).toBe('full');
+    expect(asPi1Submission(result.submission)?.abstention?.scope).toBe('full');
   });
 
   it('emits normalized tool call events without chain-of-thought', async () => {

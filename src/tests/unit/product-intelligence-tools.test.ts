@@ -21,7 +21,7 @@ import { buildDefaultToolRegistry, defaultToolRegistry } from '../../product-int
 import { taxonomyTools } from '../../product-intelligence/tools/taxonomy-tools';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
 import type { ProductResearchContext, ProductResearchInput, ProductResearchResult } from '../../product-intelligence/contracts';
-import { validSubmission } from './product-intelligence/test-helpers';
+import { asPi1Submission, validSubmission } from './product-intelligence/test-helpers';
 
 const wsId = 'pi-tools-test-workspace';
 
@@ -361,8 +361,9 @@ describe('Fixture agent run using only research tools', () => {
     // The submission cites the tool-derived evidence id and the taxonomy id.
     const result = projection?.result as { resultJson: string };
     const parsed = JSON.parse(result.resultJson) as ProductResearchResult;
-    expect(parsed.submission?.identity.gtinEvidenceIds[0]).toMatch(/^validate_gtin:/);
-    expect(parsed.submission?.classificationProposal.productTypeId).toBe('pt-dog-food');
+    const pi1 = asPi1Submission(parsed.submission);
+    expect(pi1?.identity.gtinEvidenceIds[0]).toMatch(/^validate_gtin:/);
+    expect(pi1?.classificationProposal.productTypeId).toBe('pt-dog-food');
   });
 });
 

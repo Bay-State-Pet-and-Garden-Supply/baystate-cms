@@ -18,6 +18,8 @@ import type {
   ProductResearchInput,
 } from '../contracts';
 import { SUBMISSION_TOOL_NAME } from '../contracts';
+import { buildWorkflowSection } from '../workflow/workflow-prompt';
+import { WORKFLOW_TERMINAL_TOOLS } from '../workflow/bundle';
 
 export interface BuiltResearchPrompt {
   /** The prompt text sent to the session. */
@@ -63,7 +65,13 @@ export function buildResearchPrompt(
     '## Execution constraints',
     constraints,
     '',
-    `## Termination\nWhen research is complete, call the terminal tool \`${SUBMISSION_TOOL_NAME}\` exactly once with the full evidence bundle. Never propose using an image whose exact-product match or reuse rights are unknown. Do not invent taxonomy, Category Page, attribute, Product Type, or ProductField identifiers. If you cannot complete the research, submit a full abstention with an actionable next step — do not end the conversation with prose alone.`,
+    `## Termination\nWhen research is complete, call a terminal tool exactly once. ` +
+    `The terminal tools are: ${[...WORKFLOW_TERMINAL_TOOLS, SUBMISSION_TOOL_NAME].join(', ')}. ` +
+    'Never propose using an image whose exact-product match or reuse rights are unknown. ' +
+    'Do not invent taxonomy, Category Page, attribute, Product Type, or ProductField identifiers. ' +
+    'If you cannot complete the research, submit a full abstention with an actionable next step — do not end the conversation with prose alone.',
+    '',
+    buildWorkflowSection(input, context),
     '',
     `## Execution mode\n${executionModeLabel(executionMode)}`,
     existingEvidenceRefs.length > 0
