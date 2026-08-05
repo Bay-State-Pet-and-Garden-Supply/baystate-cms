@@ -62,6 +62,8 @@ export default defineConfig({
       'src/tests/unit/product-intelligence-tools.test.ts',
       'src/tests/unit/product-intelligence-workflow.test.ts',
       'src/tests/unit/product-intelligence-policy.test.ts',
+      'src/tests/unit/product-intelligence-assets.test.ts',
+      'src/tests/unit/product-intelligence-image-tools.test.ts',
     ],
   },
 });

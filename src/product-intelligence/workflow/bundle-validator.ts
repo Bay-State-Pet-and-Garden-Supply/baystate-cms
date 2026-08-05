@@ -25,6 +25,7 @@ import {
   getCachedProductTypes,
 } from '../../db/repositories/classification-config-repo';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
+import { computeCommerceApproved } from '../assets/rights';
 import type {
   IdentityConflictSubmission,
   InsufficientEvidenceSubmission,
@@ -117,15 +118,64 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
     }
   }
 
-  // Images: primary images need non-unknown rights and exact-product match.
+  // Images (PI-6): primary images must satisfy the deterministic
+  // commerce-approval rules — provenance is preserved, evidence is cited,
+  // rights are established with a referenced basis, and conflicting
+  // visible-package evidence blocks primary use. The commerceApproved flag
+  // the agent asserts is recomputed from the candidate's own fields.
+  const primaries = bundle.imageCandidates.filter((image) => image.role === 'primary');
+  if (primaries.length > 1) {
+    issues.push(`at most one primary image may be proposed (got ${primaries.length})`);
+  }
   for (const image of bundle.imageCandidates) {
-    if (image.role === 'primary') {
-      if (image.rightsStatus === 'unknown') {
-        issues.push(`primary image ${image.url} has unknown rights status`);
-      }
-      if (!image.exactProductMatch) {
-        issues.push(`primary image ${image.url} is not marked as an exact product match`);
-      }
+    if (image.role !== 'primary') continue;
+    // Defaults are applied by the zod schema at submission time; the validator
+    // itself stays defensive for direct-call paths.
+    const evidenceIds = image.evidenceIds ?? [];
+    const conflicts = image.conflicts ?? [];
+    const qualityStatus = image.qualityStatus ?? 'usable';
+    const exactVariantMatch = image.exactVariantMatch ?? null;
+    if (image.rightsStatus === 'unknown') {
+      issues.push(`primary image ${image.url} has unknown rights status`);
+    }
+    const authorized = ['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized'].includes(image.rightsStatus);
+    if (authorized && (!image.rightsBasis || !image.rightsEvidenceRef)) {
+      issues.push(`primary image ${image.url} declares ${image.rightsStatus} rights without a rights basis and evidence reference`);
+    }
+    if (!image.exactProductMatch) {
+      issues.push(`primary image ${image.url} is not marked as an exact product match`);
+    }
+    if (exactVariantMatch === false) {
+      issues.push(`primary image ${image.url} is marked as not an exact variant match (parent-product-only images cannot be primary)`);
+    }
+    if (evidenceIds.length === 0) {
+      issues.push(`primary image ${image.url} cites no evidence ids`);
+    }
+    if (!image.originalContentHash) {
+      issues.push(`primary image ${image.url} has no content hash (extraction provenance is required)`);
+    } else if (!/^[0-9a-f]{64}$/.test(image.originalContentHash)) {
+      issues.push(`primary image ${image.url} content hash is not a SHA-256 hex digest (${image.originalContentHash.slice(0, 24)}...)`);
+    }
+    if (qualityStatus !== 'usable') {
+      issues.push(`primary image ${image.url} quality is '${qualityStatus}', not 'usable'`);
+    }
+    if (conflicts.length > 0) {
+      issues.push(`primary image ${image.url} has conflicting visible-package evidence: ${conflicts.join('; ')}`);
+    }
+    const recomputed = computeCommerceApproved({
+      rightsStatus:
+        image.rightsStatus === 'unknown'
+          ? 'unknown'
+          : ['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized'].includes(image.rightsStatus)
+            ? 'approved'
+            : 'restricted',
+      exactProductMatch: image.exactProductMatch,
+      exactVariantMatch,
+      qualityStatus,
+      conflicts,
+    });
+    if (image.commerceApproved !== recomputed) {
+      issues.push(`primary image ${image.url} commerceApproved assertion (${image.commerceApproved}) does not match verified status (${recomputed})`);
     }
   }
 

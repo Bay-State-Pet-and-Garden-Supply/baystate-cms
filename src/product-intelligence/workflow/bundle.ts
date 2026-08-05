@@ -52,9 +52,27 @@ export const BundleClassificationProposalSchema = z.object({
 });
 export type BundleClassificationProposal = z.infer<typeof BundleClassificationProposalSchema>;
 
-export const ImageRoleSchema = z.enum(['primary', 'alternate', 'nutrition', 'ingredients']);
-export const ImageRightsStatusSchema = z.enum(['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'unknown']);
+export const ImageRoleSchema = z.enum(['primary', 'alternate', 'nutrition', 'ingredients', 'comparison']);
+export const ImageRightsStatusSchema = z.enum(['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized', 'unknown']);
 
+export const ImageExtractionMethodSchema = z.enum([
+  'json_ld',
+  'platform_api',
+  'network_response',
+  'profile_selector',
+  'media_api',
+  'manual',
+]);
+
+export const ImageQualityStatusSchema = z.enum(['usable', 'low_quality', 'invalid']);
+
+/**
+ * A proposed image candidate (PI-6). The agent proposes candidates but can
+ * never erase or replace extraction provenance — every candidate preserves
+ * source, source path, artifact id, extraction method, and content hash, and
+ * primary candidates must satisfy the deterministic commerce-approval rules
+ * (see bundle-validator).
+ */
 export const BundleImageCandidateSchema = z.object({
   sourceId: z.string().min(1),
   sourceArtifactId: z.string().min(1),
@@ -65,6 +83,29 @@ export const BundleImageCandidateSchema = z.object({
   exactVariantMatch: z.boolean().nullable().default(null),
   variantReference: z.string().max(256).nullish(),
   rightsStatus: ImageRightsStatusSchema,
+  // PI-6 provenance and verification fields.
+  /** Evidence ids (e.g. verify_image_candidate output) backing this candidate. */
+  evidenceIds: z.array(z.string().min(1)).default([]),
+  /** Page the candidate was discovered on. */
+  sourcePageUrl: z.string().url().nullish(),
+  /** Exact source path (JSON-LD key, embedded-state path, network response). */
+  sourcePath: z.string().max(1024).nullish(),
+  extractionMethod: ImageExtractionMethodSchema.nullish(),
+  retrievedAt: z.string().datetime().nullish(),
+  /** Approved reuse basis; primary images must carry one. */
+  rightsBasis: z.string().max(512).nullish(),
+  rightsEvidenceRef: z.string().max(512).nullish(),
+  /** SHA-256 of the original fetched bytes (from verify/inspect output). */
+  originalContentHash: z.string().min(1).nullish(),
+  /** dHash of the decoded pixels (duplicate detection across runs). */
+  perceptualHash: z.string().nullish(),
+  qualityStatus: ImageQualityStatusSchema.default('usable'),
+  /** Deterministic flag; the validator recomputes it from the candidate fields. */
+  commerceApproved: z.boolean(),
+  observedNetContent: NetContentSchema.nullable().default(null),
+  observedPackCount: z.number().int().positive().nullable().default(null),
+  /** Deterministic visible-package conflict reasons (net content, pack count, ...). */
+  conflicts: z.array(z.string().max(256)).default([]),
 });
 export type BundleImageCandidate = z.infer<typeof BundleImageCandidateSchema>;
 

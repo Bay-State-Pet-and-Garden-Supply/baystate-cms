@@ -28,6 +28,8 @@ import {
   type ProductResearchResult,
 } from './contracts';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from './executor';
+import type { ProductAssetEvidence } from './assets/schema';
+import type { PiAssetRow } from '../db/repositories/product-intelligence-repo';
 import { getCurrentWorkspace } from '../server/services/workspace-service';
 import { getDb } from '../db/connection';
 import {
@@ -40,6 +42,7 @@ import {
   deletePiRunsOlderThan,
   getPiResult,
   getPiRun,
+  insertPiAsset,
   insertPiComparison,
   insertPiConflict,
   insertPiEvidence,
@@ -48,6 +51,7 @@ import {
   insertPiStep,
   insertPiToolCall,
   latestPiEventSequence,
+  listPiAssetsByRun,
   listPiComparisons,
   listPiConflicts,
   listPiEvents,
@@ -69,6 +73,7 @@ import { verifyPolicySnapshot } from './policy';
 import { buildResearchPrompt } from './pi/pi-prompt-builder';
 import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
+import type { BundleImageCandidate } from './workflow/bundle';
 
 export const PI_RESULT_SCHEMA_VERSION = 1;
 
@@ -520,9 +525,11 @@ function persistSubmissionArtifacts(
     return;
   }
 
-  // PI-4 workflow submissions: persist conflicts (tool evidence stays in the
-  // tool-call records and the result JSON; the bundle cites tool evidence ids).
+  // PI-4 workflow submissions: persist image assets (PI-6) and conflicts
+  // (tool evidence stays in the tool-call records and the result JSON; the
+  // bundle cites tool evidence ids).
   if ('disposition' in submission) {
+    persistBundleAssets(runId, submission, sink);
     for (const conflict of submission.conflicts) {
       persistConflict(runId, conflict.field, conflict.severity === 'blocking' ? 'high' : conflict.severity, conflict.evidenceIds, sink);
     }
@@ -597,6 +604,149 @@ function persistConflict(
   });
 }
 
+/**
+ * Persist PI-4 bundle image candidates as durable asset records (PI-6). Each
+ * candidate also gets a source row (license/terms refs carry the rights
+ * provenance). These records are the durable image-evidence store; the
+ * promotion consumer that reads approved records for Agent Lab imports is
+ * wired in a later issue (draft promotion currently consumes no PI assets).
+ * Candidates without a content hash (unverified alternates) stay only in the
+ * result JSON — a durable asset record requires extracted provenance.
+ */
+function persistBundleAssets(
+  runId: string,
+  submission: { imageCandidates: BundleImageCandidate[] },
+  sink: PersistingExecutionEventSink,
+): void {
+  const existingSources = listPiSources(runId);
+  for (const candidate of submission.imageCandidates) {
+    if (!candidate.originalContentHash) continue;
+    let source = existingSources.find((s) => s.url === candidate.url);
+    if (!source) {
+      source = insertPiSource({
+        runId,
+        url: candidate.url,
+        domain: domainOf(candidate.url),
+        sourceType: sourceTypeOf(candidate),
+        gtinMatchStatus: candidate.exactProductMatch ? 'exact' : 'unknown',
+        variantMatchStatus: candidate.exactVariantMatch === true ? 'exact' : candidate.exactVariantMatch === false ? 'conflicting' : 'unknown',
+        retrievedAt: candidate.retrievedAt ?? null,
+        licenseRef: candidate.rightsEvidenceRef ?? null,
+        termsRef: candidate.rightsBasis ?? null,
+      });
+      existingSources.push(source);
+    }
+    insertPiAsset({
+      runId,
+      sourceId: source.id,
+      sourceUrl: candidate.url,
+      sourcePageUrl: candidate.sourcePageUrl ?? null,
+      sourceType: source.sourceType,
+      sourcePath: candidate.sourcePath ?? null,
+      sourceArtifactId: candidate.sourceArtifactId,
+      extractionMethod: candidate.extractionMethod ?? 'manual',
+      retrievedAt: candidate.retrievedAt ?? new Date().toISOString(),
+      originalContentHash: candidate.originalContentHash,
+      perceptualHash: candidate.perceptualHash ?? null,
+      variantReference: candidate.variantReference ?? null,
+      rightsStatus: rightsStatusOf(candidate),
+      rightsBasis: candidate.rightsBasis ?? null,
+      rightsEvidenceRef: candidate.rightsEvidenceRef ?? null,
+      observedNetContent: candidate.observedNetContent ?? null,
+      observedPackCount: candidate.observedPackCount ?? null,
+      exactProductMatch: candidate.exactProductMatch,
+      exactVariantMatch: candidate.exactVariantMatch ?? null,
+      qualityStatus: candidate.qualityStatus ?? 'usable',
+      commerceApproved: candidate.commerceApproved,
+      conflicts: candidate.conflicts ?? [],
+      payload: candidate,
+    });
+    sink.emitDomain('asset.added', {
+      sourceUrl: candidate.url,
+      rightsStatus: rightsStatusOf(candidate),
+      commerceApproved: candidate.commerceApproved,
+    });
+  }
+}
+
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Map a raw asset row back to the durable ProductAssetEvidence record
+ * (parse JSON columns, convert 0/1 flags). The assets table is the canonical
+ * image-evidence store — see src/product-intelligence/assets/schema.ts.
+ */
+export function assetEvidenceFromRow(row: PiAssetRow): ProductAssetEvidence {
+  return {
+    id: row.id,
+    runId: row.runId,
+    sourceId: row.sourceId,
+    sourceUrl: row.sourceUrl,
+    sourcePageUrl: row.sourcePageUrl,
+    sourceType: row.sourceType,
+    sourcePath: row.sourcePath,
+    sourceArtifactId: row.sourceArtifactId ?? '', // schema requires an artifact id; null rows predate the requirement
+    extractionMethod: row.extractionMethod as ProductAssetEvidence['extractionMethod'],
+    retrievedAt: row.retrievedAt,
+    originalContentHash: row.originalContentHash,
+    perceptualHash: row.perceptualHash,
+    variantReference: row.variantReference,
+    rightsStatus: row.rightsStatus as ProductAssetEvidence['rightsStatus'],
+    rightsBasis: row.rightsBasis,
+    rightsEvidenceRef: row.rightsEvidenceRef,
+    observedBrand: row.observedBrand,
+    observedProductName: row.observedProductName,
+    observedVariant: row.observedVariant,
+    observedNetContent: row.observedNetContentJson ? (JSON.parse(row.observedNetContentJson) as ProductAssetEvidence['observedNetContent']) : null,
+    observedPackCount: row.observedPackCount,
+    observedGtin: row.observedGtin,
+    exactProductMatch: row.exactProductMatch === 1,
+    exactVariantMatch: row.exactVariantMatch === null ? null : row.exactVariantMatch === 1,
+    qualityStatus: row.qualityStatus as ProductAssetEvidence['qualityStatus'],
+    commerceApproved: row.commerceApproved === 1,
+    conflicts: JSON.parse(row.conflictsJson) as string[],
+    payload: row.payloadJson ? (JSON.parse(row.payloadJson) as Record<string, unknown>) : {},
+    createdAt: row.createdAt,
+  };
+}
+
+function sourceTypeOf(candidate: { rightsStatus: BundleImageCandidate['rightsStatus'] }): string {
+  switch (candidate.rightsStatus) {
+    case 'supplier_authorized':
+      return 'supplier';
+    case 'manufacturer_authorized':
+      return 'manufacturer';
+    case 'licensed_dataset':
+      return 'registry'; // product_intelligence_sources.source_type vocabulary; rights stay independent
+    case 'retailer_authorized':
+      return 'retailer';
+    default:
+      return 'other';
+  }
+}
+
+// The bundle enum has no 'restricted' member; restricted outcomes (e.g. a
+// retailer without a basis) flatten to 'unknown' here. The verification
+// pipeline itself (verify_image_candidate) DOES express 'restricted' in its
+// asset records — only the agent-submitted bundle path coarsens.
+function rightsStatusOf(candidate: { rightsStatus: BundleImageCandidate['rightsStatus'] }): 'approved' | 'restricted' | 'unknown' {
+  switch (candidate.rightsStatus) {
+    case 'supplier_authorized':
+    case 'manufacturer_authorized':
+    case 'licensed_dataset':
+    case 'retailer_authorized':
+      return 'approved';
+    default:
+      return 'unknown';
+  }
+}
+
 function submissionDisposition(submission: TerminalResultSubmission): 'submitted' | 'abstained' {
   if ('evidenceSources' in submission) return submission.abstention ? 'abstained' : 'submitted';
   if ('disposition' in submission) return 'submitted';
@@ -669,6 +819,7 @@ export interface PiRunProjection {
   sources: PiSourceRow[];
   evidence: PiEvidenceRow[];
   conflicts: PiConflictRow[];
+  assets: ProductAssetEvidence[];
   result: PiResultRow | null;
   comparisons: PiComparisonRow[];
   eventCount: number;
@@ -685,6 +836,7 @@ export function getPiRunProjection(id: string): PiRunProjection | null {
     sources: listPiSources(run.id),
     evidence: listPiEvidence(run.id),
     conflicts: listPiConflicts(run.id),
+    assets: listPiAssetsByRun(run.id).map(assetEvidenceFromRow),
     result: getPiResult(run.id) ?? null,
     comparisons: listPiComparisons(run.id),
     eventCount: latestPiEventSequence(run.id) + 1,
@@ -730,7 +882,7 @@ export function createPiComparison(input: {
     fieldCount: result ? countFields(result) : 0,
     conflictCount: listPiConflicts(input.runId).length,
     sourceCount: listPiSources(input.runId).length,
-    imageCount: 0,
+    imageCount: listPiAssetsByRun(input.runId).length,
     abstained: result?.disposition === 'abstained',
     errorCode: run.errorCode,
   };

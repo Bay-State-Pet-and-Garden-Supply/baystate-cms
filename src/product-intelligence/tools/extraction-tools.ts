@@ -11,9 +11,10 @@
  */
 import { Type } from 'typebox';
 import { extractViaHttpDetailed } from '../../onboarding/page-extractor';
-import { defaultPolicyGateway } from '../policy';
+import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
 import { sha256Hex } from '../../shared/stable-id';
+import { sharpImageVerificationAdapter } from '../assets/contract';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import {
   classifyPageIdentity,
@@ -243,8 +244,13 @@ const extractStructuredPageData: PiToolAdapter = {
     url: boundedString(512, 'Product page URL'),
     expectedName: Type.Optional(boundedString(256, 'Expected product name')),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
+    const gateway = ctx.gateway ?? defaultPolicyGateway;
+    const policyDecision = await gateway.checkNetworkRequest(ctx, url, 'fetched_content');
+    if (!policyDecision.allowed) {
+      return policyDenied(policyDecision.detail ?? policyDecision.reasonCode);
+    }
     try {
       const raw = await extractViaHttpDetailed(url, null, { name: params.expectedName ? String(params.expectedName) : undefined });
       const projection = {
@@ -312,9 +318,9 @@ const extractPackagingEvidence: PiToolAdapter = {
 
 const inspectCandidateImage: PiToolAdapter = {
   name: 'inspect_candidate_image',
-  version: '1.0.0',
+  version: '1.1.0',
   description:
-    'Inspect a candidate product image: fetch it and return safe metadata (dimensions, MIME type, byte size) and a content hash. Never returns image binaries to the agent.',
+    'Inspect a candidate product image: fetch it through the policy gateway and return safe metadata (dimensions, aspect ratio, MIME type, byte size, content hash, perceptual hash) and the quality verdict. Identity and rights status are NOT determined by this tool — use verify_image_candidate. Never returns image binaries to the agent.',
   parameters: Type.Object({ url: boundedString(512, 'Image URL') }),
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
@@ -332,17 +338,39 @@ const inspectCandidateImage: PiToolAdapter = {
       const contentType = response.headers.get('content-type');
       const buffer = new Uint8Array(await response.arrayBuffer());
       if (buffer.length > 10 * 1024 * 1024) return noResult('Image exceeds 10 MB inspection limit');
+      const inspected = await sharpImageVerificationAdapter.verify({ buffer, contentType });
+      if (!inspected.verified) {
+        return noResult(inspected.rejectionReason ?? 'corrupt or non-image content', [
+          { id: evidenceId('inspect_candidate_image', url), kind: 'image_evidence', url, method: 'image_metadata_inspection' },
+        ]);
+      }
       return okResult(
         {
           url,
           contentType,
           bytes: buffer.length,
-          contentHash: sha256Hex(Buffer.from(buffer).toString('latin1')),
-          note: 'identity and rights status are NOT determined by this tool',
+          contentHash: inspected.image.contentHash,
+          perceptualHash: inspected.image.perceptualHash,
+          width: inspected.image.width,
+          height: inspected.image.height,
+          aspectRatio: inspected.image.aspectRatio,
+          qualityStatus: inspected.qualityStatus,
+          note: 'identity and rights status are NOT determined by this tool; use verify_image_candidate',
         },
-        [{ id: evidenceId('inspect_candidate_image', url), kind: 'image_evidence', url, method: 'image_metadata_inspection' }],
+        [
+          {
+            id: evidenceId('inspect_candidate_image', url),
+            kind: 'image_evidence',
+            url,
+            method: 'image_metadata_inspection',
+            contentHash: inspected.image.contentHash,
+          },
+        ],
       );
     } catch (error) {
+      if (error instanceof PolicyDeniedError) {
+        return policyDenied(`network denied: ${error.decision.reasonCode}${error.decision.detail ? ` (${error.decision.detail})` : ''}`);
+      }
       return errorResult('image_fetch_failed', error instanceof Error ? error.message.slice(0, 500) : String(error));
     }
   },

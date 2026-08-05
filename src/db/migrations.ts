@@ -1600,6 +1600,63 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Product Intelligence Asset Migration (PI-6) ───────────────────────────
+  // Durable image-asset evidence records (exact-product/variant identity,
+  // source + rights provenance, content + perceptual hashes, quality, and the
+  // deterministic commerce-approval flag). Image provenance persists with the
+  // run; onboarding import and draft-promotion consumption of approved asset
+  // records is wired in a later issue (Agent Lab imports).
+  try {
+    const piAssetsVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('product_intelligence_assets_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!piAssetsVersion) {
+      console.log('[Migrations] Running product intelligence asset schema migration...');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS product_intelligence_assets (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            source_id TEXT REFERENCES product_intelligence_sources(id) ON DELETE SET NULL,
+            source_url TEXT NOT NULL,
+            source_page_url TEXT,
+            source_type TEXT NOT NULL,
+            source_path TEXT,
+            source_artifact_id TEXT,
+            extraction_method TEXT NOT NULL CHECK (extraction_method IN ('json_ld', 'platform_api', 'network_response', 'profile_selector', 'media_api', 'manual')),
+            retrieved_at TEXT NOT NULL,
+            original_content_hash TEXT NOT NULL,
+            perceptual_hash TEXT,
+            variant_reference TEXT,
+            rights_status TEXT NOT NULL CHECK (rights_status IN ('approved', 'restricted', 'unknown')),
+            rights_basis TEXT,
+            rights_evidence_ref TEXT,
+            observed_brand TEXT,
+            observed_product_name TEXT,
+            observed_variant TEXT,
+            observed_net_content_json TEXT,
+            observed_pack_count INTEGER,
+            observed_gtin TEXT,
+            exact_product_match INTEGER NOT NULL DEFAULT 0,
+            exact_variant_match INTEGER,
+            quality_status TEXT NOT NULL CHECK (quality_status IN ('usable', 'low_quality', 'invalid')),
+            commerce_approved INTEGER NOT NULL DEFAULT 0,
+            conflicts_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_assets_run ON product_intelligence_assets(run_id);
+          CREATE INDEX IF NOT EXISTS idx_pi_assets_commerce ON product_intelligence_assets(run_id, commerce_approved);
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_assets_schema_version', '1');");
+      console.log('[Migrations] Product intelligence asset schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence asset schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

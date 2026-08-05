@@ -22,6 +22,8 @@ import { describe, expect, it } from 'vitest';
 import { Check } from 'typebox/value';
 import { StructuredSubmissionSchema } from '../../../product-intelligence/contracts';
 import { SubmissionTypeBoxSchema } from '../../../product-intelligence/pi/pi-tool-registry';
+import { ProductResearchBundleSchema } from '../../../product-intelligence/workflow/bundle';
+import { BundleTypeBoxSchema } from '../../../product-intelligence/workflow/terminal-tools';
 import { ABSTENTION_SUBMISSION, validSubmission } from './test-helpers';
 
 // ---------------------------------------------------------------------------
@@ -36,8 +38,29 @@ interface NormalizedLeaf {
   enums?: unknown[];
   minimum?: number;
   maximum?: number;
+  exclusiveMinimum?: number | boolean;
+  exclusiveMaximum?: number | boolean;
   minItems?: number;
   format?: string;
+}
+
+/** Zod emits ±MAX_SAFE_INTEGER bounds for unbounded ints; treat as unbounded. */
+const MAX_SAFE = 9007199254740991;
+function effectiveMinimum(leaf: NormalizedLeaf): number | undefined {
+  if (leaf.exclusiveMinimum !== undefined) {
+    return typeof leaf.exclusiveMinimum === 'number' ? leaf.exclusiveMinimum : leaf.minimum;
+  }
+  const min = leaf.minimum;
+  if (min === undefined || min <= -MAX_SAFE) return undefined;
+  return min;
+}
+function effectiveMaximum(leaf: NormalizedLeaf): number | undefined {
+  if (leaf.exclusiveMaximum !== undefined) {
+    return typeof leaf.exclusiveMaximum === 'number' ? leaf.exclusiveMaximum : leaf.maximum;
+  }
+  const max = leaf.maximum;
+  if (max === undefined || max >= MAX_SAFE) return undefined;
+  return max;
 }
 
 type JsonSchema = {
@@ -53,17 +76,36 @@ type JsonSchema = {
   format?: string;
   default?: unknown;
   required?: string[];
+  exclusiveMinimum?: number | boolean;
+  exclusiveMaximum?: number | boolean;
 };
 
 function walkJsonSchema(schema: JsonSchema, base: string, leaves: NormalizedLeaf[]): void {
   if (schema.anyOf) {
     // Union of string literals (TypeBox) is the same constraint as an enum
     // (Zod): normalize anyOf-of-consts to a single enum leaf so both sides
-    // compare equal.
-    const constBranches = schema.anyOf.filter((branch) => branch.const !== undefined);
-    if (constBranches.length === schema.anyOf.length && constBranches.length > 0) {
+    // compare equal. Null branches are permitted alongside the literals
+    // (zod .nullish() / TypeBox Optional(Union([X, Null]))).
+    const isNullBranch = (branch: JsonSchema): boolean => {
+      const t = Array.isArray(branch.type) ? branch.type : [branch.type];
+      return t.length === 1 && (t[0] === 'null' || t[0] === 'undefined');
+    };
+    const nonNull = schema.anyOf.filter((branch) => !isNullBranch(branch));
+    const constBranches = nonNull.filter((branch) => branch.const !== undefined);
+    const enumBranches = nonNull.filter((branch) => branch.enum !== undefined);
+    if (constBranches.length === nonNull.length && constBranches.length > 0) {
       const enums = constBranches.map((branch) => branch.const);
       leaves.push({ path: base, type: 'enum', enums });
+      for (const branch of schema.anyOf) {
+        if (isNullBranch(branch)) walkJsonSchema(branch, base, leaves);
+      }
+      return;
+    }
+    if (enumBranches.length === 1 && enumBranches.length === nonNull.length) {
+      leaves.push({ path: base, type: 'enum', enums: enumBranches[0].enum });
+      for (const branch of schema.anyOf) {
+        if (isNullBranch(branch)) walkJsonSchema(branch, base, leaves);
+      }
       return;
     }
     for (const branch of schema.anyOf) {
@@ -110,6 +152,8 @@ function walkJsonSchema(schema: JsonSchema, base: string, leaves: NormalizedLeaf
     format: schema.format,
     minimum: schema.minimum,
     maximum: schema.maximum,
+    exclusiveMinimum: schema.exclusiveMinimum,
+    exclusiveMaximum: schema.exclusiveMaximum,
   });
 }
 
@@ -185,53 +229,62 @@ const MUTATIONS: Array<{ name: string; payload: unknown }> = [
   { name: 'valid bundle', payload: validSubmission() },
 ];
 
+const SCHEMA_PAIRS: Array<{ name: string; zod: { toJSONSchema(): unknown }; typeBox: unknown }> = [
+  { name: 'PI-1 structured submission', zod: StructuredSubmissionSchema, typeBox: SubmissionTypeBoxSchema },
+  { name: 'PI-4 product research bundle', zod: ProductResearchBundleSchema, typeBox: BundleTypeBoxSchema },
+];
+
 describe('TypeBox ↔ Zod schema equivalence', () => {
   it('covers the same leaf paths with the same constraints', () => {
-    const zodSchema = normalizeZodJson(StructuredSubmissionSchema.toJSONSchema() as unknown);
-    const zodLeaves = leafMap(zodSchema);
-    const tbLeaves = leafMap(SubmissionTypeBoxSchema as unknown as JsonSchema);
+    for (const pair of SCHEMA_PAIRS) {
+      const zodLeaves = leafMap(normalizeZodJson(pair.zod.toJSONSchema()));
+      const tbLeaves = leafMap(pair.typeBox as unknown as JsonSchema);
 
-    const zodPaths = [...zodLeaves.keys()].sort();
-    const tbPaths = [...tbLeaves.keys()].sort();
+      const zodPaths = [...zodLeaves.keys()].sort();
+      const tbPaths = [...tbLeaves.keys()].sort();
 
-    expect(zodPaths).toEqual(tbPaths);
+      expect(zodPaths, pair.name).toEqual(tbPaths);
+    }
   });
 
   it('agrees on acceptance for every corpus payload', () => {
     const mismatches: string[] = [];
-    for (const { name, payload } of MUTATIONS) {
-      const typeBoxOk = Check(SubmissionTypeBoxSchema, payload);
-      const zodOk = StructuredSubmissionSchema.safeParse(payload).success;
-      if (typeBoxOk !== zodOk) {
-        mismatches.push(`${name}: typebox=${typeBoxOk} zod=${zodOk}`);
+    for (const pair of SCHEMA_PAIRS) {
+      for (const { name, payload } of MUTATIONS) {
+        const typeBoxOk = Check(pair.typeBox as Parameters<typeof Check>[0], payload);
+        const zodOk = ((pair.zod as unknown) as typeof StructuredSubmissionSchema).safeParse(payload).success;
+        if (typeBoxOk !== zodOk) {
+          mismatches.push(`${pair.name} / ${name}: typebox=${typeBoxOk} zod=${zodOk}`);
+        }
       }
     }
     expect(mismatches).toEqual([]);
   });
 
   it('agrees on leaf-level constraints (type, enum, bounds, format)', () => {
-    const zodSchema = normalizeZodJson(StructuredSubmissionSchema.toJSONSchema() as unknown);
-    const zodLeaves = leafMap(zodSchema);
-    const tbLeaves = leafMap(SubmissionTypeBoxSchema as unknown as JsonSchema);
-
     const diffs: string[] = [];
-    for (const [key, zodLeaf] of zodLeaves) {
-      const tbLeaf = tbLeaves.get(key);
-      if (!tbLeaf) {
-        diffs.push(`missing in TypeBox: ${key}`);
-        continue;
-      }
-      if (zodLeaf.format && tbLeaf.format !== zodLeaf.format) {
-        diffs.push(`format mismatch at ${key}: zod=${zodLeaf.format} typebox=${tbLeaf.format}`);
-      }
-      if (zodLeaf.minimum !== undefined && tbLeaf.minimum !== zodLeaf.minimum) {
-        diffs.push(`minimum mismatch at ${key}: zod=${zodLeaf.minimum} typebox=${tbLeaf.minimum}`);
-      }
-      if (zodLeaf.maximum !== undefined && tbLeaf.maximum !== zodLeaf.maximum) {
-        diffs.push(`maximum mismatch at ${key}: zod=${zodLeaf.maximum} typebox=${tbLeaf.maximum}`);
-      }
-      if (zodLeaf.minItems !== undefined && tbLeaf.minItems !== zodLeaf.minItems) {
-        diffs.push(`minItems mismatch at ${key}: zod=${zodLeaf.minItems} typebox=${tbLeaf.minItems}`);
+    for (const pair of SCHEMA_PAIRS) {
+      const zodLeaves = leafMap(normalizeZodJson(pair.zod.toJSONSchema()));
+      const tbLeaves = leafMap(pair.typeBox as unknown as JsonSchema);
+
+      for (const [key, zodLeaf] of zodLeaves) {
+        const tbLeaf = tbLeaves.get(key);
+        if (!tbLeaf) {
+          diffs.push(`${pair.name}: missing in TypeBox: ${key}`);
+          continue;
+        }
+        if (zodLeaf.format && tbLeaf.format !== zodLeaf.format) {
+          diffs.push(`${pair.name}: format mismatch at ${key}: zod=${zodLeaf.format} typebox=${tbLeaf.format}`);
+        }
+        if (effectiveMinimum(zodLeaf) !== effectiveMinimum(tbLeaf)) {
+          diffs.push(`${pair.name}: minimum mismatch at ${key}: zod=${effectiveMinimum(zodLeaf)} typebox=${effectiveMinimum(tbLeaf)}`);
+        }
+        if (effectiveMaximum(zodLeaf) !== effectiveMaximum(tbLeaf)) {
+          diffs.push(`${pair.name}: maximum mismatch at ${key}: zod=${effectiveMaximum(zodLeaf)} typebox=${effectiveMaximum(tbLeaf)}`);
+        }
+        if (zodLeaf.minItems !== undefined && tbLeaf.minItems !== zodLeaf.minItems) {
+          diffs.push(`${pair.name}: minItems mismatch at ${key}: zod=${zodLeaf.minItems} typebox=${tbLeaf.minItems}`);
+        }
       }
     }
     expect(diffs).toEqual([]);

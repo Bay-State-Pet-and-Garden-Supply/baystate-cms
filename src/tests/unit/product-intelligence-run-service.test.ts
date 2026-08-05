@@ -15,6 +15,7 @@ import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import {
   getPiRun,
   getPiResult,
+  listPiAssetsByRun,
   listPiEvents,
   listPiEvidence,
   listPiSources,
@@ -27,12 +28,54 @@ import {
   replayPiEvents,
   runRetentionCleanup,
   startProductIntelligenceRun,
+  assetEvidenceFromRow,
 } from '../../product-intelligence/run-service';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
-import type { ProductResearchContext, ProductResearchInput, ProductResearchResult } from '../../product-intelligence/contracts';
+import type { ProductResearchContext, ProductResearchInput, ProductResearchResult, TerminalResultSubmission } from '../../product-intelligence/contracts';
 import { TEST_INPUT, validSubmission } from './product-intelligence/test-helpers';
+import type { ProductResearchBundle } from '../../product-intelligence/workflow/bundle';
 
 const wsId = 'pi-service-test-workspace';
+
+/** A validator-valid PI-4 bundle with one approved primary image (PI-6). */
+function bundleWithImage(): ProductResearchBundle {
+  return {
+    schemaVersion: 1,
+    gtin: TEST_INPUT.gtin,
+    inputName: TEST_INPUT.registerName,
+    identity: { status: 'exact_match', brand: null, canonicalName: null, variant: null, manufacturer: null, netContent: null, packCount: null, evidenceIds: [] },
+    commerceFacts: [],
+    classificationProposals: [],
+    imageCandidates: [
+      {
+        sourceId: 's1',
+        sourceArtifactId: 'a1',
+        url: 'https://cdn.example.com/primary.jpg',
+        role: 'primary',
+        exactProductMatch: true,
+        exactVariantMatch: true,
+        variantReference: null,
+        rightsStatus: 'supplier_authorized',
+        evidenceIds: ['ev-img-1'],
+        sourcePageUrl: 'https://supplier.example.com/p/1',
+        sourcePath: 'json_ld.image',
+        extractionMethod: 'media_api',
+        retrievedAt: '2026-08-05T00:00:00.000Z',
+        rightsBasis: 'supplier_authorized_asset',
+        rightsEvidenceRef: 'ev:supplier-1',
+        originalContentHash: 'b'.repeat(64), // SHA-256 hex digest
+        perceptualHash: 'phash-img-1',
+        qualityStatus: 'usable',
+        commerceApproved: true,
+        observedNetContent: { value: 16, unit: 'oz' },
+        observedPackCount: 1,
+        conflicts: [],
+      },
+    ],
+    conflicts: [],
+    disposition: 'research_complete',
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Fake executor: scriptable terminal outcomes, no external calls
@@ -42,7 +85,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
   readonly name = 'pi';
   readonly version = '1.0.0';
   outcome: ProductResearchResult['outcome'] = 'submitted';
-  submission = validSubmission();
+  submission: TerminalResultSubmission = validSubmission();
   failure: ProductResearchResult['failure'] = null;
   emitToolCalls = true;
   /** When true, research waits until the caller signal aborts. */
@@ -353,6 +396,38 @@ describe('Product Intelligence run service', () => {
     expect(metrics.outcome).toBe('submitted');
     expect(metrics.fieldCount).toBe(1);
     expect(metrics.sourceCount).toBe(1);
+  });
+
+  it('persists bundle image candidates as durable assets with rights provenance (PI-6)', async () => {
+    const executor = new FakePiExecutor();
+    executor.submission = bundleWithImage();
+    const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT, mode: 'shadow' }, runOpts);
+    await started.completed;
+
+    const run = getPiRun(started.run.id);
+    expect(run?.status).toBe('completed');
+    const assets = listPiAssetsByRun(started.run.id).map(assetEvidenceFromRow);
+    expect(assets.length).toBe(1);
+    expect(assets[0]).toMatchObject({
+      rightsStatus: 'approved',
+      commerceApproved: true,
+      extractionMethod: 'media_api',
+      originalContentHash: 'b'.repeat(64),
+    });
+    expect(assets[0].rightsEvidenceRef).toBe('ev:supplier-1');
+    // The candidate's source row carries the license/terms refs.
+    const sources = listPiSources(started.run.id);
+    const imageSource = sources.find((s) => s.url === 'https://cdn.example.com/primary.jpg');
+    expect(imageSource?.licenseRef).toBe('ev:supplier-1');
+    expect(imageSource?.termsRef).toBe('supplier_authorized_asset');
+    // The projection exposes assets for the Agent Lab image review surface.
+    const projection = getPiRunProjection(started.run.id);
+    expect(projection?.assets).toHaveLength(1);
+
+    // Comparison metrics count persisted image assets (no longer hardcoded 0).
+    const comparison = createPiComparison({ runId: started.run.id, baselineType: 'legacy', baselineRef: 'legacy-run-xyz' });
+    const metrics = JSON.parse((comparison as { metricsJson: string }).metricsJson);
+    expect(metrics.imageCount).toBe(1);
   });
 
   it('enforces retention policy (terminal only, older than cutoff)', async () => {

@@ -93,6 +93,8 @@ describe('PiToolRegistry enforcement', () => {
       'extract_structured_page_data',
       'extract_packaging_evidence',
       'inspect_candidate_image',
+      'verify_image_candidate',
+      'discover_image_candidates',
       'list_product_type_candidates',
       'list_attribute_options',
       'list_category_page_candidates',

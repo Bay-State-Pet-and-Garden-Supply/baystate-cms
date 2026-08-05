@@ -14,6 +14,7 @@ import { discoveryTools } from './discovery-tools';
 import { verificationTools } from './verification-tools';
 import { buildExtractionTools } from './extraction-tools';
 import { taxonomyTools } from './taxonomy-tools';
+import { imageTools } from './image-tools';
 import type { PageExtractionContract } from './contract';
 
 export * from './contract';
@@ -23,6 +24,7 @@ export { discoveryTools } from './discovery-tools';
 export { verificationTools } from './verification-tools';
 export { buildExtractionTools, HttpPageExtractionAdapter } from './extraction-tools';
 export { taxonomyTools } from './taxonomy-tools';
+export { imageTools } from './image-tools';
 
 /** All research tool names the default registry exposes (policy default allowlist). */
 export const DEFAULT_RESEARCH_TOOL_NAMES: readonly string[] = [
@@ -31,6 +33,7 @@ export const DEFAULT_RESEARCH_TOOL_NAMES: readonly string[] = [
   ...verificationTools.map((t) => t.name),
   ...buildExtractionTools().map((t) => t.name),
   ...taxonomyTools.map((t) => t.name),
+  ...imageTools.map((t) => t.name),
 ];
 
 /**
@@ -44,6 +47,7 @@ export function buildDefaultToolRegistry(extractionContract?: PageExtractionCont
     ...verificationTools,
     ...buildExtractionTools(extractionContract),
     ...taxonomyTools,
+    ...imageTools,
   ]);
 }
 

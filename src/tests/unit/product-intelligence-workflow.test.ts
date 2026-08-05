@@ -11,7 +11,7 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { getPiRun, getPiResult, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
+import { getPiRun, getPiResult, listPiAssetsByRun, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
 import { startProductIntelligenceRun } from '../../product-intelligence/run-service';
 import { buildDefaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
@@ -20,6 +20,7 @@ import type { PageExtractionContract, PageExtractionResult } from '../../product
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
 import type { ProductResearchContext, ProductResearchInput, ProductResearchResult } from '../../product-intelligence/contracts';
 import {
+  type BundleImageCandidate,
   type IdentityConflictSubmission,
   type InsufficientEvidenceSubmission,
   type ProductResearchBundle,
@@ -29,6 +30,53 @@ import { validateTerminalSubmission, isWorkflowSubmission } from '../../product-
 
 const wsId = 'pi-workflow-test-workspace';
 const GTIN = '036000291452';
+
+// ---------------------------------------------------------------------------
+// PI-6 image fixture helpers
+// ---------------------------------------------------------------------------
+
+function validPrimaryImage(overrides: Partial<BundleImageCandidate> = {}): BundleImageCandidate {
+  return {
+    sourceId: 's1',
+    sourceArtifactId: 'a1',
+    url: 'https://cdn.example.com/primary.jpg',
+    role: 'primary',
+    exactProductMatch: true,
+    exactVariantMatch: true,
+    variantReference: null,
+    rightsStatus: 'supplier_authorized',
+    evidenceIds: ['ev-img-1'],
+    sourcePageUrl: `https://brand.example.com/p/${GTIN}`,
+    sourcePath: 'json_ld.image',
+    extractionMethod: 'media_api',
+    retrievedAt: '2026-08-05T00:00:00.000Z',
+    rightsBasis: 'supplier_authorized_asset',
+    rightsEvidenceRef: 'ev:supplier-1',
+    originalContentHash: 'a'.repeat(64), // SHA-256 hex digest
+    perceptualHash: 'deadbeef',
+    qualityStatus: 'usable',
+    commerceApproved: true,
+    observedNetContent: { value: 16, unit: 'oz' },
+    observedPackCount: 1,
+    conflicts: [],
+    ...overrides,
+  };
+}
+
+function exactMatchBundle(overrides: Record<string, unknown> = {}): ProductResearchBundle {
+  return {
+    schemaVersion: 1,
+    gtin: GTIN,
+    inputName: 'X',
+    identity: { status: 'exact_match', brand: null, canonicalName: null, variant: null, manufacturer: null, netContent: null, packCount: null, evidenceIds: ['ev-1'] },
+    commerceFacts: [],
+    classificationProposals: [],
+    imageCandidates: [],
+    conflicts: [],
+    disposition: 'research_complete',
+    ...overrides,
+  } as unknown as ProductResearchBundle;
+}
 
 // ---------------------------------------------------------------------------
 // Stubbed extraction contract (deterministic pages per scenario)
@@ -193,7 +241,14 @@ class WorkflowFixtureExecutor implements ProductIntelligenceExecutor {
             this.scenario.kind === 'invalid_taxonomy_id'
               ? [{ targetId: 'pt-invented', selectedOptionId: 'pt-invented', evidenceIds: [pageEvidenceId], disposition: 'proposed' }]
               : [],
-          imageCandidates: [],
+          imageCandidates: [
+            validPrimaryImage({
+              evidenceIds: [pageEvidenceId],
+              sourcePageUrl: url,
+              observedNetContent: { value: 16, unit: 'oz' },
+              observedPackCount: 1,
+            }),
+          ],
           conflicts,
           disposition:
             this.scenario.kind === 'conflicting_size'
@@ -279,6 +334,13 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     const parsed = JSON.parse(result!.resultJson) as ProductResearchResult;
     expect(isWorkflowSubmission(parsed.submission)).toBe(true);
     expect(parsed.submission && 'disposition' in parsed.submission && parsed.submission.disposition).toBe('research_complete');
+    // The valid primary image candidate is persisted as a durable asset record
+    // with commerce approval and rights provenance (PI-6).
+    const assets = listPiAssetsByRun(runId);
+    expect(assets.length).toBe(1);
+    expect(assets[0].rightsStatus).toBe('approved');
+    expect(assets[0].commerceApproved).toBe(1);
+    expect(assets[0].rightsEvidenceRef).toBe('ev:supplier-1');
   });
 
   it('blocks parent-product-only pages submitted as research_complete (validation_error)', async () => {
@@ -366,18 +428,113 @@ describe('PI-4 workflow fixtures through the full stack', () => {
   });
 
   it('accepts valid taxonomy proposals against seeded config', () => {
-    const bundle = {
-      schemaVersion: 1,
-      gtin: GTIN,
-      inputName: 'X',
-      identity: { status: 'exact_match', brand: null, canonicalName: null, variant: null, manufacturer: null, netContent: null, packCount: null, evidenceIds: ['ev-1'] },
-      commerceFacts: [],
+    const bundle = exactMatchBundle({
       classificationProposals: [{ targetId: 'pt-dog-food', selectedOptionId: 'pt-dog-food', evidenceIds: ['ev-1'], disposition: 'proposed' }],
-      imageCandidates: [],
-      conflicts: [],
-      disposition: 'research_complete',
-    } as unknown as ProductResearchBundle;
+    });
     expect(validateTerminalSubmission(bundle, GTIN, wsId).valid).toBe(true);
+  });
+
+  it('accepts a valid primary image candidate (PI-6)', () => {
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage()] });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(true);
+    expect(validation.issues).toEqual([]);
+  });
+
+  it('blocks parent-product-only images as primary (exactVariantMatch false)', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [validPrimaryImage({ exactVariantMatch: false, commerceApproved: false })],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.join(' ')).toContain('exact variant');
+  });
+
+  it('blocks primary images with conflicting visible-package evidence', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [validPrimaryImage({ conflicts: ['pack_count_mismatch: observed pack count 2 vs expected 1'], commerceApproved: false })],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.join(' ')).toContain('conflicting visible-package evidence');
+  });
+
+  it('rejects a commerceApproved assertion that does not match the verified status', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [validPrimaryImage({ conflicts: ['pack_count_mismatch'], commerceApproved: true })],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.join(' ')).toContain('commerceApproved assertion');
+  });
+
+  it('rejects more than one primary image', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [validPrimaryImage(), validPrimaryImage({ url: 'https://cdn.example.com/second.jpg' })],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.join(' ')).toContain('at most one primary image');
+  });
+
+  it('rejects a primary image without a content hash (missing extraction provenance)', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [validPrimaryImage({ originalContentHash: undefined, commerceApproved: false })],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.join(' ')).toContain('content hash');
+  });
+
+  it('blocks a retailer-sourced primary without an explicit approved basis (retailer-only image)', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({
+          rightsStatus: 'retailer_authorized',
+          rightsBasis: undefined,
+          rightsEvidenceRef: undefined,
+          commerceApproved: false,
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.join(' ')).toContain('rights basis and evidence reference');
+  });
+
+  it('accepts a retailer-sourced primary WITH an explicit approved basis and reference', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({
+          rightsStatus: 'retailer_authorized',
+          rightsBasis: 'retailer_explicit_permission',
+          rightsEvidenceRef: 'ev:retailer-license-1',
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(true);
+  });
+
+  it('accepts alternate/retailer images without blocking (non-primary roles unconstrained)', () => {
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage(),
+        {
+          sourceId: 's2',
+          sourceArtifactId: 'a2',
+          url: 'https://cdn.example.com/alternate.jpg',
+          role: 'alternate',
+          exactProductMatch: true,
+          exactVariantMatch: null,
+          rightsStatus: 'unknown',
+          evidenceIds: ['ev-img-2'],
+          commerceApproved: false,
+        },
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(true);
   });
 
   it('rejects bundles whose GTIN does not match the run input', () => {

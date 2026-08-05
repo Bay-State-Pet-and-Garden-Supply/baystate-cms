@@ -21,6 +21,7 @@ import {
   deletePiRunsOlderThan,
   getPiResult,
   getPiRun,
+  insertPiAsset,
   insertPiComparison,
   insertPiConflict,
   insertPiEvidence,
@@ -29,6 +30,7 @@ import {
   insertPiStep,
   insertPiToolCall,
   latestPiEventSequence,
+  listPiAssetsByRun,
   listPiConflicts,
   listPiEvents,
   listPiEvidence,
@@ -91,6 +93,7 @@ describe('Product Intelligence repositories', () => {
       .all() as Array<{ name: string }>;
     const names = tables.map((t) => t.name).sort();
     expect(names).toEqual([
+      'product_intelligence_assets',
       'product_intelligence_comparisons',
       'product_intelligence_conflicts',
       'product_intelligence_events',
@@ -183,6 +186,48 @@ describe('Product Intelligence repositories', () => {
     expect(conflicts[0].resolvedBy).toBe('reviewer-1');
     expect(listPiSources(run.id)).toHaveLength(1);
     expect(listPiEvidence(run.id)).toHaveLength(1);
+  });
+
+  it('persists image assets with rights and commerce approval (round-trip)', () => {
+    const run = makeRun();
+    const source = insertPiSource({ runId: run.id, url: 'https://cdn.example.com/i.jpg', domain: 'cdn.example.com', sourceType: 'supplier', licenseRef: 'ev:supplier-1', termsRef: 'supplier_authorized_asset' });
+    const row = insertPiAsset({
+      runId: run.id,
+      sourceId: source.id,
+      sourceUrl: 'https://cdn.example.com/i.jpg',
+      sourcePageUrl: 'https://brand.example.com/p/1',
+      sourceType: 'supplier',
+      sourcePath: 'json_ld.image',
+      sourceArtifactId: 'a1',
+      extractionMethod: 'media_api',
+      retrievedAt: '2026-08-05T00:00:00.000Z',
+      originalContentHash: 'hash-1',
+      perceptualHash: 'phash-1',
+      variantReference: 'v-16',
+      rightsStatus: 'approved',
+      rightsBasis: 'supplier_authorized_asset',
+      rightsEvidenceRef: 'ev:supplier-1',
+      observedNetContent: { value: 16, unit: 'oz' },
+      observedPackCount: 1,
+      exactProductMatch: true,
+      exactVariantMatch: true,
+      qualityStatus: 'usable',
+      commerceApproved: true,
+      conflicts: [],
+      payload: { role: 'primary' },
+    });
+    expect(row.sourceId).toBe(source.id);
+    expect(row.rightsStatus).toBe('approved');
+    expect(row.commerceApproved).toBe(1);
+    expect(row.exactProductMatch).toBe(1);
+    expect(JSON.parse(row.observedNetContentJson as string).value).toBe(16);
+    expect(JSON.parse(row.conflictsJson)).toEqual([]);
+    expect(JSON.parse(row.payloadJson).role).toBe('primary');
+
+    const listed = listPiAssetsByRun(run.id);
+    expect(listed).toHaveLength(1);
+    expect(listed[0].perceptualHash).toBe('phash-1');
+    expect(listed[0].variantReference).toBe('v-16');
   });
 
   it('stores results with schema version and content hash (upsert, no duplicates)', () => {
