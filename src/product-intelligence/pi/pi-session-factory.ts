@@ -24,6 +24,7 @@ import type {
 import { KNOWN_BUILTIN_TOOLS, TERMINAL_TOOLS } from '../contracts';
 import { buildApprovedResourceLoader } from './pi-resource-loader';
 import { buildProductResearchSubmissionTool } from './pi-tool-registry';
+import type { PiToolRegistry } from '../tools/registry';
 
 // ---------------------------------------------------------------------------
 // Minimal session surface (SDK session cast to this in the real factory;
@@ -73,6 +74,11 @@ export interface PiSessionFactory {
 export interface PiSdkSessionFactoryOptions {
   /** Absolute path used for session tool-path resolution. */
   cwd?: string;
+  /**
+   * Bounded research-tool registry (PI-3). When omitted, no research tools
+   * are exposed (fail closed).
+   */
+  toolRegistry?: PiToolRegistry | null;
 }
 
 type PiSdkModule = typeof import('@earendil-works/pi-coding-agent');
@@ -128,9 +134,23 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       cwd: this.options.cwd ?? process.cwd(),
     });
 
-    // --- Terminal submission tool -------------------------------------------
+    // --- Terminal submission tool + bounded research tools ------------------
     const submissionTool = buildProductResearchSubmissionTool(onSubmission);
     const customToolNames = [submissionTool.name];
+
+    // PI-3: research tools from the registry, gated by the policy's
+    // researchTools allowlist (empty -> none granted, fail closed).
+    const researchTools = this.options.toolRegistry?.buildSessionTools({
+      runId: context.runId,
+      workspaceId: context.workspaceId,
+      workspacePath: context.workspacePath,
+      allowedTools: policy.researchTools,
+      signal: context.signal ?? new AbortController().signal,
+      remainingMs: policy.deadlineMs,
+    });
+    if (researchTools && researchTools.length > 0) {
+      customToolNames.push(...researchTools.map((tool) => tool.name));
+    }
 
     // --- Session ------------------------------------------------------------
     const { session, extensionsResult } = await sdk.createAgentSession({
@@ -141,9 +161,9 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       model: model,
       thinkingLevel: route.thinkingLevel,
       tools: allowedTools,
-      // The submission tool is added by the SDK's extension runtime, not the
-      // built-in allowlist, so it is available exactly once per session.
-      customTools: [submissionTool],
+      // The submission tool and research tools are added by the SDK's
+      // extension runtime, not the built-in allowlist.
+      customTools: researchTools && researchTools.length > 0 ? [submissionTool, ...researchTools] : [submissionTool],
     });
 
     let disposed = false;

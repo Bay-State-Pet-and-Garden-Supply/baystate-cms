@@ -86,6 +86,11 @@ export const ProductIntelligencePolicySchema = z.object({
   configId: z.string().min(1),
   /** Explicit allowlist of built-in tools. Unknown names are rejected by executors. */
   allowedTools: z.array(AllowedToolSchema).max(8).default([]),
+  /**
+   * Allowlist of bounded research tools (PI-3). An empty list grants none;
+   * unknown names are rejected at session creation.
+   */
+  researchTools: z.array(z.string().min(1).max(128)).max(64).default([]),
   networkPolicy: NetworkPolicySchema.default('local_only'),
   dataSharingPolicy: DataSharingPolicySchema.default('local_only'),
   /**

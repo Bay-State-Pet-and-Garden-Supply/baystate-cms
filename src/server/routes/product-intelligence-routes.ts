@@ -26,6 +26,8 @@ import { createExecutionRouter } from '../../product-intelligence/execution-rout
 import { getProductIntelligenceFlags } from '../../product-intelligence/flags';
 import { LegacyProductIntelligenceExecutor } from '../../product-intelligence/legacy-executor';
 import { PiProductIntelligenceExecutor } from '../../product-intelligence/pi/pi-executor';
+import { PiSdkSessionFactory } from '../../product-intelligence/pi/pi-session-factory';
+import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { getPiRun, listPiRuns } from '../../db/repositories/product-intelligence-repo';
 
@@ -39,7 +41,9 @@ function requireWorkspace() {
 
 function buildRouter() {
   return createExecutionRouter({
-    pi: new PiProductIntelligenceExecutor(),
+    pi: new PiProductIntelligenceExecutor({
+      sessionFactory: new PiSdkSessionFactory({ toolRegistry: defaultToolRegistry }),
+    }),
     legacy: new LegacyProductIntelligenceExecutor(),
   });
 }

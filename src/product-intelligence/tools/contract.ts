@@ -1,0 +1,264 @@
+/**
+ * Bounded Product Intelligence tool contract (PI-3).
+ *
+ * Every agent-facing research tool is a `PiToolAdapter`: strict TypeBox
+ * parameter schema, stable version, bounded inputs, structured outcomes, and
+ * explicit no-result / policy-denied results. Adapters wrap deterministic CMS
+ * capabilities (discovery, verification, extraction, OCR, catalog lookup);
+ * the agent orchestrates them instead of improvising browser behavior.
+ *
+ * Hard rules enforced by the registry (never by the agent):
+ * - workspace + run ownership validation before dispatch;
+ * - timeout and cancellation (caller AbortSignal + remaining deadline);
+ * - request budget (policy.maxToolCalls);
+ * - credential/path/raw-artifact redaction — raw HTML and unrestricted
+ *   network payloads never reach Pi;
+ * - no writes to approved catalog or ShopSite state;
+ * - evidence ids / artifact references on every factual result.
+ *
+ * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/20
+ */
+import type { TSchema } from 'typebox';
+import { sha256Hex } from '../../shared/stable-id';
+
+// ---------------------------------------------------------------------------
+// Execution context passed to every adapter
+// ---------------------------------------------------------------------------
+
+export interface PiToolContext {
+  runId: string;
+  workspaceId: string;
+  workspacePath: string;
+  /** Caller cancellation signal (run abort). */
+  signal: AbortSignal;
+  /** Milliseconds of run deadline remaining when the call starts. */
+  remainingMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Evidence and outcomes
+// ---------------------------------------------------------------------------
+
+/** A factual result with durable provenance the agent can cite. */
+export interface PiToolEvidence {
+  /** Stable evidence id (deterministic per tool + input where possible). */
+  id: string;
+  kind: 'search_lead' | 'gtin_evidence' | 'variant_evidence' | 'parent_product_evidence' | 'official_evidence' | 'supplier_evidence' | 'retailer_corroboration' | 'community_evidence' | 'catalog_evidence' | 'taxonomy_evidence' | 'image_evidence';
+  url?: string;
+  domain?: string;
+  /** Deterministic extraction method or capability name. */
+  method: string;
+  /** Short safe snippet (never raw page content). */
+  snippet?: string;
+  /** Content hash when an artifact was read. */
+  contentHash?: string;
+  /** Timestamp when the source was retrieved. */
+  retrievedAt?: string;
+}
+
+export type PiToolResult =
+  | { status: 'ok'; data: unknown; evidence: PiToolEvidence[] }
+  | { status: 'no_result'; reason: string; evidence: PiToolEvidence[] }
+  | { status: 'policy_denied'; reason: string; evidence: PiToolEvidence[] }
+  | { status: 'error'; code: string; message: string; evidence: PiToolEvidence[] };
+
+export function okResult(data: unknown, evidence: PiToolEvidence[] = []): PiToolResult {
+  return { status: 'ok', data, evidence };
+}
+
+export function noResult(reason: string, evidence: PiToolEvidence[] = []): PiToolResult {
+  return { status: 'no_result', reason, evidence };
+}
+
+export function policyDenied(reason: string): PiToolResult {
+  return { status: 'policy_denied', reason, evidence: [] };
+}
+
+export function errorResult(code: string, message: string): PiToolResult {
+  return { status: 'error', code, message, evidence: [] };
+}
+
+/** Deterministic evidence id: tool name + sha of the identifying input. */
+export function evidenceId(toolName: string, identifyingInput: string): string {
+  return `${toolName}:${sha256Hex(identifyingInput).slice(0, 24)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Adapter shape
+// ---------------------------------------------------------------------------
+
+export interface PiToolAdapter {
+  /** Stable tool name the agent calls. */
+  name: string;
+  /** Adapter implementation version (bumped on behavior change). */
+  version: string;
+  /** LLM-facing description. */
+  description: string;
+  /** Optional system-prompt guideline bullets. */
+  promptGuidelines?: string[];
+  /** TypeBox parameter schema — rejects oversized/malformed inputs. */
+  parameters: TSchema;
+  /**
+   * Execute the tool. Must never throw for expected conditions — return an
+   * explicit outcome instead. Must honor ctx.signal and ctx.remainingMs.
+   */
+  execute(params: Record<string, unknown>, ctx: PiToolContext): Promise<PiToolResult>;
+}
+
+// ---------------------------------------------------------------------------
+// Provider-neutral page-extraction contract (PI-11 seam)
+// ---------------------------------------------------------------------------
+
+/** Identity status of an extracted page against the requested product. */
+export const PAGE_IDENTITY_STATUSES = [
+  'exact_match',
+  'probable_match',
+  'parent_product_only',
+  'wrong_variant',
+  'conflicting_identity',
+  'insufficient_evidence',
+] as const;
+export type PageIdentityStatus = (typeof PAGE_IDENTITY_STATUSES)[number];
+
+export interface ExtractedFieldEvidence {
+  field: string;
+  value: string | null;
+  /** Deterministic extraction method (e.g. 'json_ld', 'meta_tags', 'selectors'). */
+  method: string;
+  /** Where in the page the value came from (CSS path / meta name / JSON-LD type). */
+  sourcePath?: string;
+}
+
+export interface ExtractedImageCandidate {
+  url: string;
+  /** Variant mapping when the page declares one (e.g. Shopify variant id). */
+  variantRef?: string;
+  sourcePath?: string;
+}
+
+export interface PageExtractionResult {
+  requestedUrl: string;
+  finalUrl: string;
+  /** Fetch modes used (e.g. ['http_detailed']). Browser modes arrive with PI-11. */
+  fetchModes: string[];
+  /** SHA-256 of the fetched page content, when retained. */
+  contentHash: string | null;
+  /** Artifact reference (worker artifact id) when the page was archived. */
+  artifactRef: string | null;
+  fields: ExtractedFieldEvidence[];
+  /** GTINs found on the page, with their extraction method. */
+  gtins: Array<{ value: string; method: string }>;
+  sku: string | null;
+  brand: string | null;
+  productName: string | null;
+  variant: { name?: string; id?: string; sku?: string } | null;
+  size: string | null;
+  packCount: number | null;
+  images: ExtractedImageCandidate[];
+  conflicts: Array<{ field: string; summary: string }>;
+  identityStatus: PageIdentityStatus;
+  identityReasons: string[];
+  /** False when LLM-assisted extraction was involved (never overrides deterministic conflicts). */
+  deterministicOnly: boolean;
+}
+
+export interface PageExtractionContract {
+  readonly name: string;
+  readonly version: string;
+  extract(request: {
+    url: string;
+    expected?: { gtin?: string; name?: string; brandHint?: string | null };
+    signal: AbortSignal;
+    timeoutMs: number;
+  }): Promise<PageExtractionResult>;
+}
+
+// ---------------------------------------------------------------------------
+// Shared outcome helpers
+// ---------------------------------------------------------------------------
+
+export function classifyPageIdentity(input: {
+  requestedGtin: string;
+  extractedGtins: string[];
+  sku: string | null;
+  productName: string | null;
+  expectedName: string | undefined;
+  variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
+  hasAnyField: boolean;
+}): { status: PageIdentityStatus; reasons: string[] } {
+  const reasons: string[] = [];
+  const exactGtin = input.extractedGtins.some((g) => g.replace(/\D/g, '') === input.requestedGtin);
+  if (exactGtin) {
+    return { status: 'exact_match', reasons: ['exact GTIN present on page'] };
+  }
+  if (input.variantSignals.some((s) => s.kind === 'variant_mismatch')) {
+    reasons.push('variant mismatch signal present');
+    return { status: 'wrong_variant', reasons };
+  }
+  if (input.variantSignals.some((s) => s.kind === 'parent_page')) {
+    reasons.push('page is a parent product page (variant selector without exact variant)');
+    return { status: 'parent_product_only', reasons };
+  }
+  if (!input.hasAnyField) {
+    return { status: 'insufficient_evidence', reasons: ['no extractable product fields'] };
+  }
+  const nameMatches = nameAlignment(input.expectedName, input.productName);
+  if (nameMatches || input.sku) {
+    reasons.push(nameMatches ? 'product name aligns with the expected name' : 'SKU present');
+    return { status: 'probable_match', reasons };
+  }
+  return { status: 'insufficient_evidence', reasons: ['no GTIN, no SKU, and no name alignment'] };
+}
+
+/**
+ * Forgiving name alignment: token-overlap ratio (>=60% of the expected
+ * name's significant tokens appear on the page), with digit+unit merging so
+ * "16 oz" matches "16oz". Text similarity is corroboration only — identity
+ * requires the exact GTIN.
+ */
+function nameAlignment(expectedName: string | undefined, productName: string | null): boolean {
+  if (!expectedName || !productName) return false;
+  const expectedTokens = nameTokens(expectedName);
+  const pageTokens = nameTokens(productName);
+  if (expectedTokens.length < 2) return false;
+  const pageSet = new Set(pageTokens);
+  const matched = expectedTokens.filter((token) => {
+    if (pageSet.has(token)) return true;
+    // Partial containment for longer tokens: "chicken" ~ "chkn" families
+    // are not matched this way, but compound splits like "chickenbroth" are.
+    return token.length > 8 && [...pageSet].some((pageToken) => pageToken.includes(token) || token.includes(pageToken));
+  }).length;
+  return matched / expectedTokens.length >= 0.6;
+}
+
+const UNIT_TOKENS = new Set(['oz', 'lb', 'lbs', 'kg', 'g', 'ml', 'l', 'ct', 'pk', 'pack']);
+
+function nameTokens(name: string): string[] {
+  const tokens = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length >= 2);
+  const merged: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (/^\d+$/.test(token) && i + 1 < tokens.length && UNIT_TOKENS.has(tokens[i + 1])) {
+      merged.push(`${token}${tokens[i + 1]}`);
+      i += 1;
+    } else {
+      merged.push(token);
+    }
+  }
+  return merged;
+}
+
+/** Compute the simple check-digit for a 12-digit UPC (returns null when invalid). */
+export function upcCheckDigit(upc12: string): number | null {
+  if (!/^\d{11}$/.test(upc12)) return null;
+  let sum = 0;
+  for (let i = 0; i < 11; i += 1) {
+    sum += Number(upc12[i]) * (i % 2 === 0 ? 3 : 1);
+  }
+  const check = (10 - (sum % 10)) % 10;
+  return check;
+}

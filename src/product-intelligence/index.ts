@@ -17,3 +17,4 @@ export * from './pi/pi-tool-registry';
 export * from './pi/pi-resource-loader';
 export * from './pi/pi-prompt-builder';
 export * from './run-service';
+export * from './tools';

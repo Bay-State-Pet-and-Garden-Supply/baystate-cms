@@ -63,6 +63,7 @@ import {
   type PiToolCallRow,
 } from '../db/repositories/product-intelligence-repo';
 import { sha256Hex } from '../shared/stable-id';
+import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 
 export const PI_RESULT_SCHEMA_VERSION = 1;
 
@@ -71,15 +72,18 @@ export const PI_RESULT_SCHEMA_VERSION = 1;
 // ---------------------------------------------------------------------------
 
 /**
- * Default fail-closed policy: read-only tools, local-only network and data
- * sharing, no model route (Pi refuses to run until an operator configures
- * one), 5-minute deadline. `configId` is the SHA-256 of the policy's own
- * canonical JSON, so the default is immutable and reproducible.
+ * Default fail-closed policy: read-only built-in tools, the full bounded
+ * research-tool set (PI-3 — all adapters are read-only and policy-gated),
+ * local-only network and data sharing, no model route (Pi refuses to run
+ * until an operator configures one), 5-minute deadline. `configId` is the
+ * SHA-256 of the policy's own canonical JSON, so the default is immutable
+ * and reproducible.
  */
 export function buildDefaultPiPolicy(): ProductIntelligencePolicy {
   const policy = ProductIntelligencePolicySchema.parse({
     configId: 'pending',
     allowedTools: ['read', 'grep', 'find', 'ls'],
+    researchTools: [...DEFAULT_RESEARCH_TOOL_NAMES],
     networkPolicy: 'local_only',
     dataSharingPolicy: 'local_only',
     modelRoute: null,
