@@ -212,6 +212,9 @@ describe('Product Intelligence repositories', () => {
     const source = insertPiSource({ runId: run.id, url: 'https://x.example/1', domain: 'x.example', sourceType: 'other' });
     insertPiEvidence({ runId: run.id, sourceId: source.id, targetField: 'title', value: 'v' });
     insertPiResult({ runId: run.id, schemaVersion: 1, disposition: 'submitted', result: { ok: true } });
+    // Running runs are protected at the repository level.
+    expect(() => deletePiRun(run.id)).toThrow(/running/);
+    transitionPiRunStatus(run.id, 'completed', {});
     expect(deletePiRun(run.id)).toBe(true);
     expect(getPiRun(run.id)).toBeFalsy();
     const db = getDb();

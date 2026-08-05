@@ -135,9 +135,6 @@ router.get('/product-intelligence/runs/:id/events', (c) => {
   return c.json({ events: replayPiEvents(runId, Number.isFinite(after) ? after : -1) });
 });
 
-// Per-stream cleanup registry (the underlying source has no self-reference).
-const streamCleanup = new WeakMap<ReadableStream<Uint8Array>, () => void>();
-
 /**
  * GET /api/product-intelligence/runs/:id/events/stream — live SSE.
  * Replays persisted events after the cursor (reconnect-safe), then tails the
@@ -150,7 +147,14 @@ router.get('/product-intelligence/runs/:id/events/stream', async (c) => {
 
   const after = Number(c.req.query('after') ?? '-1');
   const cursor = Number.isFinite(after) ? after : -1;
+  // Fallback poll interval: configurable per stream (100-5000ms, default 500).
+  const pollMsRaw = Number(c.req.query('pollMs') ?? '500');
+  const pollMs = Number.isFinite(pollMsRaw) ? Math.min(5000, Math.max(100, pollMsRaw)) : 500;
   const encoder = new TextEncoder();
+
+  // Per-stream cleanup: start() assigns it; cancel() invokes it. Defined in
+  // the handler scope so concurrent streams never share cleanup state.
+  let cleanup: (() => void) | null = null;
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -180,7 +184,7 @@ router.get('/product-intelligence/runs/:id/events/stream', async (c) => {
         }
       }, 15_000);
 
-      const cleanup = (): void => {
+      cleanup = (): void => {
         if (closed) return;
         closed = true;
         if (pollTimer) clearInterval(pollTimer);
@@ -188,9 +192,18 @@ router.get('/product-intelligence/runs/:id/events/stream', async (c) => {
         unsubscribe();
       };
 
+      // Initial replay (reconnect) — advances the poll cursor so the poll
+      // fallback never resends already-delivered events.
+      let lastSequence = cursor;
+      for (const event of replayPiEvents(runId, cursor)) {
+        if (event.sequence > lastSequence) {
+          lastSequence = event.sequence;
+          send(event);
+        }
+      }
+
       // Fallback poll: covers missed bus events (e.g. events persisted by a
       // different process) and serves as the reconnect replay source.
-      let lastSequence = cursor;
       pollTimer = setInterval(() => {
         const events = replayPiEvents(runId, lastSequence);
         for (const event of events) {
@@ -202,25 +215,18 @@ router.get('/product-intelligence/runs/:id/events/stream', async (c) => {
         const current = getPiRun(runId);
         if (current && current.status !== 'running' && globalRunEventBus.subscriberCount(runId) <= 1) {
           // Terminal run with no live listeners left: close after draining.
-          cleanup();
+          cleanup?.();
           try {
             controller.close();
           } catch {
             // already closed
           }
         }
-      }, 500);
-
-      // Initial replay (reconnect).
-      for (const event of replayPiEvents(runId, cursor)) {
-        send(event);
-      }
-
-      streamCleanup.set(stream, cleanup);
+      }, pollMs);
     },
     cancel() {
-      streamCleanup.get(stream)?.();
-      streamCleanup.delete(stream);
+      cleanup?.();
+      cleanup = null;
     },
   });
 

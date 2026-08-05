@@ -57,6 +57,7 @@ export default defineConfig({
       'src/tests/unit/weekly-report.test.ts',
       'src/tests/unit/product-intelligence-repo.test.ts',
       'src/tests/unit/product-intelligence-run-service.test.ts',
+      'src/tests/unit/product-intelligence-sse.test.ts',
     ],
   },
 });

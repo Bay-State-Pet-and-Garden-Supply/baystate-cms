@@ -760,9 +760,19 @@ export function listPiComparisons(runId: string): PiComparisonRow[] {
 // Retention and deletion (explicit policy)
 // ---------------------------------------------------------------------------
 
-/** Hard-delete one run and everything that references it (cascade). */
+/**
+ * Hard-delete one run and everything that references it (cascade).
+ * Running runs are never deleted — cancel them first. This guard applies at
+ * the repository level so no caller (API, retention, import cleanup) can
+ * delete an in-flight run.
+ */
 export function deletePiRun(id: string): boolean {
   const db = getDb();
+  const current = getPiRun(id);
+  if (!current) return false;
+  if (current.status === 'running') {
+    throw new Error(`Cannot delete running run ${id}: cancel it first`);
+  }
   const result = db.run('DELETE FROM product_intelligence_runs WHERE id = ?', [id]);
   return result.changes > 0;
 }

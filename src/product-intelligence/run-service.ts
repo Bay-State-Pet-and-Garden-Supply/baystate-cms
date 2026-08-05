@@ -54,7 +54,13 @@ import {
   listPiSources,
   listPiToolCalls,
   transitionPiRunStatus,
+  type PiComparisonRow,
+  type PiConflictRow,
+  type PiEvidenceRow,
+  type PiResultRow,
   type PiRunRow,
+  type PiSourceRow,
+  type PiToolCallRow,
 } from '../db/repositories/product-intelligence-repo';
 import { sha256Hex } from '../shared/stable-id';
 
@@ -240,11 +246,13 @@ export class PersistingExecutionEventSink implements ExecutionEventSink {
       case 'tool_call_finished': {
         const callId = this.openToolCalls.get(String(event.sequence));
         if (!callId) {
-          // Sequence drift (e.g. replayed delivery): close the most recent open call.
-          const last = this.openToolCalls.values().next();
-          if (!last.done) {
-            completePiToolCall(last.value, { isError: event.isError ?? false });
-            this.openToolCalls.delete(last.value);
+          // Defensive fallback for sequence drift (e.g. a dropped or replayed
+          // event): close the most recently opened still-open call. Maps keep
+          // insertion order, so the last value is the newest.
+          const last = [...this.openToolCalls.values()].at(-1);
+          if (last) {
+            completePiToolCall(last, { isError: event.isError ?? false });
+            this.openToolCalls.delete(last);
           }
           break;
         }
@@ -534,15 +542,29 @@ function reviewReasons(result: ProductResearchResult): string[] {
 // Projection, replay, comparisons, retention
 // ---------------------------------------------------------------------------
 
+export interface PiStepView {
+  id: string;
+  runId: string;
+  stepType: string;
+  sequence: number;
+  status: 'running' | 'completed' | 'failed';
+  summary: string | null;
+  inputHash: string | null;
+  outputRef: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  errorJson: string | null;
+}
+
 export interface PiRunProjection {
   run: PiRunRow;
-  steps: unknown[];
-  toolCalls: unknown[];
-  sources: unknown[];
-  evidence: unknown[];
-  conflicts: unknown[];
-  result: unknown | null;
-  comparisons: unknown[];
+  steps: PiStepView[];
+  toolCalls: PiToolCallRow[];
+  sources: PiSourceRow[];
+  evidence: PiEvidenceRow[];
+  conflicts: PiConflictRow[];
+  result: PiResultRow | null;
+  comparisons: PiComparisonRow[];
   eventCount: number;
 }
 
@@ -563,7 +585,7 @@ export function getPiRunProjection(id: string): PiRunProjection | null {
   };
 }
 
-function listPiSteps(runId: string): unknown[] {
+function listPiSteps(runId: string): PiStepView[] {
   const db = getDb();
   return db
     .query(
@@ -572,7 +594,7 @@ function listPiSteps(runId: string): unknown[] {
               started_at AS startedAt, completed_at AS completedAt, error_json AS errorJson
        FROM product_intelligence_steps WHERE run_id = ? ORDER BY sequence ASC`,
     )
-    .all(runId);
+    .all(runId) as PiStepView[];
 }
 
 /** Events after a cursor — the SSE reconnect replay source. */
