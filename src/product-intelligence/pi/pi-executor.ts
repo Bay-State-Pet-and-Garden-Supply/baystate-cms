@@ -31,10 +31,8 @@ export interface PiExecutorOptions {
    * so no external calls occur.
    */
   sessionFactory?: PiSessionFactory;
-  /** Clock for deterministic deadline tests. */
+  /** Clock for deterministic duration accounting in tests. */
   now?: () => number;
-  /** Delay helper for tests (defaults to setTimeout). */
-  sleep?: (ms: number) => Promise<void>;
 }
 
 export class PiProductIntelligenceExecutor implements ProductIntelligenceExecutor {
@@ -43,12 +41,10 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
 
   private readonly sessionFactory: PiSessionFactory;
   private readonly now: () => number;
-  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: PiExecutorOptions = {}) {
     this.sessionFactory = options.sessionFactory ?? new PiSdkSessionFactory();
     this.now = options.now ?? Date.now;
-    this.sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   async startResearch(
@@ -115,19 +111,24 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       submission: StructuredSubmission | null;
       toolCallCount: number;
       sessionEnded: boolean;
-      timedOut: boolean;
-      cancelled: boolean;
       budgetExceeded: boolean;
       sessionError: string | null;
     } = {
       submission: null,
       toolCallCount: 0,
       sessionEnded: false,
-      timedOut: false,
-      cancelled: false,
       budgetExceeded: false,
       sessionError: null,
     };
+
+    // Hard deadline + caller cancellation composed into one abort signal
+    // (AbortSignal.any). Created up front so the finally block can detach.
+    const timeoutSignal = AbortSignal.timeout(Math.max(1, deadlineAt - this.now()));
+    const composed = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const onComposedAbort = (): void => {
+      void handle?.session.abort().catch(() => undefined);
+    };
+    composed.addEventListener('abort', onComposedAbort, { once: true });
 
     const onSubmission = (value: StructuredSubmission): void => {
       state.submission = value;
@@ -202,7 +203,10 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         }
       });
 
-      // --- Deadline + cancellation watchers ----------------------------------
+      // --- Deadline + cancellation: composed abort signal ---------------------
+      // The composed signal (already set up above) aborts on the hard deadline
+      // or the caller's cancellation. Cause is derived afterwards: caller
+      // aborted wins over timeout.
       let promptSettled = false;
       const promptPromise = handle.session.prompt(buildResearchPrompt(parsedInput.data, parsedContext.data).text).then(
         () => undefined,
@@ -212,42 +216,25 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         },
       );
 
-      const deadlinePromise = this.sleep(Math.max(0, deadlineAt - this.now())).then(async () => {
-        if (promptSettled) return;
-        state.timedOut = true;
-        await handle?.session.abort().catch(() => undefined);
+      let resolveAbortDone: () => void = () => undefined;
+      const abortDone = new Promise<void>((resolve) => {
+        resolveAbortDone = resolve;
       });
-
-      const cancelPromise = new Promise<void>((resolve) => {
-        if (!signal) {
-          // No caller signal: never settle — the hard deadline (or prompt
-          // completion) terminates the run.
-          return;
-        }
-        if (signal.aborted) {
-          state.cancelled = true;
-          resolve();
-          return;
-        }
-        signal.addEventListener(
-          'abort',
-          () => {
-            state.cancelled = true;
-            void handle?.session.abort().catch(() => undefined);
-            resolve();
-          },
-          { once: true },
-        );
-      });
+      if (composed.aborted) {
+        // Signal aborted between composition and listener registration.
+        resolveAbortDone();
+      } else {
+        composed.addEventListener('abort', () => resolveAbortDone(), { once: true });
+      }
 
       const promptDone = promptPromise.finally(() => {
         promptSettled = true;
       });
 
-      await Promise.race([promptDone, deadlinePromise, cancelPromise]);
+      await Promise.race([promptDone, abortDone]);
 
       // Wait for the session to actually settle after abort so disposal is safe.
-      if ((state.timedOut || state.cancelled) && !promptSettled) {
+      if ((signal?.aborted || timeoutSignal.aborted) && !promptSettled) {
         try {
           await handle.session.agent.waitForIdle();
         } catch {
@@ -256,11 +243,11 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       }
 
       // --- Terminal outcome ---------------------------------------------------
-      if (state.cancelled) {
+      if (signal?.aborted) {
         emitExecutionEvent(events, 'run_cancelled', { message: 'Run cancelled by caller signal' });
         return this.buildResult(events, runId, 'cancelled', startedAt, { session: handle, configId });
       }
-      if (state.timedOut) {
+      if (timeoutSignal.aborted) {
         emitExecutionEvent(events, 'run_timeout', {
           message: `Hard deadline exceeded (${policy.deadlineMs} ms)`,
         });
@@ -326,10 +313,12 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         failure: { code: 'unknown', message },
       });
     } finally {
+      // Detach the composed-signal listener so a late abort (or the timeout
+      // timer firing) cannot touch the disposed session, then dispose.
+      composed.removeEventListener('abort', onComposedAbort);
       handle?.dispose();
     }
   }
-
   private fail(
     events: ExecutionEventSink,
     runId: string,

@@ -11,6 +11,12 @@
  * contract on execute (belt and braces — the TypeBox schema is the runtime
  * gate, the Zod schema is the durable contract).
  *
+ * The TypeBox schema is maintained to be behaviorally equivalent to
+ * `StructuredSubmissionSchema` (same required fields, same enums, same
+ * numeric bounds, same format checks, same optionality). Schema-equivalence
+ * tests in `src/tests/unit/product-intelligence/schema-equivalence.test.ts`
+ * guard against drift between the two.
+ *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
  */
 import { Type, type TSchema } from 'typebox';
@@ -24,6 +30,76 @@ import { StructuredSubmissionSchema } from '../contracts';
 // TypeBox schema (mirrors StructuredSubmissionSchema)
 // ---------------------------------------------------------------------------
 
+const EvidenceSourceTypeBoxSchema = Type.Object({
+  id: Type.String(),
+  url: Type.String({ format: 'uri' }),
+  title: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  domain: Type.String(),
+  kind: Type.Union([
+    Type.Literal('catalog'),
+    Type.Literal('supplier'),
+    Type.Literal('registry'),
+    Type.Literal('retailer'),
+    Type.Literal('manufacturer'),
+    Type.Literal('other'),
+  ]),
+  accessedAt: Type.String({ format: 'date-time' }),
+});
+
+const EvidenceItemTypeBoxSchema = Type.Object({
+  id: Type.String(),
+  field: Type.String(),
+  value: Type.String(),
+  sourceIds: Type.Array(Type.String(), { minItems: 1 }),
+  quote: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+});
+
+const ProductFieldProposalTypeBoxSchema = Type.Object({
+  field: Type.String(),
+  value: Type.String(),
+  evidenceIds: Type.Optional(Type.Array(Type.String())),
+});
+
+const AttributeProposalTypeBoxSchema = Type.Object({
+  fieldName: Type.String(),
+  value: Type.String(),
+  evidenceIds: Type.Optional(Type.Array(Type.String())),
+});
+
+const ImageProposalTypeBoxSchema = Type.Object({
+  url: Type.String({ format: 'uri' }),
+  sourceId: Type.String(),
+  rightsStatus: Type.Union([
+    Type.Literal('unknown'),
+    Type.Literal('confirmed'),
+    Type.Literal('conflicting'),
+  ]),
+  identityMatch: Type.Union([
+    Type.Literal('unknown'),
+    Type.Literal('exact'),
+    Type.Literal('variant'),
+    Type.Literal('wrong'),
+  ]),
+  evidenceIds: Type.Optional(Type.Array(Type.String())),
+  rightsNote: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+});
+
+const ConflictTypeBoxSchema = Type.Object({
+  id: Type.String(),
+  severity: Type.Union([Type.Literal('low'), Type.Literal('medium'), Type.Literal('high')]),
+  category: Type.String(),
+  summary: Type.String(),
+  evidenceIds: Type.Optional(Type.Array(Type.String())),
+  resolutionProposal: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+});
+
+const AbstentionTypeBoxSchema = Type.Object({
+  scope: Type.Union([Type.Literal('full'), Type.Literal('partial')]),
+  reason: Type.String(),
+  actionableNextStep: Type.String(),
+  targets: Type.Optional(Type.Array(Type.String())),
+});
+
 export const SubmissionTypeBoxSchema = Type.Object({
   schemaVersion: Type.Literal(1),
   identity: Type.Object({
@@ -33,107 +109,30 @@ export const SubmissionTypeBoxSchema = Type.Object({
       Type.Literal('unknown'),
       Type.Literal('conflicting'),
     ]),
-    gtinEvidenceIds: Type.Array(Type.String()),
+    gtinEvidenceIds: Type.Optional(Type.Array(Type.String())),
     registerNameMatch: Type.Union([
       Type.Literal('exact'),
       Type.Literal('variant'),
       Type.Literal('unknown'),
       Type.Literal('conflicting'),
     ]),
-    registerNameEvidenceIds: Type.Array(Type.String()),
+    registerNameEvidenceIds: Type.Optional(Type.Array(Type.String())),
     summary: Type.String(),
   }),
-  evidenceSources: Type.Array(
-    Type.Object({
-      id: Type.String(),
-      url: Type.String(),
-      title: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-      domain: Type.String(),
-      kind: Type.Union([
-        Type.Literal('catalog'),
-        Type.Literal('supplier'),
-        Type.Literal('registry'),
-        Type.Literal('retailer'),
-        Type.Literal('manufacturer'),
-        Type.Literal('other'),
-      ]),
-      accessedAt: Type.String(),
-    }),
-  ),
-  evidenceItems: Type.Array(
-    Type.Object({
-      id: Type.String(),
-      field: Type.String(),
-      value: Type.String(),
-      sourceIds: Type.Array(Type.String()),
-      quote: Type.Optional(Type.String()),
-    }),
-  ),
+  evidenceSources: Type.Optional(Type.Array(EvidenceSourceTypeBoxSchema)),
+  evidenceItems: Type.Optional(Type.Array(EvidenceItemTypeBoxSchema)),
   productProposal: Type.Object({
-    fields: Type.Array(
-      Type.Object({
-        field: Type.String(),
-        value: Type.String(),
-        evidenceIds: Type.Array(Type.String()),
-      }),
-    ),
+    fields: Type.Optional(Type.Array(ProductFieldProposalTypeBoxSchema)),
   }),
   classificationProposal: Type.Object({
     productTypeId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
     categoryPageId: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-    attributes: Type.Array(
-      Type.Object({
-        fieldName: Type.String(),
-        value: Type.String(),
-        evidenceIds: Type.Array(Type.String()),
-      }),
-    ),
+    attributes: Type.Optional(Type.Array(AttributeProposalTypeBoxSchema)),
   }),
-  images: Type.Array(
-    Type.Object({
-      url: Type.String(),
-      sourceId: Type.String(),
-      rightsStatus: Type.Union([
-        Type.Literal('unknown'),
-        Type.Literal('confirmed'),
-        Type.Literal('conflicting'),
-      ]),
-      identityMatch: Type.Union([
-        Type.Literal('unknown'),
-        Type.Literal('exact'),
-        Type.Literal('variant'),
-        Type.Literal('wrong'),
-      ]),
-      evidenceIds: Type.Array(Type.String()),
-      rightsNote: Type.Optional(Type.String()),
-    }),
-  ),
-  conflicts: Type.Array(
-    Type.Object({
-      id: Type.String(),
-      severity: Type.Union([
-        Type.Literal('low'),
-        Type.Literal('medium'),
-        Type.Literal('high'),
-      ]),
-      category: Type.String(),
-      summary: Type.String(),
-      evidenceIds: Type.Array(Type.String()),
-      resolutionProposal: Type.Optional(Type.String()),
-    }),
-  ),
-  abstention: Type.Optional(
-    Type.Union([
-      Type.Null(),
-      Type.Object({
-        scope: Type.Union([Type.Literal('full'), Type.Literal('partial')]),
-        reason: Type.String(),
-        actionableNextStep: Type.String(),
-        targets: Type.Array(Type.String()),
-      }),
-    ]),
-  ),
-  confidence: Type.Optional(Type.Number()),
+  images: Type.Optional(Type.Array(ImageProposalTypeBoxSchema)),
+  conflicts: Type.Optional(Type.Array(ConflictTypeBoxSchema)),
+  abstention: Type.Optional(Type.Union([Type.Null(), AbstentionTypeBoxSchema])),
+  confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
 });
 
 export interface SubmissionToolDeps {
@@ -163,6 +162,7 @@ export function buildProductResearchSubmissionTool(
   }>;
 } {
   const validate = deps.validate ?? ((value: unknown) => StructuredSubmissionSchema.safeParse(value));
+
   return {
     name: SUBMISSION_TOOL_NAME,
     label: 'Submit Product Research',

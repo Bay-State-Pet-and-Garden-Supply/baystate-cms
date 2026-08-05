@@ -97,13 +97,29 @@ export class PiSdkSessionFactory implements PiSessionFactory {
         'No model route is configured in the immutable policy; refusing to run Pi with an unapproved model.',
       );
     }
+    const route = policy.modelRoute;
 
     const modelRuntime = await sdk.ModelRuntime.create();
-    const model = modelRuntime.getModel(policy.modelRoute.provider, policy.modelRoute.model);
+    const model = modelRuntime.getModel(route.provider, route.model);
     if (!model) {
       throw new PiSessionError(
         'model_unavailable',
-        `Model ${policy.modelRoute.provider}/${policy.modelRoute.model} is not known to the Pi runtime.`,
+        `Model ${route.provider}/${route.model} is not known to the Pi runtime.`, 
+      );
+    }
+
+    // Fail fast on missing credentials: a run whose model has no valid auth
+    // would otherwise burn budget and fail at the first model call.
+    const available = await modelRuntime.getAvailable();
+    const availableModel = available.find(
+      (candidate) => candidate.provider === route.provider && candidate.id === route.model,
+    );
+    if (!availableModel) {
+      throw new PiSessionError(
+        'model_unavailable',
+        `Model ${route.provider}/${route.model} has no valid credentials configured ` +
+          `(${available.length} model(s) currently available). Configure credentials for this model ` +
+          'or update the immutable policy modelRoute.',
       );
     }
 
@@ -122,8 +138,8 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       sessionManager: sdk.SessionManager.inMemory(),
       resourceLoader,
       modelRuntime,
-      model,
-      thinkingLevel: policy.modelRoute.thinkingLevel,
+      model: model,
+      thinkingLevel: route.thinkingLevel,
       tools: allowedTools,
       // The submission tool is added by the SDK's extension runtime, not the
       // built-in allowlist, so it is available exactly once per session.

@@ -245,6 +245,26 @@ describe('PiProductIntelligenceExecutor — cancellation and deadlines', () => {
     await runPromise;
     expect(events.snapshot().some((event) => event.type === 'run_timeout')).toBe(true);
   });
+
+  it('reports cancellation when the caller aborts before the deadline fires', async () => {
+    const factory = new FakeSessionFactory();
+    const executor = makeExecutor(factory);
+    const controller = new AbortController();
+    const runPromise = executor.startResearch(
+      TEST_INPUT,
+      testContext({ runId: 'run-pi-18', signal: controller.signal }, { deadlineMs: 200 }),
+      createExecutionEventSink('run-pi-18'),
+    );
+    await Promise.resolve();
+    const session = factory.created[0];
+    controller.abort();
+    const result = await runPromise;
+
+    expect(result.outcome).toBe('cancelled');
+    expect(result.failure).toBeNull();
+    expect(session.aborted).toBe(true);
+    expect(session.disposed).toBe(true);
+  });
 });
 
 describe('PiProductIntelligenceExecutor — allowlisting and prompt construction', () => {
