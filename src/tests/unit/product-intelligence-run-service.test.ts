@@ -70,6 +70,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
     }
     // Honor the caller cancellation signal (deterministic cancel test).
     if (context.signal?.aborted) {
+      events.emit('run_cancelled', { message: 'cancelled by caller signal' });
       return {
         runId: context.runId,
         outcome: 'cancelled',
@@ -94,6 +95,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
       case 'submitted':
       case 'abstained':
         events.emit('submission_received', { data: { schemaVersion: this.submission.schemaVersion } });
+        events.emit('run_completed', { data: { outcome: this.outcome } });
         return {
           runId: context.runId,
           outcome: this.outcome,
@@ -108,6 +110,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
           events: events.snapshot(),
         };
       case 'unavailable':
+        events.emit('run_completed', { data: { outcome: 'unavailable' } });
         return {
           runId: context.runId,
           outcome: 'unavailable',
@@ -121,6 +124,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
           events: events.snapshot(),
         };
       case 'failed':
+        events.emit('run_failed', { isError: true, message: this.failure?.message ?? 'no submission', data: { code: this.failure?.code ?? 'missing_submission' } });
         return {
           runId: context.runId,
           outcome: 'failed',
@@ -134,6 +138,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
           events: events.snapshot(),
         };
       case 'cancelled':
+        events.emit('run_cancelled', { message: 'cancelled' });
         return {
           runId: context.runId,
           outcome: 'cancelled',
@@ -147,6 +152,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
           events: events.snapshot(),
         };
       case 'timed_out':
+        events.emit('run_timeout', { message: 'deadline' });
         return {
           runId: context.runId,
           outcome: 'timed_out',
@@ -220,7 +226,13 @@ describe('Product Intelligence run service', () => {
     const events = listPiEvents(started.run.id);
     expect(events.length).toBeGreaterThan(3);
     expect(events.map((e) => e.type)).toContain('submission_received');
-    expect(events.map((e) => e.type)).toContain('run.completed');
+    // The SSE-facing stream maps normalized types to domain events.
+    const mapped = replayPiEvents(started.run.id).map((e) => e.type);
+    expect(mapped).toContain('run.completed');
+    expect(mapped).toContain('source.added');
+    expect(mapped).toContain('evidence.added');
+    // No duplicate run.started/run.completed (service emits only additive events).
+    expect(mapped.filter((t) => t === 'run.completed')).toHaveLength(1);
     const toolCalls = getPiRunProjection(started.run.id)?.toolCalls as Array<{ toolName: string }>;
     expect(toolCalls[0].toolName).toBe('read');
 
@@ -240,7 +252,7 @@ describe('Product Intelligence run service', () => {
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT, mode: 'shadow' }, runOpts);
     await started.completed;
     expect(getPiResult(started.run.id)?.disposition).toBe('abstained');
-    const types = listPiEvents(started.run.id).map((e) => e.type);
+    const types = replayPiEvents(started.run.id).map((e) => e.type);
     expect(types).not.toContain('run.needs_review');
   });
 
@@ -278,7 +290,7 @@ describe('Product Intelligence run service', () => {
     expect(run?.status).toBe('failed');
     expect(run?.errorCode).toBe('missing_submission');
     expect(run?.errorMessage).toContain('submission');
-    const types = listPiEvents(started.run.id).map((e) => e.type);
+    const types = replayPiEvents(started.run.id).map((e) => e.type);
     expect(types).toContain('run.failed');
   });
 
@@ -302,7 +314,7 @@ describe('Product Intelligence run service', () => {
     expect(run?.status).toBe('cancelled');
     expect(run?.cancelledAt).toBeTruthy();
     expect(run?.completedAt).toBeNull();
-    const types = listPiEvents(started.run.id).map((e) => e.type);
+    const types = replayPiEvents(started.run.id).map((e) => e.type);
     expect(types).toContain('run.cancelled');
   });
 

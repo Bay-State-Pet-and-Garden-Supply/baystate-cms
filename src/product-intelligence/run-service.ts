@@ -381,7 +381,9 @@ export async function startProductIntelligenceRun(
   };
 
   const sink = new PersistingExecutionEventSink(run.id, bus);
-  sink.emitDomain('run.started', { executor: executor.name, mode });
+  // run.started / terminal events are emitted by the executor itself (PI-1
+  // contract); the service only emits additive domain events (needs_review,
+  // source.added, ...) and the failure event for executor throws.
 
   const completed = (async () => {
     let result: ProductResearchResult;
@@ -396,7 +398,6 @@ export async function startProductIntelligenceRun(
       activeControllers.delete(run.id);
     }
 
-    const durationMs = result.durationMs;
     switch (result.outcome) {
       case 'submitted':
       case 'abstained': {
@@ -411,7 +412,6 @@ export async function startProductIntelligenceRun(
           completedAt: new Date().toISOString(),
           piVersion: result.piVersion,
         });
-        sink.emitDomain('run.completed', { disposition, durationMs, needsReview });
         break;
       }
       case 'unavailable': {
@@ -422,25 +422,21 @@ export async function startProductIntelligenceRun(
           result,
         });
         transitionPiRunStatus(run.id, 'completed', { completedAt: new Date().toISOString() });
-        sink.emitDomain('run.completed', { disposition: 'unavailable', durationMs });
         break;
       }
       case 'cancelled': {
         transitionPiRunStatus(run.id, 'cancelled', { cancelledAt: new Date().toISOString() });
-        sink.emitDomain('run.cancelled', { durationMs });
         break;
       }
       case 'failed': {
         const code = result.failure?.code ?? 'unknown';
         const message = result.failure?.message ?? 'Run failed';
         transitionPiRunStatus(run.id, 'failed', { errorCode: code, errorMessage: message });
-        sink.emitDomain('run.failed', { code, message });
         break;
       }
       case 'timed_out': {
         const message = result.failure?.message ?? 'Hard deadline exceeded';
         transitionPiRunStatus(run.id, 'failed', { errorCode: 'deadline_exceeded', errorMessage: message });
-        sink.emitDomain('run.failed', { code: 'deadline_exceeded', message });
         break;
       }
     }
