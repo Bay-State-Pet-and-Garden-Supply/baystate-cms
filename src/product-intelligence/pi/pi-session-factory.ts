@@ -147,6 +147,7 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       workspaceId: context.workspaceId,
       workspacePath: context.workspacePath,
       allowedTools: policy.researchTools,
+      policy,
       signal: context.signal ?? new AbortController().signal,
       remainingMs: policy.deadlineMs,
     });

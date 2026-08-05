@@ -92,6 +92,14 @@ export const ProductIntelligencePolicySchema = z.object({
    * unknown names are rejected at session creation.
    */
   researchTools: z.array(z.string().min(1).max(128)).max(64).default([]),
+  /**
+   * Outbound network policy (PI-5): when non-empty, external fetches are
+   * restricted to these domains (hostname suffix match). Private/link-local
+   * destinations and non-http(s) protocols are always denied.
+   */
+  allowedSourceDomains: z.array(z.string().min(1).max(256)).max(64).default([]),
+  /** Maximum accepted response body size for gateway-fetched content (PI-5). */
+  maxResponseBytes: z.number().int().positive().max(50_000_000).default(5_000_000),
   networkPolicy: NetworkPolicySchema.default('local_only'),
   dataSharingPolicy: DataSharingPolicySchema.default('local_only'),
   /**

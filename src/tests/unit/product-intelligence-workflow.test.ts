@@ -14,6 +14,7 @@ import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { getPiRun, getPiResult, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
 import { startProductIntelligenceRun } from '../../product-intelligence/run-service';
 import { buildDefaultToolRegistry } from '../../product-intelligence/tools';
+import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
 import { PiToolRegistry } from '../../product-intelligence/tools/registry';
 import type { PageExtractionContract, PageExtractionResult } from '../../product-intelligence/tools/contract';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
@@ -88,6 +89,7 @@ class WorkflowFixtureExecutor implements ProductIntelligenceExecutor {
   readonly version = '1.0.0';
   registry: PiToolRegistry;
   scenario: WorkflowScenario;
+  gateway = new PolicyGateway({ resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []) });
 
   constructor(contract: PageExtractionContract, scenario: WorkflowScenario) {
     this.registry = buildDefaultToolRegistry(contract);
@@ -102,6 +104,8 @@ class WorkflowFixtureExecutor implements ProductIntelligenceExecutor {
           runId: ctx.runId,
           workspaceId: ctx.workspaceId,
           workspacePath: ctx.workspacePath,
+          policy: ctx.policy,
+          gateway: this.gateway,
           signal: ctx.signal ?? new AbortController().signal,
           remainingMs: 300_000,
         })

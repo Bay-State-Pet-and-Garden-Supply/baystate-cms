@@ -10,8 +10,9 @@
  */
 import { Type } from 'typebox';
 import { verifyCandidate, type VerificationContext } from '../../onboarding/page-verifier';
+import { defaultPolicyGateway } from '../policy';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
-import { errorResult, evidenceId, noResult, okResult } from './contract';
+import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { boundedString } from './registry';
 
 export const verifyCandidatePage: PiToolAdapter = {
@@ -26,8 +27,12 @@ export const verifyCandidatePage: PiToolAdapter = {
     brandHint: Type.Optional(boundedString(128, 'Brand hint')),
     officialDomains: Type.Optional(Type.Array(boundedString(256, 'Official domain'), { maxItems: 10 })),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
+    const netCheck = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest({ runId: ctx.runId, policy: ctx.policy }, url);
+    if (!netCheck.allowed) {
+      return policyDenied(`network denied: ${netCheck.reasonCode}${netCheck.detail ? ` (${netCheck.detail})` : ''}`);
+    }
     const context: VerificationContext = {
       upc: String(params.gtin),
       expectedName: String(params.expectedName),

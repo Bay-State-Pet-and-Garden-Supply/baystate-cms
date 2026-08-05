@@ -18,6 +18,7 @@
  */
 import { PI_EXECUTOR_NAME, ProductResearchContextSchema, ProductResearchInputSchema, type ProductResearchContext, type ProductResearchResult, type TerminalResultSubmission } from '../contracts';
 import { terminalDisposition } from '../workflow/bundle';
+import { defaultPolicyGateway } from '../policy';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../executor';
 import { emitExecutionEvent } from '../executor';
 import { buildResearchPrompt } from './pi-prompt-builder';
@@ -116,12 +117,14 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       toolCallCount: number;
       sessionEnded: boolean;
       budgetExceeded: boolean;
+      modelCostUsd: number;
       sessionError: string | null;
     } = {
       submission: null,
       toolCallCount: 0,
       sessionEnded: false,
       budgetExceeded: false,
+      modelCostUsd: 0,
       sessionError: null,
     };
 
@@ -179,8 +182,30 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           type?: string;
           toolName?: string;
           isError?: boolean;
+          message?: { usage?: { cost?: { total?: number } } };
         };
         if (!event || typeof event.type !== 'string') return;
+
+        // Model-cost accounting (PI-5): each completed assistant message
+        // reports usage; the policy gateway enforces maxCostUsd server-side.
+        if (event.type === 'message_end' && event.message?.usage?.cost?.total !== undefined) {
+          state.modelCostUsd = Math.max(state.modelCostUsd, event.message.usage.cost.total);
+          const budget = defaultPolicyGateway.checkModelBudget(
+            { runId, policy },
+            state.modelCostUsd,
+            policy.maxCostUsd,
+          );
+          if (!budget.allowed) {
+            state.budgetExceeded = true;
+            emitExecutionEvent(events, 'run_failed', {
+              isError: true,
+              message: budget.detail ?? 'Model cost budget exceeded',
+              data: { code: 'policy_denied' },
+            });
+            void handle?.session.abort().catch(() => undefined);
+            return;
+          }
+        }
         if (event.type === 'tool_execution_start' && event.toolName) {
           state.toolCallCount += 1;
           emitExecutionEvent(events, 'tool_call_started', {

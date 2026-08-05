@@ -20,6 +20,8 @@
  */
 import type { TSchema } from 'typebox';
 import { sha256Hex } from '../../shared/stable-id';
+import type { ProductIntelligencePolicy } from '../contracts';
+import type { PolicyGateway } from '../policy/policy-gateway';
 
 // ---------------------------------------------------------------------------
 // Execution context passed to every adapter
@@ -29,6 +31,10 @@ export interface PiToolContext {
   runId: string;
   workspaceId: string;
   workspacePath: string;
+  /** Immutable policy snapshot the run executes under (PI-5). */
+  policy: ProductIntelligencePolicy;
+  /** Policy gateway for network enforcement (injectable for tests). */
+  gateway?: PolicyGateway;
   /** Caller cancellation signal (run abort). */
   signal: AbortSignal;
   /** Milliseconds of run deadline remaining when the call starts. */

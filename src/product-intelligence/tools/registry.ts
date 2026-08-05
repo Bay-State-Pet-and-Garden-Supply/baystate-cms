@@ -19,6 +19,7 @@
 import { Type, type TSchema } from 'typebox';
 import { Check } from 'typebox/value';
 import { getPiRun } from '../../db/repositories/product-intelligence-repo';
+import type { ProductIntelligencePolicy } from '../contracts';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, policyDenied } from './contract';
 
@@ -27,6 +28,8 @@ export interface SessionToolContext {
   workspaceId: string;
   workspacePath: string;
   allowedTools: string[];
+  /** Immutable policy snapshot (PI-5): network/data-sharing enforcement. */
+  policy: ProductIntelligencePolicy;
   signal: AbortSignal;
   remainingMs: number;
 }
@@ -100,7 +103,7 @@ export class PiToolRegistry {
     return definitions;
   }
 
-  private toToolDefinition(adapter: PiToolAdapter, ctx: Omit<SessionToolContext, 'allowedTools'>): ResearchToolDefinition {
+  private toToolDefinition(adapter: PiToolAdapter, ctx: SessionToolContext): ResearchToolDefinition {
     return {
       name: adapter.name,
       label: adapter.name.replace(/_/g, ' '),
@@ -112,6 +115,7 @@ export class PiToolRegistry {
           runId: ctx.runId,
           workspaceId: ctx.workspaceId,
           workspacePath: ctx.workspacePath,
+          policy: ctx.policy,
           signal: ctx.signal,
           remainingMs: ctx.remainingMs,
         });

@@ -11,6 +11,7 @@
  */
 import { Type } from 'typebox';
 import { extractViaHttpDetailed } from '../../onboarding/page-extractor';
+import { defaultPolicyGateway } from '../policy';
 import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
 import { sha256Hex } from '../../shared/stable-id';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
@@ -20,6 +21,7 @@ import {
   evidenceId,
   noResult,
   okResult,
+  policyDenied,
   type ExtractedFieldEvidence,
   type PageExtractionContract,
   type PageExtractionResult,
@@ -177,6 +179,8 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
     ],
     async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
       const url = String(params.url ?? '');
+      const netCheck = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest({ runId: ctx.runId, policy: ctx.policy }, url);
+      if (!netCheck.allowed) return policyDenied(`network denied: ${netCheck.reasonCode}${netCheck.detail ? ` (${netCheck.detail})` : ''}`);
       try {
         const result = await contract.extract({
           url,
@@ -315,16 +319,17 @@ const inspectCandidateImage: PiToolAdapter = {
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
     try {
-      const response = await fetch(url, {
-        signal: ctx.signal,
-        redirect: 'follow',
-        headers: { Accept: 'image/*' },
-      });
+      const response = await (ctx.gateway ?? defaultPolicyGateway).gatewayFetch(
+        { runId: ctx.runId, policy: ctx.policy },
+        url,
+        { signal: ctx.signal, headers: { Accept: 'image/*' } },
+        {
+          allowedContentTypes: ['image/'],
+          maxResponseBytes: Math.min(ctx.policy.maxResponseBytes, 10 * 1024 * 1024),
+        },
+      );
       if (!response.ok) return noResult(`Image fetch failed: HTTP ${response.status}`);
       const contentType = response.headers.get('content-type');
-      if (!contentType?.startsWith('image/')) {
-        return noResult(`URL is not an image (content-type: ${contentType ?? 'unknown'})`);
-      }
       const buffer = new Uint8Array(await response.arrayBuffer());
       if (buffer.length > 10 * 1024 * 1024) return noResult('Image exceeds 10 MB inspection limit');
       return okResult(

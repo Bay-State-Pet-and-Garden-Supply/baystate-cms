@@ -381,6 +381,7 @@ describe('Product Intelligence run service', () => {
     expect(a.configId).toMatch(/^[a-f0-9]{64}$/);
     expect(a.configId).toBe(b.configId);
     expect(a.modelRoute).toBeNull();
-    expect(a.allowedTools).toEqual(['read', 'grep', 'find', 'ls']);
+    expect(a.allowedTools).toEqual([]); // worker isolation: no host-file tools
+    expect(a.networkPolicy).toBe('allowlisted_remote');
   });
 });

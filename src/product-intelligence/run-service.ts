@@ -65,6 +65,8 @@ import {
   type PiToolCallRow,
 } from '../db/repositories/product-intelligence-repo';
 import { sha256Hex } from '../shared/stable-id';
+import { verifyPolicySnapshot } from './policy';
+import { buildResearchPrompt } from './pi/pi-prompt-builder';
 import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
 
@@ -85,9 +87,14 @@ export const PI_RESULT_SCHEMA_VERSION = 1;
 export function buildDefaultPiPolicy(): ProductIntelligencePolicy {
   const policy = ProductIntelligencePolicySchema.parse({
     configId: 'pending',
-    allowedTools: ['read', 'grep', 'find', 'ls'],
+    // Worker isolation: no host-file tools by default (PI-5). Research tools
+    // are the only surface the worker needs; the workspace stays unreadable.
+    allowedTools: [],
     researchTools: [...DEFAULT_RESEARCH_TOOL_NAMES],
-    networkPolicy: 'local_only',
+    // Network fetches are allowed but always pass the policy gateway (SSRF
+    // floor, protocol/port validation, size limits). Model calls stay denied
+    // until an operator configures a model route + data-sharing policy.
+    networkPolicy: 'allowlisted_remote',
     dataSharingPolicy: 'local_only',
     modelRoute: null,
     maxToolCalls: 100,
@@ -372,6 +379,23 @@ export async function startProductIntelligenceRun(
   const bus = options.bus ?? globalRunEventBus;
   const controller = new AbortController();
 
+  // Immutable snapshot verification: the configId must match the policy
+  // content, or the run refuses to start (PI-5).
+  const snapshot = verifyPolicySnapshot(policy);
+  if (!snapshot.valid) {
+    throw new Error(`Refusing to start run: ${snapshot.reason}`);
+  }
+
+  // Prompt/algorithm version captured with the run snapshot.
+  const promptHash = buildResearchPrompt(parsedInput, {
+    runId: 'pending',
+    workspaceId: workspace.id,
+    workspacePath: workspace.path,
+    policy,
+    executionMode: mode,
+    existingEvidenceRefs: [],
+  }).promptHash;
+
   const run = createPiRun({
     workspaceId: workspace.id,
     onboardingItemId: input.onboardingItemId ?? null,
@@ -381,6 +405,7 @@ export async function startProductIntelligenceRun(
     policyJson: JSON.stringify(policy),
     configSnapshotId: policy.configId,
     configSnapshotHash: policy.configId,
+    promptHash,
     codeCommit: captureCodeCommit(),
   });
   activeControllers.set(run.id, controller);

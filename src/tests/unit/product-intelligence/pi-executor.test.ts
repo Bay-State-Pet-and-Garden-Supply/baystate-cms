@@ -248,6 +248,24 @@ describe('PiProductIntelligenceExecutor — cancellation and deadlines', () => {
     expect(events.snapshot().some((event) => event.type === 'run_timeout')).toBe(true);
   });
 
+  it('fails with policy_denied when model cost exceeds maxCostUsd (server-side budget)', async () => {
+    const factory = new FakeSessionFactory();
+    const executor = makeExecutor(factory);
+    const events = createExecutionEventSink('run-pi-19');
+    const runPromise = executor.startResearch(
+      TEST_INPUT,
+      testContext({ runId: 'run-pi-19' }, { maxCostUsd: 0.01 }),
+      events,
+    );
+    await Promise.resolve();
+    const session = factory.created[0];
+    session.emit({ type: 'message_end', message: { usage: { cost: { total: 1.5 } } } });
+    await runPromise;
+    expect(events.snapshot().some((event) => event.data && (event.data as { code?: string }).code === 'policy_denied')).toBe(true);
+    expect(session.aborted).toBe(true);
+    expect(session.disposed).toBe(true);
+  });
+
   it('reports cancellation when the caller aborts before the deadline fires', async () => {
     const factory = new FakeSessionFactory();
     const executor = makeExecutor(factory);

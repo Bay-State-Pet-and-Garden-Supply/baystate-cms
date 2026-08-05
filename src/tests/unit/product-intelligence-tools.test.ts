@@ -21,7 +21,7 @@ import { buildDefaultToolRegistry, defaultToolRegistry } from '../../product-int
 import { taxonomyTools } from '../../product-intelligence/tools/taxonomy-tools';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
 import type { ProductResearchContext, ProductResearchInput, ProductResearchResult } from '../../product-intelligence/contracts';
-import { asPi1Submission, validSubmission } from './product-intelligence/test-helpers';
+import { asPi1Submission, testPolicy, validSubmission } from './product-intelligence/test-helpers';
 
 const wsId = 'pi-tools-test-workspace';
 
@@ -65,6 +65,7 @@ describe('PiToolRegistry enforcement', () => {
     runId,
     workspaceId: wsId,
     workspacePath: '/tmp/pi-tools-workspace',
+    policy: testPolicy(),
     signal: overrides.signal ?? new AbortController().signal,
     remainingMs: overrides.remainingMs ?? 60_000,
   });
@@ -104,9 +105,9 @@ describe('PiToolRegistry enforcement', () => {
 
   it('grants only allowlisted tools to a session (empty allowlist = none)', () => {
     const run = runningRun();
-    const none = defaultToolRegistry.buildSessionTools({ ...toolCtx(run.id), allowedTools: [] });
+    const none = defaultToolRegistry.buildSessionTools({ ...toolCtx(run.id), allowedTools: [], policy: testPolicy() });
     expect(none).toHaveLength(0);
-    const subset = defaultToolRegistry.buildSessionTools({ ...toolCtx(run.id), allowedTools: ['validate_gtin', 'check_exact_gtin_match'] });
+    const subset = defaultToolRegistry.buildSessionTools({ ...toolCtx(run.id), allowedTools: ['validate_gtin', 'check_exact_gtin_match'], policy: testPolicy() });
     expect(subset.map((t) => t.name).sort()).toEqual(['check_exact_gtin_match', 'validate_gtin']);
     transitionPiRunStatus(run.id, 'completed', {});
   });
@@ -266,6 +267,7 @@ class FixtureAgentExecutor implements ProductIntelligenceExecutor {
       runId: context.runId,
       workspaceId: context.workspaceId,
       workspacePath: context.workspacePath,
+      policy: context.policy,
       signal: context.signal ?? new AbortController().signal,
       remainingMs: 300_000,
     };

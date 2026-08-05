@@ -1559,6 +1559,47 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Product Intelligence Policy Migration (PI-5) ──────────────────────────
+  // Policy gateway audit trail (every external/model/budget decision) and the
+  // prompt hash captured with each run's immutable snapshot.
+  try {
+    const piPolicyVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('product_intelligence_policy_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!piPolicyVersion) {
+      console.log('[Migrations] Running product intelligence policy schema migration...');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS product_intelligence_policy_decisions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL,
+            decision TEXT NOT NULL CHECK (decision IN ('allow', 'deny')),
+            policy_version TEXT NOT NULL,
+            target_type TEXT NOT NULL CHECK (target_type IN ('model', 'network', 'budget', 'tool')),
+            target TEXT NOT NULL,
+            data_classification TEXT,
+            fallback_status TEXT NOT NULL DEFAULT 'none' CHECK (fallback_status IN ('none', 'fallback_denied', 'fallback_used')),
+            reason_code TEXT NOT NULL,
+            detail_json TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, sequence)
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_policy_decisions_run ON product_intelligence_policy_decisions(run_id, sequence);
+        `);
+        const runCols = db.query('PRAGMA table_info(product_intelligence_runs)').all() as Array<{ name: string }>;
+        if (!runCols.some((col) => col.name === 'prompt_hash')) {
+          db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN prompt_hash TEXT;');
+        }
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_policy_schema_version', '1');");
+      console.log('[Migrations] Product intelligence policy schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence policy schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

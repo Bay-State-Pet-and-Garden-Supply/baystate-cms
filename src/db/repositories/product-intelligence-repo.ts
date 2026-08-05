@@ -39,6 +39,7 @@ export interface PiRunRow {
   configSnapshotId: string;
   configSnapshotHash: string;
   codeCommit: string | null;
+  promptHash: string | null;
   piVersion: string | null;
   extensionVersionsJson: string;
   startedAt: string;
@@ -61,6 +62,7 @@ export interface CreatePiRunInput {
   configSnapshotId: string;
   configSnapshotHash: string;
   codeCommit?: string | null;
+  promptHash?: string | null;
   piVersion?: string | null;
   extensionVersionsJson?: string;
 }
@@ -73,8 +75,8 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
     `INSERT INTO product_intelligence_runs
      (id, workspace_id, onboarding_item_id, mode, status, executor, input_json,
       policy_json, config_snapshot_id, config_snapshot_hash, code_commit,
-      pi_version, extension_versions_json, started_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      prompt_hash, pi_version, extension_versions_json, started_at)
+     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.workspaceId,
@@ -86,6 +88,7 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
       input.configSnapshotId,
       input.configSnapshotHash,
       input.codeCommit ?? null,
+      input.promptHash ?? null,
       input.piVersion ?? null,
       input.extensionVersionsJson ?? '[]',
       startedAt,
@@ -98,7 +101,7 @@ const RUN_SELECT = `
   SELECT id, workspace_id AS workspaceId, onboarding_item_id AS onboardingItemId,
          mode, status, executor, input_json AS inputJson, policy_json AS policyJson,
          config_snapshot_id AS configSnapshotId, config_snapshot_hash AS configSnapshotHash,
-         code_commit AS codeCommit, pi_version AS piVersion,
+         code_commit AS codeCommit, prompt_hash AS promptHash, pi_version AS piVersion,
          extension_versions_json AS extensionVersionsJson,
          started_at AS startedAt, completed_at AS completedAt, cancelled_at AS cancelledAt,
          error_code AS errorCode, error_message AS errorMessage,

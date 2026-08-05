@@ -8,11 +8,13 @@ import { classifyPageIdentity, upcCheckDigit } from '../../product-intelligence/
 import { checkExactGtinMatch, compareIdentitySignals, checkSourcePriority } from '../../product-intelligence/tools/verification-tools';
 import { validateGtin } from '../../product-intelligence/tools/identity-tools';
 import type { PiToolContext } from '../../product-intelligence/tools/contract';
+import { testPolicy } from './product-intelligence/test-helpers';
 
 const ctx: PiToolContext = {
   runId: 'run-1',
   workspaceId: 'ws-1',
   workspacePath: '/tmp/ws',
+  policy: testPolicy(),
   signal: new AbortController().signal,
   remainingMs: 60_000,
 };
