@@ -55,6 +55,8 @@ export default defineConfig({
       'src/tests/unit/catalog-classification-db.test.ts',
       'src/tests/unit/classification-integrity-audit.test.ts',
       'src/tests/unit/weekly-report.test.ts',
+      'src/tests/unit/product-intelligence-repo.test.ts',
+      'src/tests/unit/product-intelligence-run-service.test.ts',
     ],
   },
 });

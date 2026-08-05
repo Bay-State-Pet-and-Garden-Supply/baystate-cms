@@ -2,6 +2,7 @@ import { getDb } from './connection';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'node:crypto';
+import { sha256Hex } from '../shared/stable-id';
 
 const SCHEMA_PATH = path.resolve(import.meta.dirname, 'schema.sql');
 const ONBOARDING_MIGRATION_PATH = path.resolve(import.meta.dirname, 'onboarding-migration.sql');
@@ -740,6 +741,10 @@ export function runMigrations(): void {
     ON classification_runs(onboarding_item_id)
     WHERE onboarding_item_id IS NOT NULL AND status = 'running'
   `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_remote_drift_ws_sku_status
+    ON remote_drift(workspace_id, sku, status)
+  `);
 
   // ── Catalog Classification Migration ──────────────────────────────────────
   //
@@ -856,6 +861,702 @@ export function runMigrations(): void {
     }
   } catch (e) {
     console.error('[Migrations] Catalog classification migration failed:', e);
+  }
+
+  // ── Rename shopsite_connection to connection ────────────────────────────────
+  // schema.sql creates `connection` first (CREATE IF NOT EXISTS). On an upgrade
+  // DB that still has shopsite_connection, a plain RENAME collides with the
+  // empty destination. Copy legacy rows into connection, then drop the old
+  // table, and only then mark the migration complete.
+  try {
+    const connectionRenameVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('connection_rename_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!connectionRenameVersion) {
+      console.log('[Migrations] Running connection table rename migration...');
+      db.transaction(() => {
+        const oldTables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='shopsite_connection'").all();
+        const newTables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='connection'").all();
+
+        if (oldTables.length > 0 && newTables.length === 0) {
+          db.exec('ALTER TABLE shopsite_connection RENAME TO connection;');
+        } else if (oldTables.length > 0 && newTables.length > 0) {
+          // Destination already exists (fresh schema.sql). Merge any missing
+          // legacy rows by primary key, preferring already-present connection
+          // rows for the same id. Also skip legacy rows whose workspace_id is
+          // already represented in connection under a different id.
+          db.exec(`
+            INSERT INTO connection (
+              id, workspace_id, cgi_base_url, auth_strategy, merchant_id,
+              password_secret_ref, last_tested_at, last_test_status, last_test_error
+            )
+            SELECT
+              old.id, old.workspace_id, old.cgi_base_url, old.auth_strategy, old.merchant_id,
+              old.password_secret_ref, old.last_tested_at, old.last_test_status, old.last_test_error
+            FROM shopsite_connection AS old
+            WHERE NOT EXISTS (SELECT 1 FROM connection AS cur WHERE cur.id = old.id)
+              AND NOT EXISTS (SELECT 1 FROM connection AS cur WHERE cur.workspace_id = old.workspace_id)
+          `);
+          db.exec('DROP TABLE shopsite_connection;');
+        }
+
+        const stillOld = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='shopsite_connection'").all();
+        if (stillOld.length > 0) {
+          throw new Error('shopsite_connection still exists after connection rename migration');
+        }
+        const hasConnection = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='connection'").all();
+        if (hasConnection.length === 0) {
+          throw new Error('connection table missing after connection rename migration');
+        }
+
+        db.exec("INSERT INTO app_meta (key, value) VALUES ('connection_rename_schema_version', '1');");
+      })();
+      console.log('[Migrations] Connection table rename migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Connection table rename migration failed:', e);
+    throw e;
+  }
+
+  // ── Decision Revision Migration ─────────────────────────────────────────────
+  // decision_key stores an explicit user-action token. Its uniqueness spans
+  // historical and live rows so a delayed retry can never reactivate an older
+  // action. This repair runs on every startup (even with a version marker) to
+  // fail closed if a partial deployment left the index missing or malformed.
+  try {
+    db.transaction(() => {
+      const decCols = db.query('PRAGMA table_info(classification_proposal_decisions)').all() as Array<{ name: string }>;
+      const addDecCol = (col: string, def: string) => {
+        if (!decCols.some(c => c.name === col)) {
+          db.exec('ALTER TABLE classification_proposal_decisions ADD COLUMN ' + col + ' ' + def);
+          console.log('[Migrations] Added classification_proposal_decisions.' + col);
+        }
+      };
+
+      addDecCol('revised_value_json', 'TEXT');
+      addDecCol('revised_target_id', 'TEXT');
+      addDecCol('has_revised_target', 'INTEGER NOT NULL DEFAULT 0');
+      addDecCol('decision_key', 'TEXT');
+      addDecCol('superseded_at', 'TEXT');
+
+      // Backfill presence for rows that already stored a non-null revised target
+      // before the explicit presence column existed.
+      db.exec(`UPDATE classification_proposal_decisions
+        SET has_revised_target = 1
+        WHERE revised_target_id IS NOT NULL AND COALESCE(has_revised_target, 0) = 0`);
+
+      // A partial version of the old live-only index could contain duplicate
+      // keys on superseded rows. Keep the earliest action-token owner and clear
+      // only duplicate tokens; decision rows/history remain intact.
+      db.exec('DROP INDEX IF EXISTS idx_classification_decisions_key');
+      const duplicateKeys = db.query(
+        `SELECT decision_key FROM classification_proposal_decisions
+         WHERE decision_key IS NOT NULL
+         GROUP BY decision_key HAVING COUNT(*) > 1`,
+      ).all() as Array<{ decision_key: string }>;
+      for (const { decision_key: key } of duplicateKeys) {
+        const canonical = db.query(
+          `SELECT id FROM classification_proposal_decisions
+           WHERE decision_key = ? ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+        ).get(key) as { id: string } | undefined;
+        if (!canonical) throw new Error(`Unable to reconcile duplicate decision token ${key}`);
+        db.run(
+          'UPDATE classification_proposal_decisions SET decision_key = NULL WHERE decision_key = ? AND id != ?',
+          [key, canonical.id],
+        );
+      }
+
+      db.exec(`CREATE UNIQUE INDEX idx_classification_decisions_key
+        ON classification_proposal_decisions(decision_key)
+        WHERE decision_key IS NOT NULL`);
+
+      const indexSql = db.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_classification_decisions_key'",
+      ).get() as { sql: string } | undefined;
+      if (!indexSql || /superseded_at/i.test(indexSql.sql)) {
+        throw new Error('Decision action-token uniqueness index was not created correctly.');
+      }
+
+      db.run(
+        `INSERT INTO app_meta (key, value) VALUES ('decision_revision_schema_version', '2')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      );
+    })();
+    console.log('[Migrations] Decision revision migration verified.');
+  } catch (e) {
+    console.error('[Migrations] Decision revision migration failed:', e);
+    throw e;
+  }
+
+  // ── Benchmark / Evaluation Migration ─────────────────────────────────────────
+  try {
+    db.transaction(() => {
+      // Legacy (pre-v2) shape. Kept so upgrade DBs that predate schema.sql's
+      // benchmark tables still receive the old columns; the guarded
+      // benchmark_v2 migration below adds the lifecycle/immutability columns.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS benchmark_datasets (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          holdout_strategy TEXT NOT NULL DEFAULT 'product_family',
+          split_seed INTEGER NOT NULL,
+          total_examples INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS benchmark_examples (
+          id TEXT PRIMARY KEY,
+          dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+          product_sku TEXT NOT NULL,
+          product_family_id TEXT,
+          split_group TEXT NOT NULL CHECK (split_group IN ('train', 'test', 'holdout')),
+          input_snapshot_json TEXT NOT NULL,
+          gold_labels_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_examples_dataset ON benchmark_examples(dataset_id);
+        CREATE INDEX IF NOT EXISTS idx_benchmark_examples_split ON benchmark_examples(dataset_id, split_group);
+        CREATE TABLE IF NOT EXISTS benchmark_eval_runs (
+          id TEXT PRIMARY KEY,
+          dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+          run_label TEXT NOT NULL,
+          model_config_json TEXT,
+          metrics_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_benchmark_eval_runs_dataset ON benchmark_eval_runs(dataset_id);
+      `);
+    })();
+    console.log('[Migrations] Benchmark/evaluation tables verified.');
+  } catch (e) {
+    console.error('[Migrations] Benchmark migration failed:', e);
+    throw e;
+  }
+
+  // ── Benchmark V2 Migration (frozen Gold + prediction bundles) ────────────────
+  {
+    const benchmarkV2Version = db.query('SELECT value FROM app_meta WHERE key = ?').get('benchmark_v2_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!benchmarkV2Version) {
+      console.log('[Migrations] Running benchmark v2 migration...');
+      db.transaction(() => {
+        const hasColumn = (table: string, column: string): boolean => {
+          const cols = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+          return cols.some(c => c.name === column);
+        };
+
+        // datasets: lifecycle columns.
+        if (!hasColumn('benchmark_datasets', 'status')) {
+          db.exec("ALTER TABLE benchmark_datasets ADD COLUMN status TEXT NOT NULL DEFAULT 'draft';");
+        }
+        if (!hasColumn('benchmark_datasets', 'family_review_complete')) {
+          db.exec('ALTER TABLE benchmark_datasets ADD COLUMN family_review_complete INTEGER NOT NULL DEFAULT 0;');
+        }
+        if (!hasColumn('benchmark_datasets', 'family_reviewed_by')) db.exec('ALTER TABLE benchmark_datasets ADD COLUMN family_reviewed_by TEXT;');
+        if (!hasColumn('benchmark_datasets', 'family_reviewed_at')) db.exec('ALTER TABLE benchmark_datasets ADD COLUMN family_reviewed_at TEXT;');
+        if (!hasColumn('benchmark_datasets', 'dataset_hash')) db.exec('ALTER TABLE benchmark_datasets ADD COLUMN dataset_hash TEXT;');
+        if (!hasColumn('benchmark_datasets', 'frozen_at')) db.exec('ALTER TABLE benchmark_datasets ADD COLUMN frozen_at TEXT;');
+        if (!hasColumn('benchmark_datasets', 'frozen_by')) db.exec('ALTER TABLE benchmark_datasets ADD COLUMN frozen_by TEXT;');
+        if (!hasColumn('benchmark_datasets', 'retired_at')) db.exec('ALTER TABLE benchmark_datasets ADD COLUMN retired_at TEXT;');
+        if (!hasColumn('benchmark_datasets', 'source_config_hash')) db.exec('ALTER TABLE benchmark_datasets ADD COLUMN source_config_hash TEXT;');
+
+        // examples: immutability/provenance columns.
+        if (!hasColumn('benchmark_examples', 'example_hash')) db.exec('ALTER TABLE benchmark_examples ADD COLUMN example_hash TEXT;');
+        if (!hasColumn('benchmark_examples', 'reviewer_id')) db.exec('ALTER TABLE benchmark_examples ADD COLUMN reviewer_id TEXT;');
+        if (!hasColumn('benchmark_examples', 'adjudicated_by')) db.exec('ALTER TABLE benchmark_examples ADD COLUMN adjudicated_by TEXT;');
+        if (!hasColumn('benchmark_examples', 'source_run_id')) db.exec('ALTER TABLE benchmark_examples ADD COLUMN source_run_id TEXT;');
+        if (!hasColumn('benchmark_examples', 'source_config_hash')) db.exec('ALTER TABLE benchmark_examples ADD COLUMN source_config_hash TEXT;');
+        if (!hasColumn('benchmark_examples', 'source_product_hash')) db.exec('ALTER TABLE benchmark_examples ADD COLUMN source_product_hash TEXT;');
+
+        // eval_runs: bind evaluations to the persisted prediction bundle.
+        if (!hasColumn('benchmark_eval_runs', 'prediction_bundle_id')) {
+          db.exec('ALTER TABLE benchmark_eval_runs ADD COLUMN prediction_bundle_id TEXT;');
+        }
+
+        // Backfill example_hash for pre-existing rows (deterministic and
+        // idempotent — matches the repository's insert-time hash domain).
+        const hasFamilyColumn = hasColumn('benchmark_examples', 'product_family_id');
+        const legacyExamples = db.query(
+          hasFamilyColumn
+            ? 'SELECT id, product_sku, product_family_id, split_group, input_snapshot_json, gold_labels_json FROM benchmark_examples'
+            : 'SELECT id, product_sku, split_group, input_snapshot_json, gold_labels_json FROM benchmark_examples',
+        ).all() as Array<{
+          id: string;
+          product_sku: string;
+          product_family_id: string | null;
+          split_group: string;
+          input_snapshot_json: string;
+          gold_labels_json: string;
+        }>;
+        const backfillHash = (row: { product_sku: string; product_family_id: string | null; split_group: string; input_snapshot_json: string; gold_labels_json: string }): string => {
+          return sha256Hex(JSON.stringify({
+            productSku: row.product_sku,
+            productFamilyId: row.product_family_id,
+            splitGroup: row.split_group,
+            inputSnapshotJson: row.input_snapshot_json,
+            goldLabelsJson: row.gold_labels_json,
+            sourceRunId: null,
+            sourceConfigHash: null,
+            sourceProductHash: null,
+          }));
+        };
+        for (const example of legacyExamples) {
+          const existing = db.query('SELECT example_hash FROM benchmark_examples WHERE id = ?').get(example.id) as { example_hash: string | null } | undefined;
+          if (!existing || !existing.example_hash) {
+            db.query('UPDATE benchmark_examples SET example_hash = ? WHERE id = ?').run(backfillHash(example), example.id);
+          }
+        }
+
+        // Prediction bundles + qualification receipts (new tables).
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS benchmark_prediction_bundles (
+            id TEXT PRIMARY KEY,
+            dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+            workspace_id TEXT NOT NULL,
+            run_label TEXT NOT NULL,
+            split_group TEXT NOT NULL CHECK (split_group IN ('test', 'holdout')),
+            predictions_json TEXT NOT NULL,
+            bundle_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_benchmark_prediction_bundles_dataset ON benchmark_prediction_bundles(dataset_id);
+          CREATE TABLE IF NOT EXISTS benchmark_qualification_receipts (
+            id TEXT PRIMARY KEY,
+            dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+            dataset_hash TEXT NOT NULL,
+            prediction_bundle_id TEXT NOT NULL,
+            bundle_hash TEXT NOT NULL,
+            holdout_size INTEGER NOT NULL,
+            coverage REAL NOT NULL,
+            min_class_support INTEGER NOT NULL,
+            violation_counts_json TEXT NOT NULL,
+            primary_metric TEXT NOT NULL,
+            delta_lower95 REAL NOT NULL,
+            non_regression_floors_met INTEGER NOT NULL DEFAULT 0,
+            qualified INTEGER NOT NULL DEFAULT 0,
+            reasons_json TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            generated_by TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_benchmark_qualification_receipts_dataset ON benchmark_qualification_receipts(dataset_id);
+          CREATE INDEX IF NOT EXISTS idx_benchmark_qualification_receipts_digest ON benchmark_qualification_receipts(digest);
+          CREATE INDEX IF NOT EXISTS idx_benchmark_datasets_workspace ON benchmark_datasets(workspace_id);
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('benchmark_v2_schema_version', '1');");
+      console.log('[Migrations] Benchmark v2 migration complete.');
+    }
+  }
+
+
+  // ── Product Embeddings Migration ──────────────────────────────────────────
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS product_embeddings (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          product_sku TEXT NOT NULL,
+          embedding_model TEXT NOT NULL,
+          embedding_text TEXT NOT NULL,
+          embedding_blob BLOB NOT NULL,
+          embedding_dim INTEGER NOT NULL,
+          source_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_product_embeddings_unique
+          ON product_embeddings(workspace_id, product_sku, embedding_model);
+        CREATE INDEX IF NOT EXISTS idx_product_embeddings_workspace
+          ON product_embeddings(workspace_id, embedding_model);
+      `);
+    })();
+    console.log('[Migrations] Product embeddings table verified.');
+  } catch (e) {
+    console.error('[Migrations] Product embeddings migration failed:', e);
+    throw e;
+  }
+
+  // ── Embedding v2 schema (namespace / fingerprint / failure status) ────────
+  try {
+    const embeddingV2Version = db.query("SELECT value FROM app_meta WHERE key = 'embedding_v2_schema_version'").get() as
+      | { value: string }
+      | undefined;
+    if (!embeddingV2Version || embeddingV2Version.value !== '2') {
+      console.log('[Migrations] Running embedding v2 schema migration...');
+      db.transaction(() => {
+        const hasColumn = (table: string, column: string): boolean => {
+          const cols = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+          return cols.some(c => c.name === column);
+        };
+        if (!hasColumn('product_embeddings', 'provider')) {
+          db.exec("ALTER TABLE product_embeddings ADD COLUMN provider TEXT NOT NULL DEFAULT 'ollama';");
+        }
+        if (!hasColumn('product_embeddings', 'schema_version')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;');
+        }
+        if (!hasColumn('product_embeddings', 'namespace')) {
+          db.exec("ALTER TABLE product_embeddings ADD COLUMN namespace TEXT NOT NULL DEFAULT 'production';");
+        }
+        if (!hasColumn('product_embeddings', 'failure_status')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN failure_status TEXT;');
+        }
+        if (!hasColumn('product_embeddings', 'source_config_hash')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN source_config_hash TEXT;');
+        }
+        if (!hasColumn('product_embeddings', 'decision_run_id')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN decision_run_id TEXT;');
+        }
+        if (!hasColumn('product_embeddings', 'updated_at')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN updated_at TEXT;');
+        }
+        if (!hasColumn('product_embeddings', 'model_fingerprint')) {
+          db.exec("ALTER TABLE product_embeddings ADD COLUMN model_fingerprint TEXT NOT NULL DEFAULT '';");
+        }
+        if (!hasColumn('product_embeddings', 'document_hash')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN document_hash TEXT;');
+        }
+        if (!hasColumn('product_embeddings', 'config_hash')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN config_hash TEXT;');
+        }
+        if (!hasColumn('product_embeddings', 'decision_hash')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN decision_hash TEXT;');
+        }
+        if (!hasColumn('product_embeddings', 'run_id')) {
+          db.exec('ALTER TABLE product_embeddings ADD COLUMN run_id TEXT;');
+        }
+        // Namespace-aware uniqueness replaces the legacy 3-column unique index
+        // so the same SKU+model can exist in both namespaces.
+        db.exec('DROP INDEX IF EXISTS idx_product_embeddings_unique;');
+        db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_product_embeddings_unique
+            ON product_embeddings(workspace_id, product_sku, embedding_model, namespace);
+        `);
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_product_embeddings_namespace
+            ON product_embeddings(workspace_id, namespace, embedding_model);
+        `);
+      })();
+      db.exec(`INSERT INTO app_meta (key, value) VALUES ('embedding_v2_schema_version', '2')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value;`);
+      console.log('[Migrations] Embedding v2 schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Embedding v2 schema migration failed:', e);
+    throw e;
+  }
+
+  // ── Page Identity Migration ────────────────────────────────────────────────
+  //
+  // Demotes all synthetic/local Page rows to `unverified_name_only` review
+  // context, drops the UNIQUE(name) identity assumption, adds workspace/import
+  // provenance and identity columns, clears inferred product_pages.page_id
+  // references (preserving names and assignment history), and marks
+  // category_page proposals referencing inferred identities stale without
+  // deleting decisions. A real ShopSite Pages export is required before any
+  // row can become a verified identity.
+  try {
+    const pageIdentityVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('page_identity_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!pageIdentityVersion) {
+      console.log('[Migrations] Running page identity migration...');
+      // PRAGMA foreign_keys cannot be toggled inside a transaction (SQLite
+      // silently ignores it), so the historical OFF/ON pair around the table
+      // rebuild was a no-op whenever foreign_keys was ON. Capture the current
+      // state, toggle OFF BEFORE the rebuild transaction (so DROP TABLE on a
+      // table referenced by FK constraints is permitted), and restore the
+      // captured state after it completes.
+      const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+      const fkWasOn = fkRow ? Number(fkRow.foreign_keys) === 1 : false;
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+        // 1. page_imports table (previewed imports are never stored; only
+        //    activations persist, so this table is the verified-import audit).
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS page_imports (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            parser_format_version TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('previewed', 'active', 'superseded')),
+            counts_json TEXT NOT NULL,
+            records_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            activated_at TEXT,
+            superseded_at TEXT,
+            activated_by TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_page_imports_workspace_status ON page_imports(workspace_id, status);
+        `);
+
+        // 2. Add page_index provenance/identity columns when missing.
+        const pageCols = db.query('PRAGMA table_info(page_index)').all() as Array<{ name: string }>;
+        const pageHas = (name: string) => pageCols.some(c => c.name === name);
+        if (!pageHas('workspace_id')) db.exec('ALTER TABLE page_index ADD COLUMN workspace_id TEXT;');
+        if (!pageHas('import_id')) db.exec('ALTER TABLE page_index ADD COLUMN import_id TEXT REFERENCES page_imports(id);');
+        if (!pageHas('identity_kind')) db.exec("ALTER TABLE page_index ADD COLUMN identity_kind TEXT NOT NULL DEFAULT 'unverified_name_only';");
+        if (!pageHas('identity_key')) db.exec('ALTER TABLE page_index ADD COLUMN identity_key TEXT;');
+        if (!pageHas('identity_status')) db.exec("ALTER TABLE page_index ADD COLUMN identity_status TEXT NOT NULL DEFAULT 'unverified';");
+        if (!pageHas('source_hash')) db.exec('ALTER TABLE page_index ADD COLUMN source_hash TEXT;');
+        if (!pageHas('availability')) db.exec("ALTER TABLE page_index ADD COLUMN availability TEXT NOT NULL DEFAULT 'unavailable';");
+        if (!pageHas('review_status')) db.exec("ALTER TABLE page_index ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending';");
+
+        // 3. Rebuild page_index to drop the UNIQUE(name) constraint. A name is
+        //    never an identity key — duplicate names must be representable.
+        const pageIndexSql = db.query(
+          "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'page_index'",
+        ).get() as { sql: string } | undefined;
+        if (pageIndexSql && /UNIQUE/i.test(pageIndexSql.sql)) {
+          db.exec(`
+              CREATE TABLE page_index_new (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                file_name TEXT,
+                parent_id TEXT REFERENCES page_index(id),
+                page_hash TEXT NOT NULL,
+                workspace_id TEXT,
+                import_id TEXT REFERENCES page_imports(id),
+                identity_kind TEXT NOT NULL DEFAULT 'unverified_name_only',
+                identity_key TEXT,
+                identity_status TEXT NOT NULL DEFAULT 'unverified',
+                source_hash TEXT,
+                availability TEXT NOT NULL DEFAULT 'unavailable',
+                review_status TEXT NOT NULL DEFAULT 'pending',
+                last_synced_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+              )
+            `);
+            db.exec(`
+              INSERT INTO page_index_new (
+                id, name, file_name, parent_id, page_hash, workspace_id, import_id,
+                identity_kind, identity_key, identity_status, source_hash, availability,
+                review_status, last_synced_at, created_at, updated_at
+              )
+              SELECT
+                id, name, file_name, parent_id, page_hash, workspace_id, import_id,
+                identity_kind, identity_key, identity_status, source_hash, availability,
+                review_status, last_synced_at, created_at, updated_at
+              FROM page_index
+            `);
+            db.exec('DROP TABLE page_index;');
+            db.exec('ALTER TABLE page_index_new RENAME TO page_index;');
+        }
+        db.exec('CREATE INDEX IF NOT EXISTS idx_page_index_name ON page_index(name);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_page_index_identity ON page_index(workspace_id, identity_kind, identity_key);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_page_index_import ON page_index(import_id);');
+
+        // 4. Backfill legacy rows: every existing row is name-only review
+        //    context with no verified identity. Names are preserved.
+        db.exec(
+          'UPDATE page_index SET identity_key = name WHERE identity_key IS NULL AND name IS NOT NULL',
+        );
+        db.exec(
+          'UPDATE page_index SET workspace_id = (SELECT id FROM workspace ORDER BY rowid ASC LIMIT 1) WHERE workspace_id IS NULL',
+        );
+        db.exec(`
+          UPDATE page_index SET
+            identity_kind = 'unverified_name_only',
+            identity_status = 'unverified',
+            availability = 'unavailable',
+            review_status = 'pending',
+            source_hash = COALESCE(source_hash, page_hash)
+          WHERE identity_kind = 'unverified_name_only' OR identity_status = 'unverified' OR identity_kind IS NULL
+        `);
+
+        // 5. Clear inferred product_pages.page_id references while preserving
+        //    the rows (names and assignment history survive; the FK is unset).
+        db.exec('UPDATE product_pages SET page_id = NULL WHERE page_id IS NOT NULL');
+
+        // 6. Mark category_page proposals referencing inferred identities stale
+        //    without deleting proposals or their decision history.
+        const staleCount = db.run(
+          `UPDATE classification_proposals SET status = 'stale', is_stale = 1, staleness_reason = 'page_identity_unverified'
+           WHERE proposal_type = 'category_page' AND status IN ('pending', 'accepted', 'deferred')`,
+        ).changes;
+        console.log(`[Migrations] Marked ${staleCount} category_page proposal(s) stale (page identity unverified).`);
+
+        db.exec("INSERT INTO app_meta (key, value) VALUES ('page_identity_schema_version', '1');");
+        console.log('[Migrations] Page identity migration complete.');
+        })();
+      } finally {
+        if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+      }
+    }
+  } catch (e) {
+    console.error('[Migrations] Page identity migration failed:', e);
+    throw e;
+  }
+
+  // ── Product Intelligence Migration (PI-2) ──────────────────────────────────
+  //
+  // Durable data model for Product Intelligence runs (epic #28, issue #19):
+  // runs, the replayable event stream, steps, tool calls, sources, evidence,
+  // conflicts, results, and Pi-vs-baseline comparisons. Normalized tables are
+  // authoritative; onboarding imports reference the originating run and
+  // selected evidence. Child rows cascade on run deletion (explicit retention
+  // policy lives in the run service).
+  try {
+    const piVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('product_intelligence_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!piVersion) {
+      console.log('[Migrations] Running product intelligence schema migration...');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS product_intelligence_runs (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            onboarding_item_id TEXT,
+            mode TEXT NOT NULL DEFAULT 'interactive' CHECK (mode IN ('shadow', 'interactive', 'onboarding')),
+            status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+            executor TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            policy_json TEXT NOT NULL,
+            config_snapshot_id TEXT NOT NULL,
+            config_snapshot_hash TEXT NOT NULL,
+            code_commit TEXT,
+            pi_version TEXT,
+            extension_versions_json TEXT NOT NULL DEFAULT '[]',
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            cancelled_at TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            estimated_cost REAL,
+            actual_cost REAL,
+            token_usage_json TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_runs_workspace_status ON product_intelligence_runs(workspace_id, status);
+          CREATE INDEX IF NOT EXISTS idx_pi_runs_started ON product_intelligence_runs(started_at);
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_events (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, sequence)
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_events_run ON product_intelligence_events(run_id, sequence);
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_steps (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            step_type TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
+            summary TEXT,
+            input_hash TEXT,
+            output_ref TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_json TEXT,
+            UNIQUE (run_id, sequence)
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_steps_run ON product_intelligence_steps(run_id, sequence);
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_tool_calls (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            step_id TEXT REFERENCES product_intelligence_steps(id) ON DELETE SET NULL,
+            sequence INTEGER NOT NULL,
+            tool_name TEXT NOT NULL,
+            tool_version TEXT,
+            policy_outcome TEXT NOT NULL DEFAULT 'allowed' CHECK (policy_outcome IN ('allowed', 'denied', 'budget_exceeded')),
+            request_hash TEXT,
+            response_hash TEXT,
+            artifact_ref TEXT,
+            latency_ms INTEGER,
+            cost_usd REAL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            error_json TEXT,
+            UNIQUE (run_id, sequence)
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_tool_calls_run ON product_intelligence_tool_calls(run_id, sequence);
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_sources (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            url TEXT NOT NULL,
+            canonical_url TEXT,
+            domain TEXT NOT NULL,
+            source_type TEXT NOT NULL DEFAULT 'other' CHECK (source_type IN ('catalog', 'supplier', 'registry', 'retailer', 'manufacturer', 'other')),
+            gtin_match_status TEXT NOT NULL DEFAULT 'unknown' CHECK (gtin_match_status IN ('exact', 'variant', 'unknown', 'conflicting')),
+            variant_match_status TEXT NOT NULL DEFAULT 'unknown' CHECK (variant_match_status IN ('exact', 'variant', 'unknown', 'conflicting')),
+            retrieved_at TEXT,
+            content_hash TEXT,
+            artifact_ref TEXT,
+            license_ref TEXT,
+            terms_ref TEXT,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_sources_run ON product_intelligence_sources(run_id);
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_evidence (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            source_id TEXT NOT NULL REFERENCES product_intelligence_sources(id) ON DELETE CASCADE,
+            target_field TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            extraction_method TEXT,
+            source_field TEXT,
+            reliability TEXT,
+            direct_support INTEGER NOT NULL DEFAULT 0,
+            snippet TEXT,
+            metadata_json TEXT,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_evidence_run ON product_intelligence_evidence(run_id);
+          CREATE INDEX IF NOT EXISTS idx_pi_evidence_source ON product_intelligence_evidence(source_id);
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_conflicts (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            field TEXT NOT NULL,
+            severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high')),
+            status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'dismissed')),
+            competing_values_json TEXT NOT NULL DEFAULT '[]',
+            evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+            resolution_json TEXT,
+            resolved_by TEXT,
+            resolved_at TEXT,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_conflicts_run ON product_intelligence_conflicts(run_id);
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_results (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL UNIQUE REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            schema_version INTEGER NOT NULL,
+            disposition TEXT NOT NULL CHECK (disposition IN ('submitted', 'abstained', 'unavailable')),
+            result_json TEXT NOT NULL,
+            result_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS product_intelligence_comparisons (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            baseline_type TEXT NOT NULL,
+            baseline_ref TEXT NOT NULL,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_comparisons_run ON product_intelligence_comparisons(run_id);
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_schema_version', '1');");
+      console.log('[Migrations] Product intelligence schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence schema migration failed:', e);
+    throw e;
   }
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as

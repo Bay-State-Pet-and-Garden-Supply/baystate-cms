@@ -18,14 +18,17 @@ import classificationRoutes from './routes/classification-routes';
 import storeManagerRoutes from './routes/store-manager-routes';
 import catalogRoutes from './routes/catalog-routes';
 import catalogClassificationRoutes from './routes/catalog-classification-routes';
+import embeddingRoutes from './routes/embedding-routes';
+import benchmarkRoutes from './routes/benchmark-routes';
+import productIntelligenceRoutes from './routes/product-intelligence-routes';
 import { getCurrentWorkspace } from './services/workspace-service';
 
 const app = new Hono();
 
 // API token middleware
-// When SHOPSITE_CMS_API_TOKEN is set, all mutating (non-GET) requests must include
+// When BAYSTATE_CMS_API_TOKEN is set, all mutating (non-GET) requests must include
 // an Authorization: Bearer <token> header matching the configured token.
-const apiToken = process.env.SHOPSITE_CMS_API_TOKEN;
+const apiToken = process.env.BAYSTATE_CMS_API_TOKEN;
 if (apiToken) {
   app.use('/api/*', async (c, next) => {
     if (c.req.method === 'GET' || c.req.method === 'HEAD') {
@@ -77,6 +80,10 @@ app.route('/api', classificationRoutes);
 app.route('/api', storeManagerRoutes);
 app.route('/api', catalogRoutes);
 app.route('/api', catalogClassificationRoutes);
+app.route('/api', embeddingRoutes);
+// Mounted exactly once under /api; route internals use /benchmark/... paths.
+app.route('/api', benchmarkRoutes);
+app.route('/api', productIntelligenceRoutes);
 
 // 404 handler
 app.notFound((c) => c.json({ error: 'Not found' }, 404));
