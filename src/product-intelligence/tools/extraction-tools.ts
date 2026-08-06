@@ -16,17 +16,8 @@ import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
 import { sha256Hex } from '../../shared/stable-id';
 import { sharpImageVerificationAdapter } from '../assets/contract';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
-import {
-  classifyPageIdentity,
-  errorResult,
-  evidenceId,
-  noResult,
-  okResult,
-  policyDenied,
-  type ExtractedFieldEvidence,
-  type PageExtractionContract,
-  type PageExtractionResult,
-} from './contract';
+import { classifyPageIdentity, errorResult, evidenceId, noResult, okResult, policyDenied, type ExtractedFieldEvidence, type PageExtractionContract, type PageExtractionResult } from './contract';
+import { createLadderExtractionContract } from '../extraction/ladder';
 import { boundedString } from './registry';
 
 // ---------------------------------------------------------------------------
@@ -155,7 +146,7 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
   }
 }
 
-export const defaultPageExtractionContract: PageExtractionContract = new HttpPageExtractionAdapter();
+export const defaultPageExtractionContract: PageExtractionContract = createLadderExtractionContract();
 
 // ---------------------------------------------------------------------------
 // Tools
