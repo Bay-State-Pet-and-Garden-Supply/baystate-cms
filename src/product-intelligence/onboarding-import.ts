@@ -33,6 +33,7 @@ import {
 } from '../db/repositories/product-intelligence-repo';
 import type { ExtractionData, OnboardingItem } from '../shared/schemas/onboarding';
 import { getProductIntelligenceFlags } from './flags';
+import { isPiKillSwitchEnabled } from './evaluation/rollout';
 
 export interface ImportRunResult {
   importRecord: PiImportRow;
@@ -222,6 +223,7 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
     throw new Error('Agent Lab import is disabled (productIntelligence.allowOnboardingImport is false)');
   }
   if (flags.shadowOnly) throw new Error('shadowOnly mode is enabled: Agent Lab results cannot be imported');
+  if (isPiKillSwitchEnabled()) throw new Error('Product Intelligence is disabled by the kill switch');
 
   const db = getDb();
   return db.transaction(() => {

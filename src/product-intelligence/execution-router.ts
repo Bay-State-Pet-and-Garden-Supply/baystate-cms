@@ -49,6 +49,14 @@ export function createExecutionRouter(deps: ExecutionRouterDeps): ExecutionRoute
   return {
     async resolveExecutor(): Promise<ExecutorSelection> {
       const flags = flagsProvider();
+      // PI-9: the kill switch returns every workspace to the normal pipeline.
+      if (process.env.BAYSTATE_CMS_PI_KILL_SWITCH === 'true' || flags.killSwitch) {
+        return {
+          name: LEGACY_EXECUTOR_NAME,
+          executor: deps.legacy,
+          reason: 'kill_switch: product intelligence disabled',
+        };
+      }
       if (!flags.productIntelligenceEnabled) {
         return {
           name: LEGACY_EXECUTOR_NAME,

@@ -24,6 +24,8 @@ export interface ProductIntelligenceFlags {
   allowOnboardingImport: boolean;
   /** Allow batch runs (multiple products in one launch). */
   allowBatchRuns: boolean;
+  /** Global kill switch: forces the legacy pipeline everywhere (PI-9). */
+  killSwitch: boolean;
 }
 
 export const DEFAULT_PRODUCT_INTELLIGENCE_FLAGS: ProductIntelligenceFlags = {
@@ -32,6 +34,7 @@ export const DEFAULT_PRODUCT_INTELLIGENCE_FLAGS: ProductIntelligenceFlags = {
   shadowOnly: true,
   allowOnboardingImport: false,
   allowBatchRuns: false,
+  killSwitch: false,
 };
 
 export const PRODUCT_INTELLIGENCE_FLAG_ENV: Record<keyof ProductIntelligenceFlags, string> = {
@@ -40,6 +43,7 @@ export const PRODUCT_INTELLIGENCE_FLAG_ENV: Record<keyof ProductIntelligenceFlag
   shadowOnly: 'BAYSTATE_CMS_PI_SHADOW_ONLY',
   allowOnboardingImport: 'BAYSTATE_CMS_PI_ALLOW_ONBOARDING_IMPORT',
   allowBatchRuns: 'BAYSTATE_CMS_PI_ALLOW_BATCH_RUNS',
+  killSwitch: 'BAYSTATE_CMS_PI_KILL_SWITCH',
 };
 
 function parseBooleanEnv(raw: string | undefined, fallback: boolean): boolean {
@@ -74,6 +78,10 @@ export function loadProductIntelligenceFlags(
     allowBatchRuns: parseBooleanEnv(
       env[PRODUCT_INTELLIGENCE_FLAG_ENV.allowBatchRuns],
       DEFAULT_PRODUCT_INTELLIGENCE_FLAGS.allowBatchRuns,
+    ),
+    killSwitch: parseBooleanEnv(
+      env[PRODUCT_INTELLIGENCE_FLAG_ENV.killSwitch],
+      DEFAULT_PRODUCT_INTELLIGENCE_FLAGS.killSwitch,
     ),
   };
   return flags;

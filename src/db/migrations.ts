@@ -1700,6 +1700,44 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Product Intelligence Evaluation Migration (PI-9) ────────────────────
+  // Durable evaluation runs: a golden-dataset example compared against a
+  // completed Pi run, with the gold labels, prediction, comparison, and
+  // outcome preserved for audit. Held-out products are never evaluated by
+  // default (the runner defaults to the 'test' split).
+  try {
+    const piEvalVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('pi_evaluation_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!piEvalVersion) {
+      console.log('[Migrations] Running product intelligence evaluation schema migration...');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS pi_evaluation_runs (
+            id TEXT PRIMARY KEY,
+            dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+            dataset_hash TEXT NOT NULL,
+            product_sku TEXT NOT NULL,
+            split_group TEXT NOT NULL,
+            run_id TEXT REFERENCES product_intelligence_runs(id) ON DELETE SET NULL,
+            gold_labels_json TEXT NOT NULL,
+            prediction_json TEXT NOT NULL,
+            comparison_json TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_eval_dataset ON pi_evaluation_runs(dataset_id);
+          CREATE INDEX IF NOT EXISTS idx_pi_eval_sku ON pi_evaluation_runs(product_sku);
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_evaluation_schema_version', '1');");
+      console.log('[Migrations] Product intelligence evaluation schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence evaluation schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

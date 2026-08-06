@@ -21,3 +21,7 @@ export * from './policy';
 export * from './onboarding-import';
 export * from './tools';
 export * from './assets';
+
+export * from './evaluation/gold';
+export * from './evaluation/metrics';
+export * from './evaluation/fixture-dataset';

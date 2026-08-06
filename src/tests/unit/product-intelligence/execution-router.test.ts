@@ -81,7 +81,7 @@ describe('createExecutionRouter', () => {
     const router = createExecutionRouter({
       legacy,
       pi,
-      flags: () => ({ productIntelligenceEnabled: true, piEnabled: true, shadowOnly: true, allowOnboardingImport: false, allowBatchRuns: false }),
+      flags: () => ({ productIntelligenceEnabled: true, piEnabled: true, shadowOnly: true, allowOnboardingImport: false, allowBatchRuns: false, killSwitch: false }),
     });
     expect((await router.resolveExecutor()).name).toBe(PI_EXECUTOR_NAME);
   });

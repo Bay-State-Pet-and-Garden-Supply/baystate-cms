@@ -341,6 +341,7 @@ describe('AgentRunInspector — onboarding import (PI-8)', () => {
         shadowOnly: false,
         allowOnboardingImport: true,
         allowBatchRuns: false,
+        killSwitch: false,
       },
     });
     vi.mocked(importRunToOnboarding).mockResolvedValue({
@@ -407,6 +408,7 @@ describe('AgentRunInspector — onboarding import (PI-8)', () => {
         shadowOnly: true,
         allowOnboardingImport: false,
         allowBatchRuns: false,
+        killSwitch: false,
       },
     });
 
@@ -438,6 +440,7 @@ describe('AgentRunInspector — onboarding import (PI-8)', () => {
         shadowOnly: true,
         allowOnboardingImport: false,
         allowBatchRuns: false,
+        killSwitch: false,
       },
     });
 

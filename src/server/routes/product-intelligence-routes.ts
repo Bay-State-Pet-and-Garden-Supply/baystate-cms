@@ -29,8 +29,19 @@ import { PiProductIntelligenceExecutor } from '../../product-intelligence/pi/pi-
 import { PiSdkSessionFactory } from '../../product-intelligence/pi/pi-session-factory';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { getCurrentWorkspace } from '../services/workspace-service';
+import { getDb } from '../../db/connection';
 import { getPiRun, listPiRuns } from '../../db/repositories/product-intelligence-repo';
 import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
+import {
+  currentRolloutState,
+  setRolloutConfig,
+  type RolloutGateThreshold,
+  type RolloutStage,
+} from '../../product-intelligence/evaluation/rollout';
+import { runPiEvaluation, seedPiGoldenDataset } from '../../product-intelligence/evaluation/runner';
+import { runExtractionBenchmark } from '../../product-intelligence/evaluation/extraction-benchmark';
+import { aggregatePiComparisons } from '../../product-intelligence/evaluation/metrics';
+import { PI_GOLDEN_DATASET_NAME } from '../../product-intelligence/evaluation/fixture-dataset';
 
 const router = new Hono();
 
@@ -380,6 +391,131 @@ router.post('/product-intelligence/retention', async (c) => {
 /** GET /api/product-intelligence/flags — effective runtime flags. */
 router.get('/product-intelligence/flags', (c) => {
   return c.json({ flags: getProductIntelligenceFlags() });
+});
+
+/**
+ * POST /api/product-intelligence/evaluation/dataset/fixture
+ * Seed the built-in versioned golden dataset (PI-9). Refuses duplicates.
+ */
+router.post('/product-intelligence/evaluation/dataset/fixture', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  try {
+    const result = seedPiGoldenDataset();
+    return c.json({ ...result, name: PI_GOLDEN_DATASET_NAME }, 201);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('already exists')) return c.json({ error: message }, 409);
+    return c.json({ error: message }, 400);
+  }
+});
+
+/** POST /api/product-intelligence/evaluation/run — evaluate runs against a frozen dataset. */
+router.post('/product-intelligence/evaluation/run', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const datasetId = String((body as { datasetId?: unknown }).datasetId ?? '');
+  if (!datasetId) return c.json({ error: 'datasetId is required' }, 400);
+  const runIds = Array.isArray((body as { runIds?: unknown }).runIds)
+    ? ((body as { runIds?: unknown[] }).runIds as string[])
+    : undefined;
+  try {
+    const result = runPiEvaluation({ datasetId, runIds });
+    return c.json(result, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
+/** GET /api/product-intelligence/evaluation/reports — aggregate report for a dataset version. */
+router.get('/product-intelligence/evaluation/reports', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const datasetHash = c.req.query('datasetVersion');
+  const db = getDb();
+  let rows: Array<{ comparison_json: string }>;
+  if (datasetHash) {
+    rows = db
+      .query('SELECT comparison_json FROM pi_evaluation_runs WHERE dataset_hash = ? ORDER BY created_at DESC')
+      .all(datasetHash) as Array<{ comparison_json: string }>;
+  } else {
+    rows = db
+      .query('SELECT comparison_json FROM pi_evaluation_runs ORDER BY created_at DESC LIMIT 500')
+      .all() as Array<{ comparison_json: string }>;
+  }
+  const comparisons = rows
+    .map((r) => {
+      try {
+        return JSON.parse(r.comparison_json) as Parameters<typeof aggregatePiComparisons>[0][number];
+      } catch {
+        return null;
+      }
+    })
+    .filter((c): c is Parameters<typeof aggregatePiComparisons>[0][number] => c != null);
+  const report = comparisons.length > 0 ? aggregatePiComparisons(comparisons) : null;
+  return c.json({ datasetHash: datasetHash ?? null, sampleSize: comparisons.length, report });
+});
+
+/** POST /api/product-intelligence/evaluation/benchmark — extraction-provider benchmark. */
+router.post('/product-intelligence/evaluation/benchmark', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const datasetId = String((body as { datasetId?: unknown }).datasetId ?? '');
+  if (!datasetId) return c.json({ error: 'datasetId is required' }, 400);
+  const providersRaw = (body as { providers?: unknown }).providers;
+  const providers: Array<'stub' | 'http'> = Array.isArray(providersRaw)
+    ? (providersRaw as string[]).filter((p): p is 'stub' | 'http' => p === 'stub' || p === 'http')
+    : ['stub'];
+  const network = (body as { network?: unknown }).network === true;
+  try {
+    const report = await runExtractionBenchmark({ datasetId, providers, network });
+    return c.json({ report }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
+/** GET /api/product-intelligence/rollout — rollout state + gates + kill switch. */
+router.get('/product-intelligence/rollout', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  return c.json({ state: currentRolloutState() });
+});
+
+/** POST /api/product-intelligence/rollout — set the documented rollout stage. */
+router.post('/product-intelligence/rollout', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  try {
+    const config = setRolloutConfig({
+      stage: (body as { stage?: unknown }).stage as RolloutStage,
+      documentedBy: String((body as { documentedBy?: unknown }).documentedBy ?? ''),
+      thresholds: Array.isArray((body as { thresholds?: unknown }).thresholds)
+        ? ((body as { thresholds?: unknown[] }).thresholds as RolloutGateThreshold[])
+        : undefined,
+    });
+    return c.json({ config }, 200);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
 });
 
 export default router;
