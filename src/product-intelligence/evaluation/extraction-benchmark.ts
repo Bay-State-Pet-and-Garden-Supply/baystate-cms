@@ -13,6 +13,8 @@
 import { getExamples } from '../../db/repositories/benchmark-repo';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
 import type { PageExtractionContract } from '../tools/contract';
+import { parseStructuredSignals } from '../extraction/platforms';
+import type { ManagedBrowserProvider } from '../extraction/managed-fallback';
 import { PiGoldLabelsSchema, PiProductInputSchema } from './gold';
 
 export interface ExtractionProviderExtraction {
@@ -123,6 +125,75 @@ export class HttpExtractionProvider implements ExtractionProviderAdapter {
 }
 
 /**
+ * Managed-browser provider adapter (PI-11 layer 7): benchmarks any
+ * provider-neutral ManagedBrowserProvider through the same scoring pipeline
+ * as stub/http — the "benchmark first, select the smallest justified set"
+ * enforcement point. Retrieval success is still ALWAYS distinguished from
+ * correct product extraction.
+ */
+export class ManagedExtractionProvider implements ExtractionProviderAdapter {
+  readonly name: string;
+  readonly version: string;
+  private provider: ManagedBrowserProvider;
+
+  constructor(provider: ManagedBrowserProvider) {
+    this.name = `managed:${provider.name}`;
+    this.version = provider.version;
+    this.provider = provider;
+  }
+
+  async extract(input: { url: string; gtin: string; name: string }): Promise<{
+    retrieval: { ok: boolean; status: number; contentType: string | null };
+    extraction: ExtractionProviderExtraction | null;
+  }> {
+    try {
+      const page = await this.provider.fetchPage({
+        url: input.url,
+        signal: new AbortController().signal,
+        timeoutMs: 30_000,
+      });
+      if (page.statusCode !== 200 || !page.html) {
+        return { retrieval: { ok: false, status: page.statusCode ?? 0, contentType: null }, extraction: null };
+      }
+      const signals = parseStructuredSignals(page.html);
+      const product = signals.jsonLdProducts[0] ?? null;
+      if (!product) {
+        // Retrieved but nothing extractable — retrieval is NOT extraction.
+        return {
+          retrieval: { ok: true, status: 200, contentType: 'text/html' },
+          extraction: null,
+        };
+      }
+      const gtinDigits = (product.gtin ?? '').replace(/\D/g, '');
+      const expectedDigits = input.gtin.replace(/\D/g, '');
+      const identityStatus =
+        gtinDigits.length >= 8 && gtinDigits === expectedDigits
+          ? 'exact_match'
+          : gtinDigits.length >= 8
+            ? 'conflicting_identity'
+            : 'insufficient_evidence';
+      const facts: ExtractionProviderExtraction['facts'] = [];
+      if (product.name) facts.push({ field: 'title', value: product.name, method: 'managed_browser', sourcePath: 'managed JSON-LD name', artifactRef: null });
+      if (product.sku) facts.push({ field: 'sku', value: product.sku, method: 'managed_browser', sourcePath: 'managed JSON-LD sku', artifactRef: null });
+      if (product.brand) facts.push({ field: 'brand', value: product.brand, method: 'managed_browser', sourcePath: 'managed JSON-LD brand', artifactRef: null });
+      if (product.size) facts.push({ field: 'size', value: product.size, method: 'managed_browser', sourcePath: 'managed JSON-LD size', artifactRef: null });
+      if (gtinDigits.length >= 8) facts.push({ field: 'gtin', value: gtinDigits, method: 'managed_browser', sourcePath: 'managed JSON-LD gtin', artifactRef: null });
+      return {
+        retrieval: { ok: true, status: 200, contentType: 'text/html' },
+        extraction: {
+          identityStatus,
+          variant: null,
+          facts,
+          imageUrl: product.images[0] ?? null,
+        },
+      };
+    } catch {
+      return { retrieval: { ok: false, status: 0, contentType: null }, extraction: null };
+    }
+  }
+}
+
+/**
  * Built-in deterministic benchmark pages (one per representative case). The
  * 'blocked' page is intentionally absent from this list — the test seeds its
  * fixture map without it so retrieval fails with 404.
@@ -199,9 +270,11 @@ export const STUB_BENCHMARK_PAGES: Array<{ url: string; gtin: string; name: stri
 
 export interface ExtractionBenchmarkOptions {
   datasetId: string;
-  providers: Array<'stub' | 'http'>;
+  providers: Array<'stub' | 'http' | 'managed'>;
   /** Network-enabled providers (http) stay disabled by default. */
   network?: boolean;
+  /** Managed-browser providers to benchmark (one row per provider). */
+  managed?: { providers: ManagedBrowserProvider[] };
 }
 
 export interface ExtractionBenchmarkRow {
@@ -262,12 +335,40 @@ export async function runExtractionBenchmark(opts: ExtractionBenchmarkOptions): 
   const examples = getExamples(opts.datasetId, 'test');
   const rows: ExtractionBenchmarkRow[] = [];
 
-  for (const providerName of opts.providers) {
+  const providerNames: string[] = [];
+  for (const name of opts.providers) {
+    if (name === 'managed') {
+      const managedList = opts.managed?.providers ?? [];
+      // Requested but nothing registered: one honest skip row, never silent.
+      if (managedList.length === 0) providerNames.push('managed:n/a');
+      for (const managed of managedList) providerNames.push(`managed:${managed.name}`);
+    } else {
+      providerNames.push(name);
+    }
+  }
+
+  for (const providerName of providerNames) {
     let provider: ExtractionProviderAdapter | null = null;
     if (providerName === 'stub') {
       const fixtures = new Map<string, StubPageFixture>();
       for (const page of STUB_BENCHMARK_PAGES) fixtures.set(page.url, page.fixture);
       provider = new StubExtractionProvider(fixtures);
+    } else if (providerName.startsWith('managed:')) {
+      const managed = (opts.managed?.providers ?? []).find((p) => `managed:${p.name}` === providerName);
+      if (managed) {
+        provider = new ManagedExtractionProvider(managed);
+      } else {
+        // No implementation registered — record the skip honestly.
+        rows.push({
+          provider: providerName, providerVersion: 'n/a', pages: 0, retrievalSuccess: 0, retrievalRate: 0,
+          extractionSuccess: 0, extractionRate: 0, exactProductAccuracy: null, wrongVariantRate: null,
+          parentOnlyDetectionAccuracy: null, fieldPrecision: null, fieldRecall: null,
+          traceability: { withMethod: 0, withSourcePath: 0, withArtifactRef: 0, coverage: null },
+          replayAvailable: false, medianLatencyMs: null, p95LatencyMs: null,
+          costPerPage: 0, costPerCorrectProduct: null, failureRate: 1, blockedPageRecoveryRate: null,
+        });
+        continue;
+      }
     } else if (providerName === 'http') {
       if (!opts.network) {
         // Network stays disabled by default; the row records the skip honestly.

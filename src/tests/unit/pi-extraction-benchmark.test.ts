@@ -15,6 +15,7 @@ import { initDb, getDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import * as benchmarkRepo from '../../db/repositories/benchmark-repo';
 import { runExtractionBenchmark, STUB_BENCHMARK_PAGES } from '../../product-intelligence/evaluation/extraction-benchmark';
+import { StubManagedProvider } from '../../product-intelligence/extraction/managed-fallback';
 
 const workspaceId = 'ws-pi-bench-test';
 
@@ -27,9 +28,12 @@ function seedWorkspace(wsId: string, wsPath: string) {
 }
 
 /** Seed a frozen dataset from a subset of STUB_BENCHMARK_PAGES. */
-function seedDataset(name: string, urls: string[]): string {
+function seedDataset(
+  name: string,
+  urls: string[],
+  extras: Array<{ gtin: string; sku: string; input: Record<string, unknown>; gold: Record<string, unknown> }> = [],
+): string {
   const ds = benchmarkRepo.createDataset(workspaceId, name, 'random', 42);
-  console.log('[dbg] created ds', ds.id, 'status', ds.status);
   const pages = STUB_BENCHMARK_PAGES.filter((p) => urls.includes(p.url));
   for (const page of pages) {
     const input = {
@@ -62,6 +66,9 @@ function seedDataset(name: string, urls: string[]): string {
       JSON.stringify(input),
       JSON.stringify(gold),
     );
+  }
+  for (const extra of extras) {
+    benchmarkRepo.insertExample(ds.id, extra.gtin, extra.sku, 'test', JSON.stringify(extra.input), JSON.stringify(extra.gold));
   }
   benchmarkRepo.markFamilyReviewComplete(ds.id, 'tester');
   benchmarkRepo.freezeDataset(ds.id, 'tester');
@@ -163,5 +170,98 @@ describe('PI-9 extraction benchmark', () => {
     expect(report.rows[0].provider).toBe('http');
     expect(report.rows[0].pages).toBe(0);
     expect(report.rows[0].extractionRate).toBe(0);
+  });
+  it('scores a managed-browser provider through the full benchmark pipeline', async () => {
+    // Deterministic stub managed provider serving JSON-LD pages that mirror
+    // the exact-match fixture — layer-7 seam scored end-to-end.
+    const htmlFor = (url: string): string => {
+      if (url.includes('exact-jsonld')) {
+        return '<script type="application/ld+json">{"@type":"Product","name":"Stella & Chewy Chicken Broth 16 oz","sku":"SC-16","brand":"Stella & Chewy","size":"16 oz","gtin":"085000079585"}</script>';
+      }
+      if (url.includes('xhr-only')) {
+        return '<script type="application/ld+json">{"@type":"Product","name":"Stella & Chewy Chicken Broth 16 oz","size":"16 oz","gtin":"085000079585","image":"https://cdn.example.com/v16.jpg"}</script>';
+      }
+      return '';
+    };
+    const pages = new Map<string, string>();
+    for (const p of STUB_BENCHMARK_PAGES) pages.set(p.url, htmlFor(p.url));
+    const provider = new StubManagedProvider(pages);
+
+    const urls = STUB_BENCHMARK_PAGES.filter((p) => p.fixture.identityStatus === 'exact_match').map((p) => p.url);
+    const dsId = seedDataset('managed-good', urls);
+    const report = await runExtractionBenchmark({ datasetId: dsId, providers: ['managed'], managed: { providers: [provider] } });
+
+    expect(report.rows).toHaveLength(1);
+    expect(report.rows[0].provider).toBe('managed:stub_managed');
+    expect(report.rows[0].retrievalRate).toBe(1);
+    expect(report.rows[0].extractionRate).toBe(1);
+    expect(report.rows[0].exactProductAccuracy).toBe(1);
+    expect(report.rows[0].fieldRecall).toBe(1);
+    expect(report.rows[0].traceability.coverage).toBe(1);
+    expect(report.recommendation?.recommended).toContain('managed:stub_managed');
+  });
+
+  it('distinguishes retrieval success from extraction success for managed providers', async () => {
+    // Page retrieved (200) but has no JSON-LD -> extraction must fail.
+    const pages = new Map([['https://managed.example.com/p/empty', '<html><body>no data</body></html>']]);
+    // Seed an example whose expectedPageUrl is served but empty (inserted
+    // before freeze — frozen datasets are immutable).
+    const dsId = seedDataset('managed-retrieval-only', [], [
+      {
+        gtin: '085000079585',
+        sku: '085000079585',
+        input: { gtin: '085000079585', registerName: 'STELLA CHKN BROTH 16OZ', expectedPageUrl: 'https://managed.example.com/p/empty' },
+        gold: {
+          identity: { exactProduct: true, wrongVariant: false, parentProductOnly: false, requiredAbstention: false },
+          expectedSource: null, expectedTitle: 'X', requiredFacts: [{ field: 'title', value: 'X' }],
+          expectedEvidence: [], expectedImage: null,
+          expectedClassification: { productType: null, attributes: [], categoryPages: [] },
+          misleadingSources: [], difficultyTags: [],
+        },
+      },
+    ]);
+    const report = await runExtractionBenchmark({
+      datasetId: dsId,
+      providers: ['managed'],
+      managed: { providers: [new StubManagedProvider(pages)] },
+    });
+    expect(report.rows[0].retrievalRate).toBe(1);
+    expect(report.rows[0].extractionRate).toBe(0);
+  });
+
+  it('flags conflicting GTINs instead of claiming exact matches for managed providers', async () => {
+    const wrongGtinHtml = '<script type="application/ld+json">{"@type":"Product","name":"Wrong Product","gtin":"999999999999"}</script>';
+    const provider = new StubManagedProvider(new Map([['https://managed.example.com/p/wrong', wrongGtinHtml]]));
+    const dsId = seedDataset('managed-conflict', [], [
+      {
+        gtin: '085000079585',
+        sku: '085000079585',
+        input: { gtin: '085000079585', registerName: 'STELLA CHKN BROTH 16OZ', expectedPageUrl: 'https://managed.example.com/p/wrong' },
+        gold: {
+          identity: { exactProduct: true, wrongVariant: false, parentProductOnly: false, requiredAbstention: false },
+          expectedSource: null, expectedTitle: 'Wrong Product', requiredFacts: [{ field: 'title', value: 'Wrong Product' }],
+          expectedEvidence: [], expectedImage: null,
+          expectedClassification: { productType: null, attributes: [], categoryPages: [] },
+          misleadingSources: [], difficultyTags: [],
+        },
+      },
+    ]);
+    const report = await runExtractionBenchmark({
+      datasetId: dsId,
+      providers: ['managed'],
+      managed: { providers: [provider] },
+    });
+    // Retrieved and parsed, but the GTIN conflicts — never an exact match.
+    expect(report.rows[0].retrievalRate).toBe(1);
+    expect(report.rows[0].exactProductAccuracy).toBe(0);
+    expect(report.rows[0].extractionRate).toBe(0);
+  });
+
+  it('records a skip row when a managed provider is requested but not registered', async () => {
+    const dsId = seedDataset('managed-unregistered', STUB_BENCHMARK_PAGES.map((p) => p.url).slice(0, 1));
+    const report = await runExtractionBenchmark({ datasetId: dsId, providers: ['managed'], managed: { providers: [] } });
+    expect(report.rows[0].provider).toBe('managed:n/a');
+    expect(report.rows[0].pages).toBe(0);
+    expect(report.rows[0].failureRate).toBe(1);
   });
 });

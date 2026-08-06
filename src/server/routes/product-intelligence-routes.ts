@@ -24,6 +24,7 @@ import {
 } from '../../product-intelligence/run-service';
 import { createExecutionRouter } from '../../product-intelligence/execution-router';
 import { getProductIntelligenceFlags } from '../../product-intelligence/flags';
+import { StubManagedProvider, type ManagedBrowserProvider } from '../../product-intelligence/extraction/managed-fallback';
 import { LegacyProductIntelligenceExecutor } from '../../product-intelligence/legacy-executor';
 import { PiProductIntelligenceExecutor } from '../../product-intelligence/pi/pi-executor';
 import { PiSdkSessionFactory } from '../../product-intelligence/pi/pi-session-factory';
@@ -562,12 +563,32 @@ router.post('/product-intelligence/evaluation/benchmark', async (c) => {
   const datasetId = String((body as { datasetId?: unknown }).datasetId ?? '');
   if (!datasetId) return c.json({ error: 'datasetId is required' }, 400);
   const providersRaw = (body as { providers?: unknown }).providers;
-  const providers: Array<'stub' | 'http'> = Array.isArray(providersRaw)
-    ? (providersRaw as string[]).filter((p): p is 'stub' | 'http' => p === 'stub' || p === 'http')
+  const providers: Array<'stub' | 'http' | 'managed'> = Array.isArray(providersRaw)
+    ? (providersRaw as string[]).filter((p): p is 'stub' | 'http' | 'managed' => p === 'stub' || p === 'http' || p === 'managed')
     : ['stub'];
   const network = (body as { network?: unknown }).network === true;
+  // Managed-browser providers for the benchmark. Real vendor implementations
+  // plug in programmatically; the API accepts deterministic stub pages so the
+  // layer-7 seam can be scored end-to-end before any provider is adopted
+  // (benchmark first — no provider ships adopted).
+  let managed: { providers: ManagedBrowserProvider[] } | undefined;
+  const managedRaw = (body as { managed?: unknown }).managed;
+  if (Array.isArray(managedRaw)) {
+    managed = {
+      providers: managedRaw.map((entry) => {
+        const entryObj = entry as { pages?: Array<{ url?: unknown; html?: unknown }> } | null;
+        const pages = new Map<string, string>();
+        if (Array.isArray(entryObj?.pages)) {
+          for (const page of entryObj.pages) {
+            if (page && typeof page.url === 'string' && typeof page.html === 'string') pages.set(page.url, page.html);
+          }
+        }
+        return new StubManagedProvider(pages);
+      }),
+    };
+  }
   try {
-    const report = await runExtractionBenchmark({ datasetId, providers, network });
+    const report = await runExtractionBenchmark({ datasetId, providers, network, managed });
     return c.json({ report }, 201);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
