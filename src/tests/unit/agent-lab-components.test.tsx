@@ -20,12 +20,33 @@ vi.mock('../../client/product-intelligence-api', () => ({
   comparePiRun: vi.fn(),
   parseRunInput: vi.fn(),
   parseRunPolicy: vi.fn(),
+  importRunToOnboarding: vi.fn(),
+}));
+
+vi.mock('../../client/hooks/useProductIntelligenceRun', () => ({
+  useProductIntelligenceRun: vi.fn(),
+}));
+vi.mock('../../client/hooks/useProductIntelligenceEvents', () => ({
+  useProductIntelligenceEvents: vi.fn(),
 }));
 
 import { AgentRunLauncher } from '../../client/components/agent-lab/AgentRunLauncher';
 import { AgentRunTimeline } from '../../client/components/agent-lab/AgentRunTimeline';
 import { AgentRunList } from '../../client/components/agent-lab/AgentRunList';
-import { createPiRun, listPiRuns } from '../../client/product-intelligence-api';
+import { AgentRunInspector } from '../../client/components/agent-lab/AgentRunInspector';
+import {
+  useProductIntelligenceRun,
+} from '../../client/hooks/useProductIntelligenceRun';
+import {
+  useProductIntelligenceEvents,
+} from '../../client/hooks/useProductIntelligenceEvents';
+import {
+  createPiRun,
+  listPiRuns,
+  getPiFlags,
+  importRunToOnboarding,
+  type PiRunProjection,
+} from '../../client/product-intelligence-api';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -240,6 +261,191 @@ describe('AgentRunList', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('pi');
     expect(text).toContain('completed');
+
+    unmount();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AgentRunInspector — Send to Onboarding review (PI-8)
+// ---------------------------------------------------------------------------
+
+function makeProjection(overrides: Partial<PiRunProjection> = {}): PiRunProjection {
+  return {
+    run: {
+      id: 'run-import-1',
+      workspaceId: 'ws-1',
+      onboardingItemId: null,
+      mode: 'shadow',
+      status: 'completed',
+      executor: 'pi',
+      inputJson: '{}',
+      policyJson: '{}',
+      configSnapshotId: 'cfg',
+      configSnapshotHash: 'hash',
+      codeCommit: null,
+      promptHash: null,
+      piVersion: '1.0',
+      extensionVersionsJson: '[]',
+      startedAt: '2026-01-01T00:00:00Z',
+      completedAt: '2026-01-01T00:01:00Z',
+      cancelledAt: null,
+      errorCode: null,
+      errorMessage: null,
+      estimatedCost: null,
+      actualCost: 0.01,
+      tokenUsageJson: null,
+    },
+    steps: [],
+    toolCalls: [],
+    sources: [],
+    evidence: [],
+    conflicts: [],
+    assets: [],
+    result: {
+      id: 'res-1',
+      runId: 'run-import-1',
+      schemaVersion: 1,
+      disposition: 'submitted',
+      resultJson: '{"submission":{"identity":{"status":"exact_match"}}}',
+      resultHash: 'hash',
+      createdAt: '2026-01-01T00:01:00Z',
+    },
+    comparisons: [],
+    eventCount: 0,
+    ...overrides,
+  };
+}
+
+describe('AgentRunInspector — onboarding import (PI-8)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useProductIntelligenceEvents).mockReturnValue({
+      events: [],
+      status: 'closed',
+      stop: vi.fn(),
+    });
+  });
+
+  it('renders Send to Onboarding review and imports a reviewed result (create mode)', async () => {
+    vi.mocked(useProductIntelligenceRun).mockReturnValue({
+      run: makeProjection(),
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+    });
+    vi.mocked(getPiFlags).mockResolvedValue({
+      flags: {
+        productIntelligenceEnabled: true,
+        piEnabled: true,
+        shadowOnly: false,
+        allowOnboardingImport: true,
+        allowBatchRuns: false,
+      },
+    });
+    vi.mocked(importRunToOnboarding).mockResolvedValue({
+      import: {
+        id: 'imp-1',
+        runId: 'run-import-1',
+        onboardingItemId: 'item-1',
+        resultHash: 'hash',
+        mode: 'create',
+        importingUser: null,
+        status: 'active',
+        fieldSelectionJson: '[]',
+        excludedValuesJson: '[]',
+        overriddenValuesJson: '[]',
+        importedSourceIdsJson: '[]',
+        importedEvidenceIdsJson: '[]',
+        importedImageIdsJson: '[]',
+        createdAt: '2026-01-01T00:02:00Z',
+      },
+      itemId: 'item-1',
+      batchId: 'batch-1',
+      created: true,
+    });
+
+    const { container, unmount } = await renderAsync(
+      <AgentRunInspector runId="run-import-1" onBack={vi.fn()} />,
+    );
+
+    // Flags load asynchronously — flush microtasks so the button appears.
+    const text = container.textContent ?? '';
+    expect(text).toContain('Send to Onboarding review');
+
+    const btn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Send to Onboarding review'),
+    ) as HTMLButtonElement;
+    await act(async () => {
+      btn.click();
+    });
+
+    expect(importRunToOnboarding).toHaveBeenCalledTimes(1);
+    expect(importRunToOnboarding).toHaveBeenCalledWith('run-import-1', {
+      mode: 'create',
+      onboardingItemId: null,
+      importingUser: null,
+    });
+
+    const afterText = container.textContent ?? '';
+    expect(afterText).toContain('Imported to onboarding item');
+
+    unmount();
+  });
+
+  it('does not render the import button when the import flag is off', async () => {
+    vi.mocked(useProductIntelligenceRun).mockReturnValue({
+      run: makeProjection(),
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+    });
+    vi.mocked(getPiFlags).mockResolvedValue({
+      flags: {
+        productIntelligenceEnabled: true,
+        piEnabled: true,
+        shadowOnly: true,
+        allowOnboardingImport: false,
+        allowBatchRuns: false,
+      },
+    });
+
+    const { container, unmount } = await renderAsync(
+      <AgentRunInspector runId="run-import-1" onBack={vi.fn()} />,
+    );
+
+    expect(container.textContent ?? '').not.toContain('Send to Onboarding review');
+
+    unmount();
+  });
+
+  it('renders Open in Onboarding when the run is linked to an onboarding item', async () => {
+    vi.mocked(useProductIntelligenceRun).mockReturnValue({
+      run: makeProjection({
+        run: {
+          ...makeProjection().run,
+          onboardingItemId: 'item-42',
+        },
+      }),
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+    });
+    vi.mocked(getPiFlags).mockResolvedValue({
+      flags: {
+        productIntelligenceEnabled: true,
+        piEnabled: true,
+        shadowOnly: true,
+        allowOnboardingImport: false,
+        allowBatchRuns: false,
+      },
+    });
+
+    const { container, unmount } = await renderAsync(
+      <AgentRunInspector runId="run-import-1" onBack={vi.fn()} />,
+    );
+
+    expect(container.textContent ?? '').toContain('Open in Onboarding');
 
     unmount();
   });

@@ -11,6 +11,8 @@ import {
   deletePiRun,
   createPiRun,
   parseRunInput,
+  getPiFlags,
+  importRunToOnboarding,
 } from '../../product-intelligence-api';
 import { useProductIntelligenceRun } from '../../hooks/useProductIntelligenceRun';
 import { useProductIntelligenceEvents } from '../../hooks/useProductIntelligenceEvents';
@@ -38,6 +40,20 @@ export function AgentRunInspector({ runId, onBack }: Props) {
   const [narrowTab, setNarrowTab] = useState<NarrowTab>('progress');
   const [isWide, setIsWide] = useState(() => (typeof window !== 'undefined' ? window.innerWidth >= 1100 : true));
   const [actionError, setActionError] = useState<string | null>(null);
+  const [importFlags, setImportFlags] = useState<{ allowOnboardingImport: boolean; shadowOnly: boolean } | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    getPiFlags()
+      .then((res) =>
+        setImportFlags({
+          allowOnboardingImport: res.flags.allowOnboardingImport,
+          shadowOnly: res.flags.shadowOnly,
+        }),
+      )
+      .catch(() => setImportFlags(null));
+  }, []);
 
   useEffect(() => {
     const checkWidth = () => setIsWide(window.innerWidth >= 1100);
@@ -84,6 +100,29 @@ export function AgentRunInspector({ runId, onBack }: Props) {
     }
   };
 
+  const handleImport = async () => {
+    setActionError(null);
+    setImportNotice(null);
+    if (!projection) return;
+    const targetItemId = projection.run.onboardingItemId ?? null;
+    setImporting(true);
+    try {
+      const res = await importRunToOnboarding(runId, {
+        mode: targetItemId ? 'augment' : 'create',
+        onboardingItemId: targetItemId,
+        importingUser: null,
+      });
+      setImportNotice(
+        `Imported to onboarding item ${res.itemId.slice(0, 8)}… (${res.created ? 'new item' : 'already imported'})`,
+      );
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const handleReject = async () => {
     if (!window.confirm('Reject this result? The run and all its evidence will be deleted permanently.')) return;
     setActionError(null);
@@ -106,6 +145,9 @@ export function AgentRunInspector({ runId, onBack }: Props) {
     cancelBtn: { background: '#fef3c7', color: '#92400e' },
     rerunBtn: { background: '#eff6ff', color: '#2563eb', border: '1px solid #bfdbfe' },
     rejectBtn: { background: '#dc2626', color: '#fff' },
+    importBtn: { background: '#2563eb', color: '#fff' },
+    openOnboardingBtn: { background: '#fff', color: '#2563eb', border: '1px solid #bfdbfe' },
+    importNotice: { fontSize: 12, color: '#16a34a', background: '#f0fdf4', padding: '6px 10px', borderRadius: 6, marginBottom: 12 },
     tabs: { display: 'flex', gap: 4, marginBottom: 12 },
     tab: { background: '#fff', border: '1px solid #e5e7eb', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13, color: '#6b7280', fontWeight: 600 },
     tabActive: { background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 6, padding: '6px 14px', cursor: 'pointer', fontSize: 13, color: '#2563eb', fontWeight: 600 },
@@ -135,6 +177,12 @@ export function AgentRunInspector({ runId, onBack }: Props) {
 
   const run = projection.run;
   const isRunning = run.status === 'running';
+  const importEligible =
+    run.status === 'completed' &&
+    projection.result != null &&
+    projection.result.disposition === 'submitted' &&
+    importFlags?.allowOnboardingImport === true &&
+    importFlags?.shadowOnly === false;
   const statusColors: Record<string, { bg: string; color: string }> = {
     running: { bg: '#eff6ff', color: '#2563eb' },
     completed: { bg: '#f0fdf4', color: '#16a34a' },
@@ -152,6 +200,19 @@ export function AgentRunInspector({ runId, onBack }: Props) {
       <button style={{ ...styles.actionBtn, background: '#374151', color: '#fff' }} onClick={() => setShowEvidence(true)}>Evidence</button>
       {!isRunning && (
         <button style={{ ...styles.actionBtn, ...styles.rejectBtn }} onClick={handleReject}>Reject</button>
+      )}
+      {run.onboardingItemId && (
+        <button
+          style={{ ...styles.actionBtn, ...styles.openOnboardingBtn }}
+          onClick={() => window.location.assign('/?view=onboarding')}
+        >
+          Open in Onboarding
+        </button>
+      )}
+      {importEligible && (
+        <button style={{ ...styles.actionBtn, ...styles.importBtn }} disabled={importing} onClick={handleImport}>
+          {importing ? 'Importing…' : 'Send to Onboarding review'}
+        </button>
       )}
       <button style={{ ...styles.actionBtn, background: '#6b7280', color: '#fff' }} onClick={onBack}>Close</button>
     </div>
@@ -199,6 +260,7 @@ export function AgentRunInspector({ runId, onBack }: Props) {
       </div>
 
       {actionError && <div style={styles.error}>{actionError}</div>}
+      {importNotice && <div style={styles.importNotice}>{importNotice}</div>}
 
       {isWide ? (
         <div style={styles.wideGrid}>

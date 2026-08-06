@@ -159,7 +159,7 @@ function inferBrandViaHeuristics(
 
   for (const result of searchResults) {
     const titleLower = result.title.toLowerCase();
-    const snippetLower = result.snippet.toLowerCase();
+    const snippetLower = (result.snippet ?? '').toLowerCase();
 
     for (const site of knownBrandSites) {
       const brandLower = site.brandName.toLowerCase();

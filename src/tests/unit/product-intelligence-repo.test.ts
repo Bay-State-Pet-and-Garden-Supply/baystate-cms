@@ -98,6 +98,7 @@ describe('Product Intelligence repositories', () => {
       'product_intelligence_conflicts',
       'product_intelligence_events',
       'product_intelligence_evidence',
+      'product_intelligence_imports',
       'product_intelligence_policy_decisions',
       'product_intelligence_results',
       'product_intelligence_runs',

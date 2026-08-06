@@ -11,6 +11,7 @@ import { clearProductPages, assignProductToPage, assignProductToPageId, getProdu
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
 import { getAcceptedProposals, recordHistoryEvent } from '../db/repositories/classification-run-repo';
+import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { getCachedAttributeMappings, getCachedBrands } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from '../classification/brand-resolution';
 import type { Product } from '../shared/types';
@@ -336,6 +337,19 @@ export async function promoteItems(
       // Check if we have accepted page proposals or manual page assignments. If not, refuse to promote.
       if (classificationPageProposals.length === 0) {
         const errMsg = 'No accepted product page proposals or manual page assignments exist for this item';
+        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+        completePromotionStage(item.id, false, errMsg);
+        failures.push({ itemId: item.id, error: errMsg });
+        continue;
+      }
+
+      // ── Imported Agent Lab result gate (PI-8) ─────────────────────────
+      // An item whose extraction data carries imported PI evidence is only
+      // promotable while its origin is verifiable: the run exists, the
+      // result hash matches, and the import record is active.
+      const importGate = verifyImportedResultGate(item);
+      if (!importGate.ok) {
+        const errMsg = importGate.error;
         console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
         completePromotionStage(item.id, false, errMsg);
         failures.push({ itemId: item.id, error: errMsg });

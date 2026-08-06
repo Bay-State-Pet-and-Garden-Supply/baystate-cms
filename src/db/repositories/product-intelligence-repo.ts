@@ -900,6 +900,130 @@ export function countPiAssets(runId: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// Onboarding imports (PI-8)
+// ---------------------------------------------------------------------------
+
+export interface PiImportRow {
+  id: string;
+  runId: string | null;
+  onboardingItemId: string;
+  resultHash: string;
+  mode: 'create' | 'augment';
+  importingUser: string | null;
+  status: 'active' | 'superseded' | 'stale';
+  fieldSelectionJson: string;
+  excludedValuesJson: string;
+  overriddenValuesJson: string;
+  importedSourceIdsJson: string;
+  importedEvidenceIdsJson: string;
+  importedImageIdsJson: string;
+  createdAt: string;
+}
+
+export type PiImportStatus = PiImportRow['status'];
+
+const IMPORT_SELECT = `
+  SELECT id, run_id AS runId, onboarding_item_id AS onboardingItemId,
+         result_hash AS resultHash, mode, importing_user AS importingUser,
+         status, field_selection_json AS fieldSelectionJson,
+         excluded_values_json AS excludedValuesJson,
+         overridden_values_json AS overriddenValuesJson,
+         imported_source_ids_json AS importedSourceIdsJson,
+         imported_evidence_ids_json AS importedEvidenceIdsJson,
+         imported_image_ids_json AS importedImageIdsJson,
+         created_at AS createdAt
+  FROM product_intelligence_imports
+`;
+
+export function insertPiImport(input: {
+  runId: string | null;
+  onboardingItemId: string;
+  resultHash: string;
+  mode: 'create' | 'augment';
+  importingUser?: string | null;
+  fieldSelectionJson?: string;
+  excludedValuesJson?: string;
+  overriddenValuesJson?: string;
+  importedSourceIdsJson?: string;
+  importedEvidenceIdsJson?: string;
+  importedImageIdsJson?: string;
+}): PiImportRow {
+  const db = getDb();
+  const id = randomUUID();
+  db.run(
+    `INSERT INTO product_intelligence_imports
+       (id, run_id, onboarding_item_id, result_hash, mode, importing_user, status,
+        field_selection_json, excluded_values_json, overridden_values_json,
+        imported_source_ids_json, imported_evidence_ids_json, imported_image_ids_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, input.runId, input.onboardingItemId, input.resultHash, input.mode,
+      input.importingUser ?? null,
+      input.fieldSelectionJson ?? '[]',
+      input.excludedValuesJson ?? '{}',
+      input.overriddenValuesJson ?? '{}',
+      input.importedSourceIdsJson ?? '[]',
+      input.importedEvidenceIdsJson ?? '[]',
+      input.importedImageIdsJson ?? '[]',
+      now(),
+    ],
+  );
+  return getPiImport(id) as PiImportRow;
+}
+
+export function getPiImport(id: string): PiImportRow | undefined {
+  const db = getDb();
+  return db.query(`${IMPORT_SELECT} WHERE id = ?`).get(id) as PiImportRow | undefined;
+}
+
+export function getPiImportByRunAndItem(runId: string, onboardingItemId: string): PiImportRow | undefined {
+  const db = getDb();
+  return db
+    .query(`${IMPORT_SELECT} WHERE run_id = ? AND onboarding_item_id = ?`)
+    .get(runId, onboardingItemId) as PiImportRow | undefined;
+}
+
+export function listPiImportsByItem(onboardingItemId: string): PiImportRow[] {
+  const db = getDb();
+  return db
+    .query(`${IMPORT_SELECT} WHERE onboarding_item_id = ? ORDER BY created_at DESC`)
+    .all(onboardingItemId) as PiImportRow[];
+}
+
+export function listPiImportsByRun(runId: string): PiImportRow[] {
+  const db = getDb();
+  return db
+    .query(`${IMPORT_SELECT} WHERE run_id = ? ORDER BY created_at ASC`)
+    .all(runId) as PiImportRow[];
+}
+
+export function updatePiImportStatus(id: string, status: PiImportStatus): boolean {
+  const db = getDb();
+  const result = db.run('UPDATE product_intelligence_imports SET status = ? WHERE id = ?', [status, id]);
+  return result.changes > 0;
+}
+
+/** Mark every active import of a run stale (run deletion / retention). */
+export function markPiImportsStaleByRun(runId: string): number {
+  const db = getDb();
+  const result = db.run(
+    "UPDATE product_intelligence_imports SET status = 'stale' WHERE run_id = ? AND status = 'active'",
+    [runId],
+  );
+  return Number(result.changes);
+}
+
+/** All runs that ever imported into an onboarding item (newest first). */
+export function listPiRunsByItem(onboardingItemId: string): PiRunRow[] {
+  const db = getDb();
+  return db
+    .query(
+      `${RUN_SELECT} WHERE id IN (SELECT run_id FROM product_intelligence_imports WHERE onboarding_item_id = ? AND run_id IS NOT NULL) ORDER BY started_at DESC`,
+    )
+    .all(onboardingItemId) as PiRunRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Retention and deletion (explicit policy)
 // ---------------------------------------------------------------------------
 
@@ -908,6 +1032,9 @@ export function countPiAssets(runId: string): number {
  * Running runs are never deleted — cancel them first. This guard applies at
  * the repository level so no caller (API, retention, import cleanup) can
  * delete an in-flight run.
+ *
+ * PI-8: imports of the run are marked stale BEFORE the delete (the FK is
+ * ON DELETE SET NULL) so promotion rejects the now-missing origin.
  */
 export function deletePiRun(id: string): boolean {
   const db = getDb();
@@ -916,6 +1043,7 @@ export function deletePiRun(id: string): boolean {
   if (current.status === 'running') {
     throw new Error(`Cannot delete running run ${id}: cancel it first`);
   }
+  markPiImportsStaleByRun(id);
   const result = db.run('DELETE FROM product_intelligence_runs WHERE id = ?', [id]);
   return result.changes > 0;
 }
@@ -934,6 +1062,17 @@ export function deletePiRunsOlderThan(workspaceId: string, cutoffIso: string): n
        WHERE workspace_id = ? AND started_at < ? AND status != 'running'`,
     )
     .get(workspaceId, cutoffIso) as { c: number };
+  // PI-8: import records must be marked stale BEFORE their origin runs vanish
+  // (the FK SET NULLs run_id; the status would otherwise lie as 'active').
+  const doomed = db
+    .query(
+      `SELECT id FROM product_intelligence_runs
+       WHERE workspace_id = ? AND started_at < ? AND status != 'running'`,
+    )
+    .all(workspaceId, cutoffIso) as Array<{ id: string }>;
+  for (const { id } of doomed) {
+    db.run(`UPDATE product_intelligence_imports SET status = 'stale' WHERE run_id = ? AND status = 'active'`, [id]);
+  }
   db.run(
     `DELETE FROM product_intelligence_runs
      WHERE workspace_id = ? AND started_at < ? AND status != 'running'`,

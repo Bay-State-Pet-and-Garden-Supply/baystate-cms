@@ -18,7 +18,10 @@ export function AgentLab() {
   const [flags, setFlags] = useState<ProductIntelligenceFlags | null>(null);
   const [flagsError, setFlagsError] = useState<string | null>(null);
   const [subView, setSubView] = useState<SubView>('runs');
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  // Deep link support: ?view=agentlab&run=<id> opens that run's inspector.
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(() =>
+    typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('run') : null,
+  );
 
   useEffect(() => {
     getPiFlags()

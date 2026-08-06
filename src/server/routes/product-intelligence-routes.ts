@@ -30,6 +30,7 @@ import { PiSdkSessionFactory } from '../../product-intelligence/pi/pi-session-fa
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { getPiRun, listPiRuns } from '../../db/repositories/product-intelligence-repo';
+import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
 
 const router = new Hono();
 
@@ -107,7 +108,10 @@ router.post('/product-intelligence/runs', async (c) => {
         policy: (body as { policy?: unknown }).policy
           ? ProductIntelligencePolicySchema.parse((body as { policy?: unknown }).policy)
           : buildDefaultPiPolicy(),
-        onboardingItemId: (body as { onboardingItemId?: string | null }).onboardingItemId ?? null,
+        onboardingItemId:
+          (body as { onboardingItemId?: string | null }).onboardingItemId ??
+          inputResult.data.existingOnboardingItemId ??
+          null,
       },
       { workspaceId: ws.id, workspacePath: ws.workspacePath },
     );
@@ -304,6 +308,55 @@ router.delete('/product-intelligence/runs/:id', (c) => {
   if (run.status === 'running') return c.json({ error: 'Running runs cannot be deleted; cancel first' }, 409);
   const deleted = deletePiRun(runId);
   return c.json({ deleted, runId });
+});
+
+/**
+ * POST /api/product-intelligence/runs/:id/import — import a reviewed Agent
+ * Lab result into onboarding (create or augment an item). Fails closed when
+ * the feature is disabled or shadow mode is on; idempotent per (run, item).
+ */
+router.post('/product-intelligence/runs/:id/import', async (c) => {
+  const runId = c.req.param('id');
+  if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);
+
+  const flags = getProductIntelligenceFlags();
+  if (!flags.productIntelligenceEnabled) {
+    return c.json({ error: 'Product Intelligence is disabled' }, 403);
+  }
+  if (!flags.allowOnboardingImport) {
+    return c.json({ error: 'Agent Lab import is disabled (productIntelligence.allowOnboardingImport is false)' }, 403);
+  }
+  if (flags.shadowOnly) {
+    return c.json({ error: 'shadowOnly mode is enabled: Agent Lab results cannot be imported' }, 403);
+  }
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const mode = (body as { mode?: string }).mode;
+  if (mode !== 'create' && mode !== 'augment') {
+    return c.json({ error: "mode must be 'create' or 'augment'" }, 400);
+  }
+
+  try {
+    const result = importRunToOnboarding(runId, {
+      mode,
+      onboardingItemId: (body as { onboardingItemId?: string | null }).onboardingItemId ?? null,
+      fieldSelection: (body as { fieldSelection?: string[] }).fieldSelection,
+      price: (body as { price?: string | null }).price ?? null,
+      quantity: (body as { quantity?: number | null }).quantity ?? null,
+      importingUser: (body as { importingUser?: string | null }).importingUser ?? null,
+    });
+    return c.json(
+      { import: result.importRecord, itemId: result.item.id, batchId: result.batchId, created: result.created },
+      result.created ? 201 : 200,
+    );
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
 });
 
 /** POST /api/product-intelligence/retention — explicit retention policy. */

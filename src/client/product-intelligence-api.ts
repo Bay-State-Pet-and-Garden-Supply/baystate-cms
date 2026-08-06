@@ -234,6 +234,30 @@ export interface ListRunsResponse {
   runs: PiRunRow[];
 }
 
+export interface PiImportRow {
+  id: string;
+  runId: string | null;
+  onboardingItemId: string;
+  resultHash: string;
+  mode: 'create' | 'augment';
+  importingUser: string | null;
+  status: 'active' | 'superseded' | 'stale';
+  fieldSelectionJson: string;
+  excludedValuesJson: string;
+  overriddenValuesJson: string;
+  importedSourceIdsJson: string;
+  importedEvidenceIdsJson: string;
+  importedImageIdsJson: string;
+  createdAt: string;
+}
+
+export interface ImportRunResponse {
+  import: PiImportRow;
+  itemId: string;
+  batchId: string | null;
+  created: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Fetch wrapper (mirrors src/client/api.ts)
 // ---------------------------------------------------------------------------
@@ -322,6 +346,32 @@ export function comparePiRun(
   return request<ComparisonResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}/compare`, {
     method: 'POST',
     body: JSON.stringify({ baselineType, baselineRef }),
+  });
+}
+
+export interface ImportRunToOnboardingBody {
+  mode: 'create' | 'augment';
+  onboardingItemId?: string | null;
+  fieldSelection?: string[];
+  price?: string | null;
+  quantity?: number | null;
+  importingUser?: string | null;
+}
+
+/** POST /product-intelligence/runs/:id/import — import a reviewed result. */
+export function importRunToOnboarding(
+  runId: string,
+  body: ImportRunToOnboardingBody,
+): Promise<ImportRunResponse> {
+  const payload: Record<string, unknown> = { mode: body.mode };
+  if (body.onboardingItemId != null) payload.onboardingItemId = body.onboardingItemId;
+  if (body.fieldSelection) payload.fieldSelection = body.fieldSelection;
+  if (body.price != null) payload.price = body.price;
+  if (body.quantity != null) payload.quantity = body.quantity;
+  if (body.importingUser != null) payload.importingUser = body.importingUser;
+  return request<ImportRunResponse>(`/product-intelligence/runs/${encodeURIComponent(runId)}/import`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   });
 }
 

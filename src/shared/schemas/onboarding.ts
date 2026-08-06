@@ -148,6 +148,40 @@ export const OcrAttemptOutcomeSchema = z.object({
 });
 export type OcrAttemptOutcome = z.infer<typeof OcrAttemptOutcomeSchema>;
 
+/**
+ * The PI evidence payload attached to an onboarding item's extraction data
+ * when a reviewed Agent Lab result is imported (PI-8). Distinct provenance
+ * type so classification can consume it without conflating it with
+ * spreadsheet or page evidence.
+ */
+export const ProductIntelligenceImportEvidenceSchema = z.object({
+  runId: z.string().min(1),
+  resultHash: z.string().min(1),
+  importRecordId: z.string().min(1),
+  importedAt: z.string(),
+  evidence: z.array(
+    z.object({
+      field: z.string().min(1),
+      value: z.string().max(2048),
+      sourceId: z.string().min(1),
+      evidenceId: z.string().min(1),
+      extractionMethod: z.string().max(128).nullish(),
+      snippet: z.string().max(2048).nullish(),
+    }),
+  ).default(() => []),
+  sources: z.array(
+    z.object({
+      sourceId: z.string().min(1),
+      url: z.string().url(),
+      domain: z.string().max(256).nullish(),
+      sourceType: z.string().max(128).nullish(),
+    }),
+  ).default(() => []),
+  approvedImageIds: z.array(z.string()).default(() => []),
+});
+
+export type ProductIntelligenceImportEvidence = z.infer<typeof ProductIntelligenceImportEvidenceSchema>;
+
 export const ExtractionDataSchema = z.object({
   title: z.string().nullable().default(null),
   brand: z.string().nullable().default(null),
@@ -181,7 +215,16 @@ export const ExtractionDataSchema = z.object({
   /** Detailed outcome status and provenance of the OCR extraction attempt */
   ocrOutcome: OcrAttemptOutcomeSchema.nullable().optional().default(null),
   customFields: z.record(z.string(), z.string()).default(() => ({})),
+  /**
+   * Evidence imported from Product Intelligence Agent Lab runs (PI-8). An
+   * ARRAY with one entry per imported run — a newer reviewed run augments
+   * without silently replacing an earlier import, and promotion re-verifies
+   * every entry's originating run + result hash.
+   */
+  productIntelligenceEvidence: z.array(ProductIntelligenceImportEvidenceSchema).default(() => []),
 });
+
+
 
 export type ExtractionData = z.infer<typeof ExtractionDataSchema>;
 

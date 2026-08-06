@@ -1657,6 +1657,49 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Product Intelligence Import Migration (PI-8) ─────────────────────────
+  // Durable import records: a reviewed Agent Lab run imported to an
+  // onboarding item (create or augment), with the field-selection map,
+  // excluded/overridden values, and the imported source/evidence/image ids.
+  // Idempotent per (run, item); run deletion marks records stale (FK SET
+  // NULL) so provenance survives while promotion rejects stale imports.
+  try {
+    const piImportsVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('product_intelligence_imports_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!piImportsVersion) {
+      console.log('[Migrations] Running product intelligence import schema migration...');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS product_intelligence_imports (
+            id TEXT PRIMARY KEY,
+            run_id TEXT REFERENCES product_intelligence_runs(id) ON DELETE SET NULL,
+            onboarding_item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+            result_hash TEXT NOT NULL,
+            mode TEXT NOT NULL CHECK (mode IN ('create', 'augment')),
+            importing_user TEXT,
+            status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'stale')),
+            field_selection_json TEXT NOT NULL DEFAULT '[]',
+            excluded_values_json TEXT NOT NULL DEFAULT '{}',
+            overridden_values_json TEXT NOT NULL DEFAULT '{}',
+            imported_source_ids_json TEXT NOT NULL DEFAULT '[]',
+            imported_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+            imported_image_ids_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            UNIQUE (run_id, onboarding_item_id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_imports_item ON product_intelligence_imports(onboarding_item_id);
+          CREATE INDEX IF NOT EXISTS idx_pi_imports_run ON product_intelligence_imports(run_id);
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_imports_schema_version', '1');");
+      console.log('[Migrations] Product intelligence import schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence import schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

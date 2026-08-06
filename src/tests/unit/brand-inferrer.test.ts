@@ -71,6 +71,20 @@ describe('Brand Inferrer', () => {
       expect(result?.confidence).toBeGreaterThanOrEqual(0.7);
     });
 
+    it('tolerates search results without a snippet (no crash on undefined)', async () => {
+      vi.spyOn(llmClient, 'callLlmForTask').mockRejectedValue(new Error('LLM not configured'));
+      vi.spyOn(brandSiteRepo, 'listAllBrandSites').mockReturnValue([
+        { id: '1', brandName: 'nylabone', domain: 'nylabone.com', successCount: 1, lastUsedAt: null, createdAt: '', urlPattern: null, sourceStrategy: 'official_first' },
+      ]);
+      const searchResults = [
+        { title: 'Nylabone Power Chew Ring', snippet: undefined as unknown as string, link: 'https://www.chewy.com/nylabone-ring' },
+        { title: 'Nylabone Giant Ring', snippet: undefined as unknown as string, link: 'https://www.amazon.com/nylabone' },
+      ];
+      const result = await inferBrandFromSearchResults('12345', searchResults);
+      expect(result).not.toBeNull();
+      expect(result?.brand).toBe('nylabone');
+    });
+
     it('rejects low-confidence heuristic inference', async () => {
       vi.spyOn(llmClient, 'callLlmForTask').mockRejectedValue(new Error('LLM not configured'));
       vi.spyOn(brandSiteRepo, 'listAllBrandSites').mockReturnValue([]);
