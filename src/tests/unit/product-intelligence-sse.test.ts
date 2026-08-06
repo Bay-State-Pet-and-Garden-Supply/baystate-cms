@@ -83,6 +83,37 @@ describe('Product Intelligence SSE stream', () => {
     try { unlinkSync(testDbPath); } catch { /* ok */ }
   });
 
+  it('returns 404 for runs owned by another workspace (cross-workspace isolation)', async () => {
+    // A second workspace exists; the active one (LIMIT 1) is the seeded wsId.
+    insertWorkspace({
+      id: 'other-workspace',
+      name: 'Other Workspace',
+      workspacePath: '/tmp/other-workspace',
+      gitPath: '/tmp/other-workspace/.git',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const run = createPiRun({
+      workspaceId: 'other-workspace',
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: '{}',
+      policyJson: '{}',
+      configSnapshotId: 'c',
+      configSnapshotHash: 'c',
+    });
+    const detail = await app.request(`http://localhost/api/product-intelligence/runs/${run.id}`);
+    expect(detail.status).toBe(404);
+    const events = await app.request(`http://localhost/api/product-intelligence/runs/${run.id}/events`);
+    expect(events.status).toBe(404);
+    const cancel = await app.request(`http://localhost/api/product-intelligence/runs/${run.id}/cancel`, { method: 'POST' });
+    expect(cancel.status).toBe(404);
+    const stream = await app.request(`http://localhost/api/product-intelligence/runs/${run.id}/events/stream`);
+    expect(stream.status).toBe(404);
+  });
+
   it('returns 404 for unknown runs', async () => {
     const response = await app.request('http://localhost/api/product-intelligence/runs/nope/events/stream');
     expect(response.status).toBe(404);

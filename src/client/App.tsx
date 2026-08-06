@@ -11,8 +11,9 @@ import { CatalogHealth } from './components/CatalogHealth';
 import { Onboarding } from './components/Onboarding';
 import { StoreManagerAssistant } from './components/StoreManagerAssistant';
 import { Settings } from './components/Settings';
+import { AgentLab } from './components/agent-lab/AgentLab';
 
-type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings';
+type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings' | 'agentlab';
 
 function App() {
   const [view, setView] = useState<View>('setup');
@@ -205,6 +206,13 @@ function App() {
               Onboarding
             </button>
             <button
+              style={{ ...styles.navLink, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              onClick={() => handleNavigate('agentlab')}
+            >
+              🤖 Agent Lab
+              <span style={{ display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 8, background: '#fef3c7', color: '#92400e' }}>Experimental</span>
+            </button>
+            <button
               style={view === 'changesets' ? styles.navLinkActive : styles.navLink}
               onClick={() => handleNavigate('changesets')}
             >
@@ -266,7 +274,7 @@ function App() {
         </span>
       </nav>
 
-      <main style={(view === 'onboarding' || view === 'assistant' || view === 'changesets') ? { ...styles.main, maxWidth: 'none', margin: 0 } : styles.main}>
+      <main style={(view === 'onboarding' || view === 'assistant' || view === 'changesets' || view === 'agentlab') ? { ...styles.main, maxWidth: 'none', margin: 0 } : styles.main}>
         {view === 'setup' && (
           <SetupWizard
             onComplete={handleSetupComplete}
@@ -288,6 +296,8 @@ function App() {
         {view === 'changesets' && <ChangeSetReview />}
 
         {view === 'onboarding' && <Onboarding />}
+
+        {view === 'agentlab' && <AgentLab />}
 
         {view === 'health' && workspace && (
           <CatalogHealth onSelectProduct={handleOpenProduct} />

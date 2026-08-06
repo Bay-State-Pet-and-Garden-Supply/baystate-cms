@@ -39,6 +39,19 @@ function requireWorkspace() {
   return ws;
 }
 
+/**
+ * Load a run only if it belongs to the active workspace. Run ids are UUIDs,
+ * but cross-workspace reads must still fail closed (acceptance: unauthorized
+ * workspaces cannot access Agent Lab routes).
+ */
+function requireRunInWorkspace(runId: string) {
+  const ws = requireWorkspace();
+  if (!ws) return null;
+  const run = getPiRun(runId);
+  if (!run || run.workspaceId !== ws.id) return null;
+  return run;
+}
+
 function buildRouter() {
   return createExecutionRouter({
     pi: new PiProductIntelligenceExecutor({
@@ -126,7 +139,9 @@ router.get('/product-intelligence/runs', (c) => {
 
 /** GET /api/product-intelligence/runs/:id — full normalized projection. */
 router.get('/product-intelligence/runs/:id', (c) => {
-  const projection = getPiRunProjection(c.req.param('id'));
+  const runId = c.req.param('id');
+  if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);
+  const projection = getPiRunProjection(runId);
   if (!projection) return c.json({ error: 'Run not found' }, 404);
   return c.json(projection);
 });
@@ -134,7 +149,7 @@ router.get('/product-intelligence/runs/:id', (c) => {
 /** GET /api/product-intelligence/runs/:id/events?after= — replay cursor. */
 router.get('/product-intelligence/runs/:id/events', (c) => {
   const runId = c.req.param('id');
-  if (!getPiRun(runId)) return c.json({ error: 'Run not found' }, 404);
+  if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);
   const after = Number(c.req.query('after') ?? '-1');
   return c.json({ events: replayPiEvents(runId, Number.isFinite(after) ? after : -1) });
 });
@@ -146,7 +161,7 @@ router.get('/product-intelligence/runs/:id/events', (c) => {
  */
 router.get('/product-intelligence/runs/:id/events/stream', async (c) => {
   const runId = c.req.param('id');
-  const run = getPiRun(runId);
+  const run = requireRunInWorkspace(runId);
   if (!run) return c.json({ error: 'Run not found' }, 404);
 
   const after = Number(c.req.query('after') ?? '-1');
@@ -246,7 +261,7 @@ router.get('/product-intelligence/runs/:id/events/stream', async (c) => {
 /** POST /api/product-intelligence/runs/:id/cancel */
 router.post('/product-intelligence/runs/:id/cancel', (c) => {
   const runId = c.req.param('id');
-  const run = getPiRun(runId);
+  const run = requireRunInWorkspace(runId);
   if (!run) return c.json({ error: 'Run not found' }, 404);
   if (run.status !== 'running') return c.json({ error: `Run is not running (${run.status})` }, 409);
   const aborted = cancelPiRun(runId);
@@ -257,7 +272,7 @@ router.post('/product-intelligence/runs/:id/cancel', (c) => {
 /** POST /api/product-intelligence/runs/:id/compare — Pi vs baseline. */
 router.post('/product-intelligence/runs/:id/compare', async (c) => {
   const runId = c.req.param('id');
-  if (!getPiRun(runId)) return c.json({ error: 'Run not found' }, 404);
+  if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);
   let body: unknown;
   try {
     body = await c.req.json();
@@ -284,7 +299,7 @@ router.post('/product-intelligence/runs/:id/compare', async (c) => {
 /** DELETE /api/product-intelligence/runs/:id — explicit deletion. */
 router.delete('/product-intelligence/runs/:id', (c) => {
   const runId = c.req.param('id');
-  const run = getPiRun(runId);
+  const run = requireRunInWorkspace(runId);
   if (!run) return c.json({ error: 'Run not found' }, 404);
   if (run.status === 'running') return c.json({ error: 'Running runs cannot be deleted; cancel first' }, 409);
   const deleted = deletePiRun(runId);

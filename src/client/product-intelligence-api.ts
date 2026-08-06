@@ -1,0 +1,348 @@
+/**
+ * Product Intelligence API client (PI-7).
+ *
+ * Client-side fetch wrapper for the /api/product-intelligence endpoints.
+ * Mirrors the `request<T>` pattern from `src/client/api.ts`.
+ *
+ * Types are defined locally here (mirroring the server wire shapes) so the
+ * client never imports from src/db or src/product-intelligence/run-service
+ * (those pull bun:sqlite / node:fs and would break the Vite build). Only
+ * deep imports from src/product-intelligence/contracts.ts (zod-only) are used.
+ */
+
+import type { ProductIntelligenceFlags } from '../product-intelligence/flags';
+
+// ---------------------------------------------------------------------------
+// Wire types (mirror server row shapes — JSON strings are left as strings)
+// ---------------------------------------------------------------------------
+
+export type { ProductIntelligenceFlags } from '../product-intelligence/flags';
+
+export type PiRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+export type PiRunMode = 'shadow' | 'interactive' | 'onboarding';
+
+export interface PiRunRow {
+  id: string;
+  workspaceId: string;
+  onboardingItemId: string | null;
+  mode: PiRunMode;
+  status: PiRunStatus;
+  executor: string;
+  inputJson: string;
+  policyJson: string;
+  configSnapshotId: string;
+  configSnapshotHash: string;
+  codeCommit: string | null;
+  promptHash: string | null;
+  piVersion: string | null;
+  extensionVersionsJson: string;
+  startedAt: string;
+  completedAt: string | null;
+  cancelledAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  estimatedCost: number | null;
+  actualCost: number | null;
+  tokenUsageJson: string | null;
+}
+
+export interface PiStepView {
+  id: string;
+  runId: string;
+  stepType: string;
+  sequence: number;
+  status: 'running' | 'completed' | 'failed';
+  summary: string | null;
+  inputHash: string | null;
+  outputRef: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  errorJson: string | null;
+}
+
+export interface PiToolCallRow {
+  id: string;
+  runId: string;
+  stepId: string | null;
+  sequence: number;
+  toolName: string;
+  toolVersion: string | null;
+  policyOutcome: 'allowed' | 'denied' | 'budget_exceeded';
+  requestHash: string | null;
+  responseHash: string | null;
+  artifactRef: string | null;
+  latencyMs: number | null;
+  costUsd: number | null;
+  startedAt: string;
+  completedAt: string | null;
+  errorJson: string | null;
+}
+
+export interface PiSourceRow {
+  id: string;
+  runId: string;
+  url: string;
+  canonicalUrl: string | null;
+  domain: string;
+  sourceType: string;
+  gtinMatchStatus: string;
+  variantMatchStatus: string;
+  retrievedAt: string | null;
+  contentHash: string | null;
+  artifactRef: string | null;
+  licenseRef: string | null;
+  termsRef: string | null;
+  createdAt: string;
+}
+
+export interface PiEvidenceRow {
+  id: string;
+  runId: string;
+  sourceId: string;
+  targetField: string;
+  valueJson: string;
+  extractionMethod: string | null;
+  sourceField: string | null;
+  reliability: string | null;
+  directSupport: number;
+  snippet: string | null;
+  metadataJson: string | null;
+  createdAt: string;
+}
+
+export interface PiConflictRow {
+  id: string;
+  runId: string;
+  field: string;
+  severity: 'low' | 'medium' | 'high';
+  status: 'open' | 'resolved' | 'dismissed';
+  competingValuesJson: string;
+  evidenceIdsJson: string;
+  resolutionJson: string | null;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+}
+
+export interface PiResultRow {
+  id: string;
+  runId: string;
+  schemaVersion: number;
+  disposition: 'submitted' | 'abstained' | 'unavailable';
+  resultJson: string;
+  resultHash: string;
+  createdAt: string;
+}
+
+export interface PiComparisonRow {
+  id: string;
+  runId: string;
+  baselineType: string;
+  baselineRef: string;
+  metricsJson: string;
+  createdAt: string;
+}
+
+export interface ProductAssetEvidence {
+  sourceUrl: string;
+  sourcePageUrl: string | null;
+  sourceType: string;
+  sourcePath: string | null;
+  sourceArtifactId: string;
+  extractionMethod: string;
+  retrievedAt: string;
+  originalContentHash: string;
+  perceptualHash: string | null;
+  variantReference: string | null;
+  rightsStatus: 'approved' | 'restricted' | 'unknown';
+  rightsBasis: string | null;
+  rightsEvidenceRef: string | null;
+  observedBrand: string | null;
+  observedProductName: string | null;
+  observedVariant: string | null;
+  observedNetContent: { value: number; unit: string } | null;
+  observedPackCount: number | null;
+  observedGtin: string | null;
+  exactProductMatch: boolean;
+  exactVariantMatch: boolean | null;
+  qualityStatus: 'usable' | 'low_quality' | 'invalid';
+  commerceApproved: boolean;
+  conflicts: string[];
+  id?: string;
+  runId?: string;
+  sourceId?: string;
+  payload?: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export interface PiRunProjection {
+  run: PiRunRow;
+  steps: PiStepView[];
+  toolCalls: PiToolCallRow[];
+  sources: PiSourceRow[];
+  evidence: PiEvidenceRow[];
+  conflicts: PiConflictRow[];
+  assets: ProductAssetEvidence[];
+  result: PiResultRow | null;
+  comparisons: PiComparisonRow[];
+  eventCount: number;
+}
+
+export interface PiLiveEvent {
+  runId: string;
+  sequence: number;
+  type: string;
+  payload: unknown;
+  createdAt: string;
+}
+
+export interface CreateRunInput {
+  gtin: string;
+  registerName: string;
+  brandHint?: string;
+  departmentHint?: string;
+  price?: string;
+  quantity?: number;
+  mode?: PiRunMode;
+}
+
+export interface CreateRunResponse {
+  runId: string;
+  executor: string;
+  status: PiRunStatus;
+}
+
+export interface CancelRunResponse {
+  cancelled: boolean;
+  runId: string;
+}
+
+export interface DeleteRunResponse {
+  deleted: boolean;
+  runId: string;
+}
+
+export interface ComparisonResponse {
+  comparison: PiComparisonRow;
+}
+
+export interface FlagsResponse {
+  flags: ProductIntelligenceFlags;
+}
+
+export interface ListRunsResponse {
+  runs: PiRunRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Fetch wrapper (mirrors src/client/api.ts)
+// ---------------------------------------------------------------------------
+
+const API_BASE = '/api';
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const errorMsg =
+      (data as Record<string, unknown>).error as string | undefined ||
+      (Array.isArray((data as Record<string, unknown>).errors)
+        ? ((data as Record<string, unknown[]>).errors as string[]).join('; ')
+        : null) ||
+      ((data as Record<string, unknown>).message as string | undefined) ||
+      `HTTP ${res.status}`;
+    throw new Error(errorMsg);
+  }
+  return data as T;
+}
+
+// ---------------------------------------------------------------------------
+// API functions
+// ---------------------------------------------------------------------------
+
+export function getPiFlags(): Promise<FlagsResponse> {
+  return request<FlagsResponse>('/product-intelligence/flags');
+}
+
+export function listPiRuns(params?: {
+  status?: PiRunStatus;
+  limit?: number;
+  offset?: number;
+}): Promise<ListRunsResponse> {
+  const search = new URLSearchParams();
+  if (params?.status) search.set('status', params.status);
+  if (params?.limit !== undefined) search.set('limit', String(params.limit));
+  if (params?.offset !== undefined) search.set('offset', String(params.offset));
+  const qs = search.toString();
+  return request<ListRunsResponse>(`/product-intelligence/runs${qs ? `?${qs}` : ''}`);
+}
+
+export function getPiRun(id: string): Promise<PiRunProjection> {
+  return request<PiRunProjection>(`/product-intelligence/runs/${encodeURIComponent(id)}`);
+}
+
+export function createPiRun(input: CreateRunInput): Promise<CreateRunResponse> {
+  const body: Record<string, unknown> = {
+    input: {
+      gtin: input.gtin,
+      registerName: input.registerName,
+      ...(input.brandHint !== undefined ? { brandHint: input.brandHint } : {}),
+      ...(input.departmentHint !== undefined ? { departmentHint: input.departmentHint } : {}),
+      ...(input.price !== undefined ? { price: input.price } : {}),
+      ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
+    },
+    ...(input.mode ? { mode: input.mode } : {}),
+  };
+  return request<CreateRunResponse>('/product-intelligence/runs', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export function cancelPiRun(id: string): Promise<CancelRunResponse> {
+  return request<CancelRunResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}/cancel`, {
+    method: 'POST',
+  });
+}
+
+export function deletePiRun(id: string): Promise<DeleteRunResponse> {
+  return request<DeleteRunResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function comparePiRun(
+  id: string,
+  baselineType: string,
+  baselineRef: string,
+): Promise<ComparisonResponse> {
+  return request<ComparisonResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}/compare`, {
+    method: 'POST',
+    body: JSON.stringify({ baselineType, baselineRef }),
+  });
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Helpers (parse JSON string columns — safe / null on invalid)
+// ---------------------------------------------------------------------------
+
+export function parseRunInput(row: PiRunRow): Record<string, unknown> | null {
+  try {
+    return JSON.parse(row.inputJson) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export function parseRunPolicy(row: PiRunRow): Record<string, unknown> | null {
+  try {
+    return JSON.parse(row.policyJson) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
