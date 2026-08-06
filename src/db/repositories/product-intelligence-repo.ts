@@ -50,6 +50,10 @@ export interface PiRunRow {
   estimatedCost: number | null;
   actualCost: number | null;
   tokenUsageJson: string | null;
+  /** PI-10 replay lineage: the run this run was replayed from (NULL = original). */
+  originRunId: string | null;
+  /** PI-10 replay depth: 0 for originals, +1 per replay hop. */
+  replayDepth: number;
 }
 
 export interface CreatePiRunInput {
@@ -65,23 +69,33 @@ export interface CreatePiRunInput {
   promptHash?: string | null;
   piVersion?: string | null;
   extensionVersionsJson?: string;
+  /** PI-10: origin run for replays (originals leave null). */
+  originRunId?: string | null;
+  /** PI-10: replay hop depth; 0 for originals. */
+  replayDepth?: number;
+  /** PI-10: deterministic replays insert an already-terminal run. */
+  status?: 'completed';
+  completedAt?: string | null;
 }
 
 export function createPiRun(input: CreatePiRunInput): PiRunRow {
   const db = getDb();
   const id = randomUUID();
   const startedAt = now();
+  const completedAt = input.status === 'completed' ? (input.completedAt ?? startedAt) : null;
   db.run(
     `INSERT INTO product_intelligence_runs
      (id, workspace_id, onboarding_item_id, mode, status, executor, input_json,
       policy_json, config_snapshot_id, config_snapshot_hash, code_commit,
-      prompt_hash, pi_version, extension_versions_json, started_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      prompt_hash, pi_version, extension_versions_json, started_at, completed_at,
+      origin_run_id, replay_depth)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.workspaceId,
       input.onboardingItemId ?? null,
       input.mode,
+      input.status ?? 'running',
       input.executor,
       input.inputJson,
       input.policyJson,
@@ -92,6 +106,9 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
       input.piVersion ?? null,
       input.extensionVersionsJson ?? '[]',
       startedAt,
+      completedAt,
+      input.originRunId ?? null,
+      input.replayDepth ?? 0,
     ],
   );
   return getPiRun(id) as PiRunRow;
@@ -106,7 +123,8 @@ const RUN_SELECT = `
          started_at AS startedAt, completed_at AS completedAt, cancelled_at AS cancelledAt,
          error_code AS errorCode, error_message AS errorMessage,
          estimated_cost AS estimatedCost, actual_cost AS actualCost,
-         token_usage_json AS tokenUsageJson
+         token_usage_json AS tokenUsageJson,
+         origin_run_id AS originRunId, replay_depth AS replayDepth
   FROM product_intelligence_runs
 `;
 
@@ -165,6 +183,9 @@ export function transitionPiRunStatus(
     errorMessage?: string | null;
     piVersion?: string | null;
     actualCost?: number | null;
+    /** PI-10: provider-reported cost as the pre-billing estimate (same figure
+     *  as actualCost until real billing arrives). */
+    estimatedCost?: number | null;
     tokenUsageJson?: string | null;
   } = {},
 ): PiRunRow {
@@ -186,6 +207,7 @@ export function transitionPiRunStatus(
        error_message = COALESCE(?, error_message),
        pi_version = COALESCE(?, pi_version),
        actual_cost = COALESCE(?, actual_cost),
+       estimated_cost = COALESCE(?, estimated_cost),
        token_usage_json = COALESCE(?, token_usage_json)
      WHERE id = ?`,
     [
@@ -196,6 +218,7 @@ export function transitionPiRunStatus(
       fields.errorMessage ?? null,
       fields.piVersion ?? null,
       fields.actualCost ?? null,
+      fields.estimatedCost ?? null,
       fields.tokenUsageJson ?? null,
       id,
     ],

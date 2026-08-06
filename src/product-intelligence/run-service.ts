@@ -32,6 +32,8 @@ import type { ProductAssetEvidence } from './assets/schema';
 import type { PiAssetRow } from '../db/repositories/product-intelligence-repo';
 import { getCurrentWorkspace } from '../server/services/workspace-service';
 import { getDb } from '../db/connection';
+import { checkPiRunStartBudget, checkPiStorageBudget } from './budgets';
+import { PolicyDeniedError } from './policy';
 import {
   appendPiEvent,
   completePiStep,
@@ -320,6 +322,8 @@ export interface StartPiRunInput {
   mode?: 'shadow' | 'interactive' | 'onboarding';
   policy?: ProductIntelligencePolicy;
   onboardingItemId?: string | null;
+  /** PI-10 replay lineage: set when this run is a same-configuration rerun. */
+  originRunId?: string | null;
 }
 
 export interface StartPiRunResult {
@@ -381,6 +385,11 @@ export async function startProductIntelligenceRun(
     throw new Error(`Workspace not found: ${workspace.id}; cannot start a Product Intelligence run`);
   }
 
+  // PI-10: centralized workspace budgets (concurrent/daily runs, daily tokens,
+  // daily cost). Enforced server-side before the run is created — the agent
+  // prompt is never trusted with budget decisions.
+  checkPiRunStartBudget(workspace.id);
+
   const bus = options.bus ?? globalRunEventBus;
   const controller = new AbortController();
 
@@ -412,6 +421,8 @@ export async function startProductIntelligenceRun(
     configSnapshotHash: policy.configId,
     promptHash,
     codeCommit: captureCodeCommit(),
+    originRunId: input.originRunId ?? null,
+    replayDepth: input.originRunId ? (getPiRun(input.originRunId)?.replayDepth ?? 0) + 1 : 0,
   });
   activeControllers.set(run.id, controller);
 
@@ -458,6 +469,23 @@ export async function startProductIntelligenceRun(
           sink.emitDomain('run.failed', { code: 'validation_error', message });
           return result;
         }
+        // PI-10: artifact storage budget is enforced before any durable asset
+        // rows are written, and fails the run cleanly (never leaves it stuck
+        // in 'running').
+        const submissionRun = getPiRun(run.id);
+        if (submissionRun) {
+          try {
+            checkPiStorageBudget(submissionRun.workspaceId);
+          } catch (storageError) {
+            if (storageError instanceof PolicyDeniedError) {
+              const message = `Terminal submission rejected: ${storageError.message}`;
+              transitionPiRunStatus(run.id, 'failed', { errorCode: 'policy_denied', errorMessage: message });
+              sink.emitDomain('run.failed', { code: 'policy_denied', message });
+              return result;
+            }
+            throw storageError;
+          }
+        }
         persistSubmissionArtifacts(run.id, result, sink);
         // Disposition derives from the submission shape (deterministic):
         // bundles submit; abstentions and identity-conflict submissions abstain.
@@ -470,6 +498,14 @@ export async function startProductIntelligenceRun(
         transitionPiRunStatus(run.id, 'completed', {
           completedAt: new Date().toISOString(),
           piVersion: result.piVersion,
+          actualCost: result.modelCostUsd ?? undefined,
+          estimatedCost: result.modelCostUsd ?? undefined,
+          tokenUsageJson: result.tokenUsage
+            ? JSON.stringify({
+                input_tokens: result.tokenUsage.inputTokens,
+                output_tokens: result.tokenUsage.outputTokens,
+              })
+            : undefined,
         });
         break;
       }
@@ -480,22 +516,67 @@ export async function startProductIntelligenceRun(
           disposition: 'unavailable',
           result,
         });
-        transitionPiRunStatus(run.id, 'completed', { completedAt: new Date().toISOString() });
+        transitionPiRunStatus(run.id, 'completed', {
+          completedAt: new Date().toISOString(),
+          actualCost: result.modelCostUsd ?? undefined,
+          estimatedCost: result.modelCostUsd ?? undefined,
+          tokenUsageJson: result.tokenUsage
+            ? JSON.stringify({
+                input_tokens: result.tokenUsage.inputTokens,
+                output_tokens: result.tokenUsage.outputTokens,
+              })
+            : undefined,
+        });
         break;
       }
       case 'cancelled': {
-        transitionPiRunStatus(run.id, 'cancelled', { cancelledAt: new Date().toISOString() });
+        // PI-10: usage accounting applies to every terminal outcome — a run
+        // that burns model tokens then fails/cancels still counts against the
+        // daily token/cost budgets (review finding PI-10-MINOR-5).
+        transitionPiRunStatus(run.id, 'cancelled', {
+          cancelledAt: new Date().toISOString(),
+          actualCost: result.modelCostUsd ?? undefined,
+          estimatedCost: result.modelCostUsd ?? undefined,
+          tokenUsageJson: result.tokenUsage
+            ? JSON.stringify({
+                input_tokens: result.tokenUsage.inputTokens,
+                output_tokens: result.tokenUsage.outputTokens,
+              })
+            : undefined,
+        });
         break;
       }
       case 'failed': {
         const code = result.failure?.code ?? 'unknown';
         const message = result.failure?.message ?? 'Run failed';
-        transitionPiRunStatus(run.id, 'failed', { errorCode: code, errorMessage: message });
+        transitionPiRunStatus(run.id, 'failed', {
+          errorCode: code,
+          errorMessage: message,
+          actualCost: result.modelCostUsd ?? undefined,
+          estimatedCost: result.modelCostUsd ?? undefined,
+          tokenUsageJson: result.tokenUsage
+            ? JSON.stringify({
+                input_tokens: result.tokenUsage.inputTokens,
+                output_tokens: result.tokenUsage.outputTokens,
+              })
+            : undefined,
+        });
         break;
       }
       case 'timed_out': {
         const message = result.failure?.message ?? 'Hard deadline exceeded';
-        transitionPiRunStatus(run.id, 'failed', { errorCode: 'deadline_exceeded', errorMessage: message });
+        transitionPiRunStatus(run.id, 'failed', {
+          errorCode: 'deadline_exceeded',
+          errorMessage: message,
+          actualCost: result.modelCostUsd ?? undefined,
+          estimatedCost: result.modelCostUsd ?? undefined,
+          tokenUsageJson: result.tokenUsage
+            ? JSON.stringify({
+                input_tokens: result.tokenUsage.inputTokens,
+                output_tokens: result.tokenUsage.outputTokens,
+              })
+            : undefined,
+        });
         break;
       }
     }
@@ -618,6 +699,18 @@ function persistBundleAssets(
   submission: { imageCandidates: BundleImageCandidate[] },
   sink: PersistingExecutionEventSink,
 ): void {
+  // PI-10: artifact storage budget enforced centrally at the single durable
+  // persistence point — the agent never decides storage limits itself. The
+  // pending payload bytes are counted so a single candidate batch cannot
+  // overshoot the cap (review finding PI-10-MINOR-4). Note: this is the
+  // DB payload proxy — on-disk quarantined image files are not counted.
+  const runRow = getPiRun(runId);
+  if (runRow) {
+    const pendingBytes = submission.imageCandidates
+      .filter((candidate) => candidate.originalContentHash)
+      .reduce((sum, candidate) => sum + JSON.stringify(candidate).length, 0);
+    checkPiStorageBudget(runRow.workspaceId, pendingBytes);
+  }
   const existingSources = listPiSources(runId);
   for (const candidate of submission.imageCandidates) {
     if (!candidate.originalContentHash) continue;
@@ -868,7 +961,7 @@ export function replayPiEvents(runId: string, afterSequence = -1): PiLiveEvent[]
 
 export function createPiComparison(input: {
   runId: string;
-  baselineType: 'legacy' | 'classification_run' | 'manual';
+  baselineType: 'legacy' | 'classification_run' | 'manual' | 'pi_run';
   baselineRef: string;
 }): unknown {
   const run = getPiRun(input.runId);
@@ -907,10 +1000,124 @@ function countFields(result: { resultJson: string }): number {
   }
 }
 
+/** PI-10-MINOR-7: resolve a workspace's path for reruns that must honor the
+ * origin workspace rather than the current one. */
+function workspacePathOf(workspaceId: string): string | null {
+  const row = getDb().query('SELECT workspace_path AS path FROM workspace WHERE id = ?').get(workspaceId) as { path: string } | undefined;
+  return row?.path ?? null;
+}
 /** Explicit retention: delete terminal runs older than N days. */
 export function runRetentionCleanup(workspaceId: string, olderThanDays: number): number {
   const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
   return deletePiRunsOlderThan(workspaceId, cutoff);
+}
+
+// ---------------------------------------------------------------------------
+// PI-10: replay modes (deterministic / same-configuration rerun)
+// ---------------------------------------------------------------------------
+
+/** PI-10: runaway replay chains are refused at this depth (review PI-10-MINOR-6). */
+export const MAX_PI_REPLAY_DEPTH = 16;
+
+/**
+ * PI-10 replay. Every replay creates a NEW run linked to its origin
+ * (origin_run_id + replay_depth); the original run stays immutable.
+ *
+ * 'deterministic' reconstructs the terminal result from the stored result
+ * row — no external calls, no model, no network. Refused when the origin has
+ * no stored result (failed/cancelled runs cannot be reconstructed) or the
+ * replay chain is deeper than MAX_PI_REPLAY_DEPTH.
+ *
+ * 'rerun' launches a real execution with the original immutable input,
+ * policy snapshot, config, and mode, using the caller-supplied executor
+ * (the route resolves it preferring the original's executor "where still
+ * available").
+ *
+ * @throws if the original run is still running (replays need a settled origin)
+ * or not found.
+ */
+export async function replayPiRun(
+  runId: string,
+  options: {
+    mode: 'deterministic' | 'rerun';
+    compare?: boolean;
+    executor?: ProductIntelligenceExecutor;
+  },
+): Promise<{ run: PiRunRow; mode: 'deterministic' | 'rerun' }> {
+  const origin = getPiRun(runId);
+  if (!origin) throw new Error(`Product intelligence run not found: ${runId}`);
+  if (origin.status === 'running') {
+    throw new Error(`Cannot replay a running run: ${runId}`);
+  }
+  if (origin.replayDepth >= MAX_PI_REPLAY_DEPTH) {
+    throw new Error(`Replay chain too deep (max ${MAX_PI_REPLAY_DEPTH}): ${runId}`);
+  }
+
+  if (options.mode === 'deterministic') {
+    // A failed/cancelled origin has no stored result to reconstruct — refusing
+    // beats creating a misleading 'completed' run with no result.
+    const stored = getPiResult(origin.id);
+    if (!stored) {
+      throw new Error(`Cannot deterministically replay run ${runId}: no stored result to reconstruct`);
+    }
+    const replay = createPiRun({
+      workspaceId: origin.workspaceId,
+      onboardingItemId: origin.onboardingItemId,
+      mode: origin.mode,
+      executor: origin.executor,
+      inputJson: origin.inputJson,
+      policyJson: origin.policyJson,
+      configSnapshotId: origin.configSnapshotId,
+      configSnapshotHash: origin.configSnapshotHash,
+      codeCommit: origin.codeCommit,
+      promptHash: origin.promptHash,
+      piVersion: origin.piVersion,
+      extensionVersionsJson: origin.extensionVersionsJson,
+      originRunId: origin.id,
+      replayDepth: origin.replayDepth + 1,
+      status: 'completed',
+    });
+    // Reconstruct the terminal result from the stored row (deterministic).
+    insertPiResult({
+      runId: replay.id,
+      schemaVersion: stored.schemaVersion,
+      disposition: stored.disposition,
+      result: JSON.parse(stored.resultJson) as ProductResearchResult,
+    });
+    appendPiEvent(replay.id, 0, 'replay', {
+      mode: 'deterministic',
+      originRunId: origin.id,
+      replayedAt: new Date().toISOString(),
+    });
+    if (options.compare) {
+      createPiComparison({ runId: replay.id, baselineType: 'pi_run', baselineRef: origin.id });
+    }
+    return { run: replay, mode: 'deterministic' };
+  }
+
+  // Same-configuration rerun: real execution with the original immutable
+  // configuration; the route resolved the executor preferring the original's.
+  if (!options.executor) {
+    throw new Error('Rerun requires an executor (resolve via the execution router)');
+  }
+  const started = await startProductIntelligenceRun(
+    options.executor,
+    {
+      input: ProductResearchInputSchema.parse(JSON.parse(origin.inputJson)),
+      mode: origin.mode,
+      policy: ProductIntelligencePolicySchema.parse(JSON.parse(origin.policyJson)),
+      onboardingItemId: origin.onboardingItemId,
+      originRunId: origin.id,
+    },
+    // PI-10-MINOR-7: honor the ORIGIN's workspace, not the current one — the
+    // service API only treats workspaceId as authoritative when the path is
+    // provided too, and a rerun must land in the origin's workspace.
+    { workspaceId: origin.workspaceId, workspacePath: workspacePathOf(origin.workspaceId) ?? undefined },
+  );
+  if (options.compare) {
+    createPiComparison({ runId: started.run.id, baselineType: 'pi_run', baselineRef: origin.id });
+  }
+  return { run: started.run, mode: 'rerun' };
 }
 
 export { createPiRun, countPiRuns, deletePiRun, getPiRun, listPiRuns };

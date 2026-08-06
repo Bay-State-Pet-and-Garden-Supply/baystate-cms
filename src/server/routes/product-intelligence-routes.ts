@@ -18,7 +18,7 @@ import {
   getPiRunProjection,
   globalRunEventBus,
   replayPiEvents,
-  runRetentionCleanup,
+  replayPiRun,
   startProductIntelligenceRun,
   type PiLiveEvent,
 } from '../../product-intelligence/run-service';
@@ -32,6 +32,18 @@ import { getCurrentWorkspace } from '../services/workspace-service';
 import { getDb } from '../../db/connection';
 import { getPiRun, listPiRuns } from '../../db/repositories/product-intelligence-repo';
 import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
+import {
+  PiBudgetPolicySchema,
+  getPiBudgetPolicy,
+  setPiBudgetPolicy,
+} from '../../product-intelligence/budgets';
+import {
+  PiRetentionPolicySchema,
+  applyPiRetention,
+  getPiRetentionPolicy,
+  olderThanDaysPolicy,
+  setPiRetentionPolicy,
+} from '../../product-intelligence/retention';
 import {
   currentRolloutState,
   setRolloutConfig,
@@ -370,7 +382,44 @@ router.post('/product-intelligence/runs/:id/import', async (c) => {
   }
 });
 
-/** POST /api/product-intelligence/retention — explicit retention policy. */
+/** POST /api/product-intelligence/runs/:id/replay — PI-10 replay modes. */
+router.post('/product-intelligence/runs/:id/replay', async (c) => {
+  const runId = c.req.param('id');
+  if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const mode = (body as { mode?: string }).mode;
+  if (mode !== 'deterministic' && mode !== 'rerun') {
+    return c.json({ error: "mode must be 'deterministic' or 'rerun'" }, 400);
+  }
+  const compare = (body as { compare?: boolean }).compare === true;
+  const flags = getProductIntelligenceFlags();
+  if (mode === 'rerun' && !flags.productIntelligenceEnabled) {
+    return c.json({ error: 'Product Intelligence is disabled' }, 403);
+  }
+
+  try {
+    let executor;
+    if (mode === 'rerun') {
+      const original = getPiRun(runId);
+      const selection = await buildRouter().resolveExecutorPreferring(original?.executor ?? '');
+      executor = selection.executor;
+    }
+    const result = await replayPiRun(runId, { mode, compare, executor });
+    return c.json({ runId: result.run.id, mode: result.mode, status: result.run.status, compare }, 201);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const status = message.includes('still running') ? 409 : 400;
+    return c.json({ error: message }, status);
+  }
+});
+
+/** POST /api/product-intelligence/retention — PI-10 per-category retention. */
 router.post('/product-intelligence/retention', async (c) => {
   const ws = requireWorkspace();
   if (!ws) return c.json({ error: 'No active workspace' }, 400);
@@ -380,12 +429,50 @@ router.post('/product-intelligence/retention', async (c) => {
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
-  const olderThanDays = Number((body as { olderThanDays?: number }).olderThanDays);
-  if (!Number.isFinite(olderThanDays) || olderThanDays <= 0) {
-    return c.json({ error: 'olderThanDays must be a positive number' }, 400);
+  // Legacy shape: { olderThanDays } applies one age to every category.
+  if ((body as { olderThanDays?: number }).olderThanDays !== undefined) {
+    const olderThanDays = Number((body as { olderThanDays?: number }).olderThanDays);
+    if (!Number.isFinite(olderThanDays) || olderThanDays <= 0) {
+      return c.json({ error: 'olderThanDays must be a positive number' }, 400);
+    }
+    const policy = olderThanDaysPolicy(olderThanDays);
+    const result = applyPiRetention(ws.id, policy);
+    return c.json({ result, policy });
   }
-  const deleted = runRetentionCleanup(ws.id, olderThanDays);
-  return c.json({ deleted, olderThanDays });
+  try {
+    const policy = setPiRetentionPolicy(ws.id, PiRetentionPolicySchema.parse((body as { policy?: unknown }).policy ?? {}));
+    const result = applyPiRetention(ws.id, policy);
+    return c.json({ result, policy });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
+/** GET /api/product-intelligence/retention — current per-category policy. */
+router.get('/product-intelligence/retention', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  return c.json({ policy: getPiRetentionPolicy(ws.id) });
+});
+
+/** GET /api/product-intelligence/budgets — current workspace budget policy. */
+router.get('/product-intelligence/budgets', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  return c.json({ policy: getPiBudgetPolicy(ws.id) });
+});
+
+/** POST /api/product-intelligence/budgets — set the workspace budget policy. */
+router.post('/product-intelligence/budgets', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  try {
+    const body = await c.req.json();
+    const policy = setPiBudgetPolicy(ws.id, PiBudgetPolicySchema.parse((body as { policy?: unknown }).policy ?? {}));
+    return c.json({ policy });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
 });
 
 /** GET /api/product-intelligence/flags — effective runtime flags. */

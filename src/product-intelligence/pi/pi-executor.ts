@@ -18,7 +18,7 @@
  */
 import { PI_EXECUTOR_NAME, ProductResearchContextSchema, ProductResearchInputSchema, type ProductResearchContext, type ProductResearchResult, type TerminalResultSubmission } from '../contracts';
 import { terminalDisposition } from '../workflow/bundle';
-import { defaultPolicyGateway } from '../policy';
+import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../executor';
 import { emitExecutionEvent } from '../executor';
 import { buildResearchPrompt } from './pi-prompt-builder';
@@ -26,6 +26,52 @@ import type { PiSessionFactory, PiSessionHandle } from './pi-session-factory';
 import { PiSdkSessionFactory, PiSessionError } from './pi-session-factory';
 
 export const PI_EXECUTOR_VERSION = '1.0.0';
+
+// ---------------------------------------------------------------------------
+// PI-10 lazy DB-backed budget enforcement
+// ---------------------------------------------------------------------------
+// The Pi executor is imported by vitest tests that have no bun:sqlite, so the
+// DB-backed run lookup and workspace category-budget check are loaded lazily
+// (createRequire). Real runs always execute under bun, where the loaded
+// modules enforce authoritatively; in non-bun environments the check is a
+// no-op rather than an import-time crash.
+import { createRequire } from 'node:module';
+
+const lazyRequire = createRequire(import.meta.url);
+
+interface LazyRunRow {
+  workspaceId: string;
+}
+
+function loadPiRunRow(runId: string): LazyRunRow | undefined {
+  // Non-bun environments (vitest) cannot even load the driver module, so the
+  // initialization probe is loaded lazily too; a missing DB is the no-op
+  // signal. Genuine repo errors propagate (fail-closed).
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) return undefined;
+  } catch {
+    return undefined; // bun:sqlite unavailable (vitest): no DB, no enforcement.
+  }
+  const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
+    getPiRun?: (id: string) => LazyRunRow | undefined;
+  };
+  return repo.getPiRun?.(runId);
+}
+
+function checkWorkspaceToolCategoryBudget(workspaceId: string, toolName: string): void {
+  try {
+    const budgets = lazyRequire('../budgets') as {
+      checkPiToolCategoryBudget?: (workspaceId: string, toolName: string) => void;
+    };
+    budgets.checkPiToolCategoryBudget?.(workspaceId, toolName);
+  } catch (error) {
+    // The budget module's own load can fail in non-bun environments (vitest);
+    // a PolicyDeniedError from the check itself must NOT be swallowed — the
+    // caller turns it into a fail-closed abort (review finding PI-10-MAJOR-1).
+    if (error instanceof PolicyDeniedError) throw error;
+  }
+}
 
 export interface PiExecutorOptions {
   /**
@@ -98,12 +144,27 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
     // read it from the raw context, never from the parsed (stripped) output.
     const signal = (context as ProductResearchContext).signal;
     const configId = policy.configId;
-    const deadlineAt = startedAt + policy.deadlineMs;
+    // PI-10: the workspace budget may cap the per-run runtime below the
+    // policy deadline (maxRunRuntimeMinutes); lazy DB load, no-op outside bun.
+    const runtimeCapRun = loadPiRunRow(runId);
+    let effectiveDeadlineMs = policy.deadlineMs;
+    if (runtimeCapRun) {
+      try {
+        const budgets = lazyRequire('../budgets') as {
+          effectivePiRuntimeCapMs?: (workspaceId: string, defaultMs: number) => number;
+        };
+        effectiveDeadlineMs = budgets.effectivePiRuntimeCapMs?.(runtimeCapRun.workspaceId, policy.deadlineMs) ?? policy.deadlineMs;
+      } catch {
+        // Budget module unavailable: policy deadline stands.
+      }
+    }
+    const deadlineAt = startedAt + effectiveDeadlineMs;
 
     // --- Cancellation before start -----------------------------------------
     if (signal?.aborted) {
       emitExecutionEvent(events, 'run_cancelled', { message: 'Run cancelled before session start' });
       return this.buildResult(events, runId, 'cancelled', startedAt, {
+        costUsd: 0,
         session: null,
         configId,
       });
@@ -118,6 +179,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       sessionEnded: boolean;
       budgetExceeded: boolean;
       modelCostUsd: number;
+      inputTokens: number;
+      outputTokens: number;
       sessionError: string | null;
     } = {
       submission: null,
@@ -125,6 +188,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       sessionEnded: false,
       budgetExceeded: false,
       modelCostUsd: 0,
+      inputTokens: 0,
+      outputTokens: 0,
       sessionError: null,
     };
 
@@ -158,6 +223,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           data: { code },
         });
         return this.buildResult(events, runId, 'failed', startedAt, {
+          tokenUsage: { inputTokens: state.inputTokens, outputTokens: state.outputTokens },
+          costUsd: state.modelCostUsd,
           session: null,
           configId,
           failure: {
@@ -182,13 +249,23 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           type?: string;
           toolName?: string;
           isError?: boolean;
-          message?: { usage?: { cost?: { total?: number } } };
+          message?: { usage?: { cost?: { total?: number }; input_tokens?: number; output_tokens?: number } };
         };
         if (!event || typeof event.type !== 'string') return;
 
-        // Model-cost accounting (PI-5): each completed assistant message
-        // reports usage; the policy gateway enforces maxCostUsd server-side.
-        if (event.type === 'message_end' && event.message?.usage?.cost?.total !== undefined) {
+        // Model-cost accounting (PI-5) + token accounting (PI-10): each
+        // completed assistant message reports usage; the policy gateway
+        // enforces maxCostUsd server-side, and the run row persists token
+        // usage so workspace-level daily token budgets can be enforced
+        // centrally (src/product-intelligence/budgets.ts).
+        if (event.type === 'message_end' && event.message?.usage) {
+          if (typeof event.message.usage.input_tokens === 'number') {
+            state.inputTokens = Math.max(state.inputTokens, event.message.usage.input_tokens);
+          }
+          if (typeof event.message.usage.output_tokens === 'number') {
+            state.outputTokens = Math.max(state.outputTokens, event.message.usage.output_tokens);
+          }
+          if (event.message.usage?.cost?.total !== undefined) {
           state.modelCostUsd = Math.max(state.modelCostUsd, event.message.usage.cost.total);
           const budget = defaultPolicyGateway.checkModelBudget(
             { runId, policy },
@@ -206,7 +283,32 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
             return;
           }
         }
+        }
         if (event.type === 'tool_execution_start' && event.toolName) {
+          // PI-10: workspace-level category budgets (search/fetch/browser)
+          // enforced centrally BEFORE the call is announced — the sink
+          // persists the tool-call row synchronously on tool_call_started,
+          // so checking first keeps the boundary at exactly `max` (review
+          // finding PI-10-MINOR-3). The DB-backed check is loaded lazily so
+          // the Pi executor stays importable in vitest (no bun:sqlite there);
+          // real runs always execute under bun where enforcement is
+          // authoritative.
+          try {
+            const runRow = loadPiRunRow(runId);
+            if (runRow) checkWorkspaceToolCategoryBudget(runRow.workspaceId, event.toolName);
+          } catch (error) {
+            if (error instanceof PolicyDeniedError) {
+              state.budgetExceeded = true;
+              emitExecutionEvent(events, 'run_failed', {
+                isError: true,
+                message: error.message,
+                data: { code: 'policy_denied' },
+              });
+              void handle?.session.abort().catch(() => undefined);
+              return;
+            }
+            throw error;
+          }
           state.toolCallCount += 1;
           emitExecutionEvent(events, 'tool_call_started', {
             toolName: event.toolName,
@@ -281,6 +383,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           message: `Hard deadline exceeded (${policy.deadlineMs} ms)`,
         });
         return this.buildResult(events, runId, 'timed_out', startedAt, {
+          tokenUsage: { inputTokens: state.inputTokens, outputTokens: state.outputTokens },
+          costUsd: state.modelCostUsd,
           session: handle,
           configId,
           failure: {
@@ -292,6 +396,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       if (state.budgetExceeded) {
         const message = `Tool call budget exhausted (max ${policy.maxToolCalls})`;
         return this.buildResult(events, runId, 'failed', startedAt, {
+          tokenUsage: { inputTokens: state.inputTokens, outputTokens: state.outputTokens },
+          costUsd: state.modelCostUsd,
           session: handle,
           configId,
           failure: { code: 'policy_denied', message },
@@ -319,6 +425,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
             session: handle,
             configId,
             submission: state.submission,
+            tokenUsage: { inputTokens: state.inputTokens, outputTokens: state.outputTokens },
+            costUsd: state.modelCostUsd,
           },
         );
       }
@@ -333,6 +441,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         data: { code: 'missing_submission' },
       });
       return this.buildResult(events, runId, 'failed', startedAt, {
+        tokenUsage: { inputTokens: state.inputTokens, outputTokens: state.outputTokens },
+        costUsd: state.modelCostUsd,
         session: handle,
         configId,
         failure: { code: 'missing_submission', message },
@@ -345,6 +455,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         data: { code: 'unknown' },
       });
       return this.buildResult(events, runId, 'failed', startedAt, {
+        tokenUsage: { inputTokens: state.inputTokens, outputTokens: state.outputTokens },
+        costUsd: state.modelCostUsd,
         session: handle,
         configId,
         failure: { code: 'unknown', message },
@@ -382,6 +494,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       configId: string;
       submission?: TerminalResultSubmission | null;
       failure?: ProductResearchResult['failure'];
+      tokenUsage?: { inputTokens: number; outputTokens: number } | null;
+      costUsd?: number;
     },
   ): ProductResearchResult {
     return {
@@ -395,6 +509,11 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       durationMs: this.now() - startedAt,
       submission: parts.submission ?? null,
       failure: parts.failure ?? null,
+      tokenUsage:
+        parts.tokenUsage && (parts.tokenUsage.inputTokens > 0 || parts.tokenUsage.outputTokens > 0)
+          ? parts.tokenUsage
+          : null,
+      modelCostUsd: parts.costUsd && parts.costUsd > 0 ? parts.costUsd : null,
       events: events.snapshot(),
     };
   }

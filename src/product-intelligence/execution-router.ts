@@ -32,6 +32,8 @@ export interface ExecutionRouter {
   resolveExecutor(): Promise<ExecutorSelection>;
   /** All executors known to the router (for comparison UIs). */
   listExecutors(): Promise<ExecutorSelection[]>;
+  /** PI-10: same-configuration reruns prefer the named executor when available. */
+  resolveExecutorPreferring(name: string): Promise<ExecutorSelection>;
 }
 
 export interface ExecutionRouterDeps {
@@ -47,7 +49,7 @@ export function createExecutionRouter(deps: ExecutionRouterDeps): ExecutionRoute
   const flagsProvider = deps.flags ?? getProductIntelligenceFlags;
 
   return {
-    async resolveExecutor(): Promise<ExecutorSelection> {
+  async resolveExecutor(): Promise<ExecutorSelection> {
       const flags = flagsProvider();
       // PI-9: the kill switch returns every workspace to the normal pipeline.
       if (process.env.BAYSTATE_CMS_PI_KILL_SWITCH === 'true' || flags.killSwitch) {
@@ -83,6 +85,20 @@ export function createExecutionRouter(deps: ExecutionRouterDeps): ExecutionRoute
         executor: deps.legacy,
         reason: 'Pi executor is not installed or configured',
       };
+    },
+    /**
+     * PI-10 same-configuration rerun: prefer the named executor when it is
+     * still available under the current flags, otherwise fall back to normal
+     * resolution ("where still available").
+     */
+    async resolveExecutorPreferring(name: string): Promise<ExecutorSelection> {
+      const selection = await this.resolveExecutor();
+      if (selection.name === name) return selection;
+      if (name === PI_EXECUTOR_NAME && deps.pi) {
+        // The Pi executor is installed; only the flags diverted us.
+        return { name: PI_EXECUTOR_NAME, executor: deps.pi, reason: 'rerun: requested Pi executor' };
+      }
+      return selection;
     },
 
     async listExecutors(): Promise<ExecutorSelection[]> {

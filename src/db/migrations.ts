@@ -1738,6 +1738,53 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // ── Product Intelligence Ops Migration (PI-10) ───────────────────────────
+  // Operational tooling: replay lineage (every replay is a new run linked to
+  // its origin; originals stay immutable), centralized workspace budgets, and
+  // per-category retention policies (metadata / tool calls / sources / raw
+  // fetched content / model request+response artifacts / images).
+  try {
+    const piOpsVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('product_intelligence_ops_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!piOpsVersion) {
+      console.log('[Migrations] Running product intelligence ops schema migration...');
+      db.transaction(() => {
+        // Replay lineage: origin_run_id self-reference (SET NULL so a replayed
+        // run survives its origin's deletion); replay_depth guards runaway chains.
+        const runCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_runs') WHERE name = 'origin_run_id'").get() as { c: number };
+        if (runCols.c === 0) {
+          db.exec(`ALTER TABLE product_intelligence_runs ADD COLUMN origin_run_id TEXT REFERENCES product_intelligence_runs(id) ON DELETE SET NULL;`);
+        }
+        const depthCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_runs') WHERE name = 'replay_depth'").get() as { c: number };
+        if (depthCols.c === 0) {
+          db.exec(`ALTER TABLE product_intelligence_runs ADD COLUMN replay_depth INTEGER NOT NULL DEFAULT 0;`);
+        }
+        // Workspace budget policies (NULL fields = unlimited) and per-category
+        // retention policies (NULL fields = keep forever). Enforced centrally
+        // in src/product-intelligence/budgets.ts / retention.ts, never trusted
+        // to the agent prompt.
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS pi_budget_policies (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspace(id) ON DELETE CASCADE,
+            policy_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS pi_retention_policies (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspace(id) ON DELETE CASCADE,
+            policy_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_ops_schema_version', '1');");
+      console.log('[Migrations] Product intelligence ops schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence ops schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

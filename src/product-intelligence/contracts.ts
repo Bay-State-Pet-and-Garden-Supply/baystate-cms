@@ -401,6 +401,13 @@ export const ProductResearchResultSchema = z.object({
   configId: z.string().min(1),
   /** Wall-clock duration of the run in milliseconds. */
   durationMs: z.number().int().nonnegative(),
+  /** Model token usage reported by the provider (PI-10; null when unknown). */
+  tokenUsage: z
+    .object({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative() })
+    .nullish(),
+  /** Provider-reported model cost in USD (PI-10; null when unknown). Serves as
+   *  both the estimate and the final figure until real billing is available. */
+  modelCostUsd: z.number().nonnegative().nullish(),
   /** Terminal submission: PI-1 evidence bundle or a PI-4 workflow submission. */
   submission: TerminalResultSubmissionSchema.nullable().default(null),
   /** Terminal failure details when outcome is 'failed'. */
