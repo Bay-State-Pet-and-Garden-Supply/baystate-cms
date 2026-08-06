@@ -2,6 +2,7 @@
 
 import { z } from 'zod';
 import { ExtractionDataSchema } from './onboarding';
+import { NetworkCaptureArtifactSchema } from '../../product-intelligence/assets/schema';
 
 
 // ─── Capabilities ──────────────────────────────────────────────────────────────
@@ -38,10 +39,26 @@ export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 
 // ─── Snapshot ──────────────────────────────────────────────────────────────────
 
+/** PI-11: a single deterministic page interaction (no natural-language automation). */
+export const InteractionActionSchema = z.object({
+  type: z.enum(['click_selector', 'select_option', 'open_accordion', 'dismiss_cookie']),
+  /** CSS selector for click_selector / select_option / open_accordion. */
+  selector: z.string().max(500).optional(),
+  /** Exact option label for select_option (matched case-insensitively). */
+  optionLabel: z.string().max(200).optional(),
+  /** Max milliseconds to wait after the action before re-capture. */
+  settleMs: z.number().int().min(0).max(10_000).default(1_000),
+});
+export type InteractionAction = z.infer<typeof InteractionActionSchema>;
+
 export const SnapshotRequestSchema = z.object({
   url: z.string().url(),
   runtime: z.enum(['static', 'rendered']).default('rendered'),
   captureScreenshot: z.boolean().default(true),
+  /** PI-11: capture product-relevant XHR/fetch/GraphQL JSON responses. */
+  captureNetwork: z.boolean().optional(),
+  /** PI-11: one bounded deterministic interaction before re-capture. */
+  interaction: InteractionActionSchema.nullable().optional(),
 });
 
 export type SnapshotRequest = z.infer<typeof SnapshotRequestSchema>;
@@ -56,6 +73,22 @@ export const SnapshotResponseSchema = z.object({
   imageCandidates: z.array(z.string()).default(() => []),
   pageStructureSignals: z.array(z.string()).default(() => []),
   warnings: z.array(z.string()).default(() => []),
+  /** PI-11: product-relevant captured network responses (XHR/fetch/GraphQL JSON). */
+  networkResponses: z.array(NetworkCaptureArtifactSchema).optional(),
+  /** Deterministic interaction result, when an interaction was requested. */
+  interaction: z
+    .object({
+      action: InteractionActionSchema,
+      performed: z.boolean(),
+      /** Final URL after the action (variant selectors rewrite URLs). */
+      finalUrl: z.string(),
+      selectedOptions: z.array(z.string()).default(() => []),
+      warnings: z.array(z.string()).default(() => []),
+    })
+    .nullable()
+    .optional(),
+  /** Artifact ref for the combined network capture payload (retention). */
+  networkRef: z.string().nullable().optional(),
 });
 
 export type SnapshotResponse = z.infer<typeof SnapshotResponseSchema>;

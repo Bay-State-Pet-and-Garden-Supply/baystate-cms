@@ -19,6 +19,9 @@ import {
   fetchPageHtml,
 } from '../../product-intelligence/extraction/platforms';
 import { runExtractionLadder, exactGtinMatch, createLadderExtractionContract } from '../../product-intelligence/extraction/ladder';
+import { runBrowserInteraction, type BrowserSnapshotFn } from '../../product-intelligence/extraction/browser';
+import { ManagedFallbackRegistry, StubManagedProvider } from '../../product-intelligence/extraction/managed-fallback';
+import { LlmExtractionAdapter, isLlmAvailable, narrowLlmPrompt, NARROW_LLM_SYSTEM_PROMPT } from '../../product-intelligence/extraction/llm';
 import type { FetchedPage } from '../../product-intelligence/extraction/platforms';
 import type { PageExtractionContract } from '../../product-intelligence/tools/contract';
 
@@ -412,5 +415,297 @@ describe('ladder contract adapter + helpers', () => {
   it('rejects loose 6-digit pseudo-GTINs as identity evidence', () => {
     expect(gtinFromAny({ gtin: '123456' })).toBeNull();
     expect(gtinFromAny({ gtin: '12345678' })).toBe('12345678');
+  });
+  it('escalates to the rendered browser layer with network capture', async () => {
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://browser.example.com/p/x',
+      finalUrl: 'https://browser.example.com/p/x',
+      jsonLd: [{ '@type': 'Product', name: 'Browser Product 12oz', sku: 'BP-12', brand: 'Browser Co', gtin: '666666666666' }],
+      embeddedProductData: [],
+      imageCandidates: ['https://img.example.com/browser.jpg'],
+      networkResponses: [
+        {
+          url: 'https://browser.example.com/api/products/12',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { product: { title: 'Browser Product 12oz', sku: 'BP-12', gtin: '666666666666' } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: ['interaction:variant-selector'],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://browser.example.com/p/x',
+      { gtin: '666666666666' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://browser.example.com/p/x'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(layersUsed).toContain('browser_parsed');
+    expect(result.identityStatus).toBe('exact_match');
+    expect(result.fields.some((f) => f.method === 'network_response')).toBe(true);
+    expect(result.images.some((i) => i.url === 'https://img.example.com/browser.jpg')).toBe(true);
+  });
+
+  it('runs a bounded interaction and records the resulting variant state', async () => {
+    const snapshot: BrowserSnapshotFn = async (request) => ({
+      url: request.url,
+      finalUrl: 'https://browser.example.com/p/x?size=12oz',
+      jsonLd: [{ '@type': 'Product', name: 'Selectable Product', sku: 'SP-1', gtin: '777777777777' }],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: request.interaction
+        ? { performed: true, finalUrl: 'https://browser.example.com/p/x?size=12oz', selectedOptions: ['12 oz'] }
+        : null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const out: {
+      fields: Array<{ field: string; value: string; method: string; sourcePath?: string }>;
+      images: Array<{ url: string; sourcePath?: string }>;
+      gtins: Array<{ value: string; method: string }>;
+      sku: string | null;
+      brand: string | null;
+      productName: string | null;
+      size: string | null;
+      variant: { name?: string; id?: string; sku?: string } | null;
+      variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
+    } = { fields: [], images: [], gtins: [], sku: null, brand: null, productName: null, size: null, variant: null, variantSignals: [] };
+    const result = await runBrowserInteraction(snapshot, 'https://browser.example.com/p/x', {
+      type: 'select_option',
+      selector: '#size',
+      optionLabel: '12 oz',
+      settleMs: 500,
+    }, out);
+    expect(result.selectedOptions).toEqual(['12 oz']);
+    expect(out.variantSignals.some((s) => s.kind === 'variant_match')).toBe(true);
+    expect(out.fields.some((f) => f.field === 'variant_selection')).toBe(true);
+    expect(result.finalUrl).toContain('size=12oz');
+  });
+
+  it('escalates to the managed browser fallback with a domain-scoped provider', async () => {
+    const pages = new Map<string, string>([
+      ['https://managed.example.com/p/x', `<html><head><script type="application/ld+json">{"@type":"Product","name":"Managed Product 4oz","sku":"MP-4","gtin":"888888888888"}</script></head><body></body></html>`],
+    ]);
+    const registry = new ManagedFallbackRegistry(
+      { providers: [{ name: 'stub_managed', pinnedVersion: '0.1.0', allowedDomains: ['managed.example.com'] }] },
+      [new StubManagedProvider(pages)],
+    );
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://managed.example.com/p/x',
+      { gtin: '888888888888' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>blocked</body></html>', 'https://managed.example.com/p/x'),
+        managedFallback: registry,
+      },
+    );
+    expect(layersUsed).toContain('managed_browser');
+    expect(layersUsed).toContain('managed_parsed');
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('the managed registry is safety-first: empty allowedDomains never matches', async () => {
+    const registry = new ManagedFallbackRegistry(
+      { providers: [{ name: 'stub_managed', pinnedVersion: '0.1.0', allowedDomains: [] }] },
+      [new StubManagedProvider(new Map())],
+    );
+    expect(registry.providerFor('https://anything.example.com/p/x')).toBeNull();
+    await expect(registry.fetch('https://anything.example.com/p/x', new AbortController().signal, 5000)).rejects.toThrow(
+      /No managed fallback provider enabled/,
+    );
+  });
+
+  it('runs the narrow LLM layer for unresolved fields and flips deterministicOnly', async () => {
+    const client = {
+      async complete(prompt: string, _schema: unknown): Promise<unknown> {
+        expect(prompt).toContain('size');
+        expect(prompt).toContain(NARROW_LLM_SYSTEM_PROMPT.slice(0, 40));
+        return { values: [{ field: 'size', value: '16 oz', sourcePath: 'meta description', directSupport: true }] };
+      },
+    };
+    const adapter = new LlmExtractionAdapter({ client });
+    process.env.BAYSTATE_CMS_PI_LLM_BASE_URL = 'http://localhost:11434';
+    process.env.BAYSTATE_CMS_PI_LLM_MODEL = 'qwen2.5vl:latest';
+    try {
+      const { result, layersUsed } = await runExtractionLadder(
+        'https://llm.example.com/p/x',
+        { gtin: '999999999999' },
+        new AbortController().signal,
+        5000,
+        {
+          fetchPage: async () =>
+            fetched(`<html><head><title>T</title><meta name="description" content="16 ounce bag of premium kibble" /></head><body></body></html>`, 'https://llm.example.com/p/x'),
+          llm: { adapter },
+        },
+      );
+      expect(layersUsed).toContain('llm_extraction');
+      expect(layersUsed).toContain('llm_contributed');
+      expect(result.fields.some((f) => f.field === 'size' && f.method === 'llm_extraction')).toBe(true);
+      expect(result.deterministicOnly).toBe(false);
+    } finally {
+      delete process.env.BAYSTATE_CMS_PI_LLM_BASE_URL;
+      delete process.env.BAYSTATE_CMS_PI_LLM_MODEL;
+    }
+  });
+
+  it('the LLM adapter drops UNRESOLVED and out-of-scope values', async () => {
+    const client = {
+      async complete(): Promise<unknown> {
+        return {
+          values: [
+            { field: 'size', value: 'UNRESOLVED', directSupport: true },
+            { field: 'brand', value: 'Made Up Brand', directSupport: true },
+            { field: 'not_requested', value: 'ignored', directSupport: true },
+          ],
+        };
+      },
+    };
+    const adapter = new LlmExtractionAdapter({ client });
+    const response = await adapter.extract({
+      unresolvedFields: ['size', 'brand'],
+      excerpts: [{ field: 'size', text: 'a' }, { field: 'brand', text: 'b' }],
+      deterministicValues: {},
+    });
+    expect(response.values).toEqual([{ field: 'brand', value: 'Made Up Brand', directSupport: true }]);
+  });
+
+  it('narrowLlmPrompt embeds the request deterministically', () => {
+    const request = { unresolvedFields: ['size'], excerpts: [{ field: 'size', text: '16 oz' }], deterministicValues: { brand: 'X' } };
+    const prompt = narrowLlmPrompt(request);
+    expect(prompt).toContain(NARROW_LLM_SYSTEM_PROMPT);
+    expect(prompt).toContain('"size"');
+    expect(prompt).toContain('"16 oz"');
+  });
+
+  it('isLlmAvailable reflects the env configuration only', () => {
+    const before = isLlmAvailable();
+    process.env.BAYSTATE_CMS_PI_LLM_BASE_URL = 'http://localhost:11434';
+    process.env.BAYSTATE_CMS_PI_LLM_MODEL = 'qwen2.5vl:latest';
+    expect(isLlmAvailable()).toBe(true);
+    delete process.env.BAYSTATE_CMS_PI_LLM_MODEL;
+    expect(isLlmAvailable()).toBe(false);
+    delete process.env.BAYSTATE_CMS_PI_LLM_BASE_URL;
+    expect(isLlmAvailable()).toBe(before);
+  });
+  it('network evidence requires strong product identity (cart payloads excluded)', async () => {
+    // A cart line item carries title+sku — without gtin/variants/handle it
+    // must NOT become product evidence (review PI-11-M2).
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://shop.example.com/products/x',
+      finalUrl: 'https://shop.example.com/products/x',
+      jsonLd: [],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://shop.example.com/cart.js',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { items: [{ title: 'Chicken Broth 16oz', sku: 'CB-16' }] },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result } = await runExtractionLadder(
+      'https://shop.example.com/products/x',
+      { gtin: '085000079585' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://shop.example.com/products/x'),
+        browser: { snapshot },
+      },
+    );
+    expect(result.fields.some((f) => f.method === 'network_response')).toBe(false);
+    expect(result.productName).toBeNull();
+  });
+
+  it('the LLM layer is gated on unsettled identity (no flips on exact matches)', async () => {
+    process.env.BAYSTATE_CMS_PI_LLM_BASE_URL = 'http://localhost:11434';
+    process.env.BAYSTATE_CMS_PI_LLM_MODEL = 'qwen2.5vl:latest';
+    try {
+      // Exact GTIN + 3+ fields from JSON-LD -> settled; layer 8 must not run.
+      const complete = vi.fn(async () => ({ values: [{ field: 'brand', value: 'Fake Brand', directSupport: true }] }));
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://settled.example.com/p/x',
+      { gtin: '085000079585', name: 'Stella & Chewy\'s Chicken Broth 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched(JSON_LD_HTML, 'https://settled.example.com/p/x'),
+        llm: { adapter: new LlmExtractionAdapter({ client: { complete } }) },
+      },
+    );
+      expect(complete).not.toHaveBeenCalled();
+      // The settled early-exit returns before layers 5-8 entirely.
+      expect(layersUsed.some((layer) => layer.startsWith('llm'))).toBe(false);
+      expect(result.deterministicOnly).toBe(true);
+    } finally {
+      delete process.env.BAYSTATE_CMS_PI_LLM_MODEL;
+      delete process.env.BAYSTATE_CMS_PI_LLM_BASE_URL;
+    }
+  });
+
+  it('the LLM layer skips when there is no excerpt source', async () => {
+    process.env.BAYSTATE_CMS_PI_LLM_BASE_URL = 'http://localhost:11434';
+    process.env.BAYSTATE_CMS_PI_LLM_MODEL = 'qwen2.5vl:latest';
+    try {
+      const complete = vi.fn(async () => ({ values: [{ field: 'size', value: '16 oz', directSupport: true }] }));
+    const { layersUsed } = await runExtractionLadder(
+      'https://noexcerpt.example.com/p/x',
+      { gtin: '085000079585' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>no meta at all</body></html>', 'https://noexcerpt.example.com/p/x'),
+        llm: { adapter: new LlmExtractionAdapter({ client: { complete } }) },
+      },
+    );
+      expect(complete).not.toHaveBeenCalled();
+      expect(layersUsed).toContain('llm_skipped_no_excerpts');
+    } finally {
+      delete process.env.BAYSTATE_CMS_PI_LLM_MODEL;
+      delete process.env.BAYSTATE_CMS_PI_LLM_BASE_URL;
+    }
+  });
+
+  it('the managed registry enforces pinned provider versions', async () => {
+    const registry = new ManagedFallbackRegistry(
+      { providers: [{ name: 'stub_managed', pinnedVersion: '9.9.9', allowedDomains: ['managed.example.com'], enabled: true }] },
+      [new StubManagedProvider(new Map())],
+    );
+    expect(registry.providerFor('https://managed.example.com/p/x')).toBeNull();
+    const ok = new ManagedFallbackRegistry(
+      { providers: [{ name: 'stub_managed', pinnedVersion: '0.1.0', allowedDomains: ['managed.example.com'], enabled: true }] },
+      [new StubManagedProvider(new Map())],
+    );
+    expect(ok.providerFor('https://managed.example.com/p/x')).not.toBeNull();
+  });
+
+  it('the LLM adapter drops unsupported (directSupport:false) values', async () => {
+    const complete = vi.fn(async () => ({
+      values: [
+        { field: 'size', value: '16 oz', directSupport: true },
+        { field: 'brand', value: 'Guessed Brand', directSupport: false },
+      ],
+    }));
+    const adapter = new LlmExtractionAdapter({ client: { complete } });
+    const response = await adapter.extract({
+      unresolvedFields: ['size', 'brand'],
+      excerpts: [{ field: 'size', text: '16 oz bottle' }],
+      deterministicValues: {},
+    });
+    expect(response.values).toHaveLength(1);
+    expect(response.values[0].field).toBe('size');
   });
 });

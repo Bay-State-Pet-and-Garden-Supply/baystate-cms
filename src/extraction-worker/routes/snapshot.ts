@@ -8,7 +8,7 @@
  *                   blocking, JS execution, and optional screenshot capture.
  *
  * All artifact files are written under:
- *   <cwd>/.shopsite-cms/artifacts/profile-builder/<domain>/<job-id>/
+ *   <cwd>/.baystate-cms/artifacts/profile-builder/<domain>/<job-id>/
  *
  * The response always passes through SnapshotResponseSchema validation so the
  * caller receives a well-structured result even when warnings are present.
@@ -19,7 +19,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { chromium } from 'playwright';
 import { SnapshotRequestSchema, SnapshotResponseSchema } from '../../shared/schemas/extraction-worker';
-import type { SnapshotResponse } from '../../shared/schemas/extraction-worker';
+import type { SnapshotResponse, InteractionAction } from '../../shared/schemas/extraction-worker';
+import type { NetworkCaptureArtifact } from '../../product-intelligence/assets/schema';
+import { sha256Hex } from '../../shared/stable-id';
 import { resolveArtifactDir, writeArtifact, generateJobId, extractDomainFromUrl } from '../artifacts';
 
 // ─── HTTP constants (sourced from page-extractor.ts) ──────────────────────────
@@ -93,32 +95,6 @@ function extractJsonLdFromHtml(html: string): Record<string, unknown>[] {
   return results;
 }
 
-function extractMetaTagsFromHtml(html: string): Record<string, string> {
-  const tags: Record<string, string> = {};
-  const metaRegex = /<meta[\s\S]*?>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = metaRegex.exec(html)) !== null) {
-    const tag = match[0];
-    const getAttr = (name: string): string | null => {
-      const re = new RegExp(`${name}\\s*=\\s*["']([^"']*)["']`, 'i');
-      const m = tag.match(re);
-      return m ? m[1] : null;
-    };
-    const property = getAttr('property') ?? getAttr('name');
-    const content = getAttr('content');
-    if (property && content) {
-      tags[property] = content;
-    }
-  }
-
-  // Also grab <title>
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (titleMatch?.[1]?.trim()) {
-    tags['page:title'] = titleMatch[1].trim();
-  }
-
-  return tags;
-}
 
 /**
  * Extract embedded Shopify product data objects from HTML using regex scanning.
@@ -228,7 +204,6 @@ function isUsableImageSrc(src: string): boolean {
 
 function extractPageStructureSignalsFromHtml(html: string): string[] {
   const signals: string[] = [];
-  const lower = html.toLowerCase();
 
   // CSS class .product on any element
   if (/class\s*=\s*["'][^"']*\bproduct\b[^"']*["']/i.test(html)) {
@@ -266,7 +241,7 @@ function extractPageStructureSignalsFromHtml(html: string): string[] {
   }
 
   // add-to-cart form / button
-  if (/add\-to\-cart|add_to_cart|data\-product\-id/i.test(html)) {
+  if (/add-to-cart|add_to_cart|data-product-id/i.test(html)) {
     signals.push('interaction:add-to-cart');
   }
 
@@ -473,9 +448,230 @@ async function extractPageStructureSignalsFromPage(
 
 // ─── Snapshot execution ────────────────────────────────────────────────────────
 
+/** A product-relevant network response captured during a rendered snapshot. */
+interface CapturedNetworkResponse {
+  url: string;
+  status: number;
+  responseContentType: string | null;
+  jsonBody: unknown;
+  timingMs: number | null;
+  contentHash: string;
+}
+
+const MAX_CAPTURED_RESPONSES = 40;
+const MAX_CAPTURE_BYTES = 2_000_000;
+const MAX_AGGREGATE_CAPTURE_BYTES = 8_000_000;
+
+/** URLs that are never product evidence (cart/account/checkout/session...). */
+const NON_PRODUCT_URL = /cart|checkout|account|customer|order|session|login|logout|wishlist|billing|payment|address|profile|subscription|api\/auth|sentry|logrocket|segment|amplitude|mixpanel|fullstory|mouseflow|taboola|telemetry|beacon/i;
+
+/** Expanded tracker/analytics denylist (review PI-11-M1/n1). */
+const TRACKER_URL = /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel|sentry|logrocket|segment|amplitude|mixpanel|fullstory|mouseflow|taboola|telemetry|beacon/i;
+
+/** Keys whose values are never product evidence (credentials/personal data). */
+const SENSITIVE_KEY = /token|password|secret|authorization|cookie|sessionid|email|phone|card|ccv|cvv|ssn|birthdate/i;
+
+/**
+ * Replace sensitive values in a captured payload (depth-bounded walk; the
+ * shape is preserved, values are redacted). Requirement: do not persist
+ * unrelated credentials or personal data.
+ */
+function redactSensitiveKeys(node: unknown, depth = 0): unknown {
+  if (depth > 8) return node;
+  if (Array.isArray(node)) {
+    return node.map((item) => redactSensitiveKeys(item, depth + 1));
+  }
+  if (node === null || typeof node !== 'object') return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    out[key] = SENSITIVE_KEY.test(key) ? '[redacted]' : redactSensitiveKeys(value, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * Install a Playwright response listener that captures product-relevant
+ * XHR/fetch/GraphQL JSON responses. Filtering keeps analytics, media, and
+ * oversized payloads out; only parsed JSON bodies are retained.
+ */
+async function installNetworkCapture(page: import('playwright').Page): Promise<{
+  responses: CapturedNetworkResponse[];
+  stop: () => void;
+}> {
+  const responses: CapturedNetworkResponse[] = [];
+  let aggregateBytes = 0;
+  const startedAt = Date.now();
+  const onResponse = async (response: import('playwright').Response): Promise<void> => {
+    if (responses.length >= MAX_CAPTURED_RESPONSES) return;
+    const request = response.request();
+    const type = request.resourceType();
+    if (type !== 'xhr' && type !== 'fetch') return;
+    const headers = response.headers();
+    const contentType = headers['content-type'] ?? '';
+    if (!contentType.includes('json')) return;
+    const reqUrl = response.url();
+    // Requirement: filter to relevant product data — never analytics,
+    // cart/account/checkout/session, or personalization endpoints, and
+    // never record query strings (session tokens live there).
+    if (TRACKER_URL.test(reqUrl) || NON_PRODUCT_URL.test(reqUrl)) return;
+    const cleanUrl = reqUrl.split('?')[0];
+    try {
+      const body = await response.body();
+      if (body.byteLength > MAX_CAPTURE_BYTES) return;
+      if (aggregateBytes + body.byteLength > MAX_AGGREGATE_CAPTURE_BYTES) return;
+      const text = body.toString('utf8');
+      const json = JSON.parse(text);
+      aggregateBytes += body.byteLength;
+      responses.push({
+        url: cleanUrl,
+        status: response.status(),
+        responseContentType: headers['content-type'] ?? null,
+        jsonBody: redactSensitiveKeys(json),
+        timingMs: Date.now() - startedAt,
+        contentHash: sha256Hex(text),
+      });
+    } catch {
+      // Unparseable or oversized bodies are not product evidence.
+    }
+  };
+  page.on('response', onResponse);
+  return {
+    responses,
+    stop: () => page.off('response', onResponse),
+  };
+}
+
+/**
+ * Execute ONE bounded deterministic interaction (PI-11 layer 6). Actions are
+ * exact-selector or exact-label driven; nothing here decides taxonomy,
+ * image rights, or final product identity.
+ */
+async function performInteraction(
+  page: import('playwright').Page,
+  action: InteractionAction,
+): Promise<{ performed: boolean; finalUrl: string; selectedOptions: string[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const selectedOptions: string[] = [];
+  const settleMs = action.settleMs ?? 1_000;
+  try {
+    switch (action.type) {
+      case 'click_selector': {
+        if (!action.selector) {
+          warnings.push('click_selector requires a selector');
+          break;
+        }
+        // Exact constraints only: never allow selectors that reach purchase,
+        // cart, or submission flows (review PI-11-m5).
+        if (/cart|checkout|buy|purchase|submit|pay|place_order/i.test(action.selector)) {
+          warnings.push(`selector ${action.selector} refused: purchase/cart selectors are out of scope`);
+          break;
+        }
+        try {
+          await page.click(action.selector, { timeout: 5_000 });
+          await page.waitForTimeout(settleMs);
+        } catch (err) {
+          warnings.push(`click failed on ${action.selector}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        break;
+      }
+      case 'select_option': {
+        if (!action.selector || !action.optionLabel) {
+          warnings.push('select_option requires a selector and optionLabel');
+          break;
+        }
+        try {
+          const locator = page.locator(action.selector);
+          const labels = await locator.locator('option').allTextContents();
+          const values = await locator.locator('option').evaluateAll((options) =>
+            options.map((option) => (option as HTMLOptionElement).value ?? ''),
+          );
+          const target = action.optionLabel;
+          const index = labels.findIndex(
+            (label) => label.trim().toLowerCase() === target.toLowerCase(),
+          );
+          const valueMatch = values.findIndex((value) => value.toLowerCase() === target.toLowerCase());
+          const matchIndex = index >= 0 ? index : valueMatch;
+          if (matchIndex >= 0) {
+            await locator.selectOption({ label: labels[matchIndex] });
+            selectedOptions.push(labels[matchIndex].trim());
+          } else {
+            warnings.push(`no option matches ${target}`);
+          }
+          await page.waitForTimeout(settleMs);
+        } catch (err) {
+          warnings.push(`select failed on ${action.selector}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        break;
+      }
+      case 'open_accordion': {
+        if (!action.selector) {
+          warnings.push('open_accordion requires a selector');
+          break;
+        }
+        try {
+          const isDetails = await page.evaluate((selector) => {
+            const el = document.querySelector(selector);
+            if (el instanceof HTMLDetailsElement) {
+              el.open = true;
+              return true;
+            }
+            return false;
+          }, action.selector);
+          if (!isDetails) {
+            await page.locator(action.selector).first().click({ timeout: 5_000 });
+          }
+          await page.waitForTimeout(settleMs);
+        } catch (err) {
+          warnings.push(`accordion open failed on ${action.selector}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        break;
+      }
+      case 'dismiss_cookie': {
+        // Only act inside a visible cookie/consent banner — never on
+        // arbitrary confirm dialogs (review PI-11-m6).
+        let bannerVisible = false;
+        try {
+          bannerVisible = await page
+            .locator('[id*="cookie" i], [class*="cookie" i], [class*="consent" i], [class*="gdpr" i], [class*="banner" i]')
+            .first()
+            .isVisible({ timeout: 1_500 })
+            .catch(() => false);
+        } catch {
+          bannerVisible = false;
+        }
+        if (!bannerVisible) {
+          warnings.push('no cookie banner found; skipping dismissal');
+          break;
+        }
+        let dismissed = false;
+        try {
+          await page.getByRole('button', { name: /accept|agree|allow/i }).first().click({ timeout: 3_000 });
+          dismissed = true;
+        } catch {
+          // fall through to the next pattern
+        }
+        if (!dismissed) {
+          try {
+            await page.getByRole('button', { name: /got it|ok/i }).first().click({ timeout: 3_000 });
+            dismissed = true;
+          } catch {
+            warnings.push('no cookie button found');
+          }
+        }
+        await page.waitForTimeout(settleMs);
+        break;
+      }
+    }
+  } catch (err) {
+    warnings.push(`interaction failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { performed: warnings.length === 0, finalUrl: page.url(), selectedOptions, warnings };
+}
+
 async function doStaticSnapshot(
   url: string,
   captureScreenshot: boolean,
+  captureNetwork: boolean,
   domain: string,
   jobId: string,
 ): Promise<SnapshotResponse> {
@@ -509,6 +705,9 @@ async function doStaticSnapshot(
       imageCandidates: [],
       pageStructureSignals: [],
       warnings,
+      networkResponses: [],
+      interaction: null,
+      networkRef: null,
     });
   }
 
@@ -519,7 +718,6 @@ async function doStaticSnapshot(
 
   // Extraction phases
   const jsonLd = extractJsonLdFromHtml(html);
-  const metaTags = extractMetaTagsFromHtml(html);
   const embeddedProductData = extractEmbeddedProductDataFromHtml(html);
 
   // Resolve image URLs against base
@@ -540,9 +738,12 @@ async function doStaticSnapshot(
   writeArtifact(artifactDir, 'page.min.html', minified);
 
   // Static mode cannot capture screenshots or network
-  let screenshotRef: string | null = null;
+  const screenshotRef: string | null = null;
   if (captureScreenshot) {
     warnings.push('Screenshot capture requires rendered runtime, skipping');
+  }
+  if (captureNetwork) {
+    warnings.push('Network capture requires rendered runtime, skipping');
   }
 
   return buildSnapshotResponse({
@@ -555,12 +756,17 @@ async function doStaticSnapshot(
     imageCandidates,
     pageStructureSignals,
     warnings,
+    networkResponses: [],
+    interaction: null,
+    networkRef: null,
   });
 }
 
 async function doRenderedSnapshot(
   url: string,
   captureScreenshot: boolean,
+  captureNetwork: boolean,
+  interaction: InteractionAction | null,
   domain: string,
   jobId: string,
 ): Promise<SnapshotResponse> {
@@ -590,16 +796,22 @@ async function doRenderedSnapshot(
       imageCandidates: [],
       pageStructureSignals: [],
       warnings,
+      networkResponses: [],
+      interaction: null,
+      networkRef: null,
     });
   }
 
   let finalUrl = url;
   let htmlRef: string | null = null;
   let screenshotRef: string | null = null;
+  let networkRef: string | null = null;
   let jsonLd: Record<string, unknown>[] = [];
   let embeddedProductData: Record<string, unknown>[] = [];
   let imageCandidates: string[] = [];
   let pageStructureSignals: string[] = [];
+  let interactionResult: SnapshotResponse['interaction'] = null;
+  let networkCapture: { responses: CapturedNetworkResponse[]; stop: () => void } | null = null;
 
   try {
     const context = await browser.newContext({
@@ -610,10 +822,7 @@ async function doRenderedSnapshot(
 
     const page = await context.newPage();
 
-    // Block resource types
-    const blockPatterns = [
-      'image', 'font', 'stylesheet', 'media',
-    ];
+    // Block resource types (types inlined below).
     await page.route('**/*', async (route) => {
       const req = route.request();
       const type = req.resourceType();
@@ -627,6 +836,11 @@ async function doRenderedSnapshot(
         await route.continue();
       }
     });
+
+    // PI-11: capture product-relevant network responses during navigation.
+    if (captureNetwork) {
+      networkCapture = await installNetworkCapture(page);
+    }
 
     // Navigate
     try {
@@ -643,7 +857,25 @@ async function doRenderedSnapshot(
     // Dwell for dynamic content
     await page.waitForTimeout(RENDERED_DWELL_MS);
 
-    // Capture full-page HTML
+    // PI-11: one bounded deterministic interaction before re-capture.
+    if (interaction) {
+      const result = await performInteraction(page, interaction);
+      interactionResult = {
+        action: interaction,
+        performed: result.performed,
+        finalUrl: result.finalUrl,
+        selectedOptions: result.selectedOptions,
+        warnings: result.warnings,
+      };
+      if (result.warnings.length > 0) {
+        warnings.push(...result.warnings.map((w) => `interaction: ${w}`));
+      }
+      if (result.finalUrl) {
+        finalUrl = result.finalUrl;
+      }
+    }
+
+    // Capture full-page HTML (post-interaction when an interaction ran)
     try {
       const html = await page.content();
       htmlRef = writeArtifact(artifactDir, 'page.html', html);
@@ -691,6 +923,21 @@ async function doRenderedSnapshot(
     } catch (err) {
       warnings.push(`Page structure signal extraction failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    // PI-11: stop capture, write the combined payload artifact, and map the
+    // schema-safe subset (timing/hash stay in the artifact file only).
+    if (networkCapture) {
+      networkCapture.stop();
+      if (networkCapture.responses.length > 0) {
+        networkRef = writeArtifact(
+          artifactDir,
+          'network.json',
+          JSON.stringify(networkCapture.responses),
+        );
+      } else {
+        warnings.push('Network capture requested but no product-relevant JSON responses observed');
+      }
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     warnings.push(`Rendered snapshot error: ${msg}`);
@@ -705,6 +952,15 @@ async function doRenderedSnapshot(
     }
   }
 
+  const networkResponses: NetworkCaptureArtifact[] = networkCapture
+    ? networkCapture.responses.map((r) => ({
+        url: r.url,
+        status: r.status,
+        responseContentType: r.responseContentType,
+        jsonBody: r.jsonBody,
+      }))
+    : [];
+
   return buildSnapshotResponse({
     url,
     finalUrl,
@@ -715,6 +971,9 @@ async function doRenderedSnapshot(
     imageCandidates,
     pageStructureSignals,
     warnings,
+    networkResponses,
+    interaction: interactionResult,
+    networkRef,
   });
 }
 
@@ -730,6 +989,9 @@ interface SnapshotInput {
   imageCandidates: string[];
   pageStructureSignals: string[];
   warnings: string[];
+  networkResponses: NetworkCaptureArtifact[];
+  interaction: SnapshotResponse['interaction'];
+  networkRef: string | null;
 }
 
 function buildSnapshotResponse(input: SnapshotInput): SnapshotResponse {
@@ -747,6 +1009,9 @@ function buildSnapshotResponse(input: SnapshotInput): SnapshotResponse {
     imageCandidates: input.imageCandidates,
     pageStructureSignals: input.pageStructureSignals,
     warnings,
+    networkResponses: input.networkResponses,
+    interaction: input.interaction,
+    networkRef: input.networkRef,
   });
 
   return parsed;
@@ -805,6 +1070,7 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
         result = await doStaticSnapshot(
           request.url,
           request.captureScreenshot,
+          request.captureNetwork ?? false,
           domain,
           jobId,
         );
@@ -812,6 +1078,8 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
         result = await doRenderedSnapshot(
           request.url,
           request.captureScreenshot,
+          request.captureNetwork ?? false,
+          request.interaction ?? null,
           domain,
           jobId,
         );

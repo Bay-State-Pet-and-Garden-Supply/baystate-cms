@@ -18,6 +18,7 @@ import { sharpImageVerificationAdapter } from '../assets/contract';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { classifyPageIdentity, errorResult, evidenceId, noResult, okResult, policyDenied, type ExtractedFieldEvidence, type PageExtractionContract, type PageExtractionResult } from './contract';
 import { createLadderExtractionContract } from '../extraction/ladder';
+import { defaultLadderOptions } from '../extraction/wiring';
 import { boundedString } from './registry';
 
 // ---------------------------------------------------------------------------
@@ -146,7 +147,7 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
   }
 }
 
-export const defaultPageExtractionContract: PageExtractionContract = createLadderExtractionContract();
+export const defaultPageExtractionContract: PageExtractionContract = createLadderExtractionContract(defaultLadderOptions());
 
 // ---------------------------------------------------------------------------
 // Tools

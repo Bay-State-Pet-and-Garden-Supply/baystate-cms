@@ -10,8 +10,8 @@
  *   4. Existing domain-specific extraction profiles (declared seam; none
  *      registered into Pi yet — they live in the extraction worker).
  *
- * Browser rendering, controlled interaction, managed fallbacks, and narrow
- * LLM extraction are later ladder layers (PI-11 continuation). The engine
+ * Rendered-browser capture, bounded interaction, managed fallbacks, and
+ * narrow LLM extraction are layers 5-8 (this module). The engine
  * returns ONE normalized evidence-backed result regardless of layers used;
  * retrieval success is always distinguished from correct product extraction
  * via the identity status.
@@ -33,6 +33,10 @@ import {
   findProductLike,
   type FetchedPage,
 } from './platforms';
+import { evidenceFromBrowserSnapshot, evidenceFromProductPayload, runBrowserInteraction, type BrowserSnapshotFn } from './browser';
+import type { ManagedFallbackRegistry, ManagedPage } from './managed-fallback';
+import { isLlmAvailable, type LlmExtractionAdapter } from './llm';
+import type { InteractionAction } from '../../shared/schemas/extraction-worker';
 
 export interface LadderOptions {
   fetchPage?: typeof fetchPageHtml;
@@ -51,6 +55,14 @@ export interface LadderOptions {
       timeoutMs: number,
     ): Promise<{ fields: ExtractedFieldEvidence[]; images: Array<{ url: string; sourcePath?: string }> } | null>;
   }>;
+  /** Layer 5: rendered browser with network capture (injected worker client). */
+  browser?: { snapshot: BrowserSnapshotFn } | null;
+  /** Layer 6: exact bounded interaction constraints (caller-supplied only). */
+  interaction?: InteractionAction | null;
+  /** Layer 7: benchmark-selected managed browser / unlocking fallback. */
+  managedFallback?: ManagedFallbackRegistry | null;
+  /** Layer 8: narrow schema-constrained LLM extraction (env-configured model). */
+  llm?: { adapter: LlmExtractionAdapter } | null;
 }
 
 export interface LadderRun {
@@ -362,12 +374,161 @@ export async function runExtractionLadder(
   brand ??= fields.find((f) => f.field === 'brand')?.value ?? null;
   size ??= fields.find((f) => f.field === 'size')?.value ?? null;
 
+  // ---------------------------------------------------------------------
+  // Layers 5-8: escalate only when deterministic layers did not settle the
+  // identity. Exact GTIN + healthy field count means the page is the product.
+  // ---------------------------------------------------------------------
+  let llmContributed = false;
+  let browserSignals: string[] = [];
+  const settled = (): boolean => exactGtinMatch(expected.gtin, gtins) && fields.length >= 3;
+
+  // Layer 5: rendered browser with network capture (XHR/fetch/GraphQL).
+  if (!settled() && options.browser) {
+    layersUsed.push('browser');
+    try {
+      const snapshot = await options.browser.snapshot({ url: finalUrl, captureNetwork: true, signal });
+      fetchModes.push('browser');
+      const browserOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
+      const browserMethods = evidenceFromBrowserSnapshot(snapshot, browserOut);
+      if (browserMethods.length > 0) layersUsed.push('browser_parsed');
+      if (snapshot.warnings.length > 0) layersUsed.push('browser_warnings');
+      browserSignals = snapshot.pageStructureSignals ?? [];
+      finalUrl = snapshot.finalUrl || finalUrl;
+      // The out object copies scalar bindings by value; re-sync everything
+      // (variant included) so browser-layer evidence reaches the result.
+      sku ??= fields.find((f) => f.field === 'sku')?.value ?? null;
+      productName ??= fields.find((f) => f.field === 'product_name')?.value ?? null;
+      brand ??= fields.find((f) => f.field === 'brand')?.value ?? null;
+      size ??= fields.find((f) => f.field === 'size')?.value ?? null;
+      if (browserOut.variant) variant = browserOut.variant;
+    } catch {
+      layersUsed.push('browser_failed');
+    }
+  }
+
+  // Layer 6: exact bounded interaction (variant selectors / collapsed
+  // content) — only when the caller supplied precise constraints. Returns
+  // the resulting variant state; never decides taxonomy, rights, or identity.
+  if (!settled() && options.browser && options.interaction) {
+    layersUsed.push('interaction');
+    try {
+      const interactionOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
+      const result = await runBrowserInteraction(
+        options.browser.snapshot,
+        finalUrl,
+        options.interaction,
+        interactionOut,
+      );
+      fetchModes.push('browser');
+      finalUrl = result.finalUrl || finalUrl;
+      // The interaction's snapshot is the freshest evidence of the selected
+      // variant — prefer it over an earlier layer's first-variant (m7).
+      if (interactionOut.variant) variant = interactionOut.variant;
+      if (result.methodsUsed.length > 0) layersUsed.push('interaction_parsed');
+      layersUsed.push('interaction_done');
+    } catch {
+      layersUsed.push('interaction_failed');
+    }
+  }
+
+  // Layer 7: benchmark-selected managed browser / unlocking fallback.
+  if (!settled() && options.managedFallback) {
+    layersUsed.push('managed_browser');
+    try {
+      const managed: ManagedPage = await options.managedFallback.fetch(finalUrl, signal, timeoutMs);
+      fetchModes.push('managed_browser');
+      const managedSignals = parseStructuredSignals(managed.html);
+      const managedOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
+      for (const product of managedSignals.jsonLdProducts) {
+        evidenceFromProductPayload(
+          {
+            title: product.name ?? undefined,
+            sku: product.sku ?? undefined,
+            brand: product.brand ?? undefined,
+            size: product.size ?? undefined,
+            gtin: product.gtin ?? undefined,
+            images: product.images,
+          } as Record<string, unknown>,
+          'managed_browser',
+          'managed fallback JSON-LD',
+          managedOut,
+        );
+      }
+      if (managedSignals.jsonLdProducts.length > 0) layersUsed.push('managed_parsed');
+      finalUrl = managed.finalUrl || finalUrl;
+      if (managedOut.variant) variant = managedOut.variant;
+    } catch {
+      layersUsed.push('managed_failed');
+    }
+  }
+
+  // Layer 8: narrow schema-constrained LLM extraction — unresolved fields
+  // ONLY, bounded excerpts, never contradicting deterministic values. Any
+  // contribution makes the whole result non-deterministic, so it only runs
+  // when the deterministic layers did NOT settle the identity (review M3)
+  // and only when there is prose to resolve from (M4: no excerpt source ->
+  // no hallucinated fill-ins).
+  if (options.llm) {
+    if (!isLlmAvailable()) {
+      layersUsed.push('llm_unavailable');
+    } else if (!settled()) {
+      const canonical = ['sku', 'brand', 'product_name', 'size'];
+      const resolved = new Set(fields.map((f) => f.field));
+      const unresolved = canonical.filter((field) => !resolved.has(field));
+      if (unresolved.length > 0) {
+        // Excerpt sources: static meta first, then rendered page-structure
+        // signals (JS-rendered pages have empty static meta).
+        const excerptCandidates = [
+          ...(signals.metaDescription ? [{ text: signals.metaDescription, path: 'meta description' }] : []),
+          ...(signals.metaTitle ? [{ text: signals.metaTitle, path: 'meta title' }] : []),
+          ...browserSignals.slice(0, 4).map((text, index) => ({ text, path: `browser page structure signal ${index}` })),
+        ];
+        const excerpts = unresolved.map((field) => {
+          const first = excerptCandidates[0];
+          return { field, text: (first?.text ?? '').slice(0, 300), sourcePath: first?.path ?? 'no excerpt source' };
+        });
+        if (excerptCandidates.length === 0 || excerpts.every((e) => e.text.length === 0)) {
+          layersUsed.push('llm_skipped_no_excerpts');
+        } else {
+          layersUsed.push('llm_extraction');
+          fetchModes.push('llm_extraction');
+          try {
+            const response = await options.llm.adapter.extract({
+              unresolvedFields: unresolved,
+              excerpts,
+              deterministicValues: Object.fromEntries(
+                fields.filter((f) => f.value !== null).map((f) => [f.field, f.value as string]),
+              ),
+            });
+            for (const value of response.values) {
+              if (unresolved.includes(value.field)) {
+                addField(value.field, value.value, 'llm_extraction', value.sourcePath ?? 'llm extraction');
+                llmContributed = true;
+              }
+            }
+            if (llmContributed) {
+              layersUsed.push('llm_contributed');
+              sku ??= fields.find((f) => f.field === 'sku')?.value ?? null;
+              productName ??= fields.find((f) => f.field === 'product_name')?.value ?? null;
+              brand ??= fields.find((f) => f.field === 'brand')?.value ?? null;
+              size ??= fields.find((f) => f.field === 'size')?.value ?? null;
+            }
+          } catch {
+            layersUsed.push('llm_failed');
+          }
+        }
+      } else {
+        layersUsed.push('llm_unneeded');
+      }
+    }
+  }
+
   return {
-    result: assembleResult(),
+    result: assembleResult(llmContributed),
     layersUsed: [...new Set(layersUsed)],
   };
 
-  function assembleResult(): PageExtractionResult {
+  function assembleResult(llmContributed = false): PageExtractionResult {
     const hasAnyField = fields.length > 0;
     const identity = classifyPageIdentity({
       requestedGtin: expected.gtin ?? '',
@@ -396,7 +557,8 @@ export async function runExtractionLadder(
       conflicts,
       identityStatus: identity.status,
       identityReasons: identity.reasons,
-      deterministicOnly: true,
+      // Layer 8 (LLM extraction) makes the whole result non-deterministic.
+      deterministicOnly: !llmContributed,
     };
   }
 }
