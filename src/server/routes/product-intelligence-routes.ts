@@ -24,6 +24,8 @@ import {
 } from '../../product-intelligence/run-service';
 import { createExecutionRouter } from '../../product-intelligence/execution-router';
 import { getProductIntelligenceFlags } from '../../product-intelligence/flags';
+import { getExamples } from '../../db/repositories/benchmark-repo';
+import { PiGoldLabelsSchema, PiProductInputSchema } from '../../product-intelligence/evaluation/gold';
 import { StubManagedProvider, type ManagedBrowserProvider } from '../../product-intelligence/extraction/managed-fallback';
 import { LegacyProductIntelligenceExecutor } from '../../product-intelligence/legacy-executor';
 import { PiProductIntelligenceExecutor } from '../../product-intelligence/pi/pi-executor';
@@ -53,6 +55,14 @@ import {
 } from '../../product-intelligence/evaluation/rollout';
 import { runPiEvaluation, seedPiGoldenDataset } from '../../product-intelligence/evaluation/runner';
 import { runExtractionBenchmark } from '../../product-intelligence/evaluation/extraction-benchmark';
+import {
+  DatabaseSearchStub,
+  MisleadingSearchStub,
+  PerfectWebSearchStub,
+  runSearchBenchmark,
+  SitemapSearchStub,
+  type SearchStrategyAdapter,
+} from '../../product-intelligence/evaluation/search-benchmark';
 import { aggregatePiComparisons } from '../../product-intelligence/evaluation/metrics';
 import { PI_GOLDEN_DATASET_NAME } from '../../product-intelligence/evaluation/fixture-dataset';
 
@@ -594,6 +604,90 @@ router.post('/product-intelligence/evaluation/benchmark', async (c) => {
     return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
   }
 });
+
+/**
+ * POST /api/product-intelligence/evaluation/search-benchmark
+ * Score product-page SEARCH strategies (the page-finding stage) against the
+ * golden dataset: page-found rate, rank@1, precision@5, misleading-source
+ * rejection, blocked-official recovery. Deterministic stubs model the real
+ * discovery strategies; real vendors plug in programmatically.
+ */
+router.post('/product-intelligence/evaluation/search-benchmark', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const datasetId = String((body as { datasetId?: unknown }).datasetId ?? '');
+  if (!datasetId) return c.json({ error: 'datasetId is required' }, 400);
+
+  const strategiesRaw = (body as { strategies?: unknown }).strategies;
+  const strategyNames: string[] = Array.isArray(strategiesRaw)
+    ? (strategiesRaw as string[]).filter((s): s is string => typeof s === 'string')
+    : ['web_search_perfect', 'sitemap', 'structured_database'];
+
+  // Deterministic stub strategies modeled on the real discovery tools,
+  // built from THIS dataset's gold labels (oracle upper bounds for the
+  // scoring pipeline — real vendors plug in programmatically). The sitemap
+  // stub cannot crawl blocked_official domains and the misleading stub
+  // ranks noise above the truth, so the relative comparison is meaningful.
+  const golden = getSearchFixtures(datasetId);
+  const strategyRegistry: Record<string, SearchStrategyAdapter | undefined> = {
+    web_search_perfect: new PerfectWebSearchStub(golden.pagesByGtin),
+    sitemap: new SitemapSearchStub(golden.pagesByDomain),
+    structured_database: new DatabaseSearchStub(golden.pagesByGtin),
+    web_search_misleading: new MisleadingSearchStub(golden.pagesByGtin, golden.misleadingByGtin),
+  };
+  const strategies: Array<SearchStrategyAdapter | { name: string; version?: string }> = strategyNames.map(
+    (name) => strategyRegistry[name] ?? { name, version: 'n/a' },
+  );
+
+  try {
+    const report = await runSearchBenchmark({ datasetId, strategies });
+    return c.json({ report }, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
+/** Search fixtures derived from the dataset's own gold labels. */
+function getSearchFixtures(datasetId: string): {
+  pagesByGtin: Map<string, string>;
+  pagesByDomain: Map<string, Map<string, string>>;
+  misleadingByGtin: Map<string, string>;
+} {
+  const pagesByGtin = new Map<string, string>();
+  const pagesByDomain = new Map<string, Map<string, string>>();
+  const misleadingByGtin = new Map<string, string>();
+  const examples = getExamples(datasetId, 'test');
+  for (const example of examples) {
+    const input = PiProductInputSchema.safeParse(JSON.parse(example.input_snapshot_json));
+    const gold = PiGoldLabelsSchema.safeParse(JSON.parse(example.gold_labels_json));
+    if (!input.success || !gold.success || !input.data.expectedPageUrl) continue;
+    pagesByGtin.set(input.data.gtin, input.data.expectedPageUrl);
+    const domain = (() => {
+      try {
+        return new URL(input.data.expectedPageUrl).hostname.toLowerCase();
+      } catch {
+        return null;
+      }
+    })();
+    // A sitemap crawl cannot reach blocked official domains.
+    if (domain && !gold.data.difficultyTags.includes('blocked_official')) {
+      const existing = pagesByDomain.get(domain) ?? new Map<string, string>();
+      existing.set(input.data.gtin, input.data.expectedPageUrl);
+      pagesByDomain.set(domain, existing);
+    }
+    const misleading = gold.data.misleadingSources[0];
+    if (misleading) {
+      misleadingByGtin.set(input.data.gtin, `https://${misleading.domain}/misleading`);
+    }
+  }
+  return { pagesByGtin, pagesByDomain, misleadingByGtin };
+}
 
 /** GET /api/product-intelligence/rollout — rollout state + gates + kill switch. */
 router.get('/product-intelligence/rollout', (c) => {
