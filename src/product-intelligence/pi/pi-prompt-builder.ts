@@ -50,6 +50,7 @@ export function buildResearchPrompt(
     `- Data sharing policy: ${dataSharingDescription(policy)}`,
     `- Hard deadline: ${policy.deadlineMs} ms from session start`,
     `- Maximum tool calls: ${policy.maxToolCalls}`,
+    `- You have ~${Math.max(1, Math.round(policy.deadlineMs / 60_000))} minutes. Timebox research; submit with the best available evidence before the deadline — an honest partial submission or abstention beats none.`,
   ].join('\n');
 
   const text = [

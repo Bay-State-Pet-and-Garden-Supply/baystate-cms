@@ -9,7 +9,6 @@ import { PiProductIntelligenceExecutor } from '../../../product-intelligence/pi/
 import { PiSessionError } from '../../../product-intelligence/pi/pi-session-factory';
 import { createExecutionEventSink } from '../../../product-intelligence/executor';
 import { SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
-import type { TerminalResultSubmission } from '../../../product-intelligence/contracts';
 import {
   ABSTENTION_SUBMISSION,
   asPi1Submission,
@@ -97,6 +96,30 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
       'run_timeout',
     ];
     expect(events.snapshot().every((event) => allowedTypes.includes(event.type))).toBe(true);
+  });
+
+  it('marks hallucinated tool names as denied with a precise message', async () => {
+    const factory = new FakeSessionFactory();
+    const executor = makeExecutor(factory);
+    const events = createExecutionEventSink('run-pi-unknown');
+    const runPromise = executor.startResearch(TEST_INPUT, testContext({ runId: 'run-pi-unknown' }), events);
+    await Promise.resolve();
+    const session = factory.created[0];
+    // The model calls a tool that does not exist in the session.
+    session.emitToolStart('extract_products_page');
+    session.emitToolEnd('extract_products_page', true);
+    // Then completes normally.
+    session.emitToolStart(SUBMISSION_TOOL_NAME);
+    submitViaTool(factory, validSubmission());
+    session.emitToolEnd(SUBMISSION_TOOL_NAME, false);
+    session.finish();
+    const result = await runPromise;
+
+    expect(result.outcome).toBe('submitted');
+    const finished = events.snapshot().filter((event) => event.type === 'tool_call_finished');
+    const unknown = finished.find((event) => event.toolName === 'extract_products_page');
+    expect(unknown?.isError).toBe(true);
+    expect((unknown?.data as { error?: string } | undefined)?.error ?? (unknown as { error?: string }).error).toContain('unknown_tool');
   });
 });
 

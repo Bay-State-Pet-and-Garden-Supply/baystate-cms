@@ -596,6 +596,26 @@ export function listPiEvidence(runId: string): PiEvidenceRow[] {
     .all(runId) as PiEvidenceRow[];
 }
 
+/** Evidence rows whose durable metadata carries one of the tool evidence ids
+ *  (PI smoke fix: terminal submissions cite deterministic evidenceId() strings
+ *  that must resolve to durable rows). */
+export function listPiEvidenceByToolEvidenceId(runId: string, toolEvidenceIds: string[]): PiEvidenceRow[] {
+  const db = getDb();
+  if (toolEvidenceIds.length === 0) return [];
+  const placeholders = toolEvidenceIds.map(() => '?').join(', ');
+  return db
+    .query(
+      `SELECT id, run_id AS runId, source_id AS sourceId, target_field AS targetField,
+              value_json AS valueJson, extraction_method AS extractionMethod,
+              source_field AS sourceField, reliability, direct_support AS directSupport,
+              snippet, metadata_json AS metadataJson, created_at AS createdAt
+       FROM product_intelligence_evidence
+       WHERE run_id = ? AND json_extract(metadata_json, '$.toolEvidenceId') IN (${placeholders})
+       ORDER BY created_at ASC`,
+    )
+    .all(runId, ...toolEvidenceIds) as PiEvidenceRow[];
+}
+
 export interface PiConflictRow {
   id: string;
   runId: string;

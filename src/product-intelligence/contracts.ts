@@ -333,6 +333,20 @@ export const ProductIntelligenceExecutionEventSchema = z.object({
   isError: z.boolean().nullish(),
   /** Actual tool-failure message when isError (diagnostics, PI smoke finding). */
   error: z.string().max(500).nullish(),
+  /** Tool-result evidence relayed for durable persistence (smoke finding A). */
+  evidence: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        kind: z.string().nullish(),
+        url: z.string().nullish(),
+        domain: z.string().nullish(),
+        method: z.string().nullish(),
+        snippet: z.string().nullish(),
+        contentHash: z.string().nullish(),
+      }),
+    )
+    .nullish(),
   /** Small machine-readable payload (e.g. executor name, versions). */
   data: z.unknown().nullish(),
 });

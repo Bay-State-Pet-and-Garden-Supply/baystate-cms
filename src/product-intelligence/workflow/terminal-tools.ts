@@ -180,7 +180,9 @@ export interface WorkflowTerminalTool {
   }>;
 }
 
-type SubmissionValidator = (value: unknown) => { success: boolean; data?: TerminalSubmission };
+type SubmissionValidator = (
+  value: unknown,
+) => { success: boolean; data?: TerminalSubmission; error?: unknown };
 
 /**
  * Build the three PI-4 terminal submission tools. All deliver to the same
@@ -249,7 +251,22 @@ export function buildWorkflowTerminalTools(
     async execute(_toolCallId: string, params: unknown) {
       const parsed = validators[spec.name](params);
       if (!parsed.success || !parsed.data) {
-        throw new Error(`Invalid submission payload for ${spec.name}`);
+        // Returned, not thrown: the SDK relays the text verbatim to the model
+        // so it can fix the payload (smoke finding B/G).
+        const zodError = parsed.error as { issues?: Array<{ path: Array<string | number>; message: string }> } | undefined;
+        const issues = (zodError?.issues ?? [])
+          .slice(0, 3)
+          .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+          .join('; ');
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Invalid submission payload for ${spec.name}: ${issues || 'validation failed'}; check the terminal submission schema — leave unknown ids null.`.slice(0, 400),
+            },
+          ],
+          details: {},
+        };
       }
       onSubmission(parsed.data);
       return {

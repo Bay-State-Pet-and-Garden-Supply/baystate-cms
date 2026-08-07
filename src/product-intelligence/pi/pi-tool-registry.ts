@@ -182,10 +182,22 @@ export function buildProductResearchSubmissionTool(
     async execute(_toolCallId: string, params: unknown) {
       const parsed = validate(params);
       if (!parsed.success) {
+        // Returned, not thrown: the SDK relays this text verbatim to the
+        // model and to tool_execution_end.result — the model sees exactly
+        // why its payload was rejected and can fix it (smoke finding B/G).
         const issues = parsed.error.issues
+          .slice(0, 3)
           .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
           .join('; ');
-        throw new Error(`Invalid submission payload: ${issues}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Invalid submission payload: ${issues}; expected shape: schemaVersion, gtin, inputName, identity{status in {exact_match, probable_match, parent_product_only, wrong_variant, conflicting_identity, insufficient_evidence}}, evidenceSources/evidenceIds, fields — leave unknown ids null.`.slice(0, 400),
+            },
+          ],
+          details: {},
+        };
       }
       onSubmission(parsed.data as unknown as TerminalResultSubmission);
       return {

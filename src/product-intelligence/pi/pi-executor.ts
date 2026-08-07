@@ -27,6 +27,31 @@ import { PiSdkSessionFactory, PiSessionError } from './pi-session-factory';
 
 export const PI_EXECUTOR_VERSION = '1.0.0';
 
+/** Evidence relayed by the tool wrapper through SDK result.details. */
+export interface RelayedToolEvidence {
+  id: string;
+  kind: string;
+  url?: string;
+  domain?: string;
+  method?: string;
+  snippet?: string;
+  contentHash?: string;
+  retrievedAt?: string;
+}
+
+/** Best-effort extraction of tool evidence from the SDK result.details. */
+export function extractToolEvidence(result: unknown): RelayedToolEvidence[] {
+  if (result === null || result === undefined || typeof result !== 'object') return [];
+  const details = (result as { details?: unknown }).details;
+  if (details === null || details === undefined || typeof details !== 'object') return [];
+  const evidence = (details as { evidence?: unknown }).evidence;
+  if (!Array.isArray(evidence)) return [];
+  return evidence.filter(
+    (entry): entry is RelayedToolEvidence =>
+      !!entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string',
+  );
+}
+
 /** Best-effort extraction of a tool-failure message from the SDK result. */
 export function extractToolError(result: unknown): string | undefined {
   if (result === null || result === undefined) return undefined;
@@ -204,6 +229,7 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       inputTokens: number;
       outputTokens: number;
       sessionError: string | null;
+      unknownToolNames: Set<string>;
     } = {
       submission: null,
       toolCallCount: 0,
@@ -213,6 +239,7 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       inputTokens: 0,
       outputTokens: 0,
       sessionError: null,
+      unknownToolNames: new Set(),
     };
 
     // Hard deadline + caller cancellation composed into one abort signal
@@ -266,6 +293,10 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       });
 
       // --- Session event mapping (tool calls, agent lifecycle) --------------
+      // Known-tool set for unknown-tool marking (smoke finding D): the SDK
+      // relays events for hallucinated tool names too; those must show as
+      // denied calls in the inspector, not allowed ones.
+      const knownToolNames = new Set<string>(handle.effectiveTools ?? []);
       handle.session.subscribe((rawEvent) => {
         const event = rawEvent as {
           type?: string;
@@ -314,6 +345,9 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         }
         }
         if (event.type === 'tool_execution_start' && event.toolName) {
+          if (!knownToolNames.has(event.toolName)) {
+            state.unknownToolNames.add(event.toolName);
+          }
           // PI-10: workspace-level category budgets (search/fetch/browser)
           // enforced centrally BEFORE the call is announced — the sink
           // persists the tool-call row synchronously on tool_call_started,
@@ -353,12 +387,24 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
             void handle?.session.abort().catch(() => undefined);
           }
         } else if (event.type === 'tool_execution_end' && event.toolName) {
+          const isUnknownTool = state.unknownToolNames.delete(event.toolName);
           emitExecutionEvent(events, 'tool_call_finished', {
             toolName: event.toolName,
-            isError: event.isError ?? false,
-            // Surface the SDK's actual failure message (e.g. submission
+            isError: (event.isError ?? false) || isUnknownTool,
+            // Unknown tool names get a precise denial message; otherwise
+            // surface the SDK's actual failure message (e.g. submission
             // schema rejections) instead of the generic fallback.
-            ...(event.isError ? { error: extractToolError(event.result) } : {}),
+            ...(isUnknownTool
+              ? { error: `unknown_tool: ${event.toolName}` }
+              : event.isError
+                ? { error: extractToolError(event.result) }
+                : {}),
+            // Tool-result evidence (id/url/domain/method/...) relays through
+            // the SDK's result.details (verified live) for durable
+            // persistence at the sink (smoke finding A).
+            ...(extractToolEvidence(event.result).length > 0
+              ? { evidence: extractToolEvidence(event.result) }
+              : {}),
           });
         } else if (event.type === 'agent_end') {
           state.sessionEnded = true;

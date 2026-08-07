@@ -121,7 +121,14 @@ export class PiToolRegistry {
         });
         return {
           content: [{ type: 'text', text: serializeToolResult(result) }],
-          details: { status: result.status },
+          // The SDK relays `details` into tool_execution_end.result (verified
+          // live), so the executor can persist tool evidence durably.
+          details: {
+            status: result.status,
+            ...(result.status === 'ok' || result.status === 'no_result'
+              ? { evidence: result.evidence }
+              : {}),
+          },
         };
       },
     };

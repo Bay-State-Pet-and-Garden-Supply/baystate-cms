@@ -58,6 +58,7 @@ import {
   listPiConflicts,
   listPiEvents,
   listPiEvidence,
+  listPiEvidenceByToolEvidenceId,
   listPiRuns,
   listPiSources,
   listPiToolCalls,
@@ -167,6 +168,82 @@ export const globalRunEventBus = new RunEventBus();
  * to the live bus. The sink owns the per-run sequence counter — domain
  * events emitted through it can never collide with executor events.
  */
+/** Evidence as relayed on tool_call_finished events (subset of the schema). */
+export interface ToolEvidenceEvent {
+  id: string;
+  kind?: string | null;
+  url?: string | null;
+  domain?: string | null;
+  method?: string | null;
+  snippet?: string | null;
+  contentHash?: string | null;
+}
+
+/**
+ * Smoke finding A: persist tool-result evidence durably at tool completion.
+ * Each evidence entry gets a source row (deduped by url per run) so evidence
+ * never dangles, and an evidence row keyed by the deterministic tool evidence
+ * id (metadata.toolEvidenceId) so terminal submissions can cite it.
+ */
+export function persistToolEvidence(
+  runId: string,
+  evidence: ToolEvidenceEvent[],
+  emit: (type: string, payload: Record<string, unknown>) => void,
+): void {
+  const existingSources = listPiSources(runId);
+  const alreadyPersisted = new Set(
+    listPiEvidenceByToolEvidenceId(runId, evidence.map((entry) => entry.id)).map(
+      (row) => (JSON.parse(row.metadataJson ?? '{}') as { toolEvidenceId?: string }).toolEvidenceId,
+    ),
+  );
+  for (const entry of evidence) {
+    if (alreadyPersisted.has(entry.id)) continue;
+    if (!entry.url) {
+      // No source URL -> no durable source row; the evidence cannot dangle.
+      continue;
+    }
+    let source = existingSources.find((candidate) => candidate.url === entry.url);
+    if (!source) {
+      source = insertPiSource({
+        runId,
+        url: entry.url,
+        domain: entry.domain ?? domainOf(entry.url),
+        sourceType: sourceTypeOfKind(entry.kind),
+      });
+      existingSources.push(source);
+      emit('source.added', { url: entry.url, domain: entry.domain ?? domainOf(entry.url) });
+    }
+    insertPiEvidence({
+      runId,
+      sourceId: source.id,
+      targetField: entry.kind ?? 'tool_evidence',
+      value: { evidenceId: entry.id, snippet: entry.snippet ?? null },
+      extractionMethod: entry.method ?? null,
+      snippet: entry.snippet ?? entry.method ?? null,
+      metadata: { toolEvidenceId: entry.id },
+    });
+    alreadyPersisted.add(entry.id);
+  }
+}
+
+function sourceTypeOfKind(kind: string | null | undefined): string {
+  switch (kind) {
+    case 'official_evidence':
+      return 'manufacturer';
+    case 'supplier_evidence':
+      return 'supplier';
+    case 'retailer_corroboration':
+      return 'retailer';
+    case 'gtin_evidence':
+    case 'search_lead':
+      return 'registry';
+    case 'catalog_evidence':
+      return 'catalog';
+    default:
+      return 'other';
+  }
+}
+
 export class PersistingExecutionEventSink implements ExecutionEventSink {
   readonly runId: string;
   private readonly events: ProductIntelligenceExecutionEvent[] = [];
@@ -189,6 +266,8 @@ export class PersistingExecutionEventSink implements ExecutionEventSink {
       message: fields.message,
       toolName: fields.toolName,
       isError: fields.isError,
+      error: fields.error,
+      evidence: fields.evidence,
       data: fields.data,
     });
   }
@@ -269,6 +348,13 @@ export class PersistingExecutionEventSink implements ExecutionEventSink {
         const complete = (callId: string): void => {
           completePiToolCall(callId, { isError: event.isError ?? false, errorJson });
         };
+        // Smoke finding A: persist tool-result evidence durably so the run
+        // inspector is truthful even for failed/deadline runs.
+        if (Array.isArray(event.evidence) && event.evidence.length > 0) {
+          persistToolEvidence(this.runId, event.evidence as ToolEvidenceEvent[], (type, payload) => {
+            this.emitDomain(type, payload);
+          });
+        }
         const callId = this.openToolCalls.get(String(event.sequence));
         if (!callId) {
           // Defensive fallback for sequence drift (e.g. a dropped or replayed
@@ -610,14 +696,16 @@ function persistSubmissionArtifacts(
     return;
   }
 
-  // PI-4 workflow submissions: persist image assets (PI-6) and conflicts
-  // (tool evidence stays in the tool-call records and the result JSON; the
-  // bundle cites tool evidence ids).
+  // PI-4 workflow submissions: persist image assets (PI-6) and conflicts.
+  // Per-tool evidence rows are persisted at tool completion (smoke finding
+  // A); this terminal JOIN verifies every identity-cited evidence id has a
+  // durable row and reports gaps honestly without fabricating rows.
   if ('disposition' in submission) {
     persistBundleAssets(runId, submission, sink);
     for (const conflict of submission.conflicts) {
       persistConflict(runId, conflict.field, conflict.severity === 'blocking' ? 'high' : conflict.severity, conflict.evidenceIds, sink);
     }
+    reconcileCitedEvidence(runId, submission, sink);
     return;
   }
   if ('recommendedDisposition' in submission) {
@@ -664,6 +752,33 @@ function persistPi1Artifacts(runId: string, submission: StructuredSubmission, si
     persistConflict(runId, conflict.category, conflict.severity, conflict.evidenceIds, sink, {
       resolution: conflict.resolutionProposal ? { proposal: conflict.resolutionProposal } : undefined,
     });
+  }
+}
+
+/** Smoke finding A (terminal half): ensure every evidence id the bundle
+ *  cites on its identity resolves to a durable evidence row. Per-tool
+ *  persistence already created the rows; this only reports gaps. Never
+ *  fabricates an evidence row without a source. */
+function reconcileCitedEvidence(
+  runId: string,
+  submission: { identity?: { evidenceIds?: string[] } },
+  sink: PersistingExecutionEventSink,
+): void {
+  const cited = submission.identity?.evidenceIds ?? [];
+  if (cited.length === 0) return;
+  const persisted = new Set(
+    listPiEvidenceByToolEvidenceId(runId, cited).map(
+      (row: { metadataJson: string | null }) =>
+        (JSON.parse(row.metadataJson ?? '{}') as { toolEvidenceId?: string }).toolEvidenceId,
+    ),
+  );
+  for (const id of cited) {
+    if (!persisted.has(id)) {
+      sink.emitDomain('evidence.gap', {
+        evidenceId: id,
+        detail: 'cited on the submission but no durable evidence row (source URL missing at tool time)',
+      });
+    }
   }
 }
 
@@ -1010,6 +1125,41 @@ function workspacePathOf(workspaceId: string): string | null {
   const row = getDb().query('SELECT workspace_path AS path FROM workspace WHERE id = ?').get(workspaceId) as { path: string } | undefined;
   return row?.path ?? null;
 }
+/** Clone sources + evidence + conflicts from an origin run into a replay run. */
+function clonePiEvidenceRows(originRunId: string, replayRunId: string): void {
+  const sourceIdMap = new Map<string, string>();
+  for (const source of listPiSources(originRunId)) {
+    const row = insertPiSource({
+      runId: replayRunId,
+      url: source.url,
+      canonicalUrl: source.canonicalUrl ?? null,
+      domain: source.domain,
+      sourceType: source.sourceType,
+      gtinMatchStatus: source.gtinMatchStatus,
+      variantMatchStatus: source.variantMatchStatus,
+      retrievedAt: source.retrievedAt ?? null,
+      licenseRef: source.licenseRef ?? null,
+      termsRef: source.termsRef ?? null,
+    });
+    sourceIdMap.set(source.id, row.id);
+  }
+  for (const evidence of listPiEvidence(originRunId)) {
+    const sourceId = evidence.sourceId ? (sourceIdMap.get(evidence.sourceId) ?? null) : null;
+    insertPiEvidence({
+      runId: replayRunId,
+      sourceId: sourceId ?? '',
+      targetField: evidence.targetField,
+      value: JSON.parse(evidence.valueJson ?? 'null'),
+      extractionMethod: evidence.extractionMethod ?? null,
+      sourceField: evidence.sourceField ?? null,
+      reliability: evidence.reliability ?? null,
+      directSupport: evidence.directSupport === 1,
+      snippet: evidence.snippet ?? null,
+      metadata: evidence.metadataJson ? JSON.parse(evidence.metadataJson) : null,
+    });
+  }
+}
+
 /** Explicit retention: delete terminal runs older than N days. */
 export function runRetentionCleanup(workspaceId: string, olderThanDays: number): number {
   const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
@@ -1088,6 +1238,11 @@ export async function replayPiRun(
       disposition: stored.disposition,
       result: JSON.parse(stored.resultJson) as ProductResearchResult,
     });
+    // Smoke finding A under PI-10: the per-tool evidence/source rows are part
+    // of the run's durable story — the deterministic replay clones them so
+    // the replayed run's inspector matches the original (new ids, preserved
+    // metadata incl. metadata.toolEvidenceId).
+    clonePiEvidenceRows(origin.id, replay.id);
     appendPiEvent(replay.id, 0, 'replay', {
       mode: 'deterministic',
       originRunId: origin.id,
