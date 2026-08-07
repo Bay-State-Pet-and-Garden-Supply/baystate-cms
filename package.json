@@ -1,5 +1,5 @@
 {
-  "name": "@baystate/shopsite-cms",
+  "name": "@baystate/baystate-cms",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,10 +8,10 @@
     "dev": "bun run scripts/dev.ts",
     "build": "vite build && tsc --noEmit",
     "start": "bun run src/server/index.ts",
-    "test": "vitest run && bun test src/tests/unit/db-migration.test.ts src/tests/unit/catalog-health.test.ts src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts src/tests/unit/onboarding-repos.test.ts src/tests/unit/draft-promoter.test.ts src/tests/unit/onboarding-duplicate-skip.test.ts src/tests/unit/extractor-profiles.test.ts src/tests/unit/extraction-remedies.test.ts src/tests/unit/classification-pipeline.test.ts src/tests/unit/source-discovery.test.ts src/tests/unit/profile-generation-repo.test.ts src/tests/unit/profile-promoter.test.ts src/tests/unit/serper-cache-integration.test.ts src/tests/unit/serper-cache-repo.test.ts src/tests/unit/sitemap-cache-repo.test.ts src/tests/unit/sitemap-fetcher.test.ts src/tests/unit/sitemap-matcher.test.ts src/tests/unit/profile-generation-revision-repo.test.ts src/tests/unit/profile-generation-field-decision-repo.test.ts src/tests/unit/llm-task-config-repo.test.ts src/tests/unit/llm-client-task-routing.test.ts src/tests/unit/name-consolidation-guard.test.ts src/tests/unit/profile-governance-service.test.ts src/tests/unit/domain-diagnostics-service.test.ts src/tests/unit/packaging-ocr.test.ts src/tests/unit/product-field-audit-service.test.ts src/tests/unit/store-manager-tools.test.ts src/tests/unit/store-manager.test.ts src/tests/unit/store-manager-chat-history-service.test.ts",
+    "test": "vitest run && bun run test:db",
     "test:watch": "vitest",
     "test:unit": "vitest run",
-    "test:db": "bun test src/tests/unit/db-migration.test.ts",
+    "test:db": "src/tests/unit/pi-approved-policies.test.ts src/tests/unit/pi-network-boundary.test.ts src/tests/unit/pi-review-decisions.test.ts src/tests/unit/pi-reuse-policies.test.ts bun test src/tests/integration/phase2-change-set.test.ts src/tests/integration/phase3-sync-drift.test.ts src/tests/unit/benchmark-dataset-lifecycle.test.ts src/tests/unit/benchmark-evaluator.test.ts src/tests/unit/benchmark-export.test.ts src/tests/unit/benchmark-prediction.test.ts src/tests/unit/benchmark-qualification.test.ts src/tests/unit/brand-integration.test.ts src/tests/unit/catalog-classification-db.test.ts src/tests/unit/catalog-evidence-verifier.test.ts src/tests/unit/catalog-health.test.ts src/tests/unit/classification-config-store.test.ts src/tests/unit/classification-integrity-audit.test.ts src/tests/unit/classification-pipeline.test.ts src/tests/unit/classification-runtime-snapshot.test.ts src/tests/unit/cloud-vlm-client.test.ts src/tests/unit/curation-target-ranker.test.ts src/tests/unit/db-migration.test.ts src/tests/unit/decision-revision-migration.test.ts src/tests/unit/detail-enrichment-integration.test.ts src/tests/unit/domain-diagnostics-service.test.ts src/tests/unit/draft-promoter.test.ts src/tests/unit/embedding-maintenance.test.ts src/tests/unit/embedding-routes.test.ts src/tests/unit/evidence-extraction.test.ts src/tests/unit/extraction-remedies.test.ts src/tests/unit/extractor-profiles.test.ts src/tests/unit/llm-client-task-routing.test.ts src/tests/unit/llm-task-config-repo.test.ts src/tests/unit/name-consolidation-guard.test.ts src/tests/unit/onboarding-decision-routes.test.ts src/tests/unit/onboarding-duplicate-skip.test.ts src/tests/unit/onboarding-repos.test.ts src/tests/unit/packaging-ocr.test.ts src/tests/unit/page-identity-migration.test.ts src/tests/unit/page-import-service.test.ts src/tests/unit/page-routes.test.ts src/tests/unit/product-field-audit-service.test.ts src/tests/unit/product-intelligence-repo.test.ts src/tests/unit/product-intelligence-run-service.test.ts src/tests/unit/product-intelligence-sse.test.ts src/tests/unit/product-intelligence-tool-contracts.test.ts src/tests/unit/product-intelligence-tools.test.ts src/tests/unit/product-intelligence-workflow.test.ts src/tests/unit/product-intelligence-policy.test.ts src/tests/unit/product-intelligence-assets.test.ts src/tests/unit/product-intelligence-image-tools.test.ts src/tests/unit/product-intelligence-import.test.ts src/tests/unit/pi-golden-dataset.test.ts src/tests/unit/pi-evaluation-runner.test.ts src/tests/unit/pi-extraction-benchmark.test.ts src/tests/unit/pi-rollout.test.ts src/tests/unit/pi-shadow-immutability.test.ts src/tests/unit/pi-budgets.test.ts src/tests/unit/pi-retention.test.ts src/tests/unit/pi-replay.test.ts src/tests/unit/pi-search-benchmark.test.ts src/tests/unit/pi-evidence-persistence.test.ts src/tests/unit/product-retrieval.test.ts src/tests/unit/profile-generation-field-decision-repo.test.ts src/tests/unit/profile-generation-repo.test.ts src/tests/unit/profile-generation-revision-repo.test.ts src/tests/unit/profile-governance-service.test.ts src/tests/unit/profile-promoter.test.ts src/tests/unit/reviewed-facts.test.ts src/tests/unit/runtime-snapshot-v2.test.ts src/tests/unit/serper-cache-integration.test.ts src/tests/unit/serper-cache-repo.test.ts src/tests/unit/sitemap-cache-repo.test.ts src/tests/unit/sitemap-fetcher.test.ts src/tests/unit/sitemap-matcher.test.ts src/tests/unit/source-discovery.test.ts src/tests/unit/store-manager-chat-history-service.test.ts src/tests/unit/store-manager-tools.test.ts src/tests/unit/store-manager.test.ts src/tests/unit/weekly-report.test.ts src/tests/unit/workspace-connection.test.ts",
     "test:db-catalog": "bun test src/tests/unit/catalog-classification-db.test.ts",
     "worker:dev": "node --import ./preload/crawlee-storage.mjs --import tsx src/extraction-worker/server.ts",
     "worker:start": "node --import ./preload/crawlee-storage.mjs dist/extraction-worker/server.js",
@@ -31,13 +31,15 @@
     "crawlee": "^3.17.0",
     "fast-xml-parser": "^5.0.0",
     "hono": "^4.7.0",
-    "typebox": "1.3.7",
+    "icecat": "^1.4.5",
     "playwright": "1.58.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "sharp": "^0.35.3",
+    "typebox": "1.3.7",
     "xlsx": "^0.18.5",
-    "zod": "^4.2.1"
+    "zod": "^4.2.1",
+    "proper-lockfile": "^4.1.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -53,5 +55,6 @@
     "typescript-eslint": "^8.60.1",
     "vite": "^6.0.0",
     "vitest": "^3.0.0"
-  }
+  },
+  "allowScripts": {}
 }
