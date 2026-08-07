@@ -265,6 +265,10 @@ export class PersistingExecutionEventSink implements ExecutionEventSink {
         break;
       }
       case 'tool_call_finished': {
+        const errorJson = event.isError && event.error ? String(event.error).slice(0, 500) : undefined;
+        const complete = (callId: string): void => {
+          completePiToolCall(callId, { isError: event.isError ?? false, errorJson });
+        };
         const callId = this.openToolCalls.get(String(event.sequence));
         if (!callId) {
           // Defensive fallback for sequence drift (e.g. a dropped or replayed
@@ -272,12 +276,12 @@ export class PersistingExecutionEventSink implements ExecutionEventSink {
           // insertion order, so the last value is the newest.
           const last = [...this.openToolCalls.values()].at(-1);
           if (last) {
-            completePiToolCall(last, { isError: event.isError ?? false });
+            complete(last);
             this.openToolCalls.delete(last);
           }
           break;
         }
-        completePiToolCall(callId, { isError: event.isError ?? false });
+        complete(callId);
         this.openToolCalls.delete(callId);
         break;
       }

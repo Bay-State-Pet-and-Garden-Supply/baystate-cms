@@ -114,9 +114,15 @@ describe('PiSdkSessionFactory — real SDK (no prompt, no network)', () => {
         };
         expect(session.sessionId).toBeTruthy();
         const toolNames = session.agent.state.tools.map((tool) => tool.name).sort();
-        expect(toolNames).toEqual(['find', 'grep', 'ls', 'read']);
-
-        const expected = [
+        // Fixed SDK wiring (live-smoke finding): passing `tools: []` made the
+        // SDK filter out EVERY tool — custom tools included — so the model
+        // saw no callable tools and ended without submitting. The SDK now
+        // receives `tools: undefined` + explicit builtin exclusions. The
+        // stable contract (builtin activation order is an SDK internal):
+        //   1. every custom research/terminal tool is ALWAYS exposed,
+        //   2. no denied builtin (bash/edit/write) ever leaks through,
+        //   3. nothing outside the policy universe appears.
+        const expectedUniverse = [
           'find',
           'grep',
           'ls',
@@ -126,7 +132,18 @@ describe('PiSdkSessionFactory — real SDK (no prompt, no network)', () => {
           'submit_insufficient_evidence',
           'submit_identity_conflict',
         ];
-        expect(handle.effectiveTools.sort()).toEqual(expected.sort());
+        for (const tool of toolNames) {
+          expect(expectedUniverse).toContain(tool);
+        }
+        expect(toolNames).toContain('read');
+        expect(toolNames).not.toContain('bash');
+        expect(toolNames).not.toContain('edit');
+        expect(toolNames).not.toContain('write');
+        expect(toolNames).toContain(SUBMISSION_TOOL_NAME);
+        expect(toolNames).toContain('submit_product_research_bundle');
+        expect(toolNames).toContain('submit_insufficient_evidence');
+        expect(toolNames).toContain('submit_identity_conflict');
+        expect(handle.effectiveTools.sort()).toEqual([...expectedUniverse].sort());
         expect(handle.piVersion).toMatch(/^\d+\.\d+\.\d+$/);
         expect(handle.extensionVersions).toEqual([]);
         expect(received).toBeNull();

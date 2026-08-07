@@ -156,6 +156,14 @@ export class PiSdkSessionFactory implements PiSessionFactory {
     }
 
     // --- Session ------------------------------------------------------------
+    // SDK quirk (pi-coding-agent): passing `tools: []` makes the SDK treat the
+    // empty array as an allowlist that filters out EVERY tool — custom tools
+    // included — so the model sees no callable tools and ends without
+    // submitting (live-smoke finding). Builtins must instead be excluded
+    // explicitly while custom research tools pass through unfiltered:
+    //   tools: undefined            -> allowedToolNames = undefined (all pass)
+    //   excludeTools: <not granted> -> the policy's fail-closed isolation is
+    //                                  preserved exactly (PI-5).
     const { session, extensionsResult } = await sdk.createAgentSession({
       cwd: this.options.cwd ?? process.cwd(),
       sessionManager: sdk.SessionManager.inMemory(),
@@ -163,7 +171,8 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       modelRuntime,
       model: model,
       thinkingLevel: route.thinkingLevel,
-      tools: allowedTools,
+      tools: undefined,
+      excludeTools: KNOWN_BUILTIN_TOOLS.filter((name) => !allowedTools.includes(name)),
       // The submission tool and research tools are added by the SDK's
       // extension runtime, not the built-in allowlist.
       customTools:

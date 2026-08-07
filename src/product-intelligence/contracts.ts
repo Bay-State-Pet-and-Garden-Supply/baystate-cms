@@ -331,6 +331,8 @@ export const ProductIntelligenceExecutionEventSchema = z.object({
   message: z.string().max(2048).nullish(),
   toolName: z.string().max(256).nullish(),
   isError: z.boolean().nullish(),
+  /** Actual tool-failure message when isError (diagnostics, PI smoke finding). */
+  error: z.string().max(500).nullish(),
   /** Small machine-readable payload (e.g. executor name, versions). */
   data: z.unknown().nullish(),
 });

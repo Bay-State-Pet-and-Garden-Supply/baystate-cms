@@ -27,6 +27,28 @@ import { PiSdkSessionFactory, PiSessionError } from './pi-session-factory';
 
 export const PI_EXECUTOR_VERSION = '1.0.0';
 
+/** Best-effort extraction of a tool-failure message from the SDK result. */
+export function extractToolError(result: unknown): string | undefined {
+  if (result === null || result === undefined) return undefined;
+  if (typeof result === 'string') return result.slice(0, 500);
+  if (result instanceof Error) return result.message.slice(0, 500);
+  if (Array.isArray(result)) {
+    const text = result
+      .map((item) => (item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string' ? (item as { text: string }).text : undefined))
+      .filter((item): item is string => item !== undefined)
+      .join('; ');
+    return text.length > 0 ? text.slice(0, 500) : undefined;
+  }
+  if (typeof result === 'object') {
+    const obj = result as Record<string, unknown>;
+    const text = typeof obj.text === 'string' ? obj.text : typeof obj.message === 'string' ? obj.message : typeof obj.error === 'string' ? obj.error : undefined;
+    if (typeof obj.content === 'string') return obj.content.slice(0, 500);
+    if (Array.isArray(obj.content)) return extractToolError(obj.content);
+    if (text) return text.slice(0, 500);
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // PI-10 lazy DB-backed budget enforcement
 // ---------------------------------------------------------------------------
@@ -249,7 +271,8 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           type?: string;
           toolName?: string;
           isError?: boolean;
-          message?: { usage?: { cost?: { total?: number }; input_tokens?: number; output_tokens?: number } };
+          result?: unknown;
+          message?: { usage?: { cost?: { total?: number }; input_tokens?: number; output_tokens?: number; input?: number; output?: number } };
         };
         if (!event || typeof event.type !== 'string') return;
 
@@ -259,11 +282,17 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
         // usage so workspace-level daily token budgets can be enforced
         // centrally (src/product-intelligence/budgets.ts).
         if (event.type === 'message_end' && event.message?.usage) {
+          // Provider usage keys differ: OpenAI-style input_tokens/output_tokens
+          // vs opencode-go's input/output (live-smoke finding).
           if (typeof event.message.usage.input_tokens === 'number') {
             state.inputTokens = Math.max(state.inputTokens, event.message.usage.input_tokens);
+          } else if (typeof event.message.usage.input === 'number') {
+            state.inputTokens = Math.max(state.inputTokens, event.message.usage.input);
           }
           if (typeof event.message.usage.output_tokens === 'number') {
             state.outputTokens = Math.max(state.outputTokens, event.message.usage.output_tokens);
+          } else if (typeof event.message.usage.output === 'number') {
+            state.outputTokens = Math.max(state.outputTokens, event.message.usage.output);
           }
           if (event.message.usage?.cost?.total !== undefined) {
           state.modelCostUsd = Math.max(state.modelCostUsd, event.message.usage.cost.total);
@@ -327,6 +356,9 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           emitExecutionEvent(events, 'tool_call_finished', {
             toolName: event.toolName,
             isError: event.isError ?? false,
+            // Surface the SDK's actual failure message (e.g. submission
+            // schema rejections) instead of the generic fallback.
+            ...(event.isError ? { error: extractToolError(event.result) } : {}),
           });
         } else if (event.type === 'agent_end') {
           state.sessionEnded = true;
