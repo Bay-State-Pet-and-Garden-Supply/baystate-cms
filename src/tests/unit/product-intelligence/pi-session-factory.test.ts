@@ -16,7 +16,7 @@ import {
   effectiveToolNames,
   validateToolAllowlist,
 } from '../../../product-intelligence/pi/pi-session-factory';
-import { SUBMISSION_TOOL_NAME, TERMINAL_TOOLS } from '../../../product-intelligence/contracts';
+import { TERMINAL_TOOLS, WORKFLOW_SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
 import { TEST_INPUT, testContext, testPolicy } from './test-helpers';
 
 describe('tool allowlisting (pure functions)', () => {
@@ -36,7 +36,14 @@ describe('tool allowlisting (pure functions)', () => {
   it('effective tools are allowlist + terminal tools only', () => {
     const tools = effectiveToolNames(testPolicy({ allowedTools: ['read', 'grep'] }));
     expect(tools).toEqual(['read', 'grep', ...TERMINAL_TOOLS]);
-    expect(tools).toContain(SUBMISSION_TOOL_NAME);
+    expect(tools).toContain(WORKFLOW_SUBMISSION_TOOL_NAME);
+  });
+
+  it('never exposes the legacy PI-1 terminal tool (P0-3)', () => {
+    const tools = effectiveToolNames(testPolicy({ allowedTools: ['read', 'grep'] }));
+    expect(tools).not.toContain('submit_product_research');
+    expect(tools).toContain('submit_product_research_bundle');
+    expect(TERMINAL_TOOLS).not.toContain('submit_product_research');
   });
 
   it('never includes edit/write/bash by default', () => {
@@ -127,7 +134,6 @@ describe('PiSdkSessionFactory — real SDK (no prompt, no network)', () => {
           'grep',
           'ls',
           'read',
-          SUBMISSION_TOOL_NAME,
           'submit_product_research_bundle',
           'submit_insufficient_evidence',
           'submit_identity_conflict',
@@ -139,7 +145,8 @@ describe('PiSdkSessionFactory — real SDK (no prompt, no network)', () => {
         expect(toolNames).not.toContain('bash');
         expect(toolNames).not.toContain('edit');
         expect(toolNames).not.toContain('write');
-        expect(toolNames).toContain(SUBMISSION_TOOL_NAME);
+        // P0-3: the legacy PI-1 terminal tool is never exposed to sessions.
+        expect(toolNames).not.toContain('submit_product_research');
         expect(toolNames).toContain('submit_product_research_bundle');
         expect(toolNames).toContain('submit_insufficient_evidence');
         expect(toolNames).toContain('submit_identity_conflict');

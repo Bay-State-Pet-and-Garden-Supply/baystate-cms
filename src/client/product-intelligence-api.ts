@@ -217,11 +217,6 @@ export interface CancelRunResponse {
   runId: string;
 }
 
-export interface DeleteRunResponse {
-  deleted: boolean;
-  runId: string;
-}
-
 export interface ComparisonResponse {
   comparison: PiComparisonRow;
 }
@@ -332,11 +327,8 @@ export function cancelPiRun(id: string): Promise<CancelRunResponse> {
   });
 }
 
-export function deletePiRun(id: string): Promise<DeleteRunResponse> {
-  return request<DeleteRunResponse>(`/product-intelligence/runs/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
-}
+// Physical deletion is retention/maintenance-only (P2-1): no user-facing
+// delete API exists — rejection is a durable review decision.
 
 export function comparePiRun(
   id: string,
@@ -373,6 +365,39 @@ export function importRunToOnboarding(
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export interface PiReviewDecision {
+  id: string;
+  runId: string;
+  decision: 'approve' | 'reject';
+  resultHash: string;
+  supersedesDecisionId: string | null;
+  reviewer: string;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface PiRunReviewState {
+  decision: PiReviewDecision | null;
+  /** True when the latest decision approves the run's current stored result. */
+  approved: boolean;
+}
+
+/** POST /product-intelligence/runs/:id/review — durable approve/reject (P1-2). */
+export function reviewPiRun(
+  runId: string,
+  body: { decision: 'approve' | 'reject'; reviewer: string; note?: string },
+): Promise<{ decision: PiReviewDecision }> {
+  return request<{ decision: PiReviewDecision }>(`/product-intelligence/runs/${encodeURIComponent(runId)}/review`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/** GET /product-intelligence/runs/:id/review — latest decision + approval state. */
+export function getPiRunReview(runId: string): Promise<PiRunReviewState> {
+  return request<PiRunReviewState>(`/product-intelligence/runs/${encodeURIComponent(runId)}/review`);
 }
 
 

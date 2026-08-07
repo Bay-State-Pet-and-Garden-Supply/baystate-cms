@@ -14,6 +14,7 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/23
  */
 import { Type } from 'typebox';
+import { createRequire } from 'node:module';
 import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import { parseNetContent, verifyImageCandidate } from '../assets/verification';
 import { discoverCandidates } from '../assets/discovery';
@@ -21,6 +22,7 @@ import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation } 
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { boundedString } from './registry';
+import type { EvidenceResolver, ResolvedEvidenceFact } from '../assets/verification';
 
 export const verifyImageCandidateTool: PiToolAdapter = {
   name: 'verify_image_candidate',
@@ -55,17 +57,22 @@ export const verifyImageCandidateTool: PiToolAdapter = {
     ),
     rightsBasis: Type.Optional(boundedString(512, 'Declared rights basis (e.g. supplier_authorized_asset)')),
     rightsEvidenceRef: Type.Optional(boundedString(512, 'Evidence reference backing the rights basis')),
-    observedProductName: Type.Optional(boundedString(512, 'Observed product name (OCR/structured)')),
+    evidenceIds: Type.Optional(Type.Array(boundedString(128, 'Durable evidence-row id backing this verification'))),
+    observedProductName: Type.Optional(boundedString(512, 'Observed product name (agent assertion — recorded, not authoritative)')),
     observedBrand: Type.Optional(boundedString(256, 'Observed brand (OCR/structured)')),
     observedVariant: Type.Optional(boundedString(256, 'Observed variant (OCR/structured)')),
     observedNetContentValue: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
     observedNetContentUnit: Type.Optional(boundedString(16, 'Observed net content unit')),
     observedPackCount: Type.Optional(Type.Integer({ exclusiveMinimum: 0 })),
-    observedGtin: Type.Optional(boundedString(64, 'Observed GTIN (OCR/structured)')),
+    observedGtin: Type.Optional(boundedString(64, 'Observed GTIN (agent assertion — recorded, not authoritative)')),
   }),
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
     const gateway = ctx.gateway ?? defaultPolicyGateway;
+
+    // Server-resolved durable evidence (lazy import keeps this module
+    // importable in vitest — no bun:sqlite at module scope).
+    const evidenceResolver: EvidenceResolver = (evidenceIds) => resolveEvidenceFacts(ctx.runId, evidenceIds);
 
     const observed: IdentityObservation = {
       brand: params.observedBrand ? String(params.observedBrand) : null,
@@ -100,13 +107,26 @@ export const verifyImageCandidateTool: PiToolAdapter = {
           declaredSourceType: params.declaredSourceType ? String(params.declaredSourceType) : null,
           declaredRightsBasis: params.rightsBasis ? String(params.rightsBasis) : null,
           declaredRightsEvidenceRef: params.rightsEvidenceRef ? String(params.rightsEvidenceRef) : null,
+          evidenceIds: Array.isArray(params.evidenceIds) ? (params.evidenceIds as unknown[]).map((id) => String(id)) : undefined,
           observed,
         },
-        { runId: ctx.runId, policy: ctx.policy, gateway, signal: ctx.signal },
+        {
+          runId: ctx.runId,
+          policy: ctx.policy,
+          gateway,
+          signal: ctx.signal,
+          evidenceResolver,
+          // P0-6: rights resolve ONLY from the workspace's durable reuse
+          // grants (server-authoritative). The declared source tier + basis
+          // strings prove origin only, never reuse permission — absent a
+          // grant, reuse is denied (fail closed).
+          reuseGrantResolver: loadReuseGrantResolver(ctx.workspaceId),
+        },
       );
+      const evidenceContentHash = record.originalContentHash || undefined;
       if (record.qualityStatus === 'invalid') {
         return noResult(record.conflicts[0] ?? 'image could not be verified', [
-          { id: evidenceId('verify_image_candidate', url), kind: 'image_evidence', url, method: 'image_verification_pipeline', contentHash: record.originalContentHash || undefined },
+          { id: evidenceId('verify_image_candidate', url), kind: 'image_evidence', url, method: 'image_verification_pipeline', contentHash: evidenceContentHash },
         ]);
       }
       return okResult(record, [
@@ -115,7 +135,7 @@ export const verifyImageCandidateTool: PiToolAdapter = {
           kind: 'image_evidence',
           url,
           method: 'image_verification_pipeline',
-          contentHash: record.originalContentHash,
+          contentHash: evidenceContentHash,
           retrievedAt: record.retrievedAt,
         },
       ]);
@@ -172,6 +192,112 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
     }
   },
 };
+
+/**
+ * Resolve durable evidence rows into the facts the verification pipeline
+ * consumes. Lazy require (createRequire) keeps this module importable in
+ * vitest (no bun:sqlite in the module graph) — see pi-executor for the
+ * same pattern. Real runs always execute under bun.
+ */
+interface LazyEvidenceRow {
+  id: string;
+  sourceId: string;
+  targetField: string;
+  valueJson: string;
+  extractionMethod: string | null;
+  snippet: string | null;
+  metadataJson: string | null;
+}
+interface LazySourceRow {
+  id: string;
+  url: string;
+  domain: string;
+}
+
+const lazyRequire = createRequire(import.meta.url);
+
+let _evidenceRepo:
+  | {
+      listPiEvidence: (runId: string) => LazyEvidenceRow[];
+      listPiSources: (runId: string) => LazySourceRow[];
+    }
+  | undefined;
+
+function loadEvidenceRepo(): { listPiEvidence: (runId: string) => LazyEvidenceRow[]; listPiSources: (runId: string) => LazySourceRow[] } {
+  if (!_evidenceRepo) {
+    try {
+      const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+      if (!conn.isDbInitialized?.()) {
+        // No DB (e.g. vitest): return an empty resolver — no evidence rows
+        // can resolve, so identity comparison cannot approve. Fail closed.
+        _evidenceRepo = { listPiEvidence: () => [], listPiSources: () => [] };
+        return _evidenceRepo;
+      }
+    } catch {
+      _evidenceRepo = { listPiEvidence: () => [], listPiSources: () => [] };
+      return _evidenceRepo;
+    }
+    _evidenceRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _evidenceRepo>;
+  }
+  return _evidenceRepo;
+}
+
+function resolveEvidenceFacts(runId: string, evidenceIds: string[]): ResolvedEvidenceFact[] {
+  if (!evidenceIds.length) return [];
+  const repo = loadEvidenceRepo();
+  const rows = repo.listPiEvidence(runId).filter((row) => evidenceIds.includes(row.id));
+  if (rows.length === 0) return [];
+  const sources = new Map(repo.listPiSources(runId).map((source) => [source.id, source]));
+  return rows.map((row) => {
+    let value: unknown;
+    try {
+      value = JSON.parse(row.valueJson);
+    } catch {
+      value = null;
+    }
+    let contentHash: string | null;
+    try {
+      const metadata = row.metadataJson ? (JSON.parse(row.metadataJson) as { contentHash?: unknown }) : null;
+      contentHash = metadata && typeof metadata.contentHash === 'string' ? metadata.contentHash : null;
+    } catch {
+      contentHash = null;
+    }
+    const source = sources.get(row.sourceId);
+    return {
+      id: row.id,
+      targetField: row.targetField,
+      value,
+      extractionMethod: row.extractionMethod,
+      snippet: row.snippet,
+      sourceUrl: source?.url ?? null,
+      sourceDomain: source?.domain ?? null,
+      contentHash,
+    };
+  });
+}
+
+/**
+ * P0-6: durable server-authoritative reuse grants. Lazy-load the workspace
+ * grant resolver; with no DB (vitest) or no grants, reuse is denied.
+ */
+function loadReuseGrantResolver(workspaceId: string): (sourceTier: string, domain: string) => boolean {
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) {
+      return () => false;
+    }
+  } catch {
+    return () => false;
+  }
+  try {
+    const repo = lazyRequire('../../db/repositories/pi-reuse-policy-repo') as {
+      buildReuseGrantResolver: (workspaceId: string) => (sourceTier: string, domain: string) => boolean;
+    };
+    return repo.buildReuseGrantResolver(workspaceId);
+  } catch {
+    return () => false;
+  }
+}
 
 export const imageTools: PiToolAdapter[] = [verifyImageCandidateTool, discoverImageCandidatesTool];
 

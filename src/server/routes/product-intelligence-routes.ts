@@ -9,12 +9,15 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/19
  */
 import { Hono } from 'hono';
-import { ProductIntelligencePolicySchema, ProductResearchInputSchema } from '../../product-intelligence/contracts';
+import {
+  ProductIntelligencePolicySchema,
+  ProductResearchInputSchema,
+  type ProductIntelligencePolicy,
+} from '../../product-intelligence/contracts';
 import {
   buildDefaultPiPolicy,
   cancelPiRun,
   createPiComparison,
-  deletePiRun,
   getPiRunProjection,
   globalRunEventBus,
   replayPiEvents,
@@ -23,6 +26,7 @@ import {
   type PiLiveEvent,
 } from '../../product-intelligence/run-service';
 import { createExecutionRouter } from '../../product-intelligence/execution-router';
+import { assertReducingOverride, computePolicyConfigId } from '../../product-intelligence/policy';
 import { getProductIntelligenceFlags } from '../../product-intelligence/flags';
 import { getExamples } from '../../db/repositories/benchmark-repo';
 import { PiGoldLabelsSchema, PiProductInputSchema } from '../../product-intelligence/evaluation/gold';
@@ -33,8 +37,18 @@ import { PiSdkSessionFactory } from '../../product-intelligence/pi/pi-session-fa
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { getDb } from '../../db/connection';
-import { getPiRun, listPiRuns } from '../../db/repositories/product-intelligence-repo';
+import { getPiRun, getPiResult, listPiRuns } from '../../db/repositories/product-intelligence-repo';
+import {
+  getActiveApprovedPolicy,
+  getApprovedPolicyById,
+  seedDefaultApprovedPolicy,
+} from '../../db/repositories/pi-approved-policy-repo';
 import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
+import { assertRunApprovedForImport } from '../../product-intelligence/review-gate';
+import {
+  createReviewDecision,
+  getLatestReviewDecision,
+} from '../../db/repositories/pi-review-decision-repo';
 import {
   PiBudgetPolicySchema,
   getPiBudgetPolicy,
@@ -134,14 +148,51 @@ router.post('/product-intelligence/runs', async (c) => {
 
   try {
     const selection = await buildRouter().resolveExecutor();
+
+    // P0-2 policy authority: caller-supplied policy objects are never
+    // accepted. The caller selects an approved policy record by id (or the
+    // workspace default, seeded lazily) and may only apply strictly-reducing
+    // overrides validated by assertReducingOverride.
+    if ((body as { policy?: unknown }).policy !== undefined) {
+      return c.json({ error: 'Caller-supplied policy is not accepted; use policyId + policyOverrides' }, 400);
+    }
+    const policyId = (body as { policyId?: string }).policyId;
+    const rawOverrides = (body as { policyOverrides?: unknown }).policyOverrides;
+    const defaultPolicy = buildDefaultPiPolicy();
+    seedDefaultApprovedPolicy(ws.id, JSON.stringify(defaultPolicy), defaultPolicy.configId);
+    const approved = policyId ? getApprovedPolicyById(ws.id, policyId) : getActiveApprovedPolicy(ws.id);
+    if (!approved || approved.active !== 1) {
+      return c.json(
+        { error: policyId ? `Approved policy ${policyId} not found or inactive for this workspace` : 'No active approved policy for this workspace' },
+        400,
+      );
+    }
+    let resolvedPolicy: ProductIntelligencePolicy;
+    try {
+      const base = ProductIntelligencePolicySchema.parse(JSON.parse(approved.policyJson));
+      let merged: ProductIntelligencePolicy;
+      if (rawOverrides !== undefined) {
+        if (typeof rawOverrides !== 'object' || rawOverrides === null || Array.isArray(rawOverrides)) {
+          return c.json({ error: 'policyOverrides must be an object' }, 400);
+        }
+        merged = assertReducingOverride(base, rawOverrides as Partial<ProductIntelligencePolicy>);
+      } else {
+        merged = base;
+      }
+      // Re-hash after merging so the configId still matches the content
+      // (verifyPolicySnapshot refuses mismatched snapshots). The final parse
+      // validates the merged shape and returns 400 for invalid overrides.
+      resolvedPolicy = computePolicyConfigId(ProductIntelligencePolicySchema.parse(merged));
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+
     const started = await startProductIntelligenceRun(
       selection.executor,
       {
         input: inputResult.data,
         mode: mode as 'shadow' | 'interactive' | 'onboarding',
-        policy: (body as { policy?: unknown }).policy
-          ? ProductIntelligencePolicySchema.parse((body as { policy?: unknown }).policy)
-          : buildDefaultPiPolicy(),
+        policy: resolvedPolicy,
         onboardingItemId:
           (body as { onboardingItemId?: string | null }).onboardingItemId ??
           inputResult.data.existingOnboardingItemId ??
@@ -334,15 +385,9 @@ router.post('/product-intelligence/runs/:id/compare', async (c) => {
   }
 });
 
-/** DELETE /api/product-intelligence/runs/:id — explicit deletion. */
-router.delete('/product-intelligence/runs/:id', (c) => {
-  const runId = c.req.param('id');
-  const run = requireRunInWorkspace(runId);
-  if (!run) return c.json({ error: 'Run not found' }, 404);
-  if (run.status === 'running') return c.json({ error: 'Running runs cannot be deleted; cancel first' }, 409);
-  const deleted = deletePiRun(runId);
-  return c.json({ deleted, runId });
-});
+// Physical deletion is retention/maintenance-only (P2-1); there is no
+// user-facing delete route. Rejection is a durable review decision (POST
+// /runs/:id/review) and run rows stay immutable for audit.
 
 /**
  * POST /api/product-intelligence/runs/:id/import — import a reviewed Agent
@@ -376,6 +421,9 @@ router.post('/product-intelligence/runs/:id/import', async (c) => {
   }
 
   try {
+    // P1-2 review gate: import requires a durable human approval bound to
+    // the EXACT stored result (decision.result_hash === stored hash).
+    assertRunApprovedForImport(runId);
     const result = importRunToOnboarding(runId, {
       mode,
       onboardingItemId: (body as { onboardingItemId?: string | null }).onboardingItemId ?? null,
@@ -389,8 +437,63 @@ router.post('/product-intelligence/runs/:id/import', async (c) => {
       result.created ? 201 : 200,
     );
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    const message = error instanceof Error ? error.message : String(error);
+    // The review gate fails closed with a 409; everything else stays 400.
+    const status = message.includes('approval') || message.includes('stored result') ? 409 : 400;
+    return c.json({ error: message }, status);
   }
+});
+
+/**
+ * POST /api/product-intelligence/runs/:id/review — record a durable human
+ * approve/reject decision bound to the run's exact stored result (P1-2).
+ * Append-only; the latest decision is authoritative (supersedes chain).
+ */
+router.post('/product-intelligence/runs/:id/review', async (c) => {
+  const runId = c.req.param('id');
+  if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);
+
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const decision = (body as { decision?: unknown }).decision;
+  const reviewer = (body as { reviewer?: unknown }).reviewer;
+  if (decision !== 'approve' && decision !== 'reject') {
+    return c.json({ error: "decision must be 'approve' or 'reject'" }, 400);
+  }
+  if (typeof reviewer !== 'string' || reviewer.trim() === '') {
+    return c.json({ error: 'reviewer is required' }, 400);
+  }
+  const note = (body as { note?: unknown }).note;
+  if (note !== undefined && typeof note !== 'string') {
+    return c.json({ error: 'note must be a string' }, 400);
+  }
+
+  const stored = getPiResult(runId);
+  if (!stored) {
+    return c.json({ error: 'Run has no stored result to review' }, 409);
+  }
+  const row = createReviewDecision({
+    runId,
+    decision,
+    resultHash: stored.resultHash,
+    reviewer: reviewer.trim(),
+    note: note !== undefined ? String(note) : null,
+  });
+  return c.json({ decision: row }, 201);
+});
+
+/** GET /api/product-intelligence/runs/:id/review — latest decision + approval state. */
+router.get('/product-intelligence/runs/:id/review', (c) => {
+  const runId = c.req.param('id');
+  if (!requireRunInWorkspace(runId)) return c.json({ error: 'Run not found' }, 404);
+  const latest = getLatestReviewDecision(runId);
+  const stored = getPiResult(runId);
+  const approved = !!(stored && latest && latest.decision === 'approve' && latest.resultHash === stored.resultHash);
+  return c.json({ decision: latest ?? null, approved });
 });
 
 /** POST /api/product-intelligence/runs/:id/replay — PI-10 replay modes. */

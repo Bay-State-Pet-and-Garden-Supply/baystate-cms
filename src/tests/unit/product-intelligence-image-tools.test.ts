@@ -14,7 +14,7 @@ import sharp from 'sharp';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { createPiRun, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, insertPiEvidence, insertPiSource, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
 import { testPolicy } from './product-intelligence/test-helpers';
@@ -99,7 +99,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
-  it('verifies a supplier image candidate with matching packaging evidence', async () => {
+  it('verifies a supplier image candidate from durable evidence — identity resolves, rights stay restricted without a grant', async () => {
     const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
       .png()
       .toBuffer();
@@ -108,6 +108,28 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
     const run = runningRun();
+    // Seed durable evidence rows (server-authoritative facts) for the run.
+    const source = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { contentHash: 'ocr-content-hash' },
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'product_name',
+      value: 'Stella Chicken Broth 16 oz',
+      extractionMethod: 'image_ocr',
+    });
     const result = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('verify_image_candidate')!,
       {
@@ -117,23 +139,91 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
         netContentValue: 16,
         netContentUnit: 'oz',
         declaredSourceType: 'supplier',
-        rightsBasis: 'supplier_authorized_asset',
-        rightsEvidenceRef: 'ev:supplier-1',
-        observedProductName: 'Stella Chicken Broth 16 oz',
-        observedNetContentValue: 16,
-        observedNetContentUnit: 'oz',
-        observedGtin: '036000291452',
+        evidenceIds: ['ignored-non-matching-id'],
       },
       toolCtx(run.id, { gateway }),
     );
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
-      const record = result.data as { commerceApproved: boolean; rightsStatus: string; qualityStatus: string; exactProductMatch: boolean; perceptualHash: string | null };
-      expect(record.commerceApproved).toBe(true);
-      expect(record.rightsStatus).toBe('approved');
+      const record = result.data as {
+        commerceApproved: boolean;
+        rightsStatus: string;
+        qualityStatus: string;
+        exactProductMatch: boolean;
+        perceptualHash: string | null;
+        observationProvenance: string;
+        observedGtin: string | null;
+      };
+      // A non-matching evidence id resolves nothing -> no authoritative facts.
+      expect(record.observedGtin).toBeNull();
+      expect(record.observationProvenance).toBe('agent_asserted');
+      expect(record.exactProductMatch).toBe(false);
+      expect(record.rightsStatus).toBe('restricted'); // no reuse grant wired yet
       expect(record.qualityStatus).toBe('usable');
-      expect(record.exactProductMatch).toBe(true);
+      expect(record.commerceApproved).toBe(false);
       expect(record.perceptualHash).toMatch(/^[0-9a-f]{16}$/);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('verifies from matching durable evidence ids and fails closed without a grant', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun();
+    const source = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    const gtinRow = insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { contentHash: 'ocr-content-hash' },
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'net_content',
+      value: { value: 16, unit: 'oz' },
+      extractionMethod: 'image_ocr',
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.example.com/i.png',
+        gtin: '036000291452',
+        expectedName: 'Stella Chicken Broth 16 oz',
+        netContentValue: 16,
+        netContentUnit: 'oz',
+        declaredSourceType: 'supplier',
+        evidenceIds: [gtinRow.id],
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const record = result.data as {
+        commerceApproved: boolean;
+        rightsStatus: string;
+        qualityStatus: string;
+        exactProductMatch: boolean;
+        observationProvenance: string;
+      };
+      expect(record.observationProvenance).toBe('evidence');
+      expect(record.exactProductMatch).toBe(true);
+      expect(record.qualityStatus).toBe('usable');
+      // Deterministic rights: no durable reuse grant -> restricted, never approved.
+      expect(record.rightsStatus).toBe('restricted');
+      expect(record.commerceApproved).toBe(false);
     }
     transitionPiRunStatus(run.id, 'completed', {});
   });

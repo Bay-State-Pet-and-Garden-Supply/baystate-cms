@@ -173,4 +173,166 @@ describe('PI per-tool evidence persistence (smoke finding A)', () => {
       replayEvidence.map((row) => (JSON.parse(row.metadataJson ?? '{}') as { toolEvidenceId?: string }).toolEvidenceId).sort(),
     ).toEqual(['ev-gtin-1', 'ev-search-1']);
   });
+
+  it('persists FIELD-LEVEL evidence as per-field rows with value + method + path (P1-4)', () => {
+    const runId = makeRun();
+    const sink = new PersistingExecutionEventSink(runId);
+    sink.emit('tool_call_finished', {
+      toolName: 'extract_product_page',
+      evidence: [
+        {
+          id: 'extract_product_page:abc:title:def',
+          field: 'title',
+          value: 'Feline Wormeze Liquid 4oz',
+          method: 'json_ld',
+          path: 'jsonLd.name',
+          snippet: 'Feline Wormeze Liquid 4oz',
+          url: 'https://brand.example.com/p/product',
+          domain: 'brand.example.com',
+        },
+        {
+          id: 'extract_product_page:abc:size:ghij',
+          field: 'size',
+          value: '16 oz',
+          method: 'json_ld',
+          path: 'jsonLd.offers.size',
+          snippet: '16 oz',
+          url: 'https://brand.example.com/p/product',
+          domain: 'brand.example.com',
+        },
+        {
+          id: 'extract_product_page:abc:gtin:klm',
+          field: 'gtin',
+          value: '745801105447',
+          method: 'json_ld.gtin',
+          path: 'json_ld.gtin',
+          snippet: '745801105447',
+          url: 'https://brand.example.com/p/product',
+          domain: 'brand.example.com',
+        },
+      ] as never,
+    });
+
+    const evidence = listPiEvidence(runId);
+    expect(evidence).toHaveLength(3);
+    const byField = Object.fromEntries(evidence.map((row) => [row.targetField, row]));
+    expect(Object.keys(byField).sort()).toEqual(['gtin', 'size', 'title']);
+
+    // Each row carries the ACTUAL extracted value (not the coarse id wrapper).
+    expect(JSON.parse(byField['size'].valueJson)).toBe('16 oz');
+    expect(JSON.parse(byField['title'].valueJson)).toBe('Feline Wormeze Liquid 4oz');
+    expect(JSON.parse(byField['gtin'].valueJson)).toBe('745801105447');
+
+    // Method + snippet persisted.
+    expect(byField['size'].extractionMethod).toBe('json_ld');
+    expect(byField['gtin'].extractionMethod).toBe('json_ld.gtin');
+    expect(byField['title'].snippet).toBe('Feline Wormeze Liquid 4oz');
+
+    // Field-specific durable ids in metadata (UNIQUE per field).
+    const toolIds = evidence.map((row) => (JSON.parse(row.metadataJson ?? '{}') as { toolEvidenceId?: string }).toolEvidenceId);
+    expect(new Set(toolIds).size).toBe(3);
+    expect(toolIds).toContain('extract_product_page:abc:size:ghij');
+  });
+
+  it('reconstructs field = value supported by path from persisted rows alone (P1-4)', () => {
+    const runId = makeRun();
+    const sink = new PersistingExecutionEventSink(runId);
+    sink.emit('tool_call_finished', {
+      toolName: 'extract_product_page',
+      evidence: [
+        {
+          id: 'epp:url:size:abc',
+          field: 'size',
+          value: '16 oz',
+          method: 'json_ld',
+          path: 'jsonLd.offers.size',
+          url: 'https://brand.example.com/p/product',
+          domain: 'brand.example.com',
+        },
+      ] as never,
+    });
+
+    const rows = listPiEvidence(runId);
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    const meta = JSON.parse(row.metadataJson ?? '{}') as { toolEvidenceId?: string; path?: string };
+    // The reviewer can reconstruct the full claim from the durable row alone:
+    // field = value supported by path.
+    expect(row.targetField).toBe('size');
+    expect(JSON.parse(row.valueJson)).toBe('16 oz');
+    expect(row.extractionMethod).toBe('json_ld');
+    expect(meta.path).toBe('jsonLd.offers.size');
+    expect(meta.toolEvidenceId).toBe('epp:url:size:abc');
+    expect(`${row.targetField} = ${JSON.parse(row.valueJson)} supported by ${meta.path}`).toBe(
+      'size = 16 oz supported by jsonLd.offers.size',
+    );
+    // And it resolves through the tool-evidence-id query used by citations.
+    const cited = listPiEvidenceByToolEvidenceId(runId, ['epp:url:size:abc']);
+    expect(cited).toHaveLength(1);
+    expect(cited[0].targetField).toBe('size');
+  });
+
+  it('keeps legacy page-level evidence behavior intact alongside field entries (P1-4)', () => {
+    const runId = makeRun();
+    const sink = new PersistingExecutionEventSink(runId);
+    // Legacy entry (kind-based, coarse value wrapper) + field entry in one event.
+    sink.emit('tool_call_finished', {
+      toolName: 'extract_product_page',
+      evidence: [
+        {
+          id: 'ev-page-agg',
+          kind: 'search_lead',
+          url: 'https://brand.example.com/p/product',
+          domain: 'brand.example.com',
+          method: 'ladder',
+          snippet: 'page-level',
+        },
+        {
+          id: 'epp:url:brand:x',
+          field: 'brand',
+          value: 'Farnam',
+          method: 'json_ld',
+          path: 'jsonLd.brand.name',
+          url: 'https://brand.example.com/p/product',
+          domain: 'brand.example.com',
+        },
+      ] as never,
+    });
+
+    const evidence = listPiEvidence(runId);
+    expect(evidence).toHaveLength(2);
+    const legacy = evidence.find((row) => row.targetField === 'search_lead')!;
+    const fieldRow = evidence.find((row) => row.targetField === 'brand')!;
+    // Legacy: kind -> targetField, coarse { evidenceId, snippet } value.
+    expect(legacy.extractionMethod).toBe('ladder');
+    const legacyValue = JSON.parse(legacy.valueJson) as { evidenceId?: string; snippet?: string };
+    expect(legacyValue.evidenceId).toBe('ev-page-agg');
+    expect(legacyValue.snippet).toBe('page-level');
+    // Field entry: actual value + path metadata.
+    expect(JSON.parse(fieldRow.valueJson)).toBe('Farnam');
+    expect((JSON.parse(fieldRow.metadataJson ?? '{}') as { path?: string }).path).toBe('jsonLd.brand.name');
+  });
+
+  it('dedupes field-level entries by id (idempotent re-emission, P1-4)', () => {
+    const runId = makeRun();
+    const sink = new PersistingExecutionEventSink(runId);
+    const fieldEvidence = [
+      {
+        id: 'epp:url:size:abc',
+        field: 'size',
+        value: '16 oz',
+        method: 'json_ld',
+        path: 'jsonLd.offers.size',
+        url: 'https://brand.example.com/p/product',
+        domain: 'brand.example.com',
+      },
+    ] as never;
+    sink.emit('tool_call_finished', { toolName: 'x', evidence: fieldEvidence });
+    sink.emit('tool_call_finished', { toolName: 'x', evidence: fieldEvidence });
+    const evidence = listPiEvidence(runId);
+    expect(evidence).toHaveLength(1);
+    expect(JSON.parse(evidence[0].valueJson)).toBe('16 oz');
+    const sources = listPiSources(runId);
+    expect(sources).toHaveLength(1);
+  });
 });

@@ -18,7 +18,8 @@ import { matchSitemapUrls } from '../../onboarding/sitemap-matcher';
 import { resolveVariantsForCandidates } from '../../onboarding/variant-url-resolver';
 import type { InsertSourceData } from '../../db/repositories/onboarding-source-repo';
 import type { PiToolAdapter, PiToolContext, PiToolEvidence, PiToolResult } from './contract';
-import { errorResult, evidenceId, noResult, okResult } from './contract';
+import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
+import { defaultPolicyGateway } from '../policy';
 import { boundedString } from './registry';
 
 function toLeadEvidence(toolName: string, candidates: InsertSourceData[]): PiToolEvidence[] {
@@ -32,6 +33,31 @@ function toLeadEvidence(toolName: string, candidates: InsertSourceData[]): PiToo
   }));
 }
 
+/**
+ * P0-1: the Serper search endpoint receives product input (GTIN/name). Gate
+ * the query through the policy gateway with the search_query classification
+ * so dataSharingPolicy local_only/cloud_models_only deny it before any bytes
+ * leave the process (audited as a network decision).
+ */
+const SERPER_SEARCH_URL = 'https://google.serper.dev/search';
+
+async function gateSearchQuery(ctx: PiToolContext): Promise<{ allowed: boolean; reason: string }> {
+  const decision = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest(ctx, SERPER_SEARCH_URL, 'search_query');
+  if (decision.allowed) return { allowed: true, reason: '' };
+  return { allowed: false, reason: `web search denied: ${decision.reasonCode}${decision.detail ? ` (${decision.detail})` : ''}` };
+}
+
+/**
+ * P0-1: a brand-domain sitemap fetch is a network request for a
+ * caller-supplied domain. Validate the destination through the gateway before
+ * the legacy sitemap fetcher runs (SSRF floor + allowlist + audit).
+ */
+async function gateSitemapFetch(ctx: PiToolContext, domain: string): Promise<{ allowed: boolean; reason: string }> {
+  const decision = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest(ctx, `https://${domain}/`, 'fetched_content');
+  if (decision.allowed) return { allowed: true, reason: '' };
+  return { allowed: false, reason: `sitemap fetch denied: ${decision.reasonCode}${decision.detail ? ` (${decision.detail})` : ''}` };
+}
+
 const searchUpc: PiToolAdapter = {
   name: 'search_upc',
   version: '1.0.0',
@@ -42,9 +68,11 @@ const searchUpc: PiToolAdapter = {
     name: Type.Optional(boundedString(256, 'Register name to disambiguate the search')),
     brandHint: Type.Optional(boundedString(128, 'Brand hint')),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const gtin = String(params.gtin ?? '');
     const name = String(params.name ?? '');
+    const gate = await gateSearchQuery(ctx);
+    if (!gate.allowed) return policyDenied(gate.reason);
     try {
       const { candidates, consolidatedName, inferredBrand } = await discoverSources(
         gtin,
@@ -87,9 +115,11 @@ const searchProductName: PiToolAdapter = {
     gtin: Type.Optional(boundedString(64, 'Optional GTIN to constrain the search')),
     brandHint: Type.Optional(boundedString(128, 'Brand hint')),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const name = String(params.name ?? '');
     const gtin = params.gtin ? String(params.gtin) : '';
+    const gate = await gateSearchQuery(ctx);
+    if (!gate.allowed) return policyDenied(gate.reason);
     try {
       const { candidates } = await discoverSources(gtin || name, name, params.brandHint ? String(params.brandHint) : null, {});
       if (candidates.length === 0) return noResult(`No search candidates for "${name.slice(0, 60)}"`);
@@ -140,10 +170,12 @@ const searchBrandSitemap: PiToolAdapter = {
     name: Type.Optional(boundedString(256, 'Product name for matching')),
     productUrlPattern: Type.Optional(boundedString(256, 'Product URL pattern filter')),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const domain = String(params.domain ?? '');
     const gtin = String(params.gtin ?? '');
     const name = String(params.name ?? '');
+    const gate = await gateSitemapFetch(ctx, domain);
+    if (!gate.allowed) return policyDenied(gate.reason);
     try {
       const sitemap = await fetchAndParseSitemap(domain, params.productUrlPattern ? String(params.productUrlPattern) : null);
       if (sitemap.urls.length === 0) return noResult(`No sitemap URLs found for ${domain}`);
@@ -215,7 +247,7 @@ const resolveProductVariants: PiToolAdapter = {
     brandHint: Type.Optional(boundedString(128, 'Brand hint')),
     candidateUrls: Type.Array(boundedString(512, 'Candidate URL'), { maxItems: 6 }),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const candidates: InsertSourceData[] = (params.candidateUrls as string[]).map((url, index) => ({
       id: `adapter-${index}`,
       url,
@@ -224,9 +256,21 @@ const resolveProductVariants: PiToolAdapter = {
       confidence: 0,
       sourceMethod: 'agent_candidate',
     }));
+    // P0-1: every candidate URL is fetched by the variant resolver — validate
+    // each destination through the gateway first; denied URLs are dropped and
+    // the tool fails closed when none survive.
+    const gateway = ctx.gateway ?? defaultPolicyGateway;
+    const allowedCandidates: InsertSourceData[] = [];
+    for (const candidate of candidates) {
+      const decision = await gateway.checkNetworkRequest(ctx, candidate.url, 'fetched_content');
+      if (decision.allowed) allowedCandidates.push(candidate);
+    }
+    if (allowedCandidates.length === 0) {
+      return policyDenied('all candidate URLs denied by the network policy');
+    }
     try {
       const resolved = await resolveVariantsForCandidates({
-        candidates,
+        candidates: allowedCandidates,
         upc: String(params.gtin),
         rawName: String(params.rawName),
         expectedName: params.expectedName ? String(params.expectedName) : String(params.rawName),

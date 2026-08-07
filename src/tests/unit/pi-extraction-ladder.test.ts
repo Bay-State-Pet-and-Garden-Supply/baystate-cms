@@ -71,7 +71,7 @@ const NEXTJS_HTML = `
 
 const NUXT_HTML = `
 <html><head><title>Catnip Toy</title></head>
-<body><script>window.__NUXT__={"data":[{"product":{"title":"Catnip Toy Mouse","sku":"CT-1","gtin":"098765432109","brand":"Paws Inc","images":["https://img.example.com/mouse.jpg"]}}]}</script></body></html>`;
+<body><script>window.__NUXT__={"data":[{"product":{"title":"Catnip Toy Mouse","sku":"CT-1","gtin":"098765432109","brand":"Paws Inc","images":["https://img.example.com/mouse.jpg"],"variants":[{"id":1,"title":"Mouse","sku":"CT-1"}]}}]}</script></body></html>`;
 
 function fetched(html: string, finalUrl = 'https://example.com/p/1'): FetchedPage {
   return { html, finalUrl, status: 200, contentHash: `hash-${html.length}` };
@@ -292,6 +292,133 @@ describe('extraction ladder', () => {
     expect(result.conflicts.some((c) => c.field === '_retrieval')).toBe(true);
     expect(layersUsed).toEqual(['http']);
   });
+
+  it('never marks a multi-variant page exact when the default variant is another size (P0-5 adversarial)', async () => {
+    const shopifyHtml = `<html><head><title>Wormeze Feline</title>
+<script src="/cdn/shop/t/1/main.js"></script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://shop.example.com/products/wormeze-feline',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched(shopifyHtml, 'https://shop.example.com/products/wormeze-feline'),
+        fetchShopify: async () =>
+          ({
+            id: 7,
+            title: 'Wormeze Feline Anthelmintic',
+            vendor: 'Durvet',
+            product_type: 'Pet',
+            handle: 'wormeze-feline',
+            // The product payload carries the requested CHILD GTIN (the page
+            // represents the whole family), while the default variant is
+            // another size — the review P0-5 danger case.
+            gtin: '745801105447',
+            variants: [
+              { id: 701, title: '8 oz', sku: 'W-8', available: true },
+              { id: 702, title: '16 oz', sku: 'W-16', available: true },
+            ],
+            images: [],
+          }) as never,
+      },
+    );
+    expect(result.gtins.map((g) => g.value)).toContain('745801105447');
+    // Exact GTIN is represented, but the selected/default variant is another
+    // size and there is no positive single-variant or child-linkage proof.
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+
+  it('exact-matches a page the platform API affirms is single-variant (P0-5 positive proof)', async () => {
+    const singleHtml = `<html><head><title>Single Variant</title>
+<script src="/cdn/shop/t/1/main.js"></script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://shop.example.com/products/single',
+      { gtin: '555566667777', name: 'Single Variant 8oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched(singleHtml, 'https://shop.example.com/products/single'),
+        fetchShopify: async () =>
+          ({
+            id: 8,
+            title: 'Single Variant 8oz',
+            vendor: 'Vendor Co',
+            handle: 'single',
+            gtin: '555566667777',
+            // Platform API affirmatively reports exactly one variant.
+            variants: [{ id: 1, title: '8 oz', sku: 'SV-8', available: true }],
+            images: [],
+          }) as never,
+      },
+    );
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('does not exact-match when a group page declares the GTIN but no positive proof exists (P0-5)', async () => {
+    // A leaf Product node carries the exact GTIN, but the SAME page also
+    // carries ProductGroup/hasVariant markers — so single-variant proof is
+    // invalidated and the ladder must fall through instead of settling.
+    const groupHtml = `<html><head>
+<script type="application/ld+json">{"@type":"Product","name":"Wormeze Feline 4oz","sku":"W-4","gtin":"745801105447"}</script>
+<script type="application/ld+json">{"@type":"ProductGroup","name":"Wormeze Feline (all sizes)","hasVariant":[{"@type":"Product","name":"Wormeze Feline 8oz"}]}</script>
+</head><body></body></html>`;
+    const { result } = await runExtractionLadder(
+      'https://group.example.com/p/wormeze',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(groupHtml, 'https://group.example.com/p/wormeze') },
+    );
+    expect(result.gtins.map((g) => g.value)).toContain('745801105447');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match');
+    expect(result.identityReasons.join(' ')).toContain('variant status unproven');
+  });
+
+  it('exact-matches via positive selected-variant linkage after a bounded interaction (P0-5)', async () => {
+    const snapshot: BrowserSnapshotFn = async (request) => ({
+      url: 'https://browser.example.com/p/size-pick',
+      finalUrl: 'https://browser.example.com/p/size-pick',
+      // A Product node with a variants list — NOT single-variant proof, so
+      // only the interaction's variant_match signal can settle the identity.
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Size Pick 16oz',
+          sku: 'SP-16',
+          gtin: '121212121212',
+          variants: [
+            { id: 1, title: '8 oz' },
+            { id: 2, title: '16 oz' },
+          ],
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: request.interaction
+        ? { performed: true, finalUrl: 'https://browser.example.com/p/size-pick?size=16oz', selectedOptions: ['16 oz'] }
+        : null,
+      pageStructureSignals: ['interaction:variant-selector'],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://browser.example.com/p/size-pick',
+      { gtin: '121212121212', name: 'Size Pick 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://browser.example.com/p/size-pick'),
+        browser: { snapshot },
+        interaction: { type: 'select_option', selector: '#size', optionLabel: '16 oz', settleMs: 500 },
+      },
+    );
+    expect(layersUsed).toContain('interaction');
+    expect(result.identityStatus).toBe('exact_match');
+    expect(result.identityReasons.join(' ')).toContain('selected-variant linkage');
+  });
 });
 
 describe('ladder contract adapter + helpers', () => {
@@ -362,7 +489,7 @@ describe('ladder contract adapter + helpers', () => {
   it('falls back from a failed Shopify .js fetch to embedded Next.js state (Hydrogen)', async () => {
     const hydrogenHtml = `<html><head><title>Hydrogen Store</title>
 <script src="https://cdn.shopify.com/s/files/1/0000/main.js"></script>
-<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"product":{"title":"Hydrogen Product 6oz","sku":"H-6","gtin":"333333333333"}}}}</script>
+<script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"product":{"title":"Hydrogen Product 6oz","sku":"H-6","gtin":"333333333333","variants":[{"id":1,"title":"6 oz","sku":"H-6"}]}}}}</script>
 </head><body></body></html>`;
     const fetchShopify = vi.fn(async () => {
       throw new Error('HTTP 404 for .js endpoint');
@@ -397,7 +524,7 @@ describe('ladder contract adapter + helpers', () => {
 
   it('parses Nuxt 3 __NUXT_DATA__ devalue payloads', async () => {
     const html = `<html><head><title>T</title></head><body>
-<script id="__NUXT_DATA__" type="application/json">["ShallowRef:1",{"product":{"title":"Nuxt3 Product 8oz","sku":"N3-8","gtin":"555555555555"},"$sconfig":{}}]</script>
+<script id="__NUXT_DATA__" type="application/json">["ShallowRef:1",{"product":{"title":"Nuxt3 Product 8oz","sku":"N3-8","gtin":"555555555555","variants":[{"id":1,"title":"8 oz","sku":"N3-8"}]},"$sconfig":{}}]</script>
 </body></html>`;
     const data = parseNuxtData(html);
     expect(data.product?.title).toBe('Nuxt3 Product 8oz');

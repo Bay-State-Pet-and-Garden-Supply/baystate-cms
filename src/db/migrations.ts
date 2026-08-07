@@ -1785,6 +1785,146 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // P0-2 (review remediation): server-authoritative, immutable/versioned PI
+  // execution policies. Callers select an approved policy by record id and
+  // may only apply strictly-reducing overrides; the policy object itself is
+  // never caller-supplied. Each version row is immutable; a policy change
+  // creates a new version and deactivates the previous ones (only the newest
+  // version of a record may be active).
+  try {
+    const piApprovedPoliciesVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('product_intelligence_approved_policies_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!piApprovedPoliciesVersion) {
+      console.log('[Migrations] Running product intelligence approved policies migration...');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS pi_approved_policies (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            policy_json TEXT NOT NULL,
+            policy_config_id TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            UNIQUE(workspace_id, name, version)
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_approved_policies_ws_active ON pi_approved_policies(workspace_id, active);
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_approved_policies_schema_version', '1');");
+      console.log('[Migrations] Product intelligence approved policies migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence approved policies migration failed:', e);
+    throw e;
+  }
+
+  // Review remediation (P1-2/P0-6): durable human review decisions for
+  // Agent Lab imports, server-authoritative reuse grants for image rights,
+  // and the extended extraction_method CHECK on product_intelligence_assets.
+  // Review decisions are append-only: every approve/reject is a new row with
+  // a result_hash binding the decision to the exact stored result, chained
+  // via supersedes_decision_id. Reuse grants are workspace-scoped
+  // (source tier + domain pattern) and resolve independently of source
+  // identity — a canonical vendor domain proves ORIGIN, never reuse rights.
+  try {
+    const reviewRemediationVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('pi_review_remediation_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!reviewRemediationVersion) {
+      console.log('[Migrations] Running review remediation schema migration...');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS pi_review_decisions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            decision TEXT NOT NULL CHECK (decision IN ('approve', 'reject')),
+            result_hash TEXT NOT NULL,
+            supersedes_decision_id TEXT REFERENCES pi_review_decisions(id),
+            reviewer TEXT NOT NULL,
+            note TEXT,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_pi_review_decisions_run ON pi_review_decisions(run_id);
+          CREATE TABLE IF NOT EXISTS pi_reuse_policies (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id) ON DELETE CASCADE,
+            source_tier TEXT NOT NULL,
+            domain_pattern TEXT NOT NULL,
+            allowed INTEGER NOT NULL DEFAULT 1,
+            terms TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(workspace_id, source_tier, domain_pattern)
+          );
+          -- SQLite cannot ALTER a CHECK constraint: rebuild the assets table
+          -- with the extended extraction_method enum ('image_ocr', 'decoder'
+          -- were added to the zod schema in P0-6). No table references
+          -- product_intelligence_assets (verified), so the drop/rename is safe.
+          CREATE TABLE IF NOT EXISTS product_intelligence_assets_new (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+            source_id TEXT REFERENCES product_intelligence_sources(id) ON DELETE SET NULL,
+            source_url TEXT NOT NULL,
+            source_page_url TEXT,
+            source_type TEXT NOT NULL,
+            source_path TEXT,
+            source_artifact_id TEXT,
+            extraction_method TEXT NOT NULL CHECK (extraction_method IN ('json_ld', 'platform_api', 'network_response', 'profile_selector', 'media_api', 'manual', 'image_ocr', 'decoder')),
+            retrieved_at TEXT NOT NULL,
+            original_content_hash TEXT NOT NULL,
+            perceptual_hash TEXT,
+            variant_reference TEXT,
+            rights_status TEXT NOT NULL CHECK (rights_status IN ('approved', 'restricted', 'unknown')),
+            rights_basis TEXT,
+            rights_evidence_ref TEXT,
+            observed_brand TEXT,
+            observed_product_name TEXT,
+            observed_variant TEXT,
+            observed_net_content_json TEXT,
+            observed_pack_count INTEGER,
+            observed_gtin TEXT,
+            exact_product_match INTEGER NOT NULL DEFAULT 0,
+            exact_variant_match INTEGER,
+            quality_status TEXT NOT NULL CHECK (quality_status IN ('usable', 'low_quality', 'invalid')),
+            commerce_approved INTEGER NOT NULL DEFAULT 0,
+            conflicts_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO product_intelligence_assets_new
+            (id, run_id, source_id, source_url, source_page_url, source_type, source_path, source_artifact_id,
+             extraction_method, retrieved_at, original_content_hash, perceptual_hash, variant_reference,
+             rights_status, rights_basis, rights_evidence_ref, observed_brand, observed_product_name,
+             observed_variant, observed_net_content_json, observed_pack_count, observed_gtin,
+             exact_product_match, exact_variant_match, quality_status, commerce_approved, conflicts_json,
+             payload_json, created_at)
+          SELECT id, run_id, source_id, source_url, source_page_url, source_type, source_path, source_artifact_id,
+             extraction_method, retrieved_at, original_content_hash, perceptual_hash, variant_reference,
+             rights_status, rights_basis, rights_evidence_ref, observed_brand, observed_product_name,
+             observed_variant, observed_net_content_json, observed_pack_count, observed_gtin,
+             exact_product_match, exact_variant_match, quality_status, commerce_approved, conflicts_json,
+             payload_json, created_at
+          FROM product_intelligence_assets;
+          DROP TABLE product_intelligence_assets;
+          ALTER TABLE product_intelligence_assets_new RENAME TO product_intelligence_assets;
+          CREATE INDEX IF NOT EXISTS idx_pi_assets_run ON product_intelligence_assets(run_id);
+          CREATE INDEX IF NOT EXISTS idx_pi_assets_commerce ON product_intelligence_assets(run_id, commerce_approved);
+        `);
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_review_remediation_schema_version', '1');");
+      console.log('[Migrations] Review remediation schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Review remediation schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

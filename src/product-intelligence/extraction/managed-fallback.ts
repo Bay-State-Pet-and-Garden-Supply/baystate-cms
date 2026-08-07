@@ -52,6 +52,13 @@ export interface ManagedFetchRequest {
   url: string;
   signal: AbortSignal;
   timeoutMs: number;
+  /**
+   * P0-1: policy-gateway-bound fetch for provider HTTP calls. The registry
+   * attaches it at dispatch (defaults to the global fetch for non-PI callers
+   * and tests); real providers must use it so provider traffic rides the
+   * enforced network capability.
+   */
+  fetchFn?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 }
 
 export interface ManagedBrowserProvider {
@@ -79,10 +86,16 @@ export const MANAGED_FALLBACK_CANDIDATES: Array<{ name: string; vendor: string; 
 export class ManagedFallbackRegistry {
   private registered = new Map<string, ManagedBrowserProvider>();
   private config: ManagedFallbackConfig;
+  private readonly fetchFn: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-  constructor(config: ManagedFallbackConfigInput = DEFAULT_MANAGED_FALLBACK_CONFIG, providers: ManagedBrowserProvider[] = []) {
+  constructor(
+    config: ManagedFallbackConfigInput = DEFAULT_MANAGED_FALLBACK_CONFIG,
+    providers: ManagedBrowserProvider[] = [],
+    fetchFn: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = fetch,
+  ) {
     this.config = ManagedFallbackConfigSchema.parse(config);
     for (const provider of providers) this.register(provider);
+    this.fetchFn = fetchFn;
   }
 
   configure(config: ManagedFallbackConfigInput): void {
@@ -125,7 +138,7 @@ export class ManagedFallbackRegistry {
   async fetch(url: string, signal: AbortSignal, timeoutMs: number): Promise<ManagedPage> {
     const provider = this.providerFor(url);
     if (!provider) throw new Error(`No managed fallback provider enabled for ${url}`);
-    return provider.fetchPage({ url, signal, timeoutMs });
+    return provider.fetchPage({ url, signal, timeoutMs, fetchFn: this.fetchFn });
   }
 }
 

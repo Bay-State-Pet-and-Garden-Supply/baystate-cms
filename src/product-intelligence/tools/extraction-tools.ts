@@ -16,9 +16,26 @@ import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
 import { sha256Hex } from '../../shared/stable-id';
 import { sharpImageVerificationAdapter } from '../assets/contract';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
-import { classifyPageIdentity, errorResult, evidenceId, noResult, okResult, policyDenied, type ExtractedFieldEvidence, type PageExtractionContract, type PageExtractionResult } from './contract';
+import {
+  classifyPageIdentity,
+  errorResult,
+  evidenceId,
+  fieldEvidenceId,
+  noResult,
+  okResult,
+  policyDenied,
+  structuredSingleVariantProof,
+  variantProofFromSignals,
+  type ExtractedFieldEvidence,
+  type FieldEvidenceEntry,
+  type PageExtractionContract,
+  type PageExtractionResult,
+} from './contract';
 import { createLadderExtractionContract } from '../extraction/ladder';
 import { defaultLadderOptions } from '../extraction/wiring';
+import { HTTP_EXTRACTION_HEADERS, type FetchedPage, type ShopifyProductJson } from '../extraction/platforms';
+import type { LadderOptions } from '../extraction/ladder';
+import type { PolicyGateway } from '../policy/policy-gateway';
 import { boundedString } from './registry';
 
 // ---------------------------------------------------------------------------
@@ -109,6 +126,7 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
       variantSignals.push({ kind: 'variant_match' });
     }
 
+    const proof = variantProofFromSignals(variantSignals);
     const identity = classifyPageIdentity({
       requestedGtin: expected.gtin ?? '',
       extractedGtins: gtins.map((g) => g.value),
@@ -117,6 +135,8 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
       expectedName: expected.name,
       variantSignals,
       hasAnyField: fields.length > 0 || gtins.length > 0,
+      singleVariantProof: proof.singleVariantProof || structuredSingleVariantProof(rawHtml),
+      selectedVariantLinkage: proof.selectedVariantLinkage,
     });
 
     const conflicts: Array<{ field: string; summary: string }> = [];
@@ -149,6 +169,50 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
 
 export const defaultPageExtractionContract: PageExtractionContract = createLadderExtractionContract(defaultLadderOptions());
 
+/**
+ * P0-1: ladder options whose HTTP layer rides the policy gateway. The ladder
+ * already accepts `fetchPage`/`fetchShopify` seams (no ladder change needed);
+ * here they are bound to gatewayFetch so destination policy, per-hop redirect
+ * revalidation, size/type limits, and audit attribution apply to every
+ * PI-initiated page fetch.
+ */
+function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
+  const gateway: PolicyGateway = ctx.gateway ?? defaultPolicyGateway;
+  const netCtx = { runId: ctx.runId, policy: ctx.policy };
+  const options = defaultLadderOptions();
+  options.fetchPage = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<FetchedPage> => {
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const response = await gateway.gatewayFetch(
+      netCtx,
+      url,
+      { headers: HTTP_EXTRACTION_HEADERS, signal: combined },
+      {
+        dataClassification: 'fetched_content',
+        maxResponseBytes: 5 * 1024 * 1024,
+        allowedContentTypes: ['text/html', 'application/xhtml+xml', 'application/json'],
+      },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+    const html = await response.text();
+    if (html.length > 5_000_000) throw new Error(`Response too large (${html.length} chars) for ${url}`);
+    return { html, finalUrl: response.url || url, status: response.status, contentHash: sha256Hex(html) };
+  };
+  options.fetchShopify = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<ShopifyProductJson> => {
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const response = await gateway.gatewayFetch(
+      netCtx,
+      url,
+      { headers: HTTP_EXTRACTION_HEADERS, signal: combined },
+      { dataClassification: 'fetched_content', maxResponseBytes: 2 * 1024 * 1024, allowedContentTypes: ['application/json'] },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+    return (await response.json()) as ShopifyProductJson;
+  };
+  return options;
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
@@ -175,7 +239,11 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
       const netCheck = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest({ runId: ctx.runId, policy: ctx.policy }, url);
       if (!netCheck.allowed) return policyDenied(`network denied: ${netCheck.reasonCode}${netCheck.detail ? ` (${netCheck.detail})` : ''}`);
       try {
-        const result = await contract.extract({
+        // P0-1: when running the default ladder, bind its HTTP layer to the
+        // policy gateway (per-run context) so the fetch itself is enforced,
+        // not only pre-checked.
+        const runContract = contract === defaultPageExtractionContract ? createLadderExtractionContract(gatewayBoundLadderOptions(ctx)) : contract;
+        const result = await runContract.extract({
           url,
           expected: {
             gtin: params.gtin ? String(params.gtin) : undefined,
@@ -187,6 +255,38 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
         });
         if (result.fields.length === 0 && result.gtins.length === 0 && result.images.length === 0) {
           return noResult(`No extractable product data at ${url.slice(0, 80)}`);
+        }
+        const domainOf = (pageUrl: string): string | undefined => {
+          try { return new URL(pageUrl).hostname; } catch { return undefined; }
+        };
+        const pageDomain = domainOf(result.finalUrl);
+        // P1-4: one FieldEvidenceEntry per extracted field (field-specific
+        // durable id) so persistence stores value + method + source path per
+        // row. The page-level aggregate entry is kept for consumers that cite
+        // the coarse id (bundle identity evidenceIds).
+        const fieldEvidence: FieldEvidenceEntry[] = result.fields.map((f) => ({
+          id: fieldEvidenceId('extract_product_page', result.finalUrl, f.field, f.sourcePath ?? f.value ?? ''),
+          field: f.field,
+          value: f.value,
+          method: f.method,
+          path: f.sourcePath,
+          snippet: f.value ? String(f.value).slice(0, 200) : undefined,
+          url: result.finalUrl,
+          domain: pageDomain,
+          contentHash: result.contentHash ?? undefined,
+        }));
+        for (const g of result.gtins) {
+          fieldEvidence.push({
+            id: fieldEvidenceId('extract_product_page', result.finalUrl, 'gtin', `${g.method}:${g.value}`),
+            field: 'gtin',
+            value: g.value,
+            method: g.method,
+            path: g.method,
+            snippet: g.value.slice(0, 40),
+            url: result.finalUrl,
+            domain: pageDomain,
+            contentHash: result.contentHash ?? undefined,
+          });
         }
         return okResult(
           {
@@ -214,10 +314,11 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
               id: evidenceId('extract_product_page', url),
               kind: result.identityStatus === 'exact_match' ? 'gtin_evidence' : 'search_lead',
               url: result.finalUrl,
-              domain: (() => { try { return new URL(result.finalUrl).hostname; } catch { return undefined; } })(),
+              domain: pageDomain,
               method: contract.name,
               contentHash: result.contentHash ?? undefined,
             },
+            ...fieldEvidence,
           ],
         );
       } catch (error) {
@@ -280,8 +381,14 @@ const extractPackagingEvidence: PiToolAdapter = {
     gtin: Type.Optional(boundedString(64, 'SKU/UPC for logging')),
     imageSourceUrl: Type.Optional(boundedString(512, 'Original page URL for provenance')),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const imageUrl = String(params.imageUrl ?? '');
+    // P0-1: the OCR path hands this URL to the legacy image loader (raw
+    // fetch). Validate the destination through the policy gateway first —
+    // private/link-local, allowlist, and data-sharing restrictions deny the
+    // call before any bytes are fetched.
+    const netCheck = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest({ runId: ctx.runId, policy: ctx.policy }, imageUrl);
+    if (!netCheck.allowed) return policyDenied(`image fetch denied: ${netCheck.reasonCode}${netCheck.detail ? ` (${netCheck.detail})` : ''}`);
     try {
       const ocr = await extractPackagingOcr({
         imageUrl,

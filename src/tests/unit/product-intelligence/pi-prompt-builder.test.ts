@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildResearchPrompt } from '../../../product-intelligence/pi/pi-prompt-builder';
-import { SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
+import { WORKFLOW_SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
 import { TEST_INPUT, testContext } from './test-helpers';
 
 describe('buildResearchPrompt', () => {
@@ -44,7 +44,7 @@ describe('buildResearchPrompt', () => {
 
   it('names the terminal submission tool as the only way to end research', () => {
     const { text } = buildResearchPrompt(TEST_INPUT, testContext());
-    expect(text).toContain(SUBMISSION_TOOL_NAME);
+    expect(text).toContain(WORKFLOW_SUBMISSION_TOOL_NAME);
     expect(text).toContain('exactly once');
     expect(text).toContain('do not end the conversation with prose alone');
   });

@@ -358,9 +358,21 @@ export type ProductIntelligenceExecutionEvent = z.infer<
 // Terminal result submission (PI-1 envelope + PI-4 workflow submissions)
 // ---------------------------------------------------------------------------
 
-/** Any terminal submission the run service persists: the PI-1 evidence bundle or a PI-4 workflow submission. */
+/** Any terminal submission the run service persists: the legacy PI-1 evidence envelope or a PI-4 workflow submission. */
 export const TerminalResultSubmissionSchema = z.union([StructuredSubmissionSchema, TerminalSubmissionSchema]);
 export type TerminalResultSubmission = z.infer<typeof TerminalResultSubmissionSchema>;
+
+/**
+ * The legacy PI-1 terminal envelope (schemaVersion 1 structured evidence
+ * bundle). Kept for parsing/rendering historical runs only — never presented
+ * to live Pi sessions (P0-3); live terminals are the PI-4 workflow tools.
+ */
+export type LegacyTerminalSubmission = StructuredSubmission;
+
+/** Type narrowing for the legacy PI-1 envelope (historical parsing only). */
+export function isLegacyTerminalSubmission(value: unknown): value is LegacyTerminalSubmission {
+  return StructuredSubmissionSchema.safeParse(value).success;
+}
 
 // ---------------------------------------------------------------------------
 // Result
@@ -439,10 +451,25 @@ export type ProductResearchResult = z.infer<typeof ProductResearchResultSchema>;
 
 export const PI_EXECUTOR_NAME = 'pi' as const;
 export const LEGACY_EXECUTOR_NAME = 'legacy' as const;
+
+/**
+ * @deprecated Legacy PI-1 terminal tool (P0-3). Removed from live Pi
+ * sessions: it bypassed the PI-4 workflow validator. Kept only for parsing
+ * and rendering historical runs and for schema-equivalence pinning.
+ */
 export const SUBMISSION_TOOL_NAME = 'submit_product_research' as const;
 
-/** Tools every Pi research session exposes regardless of policy. */
-export const TERMINAL_TOOLS: readonly string[] = [SUBMISSION_TOOL_NAME];
+/**
+ * The PI-4 workflow terminal tool every Pi research session exposes
+ * regardless of policy. Session research ends through exactly one workflow
+ * terminal tool (see WORKFLOW_TERMINAL_TOOLS in workflow/bundle); this is
+ * the canonical one. Kept as a literal here to avoid a contracts <->
+ * workflow import cycle.
+ */
+export const WORKFLOW_SUBMISSION_TOOL_NAME = 'submit_product_research_bundle' as const;
+
+/** Terminal tools every Pi research session exposes regardless of policy. */
+export const TERMINAL_TOOLS: readonly string[] = [WORKFLOW_SUBMISSION_TOOL_NAME];
 
 /** Built-in Pi tools that may be referenced by policy.allowedTools. */
 export const KNOWN_BUILTIN_TOOLS: readonly string[] = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'];

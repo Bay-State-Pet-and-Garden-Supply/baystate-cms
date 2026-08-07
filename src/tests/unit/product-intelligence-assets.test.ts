@@ -389,7 +389,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       gateway,
     });
 
-    it('approves a verified supplier asset with matching evidence', async () => {
+    it('approves a verified supplier asset with evidence-resolved facts and a reuse grant', async () => {
       const record = await verifyImageCandidate(
         {
           url: 'https://cdn.example.com/i.png',
@@ -400,16 +400,19 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           expectedNetContent: { value: 16, unit: 'oz' },
           expectedPackCount: 1,
           declaredSourceType: 'supplier',
-          declaredRightsBasis: 'supplier_authorized_asset',
-          declaredRightsEvidenceRef: 'ev:supplier-1',
-          observed: {
-            productName: 'Stella Chicken Broth 16 oz',
-            netContent: { value: 16, unit: 'oz' },
-            packCount: 1,
-            gtin: GTIN,
-          },
+          evidenceIds: ['ev-gtin-1', 'ev-name-1', 'ev-net-1'],
         },
-        deps(gatewayReturning(solidPng)),
+        {
+          ...deps(gatewayReturning(solidPng)),
+          // Server-resolved durable evidence rows (the only authority).
+          evidenceResolver: (ids) =>
+            ids.map((id) => {
+              if (id === 'ev-gtin-1') return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+              if (id === 'ev-name-1') return { id, targetField: 'product_name', value: 'Stella Chicken Broth 16 oz', extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+              return { id, targetField: 'net_content', value: { value: 16, unit: 'oz' }, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+            }),
+          reuseGrantResolver: (tier) => tier === 'supplier',
+        },
       );
       expect(record.qualityStatus).toBe('usable');
       expect(record.rightsStatus).toBe('approved');
@@ -419,9 +422,79 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(record.originalContentHash).toMatch(/^[0-9a-f]{64}$/);
       expect(record.perceptualHash).toMatch(/^[0-9a-f]{16}$/);
       expect(record.conflicts).toEqual([]);
+      expect(record.observationProvenance).toBe('evidence');
+      expect(record.agentAsserted).toBeNull();
     });
 
-    it('blocks commerce approval on a net-content conflict even with supplier rights', async () => {
+    it('ignores agent-asserted observations without durable evidence (never authoritative)', async () => {
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/asserted.png',
+          sourcePageUrl: PAGE,
+          expectedGtin: GTIN,
+          expectedName: 'Stella Chicken Broth 16 oz',
+          declaredSourceType: 'supplier',
+          // Agent-asserted: the model claims the observed packaging facts.
+          observed: { productName: 'Stella Chicken Broth 16 oz', gtin: GTIN },
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: () => [], // no durable evidence rows resolve
+          reuseGrantResolver: () => false,
+        },
+      );
+      expect(record.exactProductMatch).toBe(false);
+      expect(record.commerceApproved).toBe(false);
+      expect(record.rightsStatus).toBe('restricted');
+      expect(record.observationProvenance).toBe('agent_asserted');
+      // The assertion is recorded for review but never used for matching.
+      expect(record.agentAsserted?.gtin).toBe(GTIN);
+    });
+
+    it('denies approval for a manufacturer-hosted image without a reuse grant even when identity resolves', async () => {
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/mfr.png',
+          sourcePageUrl: PAGE,
+          expectedGtin: GTIN,
+          declaredSourceType: 'manufacturer',
+          evidenceIds: ['ev-gtin-1'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
+          // No reuse grant at all (default): origin proves nothing.
+        },
+      );
+      expect(record.exactProductMatch).toBe(true); // identity resolves from evidence
+      expect(record.rightsStatus).toBe('restricted'); // but reuse is not authorized
+      expect(record.commerceApproved).toBe(false);
+    });
+
+    it('binds OCR-method evidence to the image content hash', async () => {
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/ocr.png',
+          sourcePageUrl: PAGE,
+          extractionMethod: 'image_ocr',
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-ocr'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: 'persisted-content-hash' })),
+          reuseGrantResolver: () => true,
+        },
+      );
+      expect(record.qualityStatus).toBe('usable');
+      expect(record.extractionMethod).toBe('image_ocr');
+      expect(record.originalContentHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(record.observationProvenance).toBe('evidence');
+    });
+
+    it('blocks commerce approval on a net-content conflict even with a reuse grant', async () => {
       const record = await verifyImageCandidate(
         {
           url: 'https://cdn.example.com/wrong.png',
@@ -430,29 +503,41 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           expectedName: 'Stella Chicken Broth 16 oz',
           expectedNetContent: { value: 16, unit: 'oz' },
           declaredSourceType: 'supplier',
-          declaredRightsBasis: 'supplier_authorized_asset',
-          declaredRightsEvidenceRef: 'ev:supplier-1',
-          observed: { productName: 'Stella Chicken Broth 8 oz', netContent: { value: 8, unit: 'oz' }, gtin: GTIN },
+          evidenceIds: ['ev-gtin-1', 'ev-name-wrong', 'ev-net-wrong'],
         },
-        deps(gatewayReturning(solidPng)),
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => {
+              if (id === 'ev-gtin-1') return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+              if (id === 'ev-name-wrong') return { id, targetField: 'product_name', value: 'Stella Chicken Broth 8 oz', extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+              return { id, targetField: 'net_content', value: { value: 8, unit: 'oz' }, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+            }),
+          reuseGrantResolver: () => true,
+        },
       );
       expect(record.exactProductMatch).toBe(false);
       expect(record.conflicts.some((c) => c.startsWith('net_content_mismatch'))).toBe(true);
       expect(record.commerceApproved).toBe(false);
     });
 
-    it('gives network-discovered URLs unknown rights and no approval', async () => {
+    it('gives network-discovered URLs restricted rights without a grant and no approval', async () => {
       const record = await verifyImageCandidate(
         {
           url: 'https://cdn.example.com/unknown.png',
           sourcePageUrl: PAGE,
           expectedGtin: GTIN,
           declaredSourceType: 'network_discovered',
-          observed: { gtin: GTIN },
+          evidenceIds: ['ev-gtin-1'],
         },
-        deps(gatewayReturning(solidPng)),
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
+          reuseGrantResolver: () => false,
+        },
       );
-      expect(record.rightsStatus).toBe('unknown');
+      expect(record.rightsStatus).toBe('restricted');
       expect(record.commerceApproved).toBe(false);
     });
 
@@ -469,8 +554,13 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
     it('marks tiny images low_quality', async () => {
       const tiny = await makeSolidPng(120, 90);
       const record = await verifyImageCandidate(
-        { url: 'https://cdn.example.com/tiny.png', declaredSourceType: 'supplier', declaredRightsBasis: 'b', declaredRightsEvidenceRef: 'e', observed: { gtin: GTIN }, expectedGtin: GTIN },
-        deps(gatewayReturning(tiny)),
+        { url: 'https://cdn.example.com/tiny.png', declaredSourceType: 'supplier', evidenceIds: ['ev-gtin-1'], expectedGtin: GTIN },
+        {
+          ...deps(gatewayReturning(tiny)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
+          reuseGrantResolver: () => true,
+        },
       );
       expect(record.qualityStatus).toBe('low_quality');
       expect(record.commerceApproved).toBe(false);

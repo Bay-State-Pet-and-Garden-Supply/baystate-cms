@@ -197,7 +197,7 @@ export class FakeSessionFactory implements PiSessionFactory {
   failWith: Error | null = null;
   /** Latest submission handler passed by the executor (drives the submit tool). */
   lastSubmissionHandler: ((submission: TerminalResultSubmission) => void) | null = null;
-  effectiveTools: string[] = ['read', 'grep', 'find', 'ls', 'submit_product_research'];
+  effectiveTools: string[] = ['read', 'grep', 'find', 'ls', 'submit_product_research_bundle'];
   piVersion: string | null = '0.83.0';
 
   async createSession(

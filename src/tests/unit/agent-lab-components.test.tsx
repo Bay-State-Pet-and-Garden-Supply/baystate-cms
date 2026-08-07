@@ -16,11 +16,12 @@ vi.mock('../../client/product-intelligence-api', () => ({
   getPiRun: vi.fn(),
   createPiRun: vi.fn(),
   cancelPiRun: vi.fn(),
-  deletePiRun: vi.fn(),
   comparePiRun: vi.fn(),
   parseRunInput: vi.fn(),
   parseRunPolicy: vi.fn(),
   importRunToOnboarding: vi.fn(),
+  reviewPiRun: vi.fn(),
+  getPiRunReview: vi.fn(),
 }));
 
 vi.mock('../../client/hooks/useProductIntelligenceRun', () => ({
@@ -45,6 +46,7 @@ import {
   listPiRuns,
   getPiFlags,
   importRunToOnboarding,
+  getPiRunReview,
   type PiRunProjection,
 } from '../../client/product-intelligence-api';
 
@@ -365,6 +367,20 @@ describe('AgentRunInspector — onboarding import (PI-8)', () => {
       batchId: 'batch-1',
       created: true,
     });
+    // P1-2: an approved review decision unlocks the import button.
+    vi.mocked(getPiRunReview).mockResolvedValue({
+      decision: {
+        id: 'd1',
+        runId: 'run-import-1',
+        decision: 'approve',
+        resultHash: 'hash',
+        supersedesDecisionId: null,
+        reviewer: 'user',
+        note: null,
+        createdAt: '2026-01-01T00:01:00Z',
+      },
+      approved: true,
+    });
 
     const { container, unmount } = await renderAsync(
       <AgentRunInspector runId="run-import-1" onBack={vi.fn()} />,
@@ -401,6 +417,7 @@ describe('AgentRunInspector — onboarding import (PI-8)', () => {
       loading: false,
       refresh: vi.fn(),
     });
+    vi.mocked(getPiRunReview).mockResolvedValue({ decision: null, approved: false });
     vi.mocked(getPiFlags).mockResolvedValue({
       flags: {
         productIntelligenceEnabled: true,
@@ -433,6 +450,7 @@ describe('AgentRunInspector — onboarding import (PI-8)', () => {
       loading: false,
       refresh: vi.fn(),
     });
+    vi.mocked(getPiRunReview).mockResolvedValue({ decision: null, approved: false });
     vi.mocked(getPiFlags).mockResolvedValue({
       flags: {
         productIntelligenceEnabled: true,

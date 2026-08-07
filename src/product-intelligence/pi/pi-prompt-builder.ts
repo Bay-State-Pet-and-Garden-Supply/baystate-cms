@@ -17,7 +17,6 @@ import type {
   ProductResearchContext,
   ProductResearchInput,
 } from '../contracts';
-import { SUBMISSION_TOOL_NAME } from '../contracts';
 import { buildWorkflowSection } from '../workflow/workflow-prompt';
 import { WORKFLOW_TERMINAL_TOOLS } from '../workflow/bundle';
 
@@ -67,7 +66,7 @@ export function buildResearchPrompt(
     constraints,
     '',
     `## Termination\nWhen research is complete, call a terminal tool exactly once. ` +
-    `The terminal tools are: ${[...WORKFLOW_TERMINAL_TOOLS, SUBMISSION_TOOL_NAME].join(', ')}. ` +
+    `The terminal tools are: ${WORKFLOW_TERMINAL_TOOLS.join(', ')}. ` +
     'Never propose using an image whose exact-product match or reuse rights are unknown. ' +
     'Do not invent taxonomy, Category Page, attribute, Product Type, or ProductField identifiers. ' +
     'If you cannot complete the research, submit a full abstention with an actionable next step — do not end the conversation with prose alone.',

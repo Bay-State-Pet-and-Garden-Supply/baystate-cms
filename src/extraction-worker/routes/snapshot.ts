@@ -510,6 +510,8 @@ async function installNetworkCapture(page: import('playwright').Page): Promise<{
     const contentType = headers['content-type'] ?? '';
     if (!contentType.includes('json')) return;
     const reqUrl = response.url();
+    // P0-1: never capture responses from private/link-local destinations.
+    if (isPrivateOrLinkLocalUrl(reqUrl)) return;
     // Requirement: filter to relevant product data — never analytics,
     // cart/account/checkout/session, or personalization endpoints, and
     // never record query strings (session tokens live there).
@@ -668,6 +670,46 @@ async function performInteraction(
   return { performed: warnings.length === 0, finalUrl: page.url(), selectedOptions, warnings };
 }
 
+/**
+ * P0-1: worker-side destination floor for browser/static navigation. The
+ * authoritative DNS-based SSRF check lives at the tool boundary (policy
+ * gateway); this cheap static check rejects obvious private/link-local and
+ * non-http(s) destinations for navigation redirects and captured network
+ * responses. Kept self-contained so the worker never imports the gateway.
+ */
+function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return true;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return true;
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === 'localhost' || hostname === '::1') return true;
+  if (hostname.endsWith('.local')) return true;
+  const isIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':');
+  if (!isIpLiteral) return false;
+  if (hostname.includes(':')) {
+    return (
+      hostname === '::' ||
+      hostname.startsWith('0:0:0:0:0:0:0:1') ||
+      hostname.startsWith('fe80') ||
+      hostname.startsWith('fc') ||
+      hostname.startsWith('fd')
+    );
+  }
+  const [a, b] = hostname.split('.').map(Number);
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 0) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
 async function doStaticSnapshot(
   url: string,
   captureScreenshot: boolean,
@@ -679,15 +721,71 @@ async function doStaticSnapshot(
   const artifactDir = resolveArtifactDir(domain, jobId);
 
 
-  // Fetch
-  let response: Response;
+  // Fetch — P0-1: private/link-local destinations are denied up front and
+  // redirects are followed manually with every hop re-checked, so a public
+  // start URL cannot tunnel navigation to a private destination.
+  let response: Response | undefined;
   let html: string;
   try {
-    response = await fetch(url, {
-      headers: HTTP_EXTRACTION_HEADERS,
-      signal: AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS),
-      redirect: 'follow',
-    });
+    let currentUrl = url;
+    let redirects = 0;
+    for (;;) {
+      if (isPrivateOrLinkLocalUrl(currentUrl)) {
+        warnings.push(`Blocked private/link-local destination: ${currentUrl}`);
+        return buildSnapshotResponse({
+          url,
+          finalUrl: url,
+          htmlRef: null,
+          screenshotRef: null,
+          jsonLd: [],
+          embeddedProductData: [],
+          imageCandidates: [],
+          pageStructureSignals: [],
+          warnings,
+          networkResponses: [],
+          interaction: null,
+          networkRef: null,
+        });
+      }
+      const hop = await fetch(currentUrl, {
+        headers: HTTP_EXTRACTION_HEADERS,
+        signal: AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS),
+        redirect: 'manual',
+      });
+      if (hop.status >= 300 && hop.status < 400) {
+        const location = hop.headers.get('location');
+        if (!location) {
+          warnings.push(`Redirect without Location at ${currentUrl}`);
+          break;
+        }
+        redirects += 1;
+        if (redirects > 5) {
+          warnings.push(`Too many redirects from ${url}`);
+          break;
+        }
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+      response = hop;
+      break;
+    }
+    if (!response) {
+      warnings.push(`Static fetch failed: no response after redirect handling`);
+      return buildSnapshotResponse({
+        url,
+        finalUrl: url,
+        htmlRef: null,
+        screenshotRef: null,
+        jsonLd: [],
+        embeddedProductData: [],
+        imageCandidates: [],
+        pageStructureSignals: [],
+        warnings,
+        networkResponses: [],
+        interaction: null,
+        networkRef: null,
+      });
+    }
     if (!response.ok) {
       warnings.push(`HTTP fetch returned ${response.status} ${response.statusText}`);
     }
@@ -830,6 +928,14 @@ async function doRenderedSnapshot(
       const isTracker =
         /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i.test(reqUrl);
 
+      // P0-1: abort navigation/sub-resources to private or link-local
+      // destinations (defense in depth on top of the tool-boundary gateway
+      // check; redirect hops and sub-requests are covered here too).
+      if (isPrivateOrLinkLocalUrl(reqUrl)) {
+        await route.abort();
+        return;
+      }
+
       if (type === 'image' || type === 'font' || type === 'media' || type === 'stylesheet' || isTracker) {
         await route.abort();
       } else {
@@ -842,16 +948,21 @@ async function doRenderedSnapshot(
       networkCapture = await installNetworkCapture(page);
     }
 
-    // Navigate
-    try {
-      await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: RENDERED_TIMEOUT_MS,
-      });
-      finalUrl = page.url();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      warnings.push(`Navigation failed: ${msg}`);
+    // Navigate — P0-1: deny obvious private/link-local destinations before
+    // the browser touches them (the route handler above also aborts them).
+    if (isPrivateOrLinkLocalUrl(url)) {
+      warnings.push(`Blocked private/link-local navigation destination: ${url}`);
+    } else {
+      try {
+        await page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: RENDERED_TIMEOUT_MS,
+        });
+        finalUrl = page.url();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        warnings.push(`Navigation failed: ${msg}`);
+      }
     }
 
     // Dwell for dynamic content

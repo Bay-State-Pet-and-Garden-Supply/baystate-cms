@@ -46,9 +46,10 @@ export type PolicyReasonCode =
   | 'model_not_in_route'
   | 'budget_exceeded'
   | 'tool_not_allowed'
+  | 'data_sharing_denies_search'
   | 'unknown';
 
-export type DataClassification = 'public' | 'product_input' | 'fetched_content' | 'local_evidence';
+export type DataClassification = 'public' | 'product_input' | 'fetched_content' | 'search_query' | 'local_evidence';
 
 export interface PolicyCheckContext {
   runId: string;
@@ -231,6 +232,17 @@ export class PolicyGateway {
       this.record(ctx, decision, 'network', url, dataClassification);
       return decision;
     }
+    // P0-1: third-party search queries transmit product input (GTIN/name) to
+    // an external search engine. Under local_only or cloud_models_only
+    // data-sharing policies that transmission is DENIED — never merely
+    // logged — so agent search tools return policy_denied without a query.
+    if (dataClassification === 'search_query' && (policy.dataSharingPolicy === 'local_only' || policy.dataSharingPolicy === 'cloud_models_only')) {
+      decision.allowed = false;
+      decision.reasonCode = 'data_sharing_denies_search';
+      decision.detail = 'third-party search queries denied under the run\'s data-sharing policy';
+      this.record(ctx, decision, 'network', url, dataClassification);
+      return decision;
+    }
     if (policy.dataSharingPolicy === 'cloud_models_only' && !followRedirects) {
       // cloud_models_only permits model calls only; page fetches are denied.
       decision.allowed = false;
@@ -380,6 +392,24 @@ export class PolicyGateway {
 
       return response;
     }
+  }
+
+  /**
+   * P0-1: build a fetch-like function bound to this gateway for a run
+   * context. Every call performs policy destination validation, per-hop
+   * redirect re-validation, size/type limits, and audit attribution. Used by
+   * the extraction ladder, managed providers, and OCR paths so no PI-initiated
+   * transport bypasses the network capability.
+   */
+  buildPiNetworkFetch(
+    ctx: PolicyCheckContext,
+    options: { dataClassification?: DataClassification } = {},
+  ): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+    const dataClassification = options.dataClassification ?? 'fetched_content';
+    return (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      return this.gatewayFetch(ctx, url, init, { dataClassification });
+    };
   }
 
   // -------------------------------------------------------------------------

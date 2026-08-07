@@ -32,6 +32,28 @@ export function ProductFieldEvidence({ projection, fieldKey }: Props) {
     return src?.url ?? '(unknown source)';
   };
 
+  // P1-4: field-level rows store the ACTUAL extracted value in valueJson plus
+  // the source path + durable tool evidence id in metadataJson; legacy rows
+  // store { evidenceId, snippet }. Render both faithfully.
+  const displayValue = (e: typeof supporting[number]): string => {
+    let parsed: unknown = e.valueJson;
+    try { parsed = JSON.parse(e.valueJson); } catch { /* keep raw */ }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const obj = parsed as { evidenceId?: string; snippet?: string };
+      return obj.snippet ?? obj.evidenceId ?? e.valueJson;
+    }
+    return String(parsed);
+  };
+
+  const evidenceMeta = (e: typeof supporting[number]): { path: string | null; toolEvidenceId: string | null } => {
+    try {
+      const meta = JSON.parse(e.metadataJson ?? '{}') as { path?: string; toolEvidenceId?: string };
+      return { path: meta.path ?? null, toolEvidenceId: meta.toolEvidenceId ?? null };
+    } catch {
+      return { path: null, toolEvidenceId: null };
+    }
+  };
+
   return (
     <div style={styles.card}>
       <h3 style={styles.title}>Evidence: {fieldKey}</h3>
@@ -42,13 +64,15 @@ export function ProductFieldEvidence({ projection, fieldKey }: Props) {
           <p style={styles.empty}>No direct supporting evidence.</p>
         ) : (
           supporting.map((e) => {
-            let value: string = e.valueJson;
-            try { value = String(JSON.parse(e.valueJson)); } catch { /* keep raw */ }
+            const meta = evidenceMeta(e);
             return (
               <div key={e.id} style={styles.evidence}>
-                <div style={styles.evidenceValue}>{value}</div>
+                <div style={styles.evidenceValue}>{displayValue(e)}</div>
                 <div style={styles.evidenceMeta}>
                   {e.extractionMethod ?? 'unknown'}
+                  {meta.path ? ` · ${meta.path}` : ''}
+                  {meta.toolEvidenceId ? ` · ${meta.toolEvidenceId.slice(0, 40)}` : ''}
+                  {' · '}
                   {sourceUrl(e.sourceId)}
                 </div>
                 {e.snippet && (

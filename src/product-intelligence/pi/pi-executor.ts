@@ -30,13 +30,17 @@ export const PI_EXECUTOR_VERSION = '1.0.0';
 /** Evidence relayed by the tool wrapper through SDK result.details. */
 export interface RelayedToolEvidence {
   id: string;
-  kind: string;
+  kind?: string;
   url?: string;
   domain?: string;
   method?: string;
   snippet?: string;
   contentHash?: string;
   retrievedAt?: string;
+  /** P1-4 field-level entries: extracted field name + value + source path. */
+  field?: string;
+  value?: string | null;
+  path?: string;
 }
 
 /** Best-effort extraction of tool evidence from the SDK result.details. */

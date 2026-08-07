@@ -21,7 +21,9 @@ import {
   deletePiRun,
   getPiImportByRunAndItem,
   insertPiAsset,
+  insertPiEvidence,
   insertPiResult,
+  insertPiSource,
   listPiImportsByRun,
   transitionPiRunStatus,
 } from '../../db/repositories/product-intelligence-repo';
@@ -60,6 +62,27 @@ function envelopeWithTitle(title: string, extra: Record<string, unknown> = {}) {
     productProposal: { fields: [{ field: 'title', value: title, evidenceIds: ['ev-gtin-1'] }] },
     ...extra,
   };
+}
+
+/** Seed a durable field-level evidence row + source (P1-1 normalized world). */
+function seedFieldEvidence(
+  runId: string,
+  field: string,
+  value: unknown,
+  evidenceId: string,
+  sourceUrl = 'https://supplier.example.com/p/1',
+  extractionMethod = 'json_ld',
+) {
+  const source = insertPiSource({ runId, url: sourceUrl, domain: 'supplier.example.com', sourceType: 'supplier' });
+  return insertPiEvidence({
+    runId,
+    sourceId: source.id,
+    targetField: field,
+    value,
+    extractionMethod,
+    snippet: `<${field}> ${String(value)}`,
+    metadata: { toolEvidenceId: evidenceId, path: `jsonLd.${field}` },
+  });
 }
 
 describe('PI-8 onboarding import', () => {
@@ -179,6 +202,9 @@ describe('PI-8 onboarding import', () => {
     });
     const batch = createBatch({ workspaceId: wsId, name: 'augment seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Existing Product', rowNumber: 1 }]);
+
+    // The selected price fact must resolve to durable field-level evidence (P1-1).
+    seedFieldEvidence(runId, 'price', '12.99', 'ev-price-1');
 
     const result = importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
     expect(result.created).toBe(true);
@@ -314,6 +340,153 @@ describe('PI-8 onboarding import', () => {
     expect(listPiImportsByRun(badRun.id)).toHaveLength(0);
   });
 
+  it('P1-1: resolves every selected fact from durable field-level evidence and carries provenance', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      ...validSubmission(),
+      productProposal: {
+        fields: [
+          { field: 'netContent', value: '16 oz', evidenceIds: ['ev-nc-1'] },
+          { field: 'size', value: '16 oz', evidenceIds: ['ev-size-1'] },
+        ],
+      },
+    });
+    const source = insertPiSource({
+      runId,
+      url: 'https://brand.example.com/p/wormeze',
+      domain: 'brand.example.com',
+      sourceType: 'registry',
+    });
+    insertPiEvidence({
+      runId,
+      sourceId: source.id,
+      targetField: 'netContent',
+      value: '16 oz',
+      extractionMethod: 'json_ld',
+      snippet: '<span>16 oz</span>',
+      metadata: { toolEvidenceId: 'ev-nc-1', path: 'jsonLd.offers.size' },
+    });
+    insertPiEvidence({
+      runId,
+      sourceId: source.id,
+      targetField: 'size',
+      value: '16 oz',
+      extractionMethod: 'profile_selector',
+      snippet: 'size 16 oz',
+      metadata: { toolEvidenceId: 'ev-size-1' },
+    });
+    const batch = createBatch({ workspaceId: wsId, name: 'p1 seed', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
+
+    const result = importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    const refreshed = findItemById(item.id);
+    const evidence = refreshed?.extractionData?.productIntelligenceEvidence?.[0]?.evidence ?? [];
+    expect(evidence.map((e) => e.field).sort()).toEqual(['netContent', 'size']);
+    const nc = evidence.find((e) => e.field === 'netContent');
+    expect(nc?.evidenceId).toBe('ev-nc-1');
+    expect(nc?.extractionMethod).toBe('json_ld');
+    expect(nc?.snippet).toBe('<span>16 oz</span>');
+    const size = evidence.find((e) => e.field === 'size');
+    expect(size?.evidenceId).toBe('ev-size-1');
+    expect(size?.extractionMethod).toBe('profile_selector');
+    // Durable source row (URL/domain) rides through, never the runId.
+    expect(refreshed?.extractionData?.productIntelligenceEvidence?.[0]?.sources?.[0]?.url).toBe('https://brand.example.com/p/wormeze');
+    expect(JSON.parse(result.importRecord.importedEvidenceIdsJson)).toContain('ev-nc-1');
+    expect(JSON.parse(result.importRecord.importedSourceIdsJson)).toContain(source.id);
+  });
+
+  it('P1-1: fails closed with a per-field report when a selected fact lacks durable evidence', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      ...validSubmission(),
+      productProposal: {
+        fields: [
+          { field: 'netContent', value: '16 oz', evidenceIds: ['ev-nc-1'] },
+          { field: 'size', value: '16 oz', evidenceIds: ['ev-size-1'] },
+        ],
+      },
+    });
+    seedFieldEvidence(runId, 'netContent', '16 oz', 'ev-nc-1'); // size intentionally not seeded
+    const batch = createBatch({ workspaceId: wsId, name: 'fail seed', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
+
+    let caught: unknown = null;
+    try {
+      importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const e = caught as { name?: string; unresolvedFields?: Array<{ field: string }> };
+    expect(e.name).toBe('UnresolvedEvidenceError');
+    expect(e.unresolvedFields?.map((f) => f.field)).toContain('size');
+    expect(e.unresolvedFields?.map((f) => f.field)).not.toContain('netContent');
+    // Atomic: no import record, no extraction payload written.
+    expect(listPiImportsByRun(runId)).toHaveLength(0);
+    expect(findItemById(item.id)?.extractionData?.productIntelligenceEvidence ?? []).toHaveLength(0);
+  });
+
+  it('P1-1: legacy envelope fails closed unless its evidence resolves to durable rows', () => {
+    const envelope = {
+      ...validSubmission(),
+      productProposal: { fields: [{ field: 'netContent', value: '16 oz', evidenceIds: ['ev-gtin-1'] }] },
+    };
+
+    // No durable rows -> fail closed, nothing written.
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelope);
+    const batch = createBatch({ workspaceId: wsId, name: 'legacy seed', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
+    let caught: unknown = null;
+    try {
+      importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as { name?: string }).name).toBe('UnresolvedEvidenceError');
+    expect(listPiImportsByRun(runId)).toHaveLength(0);
+
+    // A durable legacy submission row (metadata.submissionEvidenceId) resolves.
+    const runId2 = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelope);
+    const source2 = insertPiSource({
+      runId: runId2,
+      url: 'https://supplier.example.com/p/x',
+      domain: 'supplier.example.com',
+      sourceType: 'supplier',
+    });
+    insertPiEvidence({
+      runId: runId2,
+      sourceId: source2.id,
+      targetField: 'netContent',
+      value: '16 oz',
+      extractionMethod: 'manual',
+      metadata: { submissionEvidenceId: 'ev-gtin-1' },
+    });
+    const batch2 = createBatch({ workspaceId: wsId, name: 'legacy seed 2', fileName: 'seed', totalItems: 1 });
+    const [item2] = insertItems(batch2.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
+    const result2 = importRunToOnboarding(runId2, { mode: 'augment', onboardingItemId: item2.id });
+    const ev2 = findItemById(item2.id)?.extractionData?.productIntelligenceEvidence?.[0]?.evidence ?? [];
+    expect(ev2.map((e) => e.field)).toContain('netContent');
+    expect(ev2[0]?.extractionMethod).toBe('manual');
+    expect(JSON.parse(result2.importRecord.importedSourceIdsJson)).toContain(source2.id);
+  });
+
+  it('P1-1: never fabricates evidence or source ids', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      ...validSubmission(),
+      productProposal: { fields: [{ field: 'netContent', value: '16 oz', evidenceIds: ['ev-nc-1'] }] },
+    });
+    seedFieldEvidence(runId, 'netContent', '16 oz', 'ev-nc-1');
+    const batch = createBatch({ workspaceId: wsId, name: 'nofab seed', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
+
+    const result = importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    const evidenceIds = JSON.parse(result.importRecord.importedEvidenceIdsJson) as string[];
+    const sourceIds = JSON.parse(result.importRecord.importedSourceIdsJson) as string[];
+    expect(evidenceIds).toContain('ev-nc-1');
+    // No `${runId}:${field}` fabrications, no runId-as-source fallbacks.
+    expect(evidenceIds.some((id) => /:netContent$/.test(id))).toBe(false);
+    expect(evidenceIds.some((id) => id.startsWith(runId))).toBe(false);
+    expect(sourceIds.some((id) => id === runId)).toBe(false);
+  });
+
   it('route: 403 when disabled, 201 create, 200 idempotent, 404 cross-workspace', async () => {
     // Reset flags to defaults first: import disabled.
     overrideProductIntelligenceFlags(DEFAULT_PRODUCT_INTELLIGENCE_FLAGS);
@@ -327,6 +500,14 @@ describe('PI-8 onboarding import', () => {
 
     // Enable import.
     overrideProductIntelligenceFlags({ productIntelligenceEnabled: true, piEnabled: true, shadowOnly: false, allowOnboardingImport: true, allowBatchRuns: false });
+    // P1-2: the import route now requires a durable human approval bound to
+    // the exact stored result before any import may cross into onboarding.
+    const reviewed = await app.request(`http://localhost/api/product-intelligence/runs/${runId}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve', reviewer: 'tester', note: 'route test' }),
+    });
+    expect(reviewed.status).toBe(201);
     const created = await app.request(`http://localhost/api/product-intelligence/runs/${runId}/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

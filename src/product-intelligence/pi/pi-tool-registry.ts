@@ -1,15 +1,15 @@
 /**
- * Pi terminal structured submission tool (PI-1).
+ * Legacy PI-1 structured-submission schema mirror (TypeBox).
  *
- * The only way an agent's research becomes a candidate product result is a
- * call to `submit_product_research` whose payload validates against the
- * structured submission contract. Ordinary assistant prose can never become
- * the authoritative product result.
+ * P0-3: the legacy `submit_product_research` terminal tool has been REMOVED
+ * from live Pi sessions — every session terminal is a PI-4 workflow tool
+ * (submit_product_research_bundle / submit_insufficient_evidence /
+ * submit_identity_conflict), all of which pass the PI-4 bundle validator.
  *
- * The tool is defined with a TypeBox parameter schema (the Pi SDK's native
- * tool-schema format) and re-validates the payload with the authoritative Zod
- * contract on execute (belt and braces — the TypeBox schema is the runtime
- * gate, the Zod schema is the durable contract).
+ * This file now only keeps the TypeBox mirror of `StructuredSubmissionSchema`
+ * (the legacy PI-1 envelope) so that:
+ *   - schema-equivalence tests keep pinning the zod <-> TypeBox drift,
+ *   - historical run payloads can still be validated when parsed.
  *
  * The TypeBox schema is maintained to be behaviorally equivalent to
  * `StructuredSubmissionSchema` (same required fields, same enums, same
@@ -18,14 +18,12 @@
  * guard against drift between the two.
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
+ * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/21
  */
-import { Type, type TSchema } from 'typebox';
-import { SUBMISSION_TOOL_NAME } from '../contracts';
-import { StructuredSubmissionSchema } from '../contracts';
-import type { TerminalResultSubmission } from '../contracts';
+import { Type } from 'typebox';
 
 // ---------------------------------------------------------------------------
-// TypeBox schema (mirrors StructuredSubmissionSchema)
+// TypeBox schema (mirrors StructuredSubmissionSchema — legacy PI-1 envelope)
 // ---------------------------------------------------------------------------
 
 const EvidenceSourceTypeBoxSchema = Type.Object({
@@ -132,83 +130,3 @@ export const SubmissionTypeBoxSchema = Type.Object({
   abstention: Type.Optional(Type.Union([Type.Null(), AbstentionTypeBoxSchema])),
   confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
 });
-
-export interface SubmissionToolDeps {
-  /** Authoritative validation; defaults to the structured submission contract. */
-  validate?: (value: unknown) => ReturnType<typeof StructuredSubmissionSchema.safeParse>;
-}
-
-/**
- * Build the terminal submission tool definition.
- *
- * `onSubmission` receives the validated submission when the agent calls the
- * tool with a valid payload. Invalid payloads surface as tool errors so the
- * agent can correct and retry; the executor decides what happens next.
- */
-export function buildProductResearchSubmissionTool(
-  onSubmission: (submission: TerminalResultSubmission) => void,
-  deps: SubmissionToolDeps = {},
-): {
-  name: string;
-  label: string;
-  description: string;
-  promptGuidelines: string[];
-  parameters: TSchema;
-  execute: (toolCallId: string, params: unknown) => Promise<{
-    content: Array<{ type: 'text'; text: string }>;
-    details: Record<string, never>;
-  }>;
-} {
-  const validate = deps.validate ?? ((value: unknown) => StructuredSubmissionSchema.safeParse(value));
-
-  return {
-    name: SUBMISSION_TOOL_NAME,
-    label: 'Submit Product Research',
-    description:
-      'TERMINAL TOOL. Call this exactly once when research is complete and every claim is backed by evidence. ' +
-      'Submits the structured evidence bundle: identity assessment, evidence sources, evidence items, ' +
-      'product field proposals, classification proposals, image proposals with rights/identity provenance, ' +
-      'conflicts, and an optional abstention. Never invent taxonomy, Category Page, attribute, Product Type, ' +
-      'or ProductField identifiers: leave ids null or omit entries you cannot ground. If you cannot research ' +
-      'the product with confidence, submit a full abstention with an actionable next step.',
-    promptGuidelines: [
-      `The only valid terminal action is ${SUBMISSION_TOOL_NAME}.`,
-      'Every factual value must reference at least one evidence source you actually fetched or read.',
-      'Image proposals must state rightsStatus and identityMatch; never claim exact match without direct evidence.',
-      'Never invent identifiers for taxonomy, Category Page, attributes, Product Types, or ProductFields.',
-      'You may abstain (full or partial) — an honest abstention is better than unsupported claims.',
-    ],
-    parameters: SubmissionTypeBoxSchema,
-    async execute(_toolCallId: string, params: unknown) {
-      const parsed = validate(params);
-      if (!parsed.success) {
-        // Returned, not thrown: the SDK relays this text verbatim to the
-        // model and to tool_execution_end.result — the model sees exactly
-        // why its payload was rejected and can fix it (smoke finding B/G).
-        const issues = parsed.error.issues
-          .slice(0, 3)
-          .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-          .join('; ');
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Invalid submission payload: ${issues}; expected shape: schemaVersion, gtin, inputName, identity{status in {exact_match, probable_match, parent_product_only, wrong_variant, conflicting_identity, insufficient_evidence}}, evidenceSources/evidenceIds, fields — leave unknown ids null.`.slice(0, 400),
-            },
-          ],
-          details: {},
-        };
-      }
-      onSubmission(parsed.data as unknown as TerminalResultSubmission);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: 'Submission accepted. Your research has been recorded; do not call this tool again.',
-          },
-        ],
-        details: {},
-      };
-    },
-  };
-}

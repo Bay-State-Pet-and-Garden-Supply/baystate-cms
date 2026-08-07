@@ -22,8 +22,8 @@ import type { ProductIntelligencePolicy } from '../contracts';
 import type { PolicyGateway } from '../policy/policy-gateway';
 import type { ImageVerificationContract } from './contract';
 import { sharpImageVerificationAdapter } from './contract';
-import { computeCommerceApproved, resolveRights } from './rights';
-import type { IdentityObservation, NetContent, ProductAssetEvidence } from './schema';
+import { computeCommerceApproved } from './rights';
+import type { IdentityObservation, NetContent, ObservationProvenance, ProductAssetEvidence } from './schema';
 import type { ExtractionMethod } from './schema';
 
 export const MAX_VERIFICATION_BYTES = 10 * 1024 * 1024;
@@ -296,6 +296,19 @@ export interface VerifyImageDeps {
   signal?: AbortSignal;
   contract?: ImageVerificationContract;
   now?: () => Date;
+  /**
+   * Resolves durable evidence rows (product_intelligence_evidence) by id.
+   * The pipeline derives authoritative packaging observations from these
+   * rows only. Defaults to no facts — without evidence, identity comparison
+   * cannot approve.
+   */
+  evidenceResolver?: EvidenceResolver;
+  /**
+   * Server-authoritative reuse grant: (sourceTier, domain) -> reuse allowed.
+   * A manufacturer/supplier domain proves ORIGIN, not authorization.
+   * Defaults to NO grants — every asset is restricted until a grant exists.
+   */
+  reuseGrantResolver?: ReuseGrantResolver;
 }
 
 export interface VerifyImageInput {
@@ -315,9 +328,26 @@ export interface VerifyImageInput {
   declaredSourceType?: string | null;
   declaredRightsBasis?: string | null;
   declaredRightsEvidenceRef?: string | null;
-  /** Packaging evidence gathered separately (OCR/structured); pixels alone cannot OCR. */
+  /** Durable evidence-row ids the server resolves into observations. */
+  evidenceIds?: string[];
+  /** Agent-asserted packaging observations — recorded, never authoritative. */
   observed?: Partial<IdentityObservation>;
 }
+
+/** A durable evidence row resolved to the facts the pipeline can consume. */
+export interface ResolvedEvidenceFact {
+  id: string;
+  targetField: string | null;
+  value: unknown;
+  extractionMethod: string | null;
+  snippet: string | null;
+  sourceUrl: string | null;
+  sourceDomain: string | null;
+  contentHash: string | null;
+}
+
+export type EvidenceResolver = (evidenceIds: string[]) => ResolvedEvidenceFact[];
+export type ReuseGrantResolver = (sourceTier: string, domain: string) => boolean;
 
 /**
  * Verify an image candidate end-to-end. Never throws for expected conditions:
@@ -351,25 +381,50 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   }
 
   const decoded = await contract.verify({ buffer, contentType });
+
+  // Authoritative observations come from durable evidence rows (server-
+  // resolved), with deterministic pixel-decoder output filling gaps. The
+  // caller-supplied `observed` (agent assertion) is recorded separately and
+  // never participates in identity classification.
+  const evidenceFacts = deps.evidenceResolver ? deps.evidenceResolver(input.evidenceIds ?? []) : [];
+  const fromEvidence = observationFromFacts(evidenceFacts);
   const observed: IdentityObservation = {
-    brand: input.observed?.brand ?? decoded.observed.brand ?? null,
-    productName: input.observed?.productName ?? decoded.observed.productName ?? null,
-    variant: input.observed?.variant ?? decoded.observed.variant ?? null,
-    netContent: input.observed?.netContent ?? decoded.observed.netContent ?? null,
-    packCount: input.observed?.packCount ?? decoded.observed.packCount ?? null,
-    gtin: input.observed?.gtin ?? decoded.observed.gtin ?? null,
+    brand: fromEvidence.brand ?? decoded.observed.brand ?? null,
+    productName: fromEvidence.productName ?? decoded.observed.productName ?? null,
+    variant: fromEvidence.variant ?? decoded.observed.variant ?? null,
+    netContent: fromEvidence.netContent ?? decoded.observed.netContent ?? null,
+    packCount: fromEvidence.packCount ?? decoded.observed.packCount ?? null,
+    gtin: fromEvidence.gtin ?? decoded.observed.gtin ?? null,
   };
-  const rights = resolveRights(declaredSourceType, input.declaredRightsBasis, input.declaredRightsEvidenceRef);
+  const agentAsserted: IdentityObservation | null = input.observed
+    ? {
+        brand: input.observed.brand ?? null,
+        productName: input.observed.productName ?? null,
+        variant: input.observed.variant ?? null,
+        netContent: input.observed.netContent ?? null,
+        packCount: input.observed.packCount ?? null,
+        gtin: input.observed.gtin ?? null,
+      }
+    : null;
+  const observationProvenance: ObservationProvenance = evidenceFacts.length > 0 ? 'evidence' : agentAsserted ? 'agent_asserted' : 'decoder';
+
+  // Rights resolve ONLY from a durable reuse grant. Declared source tier +
+  // basis strings prove where the asset came from, never authorization.
+  const grantResolver = deps.reuseGrantResolver ?? (() => false);
+  const reuseGranted = grantResolver(declaredSourceType, domainOf(input.url));
+  const rightsStatus = reuseGranted ? 'approved' : 'restricted';
+  const rightsBasis = reuseGranted ? (input.declaredRightsBasis ?? 'reuse_grant') : null;
+  const rightsEvidenceRef = reuseGranted ? (input.declaredRightsEvidenceRef ?? null) : null;
 
   if (!decoded.verified) {
     return {
-      ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed),
+      ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted),
       exactProductMatch: false,
       exactVariantMatch: null,
       qualityStatus: 'invalid',
-      rightsStatus: rights.rightsStatus,
-      rightsBasis: input.declaredRightsBasis ?? null,
-      rightsEvidenceRef: input.declaredRightsEvidenceRef ?? null,
+      rightsStatus,
+      rightsBasis,
+      rightsEvidenceRef,
       commerceApproved: false,
       conflicts: [`invalid_image: ${decoded.rejectionReason ?? 'decode failed'}`],
     };
@@ -386,7 +441,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     expectedFormula: input.expectedFormula ?? null,
   });
   const commerceApproved = computeCommerceApproved({
-    rightsStatus: rights.rightsStatus,
+    rightsStatus,
     exactProductMatch: identity.exactProductMatch,
     exactVariantMatch: identity.exactVariantMatch,
     qualityStatus: decoded.qualityStatus,
@@ -394,16 +449,88 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   });
 
   return {
-    ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed),
+    ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted),
     exactProductMatch: identity.exactProductMatch,
     exactVariantMatch: identity.exactVariantMatch,
     qualityStatus: decoded.qualityStatus,
-    rightsStatus: rights.rightsStatus,
-    rightsBasis: input.declaredRightsBasis ?? null,
-    rightsEvidenceRef: input.declaredRightsEvidenceRef ?? null,
+    rightsStatus,
+    rightsBasis,
+    rightsEvidenceRef,
     commerceApproved,
     conflicts: identity.conflicts,
   };
+}
+
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+const OBSERVED_FIELD_KEYS: Record<string, keyof IdentityObservation> = {
+  gtin: 'gtin',
+  upc: 'gtin',
+  brand: 'brand',
+  product_name: 'productName',
+  productname: 'productName',
+  name: 'productName',
+  title: 'productName',
+  variant: 'variant',
+  net_content: 'netContent',
+  netcontent: 'netContent',
+  pack_count: 'packCount',
+  packcount: 'packCount',
+};
+
+/** Derive an authoritative observation from durable evidence facts. Only
+ *  targetField-mapped values (or direct string/number values on known
+ *  fields) are trusted — evidence rows are the only durable authority. */
+function observationFromFacts(facts: ResolvedEvidenceFact[]): IdentityObservation {
+  const out: IdentityObservation = { brand: null, productName: null, variant: null, netContent: null, packCount: null, gtin: null };
+  for (const fact of facts) {
+    const key = OBSERVED_FIELD_KEYS[(fact.targetField ?? '').toLowerCase().replace(/[^a-z0-9]/g, '_')];
+    if (!key) continue;
+    const value = fact.value;
+    if (key === 'netContent') {
+      if (value && typeof value === 'object' && 'value' in value && typeof (value as { value?: unknown }).value === 'number' && typeof (value as { unit?: unknown }).unit === 'string') {
+        const net = value as { value: number; unit: string };
+        out.netContent = { value: net.value, unit: net.unit };
+      } else if (value !== null && value !== undefined) {
+        out.netContent = parseNetContent(String(value)) ?? out.netContent;
+      }
+      continue;
+    }
+    if (key === 'packCount') {
+      const raw = factValue(value, key);
+      const n = Number(raw ?? value);
+      if (Number.isInteger(n) && n > 0) out.packCount = n;
+      continue;
+    }
+    if (key === 'gtin') {
+      const raw = factValue(value, key) ?? (value && typeof value === 'object' ? (value as Record<string, unknown>).value : null);
+      const digits = String(raw ?? '').replace(/\D/g, '');
+      if (digits.length >= 8 && digits.length <= 14) out.gtin = digits;
+      continue;
+    }
+    const stringValue = factValue(value, key);
+    if (stringValue !== null && stringValue !== undefined) out[key] = String(stringValue);
+  }
+  return out;
+}
+
+function factValue(value: unknown, key: keyof IdentityObservation): unknown {
+  if (typeof value === 'string' || typeof value === 'number') return value;
+  if (value === null || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  if ('value' in obj && obj.value !== null && obj.value !== undefined) return obj.value;
+  if (key in obj) return obj[key];
+  // persistToolEvidence stores { evidenceId, snippet }; fall back to snippet
+  // only for name-ish fields (never GTIN — a URL would pass the digit check
+  // only for true 8-14 digit identifiers).
+  if (key === 'productName' && typeof obj.snippet === 'string') return obj.snippet;
+  return null;
 }
 
 function baseRecord(
@@ -412,6 +539,8 @@ function baseRecord(
   retrievedAt: string,
   decoded: Awaited<ReturnType<ImageVerificationContract['verify']>>,
   observed: IdentityObservation,
+  observationProvenance: ObservationProvenance,
+  agentAsserted: IdentityObservation | null,
 ): Omit<
   ProductAssetEvidence,
   'exactProductMatch' | 'exactVariantMatch' | 'qualityStatus' | 'rightsStatus' | 'rightsBasis' | 'rightsEvidenceRef' | 'commerceApproved' | 'conflicts'
@@ -433,6 +562,8 @@ function baseRecord(
     observedNetContent: observed.netContent,
     observedPackCount: observed.packCount,
     observedGtin: observed.gtin,
+    observationProvenance,
+    agentAsserted,
   };
 }
 
@@ -448,7 +579,7 @@ function failRecord(input: VerifyImageInput, declaredSourceType: string, retriev
     originalContentHash: '',
     perceptualHash: null,
     variantReference: null,
-    rightsStatus: resolveRights(declaredSourceType, null, null).rightsStatus,
+    rightsStatus: 'restricted',
     rightsBasis: null,
     rightsEvidenceRef: null,
     observedBrand: null,
@@ -457,6 +588,8 @@ function failRecord(input: VerifyImageInput, declaredSourceType: string, retriev
     observedNetContent: null,
     observedPackCount: null,
     observedGtin: null,
+    observationProvenance: 'decoder',
+    agentAsserted: null,
     exactProductMatch: false,
     exactVariantMatch: null,
     qualityStatus: 'invalid',

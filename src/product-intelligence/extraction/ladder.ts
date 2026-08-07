@@ -19,7 +19,12 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/29
  */
 import type { PageExtractionResult, ExtractedFieldEvidence, ExtractedImageCandidate } from '../tools/contract';
-import { classifyPageIdentity, type PageExtractionContract } from '../tools/contract';
+import {
+  classifyPageIdentity,
+  jsonLdLeafProductProof,
+  structuredSingleVariantProof,
+  type PageExtractionContract,
+} from '../tools/contract';
 import {
   fetchPageHtml,
   parseStructuredSignals,
@@ -100,6 +105,12 @@ export async function runExtractionLadder(
   let variant: { name?: string; id?: string; sku?: string } | null = null;
   let finalUrl = url;
   let contentHash: string | null = null;
+  // P0-5 positive proof accumulator: singleVariantProof only becomes true on
+  // AFFIRMATIVE evidence (structured leaf-product declaration, platform API
+  // reporting exactly one variant, browser JSON-LD leaf declaration). The
+  // absence of variant UI or signals is never treated as proof.
+  let singleVariantProof = false;
+  const selectedVariantLinkage = (): boolean => variantSignals.some((s) => s.kind === 'variant_match');
 
   const addField = (field: string, value: string | null | undefined, method: string, sourcePath?: string): void => {
     if (value === null || value === undefined) return;
@@ -157,6 +168,7 @@ export async function runExtractionLadder(
   contentHash = page.contentHash;
 
   const signals = parseStructuredSignals(page.html);
+  singleVariantProof ||= structuredSingleVariantProof(page.html);
   for (const product of signals.jsonLdProducts) {
     if (product.name) addField('product_name', product.name, 'json_ld', 'JSON-LD Product.name');
     if (product.sku) addField('sku', product.sku, 'json_ld', 'JSON-LD Product.sku');
@@ -180,9 +192,11 @@ export async function runExtractionLadder(
   }
   productName ??= signals.ogTitle ?? signals.metaTitle;
 
-  // Early exit: exact GTIN plus a healthy field count — the page is the
-  // product; do not spend platform fetches on it.
-  if (exactGtinMatch(expected.gtin, gtins) && fields.length >= 3) {
+  // Early exit: exact GTIN plus a healthy field count AND positive
+  // single-variant proof — the page is the product; do not spend platform
+  // fetches on it. Without proof the ladder falls through so variant
+  // resolution layers can settle identity (review P0-5).
+  if (exactGtinMatch(expected.gtin, gtins) && fields.length >= 3 && (singleVariantProof || selectedVariantLinkage())) {
     return {
       result: assembleResult(),
       layersUsed: [...new Set(layersUsed)],
@@ -208,6 +222,9 @@ export async function runExtractionLadder(
           brand ??= productJson.vendor ?? null;
           if (productJson.variants.length > 1) {
             variantSignals.push({ kind: 'parent_page' });
+          } else if (productJson.variants.length === 1) {
+            // Platform API affirmatively reports exactly one variant.
+            singleVariantProof = true;
           }
           const first = productJson.variants[0];
           if (first) {
@@ -241,6 +258,22 @@ export async function runExtractionLadder(
             if (fallbackGtin) addGtin(fallbackGtin, 'platform_api');
             productName ??= typeof product.title === 'string' ? product.title : null;
             sku ??= typeof product.sku === 'string' ? product.sku : null;
+            if (Array.isArray(product.variants)) {
+              const firstVariant = product.variants.find((v) => !!v && typeof v === 'object') as Record<string, unknown> | undefined;
+              if (firstVariant) {
+                variant = {
+                  id: typeof firstVariant.id === 'string' || typeof firstVariant.id === 'number' ? String(firstVariant.id) : undefined,
+                  name: typeof firstVariant.title === 'string' ? firstVariant.title : typeof firstVariant.name === 'string' ? firstVariant.name : undefined,
+                  sku: typeof firstVariant.sku === 'string' ? firstVariant.sku : undefined,
+                };
+                if (product.variants.length > 1) {
+                  variantSignals.push({ kind: 'parent_page' });
+                } else if (product.variants.length === 1) {
+                  // Platform API affirmatively reports exactly one variant.
+                  singleVariantProof = true;
+                }
+              }
+            }
           } else {
             const nuxtFallback = parseNuxtData(page.html);
             if (nuxtFallback.product) {
@@ -307,7 +340,12 @@ export async function runExtractionLadder(
               name: typeof firstVariant.title === 'string' ? firstVariant.title : typeof firstVariant.name === 'string' ? firstVariant.name : undefined,
               sku: typeof firstVariant.sku === 'string' ? firstVariant.sku : undefined,
             };
-            if (product.variants.length > 1) variantSignals.push({ kind: 'parent_page' });
+            if (product.variants.length > 1) {
+              variantSignals.push({ kind: 'parent_page' });
+            } else if (product.variants.length === 1) {
+              // Platform API affirmatively reports exactly one variant.
+              singleVariantProof = true;
+            }
           }
         }
       } else {
@@ -335,6 +373,23 @@ export async function runExtractionLadder(
           : [];
         for (const image of productImages) {
           if (!images.some((i) => i.url === image)) images.push({ url: image, sourcePath: '__NUXT__ product.images' });
+        }
+        if (Array.isArray(product.variants)) {
+          const firstVariant = product.variants.find((v) => !!v && typeof v === 'object') as Record<string, unknown> | undefined;
+          if (firstVariant) {
+            variant = {
+              id: typeof firstVariant.id === 'string' || typeof firstVariant.id === 'number' ? String(firstVariant.id) : undefined,
+              name: typeof firstVariant.title === 'string' ? firstVariant.title : typeof firstVariant.name === 'string' ? firstVariant.name : undefined,
+              sku: typeof firstVariant.sku === 'string' ? firstVariant.sku : undefined,
+            };
+            if (typeof firstVariant.sku === 'string') addField('sku', firstVariant.sku, 'platform_api', '__NUXT__ product.variants[0].sku');
+            if (product.variants.length > 1) {
+              variantSignals.push({ kind: 'parent_page' });
+            } else if (product.variants.length === 1) {
+              // Platform API affirmatively reports exactly one variant.
+              singleVariantProof = true;
+            }
+          }
         }
       } else {
         layersUsed.push('nuxt_no_product');
@@ -380,7 +435,8 @@ export async function runExtractionLadder(
   // ---------------------------------------------------------------------
   let llmContributed = false;
   let browserSignals: string[] = [];
-  const settled = (): boolean => exactGtinMatch(expected.gtin, gtins) && fields.length >= 3;
+  const settled = (): boolean =>
+    exactGtinMatch(expected.gtin, gtins) && fields.length >= 3 && (singleVariantProof || selectedVariantLinkage());
 
   // Layer 5: rendered browser with network capture (XHR/fetch/GraphQL).
   if (!settled() && options.browser) {
@@ -390,6 +446,9 @@ export async function runExtractionLadder(
       fetchModes.push('browser');
       const browserOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
       const browserMethods = evidenceFromBrowserSnapshot(snapshot, browserOut);
+      // Rendered JSON-LD retains the page's affirmative leaf-product claim
+      // (review P0-5): @type Product with no hasVariant/variants keys.
+      if (snapshot.jsonLd.some(jsonLdLeafProductProof)) singleVariantProof = true;
       if (browserMethods.length > 0) layersUsed.push('browser_parsed');
       if (snapshot.warnings.length > 0) layersUsed.push('browser_warnings');
       browserSignals = snapshot.pageStructureSignals ?? [];
@@ -438,6 +497,7 @@ export async function runExtractionLadder(
       const managed: ManagedPage = await options.managedFallback.fetch(finalUrl, signal, timeoutMs);
       fetchModes.push('managed_browser');
       const managedSignals = parseStructuredSignals(managed.html);
+      singleVariantProof ||= structuredSingleVariantProof(managed.html);
       const managedOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
       for (const product of managedSignals.jsonLdProducts) {
         evidenceFromProductPayload(
@@ -538,6 +598,8 @@ export async function runExtractionLadder(
       expectedName: expected.name,
       variantSignals,
       hasAnyField,
+      singleVariantProof,
+      selectedVariantLinkage: selectedVariantLinkage(),
     });
     return {
       requestedUrl: url,

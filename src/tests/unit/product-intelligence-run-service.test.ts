@@ -128,7 +128,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
       };
     }
     events.emit('run_started', { message: `researching ${input.gtin}` });
-    events.emit('session_created', { data: { piVersion: '0.83.0', tools: ['read', 'grep', 'find', 'ls', 'submit_product_research'] } });
+    events.emit('session_created', { data: { piVersion: '0.83.0', tools: ['read', 'grep', 'find', 'ls', 'submit_product_research_bundle'] } });
     if (this.emitToolCalls) {
       events.emit('tool_call_started', { toolName: 'read' });
       events.emit('tool_call_finished', { toolName: 'read', isError: false });

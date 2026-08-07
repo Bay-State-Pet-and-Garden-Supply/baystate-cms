@@ -16,7 +16,9 @@
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import {
+  PI_EXECUTOR_NAME,
   ProductIntelligencePolicySchema,
   ProductResearchInputSchema,
   type StructuredSubmission,
@@ -177,6 +179,10 @@ export interface ToolEvidenceEvent {
   method?: string | null;
   snippet?: string | null;
   contentHash?: string | null;
+  /** P1-4 field-level entries: extracted field name + value + source path. */
+  field?: string | null;
+  value?: string | null;
+  path?: string | null;
 }
 
 /**
@@ -213,14 +219,22 @@ export function persistToolEvidence(
       existingSources.push(source);
       emit('source.added', { url: entry.url, domain: entry.domain ?? domainOf(entry.url) });
     }
+    // P1-4: field-level entries persist ONE row per extracted field carrying
+    // the ACTUAL value, the extraction method, and the source path — so a
+    // reviewer can reconstruct 'field = value supported by path' from the
+    // persisted rows alone. Legacy page-level entries keep the coarse
+    // { evidenceId, snippet } value and kind-based target field.
+    const isFieldEntry = typeof entry.field === 'string' && entry.field.length > 0;
     insertPiEvidence({
       runId,
       sourceId: source.id,
-      targetField: entry.kind ?? 'tool_evidence',
-      value: { evidenceId: entry.id, snippet: entry.snippet ?? null },
+      targetField: typeof entry.field === 'string' && entry.field.length > 0 ? entry.field : (entry.kind ?? 'tool_evidence'),
+      value: isFieldEntry ? (entry.value ?? null) : { evidenceId: entry.id, snippet: entry.snippet ?? null },
       extractionMethod: entry.method ?? null,
-      snippet: entry.snippet ?? entry.method ?? null,
-      metadata: { toolEvidenceId: entry.id },
+      snippet: entry.snippet ?? null,
+      metadata: isFieldEntry
+        ? { toolEvidenceId: entry.id, path: entry.path ?? null, contentHash: entry.contentHash ?? null }
+        : { toolEvidenceId: entry.id },
     });
     alreadyPersisted.add(entry.id);
   }
@@ -1259,12 +1273,33 @@ export async function replayPiRun(
   if (!options.executor) {
     throw new Error('Rerun requires an executor (resolve via the execution router)');
   }
+  // P0-4 (review remediation): the kill switch / feature flags dominate every
+  // path, reruns included. When the current resolution diverted to the legacy
+  // executor, a Pi rerun must be refused — never resurrect Pi. A rerun must
+  // also never change the origin's executor family (fail closed).
+  if (origin.executor === PI_EXECUTOR_NAME && options.executor.name !== PI_EXECUTOR_NAME) {
+    throw new Error('Pi is disabled; rerun unavailable');
+  }
+  if (origin.executor !== PI_EXECUTOR_NAME && options.executor.name === PI_EXECUTOR_NAME) {
+    throw new Error('A rerun must use the same executor family as the origin run');
+  }
+  // P0-4 + P0-2: a rerun must not resurrect a security policy that is no
+  // longer approved/active. The repo is loaded lazily (createRequire) so
+  // run-service stays importable in non-bun environments.
+  const originPolicy = ProductIntelligencePolicySchema.parse(JSON.parse(origin.policyJson));
+  const lazyRequire = createRequire(import.meta.url);
+  const { isApprovedPolicyActive } = lazyRequire('../db/repositories/pi-approved-policy-repo') as {
+    isApprovedPolicyActive: (workspaceId: string, configId: string) => boolean;
+  };
+  if (!isApprovedPolicyActive(origin.workspaceId, originPolicy.configId)) {
+    throw new Error('origin policy is no longer approved; rerun refused');
+  }
   const started = await startProductIntelligenceRun(
     options.executor,
     {
       input: ProductResearchInputSchema.parse(JSON.parse(origin.inputJson)),
       mode: origin.mode,
-      policy: ProductIntelligencePolicySchema.parse(JSON.parse(origin.policyJson)),
+      policy: originPolicy,
       onboardingItemId: origin.onboardingItemId,
       originRunId: origin.id,
     },

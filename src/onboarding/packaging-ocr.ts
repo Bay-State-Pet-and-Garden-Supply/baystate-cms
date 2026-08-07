@@ -65,12 +65,14 @@ function isRemoteUrl(value: string): boolean {
 
 /**
  * Fetch a remote image and return its base64-encoded contents.
+ * `fetchFn` defaults to the global fetch (onboarding pipeline unchanged);
+ * PI callers may pass a policy-gateway-bound fetch (P0-1).
  */
-async function fetchRemoteImageAsBase64(url: string): Promise<string | null> {
+async function fetchRemoteImageAsBase64(url: string, fetchFn: typeof fetch = fetch): Promise<string | null> {
   try {
-    const response = await fetch(url, {
+    const response = await fetchFn(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; ShopSiteCMS/1.0)',
+        'User-Agent': 'Mozilla/5.0 (compatible; BaystateCMS/1.0)',
         Accept: 'image/*',
       },
       redirect: 'follow',

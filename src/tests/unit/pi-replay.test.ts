@@ -16,6 +16,7 @@ import os from 'node:os';
 import { initDb, getDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { createPiRun, getPiResult, getPiRun, insertPiResult, listPiComparisons, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { seedDefaultApprovedPolicy } from '../../db/repositories/pi-approved-policy-repo';
 import { replayPiRun } from '../../product-intelligence/run-service';
 import { validSubmission } from './product-intelligence/test-helpers';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
@@ -36,11 +37,11 @@ function seedWorkspace(wsId: string, wsPath: string) {
 import { buildDefaultPiPolicy } from '../../product-intelligence/run-service';
 const TEST_POLICY: ProductIntelligencePolicy = buildDefaultPiPolicy();
 
-function makeTerminalRun(): string {
+function makeTerminalRun(executorName: 'pi' | 'legacy' = 'pi'): string {
   const run = createPiRun({
     workspaceId,
     mode: 'shadow',
-    executor: 'pi',
+    executor: executorName,
     inputJson: JSON.stringify({ gtin: '085000079585', registerName: 'STELLA CHKN BROTH 16OZ' }),
     policyJson: JSON.stringify(TEST_POLICY),
     configSnapshotId: TEST_POLICY.configId,
@@ -76,6 +77,33 @@ function makeTerminalRun(): string {
   });
   transitionPiRunStatus(run.id, 'completed', {});
   return run.id;
+}
+
+class FakeLegacyExecutor implements ProductIntelligenceExecutor {
+  readonly name = 'legacy';
+  readonly version = '1.0.0';
+  calls = 0;
+
+  async startResearch(
+    _input: { gtin: string },
+    context: { runId: string; policy: { configId: string }; signal?: AbortSignal },
+    _events: ExecutionEventSink,
+  ): Promise<import('../../product-intelligence/contracts').ProductResearchResult> {
+    this.calls += 1;
+    return {
+      runId: context.runId,
+      outcome: 'unavailable',
+      executor: this.name,
+      executorVersion: this.version,
+      piVersion: '0.83.0',
+      extensionVersions: [],
+      configId: context.policy.configId,
+      durationMs: 1,
+      submission: null,
+      failure: null,
+      events: [],
+    };
+  }
 }
 
 class FakeExecutor implements ProductIntelligenceExecutor {
@@ -164,6 +192,8 @@ describe('PI-10 replay modes', () => {
 
   it('same-configuration rerun launches a real execution with the origin config', async () => {
     const origin = makeTerminalRun();
+    // P0-2/P0-4: a rerun requires the origin policy to be an active approved record.
+    seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
     const executor = new FakeExecutor();
     const { run, mode } = await replayPiRun(origin, { mode: 'rerun', executor });
 
@@ -205,6 +235,52 @@ describe('PI-10 replay modes', () => {
   it('rerun without an executor is refused', async () => {
     const origin = makeTerminalRun();
     await expect(replayPiRun(origin, { mode: 'rerun' })).rejects.toThrow(/executor/);
+  });
+
+  it('refuses a Pi rerun when the current resolution is not Pi (kill-switch dominance, P0-4)', async () => {
+    const origin = makeTerminalRun('pi');
+    const legacy = new FakeLegacyExecutor();
+    await expect(replayPiRun(origin, { mode: 'rerun', executor: legacy })).rejects.toThrow(
+      /Pi is disabled; rerun unavailable/,
+    );
+    expect(legacy.calls).toBe(0);
+  });
+
+  it('refuses a rerun that changes executor family (P0-4)', async () => {
+    const origin = makeTerminalRun('legacy');
+    const pi = new FakeExecutor();
+    await expect(replayPiRun(origin, { mode: 'rerun', executor: pi })).rejects.toThrow(
+      /same executor family/,
+    );
+    expect(pi.calls).toBe(0);
+  });
+
+  it('refuses a rerun whose origin policy is no longer approved (P0-4 + P0-2)', async () => {
+    const origin = makeTerminalRun('pi');
+    // No approved-policy record seeded for the workspace → configId inactive.
+    const pi = new FakeExecutor();
+    await expect(replayPiRun(origin, { mode: 'rerun', executor: pi })).rejects.toThrow(
+      /origin policy is no longer approved/,
+    );
+    expect(pi.calls).toBe(0);
+  });
+
+  it('reruns successfully when the origin policy is an active approved record (P0-4 happy path)', async () => {
+    const origin = makeTerminalRun('pi');
+    seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
+    const executor = new FakeExecutor();
+    const { run, mode } = await replayPiRun(origin, { mode: 'rerun', executor });
+    expect(mode).toBe('rerun');
+    expect(executor.calls).toBe(1);
+    expect(run.originRunId).toBe(origin);
+  });
+
+  it('deterministic replay stays available with no active approved policy (P0-4)', async () => {
+    const origin = makeTerminalRun('pi');
+    const { run, mode } = await replayPiRun(origin, { mode: 'deterministic' });
+    expect(mode).toBe('deterministic');
+    expect(run.status).toBe('completed');
+    expect(getPiResult(run.id)).toBeDefined();
   });
 
   it('refuses deterministic replay of an origin without a stored result', async () => {

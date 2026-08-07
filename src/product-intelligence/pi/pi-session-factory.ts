@@ -24,7 +24,6 @@ import type {
 import { buildWorkflowTerminalTools } from '../workflow/terminal-tools';
 import { KNOWN_BUILTIN_TOOLS, TERMINAL_TOOLS } from '../contracts';
 import { buildApprovedResourceLoader } from './pi-resource-loader';
-import { buildProductResearchSubmissionTool } from './pi-tool-registry';
 import type { PiToolRegistry } from '../tools/registry';
 
 // ---------------------------------------------------------------------------
@@ -135,10 +134,10 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       cwd: this.options.cwd ?? process.cwd(),
     });
 
-    // --- Terminal submission tools (PI-1 envelope + PI-4 workflow) ----------
-    const submissionTool = buildProductResearchSubmissionTool(onSubmission);
+    // --- Terminal submission tools (PI-4 workflow only; the legacy PI-1
+    // envelope tool was removed in P0-3) --------------------------------
     const workflowTerminalTools = buildWorkflowTerminalTools(onSubmission);
-    const customToolNames = [submissionTool.name, ...workflowTerminalTools.map((t) => t.name)];
+    const customToolNames = [...workflowTerminalTools.map((t) => t.name)];
 
     // PI-3: research tools from the registry, gated by the policy's
     // researchTools allowlist (empty -> none granted, fail closed).
@@ -173,12 +172,12 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       thinkingLevel: route.thinkingLevel,
       tools: undefined,
       excludeTools: KNOWN_BUILTIN_TOOLS.filter((name) => !allowedTools.includes(name)),
-      // The submission tool and research tools are added by the SDK's
+      // The workflow terminal tools and research tools are added by the SDK's
       // extension runtime, not the built-in allowlist.
       customTools:
         researchTools && researchTools.length > 0
-          ? [submissionTool, ...workflowTerminalTools, ...researchTools]
-          : [submissionTool, ...workflowTerminalTools],
+          ? [...workflowTerminalTools, ...researchTools]
+          : workflowTerminalTools,
     });
 
     let disposed = false;

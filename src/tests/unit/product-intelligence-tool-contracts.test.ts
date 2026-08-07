@@ -4,7 +4,7 @@
  * signal comparison, source priority, and page identity classification.
  */
 import { describe, expect, it } from 'vitest';
-import { classifyPageIdentity, upcCheckDigit } from '../../product-intelligence/tools/contract';
+import { classifyPageIdentity, jsonLdLeafProductProof, structuredSingleVariantProof, upcCheckDigit, variantProofFromSignals } from '../../product-intelligence/tools/contract';
 import { checkExactGtinMatch, compareIdentitySignals, checkSourcePriority } from '../../product-intelligence/tools/verification-tools';
 import { validateGtin } from '../../product-intelligence/tools/identity-tools';
 import type { PiToolContext } from '../../product-intelligence/tools/contract';
@@ -125,7 +125,7 @@ describe('check_source_priority', () => {
 });
 
 describe('classifyPageIdentity', () => {
-  it('returns exact_match when the exact GTIN is on the page', () => {
+  it('returns exact_match when the exact GTIN is on a page affirmatively proven single-variant', () => {
     const result = classifyPageIdentity({
       requestedGtin: '085000079585',
       extractedGtins: ['085000079585'],
@@ -134,8 +134,58 @@ describe('classifyPageIdentity', () => {
       expectedName: 'x',
       variantSignals: [],
       hasAnyField: true,
+      singleVariantProof: true,
+      selectedVariantLinkage: false,
     });
     expect(result.status).toBe('exact_match');
+  });
+
+  it('returns exact_match when the exact GTIN is on a page with positive selected-variant linkage', () => {
+    const result = classifyPageIdentity({
+      requestedGtin: '085000079585',
+      extractedGtins: ['085000079585'],
+      sku: null,
+      productName: 'Anything',
+      expectedName: 'x',
+      variantSignals: [{ kind: 'variant_match' }],
+      hasAnyField: true,
+      singleVariantProof: false,
+      selectedVariantLinkage: true,
+    });
+    expect(result.status).toBe('exact_match');
+  });
+
+  it('refuses exact_match for an exact GTIN without positive variant proof (P0-5)', () => {
+    // Exact GTIN establishes the entity is REPRESENTED, not that the page
+    // currently displays that variant — no proof => conservative probable.
+    const result = classifyPageIdentity({
+      requestedGtin: '085000079585',
+      extractedGtins: ['085000079585'],
+      sku: null,
+      productName: 'Anything',
+      expectedName: 'x',
+      variantSignals: [],
+      hasAnyField: true,
+      singleVariantProof: false,
+      selectedVariantLinkage: false,
+    });
+    expect(result.status).toBe('probable_match');
+    expect(result.reasons.join(' ')).toContain('variant status unproven');
+  });
+
+  it('returns parent_product_only for an exact GTIN on a parent page with no proof', () => {
+    const result = classifyPageIdentity({
+      requestedGtin: '085000079585',
+      extractedGtins: ['085000079585'],
+      sku: null,
+      productName: 'Anything',
+      expectedName: 'x',
+      variantSignals: [{ kind: 'parent_page' }],
+      hasAnyField: true,
+      singleVariantProof: false,
+      selectedVariantLinkage: false,
+    });
+    expect(result.status).toBe('parent_product_only');
   });
 
   it('returns wrong_variant on variant mismatch even with name alignment', () => {
@@ -147,6 +197,8 @@ describe('classifyPageIdentity', () => {
       expectedName: 'Stella Chicken Broth',
       variantSignals: [{ kind: 'variant_mismatch' }],
       hasAnyField: true,
+      singleVariantProof: false,
+      selectedVariantLinkage: false,
     });
     expect(result.status).toBe('wrong_variant');
   });
@@ -160,6 +212,8 @@ describe('classifyPageIdentity', () => {
       expectedName: 'Stella Broth 16oz',
       variantSignals: [{ kind: 'parent_page' }],
       hasAnyField: true,
+      singleVariantProof: false,
+      selectedVariantLinkage: false,
     });
     expect(result.status).toBe('parent_product_only');
   });
@@ -173,6 +227,8 @@ describe('classifyPageIdentity', () => {
       expectedName: 'x',
       variantSignals: [],
       hasAnyField: false,
+      singleVariantProof: false,
+      selectedVariantLinkage: false,
     });
     expect(result.status).toBe('insufficient_evidence');
   });
@@ -186,7 +242,51 @@ describe('classifyPageIdentity', () => {
       expectedName: 'STELLA CHKN BROTH 16OZ',
       variantSignals: [],
       hasAnyField: true,
+      singleVariantProof: false,
+      selectedVariantLinkage: false,
     });
     expect(result.status).toBe('probable_match');
+  });
+});
+
+describe('variant proof helpers (P0-5)', () => {
+  it('variantProofFromSignals: single-variant proof requires a positive platform count', () => {
+    expect(variantProofFromSignals([], 1)).toEqual({ singleVariantProof: true, selectedVariantLinkage: false });
+    expect(variantProofFromSignals([], 2)).toEqual({ singleVariantProof: false, selectedVariantLinkage: false });
+    // Absence of signals is never proof.
+    expect(variantProofFromSignals([], undefined)).toEqual({ singleVariantProof: false, selectedVariantLinkage: false });
+    // A variant_match signal is positive selected-child linkage.
+    expect(variantProofFromSignals([{ kind: 'variant_match' }], undefined)).toEqual({
+      singleVariantProof: false,
+      selectedVariantLinkage: true,
+    });
+  });
+
+  it('structuredSingleVariantProof requires an affirmative leaf Product with no group/variant markers', () => {
+    const leaf = '<script type="application/ld+json">{"@type":"Product","name":"A","gtin":"1"}</script>';
+    expect(structuredSingleVariantProof(leaf)).toBe(true);
+    // ProductGroup pages are never single-variant proof.
+    const group =
+      '<script type="application/ld+json">{"@type":"ProductGroup","hasVariant":[{"@type":"Product"}]}</script>';
+    expect(structuredSingleVariantProof(group)).toBe(false);
+    // hasVariant markers anywhere invalidate the proof even with a leaf node.
+    const group2 =
+      '<script type="application/ld+json">{"@type":"Product","name":"A","hasVariant":[{}]}</script>';
+    expect(structuredSingleVariantProof(group2)).toBe(false);
+    // variants markers invalidate the proof (parent page carrying default data).
+    const variants =
+      '<script id="__NEXT_DATA__" type="application/json">{"product":{"variants":[]}}</script>';
+    expect(structuredSingleVariantProof(variants)).toBe(false);
+    // No Product declaration at all: absence is not proof.
+    expect(structuredSingleVariantProof('<html><body>nothing</body></html>')).toBe(false);
+  });
+
+  it('jsonLdLeafProductProof only accepts @type Product without variant keys', () => {
+    expect(jsonLdLeafProductProof({ '@type': 'Product', name: 'A' })).toBe(true);
+    expect(jsonLdLeafProductProof({ '@type': 'Product', hasVariant: [] })).toBe(false);
+    expect(jsonLdLeafProductProof({ '@type': 'Product', variants: [{}] })).toBe(false);
+    expect(jsonLdLeafProductProof({ '@type': 'ProductGroup', hasVariant: [] })).toBe(false);
+    expect(jsonLdLeafProductProof({ '@type': ['Product', 'ItemPage'] })).toBe(true);
+    expect(jsonLdLeafProductProof(null)).toBe(false);
   });
 });

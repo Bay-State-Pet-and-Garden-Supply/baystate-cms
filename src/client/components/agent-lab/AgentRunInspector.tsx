@@ -8,11 +8,12 @@
 import React, { useEffect, useState } from 'react';
 import {
   cancelPiRun,
-  deletePiRun,
   createPiRun,
   parseRunInput,
   getPiFlags,
   importRunToOnboarding,
+  reviewPiRun,
+  getPiRunReview,
 } from '../../product-intelligence-api';
 import { useProductIntelligenceRun } from '../../hooks/useProductIntelligenceRun';
 import { useProductIntelligenceEvents } from '../../hooks/useProductIntelligenceEvents';
@@ -43,6 +44,31 @@ export function AgentRunInspector({ runId, onBack }: Props) {
   const [importFlags, setImportFlags] = useState<{ allowOnboardingImport: boolean; shadowOnly: boolean } | null>(null);
   const [importing, setImporting] = useState(false);
   const [importNotice, setImportNotice] = useState<string | null>(null);
+  const [reviewApproved, setReviewApproved] = useState(false);
+  const [reviewing, setReviewing] = useState<'approve' | 'reject' | null>(null);
+  const [reviewState, setReviewState] = useState<string | null>(null);
+
+  // P1-2: load the durable review state for this run; import stays disabled
+  // until the latest decision approves the run's current stored result.
+  useEffect(() => {
+    let cancelled = false;
+    getPiRunReview(runId)
+      .then((res) => {
+        if (cancelled) return;
+        setReviewApproved(res.approved);
+        setReviewState(
+          res.decision
+            ? `${res.decision.decision === 'approve' ? 'Approved' : 'Rejected'} by ${res.decision.reviewer} (${new Date(res.decision.createdAt).toLocaleString()})`
+            : null,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setReviewApproved(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, refresh]);
 
   useEffect(() => {
     getPiFlags()
@@ -124,13 +150,30 @@ export function AgentRunInspector({ runId, onBack }: Props) {
   };
 
   const handleReject = async () => {
-    if (!window.confirm('Reject this result? The run and all its evidence will be deleted permanently.')) return;
+    if (!window.confirm('Reject this result? The run and its evidence stay in the audit log (durable reject decision).')) return;
     setActionError(null);
     try {
-      await deletePiRun(runId);
+      await reviewPiRun(runId, { decision: 'reject', reviewer: 'user' });
       onBack();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleReviewDecision = async (decision: 'approve' | 'reject') => {
+    setActionError(null);
+    setReviewing(decision);
+    try {
+      const res = await reviewPiRun(runId, { decision, reviewer: 'user' });
+      setReviewApproved(res.decision.decision === 'approve');
+      setReviewState(
+        `${res.decision.decision === 'approve' ? 'Approved' : 'Rejected'} by ${res.decision.reviewer} (${new Date(res.decision.createdAt).toLocaleString()})`,
+      );
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReviewing(null);
     }
   };
 
@@ -210,8 +253,8 @@ export function AgentRunInspector({ runId, onBack }: Props) {
         </button>
       )}
       {importEligible && (
-        <button style={{ ...styles.actionBtn, ...styles.importBtn }} disabled={importing} onClick={handleImport}>
-          {importing ? 'Importing…' : 'Send to Onboarding review'}
+        <button style={{ ...styles.actionBtn, ...styles.importBtn }} disabled={importing || !reviewApproved} onClick={handleImport}>
+          {importing ? 'Importing…' : reviewApproved ? 'Send to Onboarding review' : 'Approve result to import'}
         </button>
       )}
       <button style={{ ...styles.actionBtn, background: '#6b7280', color: '#fff' }} onClick={onBack}>Close</button>
@@ -243,6 +286,30 @@ export function AgentRunInspector({ runId, onBack }: Props) {
       <ConflictReviewPanel projection={projection} onReject={handleReject} />
       <div style={{ marginTop: 12 }}>
         <AgentRunComparison projection={projection} />
+      </div>
+      <div style={{ marginTop: 12, padding: 12, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', marginBottom: 8 }}>
+          Review decision
+        </div>
+        <div style={{ fontSize: 13, color: reviewApproved ? '#15803d' : '#b45309', marginBottom: 8 }}>
+          {reviewState ?? 'No durable review decision yet — import is locked until this result is approved.'}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            style={{ ...styles.actionBtn, background: '#15803d', color: '#fff' }}
+            disabled={reviewing !== null}
+            onClick={() => void handleReviewDecision('approve')}
+          >
+            {reviewing === 'approve' ? 'Approving…' : 'Approve for onboarding'}
+          </button>
+          <button
+            style={{ ...styles.actionBtn, background: '#b91c1c', color: '#fff' }}
+            disabled={reviewing !== null}
+            onClick={() => void handleReviewDecision('reject')}
+          >
+            {reviewing === 'reject' ? 'Rejecting…' : 'Reject decision'}
+          </button>
+        </div>
       </div>
     </div>
   );

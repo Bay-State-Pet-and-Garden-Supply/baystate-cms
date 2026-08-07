@@ -20,6 +20,10 @@ export const ExtractionMethodSchema = z.enum([
   'profile_selector',
   'media_api',
   'manual',
+  // PI-6 review hardening: OCR/pixel-derived facts are their own extraction
+  // methods (server-resolved, bound to the inspected image content hash).
+  'image_ocr',
+  'decoder',
 ]);
 export type ExtractionMethod = z.infer<typeof ExtractionMethodSchema>;
 
@@ -35,6 +39,27 @@ export const NetContentSchema = z.object({
   unit: z.string().min(1).max(16),
 });
 export type NetContent = z.infer<typeof NetContentSchema>;
+
+/**
+ * Packaging observations, as established by the verification pipeline.
+ * `identity` fields may come from durable evidence rows (provenance
+ * 'evidence'), from the deterministic pixel decoder ('decoder'), or be
+ * caller-supplied agent assertions ('agent_asserted') — the latter are
+ * recorded for review but are never authoritative for exact matching or
+ * commerce approval.
+ */
+export const IdentityObservationSchema = z.object({
+  brand: z.string().max(256).nullable().default(null),
+  productName: z.string().max(512).nullable().default(null),
+  variant: z.string().max(256).nullable().default(null),
+  netContent: NetContentSchema.nullable().default(null),
+  packCount: z.number().int().positive().nullable().default(null),
+  gtin: z.string().max(64).nullable().default(null),
+});
+export type IdentityObservation = z.infer<typeof IdentityObservationSchema>;
+
+export const ObservationProvenanceSchema = z.enum(['evidence', 'decoder', 'agent_asserted']);
+export type ObservationProvenance = z.infer<typeof ObservationProvenanceSchema>;
 
 /**
  * The required asset record from the PI-6 issue. `conflicts` is an addition
@@ -80,6 +105,12 @@ export const ProductAssetEvidenceSchema = z.object({
   commerceApproved: z.boolean(),
   /** Visible-package conflict reasons (net content, pack count, flavor, ...). */
   conflicts: z.array(z.string()).default([]),
+  /** How the observed packaging fields were established (durable evidence,
+   *  deterministic pixel decoder, or non-authoritative agent assertion). */
+  observationProvenance: ObservationProvenanceSchema.optional(),
+  /** Caller-supplied (agent-asserted) observations, recorded for review but
+   *  never fed into exact matching or commerce approval. */
+  agentAsserted: IdentityObservationSchema.nullish(),
   // Durable-record fields (DB identity + payload), optional on the record the
   // pipeline returns; filled when persisted/loaded from product_intelligence_assets.
   id: z.string().nullish(),
@@ -89,16 +120,6 @@ export const ProductAssetEvidenceSchema = z.object({
   createdAt: z.string().nullish(),
 });
 export type ProductAssetEvidence = z.infer<typeof ProductAssetEvidenceSchema>;
-
-export const IdentityObservationSchema = z.object({
-  brand: z.string().max(256).nullable().default(null),
-  productName: z.string().max(512).nullable().default(null),
-  variant: z.string().max(256).nullable().default(null),
-  netContent: NetContentSchema.nullable().default(null),
-  packCount: z.number().int().positive().nullable().default(null),
-  gtin: z.string().max(64).nullable().default(null),
-});
-export type IdentityObservation = z.infer<typeof IdentityObservationSchema>;
 
 /** Verification input: the asset URL, expected product fields, and observed packaging evidence. */
 export const ImageVerificationInputSchema = z.object({
@@ -116,11 +137,16 @@ export const ImageVerificationInputSchema = z.object({
   expectedPackCount: z.number().int().positive().nullish(),
   expectedFlavor: z.string().max(256).nullish(),
   expectedFormula: z.string().max(256).nullish(),
-  /** Declared source kind drives rights resolution (never inferred from pixels). */
+  /** Declared source kind (origin only — never by itself a reuse grant). */
   declaredSourceType: z.string().max(128).nullish(),
   declaredRightsBasis: z.string().max(512).nullish(),
   declaredRightsEvidenceRef: z.string().max(512).nullish(),
-  /** Packaging evidence gathered separately (OCR/structured) — pixels alone cannot OCR. */
+  /** Durable evidence-row ids (product_intelligence_evidence) the server
+   *  resolves into authoritative observations. Agent-supplied `observed`
+   *  below is recorded but never authoritative. */
+  evidenceIds: z.array(z.string().min(1)).optional(),
+  /** Packaging evidence gathered separately (OCR/structured) — recorded as
+   *  agent-asserted, never fed into exact matching or commerce approval. */
   observed: IdentityObservationSchema.optional(),
 });
 export type ImageVerificationInput = z.infer<typeof ImageVerificationInputSchema>;

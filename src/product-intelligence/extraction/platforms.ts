@@ -14,7 +14,7 @@ import { sha256Hex } from '../../shared/stable-id';
  * constant (that module pulls in playwright + DB repos, which would break
  * vitest importability here); kept identical for consistent site responses.
  */
-const HTTP_EXTRACTION_HEADERS: Record<string, string> = {
+export const HTTP_EXTRACTION_HEADERS: Record<string, string> = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -23,6 +23,9 @@ const HTTP_EXTRACTION_HEADERS: Record<string, string> = {
   'Pragma': 'no-cache',
 };
 
+/** Fetch-like function used by the ladder's HTTP layer (P0-1 seam). */
+export type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export interface FetchedPage {
   html: string;
   finalUrl: string;
@@ -30,18 +33,23 @@ export interface FetchedPage {
   contentHash: string;
 }
 
-/** Fetch raw page HTML following redirects; records the final URL + hash. */
-export async function fetchPageHtml(url: string, signal: AbortSignal, timeoutMs: number): Promise<FetchedPage> {
+/**
+ * Fetch raw page HTML following redirects; records the final URL + hash.
+ * `fetchFn` defaults to the global fetch so non-PI callers/tests are
+ * unchanged; PI callers pass a policy-gateway-bound fetch (P0-1) so the
+ * ladder's HTTP layer is the enforced network capability.
+ */
+export async function fetchPageHtml(url: string, signal: AbortSignal, timeoutMs: number, fetchFn: NetworkFetch = fetch): Promise<FetchedPage> {
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-  const response = await fetch(url, { headers: HTTP_EXTRACTION_HEADERS, redirect: 'follow', signal: combined });
+  const response = await fetchFn(url, { headers: HTTP_EXTRACTION_HEADERS, redirect: 'follow', signal: combined });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} for ${url}`);
   }
   const html = await response.text();
-  // Hard response-size cap (5 MB) — the ladder is not routed through the
-  // policy gateway's gatewayFetch, so this is the local guard against
-  // unbounded retention (review PI-11-MAJOR-5).
+  // Hard response-size cap (5 MB) — the policy gateway's gatewayFetch also
+  // enforces this via maxResponseBytes when the caller injects it (P0-1);
+  // this local guard covers the default (raw fetch) path too.
   if (html.length > 5_000_000) {
     throw new Error(`Response too large (${html.length} chars) for ${url}`);
   }
@@ -245,10 +253,10 @@ export function shopifyProductUrl(productUrl: string): string | null {
   }
 }
 
-async function fetchJson(url: string, signal: AbortSignal, timeoutMs: number): Promise<unknown> {
+async function fetchJson(url: string, signal: AbortSignal, timeoutMs: number, fetchFn: NetworkFetch = fetch): Promise<unknown> {
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-  const response = await fetch(url, { headers: HTTP_EXTRACTION_HEADERS, redirect: 'follow', signal: combined });
+  const response = await fetchFn(url, { headers: HTTP_EXTRACTION_HEADERS, redirect: 'follow', signal: combined });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} for ${url}`);
   }
@@ -256,8 +264,8 @@ async function fetchJson(url: string, signal: AbortSignal, timeoutMs: number): P
 }
 
 /** Fetch Shopify's public product JSON (deterministic platform API). */
-export async function fetchShopifyProductJson(url: string, signal: AbortSignal, timeoutMs: number): Promise<ShopifyProductJson> {
-  const parsed = (await fetchJson(url, signal, timeoutMs)) as Partial<ShopifyProductJson>;
+export async function fetchShopifyProductJson(url: string, signal: AbortSignal, timeoutMs: number, fetchFn: NetworkFetch = fetch): Promise<ShopifyProductJson> {
+  const parsed = (await fetchJson(url, signal, timeoutMs, fetchFn)) as Partial<ShopifyProductJson>;
   if (typeof parsed.title !== 'string' || !Array.isArray(parsed.variants)) {
     throw new Error('Shopify product JSON missing expected fields');
   }

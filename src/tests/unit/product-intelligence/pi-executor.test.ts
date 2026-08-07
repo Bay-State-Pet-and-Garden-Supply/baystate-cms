@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { PiProductIntelligenceExecutor } from '../../../product-intelligence/pi/pi-executor';
 import { PiSessionError } from '../../../product-intelligence/pi/pi-session-factory';
 import { createExecutionEventSink } from '../../../product-intelligence/executor';
-import { SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
+import { WORKFLOW_SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
 import {
   ABSTENTION_SUBMISSION,
   asPi1Submission,
@@ -72,14 +72,14 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     const session = factory.created[0];
     session.emitToolStart('read');
     session.emitToolEnd('read', false);
-    session.emitToolStart(SUBMISSION_TOOL_NAME);
+    session.emitToolStart(WORKFLOW_SUBMISSION_TOOL_NAME);
     submitViaTool(factory, validSubmission());
-    session.emitToolEnd(SUBMISSION_TOOL_NAME, false);
+    session.emitToolEnd(WORKFLOW_SUBMISSION_TOOL_NAME, false);
     session.finish();
     await runPromise;
 
     const toolEvents = events.snapshot().filter((event) => event.type === 'tool_call_started');
-    expect(toolEvents.map((event) => event.toolName)).toEqual(['read', SUBMISSION_TOOL_NAME]);
+    expect(toolEvents.map((event) => event.toolName)).toEqual(['read', WORKFLOW_SUBMISSION_TOOL_NAME]);
     // No assistant-prose / chain-of-thought events are emitted — only the
     // normalized execution event types.
     const allowedTypes = [
@@ -109,9 +109,9 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     session.emitToolStart('extract_products_page');
     session.emitToolEnd('extract_products_page', true);
     // Then completes normally.
-    session.emitToolStart(SUBMISSION_TOOL_NAME);
+    session.emitToolStart(WORKFLOW_SUBMISSION_TOOL_NAME);
     submitViaTool(factory, validSubmission());
-    session.emitToolEnd(SUBMISSION_TOOL_NAME, false);
+    session.emitToolEnd(WORKFLOW_SUBMISSION_TOOL_NAME, false);
     session.finish();
     const result = await runPromise;
 
@@ -324,7 +324,7 @@ describe('PiProductIntelligenceExecutor — allowlisting and prompt construction
     await runPromise;
 
     expect(factory.created.length).toBe(1);
-    expect(factory.created[0].promptText).toContain(SUBMISSION_TOOL_NAME);
+    expect(factory.created[0].promptText).toContain(WORKFLOW_SUBMISSION_TOOL_NAME);
     expect(factory.created[0].promptText).toContain('read, grep');
   });
 

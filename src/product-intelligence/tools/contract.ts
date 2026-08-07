@@ -62,17 +62,50 @@ export interface PiToolEvidence {
   retrievedAt?: string;
 }
 
-export type PiToolResult =
-  | { status: 'ok'; data: unknown; evidence: PiToolEvidence[] }
-  | { status: 'no_result'; reason: string; evidence: PiToolEvidence[] }
-  | { status: 'policy_denied'; reason: string; evidence: PiToolEvidence[] }
-  | { status: 'error'; code: string; message: string; evidence: PiToolEvidence[] };
+/**
+ * Field-level durable evidence (P1-4): ONE entry per extracted field with a
+ * field-specific id so a reviewer can reconstruct exactly which source path
+ * supported which value ('size = 16 oz supported by path X') from persisted
+ * rows alone. Persistence writes one row per entry: targetField = field,
+ * value = the ACTUAL extracted value, extractionMethod = method,
+ * metadata.path = the source path.
+ */
+export interface FieldEvidenceEntry {
+  /** Field-specific durable evidence id (see fieldEvidenceId). */
+  id: string;
+  /** Extracted field name (title, gtin, size, ...). */
+  field: string;
+  /** The actual extracted value. */
+  value: string | null;
+  /** Deterministic extraction method (e.g. 'json_ld', 'html_heuristics'). */
+  method: string;
+  /** Where in the page the value came from (JSON-LD path / selector / meta name). */
+  path?: string;
+  /** Short safe snippet of the source text (never raw page content). */
+  snippet?: string;
+  url?: string;
+  domain?: string;
+  /** Content hash of the artifact the field was extracted from. */
+  contentHash?: string;
+  /** Legacy compatibility fields (serializers read them; field entries leave them unset). */
+  kind?: string;
+  retrievedAt?: string;
+}
 
-export function okResult(data: unknown, evidence: PiToolEvidence[] = []): PiToolResult {
+/** Field-level evidence may appear alongside page-level evidence entries. */
+export type ToolEvidence = PiToolEvidence | FieldEvidenceEntry;
+
+export type PiToolResult =
+  | { status: 'ok'; data: unknown; evidence: ToolEvidence[] }
+  | { status: 'no_result'; reason: string; evidence: ToolEvidence[] }
+  | { status: 'policy_denied'; reason: string; evidence: ToolEvidence[] }
+  | { status: 'error'; code: string; message: string; evidence: ToolEvidence[] };
+
+export function okResult(data: unknown, evidence: ToolEvidence[] = []): PiToolResult {
   return { status: 'ok', data, evidence };
 }
 
-export function noResult(reason: string, evidence: PiToolEvidence[] = []): PiToolResult {
+export function noResult(reason: string, evidence: ToolEvidence[] = []): PiToolResult {
   return { status: 'no_result', reason, evidence };
 }
 
@@ -87,6 +120,15 @@ export function errorResult(code: string, message: string): PiToolResult {
 /** Deterministic evidence id: tool name + sha of the identifying input. */
 export function evidenceId(toolName: string, identifyingInput: string): string {
   return `${toolName}:${sha256Hex(identifyingInput).slice(0, 24)}`;
+}
+
+/**
+ * Field-specific durable evidence id (P1-4): tool + source url + field +
+ * path/value hash. Unique per field on a page so one extraction produces one
+ * resolvable id per extracted field — never the same id on N rows.
+ */
+export function fieldEvidenceId(toolName: string, url: string, field: string, pathOrValue: string): string {
+  return `${toolName}:${sha256Hex(url).slice(0, 24)}:${field}:${sha256Hex(pathOrValue).slice(0, 24)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,11 +233,26 @@ export function classifyPageIdentity(input: {
   expectedName: string | undefined;
   variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
   hasAnyField: boolean;
+  /** POSITIVE single-variant evidence (P0-5): the page affirmatively reports exactly one variant. */
+  singleVariantProof: boolean;
+  /** POSITIVE selected-child linkage (P0-5): the requested child variant is the selected/default one. */
+  selectedVariantLinkage: boolean;
 }): { status: PageIdentityStatus; reasons: string[] } {
   const reasons: string[] = [];
   const exactGtin = input.extractedGtins.some((g) => g.replace(/\D/g, '') === input.requestedGtin);
-  if (exactGtin) {
-    return { status: 'exact_match', reasons: ['exact GTIN present on page'] };
+  // P0-5 (review hardening): exact GTIN establishes that the requested entity
+  // is REPRESENTED on the page — never automatically that the page currently
+  // displays that variant. exact_match additionally requires POSITIVE
+  // single-variant evidence (a platform/structured claim of exactly one
+  // variant) or POSITIVE selected-child linkage (a variant_match signal).
+  // Absence of detected variant UI is deliberately not proof.
+  if (exactGtin && (input.singleVariantProof || input.selectedVariantLinkage)) {
+    reasons.push(
+      input.singleVariantProof
+        ? 'exact GTIN present on a page affirmatively proven single-variant'
+        : 'exact GTIN present with positive selected-variant linkage',
+    );
+    return { status: 'exact_match', reasons };
   }
   if (input.variantSignals.some((s) => s.kind === 'variant_mismatch')) {
     reasons.push('variant mismatch signal present');
@@ -209,11 +266,67 @@ export function classifyPageIdentity(input: {
     return { status: 'insufficient_evidence', reasons: ['no extractable product fields'] };
   }
   const nameMatches = nameAlignment(input.expectedName, input.productName);
+  if (exactGtin) {
+    // The exact entity is represented, but variant status is unproven —
+    // settle conservatively below exact_match (review P0-5).
+    reasons.push('exact GTIN present but variant status unproven');
+    if (nameMatches || input.sku) {
+      reasons.push(nameMatches ? 'product name aligns with the expected name' : 'SKU present');
+    }
+    return { status: 'probable_match', reasons };
+  }
   if (nameMatches || input.sku) {
     reasons.push(nameMatches ? 'product name aligns with the expected name' : 'SKU present');
     return { status: 'probable_match', reasons };
   }
   return { status: 'insufficient_evidence', reasons: ['no GTIN, no SKU, and no name alignment'] };
+}
+
+/**
+ * Derive the P0-5 proof booleans from variant signals and an optional
+ * platform-reported variant count. `singleVariantProof` requires POSITIVE
+ * evidence (a platform affirmatively reporting exactly one variant) — the
+ * absence of signals is never treated as proof.
+ */
+export function variantProofFromSignals(
+  signals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>,
+  platformVariantCount?: number,
+): { singleVariantProof: boolean; selectedVariantLinkage: boolean } {
+  return {
+    singleVariantProof: platformVariantCount === 1,
+    selectedVariantLinkage: signals.some((s) => s.kind === 'variant_match'),
+  };
+}
+
+/**
+ * Positive single-variant proof from an HTML page's structured data (P0-5):
+ * the page must declare at least one JSON-LD Product node while carrying NO
+ * ProductGroup / hasVariant / variants markers anywhere. Per schema.org a
+ * plain Product node without hasVariant is a leaf product. ProductGroup,
+ * hasVariant, or variants markers anywhere in the page invalidate the proof
+ * (a parent page may still embed a leaf-shaped default-variant node).
+ */
+export function structuredSingleVariantProof(html: string): boolean {
+  if (/"hasVariant"/.test(html)) return false;
+  if (/"@type"\s*:\s*"ProductGroup"/.test(html)) return false;
+  if (/"variants"\s*:/.test(html)) return false;
+  // Closing quote anchors the match so "ProductGroup" cannot satisfy it.
+  return /"@type"\s*:\s*"Product"/.test(html);
+}
+
+/**
+ * Positive single-variant proof from a parsed JSON-LD entry: @type Product
+ * with no hasVariant/variants keys (leaf product claim). Object-level check
+ * for browser-snapshot JSON-LD, which is no longer embedded in page HTML.
+ */
+export function jsonLdLeafProductProof(entry: unknown): boolean {
+  if (!entry || typeof entry !== 'object') return false;
+  const obj = entry as Record<string, unknown>;
+  if (obj['hasVariant'] !== undefined) return false;
+  if (obj['variants'] !== undefined) return false;
+  const type = obj['@type'];
+  const types = Array.isArray(type) ? type : [type];
+  return types.includes('Product');
 }
 
 /**

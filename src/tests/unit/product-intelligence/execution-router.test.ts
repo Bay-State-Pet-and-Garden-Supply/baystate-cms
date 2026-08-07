@@ -94,6 +94,36 @@ describe('createExecutionRouter', () => {
     const executors = await router.listExecutors();
     expect(executors.map((e) => e.name).sort()).toEqual([LEGACY_EXECUTOR_NAME, PI_EXECUTOR_NAME]);
   });
+
+  it('resolveExecutorPreferring does not override the kill switch (P0-4)', async () => {
+    overrideProductIntelligenceFlags({ productIntelligenceEnabled: true, piEnabled: true, killSwitch: true });
+    const legacy = new LegacyProductIntelligenceExecutor();
+    const pi = fakePiExecutor();
+    const router = createExecutionRouter({ legacy, pi });
+    const selection = await router.resolveExecutorPreferring(PI_EXECUTOR_NAME);
+    expect(selection.name).toBe(LEGACY_EXECUTOR_NAME);
+    expect(selection.executor).toBe(legacy);
+  });
+
+  it('resolveExecutorPreferring returns the diverted selection when Pi is disabled (P0-4)', async () => {
+    overrideProductIntelligenceFlags({ productIntelligenceEnabled: true, piEnabled: false });
+    const legacy = new LegacyProductIntelligenceExecutor();
+    const pi = fakePiExecutor();
+    const router = createExecutionRouter({ legacy, pi });
+    const selection = await router.resolveExecutorPreferring(PI_EXECUTOR_NAME);
+    expect(selection.name).toBe(LEGACY_EXECUTOR_NAME);
+    expect(selection.executor).toBe(legacy);
+  });
+
+  it('resolveExecutorPreferring returns the Pi executor when the flags select it (P0-4)', async () => {
+    overrideProductIntelligenceFlags({ productIntelligenceEnabled: true, piEnabled: true });
+    const legacy = new LegacyProductIntelligenceExecutor();
+    const pi = fakePiExecutor();
+    const router = createExecutionRouter({ legacy, pi });
+    const selection = await router.resolveExecutorPreferring(PI_EXECUTOR_NAME);
+    expect(selection.name).toBe(PI_EXECUTOR_NAME);
+    expect(selection.executor).toBe(pi);
+  });
 });
 
 describe('router integration with a fake executor (no external calls)', () => {

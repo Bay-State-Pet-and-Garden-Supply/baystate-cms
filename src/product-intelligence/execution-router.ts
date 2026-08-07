@@ -32,7 +32,12 @@ export interface ExecutionRouter {
   resolveExecutor(): Promise<ExecutorSelection>;
   /** All executors known to the router (for comparison UIs). */
   listExecutors(): Promise<ExecutorSelection[]>;
-  /** PI-10: same-configuration reruns prefer the named executor when available. */
+  /**
+   * PI-10: same-configuration reruns prefer the named executor when available.
+   * The kill switch / feature flags dominate every path (P0-4): when they
+   * divert execution, the diverted selection is returned — a rerun must never
+   * resurrect the Pi executor.
+   */
   resolveExecutorPreferring(name: string): Promise<ExecutorSelection>;
 }
 
@@ -87,17 +92,16 @@ export function createExecutionRouter(deps: ExecutionRouterDeps): ExecutionRoute
       };
     },
     /**
-     * PI-10 same-configuration rerun: prefer the named executor when it is
-     * still available under the current flags, otherwise fall back to normal
-     * resolution ("where still available").
+     * PI-10 same-configuration rerun: prefer the named executor only when the
+     * current flags already select it. P0-4 removed the previous override
+     * ("only the flags diverted us"): when the kill switch or feature flags
+     * divert execution to the legacy executor, the diverted selection is
+     * returned so the rerun route can refuse a Pi rerun instead of silently
+     * resurrecting Pi.
      */
     async resolveExecutorPreferring(name: string): Promise<ExecutorSelection> {
       const selection = await this.resolveExecutor();
       if (selection.name === name) return selection;
-      if (name === PI_EXECUTOR_NAME && deps.pi) {
-        // The Pi executor is installed; only the flags diverted us.
-        return { name: PI_EXECUTOR_NAME, executor: deps.pi, reason: 'rerun: requested Pi executor' };
-      }
       return selection;
     },
 

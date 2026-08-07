@@ -189,4 +189,12 @@ describe('Product Intelligence SSE stream', () => {
     transitionPiRunStatus(run.id, 'completed', {});
     expect(deletePiRun(run.id)).toBe(true);
   });
+
+  it('has no user-facing run deletion route (P2-1); rejection is a durable decision', async () => {
+    const run = makeRun();
+    // The DELETE /runs/:id route was removed — physical deletion is
+    // retention/maintenance-only; reject lives on POST /runs/:id/review.
+    const response = await app.request(`http://localhost/api/product-intelligence/runs/${run.id}`, { method: 'DELETE' });
+    expect(response.status).toBe(404);
+  });
 });

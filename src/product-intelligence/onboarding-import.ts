@@ -27,9 +27,14 @@ import {
   getPiRun,
   insertPiImport,
   listPiAssetsByRun,
+  listPiEvidence,
+  listPiEvidenceByToolEvidenceId,
   listPiImportsByRun,
+  listPiSources,
   updatePiImportStatus,
+  type PiEvidenceRow,
   type PiImportRow,
+  type PiSourceRow,
 } from '../db/repositories/product-intelligence-repo';
 import type { ExtractionData, OnboardingItem } from '../shared/schemas/onboarding';
 import { getProductIntelligenceFlags } from './flags';
@@ -65,6 +70,73 @@ interface ProposalField {
   field: string;
   value: unknown;
   evidenceIds: string[];
+}
+
+/**
+ * Fail-closed import error (P1-1): selected facts without durable evidence.
+ * Carries a per-field report so callers/UI can show exactly which fields
+ * blocked the import.
+ */
+export class UnresolvedEvidenceError extends Error {
+  readonly unresolvedFields: Array<{ field: string; reason: string }>;
+
+  constructor(unresolvedFields: Array<{ field: string; reason: string }>) {
+    super(
+      `Import failed: ${unresolvedFields.length} selected field(s) lack durable field-level evidence: ` +
+        unresolvedFields.map((f) => `${f.field} (${f.reason})`).join('; '),
+    );
+    this.name = 'UnresolvedEvidenceError';
+    this.unresolvedFields = unresolvedFields;
+  }
+}
+
+function normalizeFieldKey(field: string): string {
+  return String(field ?? '').trim().toLowerCase();
+}
+
+function evidenceMetadataOf(row: PiEvidenceRow): Record<string, unknown> | null {
+  if (!row.metadataJson) return null;
+  try {
+    const parsed = JSON.parse(row.metadataJson) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function toolEvidenceIdOf(row: PiEvidenceRow): string | null {
+  const md = evidenceMetadataOf(row);
+  return md && typeof md.toolEvidenceId === 'string' ? md.toolEvidenceId : null;
+}
+
+/** A durable evidence row is field-level when it was persisted per field
+ *  (targetField carries the field name, not the coarse 'tool_evidence' kind). */
+function isFieldLevelEvidence(row: PiEvidenceRow): boolean {
+  return normalizeFieldKey(row.targetField) !== 'tool_evidence';
+}
+
+/** Resolve a selected fact to its durable field-level evidence row:
+ *  1. the run's per-field row for this field (targetField match, preferring
+ *     a row whose tool evidence id the proposal cited);
+ *  2. a row matching a cited tool evidence id or legacy submission evidence
+ *     id (field-level only).
+ *  Returns undefined when nothing durable resolves — the caller fails closed. */
+function resolveFieldEvidence(
+  field: string,
+  citedIds: string[],
+  byField: Map<string, PiEvidenceRow>,
+  byToolEvidenceId: Map<string, PiEvidenceRow>,
+  bySubmissionEvidenceId: Map<string, PiEvidenceRow>,
+): PiEvidenceRow | undefined {
+  const direct = byField.get(normalizeFieldKey(field));
+  if (direct) return direct;
+  for (const id of citedIds) {
+    const viaToolId = byToolEvidenceId.get(id);
+    if (viaToolId && isFieldLevelEvidence(viaToolId)) return viaToolId;
+    const viaSubmission = bySubmissionEvidenceId.get(id);
+    if (viaSubmission && isFieldLevelEvidence(viaSubmission)) return viaSubmission;
+  }
+  return undefined;
 }
 
 function digitsOf(value: string | null | undefined): string {
@@ -294,53 +366,81 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
       ? opts.fieldSelection.slice(0, 64)
       : proposals.slice(0, 64).map((p) => p.field);
 
-    // Sources + evidence items from the PI-1 envelope (when present).
-    const sources = Array.isArray(envelope.evidenceSources)
-      ? (envelope.evidenceSources as Array<Record<string, unknown>>).map((s) => ({
-          sourceId: String(s.id ?? ''),
-          url: String(s.url ?? ''),
-          domain: s.domain != null ? String(s.domain) : null,
-          sourceType: s.kind != null ? String(s.kind) : null,
-        }))
-      : [];
-    const evidenceItems = Array.isArray(envelope.evidenceItems)
-      ? (envelope.evidenceItems as Array<Record<string, unknown>>)
-      : [];
-    const fallbackSourceId = sources[0]?.sourceId ?? runId;
-
-    // Build the selected-field payload with the merge policy applied.
+    // Apply the merge policy: collect the fields this import will actually
+    // write (conflicting manual values are excluded; identical values dedupe).
     const state: {
       excluded: Record<string, { itemValue: string; importedValue: string }>;
       overridden: Record<string, string>;
     } = { excluded: {}, overridden: {} };
+    const selected: Array<{ field: string; proposal: ProposalField }> = [];
+    for (const field of fieldSelection) {
+      const proposal = proposals.find((p) => p.field === field);
+      if (!proposal || proposal.value == null) continue;
+      if (mergeField(field, proposal.value, item, state)) selected.push({ field, proposal });
+    }
+
+    // P1-1 (security review): every selected fact must resolve to a DURABLE
+    // field-level evidence row (per-tool rows keyed by metadata.toolEvidenceId;
+    // legacy submission rows keyed by metadata.submissionEvidenceId) plus its
+    // durable source row. Fabricated ids (`${runId}:${field}`), proposal
+    // evidence ids-as-source-ids, and the runId-as-source fallback are gone;
+    // an unresolvable fact aborts the import before anything is written.
+    const citedIds = [...new Set(selected.flatMap((s) => s.proposal.evidenceIds))];
+    const allEvidence = listPiEvidence(runId);
+    const allSources = listPiSources(runId);
+    const sourcesById = new Map(allSources.map((s) => [s.id, s]));
+    const byField = new Map<string, PiEvidenceRow>();
+    const bySubmissionEvidenceId = new Map<string, PiEvidenceRow>();
+    for (const row of allEvidence) {
+      const key = normalizeFieldKey(row.targetField);
+      const toolId = toolEvidenceIdOf(row);
+      if (key && (!byField.has(key) || (toolId != null && citedIds.includes(toolId)))) {
+        byField.set(key, row);
+      }
+      const md = evidenceMetadataOf(row);
+      if (md && typeof md.submissionEvidenceId === 'string') {
+        bySubmissionEvidenceId.set(md.submissionEvidenceId, row);
+      }
+    }
+    const byToolEvidenceId = new Map(
+      listPiEvidenceByToolEvidenceId(runId, citedIds).map((row) => [toolEvidenceIdOf(row) ?? row.id, row]),
+    );
+
+    const unresolved: Array<{ field: string; reason: string }> = [];
     const evidencePayload: Array<{
       field: string; value: string; sourceId: string; evidenceId: string; extractionMethod: string | null; snippet: string | null;
     }> = [];
     const evidenceIds: string[] = [];
-
-    for (const field of fieldSelection) {
-      const proposal = proposals.find((p) => p.field === field);
-      if (!proposal || proposal.value == null) continue;
-      const include = mergeField(field, proposal.value, item, state);
-      if (!include) continue;
-
-      const evItemsForField = evidenceItems.filter((e) => String(e.field ?? '') === field);
-      const evidenceId = String(
-        evItemsForField[0]?.id ?? proposal.evidenceIds[0] ?? `${runId}:${field}`,
-      );
-      const sourceId = String(
-        Array.isArray(evItemsForField[0]?.sourceIds) ? (evItemsForField[0].sourceIds as string[])[0] : (proposal.evidenceIds[0] ?? fallbackSourceId),
-      );
-      evidenceIds.push(evidenceId);
+    for (const { field, proposal } of selected) {
+      const row = resolveFieldEvidence(field, proposal.evidenceIds, byField, byToolEvidenceId, bySubmissionEvidenceId);
+      if (!row) {
+        unresolved.push({ field, reason: 'no durable field-level evidence row for this run' });
+        continue;
+      }
+      const source = row.sourceId ? sourcesById.get(row.sourceId) : undefined;
+      if (!source) {
+        unresolved.push({ field, reason: 'evidence row has no durable source row' });
+        continue;
+      }
+      evidenceIds.push(toolEvidenceIdOf(row) ?? row.id);
       evidencePayload.push({
         field,
         value: String(proposal.value).slice(0, 2048),
-        sourceId,
-        evidenceId,
-        extractionMethod: null,
-        snippet: evItemsForField[0]?.quote != null ? String(evItemsForField[0].quote).slice(0, 2048) : null,
+        sourceId: source.id,
+        evidenceId: toolEvidenceIdOf(row) ?? row.id,
+        extractionMethod: row.extractionMethod,
+        snippet: row.snippet != null ? row.snippet.slice(0, 2048) : null,
       });
     }
+    if (unresolved.length > 0) {
+      throw new UnresolvedEvidenceError(unresolved);
+    }
+
+    // Durable source rows behind the resolved evidence (deduped by source id).
+    const sources = [...new Set(evidencePayload.map((e) => e.sourceId))]
+      .map((id) => sourcesById.get(id))
+      .filter((s): s is PiSourceRow => Boolean(s))
+      .map((s) => ({ sourceId: s.id, url: s.url, domain: s.domain, sourceType: s.sourceType }));
 
     // Approved images only (commerce-approval is deterministic, never manual).
     const approvedImages = listPiAssetsByRun(runId).filter((a) => a.commerceApproved === 1);
