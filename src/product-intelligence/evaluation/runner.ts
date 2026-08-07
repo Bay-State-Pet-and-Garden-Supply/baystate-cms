@@ -20,7 +20,7 @@ import {
   listDatasets,
   markFamilyReviewComplete,
 } from '../../db/repositories/benchmark-repo';
-import { getPiResult, listPiRuns } from '../../db/repositories/product-intelligence-repo';
+import { getPiResult, listPiRuns, listPiToolCalls } from '../../db/repositories/product-intelligence-repo';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
 import { splitForFamily } from '../../classification/benchmark-exporter';
 import { PI_GOLDEN_DATASET_NAME, buildPiGoldenProducts } from './fixture-dataset';
@@ -107,11 +107,13 @@ export function runPiEvaluation(opts: RunEvaluationOptions): RunEvaluationResult
     const prediction = extractPredictionFromResult(result?.resultJson ?? null);
     const outcome = classifyRunOutcome(run.status, run.errorCode, result?.disposition ?? null, prediction?.identityStatus ?? null);
     const comparison = comparePredictionToGold(prediction, gold, outcome);
+    const toolCallRows = listPiToolCalls(run.id);
     comparison.ops = {
       durationMs: run.completedAt ? Math.max(0, Date.parse(run.completedAt) - Date.parse(run.startedAt)) : null,
       costUsd: run.actualCost,
-      toolCalls: 0,
-      deniedToolCalls: 0,
+      toolCalls: toolCallRows.length,
+      deniedToolCalls: toolCallRows.filter((row) => row.policyOutcome === 'denied').length,
+      derivedFrom: 'tool_calls',
     };
 
     db.run(

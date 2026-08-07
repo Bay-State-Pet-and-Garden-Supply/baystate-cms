@@ -29,3 +29,27 @@ Agent output only becomes a candidate result through a terminal structured submi
 - Provider-neutral executor interface with a Pi adapter (chosen) — matches the epic's "Pi must be addable, shadowable, disableable, or replaceable" requirement.
 - Direct Pi invocation from onboarding code — rejected: couples the workflow to the runtime, blocks shadowing/comparison, and risks onboarding availability on Pi failures.
 - Agent writes approved files directly — rejected outright by the program's product principle: deterministic CMS code validates, reviews, promotes, and publishes.
+
+## Revised requirement: in-process execution boundary (P1-5)
+
+Issue #22 originally scoped PI-5 sandboxing as a disposable container / micro-VM with no production DB credentials and no workspace write access. The implemented boundary is deliberately different, and this section formally revises the requirement for the **local single-operator deployment**:
+
+- Pi sessions run **in the server process** behind the provider-neutral executor (`src/product-intelligence/executor.ts`) with the Pi SDK imported lazily (no Pi code loads unless a run starts).
+- Rendered-browser work delegates to the **extraction worker** process (`src/extraction-worker/`), which enforces private/link-local destination floors on navigation and network capture.
+- The resource loader refuses auto-discovered extensions, skills, templates, and project/global context files (approved-extension-only).
+- The **PolicyGateway is the enforced network boundary** (P0-1): every external side effect reachable transitively from a PI tool — HTTP, search providers, OCR/model providers, browser navigation/network capture, managed providers — passes the server-authoritative policy (SSRF/private-IP rejection, per-hop redirect re-validation, size/type caps, data-sharing gates, audit rows) before execution. No raw `fetch()` bypasses the gateway in PI-reachable code.
+
+### Risk register (accepted residual risks)
+
+| ID | Risk | Mitigation in place |
+| --- | --- | --- |
+| R1 | **Supply-chain exposure** — the Pi SDK and model-provider clients run in the server process | Pinned dependency versions (`bun.lock` frozen install), npm/bun audit in the CI gate, minimal provider surface (only the routed model's client is loaded), lazy import so non-PI deployments never load Pi code |
+| R2 | **Process secrets** — server env vars (API tokens, provider keys) are technically reachable from in-process Pi tool code | Least-privilege tool design (25 bounded research tools, no tool reads environment variables), code review gate on all tool adapters, policy deny-lists enforced before dispatch |
+| R3 | **Database availability** — PI tool code shares the in-process `bun:sqlite` database | Repository pattern only (no raw SQL from tools); deterministic verification/evidence code reads through repositories; budget/retention enforcement is DB-backed and fail-closed |
+| R4 | **Deployment assumption** — single-operator local server; **not multi-tenant** | Documented here as a hard constraint: enabling PI in a multi-tenant deployment first requires the micro-VM / process isolation from issue #22; the policy gateway and resource-loader hardening are not a substitute for tenant isolation |
+
+**Acceptance line:** Accepted as residual risk pending product-owner sign-off — [DATE]
+
+## Provider scope: benchmark-first integration (P2-3)
+
+`pi-web-access` extension factories and real managed-provider adapters are **out of scope until benchmarked**. The benchmark-first enforcement point is extraction layer 7 / the managed fallback (`src/product-intelligence/extraction/managed-fallback.ts` + `evaluation/extraction-benchmark.ts`): interfaces, provider registries, and honest skip-row semantics are the integration contract, and a provider is only adopted after measured retrieval/extraction/cost results justify it. This is a deliberate scope decision recorded for issues #28/#29, not an unimplemented feature.

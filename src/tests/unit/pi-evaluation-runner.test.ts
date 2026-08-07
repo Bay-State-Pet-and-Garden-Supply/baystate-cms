@@ -15,7 +15,7 @@ import os from 'node:os';
 import { initDb, getDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import * as benchmarkRepo from '../../db/repositories/benchmark-repo';
-import { createPiRun, insertPiResult, transitionPiRunStatus, getPiResult } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, insertPiResult, insertPiToolCall, transitionPiRunStatus, getPiResult } from '../../db/repositories/product-intelligence-repo';
 import { runPiEvaluation } from '../../product-intelligence/evaluation/runner';
 import { buildPiGoldenProducts } from '../../product-intelligence/evaluation/fixture-dataset';
 
@@ -143,6 +143,33 @@ describe('PI-9 evaluation runner', () => {
     expect(result.report!.outcomeDistribution.wrong_variant).toBeGreaterThanOrEqual(1);
     expect(result.report!.outcomeDistribution.abstained).toBeGreaterThanOrEqual(1);
     expect(result.report!.outcomeDistribution.submitted).toBe(0);
+  });
+
+  it('derives tool-call metrics from the persisted tool-call table (P2-2)', () => {
+    const products = buildPiGoldenProducts();
+    const exactGtin =
+      products.find(
+        (p) => p.gold.identity.exactProduct && p.input.gtin !== '085000079585' && !p.gold.identity.wrongVariant && !p.gold.identity.parentProductOnly && !p.gold.identity.requiredAbstention,
+      )?.input.gtin ?? GTIN;
+    const runId = makeRun(exactGtin, bundleEnvelope('exact_match', [{ field: 'size', values: ['16 oz'] }]));
+    insertPiToolCall({ runId, sequence: 1, toolName: 'search_upc', policyOutcome: 'allowed' });
+    insertPiToolCall({ runId, sequence: 2, toolName: 'extract_product_page', policyOutcome: 'allowed' });
+    insertPiToolCall({ runId, sequence: 3, toolName: 'submit_product_research_bundle', policyOutcome: 'denied' });
+
+    runPiEvaluation({ datasetId, runIds: [runId] });
+
+    const rows = getDb()
+      .query('SELECT comparison_json FROM pi_evaluation_runs WHERE run_id = ?')
+      .all(runId) as Array<{ comparison_json: string }>;
+    expect(rows.length).toBe(1);
+    const ops = JSON.parse(rows[0].comparison_json).ops as {
+      toolCalls: number;
+      deniedToolCalls: number;
+      derivedFrom?: string;
+    };
+    expect(ops.toolCalls).toBe(3);
+    expect(ops.deniedToolCalls).toBe(1);
+    expect(ops.derivedFrom).toBe('tool_calls');
   });
 
   it('honors runIds restriction and skips products without runs', () => {
