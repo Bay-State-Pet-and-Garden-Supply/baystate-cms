@@ -311,6 +311,8 @@ export interface PiComparison {
     costUsd: number | null;
     toolCalls: number;
     deniedToolCalls: number;
+    /** P2-2: 'tool_calls' when counts were derived from the persisted tool-call table, 'placeholder' otherwise. */
+    derivedFrom?: 'tool_calls' | 'placeholder';
   };
 }
 
