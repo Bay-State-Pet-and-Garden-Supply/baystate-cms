@@ -519,7 +519,9 @@ async function installNetworkCapture(
     // resolution applies to captured sub-resources too, and lookup failure
     // fails closed (an unresolvable destination is never captured).
     if (isPrivateOrLinkLocalUrl(reqUrl)) return;
-    if (!isDestinationAllowed(reqUrl, sourcesAllowlist)) return;
+    // Round-4 P1-4: pinned http captures present IP-literal URLs — match the
+    // allowlist against the Host header identity in that case.
+    if (!isDestinationAllowed(reqUrl, sourcesAllowlist, effectiveHostForIpLiteral(reqUrl, response.request().headers()['host']))) return;
     if ((await resolveDestinationAndCheck(reqUrl)) !== null) return;
     // Requirement: filter to relevant product data — never analytics,
     // cart/account/checkout/session, or personalization endpoints, and
@@ -697,8 +699,7 @@ function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
   const hostname = parsed.hostname.toLowerCase();
   if (hostname === 'localhost' || hostname === '::1') return true;
   if (hostname.endsWith('.local')) return true;
-  const isIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':');
-  if (!isIpLiteral) return false;
+  if (!isIpLiteralHostname(hostname)) return false;
   if (hostname.includes(':')) {
     return (
       hostname === '::' ||
@@ -719,6 +720,66 @@ function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
   return false;
 }
 
+/** True when the hostname is a literal IP (v4 dotted or v6). */
+function isIpLiteralHostname(hostname: string): boolean {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':');
+}
+
+/**
+ * Round-4 P1-4: pure URL rewrite that closes the DNS-rebinding TOCTOU window
+ * for http destinations. Given a validated PUBLIC address, rewrite an http
+ * URL to the address literal so the connection is pinned to the exact
+ * address that was validated (the caller must send a Host header with the
+ * original hostname). Returns null when the URL is not pinnable — non-http
+ * (TLS SNI prevents https pinning without an outbound proxy), an IP-literal
+ * hostname (already pinned), or an empty address.
+ */
+export function pinHttpDestination(rawUrl: string, address: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:') return null;
+  if (isIpLiteralHostname(parsed.hostname)) return null;
+  if (!address) return null;
+  const formatted = address.includes(':') ? `[${address}]` : address;
+  return `http://${formatted}${parsed.pathname}${parsed.search}`;
+}
+
+/**
+ * Round-4 P1-4: resolve a hostname to a single PUBLIC address suitable for
+ * connection pinning. Returns null (deny) when ANY record is
+ * private/link-local/loopback or when resolution fails (fail closed) — a
+ * destination that cannot be proven public is never pinned.
+ */
+export async function resolvePublicAddress(hostname: string): Promise<string | null> {
+  let records: Array<{ address: string; family: number }>;
+  try {
+    records = await lookup(hostname, { all: true });
+  } catch {
+    return null; // fail closed
+  }
+  if (records.length === 0) return null;
+  if (records.some((record) => isPrivateOrLinkLocalUrl(`http://${record.address}/`))) return null;
+  return records[0].address;
+}
+
+/**
+ * Round-4 P1-4: true when a response URL is an IP-literal form that differs
+ * from the logical (hostname-form) destination — i.e. the hop was pinned.
+ */
+function isPinnedResponseUrl(responseUrl: string, logicalUrl: string): boolean {
+  try {
+    const respHost = new URL(responseUrl).hostname.toLowerCase();
+    const logicalHost = new URL(logicalUrl).hostname.toLowerCase();
+    return isIpLiteralHostname(respHost) && respHost !== logicalHost;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * P0-1 (round 2): the run's allowed-source-domains apply to navigation
  * (initial + redirect hops) and captured sub-resources. An absent or empty
@@ -726,11 +787,14 @@ function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
  * apply); a non-empty allowlist requires an exact or subdomain-suffix match
  * (case-insensitive, `www.` normalized).
  */
-function isDestinationAllowed(rawUrl: string, sourcesAllowlist: string[] | undefined): boolean {
+function isDestinationAllowed(rawUrl: string, sourcesAllowlist: string[] | undefined, hostOverride?: string | null): boolean {
   if (!sourcesAllowlist || sourcesAllowlist.length === 0) return true;
   let hostname: string;
   try {
-    hostname = new URL(rawUrl).hostname.toLowerCase();
+    // Round-4 P1-4: pinned http connections present an IP-literal URL; the
+    // caller supplies the original hostname via the Host header, which is
+    // authoritative for allowlist matching in that case.
+    hostname = (hostOverride ?? new URL(rawUrl).hostname).toLowerCase();
   } catch {
     return false;
   }
@@ -740,6 +804,21 @@ function isDestinationAllowed(rawUrl: string, sourcesAllowlist: string[] | undef
     if (normalized.length === 0) return false;
     return hostname === normalized || hostname.endsWith('.' + normalized);
   });
+}
+
+/**
+ * Round-4 P1-4: for IP-literal URLs (pinned http connections), the allowlist
+ * identity comes from the request's Host header; hostname-form URLs use their
+ * own hostname. Returns null when the URL is not an IP literal.
+ */
+function effectiveHostForIpLiteral(rawUrl: string, hostHeader: string | undefined): string | null {
+  try {
+    const hostname = new URL(rawUrl).hostname.toLowerCase();
+    if (!isIpLiteralHostname(hostname)) return null;
+    return hostHeader ? hostHeader.split(':')[0].toLowerCase() : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -766,7 +845,7 @@ export async function resolveDestinationAndCheck(rawUrl: string): Promise<string
   } catch {
     return null; // unparseable/non-http — the literal floor already rejects it
   }
-  const isIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':');
+  const isIpLiteral = isIpLiteralHostname(hostname);
   if (isIpLiteral) return null;
   try {
     const records = await lookup(hostname, { all: true });
@@ -791,6 +870,49 @@ async function isNavigationBlocked(rawUrl: string, sourcesAllowlist: string[] | 
   return null;
 }
 
+/**
+ * Round-4 P1-4: fetch one logical http(s) destination with the connection
+ * PINNED for http. The http URL is rewritten to the validated public IP
+ * literal and the original hostname is sent as the Host header, so the
+ * connection is made to the exact address that passed validation — a
+ * rebinding hostname cannot answer public at validation time and private at
+ * connection time. https URLs cannot be pinned (TLS SNI requires the real
+ * hostname) and are fetched as-is after their caller-side validation;
+ * returns { pinned: true } only for pinned http fetches.
+ *
+ * Throws when an http hostname cannot be proven public (fail closed — the
+ * caller treats it as a blocked destination).
+ */
+async function fetchPinned(logicalUrl: string, timeoutMs: number): Promise<{ response: Response; pinned: boolean }> {
+  let parsed: URL;
+  try {
+    parsed = new URL(logicalUrl);
+  } catch {
+    return { response: await fetch(logicalUrl, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) }), pinned: false };
+  }
+  const headers: Record<string, string> = { ...HTTP_EXTRACTION_HEADERS };
+  let fetchUrl = logicalUrl;
+  let pinned = false;
+  if (parsed.protocol === 'http:' && !isIpLiteralHostname(parsed.hostname)) {
+    const address = await resolvePublicAddress(parsed.hostname);
+    if (address === null) {
+      throw new Error(`Cannot pin ${logicalUrl} to a validated public address`);
+    }
+    const pinnedUrl = pinHttpDestination(logicalUrl, address);
+    if (pinnedUrl) {
+      fetchUrl = pinnedUrl;
+      headers.Host = parsed.hostname;
+      pinned = true;
+    }
+  }
+  const response = await fetch(fetchUrl, {
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'manual',
+  });
+  return { response, pinned };
+}
+
 async function doStaticSnapshot(
   url: string,
   captureScreenshot: boolean,
@@ -807,10 +929,17 @@ async function doStaticSnapshot(
   // the run's allowed source domains are denied up front, redirects are
   // followed manually with every hop re-checked (allowlist + DNS), so a
   // public start URL cannot tunnel navigation to a private destination.
+  // Round-4 P1-4: every http hop is additionally PINNED to the validated
+  // public address (see fetchPinned) so a rebinding hostname cannot answer
+  // public at validation time and private at connection time. Redirects are
+  // resolved against the LOGICAL (hostname-form) URL so every hop re-enters
+  // the full validation loop.
   let response: Response | undefined;
   let html: string;
+  // Logical (hostname-form) destination: updated per redirect hop; the
+  // initial value is read by the blocked-first-hop early return.
+  let currentUrl = url;
   try {
-    let currentUrl = url;
     let redirects = 0;
     for (;;) {
       const blocked = await isNavigationBlocked(currentUrl, sourcesAllowlist);
@@ -818,7 +947,7 @@ async function doStaticSnapshot(
         warnings.push(blocked);
         return buildSnapshotResponse({
           url,
-          finalUrl: url,
+          finalUrl: currentUrl,
           htmlRef: null,
           screenshotRef: null,
           jsonLd: [],
@@ -831,11 +960,8 @@ async function doStaticSnapshot(
           networkRef: null,
         });
       }
-      const hop = await fetch(currentUrl, {
-        headers: HTTP_EXTRACTION_HEADERS,
-        signal: AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS),
-        redirect: 'manual',
-      });
+      const hopResult = await fetchPinned(currentUrl, HTTP_FETCH_TIMEOUT_MS);
+      const hop = hopResult.response;
       if (hop.status >= 300 && hop.status < 400) {
         const location = hop.headers.get('location');
         if (!location) {
@@ -857,7 +983,7 @@ async function doStaticSnapshot(
       warnings.push(`Static fetch failed: no response after redirect handling`);
       return buildSnapshotResponse({
         url,
-        finalUrl: url,
+        finalUrl: currentUrl,
         htmlRef: null,
         screenshotRef: null,
         jsonLd: [],
@@ -893,7 +1019,9 @@ async function doStaticSnapshot(
     });
   }
 
-  const finalUrl = response.url || url;
+  // Round-4 P1-4: when the fetch was pinned, response.url is the IP-literal
+  // form — report the logical (hostname-form) destination as the final URL.
+  const finalUrl = isPinnedResponseUrl(response.url, currentUrl) ? currentUrl : response.url || url;
 
   // Write raw HTML artifact
   const htmlRef = writeArtifact(artifactDir, 'page.html', html);
@@ -1018,11 +1146,13 @@ async function doRenderedSnapshot(
       // (defense in depth on top of the tool-boundary gateway check; redirect
       // hops and sub-requests are covered here too). Round-3: DNS resolution
       // applies to intercepts as well, and lookup failure fails closed.
+      // Round-4 P1-4: pinned http connections present IP-literal URLs — the
+      // allowlist identity comes from the Host header in that case.
       if (isPrivateOrLinkLocalUrl(reqUrl)) {
         await route.abort();
         return;
       }
-      if (!isDestinationAllowed(reqUrl, sourcesAllowlist)) {
+      if (!isDestinationAllowed(reqUrl, sourcesAllowlist, effectiveHostForIpLiteral(reqUrl, req.headers()['host']))) {
         await route.abort();
         return;
       }
@@ -1052,11 +1182,47 @@ async function doRenderedSnapshot(
       warnings.push(blocked);
     } else {
       try {
-        await page.goto(url, {
-          waitUntil: 'domcontentloaded',
-          timeout: RENDERED_TIMEOUT_MS,
-        });
-        finalUrl = page.url();
+        // Round-4 P1-4: for http destinations, PIN the navigation to the
+        // validated public address (IP-literal URL + Host header) so a
+        // rebinding hostname cannot answer public at validation time and
+        // private at connection time. https destinations cannot be pinned
+        // (TLS SNI requires the real hostname) — they rely on the
+        // re-validation above immediately before goto plus the per-request
+        // route checks; the residual TOCTOU window for https is documented
+        // at resolveDestinationAndCheck.
+        let gotoUrl = url;
+        let gotoHeaders: Record<string, string> | undefined;
+        let pinnedNavigation = false;
+        let allowGoto = true;
+        const parsed = new URL(url);
+        if (parsed.protocol === 'http:' && !isIpLiteralHostname(parsed.hostname)) {
+          const address = await resolvePublicAddress(parsed.hostname);
+          if (address === null) {
+            warnings.push(`Navigation denied: ${url} cannot be pinned to a validated public address`);
+            allowGoto = false;
+          } else {
+            const pinned = pinHttpDestination(url, address);
+            if (pinned) {
+              gotoUrl = pinned;
+              gotoHeaders = { Host: parsed.hostname };
+              pinnedNavigation = true;
+            }
+          }
+        }
+        if (allowGoto) {
+          if (gotoHeaders) {
+            // Playwright applies Host via page-level extra headers; the
+            // pinned connection then presents the original hostname.
+            await page.setExtraHTTPHeaders(gotoHeaders);
+          }
+          await page.goto(gotoUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: RENDERED_TIMEOUT_MS,
+          });
+          // Report the logical (hostname-form) destination, not the pinned
+          // IP-literal URL, as the canonical final URL.
+          finalUrl = pinnedNavigation ? url : page.url();
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         warnings.push(`Navigation failed: ${msg}`);

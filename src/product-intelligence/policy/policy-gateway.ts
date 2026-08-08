@@ -49,7 +49,7 @@ export type PolicyReasonCode =
   | 'data_sharing_denies_search'
   | 'unknown';
 
-export type DataClassification = 'public' | 'product_input' | 'fetched_content' | 'search_query' | 'local_evidence';
+export type DataClassification = 'public' | 'product_input' | 'fetched_content' | 'search_query' | 'local_evidence' | 'model_input';
 
 export interface PolicyCheckContext {
   runId: string;
@@ -119,6 +119,27 @@ export function classifyIp(address: string): 'private' | 'link_local' | 'public'
 export function isPrivateOrLinkLocal(address: string): boolean {
   const kind = classifyIp(address);
   return kind === 'private' || kind === 'link_local';
+}
+
+/**
+ * True only for EXPLICIT loopback literals (localhost / 127.0.0.0/8 / ::1 /
+ * IPv4-mapped forms). Never DNS-resolves arbitrary hostnames — resolving a
+ * hostile hostname for a "loopback test" would itself be an SSRF probe.
+ */
+export function isExplicitLoopbackEndpoint(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    let hostname = parsed.hostname.toLowerCase();
+    if (hostname.startsWith('[') && hostname.endsWith(']')) hostname = hostname.slice(1, -1);
+    if (hostname === 'localhost' || hostname === '::1' || hostname === '127.0.0.1') return true;
+    if (/^127(\.\d{1,3}){3}$/.test(hostname)) return true;
+    if (hostname.startsWith('::ffff:127.')) return true;
+    if (hostname.startsWith('0:0:0:0:0:0:ffff:127')) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +348,16 @@ export class PolicyGateway {
    * Policy-enforcing fetch: validates the destination, follows redirects
    * manually re-validating every hop, and enforces response-size and
    * content-type limits. Denied hops throw PolicyDeniedError.
+   *
+   * Round-4 P1-4 (documented residual): this is a validate-then-fetch
+   * sequence — the destination's DNS is resolved and validated here, then
+   * fetchFn() makes a SEPARATE connection with its own DNS resolution. A
+   * rebinding hostname can therefore answer public during validation and
+   * private at connection time. Full closure requires connect-time IP
+   * enforcement / DNS pinning / an outbound proxy (Bun's fetch does not
+   * expose a pinned-IP transport). Accepted residual for the single-operator
+   * local deployment; the extraction worker closes the equivalent window for
+   * http destinations by pinning to the validated address literal.
    */
   async gatewayFetch(
     ctx: PolicyCheckContext,
@@ -412,6 +443,117 @@ export class PolicyGateway {
     return (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
       return this.gatewayFetch(ctx, url, init, { dataClassification });
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Model endpoints (VLM/OCR)
+  // -------------------------------------------------------------------------
+
+  /**
+   * VLM/model-endpoint policy gate (round 4). LOCAL model endpoints
+   * (explicit localhost/loopback literals — never DNS-resolution probes)
+   * share nothing externally and are allowed under any data-sharing policy;
+   * REMOTE endpoints carry product input to a third party and must pass
+   * model-call authority: local_only denies; otherwise the provider/model
+   * must match the policy modelRoute. Every call is audited as a model
+   * decision (target_type 'model').
+   */
+  async checkModelEndpoint(
+    ctx: PolicyCheckContext,
+    call: { provider: string; model: string; endpointUrl: string; dataClassification?: DataClassification },
+  ): Promise<PolicyDecision> {
+    const { policy } = ctx;
+    const classification = call.dataClassification ?? 'model_input';
+    if (isExplicitLoopbackEndpoint(call.endpointUrl)) {
+      const decision: PolicyDecision = {
+        allowed: true,
+        reasonCode: 'unknown',
+        policyVersion: policy.configId,
+        detail: `local model endpoint ${call.endpointUrl} (${call.provider}/${call.model})`,
+      };
+      this.record(ctx, decision, 'model', `${call.provider}/${call.model}@local`, classification, 'none');
+      return decision;
+    }
+    if (policy.dataSharingPolicy === 'local_only') {
+      const decision: PolicyDecision = {
+        allowed: false,
+        reasonCode: 'local_only_denies_model',
+        policyVersion: policy.configId,
+        detail: `remote model endpoint ${call.endpointUrl} denied under local_only data-sharing policy`,
+      };
+      this.record(ctx, decision, 'model', `${call.provider}/${call.model}`, classification, 'fallback_denied');
+      return decision;
+    }
+    if (!policy.modelRoute || policy.modelRoute.provider !== call.provider || policy.modelRoute.model !== call.model) {
+      const decision: PolicyDecision = {
+        allowed: false,
+        reasonCode: 'model_not_in_route',
+        policyVersion: policy.configId,
+        detail: `${call.provider}/${call.model} is not the policy model route; fallbacks are never selected silently`,
+      };
+      this.record(ctx, decision, 'model', `${call.provider}/${call.model}`, classification, 'fallback_denied');
+      return decision;
+    }
+    const decision: PolicyDecision = {
+      allowed: true,
+      reasonCode: 'unknown',
+      policyVersion: policy.configId,
+      detail: `remote model endpoint ${call.endpointUrl} (${call.provider}/${call.model})`,
+    };
+    this.record(ctx, decision, 'model', `${call.provider}/${call.model}`, classification, 'none');
+    return decision;
+  }
+
+  /**
+   * Model-call transport (VLM/OCR): gates EVERY hop through
+   * checkModelEndpoint (local loopback endpoints are allowed under any
+   * data-sharing policy; remote endpoints must match the policy modelRoute)
+   * and enforces a response-size cap. Redirects are followed manually and
+   * re-gated hop by hop — a redirected model call cannot escape the gate.
+   */
+  buildModelFetch(
+    ctx: PolicyCheckContext,
+    call: { provider: string; model: string; endpointUrl: string },
+  ): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+    const classification: DataClassification = 'model_input';
+    return async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+      let currentUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      let redirects = 0;
+      for (;;) {
+        const decision = await this.checkModelEndpoint(ctx, {
+          provider: call.provider,
+          model: call.model,
+          endpointUrl: currentUrl,
+          dataClassification: classification,
+        });
+        if (!decision.allowed) throw new PolicyDeniedError(decision);
+        const response = await this.fetchFn(currentUrl, { ...init, redirect: 'manual', signal: init.signal });
+        if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
+          redirects += 1;
+          if (redirects > 5) {
+            throw new PolicyDeniedError({
+              allowed: false,
+              reasonCode: 'redirect_to_denied',
+              policyVersion: ctx.policy.configId,
+              detail: 'too many redirects (5) for model endpoint',
+            });
+          }
+          currentUrl = new URL(response.headers.get('location')!, currentUrl).toString();
+          continue;
+        }
+        const MAX_MODEL_RESPONSE_BYTES = 20 * 1024 * 1024;
+        const contentLength = Number(response.headers.get('content-length') ?? '0');
+        if (contentLength > MAX_MODEL_RESPONSE_BYTES) {
+          throw new PolicyDeniedError({
+            allowed: false,
+            reasonCode: 'response_too_large',
+            policyVersion: ctx.policy.configId,
+            detail: `model response exceeds ${MAX_MODEL_RESPONSE_BYTES} bytes`,
+          });
+        }
+        return response;
+      }
     };
   }
 

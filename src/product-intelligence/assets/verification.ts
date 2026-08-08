@@ -17,7 +17,7 @@
  *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/23
  */
-import { sha256Hex } from '../../shared/stable-id';
+import { sha256Hex, canonicalJsonStringify } from '../../shared/stable-id';
 import type { ProductIntelligencePolicy } from '../contracts';
 import type { PolicyGateway } from '../policy/policy-gateway';
 import type { ImageVerificationContract } from './contract';
@@ -303,6 +303,12 @@ export interface VerifyImageDeps {
    * cannot approve.
    */
   evidenceResolver?: EvidenceResolver;
+  /** Server-derived source-kind: resolves the durable source row for the
+   *  asset URL and returns its source_type. Authority never comes from the
+   *  agent's declaredSourceType string. When no durable source resolves,
+   *  verification proceeds with sourceType 'unknown' (rights stay
+   *  restricted unless a reuse grant matches). */
+  sourceTypeResolver?: (url: string) => string | null;
   /**
    * Server-authoritative reuse grant: (sourceTier, domain) -> the grant
    * record that authorized reuse, or null. A manufacturer/supplier domain
@@ -312,12 +318,41 @@ export interface VerifyImageDeps {
   reuseGrantResolver?: ReuseGrantResolver;
 }
 
+/**
+ * Round-4 (review P0): the immutable product identity a verification is
+ * performed against, derived SERVER-SIDE from the run input. The terminal
+ * validator recomputes the canonical hash from the current run's input and
+ * refuses assets verified against any other run/identity.
+ */
+export interface VerifiedAgainstSnapshot {
+  runId?: string | null;
+  gtin?: string | null;
+  name?: string | null;
+  variant?: string | null;
+  netContent?: { value: number; unit: string } | null;
+  packCount?: number | null;
+  flavor?: string | null;
+  formula?: string | null;
+}
+
+/** Canonical, order-stable hash of the identity snapshot. Both the verifier
+ *  (at tool time) and the terminal validator (at submission time) compute
+ *  this from run-derived data, so hash equality proves the asset was verified
+ *  against the same immutable product identity. */
+export function canonicalVerifiedAgainstHash(snapshot: VerifiedAgainstSnapshot): string {
+  return sha256Hex(canonicalJsonStringify(snapshot));
+}
+
 export interface VerifyImageInput {
   url: string;
   sourcePageUrl?: string | null;
   sourcePath?: string | null;
   sourceArtifactId?: string | null;
   extractionMethod?: ExtractionMethod;
+  /** Round-4: authoritative comparison target, server-derived from the run
+   *  input. Agent-supplied expected* fields below are recorded for review
+   *  but are NEVER used as comparison targets (non-authoritative hints). */
+  runIdentity?: VerifiedAgainstSnapshot | null;
   expectedGtin?: string | null;
   expectedBrand?: string | null;
   expectedName?: string | null;
@@ -326,6 +361,8 @@ export interface VerifyImageInput {
   expectedPackCount?: number | null;
   expectedFlavor?: string | null;
   expectedFormula?: string | null;
+  /** @deprecated Round-4: source kind is derived from the durable source row
+   *  via VerifyImageDeps.sourceTypeResolver, never from this agent string. */
   declaredSourceType?: string | null;
   declaredRightsBasis?: string | null;
   declaredRightsEvidenceRef?: string | null;
@@ -383,7 +420,15 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   const now = deps.now ?? (() => new Date());
   const contract = deps.contract ?? sharpImageVerificationAdapter;
   const retrievedAt = now().toISOString();
-  const declaredSourceType = input.declaredSourceType ?? 'network_discovered';
+  // Round-4: source kind derives from the durable source row (provenance),
+  // never from the agent's declared string. Unresolvable -> 'unknown' (fail
+  // closed: no grant tier, rights stay restricted unless one matches).
+  const declaredSourceType = deps.sourceTypeResolver?.(input.url) ?? 'unknown';
+  // Round-4: the comparison target is the server-derived run identity. When
+  // the run input lacks a dimension, that dimension is NOT compared — it is
+  // never taken from the agent.
+  const runIdentity = input.runIdentity ?? null;
+  const verifiedAgainstHash = runIdentity ? canonicalVerifiedAgainstHash(runIdentity) : null;
 
   const response = await deps.gateway.gatewayFetch(
     { runId: deps.runId, policy: deps.policy },
@@ -395,12 +440,12 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     },
   );
   if (!response.ok) {
-    return failRecord(input, declaredSourceType, retrievedAt, `image fetch failed: HTTP ${response.status}`);
+    return failRecord(input, declaredSourceType, retrievedAt, `image fetch failed: HTTP ${response.status}`, verifiedAgainstHash);
   }
   const contentType = response.headers.get('content-type');
   const buffer = new Uint8Array(await response.arrayBuffer());
   if (buffer.length > MAX_VERIFICATION_BYTES) {
-    return failRecord(input, declaredSourceType, retrievedAt, 'image exceeds 10 MB verification limit');
+    return failRecord(input, declaredSourceType, retrievedAt, 'image exceeds 10 MB verification limit', verifiedAgainstHash);
   }
 
   const decoded = await contract.verify({ buffer, contentType });
@@ -453,7 +498,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
 
   if (!decoded.verified) {
     return {
-      ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted),
+      ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted, verifiedAgainstHash, runIdentity),
       exactProductMatch: false,
       exactVariantMatch: null,
       qualityStatus: 'invalid',
@@ -465,15 +510,18 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     };
   }
 
+  // Round-4: the comparison target is the server-derived run identity. The
+  // agent's expected* fields are never used as comparison targets — when the
+  // run input lacks a dimension, that dimension is simply not compared.
   const identity = classifyAssetIdentity(observed, {
-    expectedGtin: input.expectedGtin ?? null,
-    expectedBrand: input.expectedBrand ?? null,
-    expectedName: input.expectedName ?? null,
-    expectedVariant: input.expectedVariant ?? null,
-    expectedNetContent: input.expectedNetContent ?? null,
-    expectedPackCount: input.expectedPackCount ?? null,
-    expectedFlavor: input.expectedFlavor ?? null,
-    expectedFormula: input.expectedFormula ?? null,
+    expectedGtin: runIdentity?.gtin ?? null,
+    expectedBrand: null,
+    expectedName: runIdentity?.name ?? null,
+    expectedVariant: runIdentity?.variant ?? null,
+    expectedNetContent: runIdentity?.netContent ?? null,
+    expectedPackCount: runIdentity?.packCount ?? null,
+    expectedFlavor: runIdentity?.flavor ?? null,
+    expectedFormula: runIdentity?.formula ?? null,
   });
   const commerceApproved = computeCommerceApproved({
     rightsStatus,
@@ -484,7 +532,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   });
 
   return {
-    ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted),
+    ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted, verifiedAgainstHash, runIdentity),
     exactProductMatch: identity.exactProductMatch,
     exactVariantMatch: identity.exactVariantMatch,
     qualityStatus: decoded.qualityStatus,
@@ -572,10 +620,12 @@ function baseRecord(
   input: VerifyImageInput,
   declaredSourceType: string,
   retrievedAt: string,
-  decoded: Awaited<ReturnType<ImageVerificationContract['verify']>>,
+  decoded: Awaited<ReturnType<ImageVerificationContract['verify']>> | null,
   observed: IdentityObservation,
   observationProvenance: ObservationProvenance,
   agentAsserted: IdentityObservation | null,
+  verifiedAgainstHash: string | null,
+  verifiedAgainst: VerifiedAgainstSnapshot | null,
 ): Omit<
   ProductAssetEvidence,
   'exactProductMatch' | 'exactVariantMatch' | 'qualityStatus' | 'rightsStatus' | 'rightsBasis' | 'rightsEvidenceRef' | 'commerceApproved' | 'conflicts'
@@ -588,9 +638,9 @@ function baseRecord(
     sourceArtifactId: input.sourceArtifactId ?? `verify_image_candidate:${sha256Hex(input.url).slice(0, 24)}`,
     extractionMethod: input.extractionMethod ?? 'manual',
     retrievedAt,
-    originalContentHash: decoded.image.contentHash,
-    perceptualHash: decoded.image.perceptualHash,
-    variantReference: observed.variant ?? input.expectedVariant ?? null,
+    originalContentHash: decoded?.image?.contentHash ?? '',
+    perceptualHash: decoded?.image?.perceptualHash ?? null,
+    variantReference: observed.variant ?? input.runIdentity?.variant ?? null,
     observedBrand: observed.brand,
     observedProductName: observed.productName,
     observedVariant: observed.variant,
@@ -599,10 +649,13 @@ function baseRecord(
     observedGtin: observed.gtin,
     observationProvenance,
     agentAsserted,
+    verifiedAgainstHash,
+    verifiedAgainst: (verifiedAgainst ?? null) as Record<string, unknown> | null,
+    declaredSourceType,
   };
 }
 
-function failRecord(input: VerifyImageInput, declaredSourceType: string, retrievedAt: string, reason: string): ProductAssetEvidence {
+function failRecord(input: VerifyImageInput, declaredSourceType: string, retrievedAt: string, reason: string, verifiedAgainstHash: string | null): ProductAssetEvidence {
   return {
     sourceUrl: input.url,
     sourcePageUrl: input.sourcePageUrl ?? null,
@@ -625,6 +678,9 @@ function failRecord(input: VerifyImageInput, declaredSourceType: string, retriev
     observedGtin: null,
     observationProvenance: 'decoder',
     agentAsserted: null,
+    verifiedAgainstHash,
+    verifiedAgainst: null,
+    declaredSourceType,
     exactProductMatch: false,
     exactVariantMatch: null,
     qualityStatus: 'invalid',

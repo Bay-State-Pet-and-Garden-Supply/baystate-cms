@@ -396,6 +396,8 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           url: 'https://cdn.example.com/i.png',
           sourcePageUrl: PAGE,
           sourcePath: 'json_ld.image',
+          // Round-4: comparison target is the server-derived run identity.
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz', netContent: { value: 16, unit: 'oz' }, packCount: 1 },
           expectedGtin: GTIN,
           expectedName: 'Stella Chicken Broth 16 oz',
           expectedNetContent: { value: 16, unit: 'oz' },
@@ -416,6 +418,8 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
             tier === 'supplier'
               ? { allowed: true as const, grantId: 'grant-supplier-1', sourceTier: 'supplier', domainPattern: '*', terms: null }
               : null,
+          // Round-4: source kind derives from the durable source row.
+          sourceTypeResolver: (url) => (url === 'https://cdn.example.com/i.png' ? 'supplier' : null),
         },
       );
       expect(record.qualityStatus).toBe('usable');
@@ -460,6 +464,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
         {
           url: 'https://cdn.example.com/mfr.png',
           sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN },
           expectedGtin: GTIN,
           declaredSourceType: 'manufacturer',
           evidenceIds: ['ev-gtin-1'],
@@ -468,6 +473,8 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           ...deps(gatewayReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
+          // Round-4: durable source kind (origin proves nothing by itself).
+          sourceTypeResolver: (url) => (url === 'https://cdn.example.com/mfr.png' ? 'manufacturer' : null),
           // No reuse grant at all (default): origin proves nothing.
         },
       );
@@ -530,6 +537,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
         {
           url: 'https://cdn.example.com/wrong.png',
           sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz', netContent: { value: 16, unit: 'oz' } },
           expectedGtin: GTIN,
           expectedName: 'Stella Chicken Broth 16 oz',
           expectedNetContent: { value: 16, unit: 'oz' },

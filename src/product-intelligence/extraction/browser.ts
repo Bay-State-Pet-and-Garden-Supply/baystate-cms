@@ -32,6 +32,15 @@ export interface BrowserSnapshot {
   interaction: { performed: boolean; finalUrl: string; selectedOptions: string[] } | null;
   /** Rendered-page structure signals (e.g. 'interaction:add-to-cart') — bounded excerpt sources for layer 8. */
   pageStructureSignals: string[];
+  /**
+   * Round-4 P1-2: DOM variant-selector affordances observed after rendering
+   * (e.g. a <select>/radio group whose options are product variant
+   * dimensions). AFFIRMATIVE contradiction/proof only — optionCount >= 2 is
+   * treated as a multiple-variant signal, optionCount === 1 as an
+   * affirmative single-variant affordance. Absence is never proof.
+   * Producer: the extraction worker's rendered-page snapshot.
+   */
+  domVariantSelectors?: Array<{ kind: 'select' | 'radio' | 'unknown'; optionCount: number }>;
   warnings: string[];
 }
 
@@ -84,6 +93,13 @@ export function evidenceFromProductPayload(
     size: string | null;
     variant: { name?: string; id?: string; sku?: string } | null;
     variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
+    /**
+     * Round-4 P1-2: affirmative variant-set evidence accumulated from payloads
+     * that DECLARE their variant set (an explicit `variants` array). `single`
+     * when a payload declares exactly one sellable variant; `multiple` when a
+     * payload or DOM selector affordance declares >= 2. Absence never counts.
+     */
+    variantSetEvidence?: { single: boolean; multiple: boolean };
   },
 ): void {
   const title = typeof product.title === 'string' ? product.title : typeof product.name === 'string' ? product.name : null;
@@ -119,6 +135,16 @@ export function evidenceFromProductPayload(
       out.variantSignals.push({ kind: 'parent_page' });
     }
   }
+  // Round-4 P1-2: a payload that DECLARES its variant set with an explicit
+  // `variants` array is affirmative variant-set evidence. Length 1 = exactly
+  // one sellable variant (single); length >= 2 = multiple (also surfaced as a
+  // parent_page signal above). A missing `variants` key or an empty array is
+  // NO evidence either way — absence never proves single-variant status.
+  if (Array.isArray(product.variants)) {
+    out.variantSetEvidence ??= { single: false, multiple: false };
+    if (product.variants.length === 1) out.variantSetEvidence.single = true;
+    else if (product.variants.length > 1) out.variantSetEvidence.multiple = true;
+  }
   const variants = Array.isArray(product.variants) ? (product.variants as Array<Record<string, unknown>>).filter((v) => v && typeof v === 'object') : [];
   const firstVariant = variants[0];
   if (firstVariant) {
@@ -143,8 +169,9 @@ export function evidenceFromBrowserSnapshot(
     size: string | null;
     variant: { name?: string; id?: string; sku?: string } | null;
     variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
+    variantSetEvidence?: { single: boolean; multiple: boolean };
   },
-): string[] {
+): { methodsUsed: string[]; variantSetEvidence: 'single' | 'multiple' | 'none' } {
   const methodsUsed: string[] = [];
   for (const jsonLd of snapshot.jsonLd) {
     evidenceFromProductPayload(jsonLd, 'json_ld', 'browser JSON-LD', out);
@@ -169,7 +196,29 @@ export function evidenceFromBrowserSnapshot(
   for (const image of snapshot.imageCandidates) {
     if (!out.images.some((i) => i.url === image)) out.images.push({ url: image, sourcePath: 'browser image candidates' });
   }
-  return [...new Set(methodsUsed)];
+  // Round-4 P1-2: DOM variant-selector affordances are AFFIRMATIVE evidence.
+  // optionCount >= 2 on a selector = the page presents >= 2 variant options
+  // (contradiction signal); optionCount === 1 = an affirmative single-variant
+  // affordance. Absence of selectors never proves anything.
+  for (const selector of snapshot.domVariantSelectors ?? []) {
+    if (selector.optionCount >= 2) {
+      out.variantSetEvidence ??= { single: false, multiple: false };
+      out.variantSetEvidence.multiple = true;
+      if (!out.variantSignals.some((signal) => signal.kind === 'parent_page')) {
+        out.variantSignals.push({ kind: 'parent_page' });
+      }
+    } else if (selector.optionCount === 1) {
+      out.variantSetEvidence ??= { single: false, multiple: false };
+      out.variantSetEvidence.single = true;
+    }
+  }
+  const tracker = out.variantSetEvidence ?? { single: false, multiple: false };
+  const variantSetEvidence: 'single' | 'multiple' | 'none' = tracker.multiple
+    ? 'multiple'
+    : tracker.single
+      ? 'single'
+      : 'none';
+  return { methodsUsed: [...new Set(methodsUsed)], variantSetEvidence };
 }
 
 /** Product-like only with strong identity markers (gtin/variants/handle). */
@@ -212,6 +261,7 @@ export async function runBrowserInteraction(
     size: string | null;
     variant: { name?: string; id?: string; sku?: string } | null;
     variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
+    variantSetEvidence?: { single: boolean; multiple: boolean };
   },
   // P0-5 round 2: the EXPECTED variant (name/GTIN from the run input). A
   // successful interaction only proves an option was selected — variant_match
@@ -220,7 +270,7 @@ export async function runBrowserInteraction(
   expectedVariant?: { name?: string; gtin?: string },
 ): Promise<{ finalUrl: string; selectedOptions: string[]; methodsUsed: string[]; warnings: string[] }> {
   const snapshotResult = await snapshot({ url, captureNetwork: true, interaction });
-  const methodsUsed = evidenceFromBrowserSnapshot(snapshotResult, out);
+  const { methodsUsed } = evidenceFromBrowserSnapshot(snapshotResult, out);
   if (interaction.type === 'select_option' && snapshotResult.interaction?.performed) {
     for (const option of snapshotResult.interaction.selectedOptions) {
       addFieldOnce(out.fields, 'variant_selection', option, 'browser', 'interaction selected option');

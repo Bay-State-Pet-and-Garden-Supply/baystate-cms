@@ -578,9 +578,39 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
       .filter((s): s is PiSourceRow => Boolean(s))
       .map((s) => ({ sourceId: s.id, url: s.url, domain: s.domain, sourceType: s.sourceType }));
 
-    // Approved images only (commerce-approval is deterministic, never manual).
-    const approvedImages = listPiAssetsByRun(runId).filter((a) => a.commerceApproved === 1);
-    const approvedImageIds = approvedImages.map((a) => a.id);
+    // Round-4 review: approved images are ONLY the assets the FINAL reviewed
+    // bundle cites via imageCandidates[].verifiedAssetIds — never the run's
+    // whole research/verification history (five verified candidates with one
+    // chosen must import exactly the one chosen). Each cited id must resolve
+    // to a durable asset row of THIS run (listPiAssetsByRun is run-scoped, so
+    // cross-run borrowing fails closed) with commerceApproved === 1; anything
+    // else aborts the import before a single write. Candidate order is
+    // preserved; duplicates dedupe. Roles are not representable in the shared
+    // approvedImageIds string[] shape, so ids only (candidate order keeps
+    // primary first when the bundle lists it first).
+    const bundleCandidates = Array.isArray(envelope.imageCandidates)
+      ? (envelope.imageCandidates as Array<Record<string, unknown>>)
+      : [];
+    const assetsById = new Map(listPiAssetsByRun(runId).map((a) => [a.id, a]));
+    const approvedImageIds: string[] = [];
+    for (const candidate of bundleCandidates) {
+      const ids = Array.isArray(candidate.verifiedAssetIds) ? candidate.verifiedAssetIds.map(String) : [];
+      for (const id of ids) {
+        if (approvedImageIds.includes(id)) continue;
+        const asset = assetsById.get(id);
+        if (!asset) {
+          throw new UnresolvedEvidenceError([
+            { field: `image:${id}`, reason: 'cited verified asset does not belong to this run (or does not exist)' },
+          ]);
+        }
+        if (asset.commerceApproved !== 1) {
+          throw new UnresolvedEvidenceError([
+            { field: `image:${id}`, reason: 'cited verified asset is not commerce-approved' },
+          ]);
+        }
+        approvedImageIds.push(id);
+      }
+    }
 
     // Materialize evidence into the item's extraction data (distinct
     // provenance key consumed by the classification pipeline).

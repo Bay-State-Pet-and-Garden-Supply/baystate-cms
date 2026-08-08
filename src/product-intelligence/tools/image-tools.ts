@@ -22,7 +22,7 @@ import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation, P
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { boundedString } from './registry';
-import type { EvidenceResolver, ResolvedEvidenceFact, ReuseGrantRecord } from '../assets/verification';
+import type { EvidenceResolver, ResolvedEvidenceFact, ReuseGrantRecord, VerifiedAgainstSnapshot } from '../assets/verification';
 
 export const verifyImageCandidateTool: PiToolAdapter = {
   name: 'verify_image_candidate',
@@ -86,6 +86,13 @@ export const verifyImageCandidateTool: PiToolAdapter = {
       gtin: params.observedGtin ? String(params.observedGtin) : null,
     };
 
+    // Round-4 (review P0): the comparison target is the server-derived run
+    // identity (from the run input), never the agent's expected* params.
+    // Agent-supplied expected*/declaredSourceType strings are NOT threaded
+    // into verification at all — a conflicting hint cannot shift the
+    // comparison target or select a reuse grant.
+    const runIdentity = loadRunIdentity(ctx.runId);
+
     try {
       const record = await verifyImageCandidate(
         {
@@ -94,19 +101,7 @@ export const verifyImageCandidateTool: PiToolAdapter = {
           sourcePath: params.sourcePath ? String(params.sourcePath) : null,
           sourceArtifactId: params.sourceArtifactId ? String(params.sourceArtifactId) : undefined,
           extractionMethod: params.extractionMethod as ExtractionMethod | undefined,
-          expectedGtin: params.gtin ? String(params.gtin) : null,
-          expectedName: params.expectedName ? String(params.expectedName) : null,
-          expectedVariant: params.variant ? String(params.variant) : null,
-          expectedNetContent:
-            params.netContentValue !== undefined && params.netContentUnit
-              ? { value: Number(params.netContentValue), unit: String(params.netContentUnit) }
-              : null,
-          expectedPackCount: params.packCount !== undefined ? Number(params.packCount) : null,
-          expectedFlavor: params.flavor ? String(params.flavor) : null,
-          expectedFormula: params.formula ? String(params.formula) : null,
-          declaredSourceType: params.declaredSourceType ? String(params.declaredSourceType) : null,
-          declaredRightsBasis: params.rightsBasis ? String(params.rightsBasis) : null,
-          declaredRightsEvidenceRef: params.rightsEvidenceRef ? String(params.rightsEvidenceRef) : null,
+          runIdentity,
           evidenceIds: Array.isArray(params.evidenceIds) ? (params.evidenceIds as unknown[]).map((id) => String(id)) : undefined,
           observed,
         },
@@ -116,6 +111,9 @@ export const verifyImageCandidateTool: PiToolAdapter = {
           gateway,
           signal: ctx.signal,
           evidenceResolver,
+          // Round-4: source kind derives from the durable source row for the
+          // URL (provenance), never the agent's declaredSourceType.
+          sourceTypeResolver: loadSourceTypeResolver(ctx.runId),
           // P0-6: rights resolve ONLY from the workspace's durable reuse
           // grants (server-authoritative). The declared source tier + basis
           // strings prove origin only, never reuse permission — absent a
@@ -218,6 +216,7 @@ interface LazySourceRow {
   id: string;
   url: string;
   domain: string;
+  sourceType?: string | null;
 }
 
 const lazyRequire = createRequire(import.meta.url);
@@ -388,6 +387,52 @@ function domainOfUrl(url: string): string {
   }
 }
 
+/** Round-4 (review P0): the server-derived identity snapshot to verify an
+ *  image against, from the run's immutable input (gtin + registerName).
+ *  Lazy (bun-only); with no DB it returns null — verification then compares
+ *  nothing (dimensions absent are never taken from the agent). */
+function loadRunIdentity(runId: string): VerifiedAgainstSnapshot | null {
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) return null;
+    const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
+      getPiRun: (runId: string) => { inputJson: string } | undefined;
+    };
+    const run = repo.getPiRun(runId);
+    if (!run) return null;
+    const input = JSON.parse(run.inputJson) as { gtin?: unknown; registerName?: unknown };
+    const gtin = input.gtin !== undefined && input.gtin !== null ? String(input.gtin).replace(/\D/g, '') : null;
+    const name = input.registerName !== undefined && input.registerName !== null ? String(input.registerName) : null;
+    if (!gtin && !name) return null;
+    return { runId, gtin: gtin && gtin.length >= 8 ? gtin : null, name };
+  } catch {
+    return null;
+  }
+}
+
+/** Round-4 (review P0): resolve the durable source-kind for an asset URL from
+ *  the run's source rows. Agent-declared source types never select a reuse
+ *  grant — this resolver is the only source of sourceType. */
+function loadSourceTypeResolver(runId: string): (url: string) => string | null {
+  let sources: Array<{ url: string; sourceType: string | null }> | null = null;
+  return (url: string) => {
+    if (sources === null) {
+      try {
+        const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+        if (!conn.isDbInitialized?.()) {
+          sources = [];
+        } else {
+          const store = loadAssetStore();
+          sources = (store?.listPiSources(runId) ?? []).map((s) => ({ url: s.url, sourceType: s.sourceType ?? null }));
+        }
+      } catch {
+        sources = [];
+      }
+    }
+    return sources.find((s) => s.url === url)?.sourceType ?? null;
+  };
+}
+
 /** Persist the server-verified record as a durable asset row; returns the
  *  row id (the id the terminal bundle cites in verifiedAssetIds) or null
  *  when no DB is available. Only usable records are persisted (invalid
@@ -438,6 +483,10 @@ function persistVerifiedAsset(runId: string, record: ProductAssetEvidence): stri
       commerceApproved: record.commerceApproved,
       conflicts: record.conflicts ?? [],
       payload: record,
+      // Round-4: bind the durable asset to the run's immutable identity.
+      verifiedAgainstJson: record.verifiedAgainst ? JSON.stringify(record.verifiedAgainst) : null,
+      verifiedAgainstHash: record.verifiedAgainstHash ?? null,
+      declaredSourceType: record.declaredSourceType ?? record.sourceType ?? null,
     }) as { id: string };
     return asset.id;
   } catch {

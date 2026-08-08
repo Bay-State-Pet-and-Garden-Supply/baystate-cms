@@ -474,14 +474,20 @@ export async function runExtractionLadder(
     try {
       const snapshot = await options.browser.snapshot({ url: finalUrl, captureNetwork: true, signal });
       fetchModes.push('browser');
-      const browserOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
-      const browserMethods = evidenceFromBrowserSnapshot(snapshot, browserOut);
-      // Rendered JSON-LD retains the page's affirmative leaf-product claim
-      // (review P0-5): @type Product with no hasVariant/variants keys. The
-      // browser is a variant-revealing layer, so its leaf claim is sufficient
-      // proof — unlike raw-HTML structured corroboration.
-      if (snapshot.jsonLd.some(jsonLdLeafProductProof)) noteProof('browser');
-      if (browserMethods.length > 0) layersUsed.push('browser_parsed');
+      const browserOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals, variantSetEvidence: { single: false, multiple: false } };
+      const browserEvidence = evidenceFromBrowserSnapshot(snapshot, browserOut);
+      // Round-4 P1-2: browser single-variant proof requires AFFIRMATIVE
+      // browser-derived variant-set evidence (a payload declaring exactly one
+      // variant, or a DOM selector with a single option). Rendered JSON-LD is
+      // only corroboration (structured) — the same leaf claim re-observed
+      // after rendering never upgrades to browser proof, because a JS-rendered
+      // size selector can hide multiple variants from the passive extractor.
+      if (browserEvidence.variantSetEvidence === 'single') {
+        noteProof('browser');
+      } else if (snapshot.jsonLd.some(jsonLdLeafProductProof)) {
+        noteProof('structured');
+      }
+      if (browserEvidence.methodsUsed.length > 0) layersUsed.push('browser_parsed');
       if (snapshot.warnings.length > 0) layersUsed.push('browser_warnings');
       browserSignals = snapshot.pageStructureSignals ?? [];
       finalUrl = snapshot.finalUrl || finalUrl;
@@ -503,7 +509,7 @@ export async function runExtractionLadder(
   if (!settled() && options.browser && options.interaction) {
     layersUsed.push('interaction');
     try {
-      const interactionOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
+      const interactionOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals, variantSetEvidence: { single: false, multiple: false } };
       const result = await runBrowserInteraction(
         options.browser.snapshot,
         finalUrl,

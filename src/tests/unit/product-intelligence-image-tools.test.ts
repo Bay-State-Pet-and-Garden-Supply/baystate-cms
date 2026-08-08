@@ -47,12 +47,12 @@ describe('PI-6 image tools', () => {
     try { unlinkSync(testDbPath); } catch { /* ok */ }
   });
 
-  function runningRun() {
+  function runningRun(inputJson = '{}') {
     return createPiRun({
       workspaceId: wsId,
       mode: 'shadow',
       executor: 'pi',
-      inputJson: '{}',
+      inputJson,
       policyJson: '{}',
       configSnapshotId: 'c',
       configSnapshotHash: 'c',
@@ -176,7 +176,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
       fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
-    const run = runningRun();
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
     const source = insertPiSource({
       runId: run.id,
       url: 'https://brand.example.com/p/1',
@@ -230,6 +230,60 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
+  it('binds OCR facts to the exact image bytes: image A\'s evidence authorizes A and is dropped for image B (round-4)', async () => {
+    const pngA = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const pngB = await sharp({ create: { width: 320, height: 240, channels: 3, background: { r: 10, g: 20, b: 30 } } })
+      .png()
+      .toBuffer();
+    const hashA = createHash('sha256').update(pngA).digest('hex');
+    const run = runningRun();
+    const source = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    // OCR fact recorded against image A\'s bytes.
+    const gtinRow = insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { contentHash: hashA },
+    });
+    const verifyWith = (bytes: Buffer) => {
+      const gateway = new PolicyGateway({
+        resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+        fetchFn: async () => new Response(new Uint8Array(bytes), { status: 200, headers: { 'content-type': 'image/png' } }),
+      });
+      return defaultToolRegistry.dispatch(
+        defaultToolRegistry.get('verify_image_candidate')!,
+        { url: 'https://cdn.example.com/i.png', gtin: '036000291452', declaredSourceType: 'supplier', evidenceIds: [gtinRow.id] },
+        toolCtx(run.id, { gateway }),
+      );
+    };
+    // Image A (hash matches the fact): the OCR gtin drives identity.
+    const resultA = await verifyWith(pngA);
+    expect(resultA.status).toBe('ok');
+    if (resultA.status === 'ok') {
+      const a = resultA.data as { observationProvenance: string; observedGtin: string | null };
+      expect(a.observationProvenance).toBe('evidence');
+      expect(a.observedGtin).toBe('036000291452');
+    }
+    // Image B (hash mismatch): image A\'s OCR fact can never authorize B.
+    const resultB = await verifyWith(pngB);
+    expect(resultB.status).toBe('ok');
+    if (resultB.status === 'ok') {
+      const b = resultB.data as { observationProvenance: string; observedGtin: string | null };
+      expect(b.observedGtin).toBeNull();
+      expect(b.observationProvenance).not.toBe('evidence');
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
   it('resolves the agent-facing toolEvidenceId namespace (dual-namespace evidence resolution)', async () => {
     const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
       .png()
@@ -238,7 +292,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
       fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
-    const run = runningRun();
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
     const source = insertPiSource({
       runId: run.id,
       url: 'https://brand.example.com/p/1',
@@ -307,11 +361,20 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
       fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
-    const run = runningRun();
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
     const source = insertPiSource({
       runId: run.id,
       url: 'https://brand.example.com/p/1',
       domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    // Round-4: the durable source row FOR THE IMAGE URL is what drives the
+    // source kind (and therefore which reuse grant is consulted) — never the
+    // agent's declaredSourceType string.
+    insertPiSource({
+      runId: run.id,
+      url: 'https://cdn.example.com/i.png',
+      domain: 'cdn.example.com',
       sourceType: 'manufacturer',
     });
     insertPiEvidence({
@@ -334,7 +397,11 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       {
         url: 'https://cdn.example.com/i.png',
         gtin: '036000291452',
-        declaredSourceType: 'manufacturer',
+        // Round-4: this agent string is IGNORED — the durable source row for
+        // the image URL (sourceType 'manufacturer') selects the grant. If the
+        // string were authoritative ('supplier' != the 'manufacturer' grant),
+        // rights would be restricted.
+        declaredSourceType: 'supplier',
         evidenceIds: ['extract_product_page:abc123:gtin:def456'],
         // Caller-asserted rights strings must NOT become the durable basis.
         rightsBasis: 'supplier_authorized_asset',

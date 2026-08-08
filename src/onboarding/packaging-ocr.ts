@@ -14,6 +14,7 @@
 import { getVlmConfig, callVlm } from './vlm-client';
 import { PackagingOcrDataSchema } from '../shared/schemas/onboarding';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
+import { sha256Hex } from '../shared/stable-id';
 
 // ─── Prompt ────────────────────────────────────────────────────────────────────
 
@@ -313,6 +314,15 @@ export interface ExtractPackagingOcrParams {
    * onboarding pipeline keeps the default global fetch.
    */
   fetchFn?: NetworkFetch;
+  /**
+   * Round-4: injected transport for the VLM MODEL call, separately gated
+   * from the image download. Product Intelligence binds this to the
+   * gateway's buildModelFetch (checkModelEndpoint authority — local
+   * loopback models allowed under any data-sharing policy; remote models
+   * must match the modelRoute). Defaults to fetchFn for the onboarding
+   * pipeline, which historically passed one transport for both.
+   */
+  modelFetchFn?: NetworkFetch;
 }
 
 /**
@@ -331,8 +341,8 @@ export interface ExtractPackagingOcrParams {
  */
 export async function extractPackagingOcr(
   params: ExtractPackagingOcrParams,
-): Promise<PackagingOcrData | null> {
-  const { imageUrl, workspacePath, imageLocalPath, imageSourceUrl, sku, fetchFn } = params;
+): Promise<(PackagingOcrData & { contentHash: string | null }) | null> {
+  const { imageUrl, workspacePath, imageLocalPath, imageSourceUrl, sku, fetchFn, modelFetchFn } = params;
 
   const vlmConfig = getVlmConfig();
   if (!vlmConfig?.enabled) {
@@ -347,11 +357,16 @@ export async function extractPackagingOcr(
     return null;
   }
 
+  // Round-4: byte-hash binding — the SHA-256 of the EXACT downloaded bytes.
+  // OCR facts are bound to this hash so image A's facts can never authorize
+  // identity while image B is being inspected.
+  const contentHash = sha256Hex(Buffer.from(base64Image, 'base64'));
+
   // Call VLM
   console.log(`[PackagingOcr] Running OCR on ${sku ?? imageUrl} using ${vlmConfig.model}`);
   let rawResponse: string;
   try {
-    rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, fetchFn);
+    rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn);
   } catch (err: any) {
     console.warn(`[PackagingOcr] VLM call failed for ${sku ?? imageUrl}: ${err.message}`);
     return null;
@@ -396,7 +411,7 @@ export async function extractPackagingOcr(
     `form="${result.productForm ?? 'N/A'}", labels=[${result.dietaryLabels.join(', ')}])`,
   );
 
-  return result;
+  return { ...result, contentHash };
 }
 
 // ─── OCR result merging (multi-image support) ────────────────────────────────

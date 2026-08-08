@@ -566,7 +566,10 @@ describe('ladder contract adapter + helpers', () => {
           url: 'https://browser.example.com/api/products/12',
           status: 200,
           responseContentType: 'application/json',
-          jsonBody: { product: { title: 'Browser Product 12oz', sku: 'BP-12', gtin: '666666666666' } },
+          // Round-4 P1-2: an explicit variants array with exactly one entry
+          // is the AFFIRMATIVE browser variant-set evidence that proves
+          // single-variant — rendered leaf JSON-LD alone no longer does.
+          jsonBody: { product: { title: 'Browser Product 12oz', sku: 'BP-12', brand: 'Browser Co', gtin: '666666666666', variants: [{ id: 1, title: '12 oz' }] } },
         },
       ],
       interaction: null,
@@ -588,6 +591,134 @@ describe('ladder contract adapter + helpers', () => {
     expect(result.identityStatus).toBe('exact_match');
     expect(result.fields.some((f) => f.method === 'network_response')).toBe(true);
     expect(result.images.some((i) => i.url === 'https://img.example.com/browser.jpg')).toBe(true);
+  });
+
+  it('round-4: rendered leaf JSON-LD alone is NOT browser proof (corroboration only)', async () => {
+    // Unknown storefront: leaf Product JSON-LD after rendering, no payload
+    // declaring the variant set, no DOM selector data. The passive extractor
+    // cannot affirm a single sellable variant — identity must NOT settle.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://unknown.example.com/p/y',
+      finalUrl: 'https://unknown.example.com/p/y',
+      jsonLd: [{ '@type': 'Product', name: 'Mystery Treat 16oz', sku: 'MY-16', gtin: '333333333333', offers: { price: '4.99' } }],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://unknown.example.com/p/y',
+      { gtin: '333333333333', name: 'Mystery Treat 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://unknown.example.com/p/y'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match'); // structured corroboration only
+    expect(result.identityReasons.join(' ')).toMatch(/variant status unproven|not exact|single-variant/i);
+  });
+
+  it('round-4: DOM size selector with 2+ options contradicts the leaf claim (parent_product_only)', async () => {
+    // The reviewer's scenario: JS-rendered size selector hides multiple
+    // variants from the passive extractor. A DOM selector with >= 2 options
+    // is AFFIRMATIVE contradiction even when only leaf JSON-LD was parsed.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://unknown.example.com/p/z',
+      finalUrl: 'https://unknown.example.com/p/z',
+      jsonLd: [{ '@type': 'Product', name: 'Size Select 16oz', sku: 'SS-16', gtin: '444444444444', offers: { price: '5.99' } }],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: ['interaction:variant-selector'],
+      domVariantSelectors: [{ kind: 'select', optionCount: 3 }],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://unknown.example.com/p/z',
+      { gtin: '444444444444', name: 'Size Select 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://unknown.example.com/p/z'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+
+  it('round-4: network payload declaring exactly one variant is affirmative browser proof', async () => {
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://api.example.com/p/one',
+      finalUrl: 'https://api.example.com/p/one',
+      jsonLd: [],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://api.example.com/api/product/555555555555',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { product: { title: 'Single Variant 8oz', sku: 'SV-8', brand: 'Single Co', gtin: '555555555555', variants: [{ id: 1, title: '8 oz' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://api.example.com/p/one',
+      { gtin: '555555555555' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://api.example.com/p/one'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).toBe('exact_match');
+    expect(result.identityReasons.join(' ')).toMatch(/exact GTIN/);
+  });
+
+  it('round-4: browser interaction linkage matching the expected variant settles exact', async () => {
+    // Leaf JSON-LD (corroboration only) PLUS a bounded select_option whose
+    // selected option overlaps the expected variant name: positive selected-
+    // child linkage — the browser interaction proves which child is selected.
+    const snapshot: BrowserSnapshotFn = async (request) => ({
+      url: 'https://link.example.com/p/s',
+      finalUrl: 'https://link.example.com/p/s',
+      jsonLd: [{ '@type': 'Product', name: 'Link Pick 16oz', sku: 'LP-16', gtin: '666666666661', offers: { price: '2.99' } }],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: request.interaction
+        ? { performed: true, finalUrl: 'https://link.example.com/p/s?size=16oz', selectedOptions: ['16 oz'] }
+        : null,
+      pageStructureSignals: ['interaction:variant-selector'],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://link.example.com/p/s',
+      { gtin: '666666666661', name: 'Link Pick 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://link.example.com/p/s'),
+        browser: { snapshot },
+        interaction: { type: 'select_option', selector: '#size', optionLabel: '16 oz', settleMs: 500 },
+      },
+    );
+    expect(layersUsed).toContain('interaction');
+    expect(result.identityStatus).toBe('exact_match');
+    expect(result.identityReasons.join(' ')).toMatch(/selected-variant linkage/);
   });
 
   it('runs a bounded interaction and records the resulting variant state', async () => {
@@ -782,7 +913,10 @@ describe('ladder contract adapter + helpers', () => {
         url: 'https://settled.example.com/p/x',
         finalUrl: 'https://settled.example.com/p/x',
         jsonLd: [{ '@type': 'Product', name: "Stella & Chewy's Chicken Broth 16oz", sku: 'SC-BROTH-16', gtin: '085000079585', offers: { price: '6.99' } }],
-        embeddedProductData: [],
+        // Round-4 P1-2: rendered leaf JSON-LD is corroboration only — the
+        // AFFIRMATIVE single-variant evidence is this embedded payload's
+        // explicit variants array with exactly one entry.
+        embeddedProductData: [{ '@type': 'Product', name: "Stella & Chewy's Chicken Broth 16oz", sku: 'SC-BROTH-16', gtin: '085000079585', variants: [{ id: 1, title: '16 oz' }] }],
         imageCandidates: [],
         networkResponses: [],
         interaction: null,

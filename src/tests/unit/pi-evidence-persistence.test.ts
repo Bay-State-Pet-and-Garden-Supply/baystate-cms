@@ -335,4 +335,45 @@ describe('PI per-tool evidence persistence (smoke finding A)', () => {
     const sources = listPiSources(runId);
     expect(sources).toHaveLength(1);
   });
+
+  it('persists OCR field-level evidence bound to the exact downloaded image bytes (round-4)', () => {
+    const runId = makeRun();
+    const sink = new PersistingExecutionEventSink(runId);
+    const contentHash = 'sha256-of-image-a';
+    const ocrEvidence = [
+      {
+        id: 'extract_packaging_evidence:hash:productName:h1',
+        field: 'productName',
+        value: 'Feline Wormeze Liquid',
+        method: 'image_ocr',
+        url: 'https://cdn.example.com/wormeze.jpg',
+        domain: 'cdn.example.com',
+        contentHash,
+      },
+      {
+        id: 'extract_packaging_evidence:hash:size:h2',
+        field: 'size',
+        value: '4 oz',
+        method: 'image_ocr',
+        url: 'https://cdn.example.com/wormeze.jpg',
+        domain: 'cdn.example.com',
+        contentHash,
+      },
+    ] as never;
+    sink.emit('tool_call_finished', { toolName: 'extract_packaging_evidence', evidence: ocrEvidence });
+    const rows = listPiEvidence(runId);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      const meta = JSON.parse(row.metadataJson ?? '{}') as { toolEvidenceId?: string; contentHash?: string };
+      expect(row.extractionMethod).toBe('image_ocr');
+      expect(meta.contentHash).toBe(contentHash);
+      expect(meta.toolEvidenceId).toContain('extract_packaging_evidence:');
+    }
+    // The citation path resolves them by the agent-visible deterministic id.
+    const byField = Object.fromEntries(rows.map((r) => [r.targetField, r]));
+    expect(JSON.parse(byField['productName'].valueJson)).toBe('Feline Wormeze Liquid');
+    expect(JSON.parse(byField['size'].valueJson)).toBe('4 oz');
+    // Both rows share one deduped source row for the image URL.
+    expect(listPiSources(runId)).toHaveLength(1);
+  });
 });

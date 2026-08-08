@@ -32,7 +32,7 @@ import { discoveryTools } from '../../product-intelligence/tools/discovery-tools
 import { fetchPageHtml, HTTP_EXTRACTION_HEADERS } from '../../product-intelligence/extraction/platforms';
 import { ManagedFallbackRegistry } from '../../product-intelligence/extraction/managed-fallback';
 import { snapshotRequestFor } from '../../product-intelligence/extraction/wiring';
-import { resolveDestinationAndCheck } from '../../extraction-worker/routes/snapshot';
+import { resolveDestinationAndCheck, pinHttpDestination, resolvePublicAddress } from '../../extraction-worker/routes/snapshot';
 import { policyDenied, type PiToolContext } from '../../product-intelligence/tools/contract';
 import type { ProductIntelligencePolicy } from '../../product-intelligence/contracts';
 import { sha256Hex } from '../../shared/stable-id';
@@ -533,9 +533,128 @@ describe('P0-1 round-3 transport injection', () => {
     expect(calls).toContain('http://localhost:11434/api/chat');
   });
 
-  it('packaging-ocr passes the injected fetch into callVlm (source-level)', () => {
+  it('packaging-ocr passes the injected model transport into callVlm (source-level)', () => {
     const source = fs.readFileSync('src/onboarding/packaging-ocr.ts', 'utf8');
-    expect(source).toContain('callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, fetchFn)');
+    expect(source).toContain('callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-4: VLM model-policy boundary (checkModelEndpoint) + field-level OCR
+// evidence bound to the exact downloaded bytes (contentHash)
+// ---------------------------------------------------------------------------
+
+describe('P0-1 round-4 VLM model-policy boundary', () => {
+  it('a REMOTE VLM endpoint is denied under local_only (model authority, not network authority)', async () => {
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+    });
+    const decision = await gateway.checkModelEndpoint(makeCtx({ policy: makePolicy({ dataSharingPolicy: 'local_only' }) }), {
+      provider: 'ollama_vlm',
+      model: 'qwen2.5vl:latest',
+      endpointUrl: 'https://vlm.example.com',
+    });
+    expect(decision.allowed).toBe(false);
+    expect(decision.reasonCode).toBe('local_only_denies_model');
+  });
+
+  it('a LOCAL loopback VLM endpoint is allowed under local_only', async () => {
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+    });
+    const decision = await gateway.checkModelEndpoint(makeCtx({ policy: makePolicy({ dataSharingPolicy: 'local_only' }) }), {
+      provider: 'ollama_vlm',
+      model: 'qwen2.5vl:latest',
+      endpointUrl: 'http://127.0.0.1:11434',
+    });
+    expect(decision.allowed).toBe(true);
+    expect(decision.detail).toContain('local model endpoint');
+  });
+
+  it('a REMOTE VLM endpoint under cloud_models_only requires the modelRoute to match', async () => {
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+    });
+    const baseCtx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const matching = await gateway.checkModelEndpoint(baseCtx, {
+      provider: 'ollama_vlm',
+      model: 'qwen2.5vl:latest',
+      endpointUrl: 'https://vlm.example.com',
+    });
+    expect(matching.allowed).toBe(true);
+    const nonMatching = await gateway.checkModelEndpoint(baseCtx, {
+      provider: 'ollama_vlm',
+      model: 'some-other-model',
+      endpointUrl: 'https://vlm.example.com',
+    });
+    expect(nonMatching.allowed).toBe(false);
+    expect(nonMatching.reasonCode).toBe('model_not_in_route');
+  });
+
+  it('extract_packaging_evidence emits one field-level evidence entry per OCR fact, each bound to the exact downloaded bytes', async () => {
+    upsertApiKey('ollama_vlm', 'enabled', 'http://127.0.0.1:11434', 'qwen2.5vl:latest');
+    const imageBytes = new Uint8Array(2048).fill(7);
+    const expectedHash = sha256Hex(Buffer.from(imageBytes));
+    const calls: string[] = [];
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+      fetchFn: async (input, _init) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.includes('/api/chat')) {
+          return new Response(
+            JSON.stringify({ message: { content: '{"productName":"Feline Wormeze Liquid","brand":"Farnam","size":"4 oz"}' } }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        return new Response(imageBytes, { status: 200, headers: { 'content-type': 'image/png' } });
+      },
+    });
+    const tool = defaultToolRegistry.get('extract_packaging_evidence');
+    expect(tool).toBeDefined();
+    const result = await tool!.execute(
+      { imageUrl: 'https://cdn.example.com/wormeze.jpg', gtin: '745801105447' },
+      makeCtx({ gateway, policy: makePolicy({ dataSharingPolicy: 'local_only' }) }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.evidence.length).toBe(3); // productName, brand, size
+    const byField = new Map(result.evidence.map((e) => [(e as { field?: string }).field ?? '', e]));
+    for (const [field, value] of [['productName', 'Feline Wormeze Liquid'], ['brand', 'Farnam'], ['size', '4 oz']] as const) {
+      const entry = byField.get(field) as { value?: string; contentHash?: string; method?: string; url?: string; id?: string };
+      expect(entry).toBeDefined();
+      expect(entry.value).toBe(value);
+      expect(entry.method).toBe('image_ocr');
+      expect(entry.contentHash).toBe(expectedHash);
+      expect(entry.url).toBe('https://cdn.example.com/wormeze.jpg');
+      expect(entry.id).toContain(`:${field}:`);
+    }
+    // Both authorities performed their own HTTP through the gateway transport.
+    expect(calls).toContain('https://cdn.example.com/wormeze.jpg');
+    expect(calls).toContain('http://127.0.0.1:11434/api/chat');
+  });
+
+  it('the VLM model call is denied when the endpoint is remote under local_only (end-to-end through the tool)', async () => {
+    upsertApiKey('ollama_vlm', 'enabled', 'https://vlm.example.com', 'qwen2.5vl:latest');
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+      fetchFn: async () => new Response('{}', { status: 200 }),
+    });
+    const tool = defaultToolRegistry.get('extract_packaging_evidence');
+    expect(tool).toBeDefined();
+    const result = await tool!.execute(
+      { imageUrl: 'https://cdn.example.com/wormeze.jpg' },
+      makeCtx({ gateway, policy: makePolicy({ dataSharingPolicy: 'local_only' }) }),
+    );
+    expect(result.status).toBe('policy_denied');
+    if (result.status === 'policy_denied') {
+      expect(result.reason).toContain('VLM model call denied: local_only_denies_model');
+    }
   });
 });
 
@@ -611,3 +730,39 @@ describe('P0-1 transport seams', () => {
 void policyDenied;
 void HTTP_EXTRACTION_HEADERS;
 void defaultPolicyGateway;
+
+// ---------------------------------------------------------------------------
+// Round-4 P1-4: DNS-rebinding TOCTOU hardening
+// ---------------------------------------------------------------------------
+
+describe('P0-1 round-4 DNS-rebinding pinning', () => {
+  it('pinHttpDestination rewrites an http hostname URL to the validated address literal', () => {
+    const pinned = pinHttpDestination('http://brand.example.com/p/wormeze-4oz?ref=1', '93.184.216.34');
+    expect(pinned).toBe('http://93.184.216.34/p/wormeze-4oz?ref=1');
+  });
+
+  it('pinHttpDestination never pins https (TLS SNI — the residual TOCTOU window stays re-validation-only)', () => {
+    expect(pinHttpDestination('https://brand.example.com/p/wormeze', '93.184.216.34')).toBeNull();
+  });
+
+  it('pinHttpDestination never pins IP-literal hosts or empty addresses', () => {
+    expect(pinHttpDestination('http://93.184.216.34/p', '93.184.216.34')).toBeNull();
+    expect(pinHttpDestination('http://brand.example.com/p', '')).toBeNull();
+    expect(pinHttpDestination('not a url', '93.184.216.34')).toBeNull();
+  });
+
+  it('pinHttpDestination brackets IPv6 addresses', () => {
+    expect(pinHttpDestination('http://brand.example.com/p', '2606:2800:220:1:248:1893:25c8:1946')).toBe(
+      'http://[2606:2800:220:1:248:1893:25c8:1946]/p',
+    );
+  });
+
+  it('resolvePublicAddress denies private-resolving hostnames (fail closed)', async () => {
+    // localhost resolves (via /etc/hosts) to a loopback address.
+    expect(await resolvePublicAddress('localhost')).toBeNull();
+  });
+
+  it('resolvePublicAddress denies unresolvable hostnames (fail closed)', async () => {
+    expect(await resolvePublicAddress('no-such-host-round4.invalid')).toBeNull();
+  });
+});

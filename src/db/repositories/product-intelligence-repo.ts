@@ -850,6 +850,13 @@ export interface PiAssetRow {
   conflictsJson: string;
   payloadJson: string;
   createdAt: string;
+  /** Round-4: canonical identity snapshot (runId+gtin+name) the asset was
+   *  verified against — binds the asset to the run's immutable identity. */
+  verifiedAgainstJson: string | null;
+  verifiedAgainstHash: string | null;
+  /** Round-4: durable source-kind derived from the source row at
+   *  verification time (never the agent's declared string). */
+  declaredSourceType: string | null;
 }
 
 const ASSET_SELECT = `
@@ -865,7 +872,9 @@ const ASSET_SELECT = `
          observed_pack_count AS observedPackCount, observed_gtin AS observedGtin,
          exact_product_match AS exactProductMatch, exact_variant_match AS exactVariantMatch,
          quality_status AS qualityStatus, commerce_approved AS commerceApproved,
-         conflicts_json AS conflictsJson, payload_json AS payloadJson, created_at AS createdAt
+         conflicts_json AS conflictsJson, payload_json AS payloadJson, created_at AS createdAt,
+         verified_against_json AS verifiedAgainstJson, verified_against_hash AS verifiedAgainstHash,
+         declared_source_type AS declaredSourceType
   FROM product_intelligence_assets
 `;
 
@@ -897,6 +906,11 @@ export function insertPiAsset(input: {
   commerceApproved?: boolean;
   conflicts?: string[];
   payload?: unknown;
+  /** Round-4: canonical identity snapshot + hash the asset was verified
+   *  against (server-derived); declaredSourceType = durable source-kind. */
+  verifiedAgainstJson?: string | null;
+  verifiedAgainstHash?: string | null;
+  declaredSourceType?: string | null;
 }): PiAssetRow {
   const db = getDb();
   const id = randomUUID();
@@ -908,8 +922,9 @@ export function insertPiAsset(input: {
       rights_basis, rights_evidence_ref, observed_brand, observed_product_name,
       observed_variant, observed_net_content_json, observed_pack_count,
       observed_gtin, exact_product_match, exact_variant_match, quality_status,
-      commerce_approved, conflicts_json, payload_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      commerce_approved, conflicts_json, payload_json, created_at,
+      verified_against_json, verified_against_hash, declared_source_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runId,
@@ -940,6 +955,9 @@ export function insertPiAsset(input: {
       JSON.stringify(input.conflicts ?? []),
       input.payload ? JSON.stringify(input.payload) : '{}',
       now(),
+      input.verifiedAgainstJson ?? null,
+      input.verifiedAgainstHash ?? null,
+      input.declaredSourceType ?? null,
     ],
   );
   return db.query(`${ASSET_SELECT} WHERE id = ?`).get(id) as PiAssetRow;

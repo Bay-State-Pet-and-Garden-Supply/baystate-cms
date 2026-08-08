@@ -589,7 +589,7 @@ export async function startProductIntelligenceRun(
           result.submission === null
             ? { valid: true, issues: [] as string[] }
             : isWorkflowSubmission(result.submission)
-              ? validateTerminalSubmission(result.submission, parsedInput.gtin, workspace.id)
+              ? validateTerminalSubmission(result.submission, parsedInput.gtin, workspace.id, run.id)
               : { valid: false, issues: ['unsupported submission shape'] as string[] };
         if (!validation.valid) {
           const message = `Terminal submission failed validation: ${validation.issues.join('; ')}`;
@@ -853,7 +853,7 @@ function persistConflict(
  * Candidates without a content hash (unverified alternates) stay only in the
  * result JSON — a durable asset record requires extracted provenance.
  */
-function persistBundleAssets(
+export function persistBundleAssets(
   runId: string,
   submission: { imageCandidates: BundleImageCandidate[] },
   sink: PersistingExecutionEventSink,
@@ -885,6 +885,23 @@ function persistBundleAssets(
       continue;
     }
     const v = verified[0];
+    // Round-4 (review P0): the asset must belong to the CURRENT run and its
+    // source URL must equal the candidate URL — cross-run borrowing or URL
+    // substitution never persists.
+    if (v.runId !== runId) {
+      sink.emitDomain('asset.rejected', {
+        url: candidate.url,
+        reason: `verified asset belongs to another run (${v.runId}); current run is ${runId}`,
+      });
+      continue;
+    }
+    if (v.sourceUrl !== candidate.url) {
+      sink.emitDomain('asset.rejected', {
+        url: candidate.url,
+        reason: `candidate url does not match the verified asset's source url (${v.sourceUrl})`,
+      });
+      continue;
+    }
     let source = existingSources.find((s) => s.id === v.sourceId) ?? existingSources.find((s) => s.url === v.sourceUrl);
     if (!source) {
       source = insertPiSource({
@@ -928,6 +945,10 @@ function persistBundleAssets(
       commerceApproved: !!v.commerceApproved,
       conflicts: parseConflictsJson(v.conflictsJson),
       payload: candidate,
+      // Round-4: preserve the durable verified-against binding + source kind.
+      verifiedAgainstJson: v.verifiedAgainstJson ?? null,
+      verifiedAgainstHash: v.verifiedAgainstHash ?? null,
+      declaredSourceType: v.declaredSourceType ?? v.sourceType ?? null,
     });
     sink.emitDomain('asset.added', {
       sourceUrl: v.sourceUrl,

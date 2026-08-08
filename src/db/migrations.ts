@@ -1963,6 +1963,43 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Round-4 (review P0): a 'server-verified' image asset must be bound to the
+  // run's immutable product identity. verified_against_hash is the SHA-256 of
+  // the canonical identity snapshot (runId + gtin + name, server-derived from
+  // the run input at verification time) — the terminal validator recomputes it
+  // from the CURRENT run's input and refuses assets that were verified against
+  // anything else. declared_source_type is the durable source-kind derived from
+  // the source row, never the agent's declared string.
+  try {
+    const verifiedAgainstVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('pi_assets_verified_against_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!verifiedAgainstVersion) {
+      console.log('[Migrations] Running pi assets verified-against schema migration...');
+      db.transaction(() => {
+        const jsonCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_assets') WHERE name = 'verified_against_json'").get() as { c: number };
+        if (jsonCols.c === 0) {
+          db.exec('ALTER TABLE product_intelligence_assets ADD COLUMN verified_against_json TEXT;');
+        }
+        const hashCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_assets') WHERE name = 'verified_against_hash'").get() as { c: number };
+        if (hashCols.c === 0) {
+          db.exec('ALTER TABLE product_intelligence_assets ADD COLUMN verified_against_hash TEXT;');
+        }
+        const sourceTypeCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_assets') WHERE name = 'declared_source_type'").get() as { c: number };
+        if (sourceTypeCols.c === 0) {
+          db.exec('ALTER TABLE product_intelligence_assets ADD COLUMN declared_source_type TEXT;');
+        }
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_assets_verified_against_schema_version', '1');");
+      console.log('[Migrations] Pi assets verified-against schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Pi assets verified-against schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

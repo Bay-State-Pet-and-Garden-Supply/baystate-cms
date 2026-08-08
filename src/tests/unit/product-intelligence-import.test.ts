@@ -173,11 +173,23 @@ describe('PI-8 onboarding import', () => {
     });
   }
 
-  it('create: batch + item created from a reviewed run with approved images only', () => {
+  it('create: batch + item created from a reviewed run with approved images only (bundle-cited)', () => {
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
-    approveRun(runId);
-    seedAsset(runId, true);
+    const approved = seedAsset(runId, true);
     seedAsset(runId, false);
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        {
+          sourceId: 'src-1',
+          sourceArtifactId: 'a1',
+          url: 'https://cdn.example.com/i.jpg',
+          role: 'primary',
+          verifiedAssetIds: [approved.id],
+        },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
 
     const result = importRunToOnboarding(runId, { mode: 'create', importingUser: 'tester' });
     expect(result.created).toBe(true);
@@ -194,7 +206,90 @@ describe('PI-8 onboarding import', () => {
     expect(evidence).toBeTruthy();
     expect(evidence?.[0]?.runId).toBe(runId);
     expect(evidence?.[0]?.resultHash).toBeTruthy();
-    expect(evidence?.[0]?.approvedImageIds).toHaveLength(1); // only commerce-approved
+    expect(evidence?.[0]?.approvedImageIds).toHaveLength(1); // only the bundle-cited asset
+  });
+
+  it('imports ONLY the bundle-cited asset, not the run\'s whole verification history', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const a1 = seedAsset(runId, true);
+    const a2 = seedAsset(runId, true);
+    const a3 = seedAsset(runId, true);
+    seedAsset(runId, true); // fourth approved asset in history, never cited
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        {
+          sourceId: 'src-1',
+          sourceArtifactId: 'a1',
+          url: 'https://cdn.example.com/i1.jpg',
+          role: 'primary',
+          verifiedAssetIds: [a1.id],
+        },
+        {
+          sourceId: 'src-2',
+          sourceArtifactId: 'a2',
+          url: 'https://cdn.example.com/i2.jpg',
+          role: 'secondary',
+          verifiedAssetIds: [a2.id, a3.id],
+        },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+
+    const result = importRunToOnboarding(runId, { mode: 'create' });
+    const item = findItemById(result.item.id);
+    const evidence = item?.extractionData?.productIntelligenceEvidence;
+    // Exactly the three cited assets, in candidate order (primary first),
+    // deduped — the uncited fourth approved asset never enters the import.
+    expect(evidence?.[0]?.approvedImageIds).toEqual([a1.id, a2.id, a3.id]);
+    expect(JSON.parse(result.importRecord.importedImageIdsJson)).toEqual([a1.id, a2.id, a3.id]);
+  });
+
+  it('fails closed when the bundle cites an asset that is not commerce-approved', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        {
+          sourceId: 'src-1',
+          sourceArtifactId: 'a1',
+          url: 'https://cdn.example.com/i.jpg',
+          role: 'primary',
+          verifiedAssetIds: ['placeholder'],
+        },
+      ],
+    });
+    const notApproved = seedAsset(runId, false);
+    // Replace the persisted result with the image-citing envelope (approval
+    // must be seeded AFTER the final result so the hash binds).
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+    const citing = JSON.parse(
+      (getDb()
+        .query('SELECT result_json AS j FROM product_intelligence_results WHERE run_id = ?')
+        .get(runId) as { j: string }).j,
+    );
+    citing.imageCandidates[0].verifiedAssetIds = [notApproved.id];
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: citing });
+    approveRun(runId);
+    expect(() => importRunToOnboarding(runId, { mode: 'create' })).toThrow(/not commerce-approved/);
+  });
+
+  it('fails closed when the bundle cites a nonexistent asset id', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        {
+          sourceId: 'src-1',
+          sourceArtifactId: 'a1',
+          url: 'https://cdn.example.com/i.jpg',
+          role: 'primary',
+          verifiedAssetIds: ['no-such-asset-id'],
+        },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+    expect(() => importRunToOnboarding(runId, { mode: 'create' })).toThrow(/does not belong to this run/);
   });
 
   it('create is idempotent: second import is a no-op on the same item', () => {

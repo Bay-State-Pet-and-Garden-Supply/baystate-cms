@@ -26,6 +26,7 @@ import {
 } from '../../db/repositories/classification-config-repo';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
 import { computeCommerceApproved } from '../assets/rights';
+import { canonicalVerifiedAgainstHash, type VerifiedAgainstSnapshot } from '../assets/verification';
 import { createRequire } from 'node:module';
 import type {
   IdentityConflictSubmission,
@@ -53,6 +54,7 @@ export function isWorkflowSubmission(value: unknown): value is TerminalSubmissio
 // ---------------------------------------------------------------------------
 interface LazyAssetRow {
   id: string;
+  runId: string;
   sourceUrl: string;
   rightsStatus: 'approved' | 'restricted' | 'unknown';
   rightsBasis: string | null;
@@ -64,30 +66,36 @@ interface LazyAssetRow {
   qualityStatus: string;
   commerceApproved: number;
   conflictsJson: string;
+  /** Round-4: canonical identity hash the asset was verified against. */
+  verifiedAgainstHash: string | null;
 }
 
-let _assetRepo: { getPiAssetsByIds: (ids: string[]) => LazyAssetRow[] } | undefined;
+let _assetRepo: {
+  getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
+  getPiRun: (runId: string) => { inputJson: string } | undefined;
+} | undefined;
 
 const lazyRequire = createRequire(import.meta.url);
 
-function loadAssetRepo(): { getPiAssetsByIds: (ids: string[]) => LazyAssetRow[] } {
+function loadAssetRepo(): {
+  getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
+  getPiRun: (runId: string) => { inputJson: string } | undefined;
+} {
   if (!_assetRepo) {
     try {
       const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
       if (!conn.isDbInitialized?.()) {
-        _assetRepo = { getPiAssetsByIds: () => [] };
+        _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
         return _assetRepo;
       }
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [] };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
       return _assetRepo;
     }
     try {
-      _assetRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
-        getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
-      };
+      _assetRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _assetRepo>;
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [] };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
     }
   }
   return _assetRepo;
@@ -119,7 +127,7 @@ function validateCommon(submission: TerminalSubmission, expectedGtin: string, is
   }
 }
 
-function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issues: string[]): void {
+function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issues: string[], runId?: string | null): void {
   const { identity } = bundle;
 
   // Identity semantics: blocked identities cannot be completed research.
@@ -195,12 +203,51 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
       issues.push(`primary image ${image.url} cites no verified asset id (authority must resolve from a durable server-verified asset)`);
       continue;
     }
+    // Round-4 (review P0): exactly ONE verified asset per terminal candidate
+    // — the binding must be unambiguous.
+    if (verifiedAssetIds.length > 1) {
+      issues.push(`primary image ${image.url} cites ${verifiedAssetIds.length} verified asset ids; exactly one is required`);
+      continue;
+    }
     const assets = assetRepo.getPiAssetsByIds(verifiedAssetIds);
     if (assets.length === 0) {
       issues.push(`primary image ${image.url} cites no resolvable durable verified asset (ids: ${verifiedAssetIds.join(', ')})`);
       continue;
     }
     const verified = assets[0];
+    // Round-4 (review P0): the verified asset must belong to the CURRENT run
+    // (no cross-run borrowing — asset.run_id is part of the binding).
+    if (runId && verified.runId !== runId) {
+      issues.push(`primary image ${image.url} cites verified asset from another run (${verified.runId}); asset must belong to the current run ${runId}`);
+      continue;
+    }
+    // Round-4 (review P0): the terminal candidate URL must equal the durable
+    // source URL of the verified asset (no URL A asset cited for URL B).
+    if (verified.sourceUrl !== image.url) {
+      issues.push(`primary image ${image.url} url does not match the verified asset's source url (${verified.sourceUrl})`);
+      continue;
+    }
+    // Round-4 (review P0): the asset must be verified against the CURRENT
+    // run's immutable product identity — recompute the canonical hash from
+    // the run input and compare. Cross-identity borrowing (verify image Y
+    // against GTIN Y, submit GTIN X) is refused.
+    if (!runId) {
+      issues.push(`primary image ${image.url} verified asset cannot be bound to a run (no run id for validation)`);
+      continue;
+    }
+    if (!verified.verifiedAgainstHash) {
+      issues.push(`primary image ${image.url} verified asset has no verified-against identity snapshot (cross-run borrowing is refused)`);
+      continue;
+    }
+    const runInput = runInputSnapshot(assetRepo, runId);
+    if (!runInput) {
+      issues.push(`primary image ${image.url} current run has no input identity to bind the verified asset against`);
+      continue;
+    }
+    if (verified.verifiedAgainstHash !== canonicalVerifiedAgainstHash(runInput)) {
+      issues.push(`primary image ${image.url} verified asset was verified against a different product identity (hash mismatch — cross-run/cross-identity borrowing refused)`);
+      continue;
+    }
     const rightsStatus = verified.rightsStatus;
     if (rightsStatus === 'unknown') {
       issues.push(`primary image ${image.url} verified asset has unknown rights status`);
@@ -282,15 +329,35 @@ export function validateTerminalSubmission(
   submission: TerminalSubmission,
   expectedGtin: string,
   workspaceId: string,
+  runId?: string | null,
 ): BundleValidationResult {
   const issues: string[] = [];
   validateCommon(submission, expectedGtin, issues);
   if ('disposition' in submission) {
-    validateBundle(submission, workspaceId, issues);
+    validateBundle(submission, workspaceId, issues, runId);
   } else if ('recommendedDisposition' in submission) {
     validateConflictSubmission(submission, issues);
   } else {
     validateInsufficientSubmission(submission, issues);
   }
   return { valid: issues.length === 0, issues };
+}
+
+/** Round-4 (review P0): the canonical identity snapshot derived from the
+ *  current run's input (same shape the verifier used at tool time). */
+function runInputSnapshot(
+  assetRepo: ReturnType<typeof loadAssetRepo>,
+  runId: string,
+): VerifiedAgainstSnapshot | null {
+  try {
+    const run = assetRepo.getPiRun(runId);
+    if (!run) return null;
+    const input = JSON.parse(run.inputJson) as { gtin?: unknown; registerName?: unknown };
+    const gtin = input.gtin !== undefined && input.gtin !== null ? String(input.gtin).replace(/\D/g, '') : null;
+    const name = input.registerName !== undefined && input.registerName !== null ? String(input.registerName) : null;
+    if (!gtin && !name) return null;
+    return { runId, gtin: gtin && gtin.length >= 8 ? gtin : null, name };
+  } catch {
+    return null;
+  }
 }

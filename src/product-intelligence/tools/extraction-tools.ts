@@ -13,6 +13,7 @@ import { Type } from 'typebox';
 import { extractViaHttpDetailed } from '../../onboarding/page-extractor';
 import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
+import { getVlmConfig } from '../../onboarding/vlm-client';
 import { sha256Hex } from '../../shared/stable-id';
 import { sharpImageVerificationAdapter } from '../assets/contract';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
@@ -417,28 +418,90 @@ const extractPackagingEvidence: PiToolAdapter = {
   }),
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const imageUrl = String(params.imageUrl ?? '');
+    const gateway = ctx.gateway ?? defaultPolicyGateway;
+    const netCtx = { runId: ctx.runId, policy: ctx.policy };
     // P0-1: the OCR path hands this URL to the legacy image loader (raw
     // fetch). Validate the destination through the policy gateway first —
     // private/link-local, allowlist, and data-sharing restrictions deny the
     // call before any bytes are fetched.
-    const netCheck = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest({ runId: ctx.runId, policy: ctx.policy }, imageUrl);
+    const netCheck = await gateway.checkNetworkRequest(netCtx, imageUrl);
     if (!netCheck.allowed) return policyDenied(`image fetch denied: ${netCheck.reasonCode}${netCheck.detail ? ` (${netCheck.detail})` : ''}`);
+
+    // Round-4 (P0): the VLM call is MODEL-POLICY-owned, not just
+    // gateway-owned. Resolve the configured VLM endpoint and gate it via
+    // checkModelEndpoint — a local loopback model is allowed under any
+    // data-sharing policy (nothing leaves the machine); a REMOTE VLM carries
+    // the prompt + image to a third party and is denied under local_only or
+    // when it is not the policy modelRoute.
+    let vlmConfig: { baseUrl: string; model: string } | null = null;
+    try {
+      vlmConfig = getVlmConfig();
+    } catch {
+      // unconfigured/unavailable — treated as no VLM
+    }
+    if (!vlmConfig) {
+      return noResult('Packaging OCR produced no result (VLM may be unconfigured or the image could not be loaded)');
+    }
+    const modelDecision = await gateway.checkModelEndpoint(netCtx, {
+      provider: 'ollama_vlm',
+      model: vlmConfig.model,
+      endpointUrl: vlmConfig.baseUrl,
+    });
+    if (!modelDecision.allowed) {
+      return policyDenied(`VLM model call denied: ${modelDecision.reasonCode}${modelDecision.detail ? ` (${modelDecision.detail})` : ''}`);
+    }
     try {
       // P0-1 (round 2): the OCR image loader performs the real fetch — inject
       // the gateway-bound fetch so the actual download is enforced end-to-end
       // (the pre-check above denies obvious violations before any bytes move).
+      // Round-4: the VLM model call rides a SEPARATE model-gated transport
+      // (buildModelFetch) so the two authorities never share a transport.
       const ocr = await extractPackagingOcr({
         imageUrl,
         sku: params.gtin ? String(params.gtin) : null,
         imageSourceUrl: params.imageSourceUrl ? String(params.imageSourceUrl) : null,
-        fetchFn: (ctx.gateway ?? defaultPolicyGateway).buildPiNetworkFetch(
-          { runId: ctx.runId, policy: ctx.policy },
-          { dataClassification: 'fetched_content' },
-        ),
+        fetchFn: gateway.buildPiNetworkFetch(netCtx, { dataClassification: 'fetched_content' }),
+        modelFetchFn: gateway.buildModelFetch(netCtx, {
+          provider: 'ollama_vlm',
+          model: vlmConfig.model,
+          endpointUrl: vlmConfig.baseUrl,
+        }),
       });
       if (!ocr) {
         return noResult('Packaging OCR produced no result (VLM may be unconfigured or the image could not be loaded)');
       }
+      // Round-4 (P1): one durable FIELD-LEVEL evidence entry per observed OCR
+      // fact, each bound to the SHA-256 of the exact downloaded image bytes
+      // (contentHash). verify_image_candidate later drops facts whose hash
+      // does not match the bytes it is inspecting.
+      const facts: Array<[string, string]> = (
+        [
+          ['productName', ocr.productName],
+          ['brand', ocr.brand],
+          ['size', ocr.size],
+          ['weight', ocr.weight],
+          ['flavorVariety', ocr.flavorVariety],
+        ] as Array<[string, unknown]>
+      ).filter(
+        (entry): entry is [string, string] =>
+          entry[1] !== null && entry[1] !== undefined && String(entry[1]).trim() !== '',
+      );
+      let domain: string | null = null;
+      try {
+        domain = new URL(imageUrl).hostname;
+      } catch {
+        domain = null;
+      }
+      const evidence = facts.map(([field, value]) => ({
+        id: fieldEvidenceId('extract_packaging_evidence', imageUrl, field, String(value)),
+        field,
+        value,
+        method: 'image_ocr' as const,
+        url: imageUrl,
+        ...(domain ? { domain } : {}),
+        contentHash: ocr.contentHash ?? undefined,
+        snippet: String(value).slice(0, 300),
+      }));
       return okResult(
         {
           productName: ocr.productName ?? null,
@@ -446,9 +509,10 @@ const extractPackagingEvidence: PiToolAdapter = {
           size: ocr.size ?? null,
           weight: ocr.weight ?? null,
           flavorVariety: ocr.flavorVariety ?? null,
+          contentHash: ocr.contentHash ?? null,
           rawFields: Object.keys(ocr).filter((k) => !['productName', 'brand', 'size', 'weight', 'flavorVariety'].includes(k)),
         },
-        [{ id: evidenceId('extract_packaging_evidence', imageUrl), kind: 'gtin_evidence', url: imageUrl, method: 'vlm_packaging_ocr' }],
+        evidence,
       );
     } catch (error) {
       return errorResult('ocr_failed', error instanceof Error ? error.message.slice(0, 500) : String(error));
