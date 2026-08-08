@@ -13,7 +13,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { initDb, getDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { createPiRun, insertPiResult, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, getPiResult, insertPiResult, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createReviewDecision } from '../../db/repositories/pi-review-decision-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { importRunToOnboarding } from '../../product-intelligence/onboarding-import';
@@ -59,6 +60,15 @@ function makeShadowRun(): string {
       productProposal: { fields: [{ field: 'title', value: 'Proposed Title' }] },
       abstention: false,
     },
+  });
+  // Round-3 finding 7: importRunToOnboarding enforces a durable approval
+  // decision itself — the fixture run needs one to be importable at all.
+  const stored = getPiResult(run.id);
+  createReviewDecision({
+    runId: run.id,
+    decision: 'approve',
+    resultHash: stored!.resultHash,
+    reviewer: JSON.stringify({ actorType: 'local_operator', authentication: 'local_ui', displayLabel: 'test' }),
   });
   transitionPiRunStatus(run.id, 'completed', {});
   return run.id;
