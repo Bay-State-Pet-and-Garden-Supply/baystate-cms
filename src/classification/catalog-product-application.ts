@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { getDb } from '../db/connection';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
@@ -6,11 +5,11 @@ import { getAcceptedProposals, recordHistoryEvent } from '../db/repositories/cla
 import { getCachedAttributeMappings } from '../db/repositories/classification-config-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
 import { findWorkspace } from '../db/repositories/workspace-repo';
-import { loadClassificationConfig } from './config-loader';
-import { createConfigSnapshot } from '../db/repositories/classification-config-repo';
-import { computeConfigHash } from '../db/repositories/classification-config-repo';
+import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from './config-loader';
+import { authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from './runtime-snapshot';
 import { mergeProductOnPages } from '../shopsite/product-page-assignments';
-import { serializeAttributeValue } from './assignment-projection';
+import { getActiveVerifiedPageIds } from '../shopsite/page-import-service';
+import { getEffectiveProposalTargetId, getEffectiveProposalValue, serializeAttributeValue } from './assignment-projection';
 import { computeProductHash } from './catalog-product-source';
 import type { Product } from '../shared/types';
 
@@ -67,11 +66,20 @@ export async function applyCatalogClassification(
     }
   }
 
-  // Config hash drift check — use pure hashing, no DB side effects
+  // Config hash drift check — supports plain config hashes (legacy), the
+  // active v2 bundle hash, and persisted runtime snapshot hashes; unknown
+  // formats fail closed.
   if (run.config_snapshot_hash) {
-    const classConfig = loadClassificationConfig(workspacePath);
-    const currentConfigHash = computeConfigHash(classConfig);
-    if (currentConfigHash !== run.config_snapshot_hash) {
+    const storedHash = String(run.config_snapshot_hash);
+    const authority = loadRuntimeConfigAuthority(workspacePath, createRuntimeActivationContext(workspacePath));
+    const matches =
+      authorityConfigHashMatches(authority, storedHash) ||
+      runtimeSnapshotHashMatchesConfig(
+        workspaceId,
+        storedHash,
+        authority.kind === 'v2' ? authority.bundle : authority.config,
+      );
+    if (!matches) {
       throw new Error('Classification config has changed since classification. Please rerun classification.');
     }
   }
@@ -90,9 +98,12 @@ export async function applyCatalogClassification(
   // Apply field assignments
   const mergedCustomFields = { ...(product.customFields || {}) };
   for (const proposal of acceptedProposals) {
-    if (proposal.proposalType !== 'field_assignment' || !proposal.targetId) continue;
+    if (proposal.proposalType !== 'field_assignment') continue;
+    // Effective reviewed target/value win over the immutable prediction.
+    const targetId = getEffectiveProposalTargetId(proposal);
+    if (!targetId) continue;
 
-    const mapping = mappings.find(m => m.attributeId === proposal.targetId);
+    const mapping = mappings.find(m => m.attributeId === targetId);
     if (!mapping) {
       skipped.push({ proposalId: proposal.id, reason: 'No attribute mapping found' });
       continue;
@@ -106,20 +117,34 @@ export async function applyCatalogClassification(
       continue;
     }
 
-    const value = serializeAttributeValue(proposal.proposedValue, mapping.serialization);
-    if (value) {
+    const effectiveValue = getEffectiveProposalValue(proposal);
+    const value = serializeAttributeValue(effectiveValue, mapping.serialization);
+    if (value || (proposal.hasRevisedValue && effectiveValue === null)) {
       mergedCustomFields[mapping.catalogField] = value;
       appliedFields.push(mapping.catalogField);
     }
   }
 
-  // Apply page assignments (additive only)
+  // Apply page assignments (additive only) — the identity of every accepted
+  // page MUST be verified in the currently active import. Name-only or
+  // out-of-import identities are skipped visibly and never serialized into
+  // ProductOnPages.
+  const verifiedPageIds = getActiveVerifiedPageIds(workspaceId);
   const additionalPages: string[] = [];
   for (const proposal of acceptedProposals) {
-    if (proposal.proposalType !== 'category_page' || !proposal.targetId) continue;
-    const pv = proposal.proposedValue as Record<string, unknown> | undefined;
-    const pageName = pv?.pageName ? String(pv.pageName) : String(proposal.targetId);
+    if (proposal.proposalType !== 'category_page') continue;
+    const targetId = getEffectiveProposalTargetId(proposal);
+    if (!targetId) continue;
+    const pv = getEffectiveProposalValue(proposal) as Record<string, unknown> | undefined;
+    const pageName = pv?.pageName ? String(pv.pageName) : String(targetId);
     const pageId = pv?.pageId ? String(pv.pageId) : null;
+    if (!pageId || !verifiedPageIds.has(pageId)) {
+      skipped.push({
+        proposalId: proposal.id,
+        reason: 'Page identity unverified (name-only or not in the active verified import)',
+      });
+      continue;
+    }
     if (!additionalPages.includes(pageName)) {
       additionalPages.push(pageName);
     }

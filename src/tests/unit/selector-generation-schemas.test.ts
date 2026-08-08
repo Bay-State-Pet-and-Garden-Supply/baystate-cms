@@ -14,7 +14,7 @@ import {
 describe('GenerateSelectorsRequestSchema', () => {
   it('accepts a valid minimal request', () => {
     const result = GenerateSelectorsRequestSchema.safeParse({
-      htmlRef: '.shopsite-cms/artifacts/profile-builder/acmepet.com/job-123/page.html',
+      htmlRef: '.baystate-cms/artifacts/profile-builder/acmepet.com/job-123/page.html',
       sourceUrl: 'https://acmepet.com/products/chicken-dinner',
       runtime: 'rendered',
       fields: [
@@ -28,7 +28,7 @@ describe('GenerateSelectorsRequestSchema', () => {
 
   it('accepts a request with snapshot context', () => {
     const result = GenerateSelectorsRequestSchema.safeParse({
-      htmlRef: '.shopsite-cms/artifacts/profile-builder/acmepet.com/job-123/page.html',
+      htmlRef: '.baystate-cms/artifacts/profile-builder/acmepet.com/job-123/page.html',
       sourceUrl: 'https://acmepet.com/products/chicken-dinner',
       runtime: 'static',
       fields: [{ key: 'titleSelector', label: 'Title', origin: 'core', valueType: 'text' }],

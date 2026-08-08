@@ -15,7 +15,7 @@ export interface ShopSiteConnectionRow {
 
 export function findConnection(workspaceId: string): ShopSiteConnectionRow | null {
   const db = getDb();
-  const row = db.query('SELECT * FROM shopsite_connection WHERE workspace_id = ? LIMIT 1').get(workspaceId) as Record<string, unknown> | undefined;
+  const row = db.query('SELECT * FROM connection WHERE workspace_id = ? LIMIT 1').get(workspaceId) as Record<string, unknown> | undefined;
   return row ? mapRow(row) : null;
 }
 
@@ -35,7 +35,7 @@ export function upsertConnection(input: {
 
   if (existing) {
     db.run(
-      `UPDATE shopsite_connection
+      `UPDATE connection
        SET cgi_base_url = ?, auth_strategy = ?, merchant_id = ?, password_secret_ref = ?,
            last_tested_at = ?, last_test_status = ?, last_test_error = ?
        WHERE id = ?`,
@@ -55,7 +55,7 @@ export function upsertConnection(input: {
 
   const id = randomUUID();
   db.run(
-    `INSERT INTO shopsite_connection
+    `INSERT INTO connection
        (id, workspace_id, cgi_base_url, auth_strategy, merchant_id, password_secret_ref, last_tested_at, last_test_status, last_test_error)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
@@ -80,7 +80,7 @@ export function updateConnectionTestStatus(
 ): void {
   const db = getDb();
   db.run(
-    `UPDATE shopsite_connection
+    `UPDATE connection
      SET last_tested_at = ?, last_test_status = ?, last_test_error = ?
      WHERE workspace_id = ?`,
     [new Date().toISOString(), status, error, workspaceId],

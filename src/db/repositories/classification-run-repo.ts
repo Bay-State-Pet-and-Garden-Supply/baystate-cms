@@ -1,5 +1,6 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
+import type { Database } from '../driver';
 import type { ClassificationEvidence, ClassificationProposal, ClassificationProposalDecision } from '../../shared/types';
 
 const now = () => new Date().toISOString();
@@ -36,7 +37,7 @@ export function createRun(
   options?: {
     onboardingItemId?: string;
     sourceKind?: 'onboarding' | 'catalog_product';
-    sourceProductHash?: string;
+    sourceProductHash?: string | null;
   },
 ): ClassificationRunRow;
 export function createRun(
@@ -47,7 +48,7 @@ export function createRun(
   optionsOrItemId?: string | {
     onboardingItemId?: string;
     sourceKind?: 'onboarding' | 'catalog_product';
-    sourceProductHash?: string;
+    sourceProductHash?: string | null;
   },
 ): ClassificationRunRow {
   let onboardingItemId: string | undefined;
@@ -101,6 +102,25 @@ export function getRun(id: string): ClassificationRunRow | null {
   return mapRun(row);
 }
 
+/**
+ * Resolve an onboarding item's persisted run pointer only when every ownership
+ * dimension agrees. Curation JSON is a convenience pointer, never authority.
+ */
+export function getValidatedOnboardingRun(
+  runId: string | null | undefined,
+  workspaceId: string,
+  onboardingItemId: string,
+  productSku: string,
+): ClassificationRunRow | null {
+  if (!runId) return null;
+  const row = getDb().query(
+    `SELECT * FROM classification_runs
+     WHERE id = ? AND workspace_id = ? AND onboarding_item_id = ?
+       AND product_sku = ? AND source_kind = 'onboarding'`,
+  ).get(runId, workspaceId, onboardingItemId, productSku) as Record<string, any> | undefined;
+  return row ? mapRun(row) : null;
+}
+
 export function getRecentCatalogRun(workspaceId: string, sku: string): ClassificationRunRow | null {
   const row = getDb()
     .query("SELECT * FROM classification_runs WHERE workspace_id = ? AND product_sku = ? AND source_kind = 'catalog_product' ORDER BY started_at DESC LIMIT 1")
@@ -148,14 +168,48 @@ function getEvidenceBySku(productSku: string): ClassificationEvidence[] {
 
 export function getProposalsByRun(runId: string): ClassificationProposal[] {
   const rows = getDb()
-    .query('SELECT * FROM classification_proposals WHERE run_id = ?')
+    .query(`SELECT p.*,
+      (SELECT d.revised_value_json FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_value_json,
+      (SELECT d.revised_target_id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_target_id,
+      (SELECT d.id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS current_decision_id,
+      (SELECT CASE WHEN d.revised_value_json IS NULL THEN 0 ELSE 1 END FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_value,
+      (SELECT COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END)
+        FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
+      FROM classification_proposals p WHERE p.run_id = ?`)
     .all(runId) as Record<string, any>[];
   return rows.map(mapProposal);
 }
 
 function getProposalsBySku(productSku: string): ClassificationProposal[] {
   const rows = getDb()
-    .query('SELECT * FROM classification_proposals WHERE product_sku = ? ORDER BY created_at DESC')
+    .query(`SELECT p.*,
+      (SELECT d.revised_value_json FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_value_json,
+      (SELECT d.revised_target_id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_target_id,
+      (SELECT d.id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS current_decision_id,
+      (SELECT CASE WHEN d.revised_value_json IS NULL THEN 0 ELSE 1 END FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_value,
+      (SELECT COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END)
+        FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
+      FROM classification_proposals p WHERE p.product_sku = ? ORDER BY p.created_at DESC`)
     .all(productSku) as Record<string, any>[];
   return rows.map(mapProposal);
 }
@@ -163,7 +217,24 @@ function getProposalsBySku(productSku: string): ClassificationProposal[] {
 // fallow-ignore-next-line unused-export — used by tests
 export function getPendingPageProposals(productSku: string): ClassificationProposal[] {
   const rows = getDb()
-    .query("SELECT * FROM classification_proposals WHERE product_sku = ? AND proposal_type = ? AND status = ? ORDER BY confidence DESC")
+    .query(`SELECT p.*,
+      (SELECT d.revised_value_json FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_value_json,
+      (SELECT d.revised_target_id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_target_id,
+      (SELECT d.id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS current_decision_id,
+      (SELECT CASE WHEN d.revised_value_json IS NULL THEN 0 ELSE 1 END FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_value,
+      (SELECT COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END)
+        FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
+      FROM classification_proposals p WHERE p.product_sku = ? AND p.proposal_type = ? AND p.status = ? ORDER BY p.confidence DESC`)
     .all(productSku, 'category_page', 'pending') as Record<string, any>[];
   return rows.map(mapProposal);
 }
@@ -171,60 +242,290 @@ export function getPendingPageProposals(productSku: string): ClassificationPropo
 export function getAcceptedProposals(productSku: string, runId?: string): ClassificationProposal[] {
   if (runId) {
     const rows = getDb()
-      .query('SELECT * FROM classification_proposals WHERE product_sku = ? AND run_id = ? AND status = ?')
+      .query(`SELECT p.*,
+        (SELECT d.revised_value_json FROM classification_proposal_decisions d
+          WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+          ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_value_json,
+        (SELECT d.revised_target_id FROM classification_proposal_decisions d
+          WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+          ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_target_id,
+        (SELECT d.id FROM classification_proposal_decisions d
+          WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+          ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS current_decision_id,
+        (SELECT CASE WHEN d.revised_value_json IS NULL THEN 0 ELSE 1 END FROM classification_proposal_decisions d
+          WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+          ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_value,
+        (SELECT COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END)
+          FROM classification_proposal_decisions d
+          WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+          ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
+        FROM classification_proposals p WHERE p.product_sku = ? AND p.run_id = ? AND p.status = ?`)
       .all(productSku, runId, 'accepted') as Record<string, any>[];
     return rows.map(mapProposal);
   }
   const rows = getDb()
-    .query('SELECT * FROM classification_proposals WHERE product_sku = ? AND status = ?')
+    .query(`SELECT p.*,
+      (SELECT d.revised_value_json FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_value_json,
+      (SELECT d.revised_target_id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_target_id,
+      (SELECT d.id FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS current_decision_id,
+      (SELECT CASE WHEN d.revised_value_json IS NULL THEN 0 ELSE 1 END FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_value,
+      (SELECT COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END)
+        FROM classification_proposal_decisions d
+        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
+      FROM classification_proposals p WHERE p.product_sku = ? AND p.status = ?`)
     .all(productSku, 'accepted') as Record<string, any>[];
   console.warn(`[ClassificationRunRepo] getAcceptedProposals called without runId for SKU ${productSku} — results are unscoped and may span multiple runs.`);
   return rows.map(mapProposal);
 }
 
-export function updateProposalReviewValue(
-  proposalId: string,
-  proposedValue: unknown,
-  targetId?: string | null,
-): void {
-  if (targetId !== undefined) {
-    getDb().run(
-      'UPDATE classification_proposals SET proposed_value_json = ?, target_id = ? WHERE id = ?',
-      [JSON.stringify(proposedValue), targetId, proposalId],
-    );
-    return;
+// ─── Decision Revisions ──────────────────────────────────────────────────────
+
+export class DecisionConflictError extends Error {
+  readonly code = 'decision_conflict';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'DecisionConflictError';
   }
-  getDb().run(
-    'UPDATE classification_proposals SET proposed_value_json = ? WHERE id = ?',
-    [JSON.stringify(proposedValue), proposalId],
+}
+
+export interface DecisionRowInput {
+  id?: string;
+  proposalId: string;
+  decision: 'accepted' | 'rejected' | 'deferred';
+  /** Optimistic-concurrency predecessor. Null means the caller observed no live decision. */
+  expectedRevisionId?: string | null;
+  /** @deprecated Transitional alias for expectedRevisionId. */
+  revisedFromId?: string | null;
+  reviewerId?: string | null;
+  reviewerNote?: string | null;
+  /** Undefined = no correction; any other value (including null) is a correction. */
+  revisedValue?: unknown;
+  revisedTargetId?: string | null;
+  createdAt?: string;
+  /** Explicit token for one user action. Network retries must reuse this token. */
+  actionToken?: string | null;
+  /** @deprecated Database/backward-compatible alias for actionToken. */
+  decisionKey?: string | null;
+}
+
+function hasOwn(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function correctionJson(input: DecisionRowInput): string | null {
+  return hasOwn(input, 'revisedValue') && input.revisedValue !== undefined
+    ? JSON.stringify(input.revisedValue)
+    : null;
+}
+
+function inputHasRevisedTarget(input: DecisionRowInput): boolean {
+  return hasOwn(input, 'revisedTargetId');
+}
+
+function rowHasRevisedTarget(row: Record<string, any>): boolean {
+  if (row.has_revised_target !== null && row.has_revised_target !== undefined) {
+    return Number(row.has_revised_target) === 1;
+  }
+  // Pre-column rows: any non-null target id is treated as a present correction.
+  return row.revised_target_id !== null && row.revised_target_id !== undefined;
+}
+
+function rowMatchesInput(row: Record<string, any>, input: DecisionRowInput): boolean {
+  const inputHasRevision = hasOwn(input, 'revisedValue') && input.revisedValue !== undefined;
+  const rowHasRevision = row.revised_value_json !== null && row.revised_value_json !== undefined;
+  const inputHasTarget = inputHasRevisedTarget(input);
+  const rowHasTarget = rowHasRevisedTarget(row);
+  return String(row.proposal_id) === input.proposalId
+    && String(row.decision) === input.decision
+    && (row.reviewer_id === null ? null : String(row.reviewer_id)) === (input.reviewerId ?? null)
+    && (row.reviewer_note === null ? null : String(row.reviewer_note)) === (input.reviewerNote ?? null)
+    && rowHasRevision === inputHasRevision
+    && (!inputHasRevision || String(row.revised_value_json) === correctionJson(input))
+    && rowHasTarget === inputHasTarget
+    && (!inputHasTarget || (row.revised_target_id === null ? null : String(row.revised_target_id)) === (input.revisedTargetId ?? null));
+}
+
+function getLiveDecisionRow(db: Database, proposalId: string): Record<string, any> | undefined {
+  return db.query(
+    `SELECT * FROM classification_proposal_decisions
+     WHERE proposal_id = ? AND superseded_at IS NULL
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+  ).get(proposalId) as Record<string, any> | undefined;
+}
+
+/**
+ * Insert one decision row inside the caller's transaction (or standalone via
+ * recordDecision). An explicit action token makes retries safe even after a
+ * newer revision exists. Optimistic predecessor checking prevents stale edits
+ * (including legacy requests without a predecessor) from superseding newer work.
+ */
+export function insertDecisionRow(
+  db: Database,
+  input: DecisionRowInput,
+): { decision: ClassificationProposalDecision; inserted: boolean; decisionId: string } {
+  const suppliedToken = input.actionToken ?? input.decisionKey ?? null;
+  const actionToken = suppliedToken?.trim() || randomUUID();
+
+  // Retry lookup comes before predecessor validation: a delayed retry of an old
+  // action returns that historical row and can never make it live again.
+  const tokenRow = db.query(
+    'SELECT * FROM classification_proposal_decisions WHERE decision_key = ?',
+  ).get(actionToken) as Record<string, any> | undefined;
+  if (tokenRow) {
+    if (input.id && String(tokenRow.id) !== input.id) {
+      throw new DecisionConflictError('The decision id does not match the action token owner.');
+    }
+    const expectedProvided = hasOwn(input, 'expectedRevisionId') || hasOwn(input, 'revisedFromId');
+    const expectedRevisionId = hasOwn(input, 'expectedRevisionId')
+      ? input.expectedRevisionId ?? null
+      : input.revisedFromId ?? null;
+    const storedPredecessor = tokenRow.revised_from_id === null ? null : String(tokenRow.revised_from_id);
+    if (!rowMatchesInput(tokenRow, input) || (expectedProvided && storedPredecessor !== expectedRevisionId)) {
+      throw new DecisionConflictError('The decision action token is already associated with a different payload.');
+    }
+    const decision = mapDecision(tokenRow);
+    return { decision, inserted: false, decisionId: decision.id };
+  }
+
+  if (input.id) {
+    const idRow = db.query('SELECT * FROM classification_proposal_decisions WHERE id = ?').get(input.id) as Record<string, any> | undefined;
+    if (idRow) {
+      throw new DecisionConflictError('The decision id is already associated with another action.');
+    }
+  }
+
+  const current = getLiveDecisionRow(db, input.proposalId);
+  const expectedProvided = hasOwn(input, 'expectedRevisionId') || hasOwn(input, 'revisedFromId');
+  const expectedRevisionId = hasOwn(input, 'expectedRevisionId')
+    ? input.expectedRevisionId ?? null
+    : input.revisedFromId ?? null;
+  const currentId = current ? String(current.id) : null;
+
+  if (expectedProvided && expectedRevisionId !== currentId) {
+    throw new DecisionConflictError('The proposal decision changed after it was loaded. Refresh and retry the edit.');
+  }
+
+  if (!expectedProvided && current) {
+    // Backward-compatible immediate retry is safe only when it is identical to
+    // the currently live row. A different legacy edit must refresh and provide
+    // the optimistic predecessor rather than risk an out-of-order overwrite.
+    if (rowMatchesInput(current, input)) {
+      const decision = mapDecision(current);
+      return { decision, inserted: false, decisionId: decision.id };
+    }
+    throw new DecisionConflictError('A predecessor decision id is required to revise an existing decision.');
+  }
+
+  if (current && rowMatchesInput(current, input)) {
+    const decision = mapDecision(current);
+    return { decision, inserted: false, decisionId: decision.id };
+  }
+
+  const createdAt = input.createdAt ?? now();
+  const decisionId = input.id ?? randomUUID();
+  const revisedFromId = currentId;
+  const revisedValueJson = correctionJson(input);
+  const hasRevisedTarget = inputHasRevisedTarget(input) ? 1 : 0;
+  const revisedTargetId = hasRevisedTarget ? (input.revisedTargetId ?? null) : null;
+
+  // Plain INSERT is intentional: only a previously verified action token may
+  // be treated as an idempotent retry. PK/FK/CHECK conflicts must fail.
+  db.run(
+    `INSERT INTO classification_proposal_decisions
+     (id, proposal_id, decision, revised_from_id, reviewer_id, reviewer_note,
+      revised_value_json, revised_target_id, has_revised_target, decision_key, superseded_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+    [
+      decisionId,
+      input.proposalId,
+      input.decision,
+      revisedFromId,
+      input.reviewerId ?? null,
+      input.reviewerNote ?? null,
+      revisedValueJson,
+      revisedTargetId,
+      hasRevisedTarget,
+      actionToken,
+      createdAt,
+    ],
+  );
+
+  const newStatus = input.decision === 'accepted' ? 'accepted' : input.decision === 'rejected' ? 'rejected' : 'deferred';
+  db.run('UPDATE classification_proposals SET status = ? WHERE id = ?', [newStatus, input.proposalId]);
+  db.run(
+    `UPDATE classification_proposal_decisions SET superseded_at = ?
+     WHERE proposal_id = ? AND id != ? AND superseded_at IS NULL`,
+    [createdAt, input.proposalId, decisionId],
+  );
+
+  const decision = mapDecision(db.query(
+    'SELECT * FROM classification_proposal_decisions WHERE id = ?',
+  ).get(decisionId) as Record<string, any>);
+  return { decision, inserted: true, decisionId };
+}
+
+/** Supersede active decisions without deleting audit history. */
+export function supersedeDecisionsForProposals(proposalIds: string[], at?: string): void {
+  if (proposalIds.length === 0) return;
+  const db = getDb();
+  const placeholders = proposalIds.map(() => '?').join(', ');
+  db.run(
+    `UPDATE classification_proposal_decisions SET superseded_at = ?
+     WHERE proposal_id IN (${placeholders}) AND superseded_at IS NULL`,
+    [at ?? now(), ...proposalIds],
   );
 }
 
-// ─── Decisions ─────────────────────────────────────────────────────────────────
+/** Standalone atomic decision write for direct/test callers. */
+export function recordDecision(decision: ClassificationProposalDecision): { inserted: boolean; decisionId: string } {
+  const db = getDb();
+  let result: { inserted: boolean; decisionId: string } = { inserted: false, decisionId: decision.id };
+  db.transaction(() => {
+    const row = insertDecisionRow(db, {
+      id: decision.id,
+      proposalId: decision.proposalId,
+      decision: decision.decision,
+      expectedRevisionId: decision.revisedFromId,
+      reviewerId: decision.reviewerId,
+      reviewerNote: decision.reviewerNote,
+      ...(decision.hasRevisedValue ? { revisedValue: decision.revisedValue } : {}),
+      ...(decision.hasRevisedTargetId ? { revisedTargetId: decision.revisedTargetId } : {}),
+      actionToken: decision.actionToken ?? decision.decisionKey,
+      createdAt: decision.createdAt,
+    });
+    result = { inserted: row.inserted, decisionId: row.decisionId };
+  })();
+  return result;
+}
 
-export function recordDecision(decision: ClassificationProposalDecision): void {
-  getDb().run(
-    `INSERT INTO classification_proposal_decisions
-     (id, proposal_id, decision, revised_from_id, reviewer_id, reviewer_note, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [
-      decision.id || randomUUID(),
-      decision.proposalId,
-      decision.decision,
-      decision.revisedFromId ?? null,
-      decision.reviewerId ?? null,
-      decision.reviewerNote ?? null,
-      now(),
-    ],
-  );
-  // Update proposal status
-  const newStatus = decision.decision === 'accepted' ? 'accepted' : decision.decision === 'rejected' ? 'rejected' : 'deferred';
-  getDb().run('UPDATE classification_proposals SET status = ? WHERE id = ?', [newStatus, decision.proposalId]);
+export function getLiveDecisionsByRun(runId: string): ClassificationProposalDecision[] {
+  const rows = getDb().query(
+    `SELECT d.* FROM classification_proposal_decisions d
+     JOIN classification_proposals p ON p.id = d.proposal_id
+     WHERE p.run_id = ? AND d.superseded_at IS NULL
+       AND d.rowid = (
+         SELECT d2.rowid FROM classification_proposal_decisions d2
+         WHERE d2.proposal_id = d.proposal_id AND d2.superseded_at IS NULL
+         ORDER BY d2.created_at DESC, d2.rowid DESC LIMIT 1
+       )
+     ORDER BY d.created_at DESC, d.rowid DESC`,
+  ).all(runId) as Record<string, any>[];
+  return rows.map(mapDecision);
 }
 
 function getDecisionsByProposal(proposalId: string): ClassificationProposalDecision[] {
   const rows = getDb()
-    .query('SELECT * FROM classification_proposal_decisions WHERE proposal_id = ? ORDER BY created_at DESC')
+    .query('SELECT * FROM classification_proposal_decisions WHERE proposal_id = ? ORDER BY created_at DESC, rowid DESC')
     .all(proposalId) as Record<string, any>[];
   return rows.map(mapDecision);
 }
@@ -262,6 +563,48 @@ function getHistoryBySku(productSku: string): Record<string, any>[] {
   return getDb()
     .query('SELECT * FROM classification_history_events WHERE product_sku = ? ORDER BY created_at DESC')
     .all(productSku) as Record<string, any>[];
+}
+
+// ─── Dependent Refresh Queue ────────────────────────────────────────────────────
+
+/**
+ * Enqueue a dependent classification refresh for a product. A dependent
+ * refresh is required whenever a Primary Product Type decision changes so the
+ * next run's snapshot can cite the accepted decision as a reviewed fact and
+ * unlock type-gated attribute/Page proposals.
+ *
+ * Deduplicates against an already-queued refresh for the same product and
+ * trigger; failed/completed rows do not block a new refresh.
+ */
+export function enqueueClassificationRefresh(input: {
+  workspaceId: string;
+  productSku: string;
+  triggerType: string;
+  refreshScope?: Record<string, unknown>;
+  requestedBy?: string | null;
+}): void {
+  const db = getDb();
+  const queued = db.query(
+    `SELECT 1 FROM classification_refresh_queue
+     WHERE workspace_id = ? AND product_sku = ? AND trigger_type = ? AND status = 'queued'
+     LIMIT 1`,
+  ).get(input.workspaceId, input.productSku, input.triggerType);
+  if (queued) return;
+
+  db.run(
+    `INSERT INTO classification_refresh_queue
+     (id, workspace_id, product_sku, trigger_type, refresh_scope_json, status, requested_by, requested_at)
+     VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`,
+    [
+      randomUUID(),
+      input.workspaceId,
+      input.productSku,
+      input.triggerType,
+      JSON.stringify(input.refreshScope ?? {}),
+      input.requestedBy ?? null,
+      now(),
+    ],
+  );
 }
 
 // ─── Mappers ───────────────────────────────────────────────────────────────────
@@ -302,6 +645,8 @@ function mapEvidence(row: Record<string, any>): ClassificationEvidence {
 }
 
 function mapProposal(row: Record<string, any>): ClassificationProposal {
+  const hasRevisedValue = Number(row.has_revised_value) === 1;
+  const hasRevisedTargetId = Number(row.has_revised_target_id) === 1;
   return {
     id: String(row.id),
     runId: String(row.run_id),
@@ -315,11 +660,22 @@ function mapProposal(row: Record<string, any>): ClassificationProposal {
     isBulkAcceptable: Number(row.is_bulk_acceptable) === 1,
     isStale: Number(row.is_stale) === 1,
     stalenessReason: row.staleness_reason ? String(row.staleness_reason) : null,
+    ...(hasRevisedValue ? { revisedValue: JSON.parse(String(row.revised_value_json)) } : {}),
+    hasRevisedValue,
+    // Explicit null target clear is a present correction; keep the key when has=true.
+    ...(hasRevisedTargetId
+      ? { revisedTargetId: row.revised_target_id === null || row.revised_target_id === undefined ? null : String(row.revised_target_id) }
+      : {}),
+    hasRevisedTargetId,
+    currentDecisionId: row.current_decision_id ? String(row.current_decision_id) : null,
     createdAt: String(row.created_at),
   };
 }
 
 function mapDecision(row: Record<string, any>): ClassificationProposalDecision {
+  const hasRevisedValue = row.revised_value_json !== null && row.revised_value_json !== undefined;
+  const hasRevisedTargetId = rowHasRevisedTarget(row);
+  const actionToken = row.decision_key ? String(row.decision_key) : null;
   return {
     id: String(row.id),
     proposalId: String(row.proposal_id),
@@ -327,6 +683,15 @@ function mapDecision(row: Record<string, any>): ClassificationProposalDecision {
     revisedFromId: row.revised_from_id ? String(row.revised_from_id) : null,
     reviewerId: row.reviewer_id ? String(row.reviewer_id) : null,
     reviewerNote: row.reviewer_note ? String(row.reviewer_note) : null,
+    ...(hasRevisedValue ? { revisedValue: JSON.parse(String(row.revised_value_json)) } : {}),
+    hasRevisedValue,
+    ...(hasRevisedTargetId
+      ? { revisedTargetId: row.revised_target_id === null || row.revised_target_id === undefined ? null : String(row.revised_target_id) }
+      : {}),
+    hasRevisedTargetId,
+    actionToken,
+    decisionKey: actionToken,
+    supersededAt: row.superseded_at ? String(row.superseded_at) : null,
     createdAt: String(row.created_at),
   };
 }

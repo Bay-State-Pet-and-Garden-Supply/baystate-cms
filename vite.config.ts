@@ -23,7 +23,7 @@ export default defineConfig({
         target: 'http://localhost:3030',
         changeOrigin: true,
         configure: (proxy) => {
-          const token = process.env.VITE_SHOPSITE_CMS_API_TOKEN;
+          const token = process.env.VITE_BAYSTATE_CMS_API_TOKEN;
           if (token) {
             proxy.on('proxyReq', (proxyReq) => {
               proxyReq.setHeader('Authorization', `Bearer ${token}`);

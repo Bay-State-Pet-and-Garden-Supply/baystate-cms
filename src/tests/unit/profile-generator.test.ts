@@ -237,13 +237,13 @@ describe('buildStableSelector (via candidates)', () => {
 // ─── generateExtractorProfile (with mocked LLM) ───────────────────────────
 
 describe('generateExtractorProfile', () => {
-  const originalEnv = process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+  const originalEnv = process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
   const originalFetch = global.fetch;
 
   beforeEach(() => {
     // Reset mocks and force the feature flag on for these tests.
     vi.resetAllMocks();
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const testConfig = {
       provider: 'openai',
       apiKey: 'test-key',
@@ -265,15 +265,15 @@ describe('generateExtractorProfile', () => {
 
   afterEach(() => {
     if (originalEnv === undefined) {
-      delete process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+      delete process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
     } else {
-      process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = originalEnv;
+      process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = originalEnv;
     }
     global.fetch = originalFetch;
   });
 
   it('returns null when feature flag is disabled', async () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'false';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'false';
     const result = await generateExtractorProfile(
       'https://example.com/p',
       SAMPLE_PRODUCT_HTML,
@@ -511,38 +511,38 @@ describe('validateGeneratedProfile', () => {
 // ─── isProfileGenerationEnabled ───────────────────────────────────────────
 
 describe('isProfileGenerationEnabled', () => {
-  const original = process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+  const original = process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
 
   afterEach(() => {
     if (original === undefined) {
-      delete process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+      delete process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
     } else {
-      process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = original;
+      process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = original;
     }
   });
 
   it('returns true for "true"', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     expect(isProfileGenerationEnabled()).toBe(true);
   });
 
   it('returns true for "1"', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = '1';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = '1';
     expect(isProfileGenerationEnabled()).toBe(true);
   });
 
   it('returns true for "yes" (case-insensitive)', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'YES';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'YES';
     expect(isProfileGenerationEnabled()).toBe(true);
   });
 
   it('returns false for any other value', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'enabled';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'enabled';
     expect(isProfileGenerationEnabled()).toBe(false);
   });
 
   it('returns true when the variable is not set (enabled by default)', () => {
-    delete process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+    delete process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
     expect(isProfileGenerationEnabled()).toBe(true);
   });
 });
@@ -550,7 +550,7 @@ describe('isProfileGenerationEnabled', () => {
 // ─── shouldAttemptProfileGeneration ──────────────────────────────────────
 
 describe('shouldAttemptProfileGeneration', () => {
-  const originalEnv = process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+  const originalEnv = process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
 
   const baseInput: ProfileGenerationTriggerInput = {
     domain: 'example.com',
@@ -566,19 +566,19 @@ describe('shouldAttemptProfileGeneration', () => {
 
   afterEach(() => {
     if (originalEnv === undefined) {
-      delete process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+      delete process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
     } else {
-      process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = originalEnv;
+      process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = originalEnv;
     }
   });
 
   it('returns false when the feature flag is disabled', () => {
-    delete process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+    delete process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
     expect(shouldAttemptProfileGeneration(baseInput)).toBe(false);
   });
 
   it('returns false when validation status is blocked', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       validationResult: { valid: false, status: 'blocked', reason: 'blocked', confidence: 0 },
@@ -587,7 +587,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns false when validation status is offline', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       validationResult: { valid: false, status: 'offline', reason: 'offline', confidence: 0 },
@@ -596,7 +596,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns false when validation status is mismatch', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       validationResult: { valid: false, status: 'mismatch', reason: 'mismatch', confidence: 0 },
@@ -605,7 +605,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns false when only price is missing (no improvement target)', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     // The "price-only missing" case: when both description AND brand are
     // present, the trigger should NOT fire. To model price-only missing,
     // set description and brand present, and the trigger must still
@@ -626,7 +626,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns false when the existing custom selectors already produced values', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       customHadAnyValue: true,
@@ -635,7 +635,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns false when the validation confidence is too low', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       validationResult: { valid: true, status: 'ok', reason: null, confidence: 0.3 },
@@ -644,7 +644,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns false when the extraction title is empty', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       extractionResult: {
@@ -657,7 +657,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns true when all conditions are met (flag on, ok, empty custom, missing description)', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       extractionResult: {
@@ -671,7 +671,7 @@ describe('shouldAttemptProfileGeneration', () => {
   });
 
   it('returns false when only brand is missing (no longer an improvement target)', () => {
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     const input: ProfileGenerationTriggerInput = {
       ...baseInput,
       extractionResult: {

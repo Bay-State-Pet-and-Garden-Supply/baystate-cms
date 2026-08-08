@@ -61,17 +61,32 @@ export function resolveBrand(inputBrand: string, brands: BrandConfig[]): BrandRe
     }
   }
 
-  // 3. Longest-prefix match using existing brand-matcher utility
-  const brandNames = brands.map(b => b.name);
-  const matchedName = matchExistingBrand(cleanInput, brandNames);
-  if (matchedName) {
-    const brand = brands.find(b => b.name === matchedName)!;
-    return {
-      brandId: brand.id,
-      brandName: brand.name,
-      confidence: 0.8,
-      matchedBy: 'prefix',
-    };
+  // 3. Longest-prefix match against canonical names and aliases
+  const candidateList: { brand: BrandConfig; candidateName: string }[] = [];
+  for (const brand of brands) {
+    candidateList.push({ brand, candidateName: brand.name });
+    for (const alias of brand.aliases) {
+      candidateList.push({ brand, candidateName: alias });
+    }
+  }
+
+  const matchedCandidateName = matchExistingBrand(
+    cleanInput,
+    candidateList.map((c) => c.candidateName),
+  );
+
+  if (matchedCandidateName) {
+    const entry = candidateList.find(
+      (c) => c.candidateName.trim().toLowerCase() === matchedCandidateName.trim().toLowerCase(),
+    );
+    if (entry) {
+      return {
+        brandId: entry.brand.id,
+        brandName: entry.brand.name,
+        confidence: 0.8,
+        matchedBy: 'prefix',
+      };
+    }
   }
 
   return null;

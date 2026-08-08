@@ -3,11 +3,12 @@
  *
  * Orchestrates a classification run for an existing catalog product
  * (no onboarding item required). Loads the product from the Git workspace,
- * snapshots classification config, creates a catalog run, and executes
- * 6 pipeline stages (omitting name_consolidation).
+ * builds and persists ONE immutable runtime snapshot before run creation,
+ * creates a catalog run, and executes 6 pipeline stages (omitting
+ * name_consolidation).
  */
-import { loadClassificationConfig } from './config-loader';
-import { syncConfigToCache, createConfigSnapshot } from '../db/repositories/classification-config-repo';
+import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from './config-loader';
+import { syncConfigToCache, createConfigSnapshot, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
 import {
   createRun,
   completeRun,
@@ -15,15 +16,16 @@ import {
   supersedeCatalogProposals,
 } from '../db/repositories/classification-run-repo';
 import { recordHistoryEvent } from '../db/repositories/classification-run-repo';
-import { listPages } from '../db/repositories/page-repo';
 import { runPipeline } from './pipeline-runner';
+import { buildRuntimeSnapshot, persistRuntimeSnapshot } from './runtime-snapshot';
 import { createCatalogEvidenceExtractionStage } from './stages/catalog-product-evidence-extraction';
 import { primaryProductTypeStage } from './stages/primary-product-type';
 import { attributeApplicabilityStage } from './stages/attribute-applicability';
 import { productAttributeProposalsStage } from './stages/attribute-proposals';
 import { categoryPageProposalsStage } from './stages/category-page-proposals';
 import { productDraftProjectionStage } from './stages/draft-projection';
-import { buildCatalogProductEvidenceInput, computeProductHash } from './catalog-product-source';
+import { computeProductHash } from './catalog-product-source';
+import { parseProductOnPages } from '../shopsite/product-page-assignments';
 import type { StageDefinition, StageContext, StageInput } from './types';
 import type { Product } from '../shared/types';
 
@@ -42,12 +44,41 @@ export async function classifyCatalogProduct(
 ): Promise<{ runId: string; success: boolean; error?: string }> {
   const sku = product.sku;
 
-  // 1. Load and sync classification config
-  const config = loadClassificationConfig(workspacePath);
-  syncConfigToCache(workspaceId, config);
-  const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+  // 1. Load the authoritative runtime config (ACTIVE v2 bundle when present,
+  //    transitional v1 otherwise) and resolve the snapshot reference binding.
+  const activationContext = createRuntimeActivationContext(workspacePath);
+  const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+  let configSnapshotRef: StageContext['configSnapshotRef'];
+  let focusedFileHashes: Record<string, string>;
+  let catalogEvidenceHash: string | null;
+  if (authority.kind === 'v2') {
+    const bundle = authority.bundle;
+    const persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+    configSnapshotRef = {
+      id: persistedId ?? bundle.manifest.bundleHash,
+      hash: bundle.manifest.bundleHash,
+      sourceCommit: bundle.manifest.sourceCatalogCommit,
+      createdAt: new Date().toISOString(),
+    };
+    focusedFileHashes = bundle.manifest.fileVersions;
+    catalogEvidenceHash = bundle.manifest.catalogEvidenceHash;
+    // The derived cache was written transactionally at activation; never
+    // re-sync the v2 bundle through the v1-shaped cache mirror.
+  } else {
+    syncConfigToCache(workspaceId, authority.config);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, authority.config);
+    configSnapshotRef = {
+      id: snapId,
+      hash: snapHash,
+      sourceCommit: null,
+      createdAt: new Date().toISOString(),
+    };
+    focusedFileHashes = authority.config.manifest.fileVersions ?? {};
+    catalogEvidenceHash = null;
+  }
 
-  // 2. Compute product hash for drift detection
+  // 2. Compute product hash for drift detection (includes search keywords
+  //    and the product's OWN ProductOnPages observations).
   const productHash = computeProductHash(product);
 
   // 3. Check for existing running catalog run
@@ -56,30 +87,50 @@ export async function classifyCatalogProduct(
     return { runId: existing.id, success: false, error: 'A classification run is already in progress for this product' };
   }
 
-  // 4. Create a catalog classification run
-  const run = createRun(workspaceId, sku, snapId, snapHash, {
+  // 4. Build + freeze + persist ONE immutable runtime snapshot before run
+  //    creation. Page context is the product's own name-only observations
+  //    (never every store Page); the page catalog is unverified.
+  const ownPageNames = parseProductOnPages(product.shopsite?.preserved);
+  const runtimeSnapshot = buildRuntimeSnapshot({
+    workspaceId,
+    workspacePath,
+    productSku: sku,
+    authority,
+    configSnapshotRef,
+    focusedFileHashes,
+    catalogEvidenceHash,
+    sourceProductHash: productHash,
+    searchKeywords: product.core.seo?.searchKeywords ?? null,
+    productPageNames: ownPageNames,
+    pages: {
+      state: 'no_verified_page_catalog',
+      nameOnlyRecords: ownPageNames.map(pageName => ({ pageId: pageName, pageName, verified: false })),
+    },
+  });
+  const { id: runtimeSnapId, hash: runtimeSnapHash } = persistRuntimeSnapshot(runtimeSnapshot);
+
+  // 5. Create a catalog classification run bound to the runtime snapshot
+  const run = createRun(workspaceId, sku, runtimeSnapId, runtimeSnapHash, {
     sourceKind: 'catalog_product',
     sourceProductHash: productHash,
   });
 
   try {
-    // 5. Build page index for existing page context
-    const pages = listPages();
-
-    // 6. Build stage context
+    // 6. Build stage context around the frozen snapshot
     const stageContext: StageContext = {
       workspacePath,
       workspaceId,
-      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+      configSnapshotRef,
+      snapshot: runtimeSnapshot,
       runId: run.id,
       catalogContext: {
         sourceProductHash: productHash,
-        existingPageIds: pages.map(p => ({ pageId: p.id, pageName: p.name })),
+        existingPageIds: ownPageNames.map(pageName => ({ pageId: pageName, pageName })),
       },
     };
 
     // 7. Create catalog evidence extraction stage (captures product snapshot)
-    const catalogEvidenceStage = createCatalogEvidenceExtractionStage(product, workspacePath, pages);
+    const catalogEvidenceStage = createCatalogEvidenceExtractionStage(product, workspacePath);
 
     // 8. Run pipeline with 6 stages (omit name_consolidation and cohort logic)
     const stages: StageDefinition[] = [
@@ -116,7 +167,7 @@ export async function classifyCatalogProduct(
       runId: run.id,
       sourceKind: 'catalog_product',
       sourceProductHash: productHash,
-      configSnapshotHash: snapHash,
+      configSnapshotHash: runtimeSnapHash,
       status: finalStatus,
       evidenceCount: result.evidence.length,
       proposalCount: result.proposals.length,

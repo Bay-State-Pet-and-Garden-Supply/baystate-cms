@@ -1,323 +1,93 @@
 import { randomUUID } from 'node:crypto';
-import fs from 'fs';
 import path from 'path';
-import os from 'os';
-import { initDb, closeDb, getDb } from '../../db/connection';
-import { runMigrations } from '../../db/migrations';
-import { insertWorkspace, findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
-import { GitClient } from '../../git/git-client';
-import { createWorkspaceDirs, writeGitignore, writeStoreConfig } from '../../git/workspace-files';
-import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
+import { getDb } from '../../db/connection';
+import { findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
+import { loadRuntimeConfigAuthority, createRuntimeActivationContext, ClassificationConfigLoadError, ClassificationConfigNotConfiguredError } from '../../classification/config-loader';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import { upsertRegistryEntry, listRegistry } from '../../db/repositories/field-registry-repo';
-import type { ClassificationConfig } from '../../shared/types';
-
+import { migrateLegacyWorkspaceIfNeeded, getStoreCatalogPath } from './migration-service';
 import type { Workspace } from '../../shared/types';
 
-function validateWorkspacePath(userPath: string): void {
-  const resolved = path.resolve(userPath.trim());
-
-  // Reject root
-  if (resolved === '/') {
-    throw new Error('Cannot create workspace at filesystem root.');
-  }
-
-  // Reject home directory itself
-  const homeDir = os.homedir();
-  if (resolved === homeDir) {
-    throw new Error('Cannot create workspace at home directory.');
-  }
-
-  // Reject system directories
-  const systemDirs = ['/etc', '/var', '/tmp', '/usr', '/bin', '/sbin', '/dev', '/proc', '/sys'];
-  for (const sysDir of systemDirs) {
-    if (resolved === sysDir || resolved.startsWith(sysDir + '/')) {
-      throw new Error(`Cannot create workspace at system directory (${sysDir}).`);
+/**
+ * Load the classification configuration for a workspace and record the result
+ * on the workspace object. Unconfigured workspaces carry no config and no
+ * error; configured-but-invalid workspaces propagate the typed error through
+ * `classificationConfigError` instead of silently falling through to a stale
+ * SQLite cache. The config object is never derived from the cache here.
+ */
+function attachClassificationConfig(ws: Workspace, workspacePath: string): void {
+  try {
+    const activationContext = createRuntimeActivationContext(workspacePath);
+    const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+    if (authority.kind === 'v2') {
+      // The derived cache was written transactionally at activation; never
+      // re-sync the v2 bundle through the v1-shaped cache mirror.
+      ws.classificationConfig = authority.bundle as unknown as Workspace['classificationConfig'];
+      ws.classificationConfigError = null;
+      return;
     }
-  }
-
-  // Check if path is inside home but not the system dirs - allowed
-}
-
-export function createWorkspace(name: string, workspacePath: string): { workspace: Workspace; dbPath: string } {
-  validateWorkspacePath(workspacePath);
-
-  const resolved = path.resolve(workspacePath.trim());
-
-  // If directory exists but isn't empty and isn't already a ShopSite workspace, reject
-  if (fs.existsSync(resolved)) {
-    const hasManifest = fs.existsSync(path.join(resolved, 'store', 'manifest.json'));
-    if (!hasManifest) {
-      const entries = fs.readdirSync(resolved).filter(e => !e.startsWith('.'));
-      if (entries.length > 0) {
-        throw new Error(`Directory "${resolved}" is not empty and does not contain a ShopSite CMS workspace. Choose an empty directory or an existing workspace.`);
-      }
+    syncConfigToCache(ws.id, authority.config);
+    ws.classificationConfig = authority.config;
+    ws.classificationConfigError = null;
+  } catch (err) {
+    if (err instanceof ClassificationConfigNotConfiguredError) {
+      // Unconfigured is a valid empty state, not an error.
+      ws.classificationConfig = undefined;
+      ws.classificationConfigError = null;
+      return;
     }
-  }
-
-  // Create directories
-  const dirs = createWorkspaceDirs(workspacePath);
-  writeGitignore(workspacePath);
-
-  // Set up git repo
-  const git = new GitClient(workspacePath);
-  git.init();
-
-  // Initialize SQLite database in .shopsite-cms
-  const dbPath = path.join(dirs.dotShopsite, 'app.db');
-  initDb(dbPath);
-  runMigrations();
-  backfillProductIndex(workspacePath);
-
-  // Create workspace record
-  const now = new Date().toISOString();
-  const workspace: Workspace = {
-    id: randomUUID(),
-    name,
-    workspacePath,
-    gitPath: dirs.git,
-    createdAt: now,
-    updatedAt: now,
-    bootstrapStatus: 'not_started',
-    baselineCommit: null,
-  };
-  insertWorkspace(workspace);
-  addRecentWorkspace(name, workspacePath);
-
-  // Write store manifest
-  writeStoreConfig(workspacePath, 'manifest.json', {
-    workspaceName: name,
-    workspaceId: workspace.id,
-    appVersion: '0.1.0',
-    schemaVersion: 1,
-    productCount: 0,
-    generatedAt: now,
-    baselineCommit: null,
-  });
-
-  // Write empty field registry
-  writeStoreConfig(workspacePath, 'field-registry.json', {
-    schemaVersion: 1,
-    entries: [],
-  });
-
-  // Write default classification config (empty, seed files)
-  const nowStr = new Date().toISOString();
-  const defaultClassConfig: ClassificationConfig = {
-    manifest: { schemaVersion: 1, compatibilityVersion: 1, createdAt: nowStr, updatedAt: nowStr, fileVersions: {} },
-    productTypes: [],
-    attributes: [],
-    attributeProfiles: [],
-    attributeMappings: [],
-    curationTargets: [],
-    brands: [],
-    guidance: [],
-    modelPolicy: { defaultProvider: 'ollama', defaultModel: '', stageOverrides: {}, imageDataSharing: 'local_only', textDataSharing: 'local_only' },
-    dataSharing: { imagePolicy: 'local_only', textPolicy: 'local_only', sensitiveDataFiltering: true, retentionDays: 90 },
-  };
-  saveClassificationConfig(workspacePath, defaultClassConfig);
-  syncConfigToCache(workspace.id, defaultClassConfig);
-
-  // Write adapter settings
-  writeStoreConfig(workspacePath, 'adapter-settings.json', {
-    xmlVersion: '15.0',
-    defaultPublishFlags: { htmlpages: true, index: true },
-    productUploadMatchingKey: 'SKU',
-    defaultNewRecords: true,
-    versionVariableOptions: {
-      checkpoint: 500,
-      useOptimizer: false,
-      sitemap: false,
-    },
-  });
-
-  return { workspace, dbPath };
-}
-
-export function loadWorkspace(workspacePath: string): Workspace | null {
-  validateWorkspacePath(workspacePath);
-
-  const resolved = path.resolve(workspacePath.trim());
-  const dbPath = path.join(resolved, '.shopsite-cms', 'app.db');
-  if (!fs.existsSync(dbPath)) {
-    return null;
-  }
-
-  // Verify app manifest exists
-  const hasManifest = fs.existsSync(path.join(resolved, 'store', 'manifest.json'));
-  if (!hasManifest) {
-    return null;
-  }
-
-  initDb(dbPath);
-  runMigrations();
-  backfillProductIndex(workspacePath);
-
-  const ws = findWorkspace();
-  if (ws) {
-    // Load classification config into SQLite cache
-    try {
-      const classConfig = loadClassificationConfig(resolved);
-      syncConfigToCache(ws.id, classConfig);
-    } catch (err) {
-      console.warn('[WorkspaceService] Failed to load classification config:', err);
+    if (err instanceof ClassificationConfigLoadError) {
+      // Configuration exists but is invalid: fail closed, never reuse a stale cache.
+      ws.classificationConfig = undefined;
+      ws.classificationConfigError = err.message;
+      return;
     }
-
-    const resolvedGit = path.join(resolved, '.git');
-    if (ws.workspacePath !== resolved || ws.gitPath !== resolvedGit) {
-      updateWorkspacePaths(ws.id, resolved, resolvedGit);
-      ws.workspacePath = resolved;
-      ws.gitPath = resolvedGit;
-    }
-    addRecentWorkspace(ws.name, workspacePath);
+    ws.classificationConfig = undefined;
+    ws.classificationConfigError = err instanceof Error ? err.message : String(err);
   }
-  return ws;
 }
 
 export function getCurrentWorkspace(): Workspace | null {
   try {
     const ws = findWorkspace();
-    if (ws) return ws;
+    if (ws) {
+      attachClassificationConfig(ws, ws.workspacePath);
+      return ws;
+    }
   } catch {
-    // DB not initialized
+    // Database not initialized yet
   }
-  return autoLoadLastWorkspace();
-}
 
-export function closeWorkspace(): void {
-  closeDb();
-}
-
-// fallow-ignore-next-line unused-type
-export interface RecentWorkspace {
-  name: string;
-  path: string;
-  lastOpened: string;
-}
-
-const RECENT_WORKSPACES_FILE = path.join(process.cwd(), '.recent-workspaces.json');
-
-export function getRecentWorkspaces(): RecentWorkspace[] {
-  try {
-    if (fs.existsSync(RECENT_WORKSPACES_FILE)) {
-      const data = fs.readFileSync(RECENT_WORKSPACES_FILE, 'utf-8');
-      return JSON.parse(data) as RecentWorkspace[];
-    }
-  } catch (err) {
-    console.error('Failed to read recent workspaces:', err);
-  }
-  return [];
-}
-
-function saveRecentWorkspaces(list: RecentWorkspace[]): void {
-  try {
-    fs.writeFileSync(RECENT_WORKSPACES_FILE, JSON.stringify(list, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to save recent workspaces:', err);
-  }
-}
-
-function addRecentWorkspace(name: string, workspacePath: string): void {
-  const resolved = path.resolve(workspacePath.trim());
-  let list = getRecentWorkspaces();
-  list = list.filter(item => path.resolve(item.path) !== resolved);
-  list.unshift({
-    name,
-    path: resolved,
-    lastOpened: new Date().toISOString()
-  });
-  if (list.length > 5) {
-    list = list.slice(0, 5);
-  }
-  saveRecentWorkspaces(list);
-}
-
-export function removeRecentWorkspace(workspacePath: string): void {
-  const resolved = path.resolve(workspacePath.trim());
-  let list = getRecentWorkspaces();
-  list = list.filter(item => path.resolve(item.path) !== resolved);
-  saveRecentWorkspaces(list);
-}
-
-function autoLoadLastWorkspace(): Workspace | null {
-  const list = getRecentWorkspaces();
-  if (list.length === 0) return null;
-  const last = list[0];
-  try {
-    if (!fs.existsSync(last.path)) {
-      removeRecentWorkspace(last.path);
-      return null;
-    }
-    return loadWorkspace(last.path);
-  } catch (err) {
-    console.error(`Failed to auto-load workspace at ${last.path}:`, err);
-    return null;
-  }
-}
-
-function backfillProductIndex(workspacePath: string): void {
-  const db = getDb();
+  // Trigger migration / initialization of single store catalog
+  const catalogPath = migrateLegacyWorkspaceIfNeeded();
   const ws = findWorkspace();
-  const workspaceId = ws?.id ?? '';
-
-  const needsBackfill = db.query(`
-    SELECT COUNT(*) as count FROM product_index 
-    WHERE custom_fields IS NULL 
-       OR custom_fields = '{}' 
-       OR (custom_fields LIKE '%ProductField1%' AND custom_fields NOT LIKE '%ProductField16%')
-  `).get() as { count: number } | undefined;
-  const count = needsBackfill?.count ?? 0;
-  if (count > 0) {
-    const productsDir = path.join(workspacePath, 'products');
-    if (fs.existsSync(productsDir)) {
-      const files = fs.readdirSync(productsDir);
-      const stmt = db.prepare(`
-        UPDATE product_index 
-        SET description = ?, search_keywords = ?, custom_fields = ?
-        WHERE sku = ?
-      `);
-      
-      const trans = db.transaction(() => {
-        for (const file of files) {
-          if (!file.endsWith('.json')) continue;
-          try {
-            const content = fs.readFileSync(path.join(productsDir, file), 'utf-8');
-            const product = JSON.parse(content);
-            stmt.run(
-              product.core.description || null,
-              product.core.seo.searchKeywords || null,
-              JSON.stringify(product.customFields || {}),
-              product.sku
-            );
-          } catch (e) {
-            console.error(`Failed to backfill product file ${file}:`, e);
-          }
-        }
-      });
-      trans();
-    }
+  if (ws) {
+    attachClassificationConfig(ws, catalogPath);
   }
+  return ws;
+}
 
-  // Always check for registry gaps regardless of product index backfill status —
-  // the registry can drift if product files were created or updated through
-  // onboarding, promotion, or manual edits after the initial bootstrap.
-  if (workspaceId) {
-    syncFieldRegistryFromProductIndex(workspaceId);
+export function loadWorkspace(workspacePath?: string): Workspace | null {
+  const targetPath = workspacePath ? path.resolve(workspacePath.trim()) : getStoreCatalogPath();
+  const ws = findWorkspace();
+  if (ws && ws.workspacePath !== targetPath) {
+    const gitPath = path.join(targetPath, '.git');
+    updateWorkspacePaths(ws.id, targetPath, gitPath);
+    ws.workspacePath = targetPath;
+    ws.gitPath = gitPath;
   }
+  return getCurrentWorkspace();
 }
 
 /**
  * Ensures the field_registry has an entry for every ProductField key present
- * in product_index.custom_fields. Runs on every workspace load so the
+ * in product_index.custom_fields. Runs on catalog load so the
  * registry stays 1:1 with the live catalog.
  */
 export function syncFieldRegistryFromProductIndex(workspaceId: string): void {
   const db = getDb();
   const now = new Date().toISOString();
 
-  // Scan a large sample of product rows for ProductField keys. A sample of
-  // 5000 is enough to discover every distinct ProductField in any real
-  // catalog; avoid DISTINCT on the full JSON column which would be slow.
   const rows = db
     .query("SELECT custom_fields FROM product_index WHERE custom_fields IS NOT NULL AND custom_fields != '' AND custom_fields != '{}' LIMIT 5000")
     .all() as Array<{ custom_fields: string | null }>;

@@ -25,9 +25,9 @@ describe('Brand Integration', () => {
 
   beforeAll(() => {
     workspaceId = randomUUID();
-    workspacePath = path.join(os.tmpdir(), `shopsite-cms-brand-int-${workspaceId.slice(0, 8)}`);
-    const dbPath = path.join(workspacePath, '.shopsite-cms', 'app.db');
-    fs.mkdirSync(path.join(workspacePath, '.shopsite-cms'), { recursive: true });
+    workspacePath = path.join(os.tmpdir(), `baystate-cms-brand-int-${workspaceId.slice(0, 8)}`);
+    const dbPath = path.join(workspacePath, '.baystate-cms', 'app.db');
+    fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
     fs.mkdirSync(path.join(workspacePath, 'store', 'classification'), { recursive: true });
     initDb(dbPath);
     runMigrations();

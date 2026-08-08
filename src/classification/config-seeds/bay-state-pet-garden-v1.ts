@@ -1,0 +1,443 @@
+// fallow-ignore-file unused-export
+
+/**
+ * Approved Bay State Pet & Garden Supply v2 seed (Milestone 7 content).
+ *
+ * This is the reviewed seed that the Milestone 3 generator turns into a
+ * preview-valid v2 candidate. Nothing here is activated automatically; the
+ * caller must pass the generated candidate through `config-store`.
+ *
+ * Product Types: the 13 historically committed types plus the approved
+ * eight-type expansion (21 total).
+ *
+ * Reviewed ShopSite field mappings (from the implementation plan):
+ *   Brand → ProductField16, Species → ProductField17, Life Stage → ProductField18,
+ *   Breed Size → ProductField19, Dietary Features → ProductField20,
+ *   Health Benefits → ProductField21, Food Form → ProductField22, Flavor → ProductField23,
+ *   Department → ProductField24, Category → ProductField25,
+ *   plus live-catalog packaging/material/color/nutrition mappings.
+ *
+ * Product Type is never mapped directly to ProductField24 or ProductField25.
+ */
+
+import type { BayStateSeed } from '../config-generator';
+
+const createdAt = '2026-08-01T12:00:00.000Z';
+
+const disabledFeature = () => ({
+  state: 'disabled' as const,
+  qualificationReceiptDigest: null,
+  activatedBy: null,
+  activatedAt: null,
+});
+
+export const BayStatePetGardenSeed: BayStateSeed = {
+  name: 'Bay State Pet & Garden Supply',
+  revision: 'bay-state-v2',
+  createdAt,
+
+  // ── Approved 21 Product Types ────────────────────────────────────────────
+  productTypes: [
+    // Historical (13)
+    { id: 'dog-toys', name: 'Dog Toys', description: 'Toys for dogs.' },
+    { id: 'cat-toys', name: 'Cat Toys', description: 'Toys for cats.' },
+    { id: 'grooming', name: 'Grooming', description: 'Pet grooming supplies and tools.' },
+    { id: 'dog-waste-bags', name: 'Dog Waste Bags', description: 'Dog waste bag rolls and dispensers.' },
+    { id: 'dog-food-dry', name: 'Dry Dog Food', description: 'Dry dog food (kibble).' },
+    { id: 'dog-food-wet', name: 'Wet Dog Food', description: 'Canned and pouch wet dog food.' },
+    { id: 'dog-treats', name: 'Dog Treats', description: 'Treats and chews for dogs.' },
+    { id: 'cat-food-dry', name: 'Dry Cat Food', description: 'Dry cat food (kibble).' },
+    { id: 'cat-food-wet', name: 'Wet Cat Food', description: 'Canned and pouch wet cat food.' },
+    { id: 'cat-treats', name: 'Cat Treats', description: 'Treats for cats.' },
+    { id: 'cat-litter', name: 'Cat Litter', description: 'Cat litter and litter accessories.' },
+    { id: 'supplements', name: 'Supplements', description: 'Pet dietary supplements.' },
+    { id: 'collars-leashes', name: 'Collars & Leashes', description: 'Collars, leashes, harnesses, and tags.' },
+    // Expansion (8)
+    { id: 'flea-tick-treatment', name: 'Flea & Tick Treatment', description: 'Flea and tick prevention and treatment products.' },
+    { id: 'bird-food', name: 'Bird Food', description: 'Bird feed and seed blends.' },
+    { id: 'lawn-fertilizer', name: 'Lawn Fertilizer', description: 'Lawn fertilizer products.' },
+    { id: 'grass-seed', name: 'Grass Seed', description: 'Grass seed and lawn repair products.' },
+    { id: 'weed-control', name: 'Weed Control', description: 'Weed prevention and control products.' },
+    { id: 'insect-control', name: 'Insect Control', description: 'Insect control products.' },
+    { id: 'potting-soil', name: 'Potting Soil', description: 'Potting soil and growing media.' },
+    { id: 'hand-tools', name: 'Hand Tools', description: 'Hand tools for garden and yard work.' },
+  ],
+
+  // ── Attributes ────────────────────────────────────────────────────────────
+  attributes: [
+    {
+      id: 'brand',
+      name: 'Brand',
+      description: 'Manufacturer or house brand.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Identity',
+      // Universal and manual-reviewable. The current short allowed-value list
+      // is not complete, so brand stays free-form rather than pretending to be
+      // a controlled vocabulary.
+      isUniversal: true,
+      evidencePolicy: {
+        directEvidenceRequired: false,
+        forbidAbsenceInference: false,
+        allowedSources: ['official_product_page', 'visual_product_evidence'],
+        allowVisualEvidence: true,
+        allowThirdPartyEvidence: false,
+        thirdPartyEvidenceApproval: null,
+        manualReviewRequired: true,
+      },
+    },
+    {
+      id: 'species',
+      name: 'Animal Species',
+      description: 'Target animal species.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Pet',
+      isUniversal: false,
+    },
+    {
+      id: 'life-stage',
+      name: 'Life Stage',
+      description: 'Pet life stage.',
+      valueMode: 'controlled',
+      canonicalUnit: null,
+      allowedValues: ['Adult', 'Puppy', 'Kitten', 'Senior', 'Junior', 'All Life Stages'],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Pet',
+      isUniversal: false,
+    },
+    {
+      id: 'breed-size',
+      name: 'Breed Size',
+      description: 'Dog breed size category.',
+      valueMode: 'controlled',
+      canonicalUnit: null,
+      allowedValues: ['Small', 'Medium', 'Large', 'Giant', 'Toy', 'All Sizes'],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Pet',
+      isUniversal: false,
+    },
+    {
+      id: 'dietary-features',
+      name: 'Dietary Features',
+      description: 'Dietary feature claims such as grain-free or high-protein.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: true,
+      isCompositionAttribute: false,
+      group: 'Nutrition',
+      isUniversal: false,
+    },
+    {
+      id: 'health-benefits',
+      name: 'Health Benefits',
+      description: 'Health benefit claims.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: true,
+      isCompositionAttribute: false,
+      group: 'Nutrition',
+      isUniversal: false,
+    },
+    {
+      id: 'food-form',
+      name: 'Food Form',
+      description: 'Physical form of pet food.',
+      valueMode: 'controlled',
+      canonicalUnit: null,
+      allowedValues: ['Dry Food', 'Wet Food', 'Treat', 'Freeze-Dried Raw', 'Frozen Raw', 'Seed Blend', 'Pellets', 'Supplement'],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Nutrition',
+      isUniversal: false,
+    },
+    {
+      id: 'flavor',
+      name: 'Flavor',
+      description: 'Flavor of food or treats.',
+      valueMode: 'controlled',
+      canonicalUnit: null,
+      allowedValues: ['Chicken', 'Beef', 'Lamb', 'Turkey', 'Duck', 'Salmon', 'Tuna', 'Fish', 'Peanut Butter', 'Assorted'],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Nutrition',
+      isUniversal: false,
+    },
+    {
+      id: 'department',
+      name: 'Department',
+      description: 'Store department classification.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'ineligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Store',
+      isUniversal: false,
+    },
+    {
+      id: 'category',
+      name: 'Category',
+      description: 'Store category classification.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'ineligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Store',
+      isUniversal: false,
+    },
+    {
+      id: 'packaging-type',
+      name: 'Packaging Type',
+      description: 'Primary package form (can/bag/box/tray/pouch).',
+      valueMode: 'controlled',
+      canonicalUnit: null,
+      allowedValues: ['Bag', 'Can', 'Box', 'Tray', 'Pouch', 'Bottle', 'Jar', 'Individual'],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Packaging',
+      isUniversal: false,
+    },
+    {
+      id: 'material',
+      name: 'Material',
+      description: 'Primary product material.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Product',
+      isUniversal: false,
+    },
+    {
+      id: 'color',
+      name: 'Color',
+      description: 'Primary product color.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Product',
+      isUniversal: false,
+    },
+    {
+      id: 'size',
+      name: 'Size',
+      description: 'Size abbreviation (S/M/L).',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Product',
+      isUniversal: false,
+    },
+    {
+      id: 'nutrition',
+      name: 'Ingredients & Nutritional Info',
+      description: 'Ingredients and nutritional information.',
+      valueMode: 'freeText',
+      canonicalUnit: null,
+      allowedValues: [],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible',
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Nutrition',
+      isUniversal: false,
+    },
+  ],
+
+  // ── Profile templates (expanded per Product Type by the generator) ───────
+  profileTemplates: [
+    {
+      id: 'pet-food',
+      name: 'Pet Food',
+      productTypeIds: [
+        'dog-food-dry', 'dog-food-wet', 'dog-treats',
+        'cat-food-dry', 'cat-food-wet', 'cat-treats',
+        'bird-food', 'supplements',
+      ],
+      attributes: [
+        { attributeId: 'food-form', required: false, cardinality: 'single' },
+        { attributeId: 'flavor', required: false, cardinality: 'single' },
+        { attributeId: 'species', required: false, cardinality: 'single' },
+        { attributeId: 'life-stage', required: false, cardinality: 'single' },
+        { attributeId: 'breed-size', required: false, cardinality: 'single' },
+        { attributeId: 'dietary-features', required: false, cardinality: 'single' },
+        { attributeId: 'health-benefits', required: false, cardinality: 'single' },
+        { attributeId: 'nutrition', required: false, cardinality: 'single' },
+      ],
+    },
+    {
+      id: 'pet-accessory',
+      name: 'Pet Accessory',
+      productTypeIds: [
+        'dog-toys', 'cat-toys', 'grooming', 'dog-waste-bags',
+        'collars-leashes', 'flea-tick-treatment', 'cat-litter',
+      ],
+      attributes: [
+        { attributeId: 'brand', required: false, cardinality: 'single' },
+        { attributeId: 'material', required: false, cardinality: 'single' },
+        { attributeId: 'color', required: false, cardinality: 'single' },
+        { attributeId: 'size', required: false, cardinality: 'single' },
+      ],
+    },
+    {
+      id: 'garden',
+      name: 'Garden',
+      productTypeIds: [
+        'lawn-fertilizer', 'grass-seed', 'weed-control',
+        'insect-control', 'potting-soil', 'hand-tools',
+      ],
+      attributes: [
+        { attributeId: 'department', required: false, cardinality: 'single' },
+        { attributeId: 'category', required: false, cardinality: 'single' },
+        { attributeId: 'packaging-type', required: false, cardinality: 'single' },
+        { attributeId: 'material', required: false, cardinality: 'single' },
+      ],
+    },
+  ],
+
+  // ── Reviewed ShopSite field mappings ─────────────────────────────────────
+  mappings: [
+    { id: 'brand-mapping', attributeId: 'brand', catalogField: 'ProductField16', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'species-mapping', attributeId: 'species', catalogField: 'ProductField17', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'life-stage-mapping', attributeId: 'life-stage', catalogField: 'ProductField18', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'breed-size-mapping', attributeId: 'breed-size', catalogField: 'ProductField19', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'dietary-features-mapping', attributeId: 'dietary-features', catalogField: 'ProductField20', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'health-benefits-mapping', attributeId: 'health-benefits', catalogField: 'ProductField21', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'food-form-mapping', attributeId: 'food-form', catalogField: 'ProductField22', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'flavor-mapping', attributeId: 'flavor', catalogField: 'ProductField23', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'department-mapping', attributeId: 'department', catalogField: 'ProductField24', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'category-mapping', attributeId: 'category', catalogField: 'ProductField25', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'packaging-type-mapping', attributeId: 'packaging-type', catalogField: 'ProductField30', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'material-mapping', attributeId: 'material', catalogField: 'ProductField28', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'color-mapping', attributeId: 'color', catalogField: 'ProductField29', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'size-mapping', attributeId: 'size', catalogField: 'ProductField4', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+    { id: 'nutrition-mapping', attributeId: 'nutrition', catalogField: 'ProductField8', serialization: { kind: 'scalar', prefix: '', suffix: '' } },
+  ],
+
+  // ── Curation targets ──────────────────────────────────────────────────────
+  // Product Type enabled; Page target disabled/mandatory:false/required:false;
+  // claim/composition fields (dietary-features, health-benefits) have no
+  // enabled targets and stay inactive.
+  curationTargets: [
+    {
+      id: 'primary-product-type',
+      kind: 'product_type',
+      label: 'Primary Product Type',
+      enabled: true,
+      mandatory: false,
+      selectionMode: 'single',
+      attributeId: null,
+      catalogField: null,
+      optionSource: 'configured',
+      required: true,
+      sortOrder: 0,
+    },
+    { id: 'brand-target', kind: 'product_field', label: 'Brand', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'brand', catalogField: 'ProductField16', optionSource: 'configured', required: false, sortOrder: 10 },
+    { id: 'species-target', kind: 'product_field', label: 'Animal Species', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'species', catalogField: 'ProductField17', optionSource: 'configured', required: false, sortOrder: 11 },
+    { id: 'life-stage-target', kind: 'product_field', label: 'Life Stage', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'life-stage', catalogField: 'ProductField18', optionSource: 'configured', required: false, sortOrder: 12 },
+    { id: 'breed-size-target', kind: 'product_field', label: 'Breed Size', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'breed-size', catalogField: 'ProductField19', optionSource: 'configured', required: false, sortOrder: 13 },
+    { id: 'food-form-target', kind: 'product_field', label: 'Food Form', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'food-form', catalogField: 'ProductField22', optionSource: 'configured', required: false, sortOrder: 14 },
+    { id: 'flavor-target', kind: 'product_field', label: 'Flavor', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'flavor', catalogField: 'ProductField23', optionSource: 'configured', required: false, sortOrder: 15 },
+    { id: 'department-target', kind: 'product_field', label: 'Department', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'department', catalogField: 'ProductField24', optionSource: 'configured', required: false, sortOrder: 16 },
+    { id: 'category-target', kind: 'product_field', label: 'Category', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'category', catalogField: 'ProductField25', optionSource: 'configured', required: false, sortOrder: 17 },
+    { id: 'packaging-type-target', kind: 'product_field', label: 'Packaging Type', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'packaging-type', catalogField: 'ProductField30', optionSource: 'configured', required: false, sortOrder: 18 },
+    { id: 'material-target', kind: 'product_field', label: 'Material', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'material', catalogField: 'ProductField28', optionSource: 'configured', required: false, sortOrder: 19 },
+    { id: 'color-target', kind: 'product_field', label: 'Color', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'color', catalogField: 'ProductField29', optionSource: 'configured', required: false, sortOrder: 20 },
+    { id: 'size-target', kind: 'product_field', label: 'Size', enabled: true, mandatory: false, selectionMode: 'single', attributeId: 'size', catalogField: 'ProductField4', optionSource: 'configured', required: false, sortOrder: 21 },
+    {
+      id: 'store-pages',
+      kind: 'page',
+      label: 'Category Pages',
+      enabled: false,
+      mandatory: false,
+      selectionMode: 'multiple',
+      attributeId: null,
+      catalogField: null,
+      optionSource: 'live_store',
+      required: false,
+      sortOrder: 30,
+    },
+  ],
+
+  brands: [
+    // The store's own reviewed canonical brands, carried from the live v1
+    // brands.json. The list is deliberately NOT treated as complete: the brand
+    // attribute stays free-text (no allowed values) with mandatory manual
+    // review, so unknown brands flow through for human approval.
+    { id: 'woof', name: 'Woof', aliases: ['WOOF', 'My Woof', 'mywoof'], oldIdAliases: [] },
+    { id: 'honest-kitchen', name: 'The Honest Kitchen', aliases: ['HONEST KITCHEN', 'Honest Kitchen', 'thehonestkitchen.com'], oldIdAliases: [] },
+    { id: 'dr-marty', name: 'Dr. Marty', aliases: ['DR MARTY', 'Dr Marty', 'DR. MARTY'], oldIdAliases: [] },
+    { id: 'blue-buffalo', name: 'Blue Buffalo', aliases: ['BLUE BUFFALO', 'Blue'], oldIdAliases: [] },
+    { id: 'tuffy', name: 'Tuffy', aliases: ['TUFFY'], oldIdAliases: [] },
+    { id: 'purina', name: 'Purina', aliases: ['PURINA'], oldIdAliases: [] },
+  ],
+
+  guidance: [],
+
+  modelPolicy: {
+    defaultProvider: 'ollama',
+    defaultModel: 'qwen2.5vl:latest',
+    providerLocalities: { ollama: 'local' },
+    stageOverrides: {},
+    imageDataSharing: 'local_only',
+    textDataSharing: 'local_only',
+    mlFeatures: {
+      productionRetrieval: disabledFeature(),
+      pageReranking: disabledFeature(),
+      confidenceCalibration: disabledFeature(),
+      productionEmbeddings: disabledFeature(),
+    },
+  },
+
+  dataSharing: {
+    imagePolicy: 'local_only',
+    textPolicy: 'local_only',
+    sensitiveDataFiltering: true,
+    retentionDays: 90,
+  },
+};

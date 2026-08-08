@@ -48,9 +48,12 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
 
   lines.push(`  <Name>${escapeXml(product.core.name)}</Name>`);
 
-  // FileName — product detail HTML page name, always slugged from product name
-  // Never use the extractor's URL-derived filename; generate our own from the curated name.
-  const fileName = generateFileName(product.core.name);
+  // FileName — product detail HTML page name. Preserves explicit customField / preserved value if set;
+  // otherwise generates slugged filename from product name.
+  const fileName = product.customFields['FileName']
+    || (product.shopsite.preserved.unknownElements['FileName'] != null
+        ? String(product.shopsite.preserved.unknownElements['FileName'])
+        : generateFileName(product.core.name));
   lines.push(`  <FileName>${escapeXml(fileName)}</FileName>`);
   // Price / SaleAmount — omit entirely when null or empty (DTD marks both as optional)
   if (product.core.price != null && product.core.price !== '') {
@@ -65,9 +68,13 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     lines.push(`  <ProductDescription><![CDATA[${escapeCdata(product.core.description)}]]></ProductDescription>`);
   }
 
-  // MoreInformationText — sync from description when not already preserved
-  if (product.core.description && !product.shopsite.preserved.unknownElements['MoreInformationText']) {
-    lines.push(`  <MoreInformationText><![CDATA[${escapeCdata(product.core.description)}]]></MoreInformationText>`);
+  // MoreInformationText — use custom field if provided, or preserved element, or sync from description
+  const moreInfoText = product.customFields['MoreInformationText']
+    || (product.shopsite.preserved.unknownElements['MoreInformationText'] != null
+        ? String(product.shopsite.preserved.unknownElements['MoreInformationText'])
+        : product.core.description);
+  if (moreInfoText) {
+    lines.push(`  <MoreInformationText><![CDATA[${escapeCdata(moreInfoText)}]]></MoreInformationText>`);
   }
 
   // Status
@@ -76,13 +83,20 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
   // Taxable
   lines.push(`  <Taxable>${product.core.taxable ? 'checked' : 'uncheck'}</Taxable>`);
 
-  // MinimumQuantity — required by ShopSite DTD
-  lines.push('  <MinimumQuantity>0</MinimumQuantity>');
+  // MinimumQuantity — required by ShopSite DTD (default to '0' if omitted)
+  const minQty = product.customFields['MinimumQuantity']
+    || (product.shopsite.preserved.unknownElements['MinimumQuantity'] != null
+        ? String(product.shopsite.preserved.unknownElements['MinimumQuantity'])
+        : '0');
+  lines.push(`  <MinimumQuantity>${escapeXml(minQty)}</MinimumQuantity>`);
 
-  // ProductType — default to Tangible for physical goods
-  if (!product.customFields['ProductType'] && !product.shopsite.preserved.unknownElements['ProductType']) {
-    lines.push('  <ProductType>Tangible</ProductType>');
-  }
+  // ShopSite <ProductType> — default to Tangible for physical goods if not specified.
+  // Note: Internal Primary Product Type (e.g. dog_food_dry) must never be mapped to ShopSite <ProductType>.
+  const shopSiteProductType = product.customFields['ProductType']
+    || (product.shopsite.preserved.unknownElements['ProductType'] != null
+        ? String(product.shopsite.preserved.unknownElements['ProductType'])
+        : 'Tangible');
+  lines.push(`  <ProductType>${escapeXml(shopSiteProductType)}</ProductType>`);
 
   // QuantityOnHand
   if (product.core.inventory.quantityOnHand != null) {

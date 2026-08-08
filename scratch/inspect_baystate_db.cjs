@@ -1,5 +1,5 @@
 const Database = require('bun:sqlite').Database;
-const path = 'workspaces/Bay State/.shopsite-cms/app.db';
+const path = 'workspaces/Bay State/.baystate-cms/app.db';
 const db = new Database(path);
 
 const registry = db.query('SELECT xml_field, label, kind, data_type FROM field_registry ORDER BY xml_field ASC').all();

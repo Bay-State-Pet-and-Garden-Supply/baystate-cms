@@ -7,13 +7,25 @@ import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { clearProductPages, assignProductToPage, assignProductToPageId, getProductPageAssignments, getPageByName } from '../db/repositories/page-repo';
+import { clearProductPages, assignProductToPageId, getProductPageAssignments } from '../db/repositories/page-repo';
+import { getActiveVerifiedPageIds } from '../shopsite/page-import-service';
+import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
-import { getAcceptedProposals, recordHistoryEvent } from '../db/repositories/classification-run-repo';
-import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
+import {
+  getAcceptedProposals,
+  getProposalsByRun,
+  getValidatedOnboardingRun,
+  recordHistoryEvent,
+} from '../db/repositories/classification-run-repo';
 import { getCachedAttributeMappings, getCachedBrands } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from '../classification/brand-resolution';
+import {
+  getEffectivePrimaryProductTypeId,
+  getEffectiveProposalTargetId,
+  getEffectiveProposalValue,
+  serializeAttributeValue,
+} from '../classification/assignment-projection';
 import type { Product } from '../shared/types';
 
 function slugify(text: string): string {
@@ -166,6 +178,9 @@ export async function promoteItems(
   if (!batch) {
     throw new Error(`Onboarding batch ${batchId} not found`);
   }
+  if (batch.workspaceId !== workspaceId) {
+    throw new Error(`Onboarding batch ${batchId} belongs to a different workspace`);
+  }
 
   const workspace = findWorkspace();
   const baseCommit = workspace?.baselineCommit ?? 'unknown';
@@ -228,7 +243,20 @@ export async function promoteItems(
         continue;
       }
       const extractionData = item.extractionData;
-      
+
+      // ── Imported Agent Lab result gate (PI-8) ─────────────────────────
+      // An item whose extraction data carries imported PI evidence is only
+      // promotable while its origin is verifiable: the run exists, the
+      // result hash matches, and the import record is active.
+      const importGate = verifyImportedResultGate(item);
+      if (!importGate.ok) {
+        const errMsg = importGate.error;
+        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+        completePromotionStage(item.id, false, errMsg);
+        failures.push({ itemId: item.id, error: errMsg });
+        continue;
+      }
+
       // Determine if product already exists
       const existingApproved = readProductFile(workspacePath, item.upc);
       
@@ -274,82 +302,85 @@ export async function promoteItems(
       const classificationCustomFields: Record<string, string> = {};
       const classificationPageNames: string[] = [];
       const classificationPageProposals: Array<{ pageId: string | null; pageName: string }> = [];
+      // Accepted page proposals whose identity is not verified in the active
+      // import. Visible and non-blocking: they are never serialized into
+      // ProductOnPages, but they do not block the rest of the draft.
+      const skippedPageRefs: Array<{ proposalId: string; pageName: string }> = [];
       let acceptedProductType: string | null = null;
 
-      const activeRunId = item.curationData?.classificationRunId ?? null;
-      // Classification proposals are always scoped to the item's active run.
-      // Legacy items without a run do not inherit decisions from historical
-      // runs for the same SKU.
+      const activeRunId = getValidatedOnboardingRun(
+        item.curationData?.classificationRunId,
+        batch.workspaceId,
+        item.id,
+        item.upc,
+      )?.id ?? null;
+      // Curation JSON is only a run pointer. Promotion accepts classification
+      // data after validating workspace, exact item, SKU, and onboarding source.
       const acceptedProposals = activeRunId
         ? getAcceptedProposals(item.upc, activeRunId)
         : [];
-      if (acceptedProposals.length > 0) {
+      const nonRejectedProposals = activeRunId
+        ? getProposalsByRun(activeRunId).filter(p => p.status !== 'rejected')
+        : (item.curationData?.classificationProposals || []).filter((p: any) => p.status !== 'rejected');
+      const activeProposals = acceptedProposals.length > 0 ? acceptedProposals : nonRejectedProposals;
+      // Only identities verified in the currently active Page import are
+      // serializable. Without an active import the set is empty — fail closed.
+      const verifiedPageIds = getActiveVerifiedPageIds(batch.workspaceId);
+      if (activeProposals.length > 0) {
         const mappings = getCachedAttributeMappings(workspaceId);
 
-        for (const proposal of acceptedProposals) {
-          if (proposal.proposalType === 'field_assignment' && proposal.targetId) {
-            const mapping = mappings.find(m => m.attributeId === proposal.targetId);
+        for (const proposal of activeProposals) {
+          // Effective reviewed target/value win over the immutable prediction.
+          const targetId = getEffectiveProposalTargetId(proposal);
+          if (proposal.proposalType === 'field_assignment' && targetId) {
+            const mapping = mappings.find(m => m.attributeId === targetId);
             if (mapping && !mapping.isStale && mapping.catalogField) {
-              const value = proposal.proposedValue;
-              const str = typeof value === 'string' ? value :
-                Array.isArray(value) ? value.join(', ') :
-                value !== null && value !== undefined ? String(value) : '';
-              if (str) {
+              const value = getEffectiveProposalValue(proposal);
+              const str = serializeAttributeValue(value, mapping.serialization);
+              if (str || (proposal.hasRevisedValue && value === null)) {
                 classificationCustomFields[mapping.catalogField] = str;
               }
             }
-          } else if (proposal.proposalType === 'category_page' && proposal.targetId) {
-            const pv = proposal.proposedValue as Record<string, unknown> | undefined;
+          } else if (proposal.proposalType === 'category_page' && targetId) {
+            const pv = getEffectiveProposalValue(proposal) as Record<string, unknown> | undefined;
             const pageId = pv?.pageId ? String(pv.pageId) : null;
-            const pageName = pv?.pageName ? String(pv.pageName) : String(proposal.targetId);
-            classificationPageNames.push(proposal.targetId);
+            const pageName = pv?.pageName ? String(pv.pageName) : String(targetId);
+            if (!pageId || !verifiedPageIds.has(pageId)) {
+              skippedPageRefs.push({ proposalId: proposal.id, pageName });
+              continue;
+            }
+            classificationPageNames.push(targetId);
             classificationPageProposals.push({ pageId, pageName });
-          } else if (proposal.proposalType === 'primary_product_type' && proposal.targetId) {
-            acceptedProductType = String(proposal.targetId);
+          } else if (proposal.proposalType === 'primary_product_type') {
+            acceptedProductType = getEffectivePrimaryProductTypeId(proposal);
           }
         }
       }
 
-      // Integrate manual checklist selections from curation data if not already present.
-      if (item.curationData?.suggestedPages && item.curationData.suggestedPages.length > 0) {
-        for (const pageName of item.curationData.suggestedPages) {
-          if (!classificationPageNames.includes(pageName)) {
-            const page = getPageByName(pageName);
-            classificationPageNames.push(pageName);
-            classificationPageProposals.push({ pageId: page?.id || null, pageName });
-          }
-        }
-      }
 
-      // Explicit/manual persisted page assignments are the fallback if we still have nothing.
+      // Explicit/manual persisted page assignments are the fallback if we still
+      // have nothing. Only verified identities qualify; name-only rows are
+      // review context and are tracked as skipped.
       if (classificationPageProposals.length === 0) {
         try {
           const dbPages = getProductPageAssignments(item.upc);
           for (const p of dbPages) {
             if (p.pageName) {
-              classificationPageNames.push(p.pageName);
-              classificationPageProposals.push({ pageId: p.pageId || null, pageName: p.pageName });
+              if (p.pageId && verifiedPageIds.has(p.pageId)) {
+                classificationPageNames.push(p.pageName);
+                classificationPageProposals.push({ pageId: p.pageId, pageName: p.pageName });
+              } else {
+                skippedPageRefs.push({ proposalId: `db:${p.pageName}`, pageName: p.pageName });
+              }
             }
           }
         } catch { /* ignore */ }
       }
 
-      // Check if we have accepted page proposals or manual page assignments. If not, refuse to promote.
-      if (classificationPageProposals.length === 0) {
+      // Check if we have anything to work with. Accepted-but-unverified pages
+      // are visible skips — they do not block the rest of the draft.
+      if (classificationPageProposals.length === 0 && skippedPageRefs.length === 0) {
         const errMsg = 'No accepted product page proposals or manual page assignments exist for this item';
-        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
-        completePromotionStage(item.id, false, errMsg);
-        failures.push({ itemId: item.id, error: errMsg });
-        continue;
-      }
-
-      // ── Imported Agent Lab result gate (PI-8) ─────────────────────────
-      // An item whose extraction data carries imported PI evidence is only
-      // promotable while its origin is verifiable: the run exists, the
-      // result hash matches, and the import record is active.
-      const importGate = verifyImportedResultGate(item);
-      if (!importGate.ok) {
-        const errMsg = importGate.error;
         console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
         completePromotionStage(item.id, false, errMsg);
         failures.push({ itemId: item.id, error: errMsg });
@@ -371,23 +402,29 @@ export async function promoteItems(
         mergedCustomFields['ProductField1'] = `new${mm}${dd}${yy}`;
       }
 
-      // ── Brand resolution (direct from spreadsheet, no proposal needed) ─
-      // Brand is always set from the spreadsheet brandHint via deterministic
-      // brand resolution. This bypasses the classification proposal system
-      // because brand is mandatory and never requires user review.
-      if (!mergedCustomFields['ProductField16']?.trim() && item.brandHint) {
-        try {
-          const workspace = findWorkspace();
-          if (workspace) {
-            const brands = getCachedBrands(workspace.id);
-            const resolved = resolveBrand(item.brandHint, brands);
-            mergedCustomFields['ProductField16'] = resolved?.brandName ?? item.brandHint;
-          } else {
-            mergedCustomFields['ProductField16'] = item.brandHint;
+      // ── Brand resolution ─────────────────────────────────────────────
+      // Brand is set from brandHint or title fallback via deterministic
+      // brand resolution against cached workspace catalog brands.
+      if (!mergedCustomFields['ProductField16']?.trim()) {
+        const brandInput = item.brandHint || coreProduct.name || item.name;
+        if (brandInput) {
+          try {
+            const workspace = findWorkspace();
+            if (workspace) {
+              const brands = getCachedBrands(workspace.id);
+              const resolved = resolveBrand(brandInput, brands);
+              if (resolved?.brandName) {
+                mergedCustomFields['ProductField16'] = resolved.brandName;
+              } else if (item.brandHint) {
+                mergedCustomFields['ProductField16'] = item.brandHint;
+              }
+            } else if (item.brandHint) {
+              mergedCustomFields['ProductField16'] = item.brandHint;
+            }
+          } catch (err: any) {
+            console.warn(`[DraftPromoter] Brand resolution failed for ${item.upc}: ${err.message}`);
+            if (item.brandHint) mergedCustomFields['ProductField16'] = item.brandHint;
           }
-        } catch (err: any) {
-          console.warn(`[DraftPromoter] Brand resolution failed for ${item.upc}: ${err.message}`);
-          mergedCustomFields['ProductField16'] = item.brandHint;
         }
       }
 
@@ -398,10 +435,9 @@ export async function promoteItems(
       if (!mergedCustomFields['ProductField16']?.trim()) missingFields.push('Brand (ProductField16)');
       if (!coreProduct.media.primary) missingFields.push('Primary Image');
 
-      // Pages are mandatory — check proposals, suggestedPages, and DB
-      const hasPages = classificationPageNames.length > 0 ||
-        (item.curationData?.suggestedPages?.length ?? 0) > 0 ||
-        (() => { try { return getProductPageAssignments(item.upc).length > 0; } catch { return false; } })();
+      // Pages are mandatory — verified assignments count; unverified accepted
+      // page proposals are visible skips that do not block the rest of the draft.
+      const hasPages = classificationPageNames.length > 0 || skippedPageRefs.length > 0;
       if (!hasPages) missingFields.push('Pages');
 
       if (missingFields.length > 0) {
@@ -495,7 +531,9 @@ export async function promoteItems(
         draftHash,
       });
 
-      // Assign product to pages from classification proposals
+      // Assign product to verified pages from classification proposals.
+      // Every proposal in classificationPageProposals has a verified identity
+      // (name-only rows were filtered above and recorded as skipped).
       const finalPages = classificationPageNames;
       if (finalPages.length > 0) {
         clearProductPages(item.upc);
@@ -503,8 +541,6 @@ export async function promoteItems(
         for (const pp of classificationPageProposals) {
           if (pp.pageId) {
             assignProductToPageId(item.upc, pp.pageId, pp.pageName);
-          } else {
-            assignProductToPage(item.upc, pp.pageName);
           }
         }
       }
@@ -516,6 +552,7 @@ export async function promoteItems(
           acceptedProductType,
           appliedFields: Object.keys(classificationCustomFields),
           appliedPages: classificationPageNames,
+          skippedPages: skippedPageRefs.map(s => s.pageName),
         });
       } catch {
         // Non-blocking

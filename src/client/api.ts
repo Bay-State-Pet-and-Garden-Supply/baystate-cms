@@ -9,7 +9,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error((data as any).error || `HTTP ${res.status}`);
+    const errorMsg = (data as any).error
+      || (Array.isArray((data as any).errors) ? (data as any).errors.join('; ') : null)
+      || (data as any).message
+      || `HTTP ${res.status}`;
+    throw new Error(errorMsg);
   }
   return data as T;
 }
@@ -114,20 +118,15 @@ export interface ExportResult {
   productCount: number;
 }
 
-// Workspace
-export interface RecentWorkspace {
-  name: string;
-  path: string;
-  lastOpened: string;
-}
-
+// Store Workspace
 export function getWorkspace() { return request<{ workspace: Workspace | null }>('/workspace'); }
-export function initWorkspace(name: string, path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/init', { method: 'POST', body: JSON.stringify({ name, path }) }); }
-export function openWorkspace(path: string) { return request<{ success: boolean; workspace: Workspace }>('/workspace/open', { method: 'POST', body: JSON.stringify({ path }) }); }
-export function pickDirectory() { return request<{ success: boolean; path?: string; error?: string; message?: string }>('/workspace/pick-directory', { method: 'POST' }); }
+export function openWorkspace() { return request<{ success: boolean; workspace: Workspace }>('/workspace/open', { method: 'POST' }); }
 export function closeWorkspace() { return request<{ success: boolean; message: string }>('/workspace/close', { method: 'POST' }); }
-export function getRecentWorkspaces() { return request<{ success: boolean; workspaces: RecentWorkspace[] }>('/workspace/recent'); }
-export function removeRecentWorkspace(path: string) { return request<{ success: boolean }>('/workspace/recent/remove', { method: 'POST', body: JSON.stringify({ path }) }); }
+export function getRecentWorkspaces() { return Promise.resolve({ success: true, workspaces: [] }); }
+export function removeRecentWorkspace(_path: string) { return Promise.resolve({ success: true }); }
+export function pickDirectory() { return Promise.resolve({ success: false, error: 'unsupported' }); }
+export function initWorkspace(_name: string, _path: string) { return getWorkspace().then(res => ({ success: true, workspace: res.workspace! })); }
+
 
 
 // Connection
@@ -228,6 +227,11 @@ export interface CatalogClassificationDetail {
     proposalType: string;
     targetId: string | null;
     proposedValue: unknown;
+    revisedValue?: unknown;
+    hasRevisedValue: boolean;
+    revisedTargetId?: string | null;
+    hasRevisedTargetId: boolean;
+    currentDecisionId: string | null;
     confidence: number;
     status: string;
   }>;
@@ -235,6 +239,12 @@ export interface CatalogClassificationDetail {
     id: string;
     proposalId: string;
     decision: string;
+    revisedFromId: string | null;
+    revisedValue?: unknown;
+    hasRevisedValue: boolean;
+    revisedTargetId?: string | null;
+    hasRevisedTargetId: boolean;
+    actionToken: string | null;
   }>;
   stageResults: Array<Record<string, unknown>>;
 }
@@ -259,7 +269,15 @@ export function runCatalogClassification(sku: string) {
 export function submitCatalogDecisions(
   sku: string,
   runId: string,
-  decisions: Array<{ proposalId: string; decision: 'accepted' | 'rejected' | 'deferred'; reviewerNote?: string | null; revisedValue?: unknown }>,
+  decisions: Array<{
+    proposalId: string;
+    decision: 'accepted' | 'rejected' | 'deferred';
+    reviewerNote?: string | null;
+    revisedValue?: unknown;
+    revisedTargetId?: string | null;
+    actionToken?: string;
+    expectedRevisionId?: string | null;
+  }>,
 ) {
   return request<{ ok: boolean; decisions: unknown[] }>(
     `/products/${encodeURIComponent(sku)}/classification/runs/${encodeURIComponent(runId)}/decisions`,

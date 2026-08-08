@@ -4,14 +4,14 @@
  * Reads the worker token from environment and validates incoming
  * `Authorization: Bearer <token>` headers.
  *
- * The server fails closed: if `SHOPSITE_CMS_WORKER_TOKEN` is not set,
+ * The server fails closed: if `BAYSTATE_CMS_WORKER_TOKEN` is not set,
  * all requests are rejected with 401.
  */
 
 import type { IncomingMessage } from 'node:http';
 
 function getToken(): string | null {
-  const token = process.env.SHOPSITE_CMS_WORKER_TOKEN;
+  const token = process.env.BAYSTATE_CMS_WORKER_TOKEN;
   return token && token.length > 0 ? token : null;
 }
 

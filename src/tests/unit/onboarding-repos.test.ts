@@ -264,20 +264,10 @@ describe('Onboarding Repositories CRUD', () => {
       "UPDATE onboarding_items SET stage = 'curation', stage_status = 'completed', curation_data_json = ? WHERE id = ?"
     ).run(JSON.stringify(curationData), item.id);
 
-    // Try to advance — should be skipped due to pending proposal
+    // Try to advance — should advance even with pending proposal
     const res1 = advanceItemsToNextStage([item.id]);
-    expect(res1.advanced).toBe(0);
-    expect(res1.skipped).toBe(1);
-
-    // Mark proposal as accepted and try again
-    curationData.classificationProposals[0].status = 'accepted';
-    db.query(
-      "UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?"
-    ).run(JSON.stringify(curationData), item.id);
-
-    const res2 = advanceItemsToNextStage([item.id]);
-    expect(res2.advanced).toBe(1);
-    expect(res2.skipped).toBe(0);
+    expect(res1.advanced).toBe(1);
+    expect(res1.skipped).toBe(0);
 
     const advancedItem = findItemById(item.id);
     expect(advancedItem?.stage).toBe('review');
@@ -485,11 +475,13 @@ describe('Onboarding Repositories CRUD', () => {
     expect(afterRes3?.stageStatus).toBe('completed');
     expect(afterRes3?.status).toBe('curated');
 
-    // Verify proposals status reverted to pending and decisions deleted
+    // Verify proposals status reverted to pending and decisions superseded
+    // (append-only: history is preserved, the decision is invalidated).
     const prop = db.query('SELECT status FROM classification_proposals WHERE id = ?').get(proposalId) as { status: string };
     expect(prop.status).toBe('pending');
-    const decCount = db.query('SELECT COUNT(*) as count FROM classification_proposal_decisions WHERE proposal_id = ?').get(proposalId) as { count: number };
-    expect(decCount.count).toBe(0);
+    const decRow = db.query('SELECT superseded_at FROM classification_proposal_decisions WHERE proposal_id = ?').get(proposalId) as { superseded_at: string | null } | undefined;
+    expect(decRow).toBeTruthy();
+    expect(decRow!.superseded_at).toBeTruthy();
 
     // --- 4. Test going back from promotion to review ---
     db.query("UPDATE onboarding_items SET stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(item.id);

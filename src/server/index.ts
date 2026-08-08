@@ -11,11 +11,11 @@ const server = serve({
   idleTimeout: 60, // SSE connections need longer idle timeout than Bun's default of 10s
 });
 
-console.log(`ShopSite CMS API server running on http://${HOST}:${PORT}`);
-if (process.env.SHOPSITE_CMS_API_TOKEN) {
+console.log(`Baystate CMS API server running on http://${HOST}:${PORT}`);
+if (process.env.BAYSTATE_CMS_API_TOKEN) {
   console.log(`API token authentication is enabled for mutating requests.`);
 } else {
-  console.log(`No API token configured. Mutating requests are unauthenticated - set SHOPSITE_CMS_API_TOKEN for production use.`);
+  console.log(`No API token configured. Mutating requests are unauthenticated - set BAYSTATE_CMS_API_TOKEN for production use.`);
 }
 
 export { server };

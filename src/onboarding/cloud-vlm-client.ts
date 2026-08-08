@@ -31,7 +31,7 @@ async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeTy
   try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; ShopSiteCMS/1.0)',
+        'User-Agent': 'Mozilla/5.0 (compatible; BaystateCMS/1.0)',
         Accept: 'image/*',
       },
       redirect: 'follow',

@@ -42,6 +42,13 @@ import type {
   SubmitCatalogDecisionsRequest,
   ApplyCatalogClassificationRequest,
   CatalogClassificationRunDetail,
+  ClassificationManifestV2,
+  ClassificationConfigBundleV2,
+  ClassificationFocusedFileName,
+  ApplicabilityCondition,
+  AttributeEvidencePolicy,
+  SerializationConfigV2,
+  MlFeatureId,
 } from './schemas/classification';
 
 export type {
@@ -101,6 +108,13 @@ export type {
   SubmitCatalogDecisionsRequest,
   ApplyCatalogClassificationRequest,
   CatalogClassificationRunDetail,
+  ClassificationManifestV2,
+  ClassificationConfigBundleV2,
+  ClassificationFocusedFileName,
+  ApplicabilityCondition,
+  AttributeEvidencePolicy,
+  SerializationConfigV2,
+  MlFeatureId,
 };
 
 /** Syncable product status for a change set item */

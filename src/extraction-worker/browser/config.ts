@@ -89,7 +89,7 @@ function parseProxyUrls(raw: string | undefined): string[] {
  * Parse worker browser config from environment variables.
  */
 export function loadWorkerBrowserConfig(): WorkerBrowserConfig {
-  const backendRaw = envStr('SHOPSITE_CMS_WORKER_BROWSER_BACKEND', DEFAULTS.backend);
+  const backendRaw = envStr('BAYSTATE_CMS_WORKER_BROWSER_BACKEND', DEFAULTS.backend);
   if (backendRaw !== 'camoufox' && backendRaw !== 'playwright') {
     console.warn(
       `[browser/config] Unknown backend "${backendRaw}", falling back to "${DEFAULTS.backend}"`,
@@ -100,23 +100,23 @@ export function loadWorkerBrowserConfig(): WorkerBrowserConfig {
 
   return {
     backend,
-    headless: envBool('SHOPSITE_CMS_WORKER_HEADLESS', DEFAULTS.headless),
-    maxConcurrency: envInt('SHOPSITE_CMS_WORKER_MAX_CONCURRENCY', DEFAULTS.maxConcurrency),
+    headless: envBool('BAYSTATE_CMS_WORKER_HEADLESS', DEFAULTS.headless),
+    maxConcurrency: envInt('BAYSTATE_CMS_WORKER_MAX_CONCURRENCY', DEFAULTS.maxConcurrency),
     maxOpenPagesPerBrowser: envInt(
-      'SHOPSITE_CMS_WORKER_MAX_OPEN_PAGES',
+      'BAYSTATE_CMS_WORKER_MAX_OPEN_PAGES',
       DEFAULTS.maxOpenPagesPerBrowser,
     ),
     retireBrowserAfterPageCount: envInt(
-      'SHOPSITE_CMS_WORKER_RETIRE_AFTER_PAGES',
+      'BAYSTATE_CMS_WORKER_RETIRE_AFTER_PAGES',
       DEFAULTS.retireBrowserAfterPageCount,
     ),
     navigationTimeoutMs: envInt(
-      'SHOPSITE_CMS_WORKER_NAVIGATION_TIMEOUT_MS',
+      'BAYSTATE_CMS_WORKER_NAVIGATION_TIMEOUT_MS',
       DEFAULTS.navigationTimeoutMs,
     ),
-    dwellMs: envInt('SHOPSITE_CMS_WORKER_DWELL_MS', DEFAULTS.dwellMs),
-    maxRequestRetries: envInt('SHOPSITE_CMS_WORKER_MAX_RETRIES', DEFAULTS.maxRequestRetries),
-    proxyUrls: parseProxyUrls(process.env.SHOPSITE_CMS_WORKER_PROXY_URLS),
+    dwellMs: envInt('BAYSTATE_CMS_WORKER_DWELL_MS', DEFAULTS.dwellMs),
+    maxRequestRetries: envInt('BAYSTATE_CMS_WORKER_MAX_RETRIES', DEFAULTS.maxRequestRetries),
+    proxyUrls: parseProxyUrls(process.env.BAYSTATE_CMS_WORKER_PROXY_URLS),
   };
 }
 

@@ -1,0 +1,74 @@
+{
+  "productFields": {
+    "ProductField16": {
+      "name": "Brand",
+      "sourceAttribute": "brand",
+      "description": "ShopSite custom field 16 maps to Brand / Manufacturer."
+    },
+    "ProductField24": {
+      "name": "Merchandise Category Tag",
+      "sourceAttribute": "productType",
+      "description": "ShopSite custom field 24 maps to internal product type tag (e.g. dog food, lawn care)."
+    }
+  },
+  "categoryPageAssignments": {
+    "dog_food_dry": [
+      "Dog Food Dry",
+      "Dog Shop All"
+    ],
+    "dog_food_wet": [
+      "Dog Food Wet",
+      "Dog Shop All"
+    ],
+    "dog_treat": [
+      "Dog Treats & Chews",
+      "Dog Shop All"
+    ],
+    "cat_food_dry": [
+      "Cat Food Dry",
+      "Cat Shop All"
+    ],
+    "cat_food_wet": [
+      "Cat Food Wet",
+      "Cat Shop All"
+    ],
+    "cat_treat": [
+      "Cat Treats",
+      "Cat Shop All"
+    ],
+    "flea_tick_control": [
+      "Dog Flea & Tick",
+      "Cat Flea & Tick",
+      "Pet Health"
+    ],
+    "bird_seed_food": [
+      "Wild Bird Seed & Food",
+      "Bird Supplies"
+    ],
+    "lawn_fertilizer": [
+      "Lawn Care Fertilizer",
+      "Lawn & Garden Shop All"
+    ],
+    "grass_seed": [
+      "Grass Seed",
+      "Lawn & Garden Shop All"
+    ],
+    "weed_control": [
+      "Weed Control",
+      "Lawn & Garden Shop All"
+    ],
+    "insect_pest_control": [
+      "Garden Insect Control",
+      "Home Insect Control",
+      "Lawn & Garden Shop All"
+    ],
+    "potting_soil": [
+      "Soil & Compost",
+      "Lawn & Garden Shop All"
+    ],
+    "hand_garden_tool": [
+      "Garden Tools",
+      "Hardware & Tools"
+    ]
+  }
+}

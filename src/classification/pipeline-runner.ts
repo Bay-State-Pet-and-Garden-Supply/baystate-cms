@@ -2,6 +2,8 @@ import { getDb } from '../db/connection';
 import { randomUUID } from 'node:crypto';
 import type { ClassificationStageName, StageDefinition, StageContext, StageInput, StageOutput, PipelineRunResult } from './types';
 import type { ClassificationEvidence, ClassificationProposal } from '../shared/types';
+import { snapshotHash } from './runtime-snapshot';
+import { validateProposalSafety } from './proposal-safety';
 
 const now = () => new Date().toISOString();
 
@@ -40,6 +42,39 @@ function linkProposalEvidence(proposalId: string, evidenceIds: string[]): void {
 }
 
 /**
+ * Fail closed when any evidence or proposal does not belong to the current
+ * run, or when a proposal was stamped with a different immutable runtime
+ * snapshot hash than the run's snapshot.
+ */
+function assertRunBoundary(options: {
+  runId: string;
+  evidence: ClassificationEvidence[];
+  proposals: ClassificationProposal[];
+  snapshotHash?: string | null;
+}): void {
+  for (const evidence of options.evidence) {
+    if (evidence.runId !== options.runId) {
+      throw new Error(
+        `Evidence runId mismatch: evidence "${evidence.id}" belongs to run "${evidence.runId}", expected "${options.runId}".`,
+      );
+    }
+  }
+  for (const proposal of options.proposals) {
+    if (proposal.runId !== options.runId) {
+      throw new Error(
+        `Proposal runId mismatch: proposal "${proposal.id}" belongs to run "${proposal.runId}", expected "${options.runId}".`,
+      );
+    }
+    if (options.snapshotHash !== undefined && options.snapshotHash !== null && proposal.snapshotHash !== options.snapshotHash) {
+      throw new Error(
+        `Proposal snapshot hash mismatch: proposal "${proposal.id}" is stamped with snapshot hash ` +
+          `${proposal.snapshotHash ?? 'null'}, expected "${options.snapshotHash}".`,
+      );
+    }
+  }
+}
+
+/**
  * Persist a successful or abstained stage atomically. A stage result must
  * never claim success unless all evidence, proposals, and evidence links are
  * durable in the same transaction.
@@ -74,6 +109,16 @@ function persistStageCompletion(options: {
 }
 
 export async function runPipeline(stages: StageDefinition[], context: StageContext, input: StageInput): Promise<PipelineRunResult> {
+  // Fail closed if the frozen snapshot was tampered with since build.
+  if (context.snapshot) {
+    const recomputed = snapshotHash(context.snapshot);
+    if (recomputed !== context.snapshot.snapshotHash) {
+      throw new Error(
+        `Runtime snapshot hash mismatch: recomputed ${recomputed}, embedded ${context.snapshot.snapshotHash}. Snapshot mutated since build.`,
+      );
+    }
+  }
+
   const order = resolveStageOrder(stages);
   const allEvidence: ClassificationEvidence[] = [...input.evidence];
   const allProposals: ClassificationProposal[] = [...input.allProposals];
@@ -95,6 +140,13 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
         };
         if (out.metadata) outputPayload.metadata = out.metadata;
 
+        assertRunBoundary({
+          runId: context.runId,
+          evidence: out.evidence,
+          proposals: out.proposals,
+          snapshotHash: context.snapshot?.snapshotHash,
+        });
+
         persistStageCompletion({
           runId: context.runId,
           sku: input.sku,
@@ -103,7 +155,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           evidence: out.evidence,
           proposals: out.proposals,
           onboardingItemId: input.onboardingItemId,
-          configSnapshotHash: context.configSnapshotRef?.hash,
+          configSnapshotHash: context.snapshot?.snapshotHash ?? context.configSnapshotRef?.hash,
           outputJson: JSON.stringify(outputPayload),
         });
 
@@ -125,6 +177,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           isBulkAcceptable: false,
           isStale: false,
           stalenessReason: null,
+          snapshotHash: context.snapshot?.snapshotHash ?? null,
           createdAt: now(),
         };
         const outputPayload: Record<string, unknown> = {
@@ -135,6 +188,12 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
         if (result.output?.metadata) {
           outputPayload.metadata = result.output.metadata;
         }
+        assertRunBoundary({
+          runId: context.runId,
+          evidence: [],
+          proposals: [abstentionProposal],
+          snapshotHash: context.snapshot?.snapshotHash,
+        });
         persistStageCompletion({
           runId: context.runId,
           sku: input.sku,
@@ -143,7 +202,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           evidence: [],
           proposals: [abstentionProposal],
           onboardingItemId: input.onboardingItemId,
-          configSnapshotHash: context.configSnapshotRef?.hash,
+          configSnapshotHash: context.snapshot?.snapshotHash ?? context.configSnapshotRef?.hash,
           outputJson: JSON.stringify(outputPayload),
           errorMessage: result.reason,
         });
@@ -166,6 +225,19 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
       throw err;
     }
   }
+  // Central candidate safety choke point: every accumulated proposal must
+  // pass claim/composition evidence, controlled membership, measured-unit,
+  // cardinality, and delimiter policy validation before the run can succeed.
+  // Confidence never bypasses this review gate.
+  const safety = validateProposalSafety(allProposals, {
+    attributes: context.snapshot?.attributes ?? [],
+    evidence: allEvidence,
+  });
+  if (!safety.ok) {
+    const finding = safety.findings[0];
+    throw new Error(`Proposal safety validation failed: ${finding.code} — ${finding.message}`);
+  }
+
   return { evidence: allEvidence, proposals: allProposals, stageOutputs };
 }
 

@@ -26,7 +26,7 @@ import { matchSitemapUrls } from '../../onboarding/sitemap-matcher';
 import * as llmClient from '../../onboarding/llm-client';
 
 describe('Sitemap Matcher', () => {
-  const testDbPath = '/tmp/shopsite-cms-sitemap-matcher-test.db';
+  const testDbPath = '/tmp/baystate-cms-sitemap-matcher-test.db';
   let originalFetch: typeof fetch;
 
   function stubFetch(responseContent: string): { calls: Array<{ url: string; body: { model: string; messages: Array<{ role: string; content: string }> } }> } {

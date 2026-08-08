@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { initWorkspace, openWorkspace, pickDirectory, bootstrapFromXml, bootstrapFromFile, bootstrapFromPull, getBootstrapStatus, getConnection, saveConnection, testConnection, getRecentWorkspaces, removeRecentWorkspace, type RecentWorkspace } from '../api';
+import { bootstrapFromXml, bootstrapFromFile, bootstrapFromPull, getBootstrapStatus, getConnection, saveConnection, testConnection } from '../api';
 
 interface Props {
   onComplete: () => void;
@@ -8,8 +8,6 @@ interface Props {
 
 export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
   const [step, setStep] = useState(0);
-  const [name, setName] = useState('My Store');
-  const [workspacePath, setWorkspacePath] = useState('');
   const [xmlInput, setXmlInput] = useState('');
   const [filePath, setFilePath] = useState('');
   const [cgiBaseUrl, setCgiBaseUrl] = useState('');
@@ -21,73 +19,22 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
   const [polling, setPolling] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [passwordConfigured, setPasswordConfigured] = useState(false);
-  const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
 
   useEffect(() => {
-    if (step === 0) {
-      loadRecents();
-    }
-  }, [step]);
-
-  const loadRecents = async () => {
-    try {
-      const res = await getRecentWorkspaces();
-      if (res.success && res.workspaces) {
-        setRecentWorkspaces(res.workspaces);
-      }
-    } catch (err) {
-      console.error('Failed to load recent workspaces:', err);
-    }
-  };
-
-  const handleOpenRecent = async (path: string) => {
-    setLoading(true);
-    setError('');
-    setResult('');
-    try {
-      const res = await openWorkspace(path);
-      setResult(`Workspace "${res.workspace.name}" opened.`);
-      if (res.workspace.bootstrapStatus === 'complete' && res.workspace.baselineCommit) {
-        onComplete();
-        return;
-      }
-      setStep(1);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRemoveRecent = async (e: React.MouseEvent, path: string) => {
-    e.stopPropagation();
-    if (confirm('Are you sure you want to remove this workspace from your recent list?')) {
+    const loadConnectionSettings = async () => {
       try {
-        await removeRecentWorkspace(path);
-        loadRecents();
-      } catch (err) {
-        setError(`Failed to remove workspace: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-  };
-
-  useEffect(() => {
-    if (step === 1) {
-      const loadConnectionSettings = async () => {
-        try {
-          const res = await getConnection();
-          if (res.connection) {
-            setCgiBaseUrl(res.connection.cgiBaseUrl || '');
-            setMerchantId(res.connection.merchantId || '');
-            setPasswordConfigured(res.connection.passwordConfigured);
-          }
-        } catch (err) {
-          console.error('Failed to load saved connection settings:', err);
+        const res = await getConnection();
+        if (res.connection) {
+          setCgiBaseUrl(res.connection.cgiBaseUrl || '');
+          setMerchantId(res.connection.merchantId || '');
+          setPasswordConfigured(res.connection.passwordConfigured);
         }
-      };
-      loadConnectionSettings();
-    }
-  }, [step]);
+      } catch (err) {
+        console.error('Failed to load saved connection settings:', err);
+      }
+    };
+    void loadConnectionSettings();
+  }, []);
 
   const startPollingStatus = (successPrefix: string) => {
     setPolling(true);
@@ -102,7 +49,7 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
           setPolling(false);
           setLoading(false);
           setResult(`${successPrefix} Baseline commit: ${res.baselineCommit || 'N/A'}`);
-          setStep(2);
+          setStep(1);
         } else if (res.bootstrapStatus === 'failed') {
           clearInterval(interval);
           setPolling(false);
@@ -118,61 +65,6 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
         setError(`Status check failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }, 2000);
-  };
-
-  const handlePickDirectory = async () => {
-    setError('');
-    try {
-      const res = await pickDirectory();
-      if (res.success && res.path) {
-        setWorkspacePath(res.path);
-      } else if (res.error !== 'cancelled') {
-        setError(res.message || 'Failed to select directory');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleInit = async () => {
-    if (!name.trim() || !workspacePath.trim()) {
-      setError('Name and path are required');
-      return;
-    }
-    setLoading(true);
-    setError('');
-    try {
-      const res = await initWorkspace(name.trim(), workspacePath.trim());
-      setResult(`Workspace "${res.workspace.name}" created.`);
-      setStep(1);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleOpen = async () => {
-    if (!workspacePath.trim()) {
-      setError('Workspace path is required');
-      return;
-    }
-    setLoading(true);
-    setError('');
-    try {
-      const res = await openWorkspace(workspacePath.trim());
-      setResult(`Workspace "${res.workspace.name}" opened.`);
-      // If workspace is already bootstrapped, enter the app immediately
-      if (res.workspace.bootstrapStatus === 'complete' && res.workspace.baselineCommit) {
-        onComplete();
-        return;
-      }
-      setStep(1);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
   };
 
   const handleSaveConnection = async () => {
@@ -253,14 +145,11 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
     result: { color: '#16a34a', padding: '8px 12px', background: '#f0fdf4', borderRadius: 4, margin: '8px 0', whiteSpace: 'pre-wrap' as any },
     section: { marginTop: 16, padding: 16, border: '1px solid #e5e7eb', borderRadius: 8 },
     heading: { fontSize: 18, fontWeight: 500, marginBottom: 8 },
-    inputContainer: { display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' },
-    inputWithButton: { flex: 1, padding: 8, fontSize: 14, border: '1px solid #ccc', borderRadius: 4, margin: 0 },
-    pickerButton: { padding: '8px 16px', fontSize: 14, cursor: 'pointer', background: '#f3f4f6', color: '#374151', border: '1px solid #d1d5db', borderRadius: 4, whiteSpace: 'nowrap' },
   };
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>ShopSite CMS Setup</h1>
+      <h1 style={styles.title}>Baystate Store Catalog Setup</h1>
 
       {error && <div style={styles.error}>{error}</div>}
       {result && <div style={styles.result}>{result}</div>}
@@ -272,108 +161,7 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
 
       {step === 0 && (
         <div>
-          {recentWorkspaces.length > 0 && (
-            <div style={styles.section}>
-              <h2 style={styles.heading}>Recent Workspaces</h2>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {recentWorkspaces.map(ws => (
-                  <div
-                    key={ws.path}
-                    onClick={() => handleOpenRecent(ws.path)}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      padding: '12px 16px',
-                      border: '1px solid #e5e7eb',
-                      borderRadius: 6,
-                      background: '#fff',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s',
-                    }}
-                    onMouseEnter={e => {
-                      e.currentTarget.style.borderColor = '#2563eb';
-                      e.currentTarget.style.background = '#f8fafc';
-                    }}
-                    onMouseLeave={e => {
-                      e.currentTarget.style.borderColor = '#e5e7eb';
-                      e.currentTarget.style.background = '#fff';
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span style={{ fontWeight: 600, color: '#1f2937', fontSize: 14 }}>📁 {ws.name}</span>
-                      <span style={{ fontSize: 12, color: '#6b7280', wordBreak: 'break-all' }}>{ws.path}</span>
-                    </div>
-                    <button
-                      onClick={(e) => handleRemoveRecent(e, ws.path)}
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: '#9ca3af',
-                        fontSize: 18,
-                        cursor: 'pointer',
-                        padding: '4px 8px',
-                        borderRadius: 4,
-                      }}
-                      onMouseEnter={e => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.background = '#fee2e2'; }}
-                      onMouseLeave={e => { e.currentTarget.style.color = '#9ca3af'; e.currentTarget.style.background = 'none'; }}
-                      title="Remove from recent list"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div style={styles.section}>
-            <h2 style={styles.heading}>Create New Workspace</h2>
-            <input
-              style={styles.input}
-              placeholder="Workspace name"
-              value={name}
-              onChange={e => setName(e.target.value)}
-            />
-            <div style={styles.inputContainer}>
-              <input
-                style={styles.inputWithButton}
-                placeholder="Workspace folder path (e.g., /home/user/my-store)"
-                value={workspacePath}
-                onChange={e => setWorkspacePath(e.target.value)}
-              />
-              <button style={styles.pickerButton} onClick={handlePickDirectory} type="button">
-                Choose Folder...
-              </button>
-            </div>
-            <button style={styles.button} onClick={handleInit} disabled={loading}>
-              {loading ? 'Creating...' : 'Create Workspace'}
-            </button>
-          </div>
-
-          <div style={styles.section}>
-            <h2 style={styles.heading}>Open Existing Workspace</h2>
-            <div style={styles.inputContainer}>
-              <input
-                style={styles.inputWithButton}
-                placeholder="Workspace folder path"
-                value={workspacePath}
-                onChange={e => setWorkspacePath(e.target.value)}
-              />
-              <button style={styles.pickerButton} onClick={handlePickDirectory} type="button">
-                Choose Folder...
-              </button>
-            </div>
-            <button style={styles.secondary} onClick={handleOpen} disabled={loading}>
-              {loading ? 'Opening...' : 'Open Workspace'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {step === 1 && (
-        <div>
-          <p>Workspace is ready. Configure direct sync if available, or import products from XML/export fallback.</p>
+          <p>Initial setup for store catalog. Configure direct sync if available, or import products from XML/export fallback.</p>
 
           <div style={styles.section}>
             <h2 style={styles.heading}>Optional Direct Sync Connection</h2>
@@ -435,7 +223,7 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
         </div>
       )}
 
-      {step === 2 && (
+      {step === 1 && (
         <div>
           <p>Bootstrap complete! You can now manage products.</p>
           <button style={styles.button} onClick={onComplete}>
@@ -443,8 +231,6 @@ export function SetupWizard({ onComplete, onUpdated: _onUpdated }: Props) {
           </button>
         </div>
       )}
-
-
     </div>
   );
 }

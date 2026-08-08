@@ -1,0 +1,443 @@
+/**
+ * Immutable Runtime Snapshot
+ *
+ * A classification run consumes exactly one deeply frozen, persisted runtime
+ * snapshot. The snapshot resolves everything a stage may read — validated
+ * configuration, focused-file hashes, catalog evidence hash, product types,
+ * attributes, profiles, mappings, guidance, model/data policies, pre-resolved
+ * field options, reviewed facts, page state, and the source product/evidence
+ * hash — once, before the run is created.
+ *
+ * Stages MUST consume the snapshot through `context.snapshot` instead of
+ * reloading workspace configuration files or querying mutable caches, so that
+ * mutating config, cache, Page rows, or model settings during a run cannot
+ * change stage output.
+ */
+import { randomUUID } from 'node:crypto';
+import { canonicalJsonStringify, hashCanonicalJson } from '../shared/stable-id';
+import { getDb } from '../db/connection';
+import type {
+  ClassificationConfig,
+  ClassificationConfigSnapshotRef,
+  CurationTargetConfig,
+  ClassificationConfigBundleV2,
+} from '../shared/schemas/classification';
+import type { RuntimeConfigAuthority } from './config-loader';
+import type { ResolvedTargetOption } from './curation-target-resolver';
+import { getExplicitCurationTargets, resolveAttributeAllowedValues } from './curation-targets';
+import { configHashMatches } from '../db/repositories/classification-config-repo';
+import {
+  collectReviewedFacts,
+  normalizeAbsentHash,
+  type ReviewedFact,
+} from './reviewed-facts';
+
+const now = () => new Date().toISOString();
+
+export interface PageSnapshotRecord {
+  pageId: string;
+  pageName: string;
+  /** False until a real ShopSite Pages export verifies the identity. */
+  verified: boolean;
+}
+
+export type PageSnapshotState =
+  | {
+      /** No verified ShopSite Pages export exists; names are review context only. */
+      state: 'no_verified_page_catalog';
+      nameOnlyRecords: PageSnapshotRecord[];
+    }
+  | {
+      state: 'verified';
+      records: PageSnapshotRecord[];
+    };
+
+/**
+ * Point-in-time input for one classification run. Everything that can affect
+ * stage output is resolved here and frozen into the snapshot.
+ */
+export interface RuntimeSnapshotInput {
+  workspaceId: string;
+  workspacePath: string;
+  productSku: string;
+  /**
+   * The loaded runtime config authority (v1 transitional or ACTIVE v2).
+   * Preferred over the legacy `config` field.
+   */
+  authority?: RuntimeConfigAuthority;
+  /** Legacy v1 config input; used by tests and v1 transitional callers. */
+  config?: ClassificationConfig;
+  configSnapshotRef: ClassificationConfigSnapshotRef;
+  focusedFileHashes?: Record<string, string>;
+  catalogEvidenceHash?: string | null;
+  pages?: PageSnapshotState;
+  /** Canonical product/evidence hash; null/empty means absent (onboarding). */
+  sourceProductHash: string | null;
+  searchKeywords?: string | null;
+  /** The product's OWN ProductOnPages observations — never every store Page. */
+  productPageNames?: string[];
+  pageImportId?: string | null;
+  pageImportHash?: string | null;
+  createdAt?: string;
+}
+
+export interface RuntimeClassificationSnapshot {
+  schemaVersion: 1;
+  snapshotHash: string;
+  createdAt: string;
+  workspaceId: string;
+  workspacePath: string;
+  productSku: string;
+  /** Which config authority this snapshot was built from. */
+  configAuthorityKind: 'v1' | 'v2';
+  /** The pre-activation nested catalog commit recorded by an active v2 manifest. */
+  sourceCatalogCommit: string | null;
+  config: ClassificationConfig;
+  configSnapshotRef: ClassificationConfigSnapshotRef;
+  focusedFileHashes: Record<string, string>;
+  catalogEvidenceHash: string | null;
+  productTypes: ClassificationConfig['productTypes'];
+  attributes: ClassificationConfig['attributes'];
+  attributeProfiles: ClassificationConfig['attributeProfiles'];
+  attributeMappings: ClassificationConfig['attributeMappings'];
+  guidance: ClassificationConfig['guidance'];
+  brands: ClassificationConfig['brands'];
+  modelPolicy: ClassificationConfig['modelPolicy'];
+  dataSharing: ClassificationConfig['dataSharing'];
+  curationTargets: CurationTargetConfig[];
+  /**
+   * Pre-resolved product-field option lists keyed by curation target ID.
+   * Live-store values are captured once at build time so stage resolution
+   * stays pure over the snapshot.
+   */
+  fieldOptions: Record<string, ResolvedTargetOption[]>;
+  reviewedFacts: ReviewedFact[];
+  pages: PageSnapshotState;
+  sourceProductHash: string | null;
+  searchKeywords: string | null;
+  productPageNames: string[];
+  pageImportId: string | null;
+  pageImportHash: string | null;
+  /**
+   * Page context is name-only review context until a verified ShopSite Pages
+   * export exists. It never supports claims or composition.
+   */
+  pageContextReliability: 'low';
+}
+
+/** Effective curation targets: enabled targets plus mandatory targets. */
+export function listEffectiveCurationTargets(config: ClassificationConfig): CurationTargetConfig[] {
+  const enabled = getExplicitCurationTargets(config);
+  const all = [...enabled];
+  for (const target of config.curationTargets ?? []) {
+    if (target.mandatory === true && !all.some(existing => existing.id === target.id)) {
+      all.push(target);
+    }
+  }
+  return all;
+}
+
+/**
+ * Pre-resolve product-field option lists at snapshot build time. This is the
+ * only point where live-store values are read; stages consume the frozen lists.
+ */
+export function computeSnapshotFieldOptions(config: ClassificationConfig): Record<string, ResolvedTargetOption[]> {
+  const result: Record<string, ResolvedTargetOption[]> = {};
+  for (const target of listEffectiveCurationTargets(config)) {
+    if (target.kind !== 'product_field') continue;
+    const attribute = config.attributes.find(candidate => candidate.id === target.attributeId);
+    if (!attribute) continue;
+    const allowed = resolveAttributeAllowedValues(config, attribute, target);
+    result[target.id] = allowed.map(value => ({ value, label: value }));
+  }
+  return result;
+}
+
+/**
+ * Resolve the snapshot-facing config view and resolved arrays from the runtime
+ * authority. V2 bundles are carried as-is (typed as the legacy shape) so every
+ * stage-visible v2 semantic (isUniversal, evidencePolicy, providerLocalities)
+ * survives into the frozen snapshot.
+ */
+function resolveAuthorityFields(authority: RuntimeConfigAuthority): {
+  config: ClassificationConfig;
+  productTypes: ClassificationConfig['productTypes'];
+  attributes: ClassificationConfig['attributes'];
+  attributeProfiles: ClassificationConfig['attributeProfiles'];
+  attributeMappings: ClassificationConfig['attributeMappings'];
+  guidance: ClassificationConfig['guidance'];
+  brands: ClassificationConfig['brands'];
+  modelPolicy: ClassificationConfig['modelPolicy'];
+  dataSharing: ClassificationConfig['dataSharing'];
+  curationTargets: CurationTargetConfig[];
+} {
+  if (authority.kind === 'v1') {
+    const config = authority.config;
+    return {
+      config,
+      productTypes: config.productTypes,
+      attributes: config.attributes,
+      attributeProfiles: config.attributeProfiles,
+      attributeMappings: config.attributeMappings,
+      guidance: config.guidance,
+      brands: config.brands,
+      modelPolicy: config.modelPolicy,
+      dataSharing: config.dataSharing,
+      curationTargets: config.curationTargets ?? [],
+    };
+  }
+  const bundle = authority.bundle;
+  return {
+    config: bundle as unknown as ClassificationConfig,
+    productTypes: bundle.productTypes as unknown as ClassificationConfig['productTypes'],
+    attributes: bundle.attributes as unknown as ClassificationConfig['attributes'],
+    attributeProfiles: bundle.attributeProfiles as unknown as ClassificationConfig['attributeProfiles'],
+    attributeMappings: bundle.attributeMappings as unknown as ClassificationConfig['attributeMappings'],
+    guidance: bundle.guidance as unknown as ClassificationConfig['guidance'],
+    brands: bundle.brands as unknown as ClassificationConfig['brands'],
+    modelPolicy: bundle.modelPolicy as unknown as ClassificationConfig['modelPolicy'],
+    dataSharing: bundle.dataSharing as unknown as ClassificationConfig['dataSharing'],
+    curationTargets: bundle.curationTargets as unknown as CurationTargetConfig[],
+  };
+}
+
+/**
+ * Build the runtime snapshot, freeze it, and compute its canonical hash.
+ * The snapshot hash covers every stage-visible field; `createdAt` and the
+ * hash field itself are excluded so identical inputs produce identical hashes.
+ */
+export function buildRuntimeSnapshot(input: RuntimeSnapshotInput): RuntimeClassificationSnapshot {
+  if (!input.authority && !input.config) {
+    throw new Error('buildRuntimeSnapshot requires either a runtime config authority or a legacy v1 config.');
+  }
+  const authority: RuntimeConfigAuthority = input.authority
+    ?? { kind: 'v1', config: input.config as ClassificationConfig };
+  const fields = resolveAuthorityFields(authority);
+  const config = fields.config;
+  const snapshot: RuntimeClassificationSnapshot = {
+    schemaVersion: 1,
+    snapshotHash: '',
+    createdAt: input.createdAt ?? now(),
+    workspaceId: input.workspaceId,
+    workspacePath: input.workspacePath,
+    productSku: input.productSku,
+    configAuthorityKind: authority.kind,
+    sourceCatalogCommit: authority.kind === 'v2' ? authority.bundle.manifest.sourceCatalogCommit : null,
+    config,
+    configSnapshotRef: input.configSnapshotRef,
+    focusedFileHashes: input.focusedFileHashes ?? config.manifest.fileVersions ?? {},
+    catalogEvidenceHash: input.catalogEvidenceHash ?? (
+      authority.kind === 'v2' ? authority.bundle.manifest.catalogEvidenceHash : null
+    ),
+    productTypes: fields.productTypes,
+    attributes: fields.attributes,
+    attributeProfiles: fields.attributeProfiles,
+    attributeMappings: fields.attributeMappings,
+    guidance: fields.guidance,
+    brands: fields.brands,
+    modelPolicy: fields.modelPolicy,
+    dataSharing: fields.dataSharing,
+    curationTargets: fields.curationTargets,
+    fieldOptions: computeSnapshotFieldOptions(config),
+    reviewedFacts: collectCompatibleReviewedFacts({
+      workspaceId: input.workspaceId,
+      productSku: input.productSku,
+      authority,
+      sourceProductHash: input.sourceProductHash,
+    }),
+    pages: input.pages ?? { state: 'no_verified_page_catalog', nameOnlyRecords: [] },
+    sourceProductHash: normalizeSourceProductHash(input.sourceProductHash),
+    searchKeywords: input.searchKeywords ?? null,
+    productPageNames: input.productPageNames ?? [],
+    pageImportId: input.pageImportId ?? null,
+    pageImportHash: input.pageImportHash ?? null,
+    pageContextReliability: 'low',
+  };
+  snapshot.snapshotHash = snapshotHash(snapshot);
+  return deepFreeze(snapshot);
+}
+
+/**
+ * Recursively freeze an object graph. Mutating any node throws in strict mode.
+ */
+export function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value;
+  for (const key of Reflect.ownKeys(value)) {
+    const child = (value as Record<PropertyKey, unknown>)[key];
+    if (child !== null && typeof child === 'object') {
+      deepFreeze(child);
+    }
+  }
+  return Object.freeze(value);
+}
+
+/**
+ * Canonical SHA-256 of every stage-visible snapshot field. Excludes the
+ * embedded hash, the creation timestamp, and the config-snapshot reference's
+ * creation timestamp so identical inputs produce identical hashes regardless
+ * of wall-clock time.
+ */
+export function snapshotHash(snapshot: RuntimeClassificationSnapshot): string {
+  const {
+    snapshotHash: _embedded,
+    createdAt: _createdAt,
+    configSnapshotRef,
+    ...rest
+  } = snapshot;
+  const { createdAt: _refCreatedAt, ...refRest } = configSnapshotRef;
+  return hashCanonicalJson({ ...rest, configSnapshotRef: refRest });
+}
+
+/**
+ * A carried fact is reusable only when the config it was accepted under still
+ * matches the current config authority — either as a plain config hash
+ * (canonical or historical signed-decimal, v1), as the active v2 bundle hash,
+ * or as a persisted runtime snapshot whose embedded config reference matches.
+ * Facts whose provenance cannot be verified fail closed (drift).
+ */
+function factConfigIsCompatible(
+  fact: ReviewedFact,
+  authority: RuntimeConfigAuthority,
+  workspaceId: string,
+): boolean {
+  if (fact.configSnapshotHash === null) return false;
+  if (authority.kind === 'v2') {
+    if (fact.configSnapshotHash === authority.bundle.manifest.bundleHash) return true;
+    return runtimeSnapshotHashMatchesConfig(workspaceId, fact.configSnapshotHash, authority.bundle);
+  }
+  if (configHashMatches(authority.config, fact.configSnapshotHash)) return true;
+  return runtimeSnapshotHashMatchesConfig(workspaceId, fact.configSnapshotHash, authority.config);
+}
+
+/**
+ * Collect reviewed facts and drop every fact whose config or source provenance
+ * drifted from the current snapshot. Incompatible facts are never silently
+ * reused: carry-forward preserves provenance and rejects drift.
+ */
+function collectCompatibleReviewedFacts(
+  input: Pick<RuntimeSnapshotInput, 'workspaceId' | 'productSku' | 'authority' | 'sourceProductHash'>,
+): ReviewedFact[] {
+  const authority = input.authority as RuntimeConfigAuthority;
+  const facts = collectReviewedFacts({ workspaceId: input.workspaceId, productSku: input.productSku });
+  const currentSourceHash = normalizeAbsentHash(input.sourceProductHash);
+  return facts.filter(
+    fact =>
+      factConfigIsCompatible(fact, authority, input.workspaceId) &&
+      normalizeAbsentHash(fact.sourceHash) === currentSourceHash,
+  );
+}
+
+/**
+ * Normalize the source hash into a single persisted representation so
+ * onboarding runs (empty string) and catalog runs (digest) compare cleanly.
+ */
+function normalizeSourceProductHash(value: string | null | undefined): string | null {
+  return normalizeAbsentHash(value);
+}
+
+/**
+ * Persist a frozen snapshot to the derived SQLite snapshot store and verify
+ * the hash survives the round-trip. Fail closed on any mismatch.
+ */
+export function persistRuntimeSnapshot(
+  snapshot: RuntimeClassificationSnapshot,
+): { id: string; hash: string } {
+  const expected = snapshotHash(snapshot);
+  if (expected !== snapshot.snapshotHash) {
+    throw new Error(
+      `Runtime snapshot hash mismatch before persistence: computed ${expected}, embedded ${snapshot.snapshotHash}.`,
+    );
+  }
+
+  const db = getDb();
+  const existing = db.query(
+    'SELECT id FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?',
+  ).get(snapshot.workspaceId, expected) as { id: string } | undefined;
+  if (existing) {
+    return { id: existing.id, hash: expected };
+  }
+
+  const id = randomUUID();
+  const serialized = canonicalJsonStringify(snapshot);
+  db.run(
+    `INSERT INTO classification_config_snapshots
+     (id, workspace_id, snapshot_hash, manifest_schema_version, compatibility_version, source_commit, config_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      snapshot.workspaceId,
+      expected,
+      1,
+      1,
+      snapshot.configSnapshotRef.sourceCommit,
+      serialized,
+      snapshot.createdAt,
+    ],
+  );
+
+  // Recompute the hash after persistence and fail closed on mismatch.
+  const stored = db.query('SELECT config_json FROM classification_config_snapshots WHERE id = ?').get(id) as
+    | { config_json: string }
+    | undefined;
+  if (!stored) {
+    throw new Error('Runtime snapshot persistence failed: no stored row.');
+  }
+  const rehydrated = JSON.parse(stored.config_json) as RuntimeClassificationSnapshot;
+  const recomputed = snapshotHash(rehydrated);
+  if (recomputed !== expected) {
+    throw new Error(
+      `Runtime snapshot hash verification failed after persistence: recomputed ${recomputed}, expected ${expected}.`,
+    );
+  }
+  return { id, hash: expected };
+}
+
+/**
+ * Read a persisted runtime snapshot by its canonical hash. Returns null when
+ * no runtime snapshot (as opposed to a plain config snapshot) is stored.
+ */
+export function getRuntimeSnapshotByHash(workspaceId: string, hash: string): RuntimeClassificationSnapshot | null {
+  const row = getDb()
+    .query('SELECT config_json FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?')
+    .get(workspaceId, hash) as { config_json: string } | undefined;
+  if (!row) return null;
+  const parsed = JSON.parse(row.config_json) as Partial<RuntimeClassificationSnapshot>;
+  if (parsed.schemaVersion !== 1 || typeof parsed.snapshotHash !== 'string' || !parsed.config) return null;
+  return parsed as RuntimeClassificationSnapshot;
+}
+
+/**
+ * Drift check for catalog application: a stored hash matches the current
+ * config either as a plain config hash (legacy compatibility), as the active
+ * v2 bundle hash, or as a persisted runtime snapshot whose embedded config
+ * reference still matches.
+ */
+export function runtimeSnapshotHashMatchesConfig(
+  workspaceId: string,
+  storedHash: string,
+  config: ClassificationConfig | ClassificationConfigBundleV2,
+): boolean {
+  const snapshot = getRuntimeSnapshotByHash(workspaceId, storedHash);
+  if (!snapshot) return false;
+  if (snapshotHash(snapshot) !== storedHash) return false;
+  const isV2 = (config as ClassificationConfigBundleV2).bundleOrigin !== undefined;
+  const configHash = isV2
+    ? (config as ClassificationConfigBundleV2).manifest.bundleHash
+    : hashCanonicalJson(config as ClassificationConfig);
+  return snapshot.configSnapshotRef.hash === configHash;
+}
+
+/**
+ * True when a stored config hash matches the current runtime authority: v2
+ * compares against the active bundle hash; v1 uses the canonical/legacy hash
+ * compatibility helper.
+ */
+export function authorityConfigHashMatches(
+  authority: RuntimeConfigAuthority,
+  storedHash: string,
+): boolean {
+  if (authority.kind === 'v2') {
+    return storedHash === authority.bundle.manifest.bundleHash;
+  }
+  return configHashMatches(authority.config, storedHash);
+}

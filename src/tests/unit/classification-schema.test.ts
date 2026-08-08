@@ -14,7 +14,47 @@ import {
   ClassificationManifestSchema,
   ClassificationHistoryEventSchema,
   ClassificationConfigSnapshotRefSchema,
+  SubmitCatalogDecisionsRequestSchema,
 } from '../../shared/schemas/classification';
+
+describe('Classification decision API schema', () => {
+  it('preserves revised targets, action tokens, predecessor ids, and explicit null values', () => {
+    const parsed = SubmitCatalogDecisionsRequestSchema.parse({
+      decisions: [{
+        proposalId: 'proposal-1',
+        decision: 'accepted',
+        revisedValue: null,
+        revisedTargetId: 'flavor',
+        actionToken: 'action-1',
+        expectedRevisionId: 'decision-0',
+      }],
+    });
+    expect(parsed.decisions[0]).toMatchObject({
+      revisedValue: null,
+      revisedTargetId: 'flavor',
+      actionToken: 'action-1',
+      expectedRevisionId: 'decision-0',
+    });
+    expect(Object.prototype.hasOwnProperty.call(parsed.decisions[0], 'revisedValue')).toBe(true);
+  });
+
+  it('rejects mixed canonical and deprecated decision aliases', () => {
+    for (const aliases of [
+      { expectedRevisionId: null, revisedFromId: 'decision-0' },
+      { revisedValue: null, proposedValue: 'legacy' },
+      { revisedTargetId: null, targetId: 'legacy-target' },
+    ]) {
+      const parsed = SubmitCatalogDecisionsRequestSchema.safeParse({
+        decisions: [{
+          proposalId: 'proposal-1',
+          decision: 'accepted',
+          ...aliases,
+        }],
+      });
+      expect(parsed.success).toBe(false);
+    }
+  });
+});
 
 describe('Classification Schema – CurationData backward compatibility', () => {
   it('parses legacy curation data and provides empty classification defaults', () => {

@@ -64,6 +64,7 @@ route.post('/change-sets/:id/approve', (c) => {
 
   return c.json({
     success: false,
+    error: result.errors.join('; '),
     errors: result.errors,
   }, result.errors.length > 0 ? 400 : 500);
 });

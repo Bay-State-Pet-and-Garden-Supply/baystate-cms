@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
 import {
   createBatch,
@@ -27,6 +26,7 @@ import {
   resetItemsToStage,
   sendItemsToPreviousStage,
   skipItems,
+  getWeeklyReportItems,
 } from '../../db/repositories/onboarding-item-repo';
 import type { PipelineStage } from '../../shared/schemas/onboarding';
 import { convertToLbs } from '../../shared/weight-converter';
@@ -144,9 +144,15 @@ import { promoteItems } from '../../onboarding/draft-promoter';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
-import { recordDecision, recordHistoryEvent, updateProposalReviewValue } from '../../db/repositories/classification-run-repo';
+import {
+  getEvidenceByRun,
+  getProposalsByRun,
+  getValidatedOnboardingRun,
+} from '../../db/repositories/classification-run-repo';
 import { validateSiblingConsistency } from '../../classification/consistency-validator';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
+import { submitProposalDecisions } from '../../classification/proposal-review-service';
+import { SubmitProposalDecisionsRequestSchema } from '../../shared/schemas/classification';
 import { getDb } from '../../db/connection';
 
 const route = new Hono();
@@ -160,6 +166,37 @@ function getWorker(workspaceId: string, workspacePath: string): OnboardingWorker
     activeWorker.start();
   }
   return activeWorker;
+}
+
+const runOwnedCurationKeys = [
+  'classificationRunId',
+  'classificationConfigSnapshot',
+  'classificationEvidence',
+  'classificationProposals',
+  'classificationDecisions',
+  'classificationHistory',
+] as const;
+
+function withoutRunOwnedCurationData(data: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...data };
+  for (const key of runOwnedCurationKeys) delete sanitized[key];
+  return sanitized;
+}
+
+function validatedItemRunId(item: {
+  id: string;
+  batchId: string;
+  upc: string;
+  curationData?: { classificationRunId?: string | null } | null;
+}): string | null {
+  const batch = findBatchById(item.batchId);
+  if (!batch) return null;
+  return getValidatedOnboardingRun(
+    item.curationData?.classificationRunId,
+    batch.workspaceId,
+    item.id,
+    item.upc,
+  )?.id ?? null;
 }
 
 // ─── BATCH UPLOAD AND CRUD ──────────────────────────────────────────────────────
@@ -296,6 +333,33 @@ route.get('/onboarding/batches', async (c) => {
   const batches = listBatches(workspace.id);
   return c.json({ batches });
 });
+
+/**
+ * GET /api/onboarding/weekly-report
+ * Get items uploaded or promoted within a specified date range (defaulting to the past 7 days).
+ */
+route.get('/onboarding/weekly-report', async (c) => {
+  const endIso = c.req.query('endDate') || new Date().toISOString();
+  let startIso = c.req.query('startDate');
+  if (!startIso) {
+    const endMs = new Date(endIso).getTime();
+    startIso = new Date(endMs - 7 * 24 * 60 * 60 * 1000).toISOString();
+  }
+
+  const items = getWeeklyReportItems(startIso, endIso);
+  const promotedCount = items.filter(
+    i => i.status === 'promoted' || (i.stage === 'promotion' && i.stageStatus === 'completed')
+  ).length;
+
+  return c.json({
+    startDate: startIso,
+    endDate: endIso,
+    items,
+    totalCount: items.length,
+    promotedCount,
+  });
+});
+
 
 /**
  * GET /api/onboarding/batches/:id
@@ -720,8 +784,29 @@ route.get('/onboarding/items/:id', async (c) => {
       )
     : [];
 
+  const activeRunId = validatedItemRunId(item);
+  const sanitizedCuration = item.curationData
+    ? withoutRunOwnedCurationData(item.curationData as unknown as Record<string, unknown>)
+    : null;
+  const hydratedItem = item.curationData
+    ? {
+        ...item,
+        curationData: activeRunId
+          ? {
+              ...sanitizedCuration,
+              classificationRunId: activeRunId,
+              classificationConfigSnapshot: item.curationData.classificationConfigSnapshot ?? null,
+              classificationProposals: getProposalsByRun(activeRunId),
+              classificationEvidence: getEvidenceByRun(activeRunId),
+              classificationDecisions: [],
+              classificationHistory: [],
+            }
+          : sanitizedCuration,
+      }
+    : item;
+
   return c.json({
-    item,
+    item: hydratedItem,
     sources,
     extraction: extractionData,
     consistencyWarnings,
@@ -779,12 +864,27 @@ route.put('/onboarding/items/:id', async (c) => {
       updateLatestExtractionData(itemId, json);
     }
     if (body.curation_data) {
-      if (body.curation_data.curatedWeight !== undefined) {
-        body.curation_data.curatedWeight = convertToLbs(body.curation_data.curatedWeight);
+      // Strip all run-owned fields from generic client input, even for a legacy
+      // item without a valid run. Only a validated persisted run may restore
+      // canonical state below.
+      const nextCurationData: Record<string, any> = withoutRunOwnedCurationData(body.curation_data);
+      if (nextCurationData.curatedWeight !== undefined) {
+        nextCurationData.curatedWeight = convertToLbs(nextCurationData.curatedWeight);
       }
+
+      const activeRunId = validatedItemRunId(item);
+      if (activeRunId) {
+        nextCurationData.classificationRunId = activeRunId;
+        nextCurationData.classificationConfigSnapshot = item.curationData?.classificationConfigSnapshot ?? null;
+        nextCurationData.classificationProposals = getProposalsByRun(activeRunId);
+        nextCurationData.classificationEvidence = getEvidenceByRun(activeRunId);
+        nextCurationData.classificationDecisions = [];
+        nextCurationData.classificationHistory = [];
+      }
+
       db.query('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?').run(
-        JSON.stringify(body.curation_data),
-        itemId
+        JSON.stringify(nextCurationData),
+        itemId,
       );
     }
   })();
@@ -814,15 +914,16 @@ route.post('/onboarding/items/:id/decisions', async (c) => {
   }
 
   const itemId = c.req.param('id');
-  const body = await c.req.json();
-
-  const { decisions } = body;
-  if (!decisions || !Array.isArray(decisions)) {
-    return c.json({ error: 'decisions array is required' }, 400);
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body.' }, 400);
   }
 
-  if (decisions.length === 0) {
-    return c.json({ error: 'decisions array must not be empty' }, 400);
+  const parsed = SubmitProposalDecisionsRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid decisions payload.', issues: parsed.error.issues }, 400);
   }
 
   const item = findItemById(itemId);
@@ -830,7 +931,6 @@ route.post('/onboarding/items/:id/decisions', async (c) => {
     return c.json({ error: 'Item not found' }, 404);
   }
 
-  // ── Require active classification run ────────────────────────────────
   const activeRunId = item.curationData?.classificationRunId;
   if (!activeRunId) {
     return c.json({
@@ -838,151 +938,41 @@ route.post('/onboarding/items/:id/decisions', async (c) => {
     }, 400);
   }
 
-  try {
-    const db = getDb();
-    const validDecisions = new Set(['accepted', 'rejected', 'deferred']);
-    for (const decision of decisions) {
-      if (!decision || typeof decision.proposalId !== 'string' || !decision.proposalId) {
-        return c.json({ error: 'Every decision requires a non-empty proposalId.' }, 400);
-      }
-      if (!validDecisions.has(decision.decision)) {
-        return c.json({ error: `Invalid decision for proposal ${decision.proposalId}.` }, 400);
-      }
-    }
-    const proposalIds = decisions.map((d: any) => d.proposalId);
-
-    // ── Reject duplicate proposal IDs ────────────────────────────────────
-    if (new Set(proposalIds).size !== proposalIds.length) {
-      return c.json({ error: 'Duplicate proposal IDs in the decisions array.' }, 400);
-    }
-
-    // ── Proposal ownership validation ─────────────────────────────────---
-    // Load all proposals referenced by the decisions together with their run
-    // metadata so we can verify ownership in a small number of queries.
+  if (parsed.data.bulk === true) {
+    const proposalIds = parsed.data.decisions.map(decision => decision.proposalId);
     const placeholders = proposalIds.map(() => '?').join(',');
-    const proposals = db.query(
-      `SELECT p.id, p.product_sku, p.run_id, p.proposal_type,
-              r.workspace_id, r.status AS run_status,
-              r.onboarding_item_id
-       FROM classification_proposals p
-       LEFT JOIN classification_runs r ON p.run_id = r.id
-       WHERE p.id IN (${placeholders})`
-    ).all(...proposalIds) as Array<{
-      id: string;
-      product_sku: string;
-      run_id: string | null;
-      proposal_type: string;
-      workspace_id: string | null;
-      run_status: string | null;
-      onboarding_item_id: string | null;
-    }>;
-
-    const proposalMap = new Map(proposals.map(p => [p.id, p]));
-
-    for (const d of decisions) {
-      const prop = proposalMap.get(d.proposalId);
-      if (!prop) {
-        return c.json({
-          error: `Proposal ${d.proposalId} not found. It may have been deleted or never existed.`,
-        }, 400);
-      }
-
-      // Verify the proposal's run matches the active run
-      if (prop.run_id !== activeRunId) {
-        return c.json({
-          error: `Proposal ${d.proposalId} belongs to run ${prop.run_id}, not the active run ${activeRunId}. Refresh the classification results and try again.`,
-        }, 400);
-      }
-
-      // Verify the proposal's SKU matches the item's UPC
-      if (prop.product_sku !== item.upc) {
-        return c.json({
-          error: `Proposal ${d.proposalId} belongs to SKU "${prop.product_sku}", not item SKU "${item.upc}".`,
-        }, 400);
-      }
-
-      // Verify the run belongs to the current workspace
-      if (prop.workspace_id !== workspace.id) {
-        return c.json({
-          error: `Proposal ${d.proposalId} belongs to a different workspace.`,
-        }, 400);
-      }
-
-      // Verify the run is linked to this exact onboarding item. Null does
-      // not establish ownership and is rejected.
-      if (prop.onboarding_item_id !== itemId) {
-        return c.json({
-          error: `Proposal ${d.proposalId} does not belong to this exact onboarding item.`,
-        }, 400);
-      }
-
-      // Verify the run is in a terminal state
-      if (prop.run_status !== 'completed' && prop.run_status !== 'completed_with_abstentions') {
-        return c.json({
-          error: `Proposal ${d.proposalId} belongs to a run with status "${prop.run_status}". Only completed runs can be reviewed.`,
-        }, 400);
-      }
+    const ineligible = getDb().query(
+      `SELECT id FROM classification_proposals
+       WHERE id IN (${placeholders}) AND run_id = ? AND COALESCE(is_bulk_acceptable, 0) = 0`,
+    ).all(...proposalIds, activeRunId) as Array<{ id: string }>;
+    if (ineligible.length > 0) {
+      return c.json({
+        error: `Proposal ${ineligible[0].id} is not eligible for bulk acceptance. Use individual review instead.`,
+      }, 400);
     }
-
-    // ── Bulk validation ─────────────────────────────────────────────────-
-    // Only explicit bulk-accept calls require every proposal to be marked
-    // bulk-acceptable. The review drawer submits multiple individual
-    // decisions at once, including manually revised values.
-    if (body.bulk === true) {
-      const existing = db.query(
-        'SELECT id, is_bulk_acceptable FROM classification_proposals WHERE id IN (' +
-        placeholders + ')'
-      ).all(...proposalIds) as Record<string, any>[];
-
-      for (const row of existing) {
-        if (!Number(row.is_bulk_acceptable)) {
-          return c.json({
-            error: `Proposal ${row.id} is not eligible for bulk acceptance. Use individual review instead.`,
-          }, 400);
-        }
-      }
-    }
-
-    // ── Record decisions in a single transaction ─────────────────────────
-    db.transaction(() => {
-      for (const d of decisions) {
-        const decisionId = d.id || randomUUID();
-        if (Object.prototype.hasOwnProperty.call(d, 'proposedValue')) {
-          updateProposalReviewValue(
-            d.proposalId,
-            d.proposedValue,
-            Object.prototype.hasOwnProperty.call(d, 'targetId') ? d.targetId ?? null : undefined,
-          );
-        }
-        recordDecision({
-          id: decisionId,
-          proposalId: d.proposalId,
-          decision: d.decision,
-          revisedFromId: d.revisedFromId ?? null,
-          reviewerId: d.reviewerId ?? null,
-          reviewerNote: d.reviewerNote ?? null,
-          createdAt: new Date().toISOString(),
-        });
-        recordHistoryEvent(
-          workspace.id,
-          item.upc,
-          'proposal_decision',
-          { proposalId: d.proposalId, decision: d.decision, proposedValue: d.proposedValue ?? null, targetId: d.targetId ?? null },
-          activeRunId,
-          d.proposalId,
-          decisionId,
-        );
-      }
-    })();
-
-    // NOTE: This endpoint does NOT mark the review stage as completed.
-    // The caller must POST to /onboarding/items/review-complete separately.
-
-    return c.json({ success: true, count: decisions.length });
-  } catch (err) {
-    console.error('[OnboardingRoutes] Record decisions failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
+
+  const result = submitProposalDecisions({
+    workspaceId: workspace.id,
+    productSku: item.upc,
+    runId: activeRunId,
+    sourceKind: 'onboarding',
+    onboardingItemId: itemId,
+    decisions: parsed.data.decisions,
+  });
+
+  if (!result.ok) {
+    const status = result.code === 'decision_conflict' ? 409 : 400;
+    return c.json({ error: result.reason, code: result.code }, status);
+  }
+
+  // This endpoint deliberately does not complete Review. The caller must
+  // drain all writes and invoke /review-complete separately.
+  return c.json({
+    success: true,
+    count: result.decisions.length,
+    decisions: result.decisions,
+  });
 });
 
 /**
@@ -1742,7 +1732,7 @@ route.put('/onboarding/settings/domains/:domain', async (c) => {
  * proposal already exists for the domain, the existing proposal ID
  * is returned instead of creating a duplicate.
  *
- * Requires SHOPSITE_CMS_PROFILE_GENERATION_ENABLED and
+ * Requires BAYSTATE_CMS_PROFILE_GENERATION_ENABLED and
  * an explicit llm_task_configs row for `profile_generation`.
  * Slow path: fetches a remote page and calls an LLM (10–30s).
  */
@@ -1752,7 +1742,7 @@ route.post('/onboarding/settings/domain-diagnostics/:domain/generate-profile', a
 
   if (!isProfileGenerationEnabled()) {
     return c.json({
-      error: 'Profile generation is disabled. Set SHOPSITE_CMS_PROFILE_GENERATION_ENABLED to enable.',
+      error: 'Profile generation is disabled. Set BAYSTATE_CMS_PROFILE_GENERATION_ENABLED to enable.',
     }, 400);
   }
 

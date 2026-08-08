@@ -3,7 +3,7 @@
  *
  * Snapshot responses return artifact refs such as `screenshotRef` and `htmlRef`.
  * These may be local filesystem paths under
- * `.shopsite-cms/artifacts/` or URL-like strings. This module provides a
+ * `.baystate-cms/artifacts/` or URL-like strings. This module provides a
  * default resolver that only returns browser-readable URLs for refs that
  * already look like URLs.
  *
@@ -22,7 +22,7 @@
  *   - Absolute paths starting with `/`
  *
  * Returns `null` for local filesystem paths (e.g.
- * `.shopsite-cms/artifacts/profile-builder/...`) that the browser
+ * `.baystate-cms/artifacts/profile-builder/...`) that the browser
  * cannot read directly.
  */
 export function defaultArtifactUrlResolver(ref: string): string | null {

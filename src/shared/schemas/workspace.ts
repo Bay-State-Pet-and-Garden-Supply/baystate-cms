@@ -12,6 +12,10 @@ export const WorkspaceSchema = z.object({
   updatedAt: z.string(),
   bootstrapStatus: z.enum(['not_started', 'running', 'complete', 'failed']).default('not_started'),
   baselineCommit: z.string().nullable().default(null),
+  /** Loaded classification configuration, or undefined when unconfigured/invalid. */
+  classificationConfig: z.unknown().optional(),
+  /** Typed load error message when configuration exists but is invalid. */
+  classificationConfigError: z.string().nullable().optional(),
 });
 
 export const ShopSiteConnectionSchema = z.object({

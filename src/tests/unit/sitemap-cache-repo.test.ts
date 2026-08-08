@@ -11,7 +11,7 @@ import {
 } from '../../db/repositories/sitemap-cache-repo';
 
 describe('Sitemap Cache Repository', () => {
-  const testDbPath = '/tmp/shopsite-cms-sitemap-cache-test.db';
+  const testDbPath = '/tmp/baystate-cms-sitemap-cache-test.db';
 
   beforeAll(() => {
     try { resetDb(); } catch { /* ok */ }

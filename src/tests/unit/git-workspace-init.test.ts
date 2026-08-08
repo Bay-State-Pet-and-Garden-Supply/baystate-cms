@@ -7,7 +7,7 @@ import path from 'path';
 import os from 'os';
 
 describe('Git Workspace Init', () => {
-  const testDir = path.join(os.tmpdir(), `shopsite-cms-test-${Date.now()}`);
+  const testDir = path.join(os.tmpdir(), `baystate-cms-test-${Date.now()}`);
   beforeAll(() => {
     // Clean up first
     try { fs.rmSync(testDir, { recursive: true }); } catch { /* ok */ }

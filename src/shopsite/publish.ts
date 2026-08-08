@@ -38,7 +38,7 @@ export async function publishStore(
   const url = `${generateUrl}?${params.toString()}`;
   const headers: Record<string, string> = {
     Authorization: authHeader,
-    'User-Agent': 'ShopSiteCMS/0.1.0',
+    'User-Agent': 'BaystateCMS/0.1.0',
     Accept: 'text/xml,application/xml,*/*',
   };
   if (cookieHeader) {

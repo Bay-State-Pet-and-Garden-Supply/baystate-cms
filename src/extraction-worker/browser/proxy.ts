@@ -2,7 +2,7 @@
  * Crawlee ProxyConfiguration factory for the extraction worker.
  *
  * Supports optional residential proxy URLs via comma-separated
- * SHOPSITE_CMS_WORKER_PROXY_URLS env var. Returns undefined when no
+ * BAYSTATE_CMS_WORKER_PROXY_URLS env var. Returns undefined when no
  * proxy is configured (direct connection).
  */
 

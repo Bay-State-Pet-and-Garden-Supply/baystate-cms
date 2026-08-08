@@ -12,7 +12,7 @@
  *   - **rendered**: Headless Playwright Chromium with JS execution for selector extraction.
  *
  * Artifact files are written under:
- *   <cwd>/.shopsite-cms/artifacts/profile-builder/<domain>/<job-id>/
+ *   <cwd>/.baystate-cms/artifacts/profile-builder/<domain>/<job-id>/
  *
  * Errors are surfaced in per-sample results; never throws uncaught errors.
  */

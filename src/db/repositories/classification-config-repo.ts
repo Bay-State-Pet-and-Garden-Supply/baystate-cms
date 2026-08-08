@@ -1,8 +1,10 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
+import { canonicalJsonFileString, canonicalJsonStringify, hashCanonicalJson, isSha256Hex, sha256Hex } from '../../shared/stable-id';
+import { buildFocusedFiles } from '../../classification/config-generator';
+import type { ClassificationConfigBundleV2 } from '../../shared/schemas/classification';
 import type {
   ClassificationConfig,
-  ClassificationManifest,
   ProductTypeConfig,
   ProductAttributeConfig,
   AttributeProfileConfig,
@@ -26,7 +28,8 @@ export interface ConfigFileMeta {
   updatedAt: string;
 }
 
-function listConfigFiles(workspaceId: string): ConfigFileMeta[] {
+// fallow-ignore-next-line unused-export — config-store diagnostics consume this in Milestone 3
+export function listConfigFiles(workspaceId: string): ConfigFileMeta[] {
   const rows = getDb()
     .query('SELECT * FROM classification_config_files WHERE workspace_id = ? ORDER BY file_name')
     .all(workspaceId) as Record<string, any>[];
@@ -40,20 +43,23 @@ function listConfigFiles(workspaceId: string): ConfigFileMeta[] {
   }));
 }
 
-function hashString(s: string): string {
-  // Simple fast hash for config comparison
+/** Exact historical signed-decimal hash used by existing snapshot rows. */
+export function computeLegacyConfigHash(config: ClassificationConfig): string {
+  return legacySignedDecimalHash(JSON.stringify(config));
+}
+
+function legacySignedDecimalHash(value: string): string {
   let hash = 0;
-  for (let i = 0; i < s.length; i++) {
-    const ch = s.charCodeAt(i);
-    hash = ((hash << 5) - hash) + ch;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash) + value.charCodeAt(index);
     hash |= 0;
   }
   return String(hash);
 }
 
 function upsertConfigFile(workspaceId: string, fileName: string, schemaVersion: number, content: unknown): void {
-  const json = JSON.stringify(content);
-  const hash = hashString(json);
+  const json = canonicalJsonStringify(content);
+  const hash = hashCanonicalJson(content);
   getDb().run(
     `INSERT INTO classification_config_files (workspace_id, file_name, schema_version, content_hash, content_json, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -93,13 +99,13 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
           pt.description ?? null,
           pt.attributeProfileId ?? null,
           JSON.stringify(pt.oldIdAliases),
-          hashString(JSON.stringify(pt)),
+          hashCanonicalJson(pt),
           now(),
           now(),
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'product-types.json', 1, config.productTypes);
+    upsertConfigFile(workspaceId, 'product-types.json', config.manifest.schemaVersion, config.productTypes);
 
     // Attributes
     db.run('DELETE FROM classification_attributes WHERE workspace_id = ?', [workspaceId]);
@@ -123,13 +129,13 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
           attr.isClaim ? 1 : 0,
           attr.isCompositionAttribute ? 1 : 0,
           attr.group ?? null,
-          hashString(JSON.stringify(attr)),
+          hashCanonicalJson(attr),
           now(),
           now(),
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'attributes.json', 1, config.attributes);
+    upsertConfigFile(workspaceId, 'attributes.json', config.manifest.schemaVersion, config.attributes);
 
     // Attribute Profiles
     db.run('DELETE FROM classification_attribute_profiles WHERE workspace_id = ?', [workspaceId]);
@@ -144,13 +150,13 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
           profile.productTypeId,
           profile.name,
           JSON.stringify(profile.attributes),
-          hashString(JSON.stringify(profile)),
+          hashCanonicalJson(profile),
           now(),
           now(),
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'attribute-profiles.json', 1, config.attributeProfiles);
+    upsertConfigFile(workspaceId, 'attribute-profiles.json', config.manifest.schemaVersion, config.attributeProfiles);
 
     // Attribute Mappings
     db.run('DELETE FROM classification_attribute_mappings WHERE workspace_id = ?', [workspaceId]);
@@ -167,18 +173,18 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
           mapping.catalogField,
           JSON.stringify(mapping.serialization),
           mapping.isStale ? 1 : 0,
-          hashString(JSON.stringify(mapping)),
+          hashCanonicalJson(mapping),
           now(),
           now(),
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'mappings.json', 1, config.attributeMappings);
+    upsertConfigFile(workspaceId, 'mappings.json', config.manifest.schemaVersion, config.attributeMappings);
 
     // Curation targets are file-backed stage settings. They do not need a
     // dedicated cache table because stages read them from the active config,
     // but tracking the file keeps config metadata/snapshots complete.
-    upsertConfigFile(workspaceId, 'curation-targets.json', 1, config.curationTargets ?? []);
+    upsertConfigFile(workspaceId, 'curation-targets.json', config.manifest.schemaVersion, config.curationTargets ?? []);
 
     // Guidance
     db.run('DELETE FROM classification_guidance WHERE workspace_id = ?', [workspaceId]);
@@ -196,13 +202,13 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
           JSON.stringify(g.structured),
           g.freeForm ?? null,
           g.manualReviewRequirement ? 1 : 0,
-          hashString(JSON.stringify(g)),
+          hashCanonicalJson(g),
           now(),
           now(),
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'guidance.json', 1, config.guidance);
+    upsertConfigFile(workspaceId, 'guidance.json', config.manifest.schemaVersion, config.guidance);
 
     // Model Policy
     db.run(
@@ -212,9 +218,9 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
          policy_json = EXCLUDED.policy_json,
          config_hash = EXCLUDED.config_hash,
          updated_at = EXCLUDED.updated_at`,
-      [workspaceId, JSON.stringify(config.modelPolicy), hashString(JSON.stringify(config.modelPolicy)), now()],
+      [workspaceId, canonicalJsonStringify(config.modelPolicy), hashCanonicalJson(config.modelPolicy), now()],
     );
-    upsertConfigFile(workspaceId, 'model-policies.json', 1, config.modelPolicy);
+    upsertConfigFile(workspaceId, 'model-policies.json', config.manifest.schemaVersion, config.modelPolicy);
 
     // Brands
     db.run('DELETE FROM classification_brands WHERE workspace_id = ?', [workspaceId]);
@@ -229,13 +235,13 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
           brand.name,
           JSON.stringify(brand.aliases),
           JSON.stringify(brand.oldIdAliases),
-          hashString(JSON.stringify(brand)),
+          hashCanonicalJson(brand),
           now(),
           now(),
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'brands.json', 1, config.brands);
+    upsertConfigFile(workspaceId, 'brands.json', config.manifest.schemaVersion, config.brands);
 
     // Data Sharing Policy
     db.run(
@@ -245,9 +251,9 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
          policy_json = EXCLUDED.policy_json,
          config_hash = EXCLUDED.config_hash,
          updated_at = EXCLUDED.updated_at`,
-      [workspaceId, JSON.stringify(config.dataSharing), hashString(JSON.stringify(config.dataSharing)), now()],
+      [workspaceId, canonicalJsonStringify(config.dataSharing), hashCanonicalJson(config.dataSharing), now()],
     );
-    upsertConfigFile(workspaceId, 'data-sharing.json', 1, config.dataSharing);
+    upsertConfigFile(workspaceId, 'data-sharing.json', config.manifest.schemaVersion, config.dataSharing);
   })();
 }
 
@@ -258,14 +264,27 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
  * Used for drift detection in read-only contexts (GET routes).
  */
 export function computeConfigHash(config: ClassificationConfig): string {
-  return hashString(JSON.stringify(config));
+  return hashCanonicalJson(config);
+}
+
+/**
+ * Compare a validated config with either a canonical SHA-256 snapshot or the
+ * exact signed-decimal legacy algorithm. Unknown hash formats fail closed.
+ * Historical rows are never rewritten by this compatibility check.
+ */
+export function configHashMatches(config: ClassificationConfig, storedHash: string): boolean {
+  if (isSha256Hex(storedHash)) return computeConfigHash(config) === storedHash;
+  if (/^-?(?:0|[1-9]\d{0,9})$/.test(storedHash)) {
+    return computeLegacyConfigHash(config) === storedHash;
+  }
+  return false;
 }
 
 /**
  * Creates a point-in-time snapshot of the active config for use in a classification run.
  */
 export function createConfigSnapshot(workspaceId: string, config: ClassificationConfig, sourceCommit?: string): { id: string; hash: string } {
-  const snapshotHash = hashString(JSON.stringify(config));
+  const snapshotHash = computeConfigHash(config);
 
   // Return existing snapshot if identical config was already captured
   const existing = getDb()
@@ -279,7 +298,7 @@ export function createConfigSnapshot(workspaceId: string, config: Classification
      (id, workspace_id, snapshot_hash, manifest_schema_version, compatibility_version,
       source_commit, config_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, workspaceId, snapshotHash, config.manifest.schemaVersion, config.manifest.compatibilityVersion, sourceCommit ?? null, JSON.stringify(config), now()],
+    [id, workspaceId, snapshotHash, config.manifest.schemaVersion, config.manifest.compatibilityVersion, sourceCommit ?? null, canonicalJsonStringify(config), now()],
   );
   return { id, hash: snapshotHash };
 }
@@ -344,7 +363,8 @@ export function getCachedAttributeMappings(workspaceId: string): AttributeMappin
   }));
 }
 
-function getCachedGuidance(workspaceId: string): GuidanceConfig[] {
+// fallow-ignore-next-line unused-export — runtime snapshot builder consumes this in Milestone 4
+export function getCachedGuidance(workspaceId: string): GuidanceConfig[] {
   const rows = getDb()
     .query('SELECT * FROM classification_guidance WHERE workspace_id = ?')
     .all(workspaceId) as Record<string, any>[];
@@ -358,7 +378,8 @@ function getCachedGuidance(workspaceId: string): GuidanceConfig[] {
   }));
 }
 
-function getCachedModelPolicy(workspaceId: string): ModelPolicyConfig | null {
+// fallow-ignore-next-line unused-export — runtime snapshot builder consumes this in Milestone 4
+export function getCachedModelPolicy(workspaceId: string): ModelPolicyConfig | null {
   const row = getDb()
     .query('SELECT * FROM classification_model_policies WHERE workspace_id = ?')
     .get(workspaceId) as Record<string, any> | undefined;
@@ -384,4 +405,156 @@ export function getCachedDataSharingPolicy(workspaceId: string): DataSharingConf
     .get(workspaceId) as Record<string, any> | undefined;
   if (!row) return null;
   return JSON.parse(String(row.policy_json)) as DataSharingConfig;
+}
+
+// ─── V2 activation cache (config-store contract) ────────────────────────────────
+
+const ACTIVE_CONFIG_HASH_KEY = (workspaceId: string) => `active_classification_config_hash:${workspaceId}`;
+
+/**
+ * Upsert the derived SQLite cache for a validated v2 activation atomically.
+ * Mirrors the manifest plus every focused file with exact canonical bytes so
+ * cache hashes equal the committed manifest file-versions, records the
+ * point-in-time snapshot, and records the active bundle hash. The caller
+ * (config-store) invokes this only after the active directory has been
+ * atomically replaced and re-validated in active mode.
+ */
+export function upsertConfigSnapshot(
+  workspaceId: string,
+  bundle: ClassificationConfigBundleV2,
+  sourceCommit: string | null = null,
+): { id: string; hash: string } {
+  const db = getDb();
+  const hash = bundle.manifest.bundleHash;
+  const snapshotId = randomUUID();
+  const focusedFiles = buildFocusedFiles(bundle);
+
+  db.transaction(() => {
+    const manifestContent = canonicalJsonFileString(bundle.manifest);
+    db.run(
+      `INSERT INTO classification_config_files (workspace_id, file_name, schema_version, content_hash, content_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, file_name) DO UPDATE SET
+         schema_version = EXCLUDED.schema_version,
+         content_hash = EXCLUDED.content_hash,
+         content_json = EXCLUDED.content_json,
+         updated_at = EXCLUDED.updated_at`,
+      [workspaceId, 'manifest.json', 2, sha256Hex(manifestContent), manifestContent, now()],
+    );
+    for (const [fileName, content] of Object.entries(focusedFiles)) {
+      db.run(
+        `INSERT INTO classification_config_files (workspace_id, file_name, schema_version, content_hash, content_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(workspace_id, file_name) DO UPDATE SET
+           schema_version = EXCLUDED.schema_version,
+           content_hash = EXCLUDED.content_hash,
+           content_json = EXCLUDED.content_json,
+           updated_at = EXCLUDED.updated_at`,
+        [workspaceId, fileName, 2, sha256Hex(content), content, now()],
+      );
+    }
+    db.run(
+      `INSERT INTO classification_config_snapshots
+       (id, workspace_id, snapshot_hash, manifest_schema_version, compatibility_version, source_commit, config_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, snapshot_hash) DO UPDATE SET
+         source_commit = EXCLUDED.source_commit,
+         config_json = EXCLUDED.config_json,
+         created_at = EXCLUDED.created_at`,
+      [
+        snapshotId,
+        workspaceId,
+        hash,
+        bundle.manifest.schemaVersion,
+        bundle.manifest.compatibilityVersion,
+        sourceCommit,
+        canonicalJsonStringify(bundle),
+        now(),
+      ],
+    );
+    db.run(
+      `INSERT INTO app_meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`,
+      [ACTIVE_CONFIG_HASH_KEY(workspaceId), hash],
+    );
+  })();
+  return { id: snapshotId, hash };
+}
+
+/** Cached active v2 bundle SHA-256, or null when no v2 activation is recorded. */
+export function getActiveConfigHash(workspaceId: string): string | null {
+  const row = getDb()
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get(ACTIVE_CONFIG_HASH_KEY(workspaceId)) as { value: string } | undefined;
+  return row ? String(row.value) : null;
+}
+
+/** Row id of a persisted config snapshot by exact hash, or null. */
+export function getPersistedConfigSnapshotId(workspaceId: string, snapshotHash: string): string | null {
+  const row = getDb()
+    .query('SELECT id FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?')
+    .get(workspaceId, snapshotHash) as { id: string } | undefined;
+  return row ? String(row.id) : null;
+}
+
+export interface ConfigCacheFileState {
+  fileName: string;
+  schemaVersion: number;
+  contentHash: string;
+  contentJson: string;
+}
+
+export interface ConfigCacheState {
+  activeHash: string | null;
+  files: ConfigCacheFileState[];
+}
+
+/**
+ * Capture the derived cache state before a v2 activation so a failed
+ * Git commit can restore the previous cache transactionally.
+ */
+export function captureConfigCacheState(workspaceId: string): ConfigCacheState {
+  const db = getDb();
+  const files = db
+    .query('SELECT file_name, schema_version, content_hash, content_json FROM classification_config_files WHERE workspace_id = ?')
+    .all(workspaceId) as Array<Record<string, unknown>>;
+  return {
+    activeHash: getActiveConfigHash(workspaceId),
+    files: files.map(row => ({
+      fileName: String(row.file_name),
+      schemaVersion: Number(row.schema_version),
+      contentHash: String(row.content_hash),
+      contentJson: String(row.content_json),
+    })),
+  };
+}
+
+/**
+ * Restore the derived cache to a previously captured state and drop any
+ * snapshot rows for the given bundle hash.
+ */
+export function restoreConfigCacheState(workspaceId: string, state: ConfigCacheState, removeSnapshotHash?: string): void {
+  const db = getDb();
+  db.transaction(() => {
+    db.run('DELETE FROM classification_config_files WHERE workspace_id = ?', [workspaceId]);
+    for (const file of state.files) {
+      db.run(
+        `INSERT INTO classification_config_files (workspace_id, file_name, schema_version, content_hash, content_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [workspaceId, file.fileName, file.schemaVersion, file.contentHash, file.contentJson, now()],
+      );
+    }
+    if (removeSnapshotHash) {
+      db.run('DELETE FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?', [workspaceId, removeSnapshotHash]);
+    }
+    if (state.activeHash === null) {
+      db.run('DELETE FROM app_meta WHERE key = ?', [ACTIVE_CONFIG_HASH_KEY(workspaceId)]);
+    } else {
+      db.run(
+        `INSERT INTO app_meta (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`,
+        [ACTIVE_CONFIG_HASH_KEY(workspaceId), state.activeHash],
+      );
+    }
+  })();
 }

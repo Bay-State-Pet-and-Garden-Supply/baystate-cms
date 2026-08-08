@@ -29,10 +29,10 @@ describe('Detail Enrichment Integration', () => {
 
   beforeAll(() => {
     workspaceId = randomUUID();
-    workspacePath = path.join(os.tmpdir(), `shopsite-cms-detail-test-${workspaceId.slice(0, 8)}`);
-    fs.mkdirSync(path.join(workspacePath, '.shopsite-cms'), { recursive: true });
+    workspacePath = path.join(os.tmpdir(), `baystate-cms-detail-test-${workspaceId.slice(0, 8)}`);
+    fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
     fs.mkdirSync(path.join(workspacePath, 'store', 'classification'), { recursive: true });
-    const dbPath = path.join(workspacePath, '.shopsite-cms', 'app.db');
+    const dbPath = path.join(workspacePath, '.baystate-cms', 'app.db');
     initDb(dbPath);
     runMigrations();
     insertWorkspace({

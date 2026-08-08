@@ -10,7 +10,7 @@
 
 import { type ClassificationEvidence, type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
 import { callLlmForTask } from '../onboarding/llm-client';
-import { listPages } from '../db/repositories/page-repo';
+import { listPages, listVerifiedPageOptions } from '../db/repositories/page-repo';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -51,14 +51,16 @@ export interface PageAssignmentResult {
 /**
  * Build a page hierarchy array from flattened options.
  *
- * Reads the live page_index to resolve parentId → parentName for each option,
- * so the LLM receives structured hierarchy context (e.g. "Cat Food Dry" is a
- * subcategory of "Cat Food Shop All").
+ * Resolves parentId → parentName from VERIFIED page identities only (the
+ * active import). When no workspaceId is provided the caller opts into the
+ * legacy all-rows read (test/back-compat paths); production callers always
+ * pass the workspace so name-only rows never enter hierarchy resolution.
  */
 export function buildPageHierarchy(
   options: Array<{ value: string; label: string }>,
+  workspaceId?: string,
 ): Array<{ id: string; name: string; parentName: string | null }> {
-  const storePages = listPages();
+  const storePages = workspaceId ? listVerifiedPageOptions(workspaceId) : listPages();
   const pageMap = new Map(storePages.map(p => [p.id, p]));
 
   return options.map(opt => {

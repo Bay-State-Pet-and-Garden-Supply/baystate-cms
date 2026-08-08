@@ -224,6 +224,11 @@ CREATE TABLE IF NOT EXISTS classification_proposal_decisions (
   revised_from_id TEXT REFERENCES classification_proposal_decisions(id),
   reviewer_id TEXT,
   reviewer_note TEXT,
+  revised_value_json TEXT,
+  revised_target_id TEXT,
+  has_revised_target INTEGER NOT NULL DEFAULT 0,
+  decision_key TEXT,
+  superseded_at TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -393,6 +398,10 @@ CREATE INDEX IF NOT EXISTS idx_classification_proposals_product
 -- Decisions index
 CREATE INDEX IF NOT EXISTS idx_classification_proposal_decisions_proposal
   ON classification_proposal_decisions(proposal_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_decisions_key
+  ON classification_proposal_decisions(decision_key)
+  WHERE decision_key IS NOT NULL;
 
 -- History indexes
 CREATE INDEX IF NOT EXISTS idx_classification_history_workspace_product

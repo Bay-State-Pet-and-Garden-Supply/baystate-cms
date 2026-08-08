@@ -1,0 +1,41 @@
+[
+  {
+    "id": "species",
+    "name": "Target Species",
+    "type": "enum",
+    "allowedValues": ["dog", "cat", "bird", "fish", "reptile", "small_animal", "horse", "wildlife"],
+    "description": "Primary species targeted by the product."
+  },
+  {
+    "id": "life_stage",
+    "name": "Life Stage",
+    "type": "enum",
+    "allowedValues": ["puppy", "kitten", "adult", "senior", "all_life_stages"],
+    "description": "Target animal lifestage."
+  },
+  {
+    "id": "food_form",
+    "name": "Food Form",
+    "type": "enum",
+    "allowedValues": ["dry", "wet", "freeze_dried", "raw", "dehydrated", "treat", "chew", "liquid", "granule"],
+    "description": "Physical form of food, treat, or chemical product."
+  },
+  {
+    "id": "flavor_protein",
+    "name": "Primary Protein / Flavor",
+    "type": "string",
+    "description": "Main flavor or animal protein source (e.g. Chicken, Beef, Salmon, Lamb, Peanut Butter)."
+  },
+  {
+    "id": "package_weight",
+    "name": "Package Weight / Volume",
+    "type": "string",
+    "description": "Standardized package size (e.g. 4 lb, 30 lb, 12.5 oz, 1 gal)."
+  },
+  {
+    "id": "organic_status",
+    "name": "Organic / Natural Status",
+    "type": "boolean",
+    "description": "Indicates if the product is certified organic or all-natural."
+  }
+]

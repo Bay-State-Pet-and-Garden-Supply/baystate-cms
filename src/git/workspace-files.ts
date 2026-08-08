@@ -19,7 +19,7 @@ export function createWorkspaceDirs(workspacePath: string): WorkspaceDirs {
     products: path.join(workspacePath, 'products'),
     store: path.join(workspacePath, 'store'),
     exports: path.join(workspacePath, 'exports'),
-    dotShopsite: path.join(workspacePath, '.shopsite-cms'),
+    dotShopsite: path.join(workspacePath, '.baystate-cms'),
     git: path.join(workspacePath, '.git'),
   };
 
@@ -40,11 +40,11 @@ export function writeGitignore(workspacePath: string): void {
     fs.writeFileSync(
       gitignorePath,
       [
-        '# ShopSite CMS ignores',
-        '.shopsite-cms/app.db',
-        '.shopsite-cms/secrets.json',
-        '.shopsite-cms/logs/',
-        '.shopsite-cms/temp/',
+        '# Baystate CMS ignores',
+        '.baystate-cms/app.db',
+        '.baystate-cms/secrets.json',
+        '.baystate-cms/logs/',
+        '.baystate-cms/temp/',
         'exports/**/*.zip',
         'exports/**/*.xml',
         '',

@@ -27,6 +27,8 @@ import type { InsertSourceData } from '../db/repositories/onboarding-source-repo
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
+export type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export interface VerificationContext {
   upc: string;
   expectedName: string;
@@ -88,10 +90,11 @@ export const MIN_IDENTITY_SIGNALS = 2;
 export async function verifyCandidate(
   candidate: InsertSourceData,
   context: VerificationContext,
+  fetchFn: NetworkFetch = fetch,
 ): Promise<VerificationResult | null> {
   let html: string;
   try {
-    const response = await fetch(candidate.url, {
+    const response = await fetchFn(candidate.url, {
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -132,12 +135,13 @@ export async function verifyTopCandidates(
   candidates: InsertSourceData[],
   context: VerificationContext,
   maxCandidates = 3,
+  fetchFn: NetworkFetch = fetch,
 ): Promise<VerificationResult[]> {
   const toVerify = candidates.slice(0, maxCandidates);
   if (toVerify.length === 0) return [];
 
   const settled = await Promise.allSettled(
-    toVerify.map(c => verifyCandidate(c, context)),
+    toVerify.map(c => verifyCandidate(c, context, fetchFn)),
   );
 
   const results: VerificationResult[] = [];

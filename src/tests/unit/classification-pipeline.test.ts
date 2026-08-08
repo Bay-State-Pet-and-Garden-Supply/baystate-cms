@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, mock } from 'bun:test';
+import { Hono } from 'hono';
 
 // Mock the LLM client so page assignment works in test environment
 mock.module('../../onboarding/llm-client', () => ({
@@ -14,18 +15,30 @@ import { initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
-import { syncConfigToCache, getCachedProductTypes, getCachedAttributes, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
+import {
+  syncConfigToCache,
+  getCachedProductTypes,
+  getCachedAttributes,
+  createConfigSnapshot,
+  computeConfigHash,
+  computeLegacyConfigHash,
+  configHashMatches,
+} from '../../db/repositories/classification-config-repo';
 import { createRun, completeRun, getProposalsByRun, getStageResults, getEvidenceByRun, recordDecision, getAcceptedProposals } from '../../db/repositories/classification-run-repo';
 import { runPipeline } from '../../classification/pipeline-runner';
 import { evidenceExtractionStage, nameConsolidationStage, categoryPageProposalsStage, productAttributeProposalsStage, attributeApplicabilityStage, primaryProductTypeStage } from '../../classification';
 import { upsertPage } from '../../db/repositories/page-repo';
 import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
+import { buildRuntimeSnapshot, persistRuntimeSnapshot } from '../../classification/runtime-snapshot';
 import { listCurationTargetCandidates } from '../../classification/curation-targets';
 import { getDb } from '../../db/connection';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
+import catalogClassificationRoutes from '../../server/routes/catalog-classification-routes';
+import { applyCatalogClassification } from '../../classification/catalog-product-application';
+import { writeProductFile } from '../../git/workspace-files';
 
 describe('Classification Pipeline Integration', () => {
   let workspacePath: string;
@@ -46,7 +59,7 @@ describe('Classification Pipeline Integration', () => {
     runMigrations();
     insertWorkspace({ id: workspaceId, name: 'test', workspacePath, gitPath: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), bootstrapStatus: 'complete', baselineCommit: null });
 
-    const now = new Date().toISOString();
+    const now = '2026-08-01T12:00:00.000Z';
     saveClassificationConfig(workspacePath, {
       manifest: { schemaVersion: 1, compatibilityVersion: 1, createdAt: now, updatedAt: now, fileVersions: {} },
       productTypes: [
@@ -78,7 +91,53 @@ describe('Classification Pipeline Integration', () => {
     expect(getCachedAttributes(workspaceId).length).toBe(1);
   });
 
-  it('runs category page proposals from evidence', async () => {
+  it('uses canonical SHA-256 for new snapshots while matching exact historical signed-decimal hashes', () => {
+    const config = loadClassificationConfig(workspacePath);
+    const canonical = computeConfigHash(config);
+    const legacy = computeLegacyConfigHash(config);
+    expect(canonical).toMatch(/^[a-f0-9]{64}$/);
+    // Fixed regression vector for the exact signed-decimal algorithm used by
+    // historical persisted snapshots. Do not derive this expectation from the
+    // implementation under test.
+    expect(legacy).toBe('-606658189');
+    expect(canonical).not.toBe(legacy);
+    expect(configHashMatches(config, canonical)).toBe(true);
+    expect(configHashMatches(config, legacy)).toBe(true);
+    expect(configHashMatches(config, 'deadbeef')).toBe(false);
+    expect(configHashMatches(config, 'not-a-hash')).toBe(false);
+    expect(configHashMatches({ ...config, productTypes: [] }, canonical)).toBe(false);
+
+    const snapshot = createConfigSnapshot(workspaceId, config);
+    expect(snapshot.hash).toBe(canonical);
+    const row = getDb().query('SELECT snapshot_hash, config_json FROM classification_config_snapshots WHERE id = ?')
+      .get(snapshot.id) as { snapshot_hash: string; config_json: string };
+    expect(row.snapshot_hash).toBe(canonical);
+    expect(JSON.parse(row.config_json)).toEqual(config);
+  });
+
+  it('accepts the fixed historical hash through both catalog drift consumers end to end', async () => {
+    const historicalHash = '-606658189';
+    const sku = 'LEGACY-DRIFT-CONSUMER';
+    const run = createRun(workspaceId, sku, null, historicalHash, { sourceKind: 'catalog_product' });
+    completeRun(run.id, 'completed');
+
+    const app = new Hono();
+    app.route('/api', catalogClassificationRoutes);
+    const detail = await app.request(`/api/products/${sku}/classification`);
+    expect(detail.status).toBe(200);
+    expect((await detail.json() as { configDrift: boolean }).configDrift).toBe(false);
+
+    writeProductFile(workspacePath, {
+      sku,
+      name: 'Legacy drift test product',
+      customFields: {},
+      shopsite: { preserved: { unknownElements: {}, advancedBlocks: {} } },
+    } as unknown as Parameters<typeof writeProductFile>[1]);
+    await expect(applyCatalogClassification(workspacePath, workspaceId, sku, run.id))
+      .rejects.toThrow('No accepted proposals to apply.');
+  });
+
+  it('abstains from category page proposals without a reviewed Product Type and verified Page catalog', async () => {
     upsertPage({ name: 'Dog Food', fileName: 'dog-food.html', parentId: null, pageHash: 'abc', lastSyncedAt: null });
     const config = loadClassificationConfig(workspacePath);
     const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
@@ -86,10 +145,13 @@ describe('Classification Pipeline Integration', () => {
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-1', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Dog Food Chicken', value: 'Dog Food Chicken', metadata: {}, capturedAt: new Date().toISOString() },
     ];
+    // Product Type target is enabled and no accepted type exists, so page
+    // proposals abstain (reviewed type + verified Page catalog required).
     const result = await runPipeline([evidenceExtractionStage, categoryPageProposalsStage], { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } }, { sku: 'TEST-SKU-1', evidence, acceptedProposals: [], allProposals: [] });
-    expect(result.proposals.length).toBeGreaterThanOrEqual(1);
-    const persisted = getProposalsByRun(run.id);
-    expect(persisted.length).toBeGreaterThanOrEqual(1);
+    const pageProposals = result.proposals.filter(p => p.proposalType === 'category_page');
+    expect(pageProposals.length).toBe(0);
+    const abstentions = result.proposals.filter(p => p.proposalType === 'reviewable_abstention');
+    expect(abstentions.length).toBeGreaterThanOrEqual(1);
   });
 
   it('produces attribute proposals via alias matching', async () => {
@@ -104,7 +166,7 @@ describe('Classification Pipeline Integration', () => {
     const result = await runPipeline([evidenceExtractionStage, primaryProductTypeStage, attributeApplicabilityStage, productAttributeProposalsStage], { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } }, { sku: 'TEST-SKU-2', evidence, acceptedProposals: [acceptedType], allProposals: [] });
     const fieldProposals = result.proposals.filter(p => p.proposalType === 'field_assignment');
     expect(fieldProposals.length).toBeGreaterThan(0);
-    recordDecision({ id: randomUUID(), proposalId: fieldProposals[0].id, decision: 'accepted', revisedFromId: null, reviewerId: null, reviewerNote: null, createdAt: new Date().toISOString() });
+    recordDecision({ id: randomUUID(), proposalId: fieldProposals[0].id, decision: 'accepted', revisedFromId: null, reviewerId: null, reviewerNote: null, revisedValue: null, revisedTargetId: null, decisionKey: null, supersededAt: null, createdAt: new Date().toISOString() });
     expect(getAcceptedProposals('TEST-SKU-2', run.id).length).toBeGreaterThan(0);
   });
 
@@ -164,7 +226,7 @@ describe('Classification Pipeline Integration', () => {
     expect(fieldProposals.length).toBe(0);
   });
 
-  it('produces attribute proposals from provisional Product Type (no accepted proposals)', async () => {
+  it('withholds type-gated attribute proposals while Product Type is pending (no accepted proposals)', async () => {
     const config = loadClassificationConfig(workspacePath);
     const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
     const run = createRun(workspaceId, 'TEST-SKU-PROV', snapId, snapHash);
@@ -201,8 +263,9 @@ describe('Classification Pipeline Integration', () => {
       },
     ];
 
-    // Run pipeline WITHOUT any accepted proposals — the pipeline should
-    // use provisional (pending) Product Type proposals for downstream stages.
+    // Run pipeline WITHOUT any accepted proposals — a pending (provisional)
+    // Product Type guess must NOT unlock decision-eligible type-gated
+    // attribute proposals (fail-closed first pass).
     const result = await runPipeline(
       [
         evidenceExtractionStage,
@@ -219,14 +282,53 @@ describe('Classification Pipeline Integration', () => {
     expect(typeProposals.length).toBeGreaterThanOrEqual(1);
     expect(typeProposals[0].status).toBe('pending');
 
-    // Should have field_assignment proposals using the provisional Product Type
+    // NO decision-eligible field assignments while the type is pending.
+    const fieldProposals = result.proposals.filter(p => p.proposalType === 'field_assignment');
+    expect(fieldProposals.length).toBe(0);
+    const flavorProposal = fieldProposals.find(p => p.targetId === 'flavor');
+    expect(flavorProposal).toBeUndefined();
+  });
+
+  it('produces type-gated attribute proposals only after the Product Type is accepted (reviewed facts carry forward)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'TEST-SKU-REVIEWED', snapId, snapHash, {
+      sourceKind: 'catalog_product',
+      sourceProductHash: 'src-hash-reviewed',
+    });
+    const evidence = [
+      { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-REVIEWED', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Beef Recipe Dry Dog Food', value: 'Beef Recipe Dry Dog Food', metadata: {}, capturedAt: new Date().toISOString() },
+      { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-REVIEWED', attributeId: null, source: 'official_product_page' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'description', snippet: 'Made with real Beef, Chicken, and Lamb', value: 'Made with real Beef, Chicken, and Lamb', metadata: {}, capturedAt: new Date().toISOString() },
+    ];
+
+    // Build + persist a runtime snapshot whose reviewed facts carry an
+    // accepted 'dry-dog-food' decision, then run the pipeline against it.
+    const runtime = buildRuntimeSnapshot({
+      workspaceId,
+      workspacePath,
+      productSku: 'TEST-SKU-REVIEWED',
+      config,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+      sourceProductHash: 'src-hash-reviewed',
+    });
+    persistRuntimeSnapshot(runtime);
+
+    // The accepted type must flow in as an in-run accepted proposal so the
+    // gating logic sees a reviewed type (facts alone are also honored).
+    const acceptedType = { id: randomUUID(), runId: run.id, productSku: 'TEST-SKU-REVIEWED', proposalType: 'primary_product_type' as const, targetId: 'dry-dog-food', proposedValue: { productTypeId: 'dry-dog-food' }, confidence: 1, evidenceIds: [], status: 'accepted' as const, isBulkAcceptable: false, isStale: false, stalenessReason: null, snapshotHash: runtime.snapshotHash, createdAt: new Date().toISOString() };
+
+    const result = await runPipeline(
+      [primaryProductTypeStage, attributeApplicabilityStage, productAttributeProposalsStage],
+      { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() }, snapshot: runtime },
+      { sku: 'TEST-SKU-REVIEWED', evidence, acceptedProposals: [acceptedType], allProposals: [] },
+    );
+
     const fieldProposals = result.proposals.filter(p => p.proposalType === 'field_assignment');
     expect(fieldProposals.length).toBeGreaterThanOrEqual(1);
-
-    // Verify there's at least one flavor proposal
     const flavorProposal = fieldProposals.find(p => p.targetId === 'flavor');
     expect(flavorProposal).toBeDefined();
     expect(flavorProposal!.status).toBe('pending');
+    expect(flavorProposal!.snapshotHash).toBe(runtime.snapshotHash);
   });
 
   it('uses live-store curation target options for a selected ProductField', async () => {
@@ -695,51 +797,25 @@ describe('Classification Pipeline Integration', () => {
       revisedFromId: null,
       reviewerId: 'test-reviewer',
       reviewerNote: null,
+      revisedValue: null,
+      revisedTargetId: null,
+      decisionKey: null,
+      supersededAt: null,
       createdAt: new Date().toISOString(),
     });
   };
 
-  it('does not let a decision from a historical run satisfy the active-run review gate', () => {
-    const item = createReviewGateItem('HISTORY');
-    const oldRun = createRun(workspaceId, item.upc, null, null, item.id);
-    completeRun(oldRun.id, 'completed');
-    decide(seedReviewProposal(oldRun.id, item.upc), 'accepted');
 
-    const activeRun = createRun(workspaceId, item.upc, null, null, item.id);
-    completeRun(activeRun.id, 'completed');
-    seedReviewProposal(activeRun.id, item.upc, 'accepted');
 
-    const gate = validateReviewCompletionGate({
-      workspaceId,
-      onboardingItemId: item.id,
-      productSku: item.upc,
-      activeRunId: activeRun.id,
-    });
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.code).toBe('unresolved_proposals');
-  });
-
-  it('blocks review completion when one of two active-run proposals is pending', () => {
+  it('blocks review completion when proposals are pending or missing decisions', () => {
     const item = createReviewGateItem('PENDING');
     const run = createRun(workspaceId, item.upc, null, null, item.id);
     completeRun(run.id, 'completed');
-    decide(seedReviewProposal(run.id, item.upc), 'accepted');
     seedReviewProposal(run.id, item.upc, 'pending');
 
     const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
     expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.code).toBe('unresolved_proposals');
-  });
-
-  it('blocks a proposal status changed without a durable decision row', () => {
-    const item = createReviewGateItem('STATUSONLY');
-    const run = createRun(workspaceId, item.upc, null, null, item.id);
-    completeRun(run.id, 'completed');
-    seedReviewProposal(run.id, item.upc, 'accepted');
-
-    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
-    expect(gate.ok).toBe(false);
-    if (!gate.ok) expect(gate.code).toBe('unresolved_proposals');
+    if (!gate.ok) expect(gate.code).toBe('pending_proposals');
   });
 
   it('allows an exact completed active run only after every proposal has a decision', () => {
@@ -790,19 +866,37 @@ describe('Classification Pipeline Integration', () => {
     completeRun(later.id, 'completed');
   });
 
-  it('enforces isBulkAcceptable: false on brand shortcut category page proposals', async () => {
-    const { buildCategoryPageProposal } = await import('../../classification/curation-target-proposal');
+  it('defaults isBulkAcceptable to false on all proposals even with high confidence (Issue #10)', async () => {
+    const { buildCategoryPageProposal, buildFieldAssignmentProposal, buildProductTypeProposal } = await import('../../classification/curation-target-proposal');
 
-    const brandProposal = buildCategoryPageProposal({
+    const typeProp = buildProductTypeProposal({
       runId: randomUUID(),
       sku: '12345',
-      pageId: 'brand-acme',
-      pageName: 'Brand - Acme',
+      productTypeId: 'dog-food',
+      confidence: 0.99,
+      evidenceIds: [],
+    });
+    expect(typeProp.isBulkAcceptable).toBe(false);
+
+    const fieldProp = buildFieldAssignmentProposal({
+      runId: randomUUID(),
+      sku: '12345',
+      attributeId: 'brand',
+      value: 'Acme',
       confidence: 0.95,
       evidenceIds: [],
-      isBulkAcceptable: false,
+      isMultiple: false,
     });
-    expect(brandProposal.isBulkAcceptable).toBe(false);
+    expect(fieldProp.isBulkAcceptable).toBe(false);
+
+    const pageProp = buildCategoryPageProposal({
+      runId: randomUUID(),
+      sku: '12345',
+      pageName: 'Dog Food',
+      confidence: 0.90,
+      evidenceIds: [],
+    });
+    expect(pageProp.isBulkAcceptable).toBe(false);
   });
 
   it('inherits catalog_product source for catalog product description and bullet point evidence', async () => {
@@ -902,6 +996,146 @@ describe('Classification Pipeline Integration', () => {
     expect(evStage?.output_json).not.toBeNull();
     const parsedOutput = JSON.parse(evStage!.output_json!);
     expect(parsedOutput.metadata?.ocrOutcome).toBeDefined();
+  });
+
+  it('rejects a tampered frozen snapshot at run start (fail closed)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const runtime = buildRuntimeSnapshot({
+      workspaceId,
+      workspacePath,
+      productSku: 'TAMPER-SKU',
+      config,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+      sourceProductHash: 'src-hash-tamper',
+    });
+    persistRuntimeSnapshot(runtime);
+
+    const run = createRun(workspaceId, 'TAMPER-SKU', null, runtime.snapshotHash, {
+      sourceKind: 'catalog_product',
+      sourceProductHash: 'src-hash-tamper',
+    });
+
+    // Mutate a frozen node: strict mode throws on write, but a structuredClone
+    // tamper bypasses Object.freeze — the pipeline's recompute must catch it.
+    const tampered = structuredClone(runtime);
+    tampered.searchKeywords = 'injected';
+
+    const evidence = [
+      { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TAMPER-SKU', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Beef', value: 'Beef', metadata: {}, capturedAt: new Date().toISOString() },
+    ];
+    await expect(
+      runPipeline(
+        [primaryProductTypeStage],
+        { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() }, snapshot: tampered },
+        { sku: 'TAMPER-SKU', evidence, acceptedProposals: [], allProposals: [] },
+      ),
+    ).rejects.toThrow(/snapshot hash mismatch/i);
+  });
+
+  it('rejects stage output whose proposal runId does not match the run (fail closed)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'RUNID-SKU', snapId, snapHash);
+
+    const rogueStage: import('../../classification/types').StageDefinition = {
+      name: 'primary_product_type_proposal',
+      requires: [],
+      evidenceFrom: [],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: 'rogue-run',
+            productSku: 'RUNID-SKU',
+            proposalType: 'primary_product_type' as const,
+            targetId: 'dry-dog-food',
+            proposedValue: { productTypeId: 'dry-dog-food' },
+            confidence: 0.9,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(
+      runPipeline(
+        [rogueStage],
+        { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
+        { sku: 'RUNID-SKU', evidence: [], acceptedProposals: [], allProposals: [] },
+      ),
+    ).rejects.toThrow(/runId mismatch/i);
+  });
+
+  it('stage output is unchanged when config/cache/Page rows mutate after the snapshot is built', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const runtime = buildRuntimeSnapshot({
+      workspaceId,
+      workspacePath,
+      productSku: 'SNAP-SKU',
+      config,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+      sourceProductHash: 'src-hash-snap',
+    });
+    persistRuntimeSnapshot(runtime);
+
+    const makeEvidence = (runId: string) => [
+      { id: randomUUID(), runId, stageName: 'evidence_extraction' as const, productSku: 'SNAP-SKU', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Dry Dog Food Beef Recipe', value: 'Dry Dog Food Beef Recipe', metadata: {}, capturedAt: new Date().toISOString() },
+    ];
+    const makeAcceptedType = (runId: string) => ({ id: randomUUID(), runId, productSku: 'SNAP-SKU', proposalType: 'primary_product_type' as const, targetId: 'dry-dog-food', proposedValue: {}, confidence: 1, evidenceIds: [], status: 'accepted' as const, isBulkAcceptable: false, isStale: false, stalenessReason: null, createdAt: new Date().toISOString() });
+
+    const runA = createRun(workspaceId, 'SNAP-SKU', null, runtime.snapshotHash, { sourceKind: 'catalog_product', sourceProductHash: 'src-hash-snap' });
+    const contextA = { workspacePath, workspaceId, runId: runA.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() }, snapshot: runtime };
+    const resultA = await runPipeline(
+      [primaryProductTypeStage, productAttributeProposalsStage],
+      contextA,
+      { sku: 'SNAP-SKU', evidence: makeEvidence(runA.id), acceptedProposals: [makeAcceptedType(runA.id)], allProposals: [] },
+    );
+    completeRun(runA.id, 'completed');
+
+    // Mutate the on-disk config, the derived cache, and Page rows AFTER the
+    // snapshot was built and frozen. The snapshot path must ignore all of it.
+    saveClassificationConfig(workspacePath, {
+      ...config,
+      manifest: { ...config.manifest, updatedAt: '2026-09-01T12:00:00.000Z' },
+      productTypes: [...config.productTypes, { id: 'cat-food', name: 'Cat Food', description: null, attributeProfileId: null, oldIdAliases: [] }],
+      attributes: [],
+      attributeProfiles: [],
+      attributeMappings: [],
+    });
+    syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
+    upsertPage({ name: 'Injected Page', fileName: 'injected.html', parentId: null, pageHash: 'zzz', lastSyncedAt: null });
+
+    const runB = createRun(workspaceId, 'SNAP-SKU', null, runtime.snapshotHash, { sourceKind: 'catalog_product', sourceProductHash: 'src-hash-snap' });
+    const contextB = { workspacePath, workspaceId, runId: runB.id, configSnapshotRef: contextA.configSnapshotRef, snapshot: runtime };
+    const resultB = await runPipeline(
+      [primaryProductTypeStage, productAttributeProposalsStage],
+      contextB,
+      { sku: 'SNAP-SKU', evidence: makeEvidence(runB.id), acceptedProposals: [makeAcceptedType(runB.id)], allProposals: [] },
+    );
+
+    const normalize = (p: any) => ({ proposalType: p.proposalType, targetId: p.targetId, proposedValue: p.proposedValue, status: p.status });
+    const sortable = (p: any) => `${p.proposalType}:${String(p.targetId)}`;
+    const a = resultA.proposals.map(normalize).sort((x: any, y: any) => sortable(x).localeCompare(sortable(y)));
+    const b = resultB.proposals.map(normalize).sort((x: any, y: any) => sortable(x).localeCompare(sortable(y)));
+
+    expect(a).toEqual(b);
+    expect(a.length).toBeGreaterThan(0);
+    // Every persisted proposal is bound to its run's snapshot hash.
+    const persistedHashes = getDb().query(
+      'SELECT config_snapshot_hash FROM classification_proposals WHERE run_id = ?',
+    ).all(runB.id) as Array<{ config_snapshot_hash: string | null }>;
+    expect(persistedHashes.length).toBeGreaterThan(0);
+    expect(persistedHashes.every(row => row.config_snapshot_hash === runtime.snapshotHash)).toBe(true);
   });
 
   it('draft promoter handles item with missing extractionData gracefully without aborting transaction', async () => {

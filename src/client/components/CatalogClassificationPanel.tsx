@@ -50,6 +50,10 @@ interface Props {
   onDraftCreated: () => void;
 }
 
+function createActionToken(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
   const [detail, setDetail] = useState<CatalogClassificationDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -60,6 +64,8 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
   // Use string map where '' means unset. We filter at submit time.
   const [decisionMap, setDecisionMap] = useState<Record<string, string>>({});
   const [changeSetId, setChangeSetId] = useState<string | null>(null);
+  // Outstanding action tokens keyed by proposalId; reused until a definitive success.
+  const actionTokensRef = React.useRef<Record<string, string>>({});
 
   const loadClassification = useCallback(async () => {
     setLoading(true);
@@ -81,6 +87,8 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
         }
         setDecisionMap(map);
       }
+      // Canonical live decisions replace any unresolved transport tokens.
+      actionTokensRef.current = {};
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -108,10 +116,20 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
   };
 
   const handleDecision = (proposalId: string, decision: string) => {
-    setDecisionMap(prev => ({
-      ...prev,
-      [proposalId]: prev[proposalId] === decision ? '' : decision,
-    }));
+    setDecisionMap(prev => {
+      const nextValue = prev[proposalId] === decision ? '' : decision;
+      // A genuine UI toggle is a new logical action; mint a fresh token.
+      // Clearing the selection drops any outstanding token for that proposal.
+      if (nextValue) {
+        actionTokensRef.current[proposalId] = createActionToken();
+      } else {
+        delete actionTokensRef.current[proposalId];
+      }
+      return {
+        ...prev,
+        [proposalId]: nextValue,
+      };
+    });
   };
 
   const handleSubmitDecisions = async () => {
@@ -119,9 +137,19 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
     setError('');
     setMessage('');
 
+    const currentByProposal = new Map((detail.decisions ?? []).map(decision => [decision.proposalId, decision]));
     const decisions = Object.entries(decisionMap)
       .filter(([_, decision]) => decision === 'accepted' || decision === 'rejected' || decision === 'deferred')
-      .map(([proposalId, decision]) => ({ proposalId, decision: decision as 'accepted' | 'rejected' | 'deferred' }));
+      .map(([proposalId, decision]) => {
+        const actionToken = actionTokensRef.current[proposalId] ?? createActionToken();
+        actionTokensRef.current[proposalId] = actionToken;
+        return {
+          proposalId,
+          decision: decision as 'accepted' | 'rejected' | 'deferred',
+          actionToken,
+          expectedRevisionId: currentByProposal.get(proposalId)?.id ?? null,
+        };
+      });
 
     if (decisions.length === 0) {
       setError('No decisions to submit.');
@@ -130,9 +158,14 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
 
     try {
       await submitCatalogDecisions(sku, detail.run.id, decisions);
+      // Clear only after a definitive success; loadClassification also resets.
+      for (const d of decisions) {
+        delete actionTokensRef.current[d.proposalId];
+      }
       setMessage(`Submitted ${decisions.length} decision(s).`);
       await loadClassification();
     } catch (err: any) {
+      // Keep outstanding tokens so a retry of the same action is idempotent.
       setError(err.message);
     }
   };
@@ -163,9 +196,7 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
   const pendingProposals = (detail?.proposals || []).filter(p =>
     p.proposalType !== 'reviewable_abstention'
   );
-  const hasPendingDecisions = pendingProposals.some(p => p.status === 'pending');
-  const allDecided = pendingProposals.length > 0 && pendingProposals.every(p => p.status !== 'pending');
-  const canApply = canDecide && allDecided;
+  const canApply = Boolean(canDecide && pendingProposals.length > 0);
 
   return (
     <div style={sectionStyle}>
@@ -239,44 +270,19 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
                   </span>
                 </div>
                 <div style={{ color: '#334155', marginBottom: 4 }}>
-                  <strong>Target:</strong> {p.targetId || '-'}
+                  <strong>Target:</strong> {(p.hasRevisedTargetId ? p.revisedTargetId : p.targetId) || '-'}
                 </div>
                 <div style={{ color: '#475569', fontSize: 12, marginBottom: 8, fontFamily: 'monospace', wordBreak: 'break-word' }}>
-                  <strong>Value:</strong> {typeof p.proposedValue === 'object' ? JSON.stringify(p.proposedValue) : String(p.proposedValue ?? '-')}
-                </div>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  {(['accepted', 'rejected', 'deferred'] as const).map(decision => (
-                    <button
-                      key={decision}
-                      onClick={() => handleDecision(p.id, decision)}
-                      style={{
-                        ...buttonBase,
-                        padding: '4px 10px',
-                        fontSize: 11,
-                        background: decisionMap[p.id] === decision
-                          ? (decision === 'accepted' ? '#16a34a' : decision === 'rejected' ? '#dc2626' : '#d97706')
-                          : '#f1f5f9',
-                        color: decisionMap[p.id] === decision ? '#ffffff' : '#475569',
-                        border: decisionMap[p.id] === decision ? 'none' : '1px solid #cbd5e1',
-                      }}
-                    >
-                      {decision.charAt(0).toUpperCase() + decision.slice(1)}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
-                  Status: {p.status}
+                  <strong>Value:</strong> {(() => {
+                    const value = p.hasRevisedValue ? p.revisedValue : p.proposedValue;
+                    return typeof value === 'object' ? JSON.stringify(value) : String(value ?? '-');
+                  })()}
                 </div>
               </div>
             ))}
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            {hasPendingDecisions && (
-              <button style={primaryButton} onClick={handleSubmitDecisions}>
-                Submit Decisions
-              </button>
-            )}
             {canApply && (
               <button
                 style={{ ...primaryButton, background: '#059669' }}

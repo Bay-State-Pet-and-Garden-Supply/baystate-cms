@@ -2,7 +2,7 @@
 
 This document explains the rules, data model, and operational
 workflow for AI-generated extractor profile proposals in
-`shopsite-cms`.
+`baystate-cms`.
 
 It is intended for engineers maintaining the onboarding
 extractor, operators reviewing proposals, and reviewers auditing

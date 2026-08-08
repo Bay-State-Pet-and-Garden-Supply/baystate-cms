@@ -5,10 +5,11 @@
  * evidence input structure used by the shared evidence extractor.
  * Also computes a deterministic product hash for drift detection.
  */
-import crypto from 'node:crypto';
+import { hashCanonicalJson } from '../shared/stable-id';
 import type { Product } from '../shared/types';
 import type { NormalizedEvidenceInput } from './product-evidence-extractor';
 import type { PageRow } from '../db/repositories/page-repo';
+import { parseProductOnPages } from '../shopsite/product-page-assignments';
 
 export interface CatalogProductSource {
   productHash: string;
@@ -28,17 +29,22 @@ export interface CatalogProductSource {
  * - primaryImage: product.core.media.primary
  * - additionalImages: product.core.media.additional
  * - searchKeywords: product.core.seo?.searchKeywords
+ *
+ * Page context comes ONLY from the product's own preserved ProductOnPages
+ * observations — never from the store-wide page index. Name-only rows are
+ * review context, not verified identities.
  */
 export function buildCatalogProductEvidenceInput(
   product: Product,
   workspacePath: string,
-  pages?: PageRow[],
+  _pages?: PageRow[],
 ): CatalogProductSource {
   // Compute a deterministic hash of classification-relevant fields
   const productHash = computeProductHash(product);
 
-  // Resolve existing page names
-  const existingPages = (pages || []).map(p => ({ pageId: p.id, pageName: p.name }));
+  // Resolve the product's OWN page observations (name-only review context).
+  const ownPageNames = parseProductOnPages(product.shopsite?.preserved);
+  const existingPages = ownPageNames.map(pageName => ({ pageId: pageName, pageName }));
   const existingPageNames = existingPages.map(p => p.pageName);
 
   // Brand: check common custom field locations
@@ -73,17 +79,20 @@ export function buildCatalogProductEvidenceInput(
 }
 
 /**
- * Compute a deterministic hash of the product fields relevant to classification.
- * This is used for drift detection at apply time.
+ * Compute a deterministic canonical hash of every product field relevant to
+ * classification, INCLUDING search keywords and the product's own Page names.
+ * This is used for drift detection at apply time; the same function runs on
+ * both sides of the comparison.
  */
 export function computeProductHash(product: Product): string {
-  const relevant = {
+  return hashCanonicalJson({
     name: product.core.name,
     description: product.core.description,
     weight: product.core.weight,
     customFields: product.customFields,
     primaryImage: product.core.media?.primary,
     additionalImages: product.core.media?.additional,
-  };
-  return crypto.createHash('sha256').update(JSON.stringify(relevant)).digest('hex');
+    searchKeywords: product.core.seo?.searchKeywords,
+    productPageNames: parseProductOnPages(product.shopsite?.preserved),
+  });
 }

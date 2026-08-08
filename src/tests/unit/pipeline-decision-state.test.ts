@@ -1,0 +1,356 @@
+import { describe, expect, it } from 'vitest';
+import type { ClassificationProposal } from '../../shared/schemas/classification';
+import { getEffectivePrimaryProductTypeId } from '../../classification/assignment-projection';
+import {
+  SequentialActionQueue,
+  canApplyProposalEdit,
+  editableCurationData,
+  getEffectiveProductTypeId,
+  getEffectiveProposalTargetId,
+  getEffectiveProposalValue,
+  isCurrentReviewGeneration,
+  isCurrentReviewVersion,
+  prepareDecisionAction,
+  proposalDecisionSnapshot,
+  withReviewedProductTypeId,
+  withReviewedProposalTarget,
+  withReviewedProposalValue,
+} from '../../client/pipeline-decision-state';
+
+function proposal(overrides: Partial<ClassificationProposal> = {}): ClassificationProposal {
+  return {
+    id: 'proposal-1',
+    runId: 'run-1',
+    productSku: 'sku-1',
+    proposalType: 'field_assignment',
+    targetId: 'flavor',
+    proposedValue: 'Chicken',
+    confidence: 0.9,
+    evidenceIds: [],
+    status: 'pending',
+    isBulkAcceptable: false,
+    isStale: false,
+    stalenessReason: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function idFactory(...ids: string[]): () => string {
+  let index = 0;
+  return () => ids[index++] ?? `generated-${index}`;
+}
+
+describe('pipeline decision effective state', () => {
+  it('hydrates revised values and explicit-null targets without mutating predictions', () => {
+    const hydrated = proposal({
+      targetId: 'page-original',
+      proposedValue: 'Original',
+      revisedValue: 'Reviewed',
+      hasRevisedValue: true,
+      revisedTargetId: null,
+      hasRevisedTargetId: true,
+      status: 'accepted',
+    });
+
+    expect(getEffectiveProposalValue(hydrated)).toBe('Reviewed');
+    expect(getEffectiveProposalTargetId(hydrated)).toBeNull();
+    expect(hydrated.proposedValue).toBe('Original');
+    expect(hydrated.targetId).toBe('page-original');
+  });
+
+  it('moves product type value and target together and removes metadata-insensitive corrections', () => {
+    const original = proposal({
+      proposalType: 'primary_product_type',
+      targetId: 'dog-food-dry',
+      proposedValue: { productTypeId: 'dog-food-dry', matchedWords: ['dog', 'kibble'] },
+    });
+
+    const corrected = withReviewedProductTypeId(original, 'cat-food-wet');
+    expect(corrected).toMatchObject({
+      proposedValue: original.proposedValue,
+      targetId: 'dog-food-dry',
+      revisedValue: { productTypeId: 'cat-food-wet' },
+      revisedTargetId: 'cat-food-wet',
+      hasRevisedValue: true,
+      hasRevisedTargetId: true,
+    });
+    expect(getEffectiveProductTypeId(corrected)).toBe('cat-food-wet');
+
+    const restored = withReviewedProductTypeId(corrected, 'dog-food-dry');
+    expect(restored.hasRevisedValue).toBe(false);
+    expect(restored.hasRevisedTargetId).toBe(false);
+    expect(restored).not.toHaveProperty('revisedValue');
+    expect(restored).not.toHaveProperty('revisedTargetId');
+
+    const cleared = withReviewedProductTypeId(original, null);
+    expect(cleared).toMatchObject({
+      revisedValue: null,
+      revisedTargetId: null,
+      hasRevisedValue: true,
+      hasRevisedTargetId: true,
+    });
+    expect(getEffectiveProductTypeId(cleared)).toBe('');
+  });
+
+  it('uses one Product Type precedence rule for historical one-sided and conflicting corrections', () => {
+    const original = proposal({
+      proposalType: 'primary_product_type',
+      targetId: 'dog-food-dry',
+      proposedValue: { productTypeId: 'dog-food-dry', matchedWords: ['dog', 'kibble'] },
+    });
+    const scenarios: Array<{
+      proposal: ClassificationProposal;
+      expected: string | null;
+    }> = [
+      {
+        proposal: { ...original, revisedValue: { productTypeId: 'cat-food-wet' }, hasRevisedValue: true },
+        expected: 'cat-food-wet',
+      },
+      {
+        proposal: { ...original, revisedTargetId: 'bird-food', hasRevisedTargetId: true },
+        expected: 'bird-food',
+      },
+      {
+        proposal: { ...original, revisedTargetId: null, hasRevisedTargetId: true },
+        expected: null,
+      },
+      {
+        proposal: {
+          ...original,
+          revisedValue: { productTypeId: 'cat-food-wet' },
+          hasRevisedValue: true,
+          revisedTargetId: 'cat-food-wet',
+          hasRevisedTargetId: true,
+        },
+        expected: 'cat-food-wet',
+      },
+      {
+        proposal: {
+          ...original,
+          revisedValue: { productTypeId: 'cat-food-wet' },
+          hasRevisedValue: true,
+          revisedTargetId: 'bird-food',
+          hasRevisedTargetId: true,
+        },
+        expected: 'bird-food',
+      },
+      {
+        proposal: { ...original, targetId: null },
+        expected: 'dog-food-dry',
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      expect(getEffectivePrimaryProductTypeId(scenario.proposal)).toBe(scenario.expected);
+      expect(getEffectiveProductTypeId(scenario.proposal)).toBe(scenario.expected ?? '');
+    }
+  });
+
+  it('stores reviewer corrections separately and removes them when prediction is reselected', () => {
+    const original = proposal();
+    const reviewed = withReviewedProposalValue(original, 'Beef');
+    expect(reviewed).toMatchObject({ proposedValue: 'Chicken', revisedValue: 'Beef', hasRevisedValue: true });
+    expect(original).not.toHaveProperty('revisedValue');
+
+    const restored = withReviewedProposalValue(reviewed, 'Chicken');
+    expect(restored.proposedValue).toBe('Chicken');
+    expect(restored.hasRevisedValue).toBe(false);
+    expect(restored).not.toHaveProperty('revisedValue');
+
+    const clearedTarget = withReviewedProposalTarget(original, null);
+    expect(clearedTarget.targetId).toBe('flavor');
+    expect(clearedTarget.hasRevisedTargetId).toBe(true);
+    expect(clearedTarget.revisedTargetId).toBeNull();
+  });
+
+  it('builds one correction-free action for an accept and returns null for a semantic no-op', () => {
+    const initial = proposal();
+    const accepted = { ...initial, status: 'accepted' as const };
+    const action = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: proposalDecisionSnapshot(initial),
+      expectedRevisionId: null,
+      createId: () => 'decision-1',
+      createActionToken: () => 'token-1',
+    });
+
+    expect(action?.input).toEqual({
+      id: 'decision-1',
+      proposalId: 'proposal-1',
+      decision: 'accepted',
+      expectedRevisionId: null,
+      actionToken: 'token-1',
+    });
+    expect(action?.input).not.toHaveProperty('revisedValue');
+    expect(action?.input).not.toHaveProperty('revisedTargetId');
+    expect(Object.isFrozen(action)).toBe(true);
+    expect(Object.isFrozen(action?.input)).toBe(true);
+
+    expect(prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: action!.snapshot,
+      expectedRevisionId: 'decision-1',
+      createId: () => 'decision-unused',
+      createActionToken: () => 'token-unused',
+    })).toBeNull();
+  });
+
+  it('retains an existing correction when only decision status changes', () => {
+    const correctedPending = proposal({
+      revisedValue: ['Chicken', 'Turkey'],
+      hasRevisedValue: true,
+    });
+    const accepted = { ...correctedPending, status: 'accepted' as const };
+    const action = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: proposalDecisionSnapshot(correctedPending),
+      expectedRevisionId: null,
+      createId: () => 'decision-1',
+      createActionToken: () => 'token-1',
+    });
+
+    expect(action?.input.revisedValue).toEqual(['Chicken', 'Turkey']);
+    expect(action?.input).not.toHaveProperty('revisedTargetId');
+  });
+
+  it('captures an immutable rapid-edit predecessor chain and reuses an exact action', () => {
+    const initial = proposal();
+    const ids = idFactory('decision-1', 'token-1', 'decision-2', 'token-2');
+    const accepted = { ...initial, status: 'accepted' as const };
+    const first = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: proposalDecisionSnapshot(initial),
+      expectedRevisionId: null,
+      createId: ids,
+      createActionToken: ids,
+    })!;
+    const corrected = withReviewedProposalValue(accepted, 'Beef');
+    const second = prepareDecisionAction({
+      proposal: corrected,
+      priorSnapshot: first.snapshot,
+      expectedRevisionId: first.input.id,
+      createId: ids,
+      createActionToken: ids,
+    })!;
+
+    expect(first.input).toMatchObject({ id: 'decision-1', actionToken: 'token-1', expectedRevisionId: null });
+    expect(second.input).toMatchObject({ id: 'decision-2', actionToken: 'token-2', expectedRevisionId: 'decision-1', revisedValue: 'Beef' });
+
+    const exactRetry = prepareDecisionAction({
+      proposal: corrected,
+      priorSnapshot: first.snapshot,
+      expectedRevisionId: first.input.id,
+      existingAction: second,
+      createId: () => 'different-id',
+      createActionToken: () => 'different-token',
+    });
+    expect(exactRetry).toBe(second);
+  });
+
+  it('strips run-owned classification arrays from ordinary item autosaves', () => {
+    const editable = editableCurationData({
+      curatedTitle: 'Reviewed title',
+      classificationRunId: 'run-1',
+      classificationProposals: [proposal()],
+      classificationEvidence: [],
+      classificationDecisions: [],
+      classificationHistory: [],
+    });
+
+    expect(editable.curatedTitle).toBe('Reviewed title');
+    expect(editable).not.toHaveProperty('classificationRunId');
+    expect(editable).not.toHaveProperty('classificationProposals');
+    expect(editable).not.toHaveProperty('classificationEvidence');
+    expect(editable).not.toHaveProperty('classificationDecisions');
+  });
+});
+
+describe('SequentialActionQueue', () => {
+  it('executes captured actions in order', async () => {
+    const queue = new SequentialActionQueue<{ token: string }, string>();
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+    const first = queue.enqueue(Object.freeze({ token: 'a' }), async action => {
+      events.push(`start-${action.token}`);
+      await firstGate;
+      events.push(`end-${action.token}`);
+      return action.token;
+    });
+    const second = queue.enqueue(Object.freeze({ token: 'b' }), async action => {
+      events.push(`start-${action.token}`);
+      events.push(`end-${action.token}`);
+      return action.token;
+    });
+
+    await Promise.resolve();
+    expect(events).toEqual(['start-a']);
+    releaseFirst();
+    await expect(Promise.all([first, second])).resolves.toEqual(['a', 'b']);
+    await expect(queue.drain()).resolves.toBeUndefined();
+    expect(events).toEqual(['start-a', 'end-a', 'start-b', 'end-b']);
+  });
+
+  it('preserves failure, rejects drain, and retries the exact captured action before later work', async () => {
+    const queue = new SequentialActionQueue<{ token: string }, string>();
+    const attempts: string[] = [];
+    let fail = true;
+    const action = Object.freeze({ token: 'same-token' });
+
+    const first = queue.enqueue(action, async captured => {
+      attempts.push(captured.token);
+      if (fail) throw new Error('network lost');
+      return captured.token;
+    });
+    const later = queue.enqueue(Object.freeze({ token: 'later-token' }), async captured => {
+      attempts.push(captured.token);
+      return captured.token;
+    });
+
+    await expect(first).rejects.toThrow('network lost');
+    await expect(queue.drain()).rejects.toThrow('network lost');
+    expect(queue.getFailedAction()).toBe(action);
+    expect(attempts).toEqual(['same-token']);
+
+    fail = false;
+    await expect(queue.retryFailed()).resolves.toBe('same-token');
+    await expect(later).resolves.toBe('later-token');
+    await expect(queue.drain()).resolves.toBeUndefined();
+    expect(attempts).toEqual(['same-token', 'same-token', 'later-token']);
+  });
+
+  it('discards queued local edits after a canonical conflict refresh', async () => {
+    const queue = new SequentialActionQueue<string, string>();
+    const first = queue.enqueue('conflict', async () => { throw new Error('409 conflict'); });
+    const queued = queue.enqueue('stale-follow-up', async action => action);
+
+    await expect(first).rejects.toThrow('409 conflict');
+    expect(queue.hasFailure()).toBe(true);
+    queue.resetAfterCanonicalRefresh();
+    await expect(queued).rejects.toThrow('discarded after canonical refresh');
+    await expect(queue.drain()).resolves.toBeUndefined();
+    expect(queue.hasFailure()).toBe(false);
+    expect(queue.hasPending()).toBe(false);
+  });
+});
+
+describe('review item generation guard', () => {
+  it('rejects late responses for another item or generation', () => {
+    expect(isCurrentReviewGeneration('item-a', 3, 'item-a', 3)).toBe(true);
+    expect(isCurrentReviewGeneration('item-b', 3, 'item-a', 3)).toBe(false);
+    expect(isCurrentReviewGeneration('item-a', 4, 'item-a', 3)).toBe(false);
+  });
+
+  it('rejects a same-generation response when a local write began in flight', () => {
+    expect(isCurrentReviewVersion('item-a', 3, 7, 'item-a', 3, 7)).toBe(true);
+    expect(isCurrentReviewVersion('item-a', 3, 8, 'item-a', 3, 7)).toBe(false);
+  });
+
+  it('blocks proposal edits while a failed action or approval transition exists', () => {
+    expect(canApplyProposalEdit(false, false)).toBe(true);
+    expect(canApplyProposalEdit(true, false)).toBe(false);
+    expect(canApplyProposalEdit(false, true)).toBe(false);
+  });
+});

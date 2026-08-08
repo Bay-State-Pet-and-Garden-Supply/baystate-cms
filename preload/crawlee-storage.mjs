@@ -13,7 +13,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { cwd } from 'node:process';
 
-const storageDir = join(cwd(), '.shopsite-cms', 'artifacts', 'crawlee-storage');
+const storageDir = join(cwd(), '.baystate-cms', 'artifacts', 'crawlee-storage');
 
 process.env.CRAWLEE_STORAGE_DIR = storageDir;
 process.env.CRAWLEE_PURGE_ON_START = '1';

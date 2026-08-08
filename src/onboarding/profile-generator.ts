@@ -10,7 +10,7 @@
  *   promotion into `extractor_profiles`.
  *
  * Safety:
- * - The whole feature is opt-in via the `SHOPSITE_CMS_PROFILE_GENERATION_ENABLED`
+ * - The whole feature is opt-in via the `BAYSTATE_CMS_PROFILE_GENERATION_ENABLED`
  *   environment variable. When disabled, no LLM calls are made and
  *   `generateExtractorProfile` returns `null`.
  * - Validation rejects selectors that produce empty titles, price text
@@ -145,12 +145,12 @@ const TRUTHY_VALUES = new Set(['true', '1', 'yes']);
  * when extraction data is available. The on-demand route in
  * `onboarding-routes.ts` also calls this to gate access.
  *
- * The env var `SHOPSITE_CMS_PROFILE_GENERATION_ENABLED` can be set
+ * The env var `BAYSTATE_CMS_PROFILE_GENERATION_ENABLED` can be set
  * to `false`, `0`, or `no` to disable; anything truthy or omitted
  * enables it.
  */
 export function isProfileGenerationEnabled(): boolean {
-  const raw = process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+  const raw = process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
   if (!raw) return true;
   return TRUTHY_VALUES.has(raw.trim().toLowerCase());
 }
@@ -1225,7 +1225,7 @@ export interface ProfileGenerationTriggerInput {
  * false-positives (silently breaking good extractions) are not.
  *
  * Returns `true` only when:
- *  1. The feature flag is enabled (`SHOPSITE_CMS_PROFILE_GENERATION_ENABLED`).
+ *  1. The feature flag is enabled (`BAYSTATE_CMS_PROFILE_GENERATION_ENABLED`).
  *  2. The extraction validation status is `ok` (not blocked/offline/mismatch).
  *  3. The extraction returned a non-empty title.
  *  4. The custom-selector layer was empty or stale (no current selectors

@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { getCurrentWorkspace } from '../services/workspace-service';
-import { loadClassificationConfig, saveClassificationConfig } from '../../classification/config-loader';
+import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
 import { processRefreshQueue } from '../../classification/refresh-queue-processor';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
@@ -9,7 +9,33 @@ import {
   listCurationTargetCandidates,
 } from '../../classification/curation-targets';
 
+import { evaluateClassificationReadiness } from '../../classification/config-validation';
+
 const router = new Hono();
+
+/**
+ * GET /api/classification/readiness
+ * Returns classification configuration readiness report for the active workspace.
+ */
+router.get('/classification/readiness', (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  try {
+    const config = loadRuntimeConfig(ws.workspacePath);
+    const activationContext = createRuntimeActivationContext(ws.workspacePath);
+    const readiness = evaluateClassificationReadiness(config, {
+      mode: config.manifest?.schemaVersion === 2 ? 'active' : 'preview',
+      catalogFields: activationContext.catalogFields,
+      verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
+    });
+    return c.json({ readiness });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
 
 /**
  * GET /api/classification/config
@@ -22,7 +48,7 @@ router.get('/classification/config', (c) => {
   }
 
   try {
-    const config = loadClassificationConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath);
     return c.json({ config });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
@@ -67,7 +93,7 @@ router.get('/classification/curation-targets', (c) => {
   }
 
   try {
-    const config = loadClassificationConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath);
     const candidates = listCurationTargetCandidates(ws.id, config);
     return c.json({ targets: config.curationTargets ?? [], candidates });
   } catch (err) {

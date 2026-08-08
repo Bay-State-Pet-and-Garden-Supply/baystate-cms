@@ -14,7 +14,7 @@ import {
 } from '../../db/repositories/page-repo';
 
 describe('SQLite Migration', () => {
-  const testDbPath = '/tmp/shopsite-cms-test.db';
+  const testDbPath = '/tmp/baystate-cms-test.db';
 
   beforeAll(() => {
     try { resetDb(); } catch { /* ok */ }
@@ -50,6 +50,70 @@ describe('SQLite Migration', () => {
       "SELECT COUNT(*) as cnt FROM app_meta WHERE key = 'classification_schema_version'"
     ).get() as { cnt: number };
     expect(rows.cnt).toBe(1);
+  });
+
+  it('should add decision revision columns and the global action-token unique index', () => {
+    const db = getDb();
+
+    const cols = db.query('PRAGMA table_info(classification_proposal_decisions)').all() as Array<{ name: string }>;
+    const names = cols.map(c => c.name);
+    for (const col of ['revised_value_json', 'revised_target_id', 'has_revised_target', 'decision_key', 'superseded_at']) {
+      expect(names).toContain(col);
+    }
+
+    const idx = db.query(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_classification_decisions_key'"
+    ).get();
+    expect(idx).toBeTruthy();
+
+    // Action tokens stay unique across superseded history, so a delayed retry
+    // can never reactivate an older action.
+    const idxSql = db.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_classification_decisions_key'"
+    ).get() as { sql: string } | undefined;
+    expect(idxSql?.sql ?? '').toContain('decision_key IS NOT NULL');
+    expect(idxSql?.sql ?? '').not.toContain('superseded_at');
+
+    // Version guard is recorded exactly once.
+    const rows = db.query(
+      "SELECT COUNT(*) as cnt FROM app_meta WHERE key = 'decision_revision_schema_version'"
+    ).get() as { cnt: number };
+    expect(rows.cnt).toBe(1);
+    const version = db.query(
+      "SELECT value FROM app_meta WHERE key = 'decision_revision_schema_version'",
+    ).get() as { value: string };
+    expect(version.value).toBe('2');
+
+    // Legacy-shaped rows (NULL new columns) round-trip after migration.
+    const now = new Date().toISOString();
+    const runId = randomUUID();
+    const proposalId = randomUUID();
+    db.run(
+      `INSERT INTO classification_runs (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, NULL, 'SKU-MIG', 'completed', ?)`,
+      [runId, 'ws-mig', now],
+    );
+    db.run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, 'SKU-MIG', 'field_assignment', '"v"', 0.8, 'pending', ?)`,
+      [proposalId, runId, now],
+    );
+    db.run(
+      `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, created_at)
+       VALUES (?, ?, 'accepted', ?)`,
+      ['legacy-dec', proposalId, now],
+    );
+    const legacy = db.query(
+      'SELECT revised_value_json, revised_target_id, decision_key, superseded_at FROM classification_proposal_decisions WHERE id = ?'
+    ).get('legacy-dec') as Record<string, unknown>;
+    expect(legacy.revised_value_json).toBeNull();
+    expect(legacy.revised_target_id).toBeNull();
+    expect(legacy.decision_key).toBeNull();
+    expect(legacy.superseded_at).toBeNull();
+
+    db.run('DELETE FROM classification_proposal_decisions WHERE id = ?', ['legacy-dec']);
+    db.run('DELETE FROM classification_proposals WHERE id = ?', [proposalId]);
+    db.run('DELETE FROM classification_runs WHERE id = ?', [runId]);
   });
 
   it('should support inserting and querying workspace', () => {
@@ -102,7 +166,7 @@ describe('SQLite Migration', () => {
     const db3 = getDb();
 
     const tables = [
-      'app_meta', 'workspace', 'shopsite_connection', 'product_index',
+      'app_meta', 'workspace', 'connection', 'product_index',
       'field_registry', 'change_sets', 'change_set_items', 'validation_results',
       'sync_jobs', 'sync_job_events', 'remote_drift', 'audit_log',
       'product_types', 'product_type_fields', 'page_index', 'product_pages',
@@ -523,7 +587,6 @@ describe('SQLite Migration', () => {
   });
 
   it('assignProductToPageId inserts both page_id and page_name', () => {
-    const db = getDb();
     const pageId = randomUUID();
     const pageName = 'Dog Food';
 
@@ -573,7 +636,7 @@ describe('SQLite Migration', () => {
     clearProductPages('SKU-ASSIGN-1');
   });
 
-  it('backward-compatible assignProductToPage resolves name to id', () => {
+  it('backward-compatible assignProductToPage resolves name to id only for verified identities', () => {
     const pageId = randomUUID();
     const pageName = 'Birds';
 
@@ -584,6 +647,11 @@ describe('SQLite Migration', () => {
       parentId: null,
       pageHash: 'hash-birds',
       lastSyncedAt: null,
+      identityKind: 'exported_guid',
+      identityKey: 'guid-birds',
+      identityStatus: 'verified',
+      availability: 'available',
+      workspaceId: 'ws-mig',
     });
 
     assignProductToPage('SKU-BACKCOMPAT-1', pageName);
@@ -594,6 +662,30 @@ describe('SQLite Migration', () => {
     expect(assignments[0].pageName).toBe(pageName);
 
     clearProductPages('SKU-BACKCOMPAT-1');
+  });
+
+  it('assignProductToPage stays name-only when the page identity is unverified', () => {
+    const pageId = randomUUID();
+    const pageName = 'Unverified Birds';
+
+    upsertPage({
+      id: pageId,
+      name: pageName,
+      fileName: 'birds.html',
+      parentId: null,
+      pageHash: 'hash-birds',
+      lastSyncedAt: null,
+      // Default identity: unverified_name_only review context.
+    });
+
+    assignProductToPage('SKU-UNVERIFIED-1', pageName);
+
+    const assignments = getProductPageAssignments('SKU-UNVERIFIED-1');
+    expect(assignments.length).toBe(1);
+    expect(assignments[0].pageId).toBeNull();
+    expect(assignments[0].pageName).toBe(pageName);
+
+    clearProductPages('SKU-UNVERIFIED-1');
   });
 
   it('backward-compatible assignProductToPage works without page_index entry', () => {

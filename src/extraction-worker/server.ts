@@ -8,9 +8,9 @@
  *
  * Environment variables:
  *
- *   SHOPSITE_CMS_WORKER_HOST   — bind address (default: 127.0.0.1)
- *   SHOPSITE_CMS_WORKER_PORT   — bind port    (default: 3032)
- *   SHOPSITE_CMS_WORKER_TOKEN  — bearer token (required; server rejects all requests when unset)
+ *   BAYSTATE_CMS_WORKER_HOST   — bind address (default: 127.0.0.1)
+ *   BAYSTATE_CMS_WORKER_PORT   — bind port    (default: 3032)
+ *   BAYSTATE_CMS_WORKER_TOKEN  — bearer token (required; server rejects all requests when unset)
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -24,8 +24,8 @@ import { handleGenerateSelector } from './routes/generate-selector';
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 
-const HOST = process.env.SHOPSITE_CMS_WORKER_HOST ?? '127.0.0.1';
-const PORT = parseInt(process.env.SHOPSITE_CMS_WORKER_PORT ?? '3032', 10);
+const HOST = process.env.BAYSTATE_CMS_WORKER_HOST ?? '127.0.0.1';
+const PORT = parseInt(process.env.BAYSTATE_CMS_WORKER_PORT ?? '3032', 10);
 
 // ─── Request router ────────────────────────────────────────────────────────────
 
@@ -88,11 +88,11 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   const tokenConfigured =
-    process.env.SHOPSITE_CMS_WORKER_TOKEN &&
-    process.env.SHOPSITE_CMS_WORKER_TOKEN.length > 0;
+    process.env.BAYSTATE_CMS_WORKER_TOKEN &&
+    process.env.BAYSTATE_CMS_WORKER_TOKEN.length > 0;
 
   console.log(
     `[extraction-worker] listening on http://${HOST}:${PORT}` +
-      (tokenConfigured ? ' (auth enabled)' : ' (auth not configured — set SHOPSITE_CMS_WORKER_TOKEN)'),
+      (tokenConfigured ? ' (auth enabled)' : ' (auth not configured — set BAYSTATE_CMS_WORKER_TOKEN)'),
   );
 });

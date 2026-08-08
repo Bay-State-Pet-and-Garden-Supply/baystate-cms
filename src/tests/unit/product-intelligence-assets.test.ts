@@ -876,6 +876,87 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(record.rightsStatus).toBe('restricted');
       expect(record.commerceApproved).toBe(false);
     });
+
+    it('Round 13 (review P1-3): observed.brand excludes unqualified/rejected brand facts (no fallback to raw fromEvidence.brand)', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/brand-unqualified.png',
+          sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-1', 'ev-unqualified-brand'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => {
+              if (id === 'ev-gtin-1') {
+                return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash };
+              }
+              // Unqualified brand fact: hash-less, non-image method, no entityId
+              return { id, targetField: 'brand', value: 'Unqualified Brand', extractionMethod: 'text_scrape', snippet: null, sourceUrl: 'https://other.example.com/unlinked', sourceDomain: 'other.example.com', contentHash: null };
+            }),
+          sourceTypeResolver: () => 'supplier',
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
+        },
+      );
+      expect(record.observedBrand).toBeNull();
+    });
+
+    it('Round 13 (review P1-4): structured entity linkage requires matching sourceUrl AND entityId', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      void pngHash;
+      // Case A: Same sourceUrl but non-matching entityId -> brand NOT qualified (observedBrand is null)
+      const recordNoMatch = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/entity-test-1.png',
+          sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-entity-1', 'ev-brand-entity-2'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => {
+              if (id === 'ev-gtin-entity-1') {
+                return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'json_ld', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null, entityId: 'product-node-1' };
+              }
+              // Cross-sell brand on same page, different entityId
+              return { id, targetField: 'brand', value: 'CrossSellBrand', extractionMethod: 'json_ld', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null, entityId: 'cross-sell-node-2' };
+            }),
+          sourceTypeResolver: () => 'supplier',
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
+        },
+      );
+      expect(recordNoMatch.observedBrand).toBeNull();
+
+      // Case B: Same sourceUrl AND matching entityId -> brand IS qualified
+      const recordMatch = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/entity-test-2.png',
+          sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-entity-1', 'ev-brand-entity-1'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => {
+              if (id === 'ev-gtin-entity-1') {
+                return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'json_ld', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null, entityId: 'product-node-1' };
+              }
+              // Same entityId product-node-1
+              return { id, targetField: 'brand', value: 'Stella', extractionMethod: 'json_ld', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null, entityId: 'product-node-1' };
+            }),
+          sourceTypeResolver: () => 'supplier',
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
+        },
+      );
+      expect(recordMatch.observedBrand).toBe('Stella');
+    });
   });
 
   // -------------------------------------------------------------------------

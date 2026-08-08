@@ -4,12 +4,13 @@ import { readProductFile } from '../../git/workspace-files';
 import { classifyCatalogProduct } from '../../classification/catalog-product-classifier';
 import { computeProductHash } from '../../classification/catalog-product-source';
 import { getDb } from '../../db/connection';
-import { getRecentCatalogRun, getEvidenceByRun, getProposalsByRun, getStageResults } from '../../db/repositories/classification-run-repo';
-import { loadClassificationConfig } from '../../classification/config-loader';
-import { computeConfigHash } from '../../db/repositories/classification-config-repo';
+import { getRecentCatalogRun, getEvidenceByRun, getLiveDecisionsByRun, getProposalsByRun, getStageResults } from '../../db/repositories/classification-run-repo';
+import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
+import { authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from '../../classification/runtime-snapshot';
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { validateCatalogReviewCompletionGate } from '../../classification/review-completion-gate';
 import { applyCatalogClassification } from '../../classification/catalog-product-application';
+import { SubmitCatalogDecisionsRequestSchema } from '../../shared/schemas/classification';
 
 const route = new Hono();
 
@@ -32,20 +33,9 @@ route.get('/products/:sku/classification', (c) => {
   const proposals = getProposalsByRun(run.id);
   const stageResults = getStageResults(run.id);
 
-  // Get decisions
-  const decisions: Array<{ id: string; proposalId: string; decision: string }> = [];
-  for (const p of proposals) {
-    const decRows = getDb()
-      .query('SELECT * FROM classification_proposal_decisions WHERE proposal_id = ? ORDER BY created_at DESC')
-      .all(p.id) as Record<string, any>[];
-    for (const d of decRows) {
-      decisions.push({
-        id: String(d.id),
-        proposalId: String(d.proposal_id),
-        decision: String(d.decision),
-      });
-    }
-  }
+  // Canonical current decisions only. Historical revisions remain available in
+  // the database audit trail but must not be restored as the active UI state.
+  const decisions = getLiveDecisionsByRun(run.id);
 
   // Drift detection — must use same hash functions as the classifier
   let sourceDrift = false;
@@ -60,9 +50,15 @@ route.get('/products/:sku/classification', (c) => {
   }
 
   if (run.configSnapshotHash) {
-    const classConfig = loadClassificationConfig(workspace.workspacePath);
-    const currentHash = computeConfigHash(classConfig);
-    if (currentHash !== run.configSnapshotHash) configDrift = true;
+    const authority = loadRuntimeConfigAuthority(workspace.workspacePath, createRuntimeActivationContext(workspace.workspacePath));
+    const matches =
+      authorityConfigHashMatches(authority, run.configSnapshotHash) ||
+      runtimeSnapshotHashMatchesConfig(
+        workspace.id,
+        run.configSnapshotHash,
+        authority.kind === 'v2' ? authority.bundle : authority.config,
+      );
+    if (!matches) configDrift = true;
   }
 
   return c.json({
@@ -143,29 +139,12 @@ route.post('/products/:sku/classification/runs/:runId/decisions', async (c) => {
     return c.json({ error: 'Invalid JSON body.' }, 400);
   }
 
-  if (!body || !Array.isArray(body.decisions) || body.decisions.length === 0) {
-    return c.json({ error: 'At least one decision is required in the decisions array.' }, 400);
+  const parsed = SubmitCatalogDecisionsRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid decisions payload.', issues: parsed.error.issues }, 400);
   }
-
-  // Validate each decision entry shape
-  const validDecisions = new Set(['accepted', 'rejected', 'deferred']);
-  const decisions: Array<{ proposalId: string; decision: 'accepted' | 'rejected' | 'deferred'; reviewerNote?: string | null; revisedValue?: unknown }> = [];
-  for (const d of body.decisions) {
-    if (!d || typeof d !== 'object') {
-      return c.json({ error: `Invalid decision entry: expected object, got ${typeof d}` }, 400);
-    }
-    if (typeof d.proposalId !== 'string' || !d.proposalId.trim()) {
-      return c.json({ error: 'Each decision must have a valid proposalId string.' }, 400);
-    }
-    if (!validDecisions.has(d.decision)) {
-      return c.json({ error: `Invalid decision "${d.decision}". Must be one of: accepted, rejected, deferred.` }, 400);
-    }
-    decisions.push({
-      proposalId: d.proposalId,
-      decision: d.decision as 'accepted' | 'rejected' | 'deferred',
-      reviewerNote: d.reviewerNote ?? null,
-      revisedValue: d.revisedValue,
-    });
+  if (parsed.data.decisions.length === 0) {
+    return c.json({ error: 'At least one decision is required in the decisions array.' }, 400);
   }
 
   const result = submitProposalDecisions({
@@ -173,11 +152,11 @@ route.post('/products/:sku/classification/runs/:runId/decisions', async (c) => {
     productSku: sku,
     runId,
     sourceKind: 'catalog_product',
-    decisions,
+    decisions: parsed.data.decisions,
   });
 
   if (!result.ok) {
-    return c.json({ error: result.reason, code: result.code }, 400);
+    return c.json({ error: result.reason, code: result.code }, result.code === 'decision_conflict' ? 409 : 400);
   }
 
   return c.json({ ok: true, decisions: result.decisions });

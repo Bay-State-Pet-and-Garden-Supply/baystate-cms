@@ -30,11 +30,10 @@ describe('deterministicStringify', () => {
     expect(result).toContain('"c"');
   });
 
-  it('should replace NaN and Infinity with null', () => {
-    const obj = { nan: NaN, inf: Infinity, negInf: -Infinity, normal: 42 };
-    const result = deterministicStringify(obj);
-    expect(result).not.toContain('NaN');
-    expect(result).not.toContain('Infinity');
+  it('rejects NaN and Infinity instead of silently rewriting them', () => {
+    expect(() => deterministicStringify({ nan: NaN })).toThrow(/Non-finite/);
+    expect(() => deterministicStringify({ inf: Infinity })).toThrow(/Non-finite/);
+    expect(() => deterministicStringify({ negInf: -Infinity })).toThrow(/Non-finite/);
   });
 });
 
@@ -49,6 +48,10 @@ describe('hashJson', () => {
     const a = { sku: 'ABC' };
     const b = { sku: 'DEF' };
     expect(hashJson(a)).not.toBe(hashJson(b));
+  });
+
+  it('preserves a fixed pre-v2 product/workspace hash vector', () => {
+    expect(hashJson({ '10': 'ten', '2': 'two', nan: Number.NaN })).toBe('11kgem');
   });
 
   it('should return a non-empty string', () => {

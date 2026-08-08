@@ -45,9 +45,9 @@ Start with a local HTTP sidecar because it is easy to inspect, test, restart, an
 Default binding:
 
 ```txt
-SHOPSITE_CMS_WORKER_HOST=127.0.0.1
-SHOPSITE_CMS_WORKER_PORT=3032
-SHOPSITE_CMS_WORKER_TOKEN=<random dev token or configured secret>
+BAYSTATE_CMS_WORKER_HOST=127.0.0.1
+BAYSTATE_CMS_WORKER_PORT=3032
+BAYSTATE_CMS_WORKER_TOKEN=<random dev token or configured secret>
 ```
 
 Security rules:
@@ -240,7 +240,7 @@ The worker should not stream large HTML/screenshots through API responses by def
 Proposed local path:
 
 ```txt
-<workspace>/.shopsite-cms/artifacts/profile-builder/<domain>/<job-id>/
+<workspace>/.baystate-cms/artifacts/profile-builder/<domain>/<job-id>/
 ```
 
 Artifact types:
@@ -305,8 +305,8 @@ src/extraction-worker/auth.ts
 Implementation details:
 
 - Zero-dependency Node.js HTTP server using `node:http` (not Hono).
-- Binds to `127.0.0.1` (env: `SHOPSITE_CMS_WORKER_HOST`, `SHOPSITE_CMS_WORKER_PORT`).
-- Bearer token auth via `SHOPSITE_CMS_WORKER_TOKEN`; optional, warns when unset.
+- Binds to `127.0.0.1` (env: `BAYSTATE_CMS_WORKER_HOST`, `BAYSTATE_CMS_WORKER_PORT`).
+- Bearer token auth via `BAYSTATE_CMS_WORKER_TOKEN`; optional, warns when unset.
 - `GET /health` returns capability flags (`playwright: true`, `crawlee: false`, `stagehand: false`).
 - Unknown paths return 404.
 - Dev script: `node --import tsx src/extraction-worker/server.ts`
@@ -332,7 +332,7 @@ docs/plans/domain-extractor-profile-worker-plan.md  — marks Phase 3 done
 Implementation details:
 
 - `artifacts.ts` provides `resolveArtifactDir()`, `writeArtifact()`, `generateJobId()`, and `extractDomainFromUrl()` helpers.
-- Artifacts are written to `<cwd>/.shopsite-cms/artifacts/profile-builder/<domain>/<job-id>/`.
+- Artifacts are written to `<cwd>/.baystate-cms/artifacts/profile-builder/<domain>/<job-id>/`.
 - `routes/snapshot.ts` handles `POST /profile-tooling/snapshot` with two runtimes:
   - **static**: Uses `fetch()` with HTTP headers from `page-extractor.ts`, parses HTML with regex for JSON-LD, meta tags, embedded Shopify product data (`productJSON`, `ShopifyAnalytics`, `__INITIAL_STATE__`), image candidates, and page structure signals. Writes `page.html` and `page.min.html` (stripped of style/svg/noscript/header/footer/nav/script).
   - **rendered**: Launches headless Playwright Chromium, blocks images/fonts/stylesheets/media/trackers via `page.route()`, navigates with `waitUntil: 'domcontentloaded'` and 25s timeout, dwells 2s for dynamic content. Extracts JSON-LD, embedded product data, image candidates, and page structure signals via `page.evaluate()`. Captures screenshot as PNG if `captureScreenshot` is true.
@@ -366,7 +366,7 @@ Implementation details:
   - `imagesSelector` / `images` / `imageSelector` / `image` → non-empty image count check; zero → `warning`
 - Image validation: counts non-SVG image candidates; sets `primaryImageMatch` if any found.
 - Variant validation: if `variantSelectionStrategy` is present, returns `{ selected: true, variantTitle: "not yet implemented" }` (actual running in Phase 5).
-- Writes per-sample HTML to artifacts at `<cwd>/.shopsite-cms/artifacts/profile-builder/<domain>/<job-id>/sample-<sanitized-url>.html`.
+- Writes per-sample HTML to artifacts at `<cwd>/.baystate-cms/artifacts/profile-builder/<domain>/<job-id>/sample-<sanitized-url>.html`.
 - Returns the full `ValidateResponseSchema`-shaped result with summary and per-sample results.
 - Errors surface in per-sample warnings; never throws uncaught errors.
 - Follows same patterns as snapshot.ts: HTTP constants, body chunk collection, Zod safeParse, response validation.
@@ -414,7 +414,7 @@ Work:
 
 - All persistence stays in the Bun server. The worker does not read or write SQLite directly.
 - Worker execution uses a mixed model: synchronous HTTP for quick single-page work and deterministic extraction, Bun-owned queued jobs for profile proposal runs and Crawlee validation sweeps.
-- Worker artifacts live under the workspace in `<workspace>/.shopsite-cms/artifacts/profile-builder/<domain>/<job-id>/`. The directory is Git-ignored.
+- Worker artifacts live under the workspace in `<workspace>/.baystate-cms/artifacts/profile-builder/<domain>/<job-id>/`. The directory is Git-ignored.
 
 ## Open design questions
 

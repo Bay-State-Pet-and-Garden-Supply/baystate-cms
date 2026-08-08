@@ -3,6 +3,7 @@ import { findChangeSetById, listChangeSetItems, setItemValidationStatus } from '
 import { validateProduct, type ValidationContext, type ValidationOptions } from './product-validation';
 import { readStoreConfig } from '../git/workspace-files';
 import { findWorkspace } from '../db/repositories/workspace-repo';
+import { getDb } from '../db/connection';
 import type { Product } from '../shared/types';
 
 export interface ChangeSetValidationResult {
@@ -27,8 +28,10 @@ export interface ChangeSetValidationResult {
  * Validate all items in a change set.
  */
 export function validateChangeSet(changeSetId: string, options?: ValidationOptions): ChangeSetValidationResult {
-  const changeSet = findChangeSetById(changeSetId);
-  const items = listChangeSetItems(changeSetId);
+  const db = getDb();
+  return db.transaction(() => {
+    const changeSet = findChangeSetById(changeSetId);
+    const items = listChangeSetItems(changeSetId);
   const allSkus = items.map(i => JSON.parse(i.draftJson)?.sku || i.sku).filter(Boolean);
   const effectiveOptions: ValidationOptions = { checkDrift: true, ...options };
 
@@ -147,4 +150,5 @@ export function validateChangeSet(changeSetId: string, options?: ValidationOptio
     items: itemResults,
     canApprove: totalBlockers === 0,
   };
+  })();
 }

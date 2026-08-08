@@ -18,8 +18,9 @@ import { unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { createPiRun } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, insertPiSource, insertPiImageCandidate } from '../../db/repositories/product-intelligence-repo';
 import { listPiAssetsByRun, listPiSources, listSourceAuthoritiesByRun, listPiEvidence } from '../../db/repositories/product-intelligence-repo';
+import { refreshResolvedAuthoritiesForRun } from '../../product-intelligence/tools/verification-tools';
 import { upsertReusePolicy } from '../../db/repositories/pi-reuse-policy-repo';
 import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { findWorkspace, insertWorkspace } from '../../db/repositories/workspace-repo';
@@ -436,6 +437,55 @@ describe('PI authority lifecycle (round-11 integration)', () => {
     expect(checkData.isOfficial).toBe(false);
     expect(checkData.authorityEstablished).toBe(false);
     expect(listPiSources(retailRunId).find((source) => source.url === RETAIL_URL)?.sourceType).toBe('other');
+  });
+
+  it('Round 13 (review P0-2): three conflicting image evidence brand rows (A, B, C) aggregate before decide -> ambiguous (no authority granted)', async () => {
+    const testGtin = '00012345678905';
+    const runId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify({ gtin: testGtin, registerName: 'Brand C Product' }),
+      policyJson: '{}',
+      configSnapshotId: 'c',
+      configSnapshotHash: 'c',
+    }).id;
+    const PAGE_URL = 'https://brand-c.example.com/product-abc';
+    const IMAGE_A = 'https://cdn.example.com/image-a.png';
+    const IMAGE_B = 'https://cdn.example.com/image-b.png';
+    const IMAGE_C = 'https://cdn.example.com/image-c.png';
+
+    upsertBrandSite('Brand C', 'brand-c.example.com', null);
+
+    const sink = new PersistingExecutionEventSink(runId);
+    const source = insertPiSource({ runId, url: PAGE_URL, domain: 'brand-c.example.com', sourceType: 'other' });
+    insertPiSource({ runId, url: IMAGE_A, domain: 'cdn.example.com', sourceType: 'other' });
+    insertPiSource({ runId, url: IMAGE_B, domain: 'cdn.example.com', sourceType: 'other' });
+    insertPiSource({ runId, url: IMAGE_C, domain: 'cdn.example.com', sourceType: 'other' });
+    insertPiImageCandidate({ runId, imageUrl: IMAGE_A, discoveringSourceId: source.id, entityId: 'e1' });
+    insertPiImageCandidate({ runId, imageUrl: IMAGE_B, discoveringSourceId: source.id, entityId: 'e1' });
+    insertPiImageCandidate({ runId, imageUrl: IMAGE_C, discoveringSourceId: source.id, entityId: 'e1' });
+
+    const hashA = createHash('sha256').update('image-a-bytes').digest('hex');
+    const hashB = createHash('sha256').update('image-b-bytes').digest('hex');
+    const hashC = createHash('sha256').update('image-c-bytes').digest('hex');
+
+    sink.emit('tool_call_finished', {
+      toolName: 'extract_packaging_evidence',
+      evidence: [
+        { id: 'ev-upc-a', field: 'upc', value: testGtin, url: IMAGE_A, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashA },
+        { id: 'ev-brand-a', field: 'brand', value: 'Brand A', url: IMAGE_A, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashA },
+        { id: 'ev-upc-b', field: 'upc', value: testGtin, url: IMAGE_B, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashB },
+        { id: 'ev-brand-b', field: 'brand', value: 'Brand B', url: IMAGE_B, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashB },
+        { id: 'ev-upc-c', field: 'upc', value: testGtin, url: IMAGE_C, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashC },
+        { id: 'ev-brand-c', field: 'brand', value: 'Brand C', url: IMAGE_C, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashC },
+      ] as never,
+    });
+
+    refreshResolvedAuthoritiesForRun(runId);
+
+    const authorities = listSourceAuthoritiesByRun(runId);
+    expect(authorities.length).toBe(0);
   });
 });
 

@@ -7,7 +7,7 @@ import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { listChangeSets, listChangeSetItems } from '../../db/repositories/change-set-repo';
-import { getProductPageAssignments } from '../../db/repositories/page-repo';
+import { getProductPageAssignments, assignProductToPageId } from '../../db/repositories/page-repo';
 import { type ExtractionData, ExtractionDataSchema } from '../../shared/schemas/onboarding';
 
 describe('Draft Promoter Service', () => {
@@ -71,6 +71,65 @@ describe('Draft Promoter Service', () => {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [proposalId, runId, sku, 'category_page', pageName, JSON.stringify({ pageId, pageName }), 1.0, 'accepted', now]
     );
+  }
+
+  function seedPromotionReadyItem(batchName: string, sku: string) {
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: batchName,
+      fileName: `${sku}.csv`,
+      totalItems: 1,
+    });
+    const [item] = insertItems(batch.id, [{
+      upc: sku,
+      name: `Product ${sku}`,
+      price: '$9.99',
+      brandHint: 'Test Brand',
+      rowNumber: 1,
+    }]);
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: `Product ${sku}`,
+      brand: 'Test Brand',
+      description: 'Promotion classification test product.',
+      bulletPoints: [],
+      primaryImage: `products/${sku}/images/primary.jpg`,
+      additionalImages: [],
+      price: '$9.99',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: `https://example.test/${sku}`,
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const curationData = {
+      curatedTitle: `Product ${sku}`,
+      titleSource: 'web',
+      suggestedPages: ['Toys'],
+      suggestedProductType: null,
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'manual',
+    };
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO page_index
+       (id, name, file_name, page_hash, created_at, updated_at)
+       VALUES ('promotion-toys-page', 'Toys', 'toys.html', 'promotion-toys-hash', ?, ?)`,
+      [now, now],
+    );
+    db.run(
+      `UPDATE onboarding_items
+       SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion',
+           stage_status = 'pending', status = 'ready'
+       WHERE id = ?`,
+      [JSON.stringify(extractionData), JSON.stringify(curationData), item.id],
+    );
+    return { batch, item, curationData };
   }
 
   it('should successfully build product drafts and promote them to a change set', async () => {
@@ -663,7 +722,7 @@ describe('Draft Promoter Service', () => {
     expect(result.failures[0].error).toContain('No accepted product page proposals');
   });
 
-  it('succeeds promotion when only curationData.suggestedPages exist but no accepted proposals', async () => {
+  it('fails promotion when only curationData.suggestedPages exist without accepted proposals or manual DB assignments', async () => {
     const batch = createBatch({
       workspaceId: wsId,
       name: 'Onboard Promo Fallback',
@@ -671,7 +730,6 @@ describe('Draft Promoter Service', () => {
       totalItems: 1
     });
 
-    // Seed the page 'Toys' in page_index so it resolves via getPageByName
     const db = getDb();
     db.run(
       "INSERT OR IGNORE INTO page_index (id, name, file_name, parent_id, page_hash, last_synced_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -704,6 +762,7 @@ describe('Draft Promoter Service', () => {
     }]);
 
     const item = items[0];
+
     const curationData = {
       curatedTitle: 'Manual Page Product',
       titleSource: 'web',
@@ -720,12 +779,266 @@ describe('Draft Promoter Service', () => {
     );
 
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    expect(promoteRes.failures.length).toBe(0);
-    expect(promoteRes.count).toBe(1);
+    expect(promoteRes.count).toBe(0);
+    expect(promoteRes.failures.length).toBe(1);
+    expect(promoteRes.failures[0].error).toContain('No accepted product page proposals');
+  });
 
-    const csItems = listChangeSetItems(promoteRes.changeSetId!);
-    expect(csItems.length).toBe(1);
-    expect(csItems[0].sku).toBe('999999999999');
-    expect(csItems[0].operation).toBe('create');
+  it('promotes the reviewer-corrected Product Type target rather than prediction metadata', async () => {
+    const { batch, item, curationData } = seedPromotionReadyItem(
+      'Corrected Product Type',
+      'TYPE-CORRECTED-001',
+    );
+    const db = getDb();
+    const now = new Date().toISOString();
+    const runId = 'run-type-corrected';
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, source_kind, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?, ?)`,
+      [runId, wsId, item.id, item.upc, now, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ ...curationData, classificationRunId: runId }), item.id],
+    );
+    db.run(
+      `INSERT OR IGNORE INTO page_index (id, name, file_name, page_hash, created_at, updated_at)
+       VALUES ('page-toys', 'Toys', 'toys.html', 'dummy-hash', ?, ?)`,
+      [now, now],
+    );
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, created_at)
+       VALUES ('proposal-type-corrected', ?, ?, 'primary_product_type', 'dog-food-dry', ?, 0.9, 'accepted', ?)`,
+      [runId, item.upc, JSON.stringify({ productTypeId: 'dog-food-dry', matchedWords: ['dog', 'kibble'] }), now],
+    );
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, created_at)
+       VALUES ('proposal-page-corrected', ?, ?, 'category_page', 'Toys', ?, 1.0, 'accepted', ?)`,
+      [runId, item.upc, JSON.stringify({ pageId: 'page-toys', pageName: 'Toys' }), now],
+    );
+    db.run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, revised_value_json, revised_target_id,
+        has_revised_target, decision_key, created_at)
+       VALUES ('decision-type-corrected', 'proposal-type-corrected', 'accepted', ?,
+               'cat-food-wet', 1, 'type-corrected-token', ?)`,
+      [JSON.stringify({ productTypeId: 'cat-food-wet' }), now],
+    );
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const history = db.query(
+      `SELECT event_json FROM classification_history_events
+       WHERE product_sku = ? AND event_type = 'promotion'
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get(item.upc) as { event_json: string };
+    expect(JSON.parse(history.event_json).acceptedProductType).toBe('cat-food-wet');
+  });
+
+  it('uses the shared Product Type rule for historical one-sided, clear, and conflicting decisions', async () => {
+    const scenarios = [
+      {
+        suffix: 'value-only',
+        revisedValueJson: JSON.stringify({ productTypeId: 'cat-food-wet' }),
+        revisedTargetId: null,
+        hasRevisedTarget: 0,
+        expected: 'cat-food-wet',
+      },
+      {
+        suffix: 'target-only',
+        revisedValueJson: null,
+        revisedTargetId: 'bird-food',
+        hasRevisedTarget: 1,
+        expected: 'bird-food',
+      },
+      {
+        suffix: 'target-clear',
+        revisedValueJson: null,
+        revisedTargetId: null,
+        hasRevisedTarget: 1,
+        expected: null,
+      },
+      {
+        suffix: 'conflicting-pair',
+        revisedValueJson: JSON.stringify({ productTypeId: 'cat-food-wet' }),
+        revisedTargetId: 'bird-food',
+        hasRevisedTarget: 1,
+        expected: 'bird-food',
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const sku = `TYPE-HISTORY-${scenario.suffix.toUpperCase()}`;
+      const { batch, item, curationData } = seedPromotionReadyItem(
+        `Historical Product Type ${scenario.suffix}`,
+        sku,
+      );
+      const db = getDb();
+      const now = new Date().toISOString();
+      const runId = `run-type-history-${scenario.suffix}`;
+      const proposalId = `proposal-type-history-${scenario.suffix}`;
+      db.run(
+        `INSERT INTO classification_runs
+         (id, workspace_id, onboarding_item_id, source_kind, product_sku, status, started_at, completed_at)
+         VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?, ?)`,
+        [runId, wsId, item.id, item.upc, now, now],
+      );
+      db.run(
+        'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+        [JSON.stringify({ ...curationData, classificationRunId: runId }), item.id],
+      );
+      db.run(
+        `INSERT INTO classification_proposals
+         (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+          confidence, status, created_at)
+         VALUES (?, ?, ?, 'primary_product_type', 'dog-food-dry', ?, 0.9, 'accepted', ?)`,
+        [proposalId, runId, item.upc, JSON.stringify({ productTypeId: 'dog-food-dry', matchedWords: ['dog', 'kibble'] }), now],
+      );
+      db.run(
+        `INSERT OR IGNORE INTO page_index (id, name, file_name, page_hash, created_at, updated_at)
+         VALUES ('page-toys', 'Toys', 'toys.html', 'dummy-hash', ?, ?)`,
+        [now, now],
+      );
+      db.run(
+        `INSERT INTO classification_proposals
+         (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+          confidence, status, created_at)
+         VALUES (?, ?, ?, 'category_page', 'Toys', ?, 1.0, 'accepted', ?)`,
+        [`proposal-page-history-${scenario.suffix}`, runId, item.upc, JSON.stringify({ pageId: 'page-toys', pageName: 'Toys' }), now],
+      );
+      db.run(
+        `INSERT INTO classification_proposal_decisions
+         (id, proposal_id, decision, revised_value_json, revised_target_id,
+          has_revised_target, decision_key, created_at)
+         VALUES (?, ?, 'accepted', ?, ?, ?, ?, ?)`,
+        [
+          `decision-type-history-${scenario.suffix}`,
+          proposalId,
+          scenario.revisedValueJson,
+          scenario.revisedTargetId,
+          scenario.hasRevisedTarget,
+          `type-history-token-${scenario.suffix}`,
+          now,
+        ],
+      );
+
+      const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+      expect(result.failures).toHaveLength(0);
+      expect(result.count).toBe(1);
+      const history = db.query(
+        `SELECT event_json FROM classification_history_events
+         WHERE product_sku = ? AND event_type = 'promotion'
+         ORDER BY created_at DESC LIMIT 1`,
+      ).get(item.upc) as { event_json: string };
+      expect(JSON.parse(history.event_json).acceptedProductType).toBe(scenario.expected);
+    }
+  });
+
+  it('ignores a persisted classification run linked to another onboarding item', async () => {
+    const { batch, item, curationData } = seedPromotionReadyItem(
+      'Foreign Product Type Run',
+      'TYPE-FOREIGN-001',
+    );
+    const [foreignItem] = insertItems(batch.id, [{
+      upc: 'TYPE-FOREIGN-HOLDER',
+      name: 'Foreign holder',
+      rowNumber: 2,
+    }]);
+    const db = getDb();
+    const now = new Date().toISOString();
+    seedAcceptedCategoryProposal(db, item.upc, 'Toys');
+    assignProductToPageId(item.upc, 'page-toys', 'Toys');
+    const runId = 'run-type-foreign';
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, source_kind, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?, ?)`,
+      [runId, wsId, foreignItem.id, item.upc, now, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ ...curationData, classificationRunId: runId }), item.id],
+    );
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, created_at)
+       VALUES ('proposal-type-foreign', ?, ?, 'primary_product_type', 'dog-food-dry', ?, 0.9, 'accepted', ?)`,
+      [runId, item.upc, JSON.stringify({ productTypeId: 'dog-food-dry' }), now],
+    );
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const history = db.query(
+      `SELECT event_json FROM classification_history_events
+       WHERE product_sku = ? AND event_type = 'promotion'
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get(item.upc) as { event_json: string };
+    expect(JSON.parse(history.event_json).acceptedProductType).toBeNull();
+  });
+
+  it('resolves brand from product title when brandHint is missing', async () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Insert cached brand into classification_brands
+    db.run(
+      `INSERT OR REPLACE INTO classification_brands
+       (id, workspace_id, name, aliases_json, created_at, updated_at)
+       VALUES ('brand-greenies', ?, 'Greenies', ?, ?, ?)`,
+      [wsId, JSON.stringify(['Feline Greenies']), now, now],
+    );
+
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'Missing Brand Batch',
+      fileName: 'missing-brand.csv',
+      totalItems: 1,
+    });
+    const [item] = insertItems(batch.id, [{
+      upc: 'GREENIES-001',
+      name: 'FELINE GREENIES TUNA 9.75OZ',
+      price: '$12.99',
+      brandHint: null,
+      rowNumber: 1,
+    }]);
+
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'FELINE GREENIES TUNA 9.75OZ',
+      brand: null,
+      description: 'Tasty cat treats.',
+      bulletPoints: [],
+      primaryImage: 'products/GREENIES-001/images/primary.jpg',
+      additionalImages: [],
+      price: '$12.99',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+    });
+
+    db.run(
+      'UPDATE onboarding_items SET stage = ?, stage_status = ?, extraction_data_json = ? WHERE id = ?',
+      ['review', 'completed', JSON.stringify(extractionData), item.id],
+    );
+
+    seedAcceptedCategoryProposal(db, item.upc, 'Cat Treats');
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+
+    const changeSetItem = db.query(
+      `SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1`,
+    ).get(item.upc) as { draft_json: string };
+
+    const draft = JSON.parse(changeSetItem.draft_json);
+    expect(draft.customFields.ProductField16).toBe('Greenies');
   });
 });

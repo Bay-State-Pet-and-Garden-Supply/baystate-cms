@@ -104,7 +104,7 @@ async function directUpload(xml: string, config: ConnectionConfig): Promise<Uplo
   const url = buildCgiScriptUrl(config.cgiBaseUrl, 'dbupload.cgi');
   const headers: Record<string, string> = {
     Authorization: authHeader(config),
-    'User-Agent': 'ShopSiteCMS/0.1.0',
+    'User-Agent': 'BaystateCMS/0.1.0',
     'Content-Type': multipart.contentType,
     'Content-Length': String(multipart.contentLength),
   };
@@ -152,7 +152,7 @@ async function finalizeDbmake(queryString: string, config: ConnectionConfig, coo
   const url = buildCgiScriptUrl(config.cgiBaseUrl, 'dbmake.cgi');
   const headers: Record<string, string> = {
     Authorization: authHeader(config),
-    'User-Agent': 'ShopSiteCMS/0.1.0',
+    'User-Agent': 'BaystateCMS/0.1.0',
     'Content-Type': 'application/x-www-form-urlencoded',
   };
   if (cookieHeader) headers.Cookie = cookieHeader;

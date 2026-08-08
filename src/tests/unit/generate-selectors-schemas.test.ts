@@ -16,7 +16,7 @@ import { GenerateSelectorsRequestSchema, GenerateSelectorsResponseSchema } from 
 
 describe('GenerateSelectorsRequestSchema', () => {
   const validRequest = {
-    htmlRef: '.shopsite-cms/artifacts/profile-builder/acmepet.com/job-123/page.html',
+    htmlRef: '.baystate-cms/artifacts/profile-builder/acmepet.com/job-123/page.html',
     sourceUrl: 'https://acmepet.com/products/chicken-dinner',
     runtime: 'rendered' as const,
     fields: [

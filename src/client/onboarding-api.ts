@@ -31,7 +31,11 @@ import type {
   GenerateSelectorResponse,
 
 } from '../shared/schemas/extraction-worker';
-import type { CurationTargetConfig } from '../shared/schemas/classification';
+import type {
+  ClassificationProposalDecision,
+  CurationTargetConfig,
+  ProposalDecisionInput,
+} from '../shared/schemas/classification';
 import type {
   GenerateSelectorsResponse,
   GenerateSelectorsRequest,
@@ -39,6 +43,17 @@ import type {
 } from '../shared/schemas/selector-generation';
 
 const API_BASE = '/api/onboarding';
+
+export class OnboardingApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null = null,
+  ) {
+    super(message);
+    this.name = 'OnboardingApiError';
+  }
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -54,7 +69,8 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const errMsg = typeof errorObj === 'object' && errorObj && 'message' in errorObj
       ? errorObj.message
       : errorObj || `HTTP ${res.status}`;
-    throw new Error(errMsg);
+    const code = typeof (data as any).code === 'string' ? (data as any).code : null;
+    throw new OnboardingApiError(errMsg, res.status, code);
   }
   return data as T;
 }
@@ -553,22 +569,13 @@ async function migrateLegacyClassification(): Promise<{ success: boolean; summar
   });
 }
 
-export interface DecisionInput {
-  id?: string;
-  proposalId: string;
-  decision: 'accepted' | 'rejected' | 'deferred';
-  revisedFromId?: string | null;
-  reviewerId?: string | null;
-  reviewerNote?: string | null;
-  proposedValue?: unknown;
-  targetId?: string | null;
-}
+export type DecisionInput = ProposalDecisionInput;
 
 export async function submitDecisions(
   itemId: string,
   decisions: DecisionInput[],
-): Promise<{ success: boolean; count: number }> {
-  return request<{ success: boolean; count: number }>(`/items/${itemId}/decisions`, {
+): Promise<{ success: boolean; count: number; decisions: ClassificationProposalDecision[] }> {
+  return request<{ success: boolean; count: number; decisions: ClassificationProposalDecision[] }>(`/items/${itemId}/decisions`, {
     method: 'POST',
     body: JSON.stringify({ decisions }),
   });
@@ -908,3 +915,33 @@ export async function retryProfileBlockedItems(
     body: JSON.stringify({ itemIds }),
   });
 }
+
+export interface WeeklyReportProductItem {
+  id: string;
+  upc: string;
+  name: string;
+  brandHint: string | null;
+  batchName: string;
+  status: string;
+  stage: string;
+  stageStatus: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WeeklyReportResponse {
+  startDate: string;
+  endDate: string;
+  items: WeeklyReportProductItem[];
+  totalCount: number;
+  promotedCount: number;
+}
+
+export async function getWeeklyReport(startDate?: string, endDate?: string): Promise<WeeklyReportResponse> {
+  const params = new URLSearchParams();
+  if (startDate) params.set('startDate', startDate);
+  if (endDate) params.set('endDate', endDate);
+  const q = params.toString();
+  return request(`/weekly-report${q ? `?${q}` : ''}`);
+}
+

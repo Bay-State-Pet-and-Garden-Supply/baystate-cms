@@ -5,28 +5,37 @@
  * only enabled product-field curation targets through the shared
  * resolver → matcher → ranker → proposal builder pipeline.
  *
- * Product Type profile filtering is optional: if Product Type is an
- * enabled target and a selected proposal exists with a profile, only
- * product-field targets matching profile attributes are processed.
- * Otherwise, all enabled product-field targets are processed.
+ * Gating (identical to the applicability stage):
+ * - A pending (unreviewed) Primary Product Type guess produces NO
+ *   decision-eligible type-gated attribute proposals.
+ * - Universal attributes proceed without a Product Type.
+ * - Profile attributes require a reviewed (accepted) Product Type and
+ *   membership in that type's profile.
+ * - When no product_type target is enabled, attributes are un-gated.
+ *
+ * Per-Product-Type cardinality comes from the accepted type's profile
+ * (not a global target selectionMode) and is passed to the shared
+ * processor so multi-value proposals use validated field-specific shapes.
  *
  * Dependencies: attribute_applicability stage.
  */
 import type { ClassificationProposal } from '../../shared/schemas/classification';
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { loadClassificationConfig } from '../config-loader';
-import { resolveEnabledTargets } from '../curation-target-resolver';
+import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { processProductFieldTarget } from '../curation-target-processor';
-import { selectPrimaryProductTypeProposal } from '../proposal-selection';
+import { getReviewedPrimaryProductTypeId } from '../proposal-selection';
 import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
+import { evaluateAttributeApplicability } from './attribute-applicability';
 
 export const productAttributeProposalsStage: StageDefinition = {
   name: 'product_attribute_proposals',
   requires: ['attribute_applicability'],
   evidenceFrom: ['evidence_extraction'],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
-    const config = loadClassificationConfig(context.workspacePath);
-    const resolved = resolveEnabledTargets(config, context.workspaceId);
+    const resolved = context.snapshot
+      ? resolveTargetsFromSnapshot(context.snapshot)
+      : resolveEnabledTargets(loadClassificationConfig(context.workspacePath), context.workspaceId);
 
     // If no enabled product-field targets exist, return succeeded (not abstained)
     if (resolved.productFields.length === 0) {
@@ -41,49 +50,66 @@ export const productAttributeProposalsStage: StageDefinition = {
       };
     }
 
-    // Determine which attribute IDs are profile-filtered.
-    // Only applies when Product Type target is enabled AND a selected
-    // Product Type proposal exists with a profile. Otherwise, all
-    // enabled product-field targets are processed.
-    let profileAttributeIds: Set<string> | null = null;
+    const typeTargetEnabled = resolved.productTypes.length > 0;
+    const acceptedTypeId = getReviewedPrimaryProductTypeId(input, context.snapshot);
 
-    if (resolved.productTypes.length > 0) {
-      const typeSelection = selectPrimaryProductTypeProposal(input);
-      const selectedType = typeSelection.proposal;
-      if (selectedType?.targetId) {
-        const profiles = getCachedAttributeProfiles(context.workspaceId);
-        const profile = profiles.find(p => p.productTypeId === selectedType.targetId);
-        if (profile && profile.attributes.length > 0) {
-          profileAttributeIds = new Set(profile.attributes.map(a => a.attributeId));
-        }
-      }
+    const profiles = context.snapshot
+      ? context.snapshot.attributeProfiles
+      : getCachedAttributeProfiles(context.workspaceId);
+    const profile = acceptedTypeId
+      ? profiles.find(p => p.productTypeId === acceptedTypeId)
+      : null;
+    const profileAttributeIds = profile
+      ? new Set(profile.attributes.map(entry => entry.attributeId))
+      : null;
+
+    // Only targets whose applicability is 'applicable' may produce
+    // decision-eligible proposals. Unknown (pending type) and not_applicable
+    // targets are withheld.
+    const gated: Array<{ target: (typeof resolved.productFields)[number]; cardinality: 'single' | 'multiple' }> = [];
+
+    for (const target of resolved.productFields) {
+      if (!target.attribute) continue;
+      const attribute = target.attribute;
+      const profileEntry = profile?.attributes.find(entry => entry.attributeId === attribute.id);
+      const evaluation = evaluateAttributeApplicability({
+        attribute,
+        profileAttributeIds,
+        conditions: profileEntry?.applicabilityConditions ?? [],
+        acceptedTypeId,
+        typeTargetEnabled,
+        reviewedFacts: context.snapshot?.reviewedFacts ?? [],
+      });
+      if (evaluation.state !== 'applicable') continue;
+
+      // Per-Product-Type cardinality wins over the global target mode when a
+      // profile entry exists; otherwise the target's own selection mode.
+      const cardinality = profileEntry?.cardinality ?? target.config.selectionMode ?? 'single';
+      gated.push({ target, cardinality });
     }
 
-    // Filter resolved fields by profile if applicable
-    const targetsToProcess = profileAttributeIds
-      ? resolved.productFields.filter(t => t.attribute && profileAttributeIds!.has(t.attribute.id))
-      : resolved.productFields;
-
-    if (targetsToProcess.length === 0) {
+    if (gated.length === 0) {
+      const blockedReason = acceptedTypeId === null && typeTargetEnabled
+        ? 'No reviewed Primary Product Type; type-gated attribute proposals are withheld until the type is accepted.'
+        : 'No applicable product-field targets for the accepted Product Type.';
       return {
         status: 'succeeded',
         output: {
           evidence: [],
           proposals: [],
           abstained: false,
-          message: profileAttributeIds
-            ? 'No enabled product-field targets match the selected Product Type profile.'
-            : 'No enabled product-field targets available.',
+          message: blockedReason,
+          metadata: { gated: true, acceptedTypeId, typeTargetEnabled },
         },
       };
     }
 
-    // Process each target through the shared engine
+    // Process each applicable target through the shared engine
     const allProposals: ClassificationProposal[] = [];
     const messages: string[] = [];
 
-    for (const target of targetsToProcess) {
-      const result = await processProductFieldTarget(target, input, context);
+    for (const { target, cardinality } of gated) {
+      const result = await processProductFieldTarget(target, input, context, { cardinality });
       allProposals.push(...result.proposals);
       if (result.message) messages.push(result.message);
     }

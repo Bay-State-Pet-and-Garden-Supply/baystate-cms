@@ -6,8 +6,9 @@ import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import { getEvidenceAttemptsByIdsForItem } from '../db/repositories/onboarding-evidence-repo';
 import { extractPackagingOcr } from './packaging-ocr';
 import { getDb } from '../db/connection';
-import { loadClassificationConfig } from '../classification/config-loader';
-import { createConfigSnapshot, syncConfigToCache } from '../db/repositories/classification-config-repo';
+import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../classification/config-loader';
+import { createConfigSnapshot, syncConfigToCache, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
+import { buildRuntimeSnapshot, persistRuntimeSnapshot } from '../classification/runtime-snapshot';
 import {
   createRun,
   completeRun,
@@ -134,10 +135,29 @@ async function runAndPersistOcrFallback(
     ocrTitle = await runAndPersistOcrFallback(item.id, ext.primaryImage, workspacePath, ext as unknown as Record<string, unknown>);
   }
 
+  // Step 1.5: Fallback brand resolution from item name if brandHint is missing
+  let activeBrandHint = item.brandHint;
+  if (!activeBrandHint && item.name) {
+    try {
+      const workspace = findWorkspace();
+      if (workspace) {
+        const brands = getCachedBrands(workspace.id);
+        const resolved = resolveBrand(item.name, brands);
+        if (resolved?.brandName) {
+          activeBrandHint = resolved.brandName;
+          updateItemBrandHint(item.id, activeBrandHint);
+          console.log(`[ProductCurator] Resolved brand "${activeBrandHint}" from title for item ${item.upc}`);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[ProductCurator] Title brand resolution failed: ${err.message}`);
+    }
+  }
+
   // Step 2: Title finalization (uses shared helper)
   const finalized = await consolidateProductTitle({
     name: item.name,
-    brandHint: item.brandHint,
+    brandHint: activeBrandHint,
     webTitle: ext.title,
     ocrTitle: ocrTitle,
     ocrWeight: ext.packagingOcrData?.weight ?? null,
@@ -209,19 +229,64 @@ export async function curateItemWithPipeline(
 
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
 
-  // Load classification config. The modular pipeline works even without
+  // Load the authoritative runtime config (ACTIVE v2 bundle when present,
+  // transitional v1 otherwise). The modular pipeline works even without
   // full product types/attributes — name_consolidation always runs.
-  const classConfig = loadClassificationConfig(workspacePath);
-
-  // Sync config to cache so stages can read cached product types/attributes
-  try {
-    syncConfigToCache(workspaceId, classConfig);
-  } catch (err: any) {
-    console.warn(`[ProductCurator] Failed to sync config to cache: ${err.message}`);
+  const activationContext = createRuntimeActivationContext(workspacePath);
+  const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+  let configSnapshotRef: {
+    id: string;
+    hash: string;
+    sourceCommit: string | null;
+    createdAt: string;
+  };
+  let focusedFileHashes: Record<string, string>;
+  let catalogEvidenceHash: string | null;
+  if (authority.kind === 'v2') {
+    const bundle = authority.bundle;
+    const persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+    configSnapshotRef = {
+      id: persistedId ?? bundle.manifest.bundleHash,
+      hash: bundle.manifest.bundleHash,
+      sourceCommit: bundle.manifest.sourceCatalogCommit,
+      createdAt: new Date().toISOString(),
+    };
+    focusedFileHashes = bundle.manifest.fileVersions;
+    catalogEvidenceHash = bundle.manifest.catalogEvidenceHash;
+    // The derived cache was written transactionally at activation.
+  } else {
+    try {
+      syncConfigToCache(workspaceId, authority.config);
+    } catch (err: any) {
+      console.warn(`[ProductCurator] Failed to sync config to cache: ${err.message}`);
+    }
+    const { id: snapshotId, hash: snapshotHash } = createConfigSnapshot(workspaceId, authority.config);
+    configSnapshotRef = {
+      id: snapshotId,
+      hash: snapshotHash,
+      sourceCommit: null,
+      createdAt: new Date().toISOString(),
+    };
+    focusedFileHashes = authority.config.manifest.fileVersions ?? {};
+    catalogEvidenceHash = null;
   }
 
-  // Create a config snapshot for reproducibility
-  const { id: snapshotId, hash: snapshotHash } = createConfigSnapshot(workspaceId, classConfig);
+  // Build + freeze + persist ONE immutable runtime snapshot before run
+  // creation so every stage reads the same frozen config, options, and facts.
+  const runtimeSnapshot = buildRuntimeSnapshot({
+    workspaceId,
+    workspacePath,
+    productSku: item.upc,
+    authority,
+    configSnapshotRef,
+    focusedFileHashes,
+    catalogEvidenceHash,
+    sourceProductHash: '',
+    searchKeywords: ext.searchKeywords ? String(ext.searchKeywords) : null,
+    productPageNames: [],
+    pages: { state: 'no_verified_page_catalog', nameOnlyRecords: [] },
+  });
+  const { id: runtimeSnapId, hash: runtimeSnapHash } = persistRuntimeSnapshot(runtimeSnapshot);
 
   // Fail any existing running classification runs for this onboarding item to ensure
   // we do not violate the UNIQUE constraint from a stale run.
@@ -238,8 +303,14 @@ export async function curateItemWithPipeline(
     }
   }
 
-  // Create a classification run
-  const run = createRun(workspaceId, item.upc, snapshotId, snapshotHash, item.id);
+  // Create a classification run bound to the immutable runtime snapshot.
+  // The onboarding source hash is null (no product source identity), matching
+  // the snapshot's normalized representation so reviewed facts carry forward.
+  const run = createRun(workspaceId, item.upc, runtimeSnapId, runtimeSnapHash, {
+    onboardingItemId: item.id,
+    sourceKind: 'onboarding',
+    sourceProductHash: runtimeSnapshot.sourceProductHash ?? null,
+  });
 
   try {
     // ── Product-line grouping for family-aware curation ───────────────────
@@ -365,12 +436,8 @@ export async function curateItemWithPipeline(
       workspacePath,
       workspaceId,
       runId: run.id,
-      configSnapshotRef: {
-        id: snapshotId,
-        hash: snapshotHash,
-        sourceCommit: null,
-        createdAt: new Date().toISOString(),
-      },
+      configSnapshotRef,
+      snapshot: runtimeSnapshot,
       productLineContext: productLineGroup
         ? {
             groupId: productLineGroup.groupId,

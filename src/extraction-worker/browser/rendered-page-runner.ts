@@ -24,13 +24,13 @@ import { randomUUID } from 'node:crypto';
 
 /**
  * Determine the Crawlee storage directory.
- * Uses .shopsite-cms/artifacts/crawlee-storage in the project dir if available,
+ * Uses .baystate-cms/artifacts/crawlee-storage in the project dir if available,
  * otherwise falls back to a temp directory.
  */
 function getCrawleeStorageDir(): string {
   // Try to use the project's artifact area
   const cwd = process.cwd();
-  const projectStorage = path.join(cwd, '.shopsite-cms', 'artifacts', 'crawlee-storage');
+  const projectStorage = path.join(cwd, '.baystate-cms', 'artifacts', 'crawlee-storage');
   return projectStorage;
 }
 

@@ -1,0 +1,144 @@
+/**
+ * Confidence Calibrator & Review Tiers
+ *
+ * Calibration is fitted ONLY from example-level development-split predictions
+ * and can alter abstention or review-priority tiers — it NEVER grants
+ * acceptance. Acceptance remains an explicit human decision; the tiers below
+ * only route items into 'abstain' / 'review' / 'auto' buckets where 'auto'
+ * still requires the normal review workflow to confirm before any acceptance.
+ */
+
+import type { BenchmarkPredictionEntry } from '../shared/schemas/classification';
+
+export interface CalibratedThresholds {
+  productType: { abstainBelow: number; reviewAbove: number };
+  categoryPage: { abstainBelow: number; reviewAbove: number };
+  fieldAssignment: { abstainBelow: number; reviewAbove: number };
+}
+
+export const DEFAULT_THRESHOLDS: CalibratedThresholds = {
+  productType: { abstainBelow: 0.35, reviewAbove: 0.85 },
+  categoryPage: { abstainBelow: 0.30, reviewAbove: 0.80 },
+  fieldAssignment: { abstainBelow: 0.25, reviewAbove: 0.75 },
+};
+
+export type ReviewTier = 'abstain' | 'review' | 'auto';
+
+/** One development example-level prediction with its gold outcome. */
+export interface DevPredictionPair {
+  proposalType: 'primary_product_type' | 'category_page' | 'field_assignment';
+  confidence: number;
+  correct: boolean;
+}
+
+export interface CalibrateOptions {
+  /** Target abstention rate on the development split. */
+  targetAbstentionRate?: number;
+  /** Confidence quantile for the 'auto' review tier (high-confidence band). */
+  autoTierQuantile?: number;
+}
+
+function tierThresholds(pairs: DevPredictionPair[], options: CalibrateOptions): { abstainBelow: number; reviewAbove: number } {
+  const targetAbstention = options.targetAbstentionRate ?? 0.15;
+  const autoQuantile = options.autoTierQuantile ?? 0.9;
+
+  if (pairs.length === 0) {
+    return { abstainBelow: 0.3, reviewAbove: 0.8 };
+  }
+
+  const confidences = pairs.map(p => p.confidence).sort((a, b) => a - b);
+
+  // Abstain floor: the confidence below which the abstention rate would exceed
+  // the target (fit to the development split only).
+  const abstainIdx = Math.min(confidences.length - 1, Math.floor(confidences.length * targetAbstention));
+  const abstainBelow = confidences[abstainIdx];
+
+  // Review 'auto' tier: the upper quantile of observed confidence. This is a
+  // review-priority hint, never an acceptance decision.
+  const autoIdx = Math.min(confidences.length - 1, Math.floor(confidences.length * autoQuantile));
+  const reviewAbove = Math.max(confidences[autoIdx], abstainBelow + 0.05);
+
+  return {
+    abstainBelow: round(abstainBelow),
+    reviewAbove: round(reviewAbove),
+  };
+}
+
+function round(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+/**
+ * Fit calibration thresholds from development-split example-level predictions
+ * only. Returns per-type thresholds that control abstention and review-priority
+ * routing.
+ */
+export function calibrateThresholds(
+  devPairs: DevPredictionPair[],
+  options: CalibrateOptions = {},
+): CalibratedThresholds {
+  const byType = {
+    'primary_product_type': devPairs.filter(p => p.proposalType === 'primary_product_type'),
+    'category_page': devPairs.filter(p => p.proposalType === 'category_page'),
+    'field_assignment': devPairs.filter(p => p.proposalType === 'field_assignment'),
+  };
+
+  return {
+    productType: tierThresholds(byType['primary_product_type'], options),
+    categoryPage: tierThresholds(byType['category_page'], options),
+    fieldAssignment: tierThresholds(byType['field_assignment'], options),
+  };
+}
+
+/** Build dev pairs from a prediction bundle + gold outcomes (pure). */
+export function devPairsFromBundle(
+  predictions: BenchmarkPredictionEntry[],
+  goldByExample: ReadonlyMap<string, { productType: string | null }>,
+): DevPredictionPair[] {
+  const pairs: DevPredictionPair[] = [];
+  for (const prediction of predictions) {
+    const gold = goldByExample.get(prediction.exampleId);
+    if (!gold?.productType) continue;
+    if (prediction.abstained || prediction.productType === null || prediction.confidence === null || prediction.confidence === undefined) {
+      continue;
+    }
+    pairs.push({
+      proposalType: 'primary_product_type',
+      confidence: prediction.confidence,
+      correct: prediction.productType === gold.productType,
+    });
+  }
+  return pairs;
+}
+
+export function shouldAbstain(
+  confidence: number,
+  proposalType: string,
+  thresholds: CalibratedThresholds = DEFAULT_THRESHOLDS,
+): boolean {
+  const t = thresholdsFor(proposalType, thresholds);
+  return confidence < t.abstainBelow;
+}
+
+/**
+ * Review-tier routing. 'auto' is a review-priority hint: the item is routed to
+ * the fast-review bucket, but a human/standard review workflow still confirms
+ * before anything is accepted. Calibration never bypasses review.
+ */
+export function getReviewTier(
+  confidence: number,
+  proposalType: string,
+  thresholds: CalibratedThresholds = DEFAULT_THRESHOLDS,
+): ReviewTier {
+  const t = thresholdsFor(proposalType, thresholds);
+  if (confidence < t.abstainBelow) return 'abstain';
+  if (confidence >= t.reviewAbove) return 'auto';
+  return 'review';
+}
+
+function thresholdsFor(proposalType: string, thresholds: CalibratedThresholds): { abstainBelow: number; reviewAbove: number } {
+  if (proposalType === 'primary_product_type') return thresholds.productType;
+  if (proposalType === 'category_page') return thresholds.categoryPage;
+  if (proposalType === 'field_assignment') return thresholds.fieldAssignment;
+  return thresholds.fieldAssignment;
+}

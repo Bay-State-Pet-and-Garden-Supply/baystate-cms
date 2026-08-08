@@ -20,6 +20,14 @@ describe('serializeAttributeValue', () => {
     expect(serializeAttributeValue(undefined, defaultSerialization)).toBe('');
   });
 
+  it('bypasses prefix/suffix for explicit null clears', () => {
+    const withPrefix = { format: 'direct', separator: ', ', prefix: 'Size: ', suffix: '' };
+    const withSuffix = { format: 'direct', separator: ', ', prefix: '', suffix: ' lb' };
+    expect(serializeAttributeValue(null, withPrefix)).toBe('');
+    expect(serializeAttributeValue(null, withSuffix)).toBe('');
+    expect(serializeAttributeValue(undefined, withPrefix)).toBe('');
+  });
+
   it('returns string value directly for direct format', () => {
     expect(serializeAttributeValue('Chicken', defaultSerialization)).toBe('Chicken');
   });
@@ -97,6 +105,83 @@ describe('buildAssignmentProjection', () => {
     expect(result.fields[0].isOverwrite).toBe(true);
     expect(result.fields[0].isNoOp).toBe(false);
     expect(result.skipped).toHaveLength(0);
+  });
+
+  it('projects an explicit null correction as a deliberate field clear', () => {
+    const proposals: ClassificationProposal[] = [
+      {
+        id: 'p-clear', runId: 'r1', productSku: 'SKU001',
+        proposalType: 'field_assignment', targetId: 'flavor',
+        proposedValue: 'Beef', revisedValue: null, hasRevisedValue: true, confidence: 0.9,
+        evidenceIds: [], status: 'accepted',
+        isBulkAcceptable: false, isStale: false, stalenessReason: null,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    const result = buildAssignmentProjection(proposals, currentCustomFields, currentPageNames, mappings);
+    expect(result.fields[0].proposedValue).toBe('');
+    expect(result.fields[0].isOverwrite).toBe(true);
+    expect(result.fields[0].isNoOp).toBe(false);
+  });
+
+  it('projects prefixed/suffixed explicit null clears as empty strings', () => {
+    const affixMappings: AttributeMappingConfig[] = [
+      {
+        id: 'size-map',
+        attributeId: 'size',
+        catalogField: 'ProductField20',
+        serialization: { format: 'direct', separator: ', ', prefix: 'Size: ', suffix: '' },
+        isStale: false,
+      },
+    ];
+    const proposals: ClassificationProposal[] = [
+      {
+        id: 'p-affix-clear', runId: 'r1', productSku: 'SKU001',
+        proposalType: 'field_assignment', targetId: 'size',
+        proposedValue: 'Large', revisedValue: null, hasRevisedValue: true, confidence: 0.9,
+        evidenceIds: [], status: 'accepted',
+        isBulkAcceptable: false, isStale: false, stalenessReason: null,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const result = buildAssignmentProjection(proposals, {}, [], affixMappings);
+    expect(result.fields[0].proposedValue).toBe('');
+  });
+
+  it('skips assignments when the revised target is explicitly cleared to null', () => {
+    const proposals: ClassificationProposal[] = [
+      {
+        id: 'p-target-clear', runId: 'r1', productSku: 'SKU001',
+        proposalType: 'field_assignment', targetId: 'flavor',
+        proposedValue: 'Beef', revisedTargetId: null, hasRevisedTargetId: true, confidence: 0.9,
+        evidenceIds: [], status: 'accepted',
+        isBulkAcceptable: false, isStale: false, stalenessReason: null,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    const result = buildAssignmentProjection(proposals, currentCustomFields, currentPageNames, mappings);
+    expect(result.fields).toHaveLength(0);
+    expect(result.skipped).toEqual([
+      expect.objectContaining({ proposalId: 'p-target-clear', targetId: null, reason: 'No attribute target' }),
+    ]);
+  });
+
+  it('uses the revised target when mapping a corrected assignment', () => {
+    const proposals: ClassificationProposal[] = [
+      {
+        id: 'p-retarget', runId: 'r1', productSku: 'SKU001',
+        proposalType: 'field_assignment', targetId: 'size',
+        proposedValue: 'Beef', revisedTargetId: 'flavor', hasRevisedTargetId: true, confidence: 0.9,
+        evidenceIds: [], status: 'accepted',
+        isBulkAcceptable: false, isStale: false, stalenessReason: null,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+
+    const result = buildAssignmentProjection(proposals, currentCustomFields, currentPageNames, mappings);
+    expect(result.fields[0].catalogField).toBe('ProductField17');
+    expect(result.fields[0].proposedValue).toBe('Beef');
   });
 
   it('flags no-op when current and proposed match', () => {

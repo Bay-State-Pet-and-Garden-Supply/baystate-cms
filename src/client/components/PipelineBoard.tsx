@@ -10,6 +10,7 @@ import {
   setItemUrl,
   submitDecisions,
   completeReviewStage,
+  OnboardingApiError,
   getCurationTargets,
   type CurationTargetsResponse,
   type ConsistencyWarning,
@@ -23,8 +24,35 @@ import type {
   StageStatus,
   BrandSite,
 } from '../../shared/schemas/onboarding';
-import type { ClassificationProposal, ClassificationEvidence, CurationTargetConfig } from '../../shared/schemas/classification';
+import type {
+  ClassificationProposal,
+  ClassificationProposalDecision,
+  ClassificationEvidence,
+  CurationTargetConfig,
+} from '../../shared/schemas/classification';
+import {
+  ActionQueueResetError,
+  SequentialActionQueue,
+  canApplyProposalEdit,
+  editableCurationData,
+  getEffectiveProductTypeId,
+  getEffectiveProposalTargetId,
+  getEffectiveProposalValue,
+  isCurrentReviewGeneration,
+  isCurrentReviewVersion,
+  prepareDecisionAction,
+  proposalDecisionSnapshot,
+  withReviewedProductTypeId,
+  withReviewedProposalValue,
+  type PreparedDecisionAction,
+  type ProposalDecisionSnapshot,
+} from '../pipeline-decision-state';
 import { SearchableBrandSelector } from './SearchableBrandSelector';
+import { ReviewDrawerShell } from './pipeline-drawer/ReviewDrawerShell';
+import { ProductImageGallery } from './pipeline-drawer/ProductImageGallery';
+import { DiscoveryStagePanel } from './pipeline-drawer/DiscoveryStagePanel';
+import { ExtractionStagePanel } from './pipeline-drawer/ExtractionStagePanel';
+import { CurationStagePanel } from './pipeline-drawer/CurationStagePanel';
 
 const STAGES: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
@@ -54,6 +82,39 @@ const STAGE_STATUS_STYLE: Record<StageStatus, { bg: string; text: string; icon: 
   failed: { bg: '#fee2e2', text: '#991b1b', icon: '✗' },
   skipped: { bg: '#e5e7eb', text: '#6b7280', icon: '⊘' },
 };
+
+function createDecisionActionToken(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+interface ItemSaveAction {
+  extractionData: Partial<ExtractionData>;
+  curationData: Partial<CurationData>;
+}
+
+/** Per-item transport state so late saves cannot race another drawer. */
+interface ItemDecisionTransportState {
+  /** Optimistic predecessor ids include queued client-generated decision ids. */
+  revisionIds: Record<string, string | null>;
+  /** Latest canonical or optimistically queued semantic state per proposal. */
+  proposalSnapshots: Record<string, ProposalDecisionSnapshot>;
+  pendingActions: Record<string, PreparedDecisionAction>;
+  /** Incremented whenever a local write begins; canonical GETs capture it. */
+  mutationVersion: number;
+  decisionQueue: SequentialActionQueue<PreparedDecisionAction, ClassificationProposalDecision>;
+  itemSaveQueue: SequentialActionQueue<ItemSaveAction, void>;
+}
+
+function createEmptyDecisionTransportState(): ItemDecisionTransportState {
+  return {
+    revisionIds: {},
+    proposalSnapshots: {},
+    pendingActions: {},
+    mutationVersion: 0,
+    decisionQueue: new SequentialActionQueue(),
+    itemSaveQueue: new SequentialActionQueue(),
+  };
+}
 
 function deriveProfileFailReason(errorMessage: string | null): 'no_profile' | 'ambiguous_match' | 'structure_mismatch' | null {
   if (!errorMessage) return null;
@@ -99,13 +160,14 @@ export function PipelineBoard({
   // Review drawer state
   const [reviewItem, setReviewItem] = useState<OnboardingItem | null>(null);
   const reviewItemRef = React.useRef<string | null>(null);
+  const reviewGenerationRef = React.useRef(0);
   const [reviewSources, setReviewSources] = useState<OnboardingSource[]>([]);
   const [reviewExtraction, setReviewExtraction] = useState<ExtractionData | null>(null);
   const [editFields, setEditFields] = useState<Partial<ExtractionData>>({});
   const [activeImageIdx, setActiveImageIdx] = useState(0);
   const [curationFields, setCurationFields] = useState<Partial<CurationData>>({});
   const [classificationProposals, setClassificationProposals] = useState<ClassificationProposal[]>([]);
-  const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
+  const [_classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
   const [consistencyWarnings, setConsistencyWarnings] = useState<ConsistencyWarning[]>([]);
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [manualUrlInput, setManualUrlInput] = useState('');
@@ -117,6 +179,66 @@ export function PipelineBoard({
   const [_drawerBrandDomain, setDrawerBrandDomain] = useState('');
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [reviewTransitioning, setReviewTransitioning] = useState(false);
+  const reviewTransitionRef = React.useRef<{ itemId: string; generation: number } | null>(null);
+  // Decision transport is scoped per onboarding item so a late save for item A
+  // cannot read/write predecessor state belonging to item B.
+  const decisionTransportByItemRef = React.useRef<Map<string, ItemDecisionTransportState>>(new Map());
+
+  const getDecisionTransport = (itemId: string): ItemDecisionTransportState => {
+    let state = decisionTransportByItemRef.current.get(itemId);
+    if (!state) {
+      state = createEmptyDecisionTransportState();
+      decisionTransportByItemRef.current.set(itemId, state);
+    }
+    return state;
+  };
+
+  const transportHasLocalWork = (transport: ItemDecisionTransportState): boolean =>
+    transport.decisionQueue.hasPending()
+    || transport.decisionQueue.hasFailure()
+    || transport.itemSaveQueue.hasPending()
+    || transport.itemSaveQueue.hasFailure();
+
+  const installCanonicalDecisionState = (
+    item: OnboardingItem | null | undefined,
+    options: { force?: boolean } = {},
+  ): boolean => {
+    const proposals = item?.curationData?.classificationProposals ?? [];
+    const evidence = item?.curationData?.classificationEvidence ?? [];
+    if (item) {
+      const transport = getDecisionTransport(item.id);
+      if (!options.force && transportHasLocalWork(transport)) return false;
+      if (options.force) {
+        const decisionIsActivelyRunning = transport.decisionQueue.hasPending()
+          && !transport.decisionQueue.hasFailure();
+        if (decisionIsActivelyRunning) return false;
+        if (transport.decisionQueue.hasFailure()) {
+          transport.decisionQueue.resetAfterCanonicalRefresh();
+        }
+      }
+      transport.revisionIds = Object.fromEntries(
+        proposals.map(proposal => [proposal.id, proposal.currentDecisionId ?? null]),
+      );
+      transport.proposalSnapshots = Object.fromEntries(
+        proposals.map(proposal => [proposal.id, proposalDecisionSnapshot(proposal)]),
+      );
+      transport.pendingActions = {};
+    }
+    setClassificationProposals(proposals);
+    setClassificationEvidence(evidence);
+    return true;
+  };
+
+  const drainAllWrites = async (itemId: string | null | undefined) => {
+    if (!itemId) return;
+    const transport = decisionTransportByItemRef.current.get(itemId);
+    if (!transport) return;
+    await Promise.all([
+      transport.decisionQueue.drain(),
+      transport.itemSaveQueue.drain(),
+    ]);
+  };
 
   // SSE
   const sseRef = React.useRef<EventSource | null>(null);
@@ -175,29 +297,41 @@ export function PipelineBoard({
     sseRef.current = sse;
 
     sse.addEventListener('item:status', async (e: MessageEvent) => {
-      // Refresh staged items on any item update
       fetchStaged();
       try {
         const event = JSON.parse(e.data);
-        if (event && event.itemId && event.itemId === reviewItemRef.current) {
-          // Re-fetch detail for the active review item to update the drawer dynamically
-          const res = await getItemDetail(event.itemId);
-          setReviewItem(res.item);
-          const extractionData = res.extraction ?? res.item?.extractionData ?? null;
-          if (extractionData) {
-            setReviewExtraction(extractionData);
-            setEditFields(extractionData);
-          } else {
-            setReviewExtraction(null);
-            setEditFields({});
-          }
-          if (res.item?.curationData) {
-            setCurationFields(res.item.curationData);
-          }
-          setConsistencyWarnings(res.consistencyWarnings ?? []);
+        const itemId = typeof event?.itemId === 'string' ? event.itemId : null;
+        if (!itemId || itemId !== reviewItemRef.current || reviewTransitionRef.current) return;
+        const generation = reviewGenerationRef.current;
+        const transport = getDecisionTransport(itemId);
+        // A background refresh must not overwrite a dirty/failed local action.
+        if (transportHasLocalWork(transport)) return;
+        const mutationVersion = transport.mutationVersion;
+
+        const res = await getItemDetail(itemId);
+        if (!isCurrentReviewVersion(
+          reviewItemRef.current,
+          reviewGenerationRef.current,
+          transport.mutationVersion,
+          itemId,
+          generation,
+          mutationVersion,
+        ) || transportHasLocalWork(transport)) return;
+
+        setReviewItem(res.item);
+        const extractionData = res.extraction ?? res.item?.extractionData ?? null;
+        if (extractionData) {
+          setReviewExtraction(extractionData);
+          setEditFields(extractionData);
+        } else {
+          setReviewExtraction(null);
+          setEditFields({});
         }
+        if (res.item?.curationData) setCurationFields(res.item.curationData);
+        installCanonicalDecisionState(res.item);
+        setConsistencyWarnings(res.consistencyWarnings ?? []);
       } catch (err) {
-        console.warn('Failed to parse SSE item:status event:', err);
+        console.warn('Failed to process SSE item:status event:', err);
       }
     });
 
@@ -369,18 +503,6 @@ export function PipelineBoard({
       return;
     }
 
-    // Curation validation
-    const curationItemsToValidate = eligibleItems.filter(item => item.stage === 'curation');
-    const itemsWithPendingProposals = curationItemsToValidate.filter(item => {
-      const proposals = item.curationData?.classificationProposals || [];
-      return proposals.some((p: any) => p.targetId !== 'product_draft_projection' && p.status !== 'accepted' && p.status !== 'rejected');
-    });
-
-    if (itemsWithPendingProposals.length > 0) {
-      const names = itemsWithPendingProposals.map(item => `'${item.name || item.upc}'`).join(', ');
-      alert(`Cannot advance: the following products have AI proposals that haven't been accepted or rejected: ${names}`);
-      return;
-    }
 
     const count = eligibleItems.length;
     if (!confirm(`Advance ${count} selected product(s) to their next stage?`)) return;
@@ -432,6 +554,20 @@ export function PipelineBoard({
   // ─── Review Drawer ──────────────────────────────────────────────────────────
 
   const openReview = async (item: OnboardingItem) => {
+    if (reviewTransitionRef.current) return;
+    const previousItemId = reviewItemRef.current;
+    if (previousItemId && previousItemId !== item.id) {
+      try {
+        await drainAllWrites(previousItemId);
+      } catch (err) {
+        setSaveStatus('error');
+        setSaveError(err instanceof Error ? err.message : String(err));
+        return;
+      }
+    }
+
+    const generation = reviewGenerationRef.current + 1;
+    reviewGenerationRef.current = generation;
     reviewItemRef.current = item.id;
     setReviewItem(item);
     setManualUrlInput(item.sourceUrl || '');
@@ -446,16 +582,24 @@ export function PipelineBoard({
     );
     setDrawerBrandDomain(site?.domain || '');
 
-    if (item.curationData?.classificationProposals) {
-      setClassificationProposals(item.curationData.classificationProposals);
-      setClassificationEvidence(item.curationData.classificationEvidence || []);
-    } else {
-      setClassificationProposals([]);
-      setClassificationEvidence([]);
-    }
+    // Seed from staged JSON first, then replace with server-hydrated canonical
+    // proposals/decision ids from item detail (which include live revisions).
+    installCanonicalDecisionState(item);
+    const transport = getDecisionTransport(item.id);
+    const mutationVersion = transport.mutationVersion;
 
     try {
       const res = await getItemDetail(item.id);
+      if (!isCurrentReviewVersion(
+        reviewItemRef.current,
+        reviewGenerationRef.current,
+        transport.mutationVersion,
+        item.id,
+        generation,
+        mutationVersion,
+      )) return;
+
+      setReviewItem(res.item);
       setReviewSources(res.sources);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
       // Prefer extraction from the dedicated extractions table, then fall
@@ -480,12 +624,32 @@ export function PipelineBoard({
           suggestedProductType: null,
         });
       }
+      // Server hydration is authoritative for proposals + currentDecisionId.
+      installCanonicalDecisionState(res.item);
     } catch (err) {
-      console.error(err);
+      if (isCurrentReviewGeneration(
+        reviewItemRef.current,
+        reviewGenerationRef.current,
+        item.id,
+        generation,
+      )) {
+        setSaveStatus('error');
+        setSaveError(err instanceof Error ? err.message : String(err));
+      }
     }
   };
 
   const closeReview = async () => {
+    if (reviewTransitionRef.current) return;
+    const closingId = reviewItemRef.current;
+    try {
+      await drainAllWrites(closingId);
+    } catch (err) {
+      setSaveStatus('error');
+      setSaveError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    reviewGenerationRef.current += 1;
     reviewItemRef.current = null;
     setReviewItem(null);
     setReviewSources([]);
@@ -509,22 +673,36 @@ export function PipelineBoard({
 
   const handlePrevItem = () => {
     if (hasPrev) {
-      openReview(itemsInStage[currentReviewIndex - 1]);
+      void openReview(itemsInStage[currentReviewIndex - 1]);
     }
   };
 
   const handleNextItem = () => {
     if (hasNext) {
-      openReview(itemsInStage[currentReviewIndex + 1]);
+      void openReview(itemsInStage[currentReviewIndex + 1]);
     }
   };
 
   const handleResetSingle = async () => {
-    if (!reviewItem) return;
+    if (!reviewItem || reviewTransitionRef.current) return;
     setLoading(true);
     try {
-      await resetStageItems([reviewItem.id]);
-      const res = await getItemDetail(reviewItem.id);
+      await drainAllWrites(reviewItem.id);
+      const itemId = reviewItem.id;
+      const generation = reviewGenerationRef.current;
+      const transport = getDecisionTransport(itemId);
+      transport.mutationVersion += 1;
+      const mutationVersion = transport.mutationVersion;
+      await resetStageItems([itemId]);
+      const res = await getItemDetail(itemId);
+      if (!isCurrentReviewVersion(
+        reviewItemRef.current,
+        reviewGenerationRef.current,
+        transport.mutationVersion,
+        itemId,
+        generation,
+        mutationVersion,
+      )) return;
       setReviewItem(res.item);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
       const extractionData = res.extraction ?? res.item?.extractionData ?? null;
@@ -538,6 +716,9 @@ export function PipelineBoard({
       if (res.item?.curationData) {
         setCurationFields(res.item.curationData);
       }
+      // After review→curation reset, proposals are pending and decisions are
+      // superseded — install the hydrated server state, not the cached accept.
+      installCanonicalDecisionState(res.item);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -545,75 +726,289 @@ export function PipelineBoard({
     }
   };
 
+  const handleAdvanceSingle = async () => {
+    if (!reviewItem || reviewTransitionRef.current) return;
+    setLoading(true);
+    try {
+      await drainAllWrites(reviewItem.id);
+      await advanceItems([reviewItem.id]);
+      await fetchStaged();
+      const res = await getItemDetail(reviewItem.id);
+      setReviewItem(res.item);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleApproveAndNext = async () => {
+    if (!reviewItem || reviewTransitionRef.current) return;
+    const nextItemToOpen = hasNext ? itemsInStage[currentReviewIndex + 1] : null;
+    await handleApproveReview();
+    if (nextItemToOpen) {
+      void openReview(nextItemToOpen);
+    }
+  };
+
   const fieldTargetForProposal = (proposal: ClassificationProposal): { target: CurationTargetConfig | null; values: string[]; label: string } => {
+    const effectiveTargetId = getEffectiveProposalTargetId(proposal);
     if (proposal.proposalType !== 'field_assignment' || !curationTargetState) {
-      return { target: null, values: [], label: proposal.targetId || 'Field' };
+      return { target: null, values: [], label: effectiveTargetId || 'Field' };
     }
     const field = curationTargetState.candidates.productFields.find(candidate =>
-      candidate.attributeId === proposal.targetId || candidate.target?.attributeId === proposal.targetId,
+      candidate.attributeId === effectiveTargetId || candidate.target?.attributeId === effectiveTargetId,
     );
     return {
       target: field?.target ?? null,
       values: field?.values ?? [],
-      label: field ? `${field.label} (${field.catalogField})` : proposal.targetId || 'Field',
+      label: field ? `${field.label} (${field.catalogField})` : effectiveTargetId || 'Field',
     };
   };
 
   const productTypeOptions = () => curationTargetState?.candidates.productTypes ?? [];
 
-  const saveChangesQuietly = async (
+  const markSavedWhenIdle = (itemId: string, generation: number) => {
+    const transport = getDecisionTransport(itemId);
+    if (transportHasLocalWork(transport)) return;
+    if (!isCurrentReviewGeneration(
+      reviewItemRef.current,
+      reviewGenerationRef.current,
+      itemId,
+      generation,
+    )) return;
+    setSaveStatus('saved');
+    setTimeout(() => {
+      if (isCurrentReviewGeneration(
+        reviewItemRef.current,
+        reviewGenerationRef.current,
+        itemId,
+        generation,
+      )) {
+        setSaveStatus(previous => previous === 'saved' ? 'idle' : previous);
+      }
+    }, 1500);
+  };
+
+  /** Save editable item fields only. Proposal decisions use their own endpoint. */
+  const saveItemChangesQuietly = (
     itemId: string,
     currentEditFields: Partial<ExtractionData>,
     currentCurationFields: Partial<CurationData>,
-    currentProposals: ClassificationProposal[]
   ) => {
+    if (reviewTransitionRef.current) return;
+    const generation = reviewGenerationRef.current;
+    const transport = getDecisionTransport(itemId);
+    transport.mutationVersion += 1;
+    const action: ItemSaveAction = JSON.parse(JSON.stringify({
+      extractionData: currentEditFields,
+      curationData: editableCurationData(currentCurationFields),
+    })) as ItemSaveAction;
+
+    if (isCurrentReviewGeneration(
+      reviewItemRef.current,
+      reviewGenerationRef.current,
+      itemId,
+      generation,
+    )) {
+      setSaveStatus('saving');
+      setSaveError(null);
+    }
+
+    const operation = transport.itemSaveQueue.enqueue(action, async captured => {
+      await updateItem(itemId, {
+        extraction_data: captured.extractionData,
+        curation_data: captured.curationData,
+      });
+    });
+
+    void operation
+      .then(() => markSavedWhenIdle(itemId, generation))
+      .catch(err => {
+        if (isCurrentReviewGeneration(
+          reviewItemRef.current,
+          reviewGenerationRef.current,
+          itemId,
+          generation,
+        )) {
+          setSaveStatus('error');
+          setSaveError(err instanceof Error ? err.message : String(err));
+        }
+      });
+  };
+
+  const refreshCanonicalAfterConflict = async (
+    itemId: string,
+    generation: number,
+    conflictMessage: string,
+  ) => {
+    try {
+      const res = await getItemDetail(itemId);
+      if (!isCurrentReviewGeneration(
+        reviewItemRef.current,
+        reviewGenerationRef.current,
+        itemId,
+        generation,
+      )) return;
+      setReviewItem(res.item);
+      installCanonicalDecisionState(res.item, { force: true });
+      setConsistencyWarnings(res.consistencyWarnings ?? []);
+      setSaveStatus('error');
+      setSaveError(`${conflictMessage} Canonical decisions were refreshed; reapply your edit.`);
+    } catch (refreshError) {
+      setSaveStatus('error');
+      setSaveError(refreshError instanceof Error ? refreshError.message : String(refreshError));
+    }
+  };
+
+  const handleDecisionSuccess = (
+    itemId: string,
+    generation: number,
+    action: PreparedDecisionAction,
+    decision: ClassificationProposalDecision,
+  ) => {
+    const transport = getDecisionTransport(itemId);
+    if (transport.pendingActions[action.input.proposalId]?.input.actionToken === action.input.actionToken) {
+      delete transport.pendingActions[action.input.proposalId];
+    }
+    if (transport.revisionIds[action.input.proposalId] === action.input.id) {
+      transport.revisionIds[action.input.proposalId] = decision.id;
+    }
+    if (isCurrentReviewGeneration(
+      reviewItemRef.current,
+      reviewGenerationRef.current,
+      itemId,
+      generation,
+    ) && !transport.pendingActions[action.input.proposalId]) {
+      setClassificationProposals(previous => previous.map(proposal =>
+        proposal.id === action.input.proposalId
+          ? { ...proposal, currentDecisionId: decision.id }
+          : proposal,
+      ));
+    }
+    markSavedWhenIdle(itemId, generation);
+  };
+
+  const enqueueProposalDecision = (
+    itemId: string,
+    generation: number,
+    proposal: ClassificationProposal,
+  ) => {
+    const transport = getDecisionTransport(itemId);
+    if (!canApplyProposalEdit(transport.decisionQueue.hasFailure(), reviewTransitionRef.current !== null)) {
+      setSaveStatus('error');
+      setSaveError('A proposal decision failed. Retry the failed save or refresh canonical state before continuing.');
+      return;
+    }
+
+    const priorSnapshot = transport.proposalSnapshots[proposal.id]
+      ?? proposalDecisionSnapshot(proposal);
+    const action = prepareDecisionAction({
+      proposal,
+      priorSnapshot,
+      expectedRevisionId: transport.revisionIds[proposal.id] ?? null,
+      existingAction: transport.pendingActions[proposal.id],
+      createId: createDecisionActionToken,
+      createActionToken: createDecisionActionToken,
+    });
+    if (!action) return;
+
+    // Capture the semantic state and optimistic predecessor now. Rapid A1/A2
+    // edits form a deterministic client-generated revision chain.
+    transport.pendingActions[proposal.id] = action;
+    transport.proposalSnapshots[proposal.id] = action.snapshot;
+    transport.revisionIds[proposal.id] = action.input.id;
+    transport.mutationVersion += 1;
+    setSaveStatus('saving');
+    setSaveError(null);
+
+    const operation = transport.decisionQueue.enqueue(action, async captured => {
+      const response = await submitDecisions(itemId, [captured.input]);
+      const persisted = response.decisions[0];
+      if (!persisted) throw new Error('Decision endpoint returned no persisted decision.');
+      if (persisted.id !== captured.input.id) {
+        throw new Error('Decision endpoint returned an unexpected decision id.');
+      }
+      return persisted;
+    });
+
+    void operation
+      .then(decision => handleDecisionSuccess(itemId, generation, action, decision))
+      .catch(err => {
+        if (err instanceof ActionQueueResetError) return;
+        if (err instanceof OnboardingApiError && err.status === 409) {
+          void refreshCanonicalAfterConflict(itemId, generation, err.message);
+          return;
+        }
+        if (isCurrentReviewGeneration(
+          reviewItemRef.current,
+          reviewGenerationRef.current,
+          itemId,
+          generation,
+        )) {
+          setSaveStatus('error');
+          setSaveError(err instanceof Error ? err.message : String(err));
+        }
+      });
+  };
+
+  const updateProposal = (proposalId: string, patch: Partial<ClassificationProposal>) => {
+    const current = classificationProposals.find(proposal => proposal.id === proposalId);
+    if (!current || !reviewItem) return;
+    const transport = getDecisionTransport(reviewItem.id);
+    if (!canApplyProposalEdit(transport.decisionQueue.hasFailure(), reviewTransitionRef.current !== null)) {
+      setSaveStatus('error');
+      setSaveError(transport.decisionQueue.hasFailure()
+        ? 'Retry the failed proposal save or refresh canonical state before making another edit.'
+        : 'Review approval is already in progress.');
+      return;
+    }
+    const nextProposal = { ...current, ...patch };
+    if (patch.hasRevisedValue === false) delete nextProposal.revisedValue;
+    if (patch.hasRevisedTargetId === false) delete nextProposal.revisedTargetId;
+    setClassificationProposals(previous => previous.map(proposal =>
+      proposal.id === proposalId ? nextProposal : proposal,
+    ));
+    enqueueProposalDecision(reviewItem.id, reviewGenerationRef.current, nextProposal);
+  };
+
+  const retryFailedWrites = async () => {
+    if (!reviewItem) return;
+    const itemId = reviewItem.id;
+    const generation = reviewGenerationRef.current;
+    const transport = getDecisionTransport(itemId);
     setSaveStatus('saving');
     setSaveError(null);
     try {
-      await updateItem(itemId, {
-        extraction_data: currentEditFields,
-        curation_data: { ...currentCurationFields, classificationProposals: currentProposals, classificationEvidence },
-      });
-      if (currentProposals.length > 0) {
-        const decs = currentProposals
-          .filter(p => ['accepted', 'rejected', 'deferred'].includes(p.status))
-          .map(p => ({
-            proposalId: p.id,
-            decision: p.status as 'accepted' | 'rejected' | 'deferred',
-            proposedValue: p.proposedValue,
-            targetId: p.targetId,
-          }));
-        if (decs.length > 0) {
-          await submitDecisions(itemId, decs);
-        }
+      if (transport.itemSaveQueue.hasFailure()) {
+        await transport.itemSaveQueue.retryFailed();
       }
-      setSaveStatus('saved');
-      setTimeout(() => {
-        setSaveStatus(prev => prev === 'saved' ? 'idle' : prev);
-      }, 1500);
+      if (transport.decisionQueue.hasFailure()) {
+        const failedAction = transport.decisionQueue.getFailedAction();
+        const decision = await transport.decisionQueue.retryFailed();
+        if (failedAction) handleDecisionSuccess(itemId, generation, failedAction, decision);
+      }
+      await drainAllWrites(itemId);
+      markSavedWhenIdle(itemId, generation);
     } catch (err) {
+      if (err instanceof OnboardingApiError && err.status === 409) {
+        await refreshCanonicalAfterConflict(itemId, generation, err.message);
+        return;
+      }
       setSaveStatus('error');
       setSaveError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const updateProposal = (proposalId: string, patch: Partial<ClassificationProposal>) => {
-    const nextProposals = classificationProposals.map(p => p.id === proposalId ? { ...p, ...patch } : p);
-    setClassificationProposals(nextProposals);
-    if (reviewItem) {
-      saveChangesQuietly(reviewItem.id, editFields, curationFields, nextProposals);
-    }
-  };
-
   const handleApproveReview = async () => {
-    if (!reviewItem) return;
+    if (!reviewItem || reviewTransitionRef.current) return;
 
-    const hasAcceptedPageProposal = classificationProposals.some(
-      proposal => proposal.proposalType === 'category_page' && proposal.status === 'accepted',
+    const hasPageProposal = classificationProposals.some(
+      proposal => proposal.proposalType === 'category_page' && proposal.status !== 'rejected',
     );
     const hasManualPageAssignment = Boolean(curationFields.suggestedPages?.length);
-    if (!hasAcceptedPageProposal && !hasManualPageAssignment) {
-      alert('At least one Product Page must be selected or accepted before review can be completed.');
+    if (!hasPageProposal && !hasManualPageAssignment) {
+      alert('At least one Product Page must be selected before review can be completed.');
       return;
     }
 
@@ -622,43 +1017,71 @@ export function PipelineBoard({
       return;
     }
 
-    // Determine the next item in this stage before updating state
     const nextItem = hasNext ? itemsInStage[currentReviewIndex + 1] : null;
+    const itemId = reviewItem.id;
+    const generation = reviewGenerationRef.current;
+    const transition = { itemId, generation };
+    const approvalEditFields = JSON.parse(JSON.stringify(editFields)) as Partial<ExtractionData>;
+    const approvalCurationFields = JSON.parse(JSON.stringify(
+      editableCurationData(curationFields),
+    )) as Partial<CurationData>;
+    const transport = getDecisionTransport(itemId);
+    transport.mutationVersion += 1;
+    reviewTransitionRef.current = transition;
+    setReviewTransitioning(true);
+
+    const transitionIsCurrent = () => reviewTransitionRef.current === transition
+      && isCurrentReviewGeneration(
+        reviewItemRef.current,
+        reviewGenerationRef.current,
+        itemId,
+        generation,
+      );
+    const releaseTransition = () => {
+      if (reviewTransitionRef.current === transition) {
+        reviewTransitionRef.current = null;
+        setReviewTransitioning(false);
+      }
+    };
 
     try {
       setSaveStatus('saving');
-      await updateItem(reviewItem.id, {
-        extraction_data: editFields,
-        curation_data: { ...curationFields, classificationProposals, classificationEvidence },
+      // A failed/conflicted write rejects here; approval never resubmits all
+      // proposals and never outruns the append-only revision queue.
+      await drainAllWrites(itemId);
+      if (!transitionIsCurrent()) return;
+      await updateItem(itemId, {
+        extraction_data: approvalEditFields,
+        curation_data: approvalCurationFields,
       });
-      if (classificationProposals.length > 0) {
-        const decs = classificationProposals
-          .filter(p => ['accepted', 'rejected', 'deferred'].includes(p.status))
-          .map(p => ({
-            proposalId: p.id,
-            decision: p.status as 'accepted' | 'rejected' | 'deferred',
-            proposedValue: p.proposedValue,
-            targetId: p.targetId,
-          }));
-        if (decs.length > 0) {
-          await submitDecisions(reviewItem.id, decs);
-        }
-      }
-      // The server verifies that every active-run proposal has a durable
-      // decision. Any failure keeps the drawer open and the item in Review.
-      await completeReviewStage([reviewItem.id]);
+      if (!transitionIsCurrent()) return;
+      await completeReviewStage([itemId]);
+      if (!transitionIsCurrent()) return;
       setSaveStatus('saved');
+      releaseTransition();
       if (nextItem) {
-        openReview(nextItem);
+        await openReview(nextItem);
       } else {
-        closeReview();
+        await closeReview();
       }
     } catch (err) {
-      setSaveStatus('error');
-      setSaveError(err instanceof Error ? err.message : String(err));
-      alert('Error updating item: ' + (err instanceof Error ? err.message : String(err)));
+      if (transitionIsCurrent()) {
+        setSaveStatus('error');
+        setSaveError(err instanceof Error ? err.message : String(err));
+        alert('Error updating item: ' + (err instanceof Error ? err.message : String(err)));
+      }
+    } finally {
+      releaseTransition();
     }
   };
+
+  const hasRetryableSaveFailure = reviewItem
+    ? getDecisionTransport(reviewItem.id).decisionQueue.hasFailure()
+      || getDecisionTransport(reviewItem.id).itemSaveQueue.hasFailure()
+    : false;
+  const proposalControlsDisabled = reviewTransitioning || Boolean(
+    reviewItem && getDecisionTransport(reviewItem.id).decisionQueue.hasFailure(),
+  );
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -735,7 +1158,7 @@ export function PipelineBoard({
             </div>
             <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 2 }}>
               UPC: {item.upc}
-              {item.brandHint && (
+              {item.brandHint ? (
                 <span>
                   {' · '}{item.brandHint}
                   {onOpenBrandSetup && (
@@ -744,7 +1167,11 @@ export function PipelineBoard({
                     </a>
                   )}
                 </span>
-              )}
+              ) : (['curation', 'review', 'promotion'].includes(item.stage) && (
+                <span style={{ color: '#dc2626', fontWeight: 600, fontSize: 10, marginLeft: 4 }}>
+                  · ⚠ Missing Brand
+                </span>
+              ))}
             </div>
             {item.sourceUrl && (
               <div style={{ fontSize: 10, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1179,1596 +1606,236 @@ export function PipelineBoard({
 
       {/* ─── REVIEW DRAWER ────────────────────────────────────────────────── */}
       {reviewItem && (
-        <>
-          <div
-            onClick={closeReview}
-            style={{
-              position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-              background: 'rgba(0,0,0,0.5)', zIndex: 1000,
-            }}
-          />
-          <div style={{
-            position: 'fixed', top: 0, right: 0, bottom: 0,
-            width: '100%', maxWidth: 700, background: '#fff',
-            zIndex: 1001,
-            display: 'flex',
-            flexDirection: 'column',
-            boxShadow: '-4px 0 12px rgba(0,0,0,0.15)',
-            boxSizing: 'border-box',
-            overflow: 'hidden',
-          }}>
-            {/* Header */}
-            <div style={{
-              padding: '24px 24px 16px',
-              borderBottom: '1px solid #e5e7eb',
-              position: 'relative',
-              flexShrink: 0
-            }}>
-              <div style={{
-                position: 'absolute', top: 20, right: 20,
-                display: 'flex', alignItems: 'center', gap: 8
-              }}>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  <button
-                    onClick={handlePrevItem}
-                    disabled={!hasPrev}
-                    style={{
-                      padding: '4px 8px',
-                      background: '#fff',
-                      border: '1px solid #d1d5db',
-                      borderRadius: 4,
-                      color: hasPrev ? '#374151' : '#d1d5db',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: hasPrev ? 'pointer' : 'not-allowed',
-                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-                    }}
-                  >
-                    ◀ Prev
-                  </button>
-                  <button
-                    onClick={handleNextItem}
-                    disabled={!hasNext}
-                    style={{
-                      padding: '4px 8px',
-                      background: '#fff',
-                      border: '1px solid #d1d5db',
-                      borderRadius: 4,
-                      color: hasNext ? '#374151' : '#d1d5db',
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: hasNext ? 'pointer' : 'not-allowed',
-                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-                    }}
-                  >
-                    Next ▶
-                  </button>
-                </div>
-                <button
-                  onClick={closeReview}
-                  style={{
-                    background: 'none', border: 'none', fontSize: 20,
-                    cursor: 'pointer', color: '#6b7280', marginLeft: 4,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}
-                >
-                  ✕
-                </button>
-              </div>
-
-              <h2 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 600, color: '#111827' }}>
-                {reviewItem.name}
-              </h2>
-              {reviewItem.expectedName && reviewItem.expectedName !== reviewItem.name && (
-                <p style={{ margin: '0 0 4px', fontSize: 13, color: '#7c3aed', fontWeight: 500 }}>
-                  Expected: {reviewItem.expectedName}
-                </p>
-              )}
-              <p style={{ margin: 0, fontSize: 13, color: '#6b7280' }}>
-                UPC: {reviewItem.upc}
-                {reviewItem.price ? <span> · Price: <strong>${(() => { const n = parseFloat(reviewItem.price.replace(/[^0-9.]/g, '')); return isNaN(n) ? reviewItem.price : n.toFixed(2); })()}</strong></span> : null}
-              </p>
-              {(() => {
-                try {
-                  const domain = reviewItem.sourceUrl ? new URL(reviewItem.sourceUrl).hostname.replace(/^www./, '') : null;
-                  if (!domain) return null;
-                  return (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); closeReview(); onOpenProfileBuilder?.(domain, reviewItem); }}
-                      style={{ marginTop: 8, padding: '4px 12px', fontSize: 12, cursor: 'pointer', border: '1px solid #007bff', borderRadius: 4, color: '#007bff', background: '#fff', fontWeight: 600 }}
-                    >
-                      Open Profile Builder
-                    </button>
-                  );
-                } catch { return null; }
-              })()}
-            </div>
-
-            {/* Scrollable Body */}
-            <div style={{
-              flex: 1,
-              overflowY: 'auto',
-              padding: 24,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 20,
-              minHeight: 0,
-            }}>
-              {/* Stage Stepper Progress */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f9fafb', padding: '12px 16px', borderRadius: 8, border: '1px solid #e5e7eb', marginBottom: 4 }}>
-                {STAGES.map((stg, idx) => {
-                  const isCurrent = reviewItem.stage === stg;
-                  const isPast = STAGES.indexOf(reviewItem.stage) > idx;
-                  const label = STAGE_LABELS[stg];
-                  
-                  let color = '#9ca3af'; // Future
-                  let fontWeight = 'normal';
-                  let icon = '○';
-                  if (isCurrent) {
-                    color = '#7c3aed'; // Current
-                    fontWeight = '600';
-                    icon = reviewItem.stageStatus === 'in_progress' ? '◌' : '●';
-                  } else if (isPast) {
-                    color = '#16a34a'; // Past
-                    fontWeight = '500';
-                    icon = '✓';
-                  }
-
-                  return (
-                    <React.Fragment key={stg}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, color, fontSize: 11, fontWeight }}>
-                        {isCurrent && reviewItem.stageStatus === 'in_progress' ? (
-                          <span style={{
-                            display: 'inline-block',
-                            width: '10px',
-                            height: '10px',
-                            border: '1.5px solid currentColor',
-                            borderTopColor: 'transparent',
-                            borderRadius: '50%',
-                            animation: 'spin 0.8s linear infinite',
-                          }} />
-                        ) : (
-                          <span>{icon}</span>
-                        )}
-                        <span>{label}</span>
-                      </div>
-                      {idx < STAGES.length - 1 && <span style={{ color: '#e5e7eb', fontSize: 11 }}>➔</span>}
-                    </React.Fragment>
-                  );
-                })}
-              </div>
-
-              {consistencyWarnings.length > 0 && (
-                <div style={{
-                  padding: '12px 14px',
-                  borderRadius: 8,
-                  border: '1px solid #f59e0b',
-                  background: '#fffbeb',
-                  color: '#92400e',
-                }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>
-                    Sibling consistency review required
-                  </div>
-                  {consistencyWarnings.map(warning => (
-                    <div key={`${warning.groupId}:${warning.field}`} style={{ fontSize: 12, marginTop: 4 }}>
-                      <strong>{warning.field.replaceAll('_', ' ')}:</strong> {warning.message}
-                    </div>
-                  ))}
-                  <div style={{ fontSize: 11, marginTop: 8 }}>
-                    This is a warning only. Results were not copied, unioned, or majority-voted across siblings.
-                  </div>
-                </div>
-              )}
-
-              {/* Status Banner */}
-              {(() => {
-                const currentStageLabel = STAGE_LABELS[reviewItem.stage];
-                const stageStatus = reviewItem.stageStatus;
-                const isNeedsReview = stageStatus === 'completed' && reviewItem.errorMessage?.startsWith('needs_review:');
-                
-                let statusBannerBg = '#f3f4f6';
-                let statusBannerTextColor = '#374151';
-                let statusBannerBorderColor = '#d1d5db';
-                let statusTitle = '';
-                let statusDesc = '';
-
-                if (stageStatus === 'pending') {
-                  statusBannerBg = '#f3f4f6';
-                  statusBannerTextColor = '#374151';
-                  statusBannerBorderColor = '#d1d5db';
-                  statusTitle = `Pending ${currentStageLabel}`;
-                  statusDesc = 'Queued. Waiting for the background worker to start processing this step...';
-                } else if (stageStatus === 'in_progress') {
-                  statusBannerBg = '#eff6ff';
-                  statusBannerTextColor = '#1e40af';
-                  statusBannerBorderColor = '#bfdbfe';
-                  statusTitle = `${currentStageLabel} in progress...`;
-                  
-                  if (reviewItem.stage === 'discovery') {
-                    statusDesc = 'Searching brand domains and search engines to find the best product page URLs...';
-                  } else if (reviewItem.stage === 'extraction') {
-                    statusDesc = 'Scraping target web page using Crawlee + Playwright, extracting product specs, title, brand, price, and downloading images...';
-                  } else if (reviewItem.stage === 'curation') {
-                    statusDesc = 'Synthesizing store-ready titles, running Ollama VLM OCR on packaging image, and matching categories...';
-                  } else {
-                    statusDesc = 'Processing in background...';
-                  }
-                } else if (isNeedsReview) {
-                  statusBannerBg = '#ffedd5';
-                  statusBannerTextColor = '#c2410c';
-                  statusBannerBorderColor = '#fed7aa';
-                  statusTitle = `${currentStageLabel} needs review`;
-                  statusDesc = reviewItem.errorMessage || 'This item requires manual review.';
-                } else if (stageStatus === 'completed') {
-                  statusBannerBg = '#f0fdf4';
-                  statusBannerTextColor = '#166534';
-                  statusBannerBorderColor = '#bbf7d0';
-                  statusTitle = `${currentStageLabel} completed`;
-                  
-                  if (reviewItem.stage === 'discovery') {
-                    statusDesc = `Successfully found product page URL: ${reviewItem.sourceUrl}`;
-                  } else if (reviewItem.stage === 'extraction') {
-                    statusDesc = 'Scraped product details and downloaded images successfully. Results are displayed below.';
-                  } else if (reviewItem.stage === 'curation') {
-                    statusDesc = 'Auto-curated title, categories, and attributes. Ready for review.';
-                  } else {
-                    statusDesc = 'This stage completed successfully.';
-                  }
-                } else if (stageStatus === 'failed') {
-                  statusBannerBg = '#fee2e2';
-                  statusBannerTextColor = '#991b1b';
-                  statusBannerBorderColor = '#fca5a5';
-                  statusTitle = `${currentStageLabel} failed`;
-                  statusDesc = reviewItem.errorMessage || 'An unknown error occurred during this stage.';
-                } else if (stageStatus === 'skipped') {
-                  statusBannerBg = '#f9fafb';
-                  statusBannerTextColor = '#4b5563';
-                  statusBannerBorderColor = '#e5e7eb';
-                  statusTitle = `${currentStageLabel} skipped`;
-                  statusDesc = 'This stage was skipped by the user.';
+        <ReviewDrawerShell
+          reviewItem={reviewItem}
+          hasPrev={hasPrev}
+          hasNext={hasNext}
+          reviewTransitioning={reviewTransitioning}
+          onPrevItem={handlePrevItem}
+          onNextItem={handleNextItem}
+          onClose={closeReview}
+          onOpenProfileBuilder={onOpenProfileBuilder}
+          consistencyWarnings={consistencyWarnings}
+          handleResetSingle={handleResetSingle}
+          saveStatus={saveStatus}
+          saveError={saveError}
+          hasRetryableSaveFailure={hasRetryableSaveFailure}
+          retryFailedWrites={retryFailedWrites}
+          onApproveReview={handleApproveReview}
+          onApproveAndNext={handleApproveAndNext}
+          onAdvanceStage={handleAdvanceSingle}
+          leftColumnContent={
+            <ProductImageGallery
+              primaryImage={editFields.primaryImage || null}
+              additionalImages={editFields.additionalImages || []}
+              activeImageIdx={activeImageIdx}
+              setActiveImageIdx={setActiveImageIdx}
+              manualImageUrl={manualImageUrl}
+              setManualImageUrl={setManualImageUrl}
+              onSetPrimary={(newPrimary) => {
+                const oldPrimary = editFields.primaryImage;
+                const newAdditional = [
+                  ...(oldPrimary ? [oldPrimary] : []),
+                  ...(editFields.additionalImages || []).filter((x) => x !== newPrimary),
+                ];
+                const nextEdit = {
+                  ...editFields,
+                  primaryImage: newPrimary,
+                  additionalImages: newAdditional,
+                };
+                setEditFields(nextEdit);
+                saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
+              }}
+              onRemoveImage={(urlToRemove, isPrimary) => {
+                let nextEdit;
+                const additional = editFields.additionalImages || [];
+                if (isPrimary) {
+                  const newPrimary = additional[0] || null;
+                  const newAdditional = additional.slice(1);
+                  nextEdit = {
+                    ...editFields,
+                    primaryImage: newPrimary,
+                    additionalImages: newAdditional,
+                  };
+                } else {
+                  nextEdit = {
+                    ...editFields,
+                    additionalImages: additional.filter((x) => x !== urlToRemove),
+                  };
                 }
-
-                return (
-                  <div style={{
-                    background: statusBannerBg,
-                    color: statusBannerTextColor,
-                    border: `1px solid ${statusBannerBorderColor}`,
-                    borderRadius: 8,
-                    padding: '10px 14px',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: 12,
-                    flexShrink: 0,
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, lineHeight: 1.4 }}>
-                      {stageStatus === 'in_progress' ? (
-                        <span style={{
-                          display: 'inline-block',
-                          width: '12px',
-                          height: '12px',
-                          border: '2px solid currentColor',
-                          borderTopColor: 'transparent',
-                          borderRadius: '50%',
-                          animation: 'spin 0.8s linear infinite',
-                          flexShrink: 0,
-                        }} />
-                      ) : isNeedsReview ? (
-                        <span style={{ fontWeight: 'bold', color: '#c2410c', flexShrink: 0 }}>⚠</span>
-                      ) : stageStatus === 'completed' ? (
-                        <span style={{ fontWeight: 'bold', color: '#16a34a', flexShrink: 0 }}>✓</span>
-                      ) : stageStatus === 'failed' ? (
-                        <span style={{ fontWeight: 'bold', color: '#dc2626', flexShrink: 0 }}>✗</span>
-                      ) : (
-                        <span style={{ flexShrink: 0 }}>⏳</span>
-                      )}
-                      <div>
-                        <strong style={{ marginRight: 6 }}>{statusTitle}:</strong>
-                        <span style={{ opacity: 0.9 }}>{statusDesc}</span>
-                      </div>
-                    </div>
-                    {(stageStatus === 'failed' || stageStatus === 'completed' || stageStatus === 'skipped') && (
-                      <button
-                        onClick={handleResetSingle}
-                        disabled={loading}
-                        style={{
-                          padding: '4px 10px',
-                          background: '#fff',
-                          border: `1px solid ${statusBannerBorderColor}`,
-                          color: statusBannerTextColor,
-                          borderRadius: 4,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          cursor: loading ? 'not-allowed' : 'pointer',
-                          boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-                          transition: 'background 0.15s',
-                          whiteSpace: 'nowrap',
-                          flexShrink: 0,
-                        }}
-                        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f9fafb'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff'; }}
-                      >
-                        {stageStatus === 'failed' ? '🔄 Retry' : '🔄 Reset'}
-                      </button>
-                    )}
-                  </div>
-                );
-              })()}
-
-              {/* Brand Configuration Editor */}
-              {reviewItem && reviewItem.stage === 'discovery' && (
-                <div style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  background: '#f9fafb',
-                  border: '1px solid #e5e7eb',
-                  borderRadius: 8,
-                  padding: 12,
-                  marginTop: 12,
-                  flexShrink: 0,
-                }}>
-                  <h3 style={{ fontSize: 13, fontWeight: 600, margin: '0 0 10px 0', color: '#374151', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    🏷️ Brand Configuration
-                  </h3>
-                  <SearchableBrandSelector
-                    brandName={_drawerBrandName}
-                    brandDomain={_drawerBrandDomain}
-                    onSelect={(brand, domain) => {
-                      setDrawerBrandName(brand);
-                      if (domain) {
-                        setDrawerBrandDomain(domain);
-                      }
-                    }}
-                    onDomainChange={(domain) => setDrawerBrandDomain(domain)}
-                    cachedBrandSites={cachedBrandSites}
-                    catalogBrands={_catalogBrands || []}
-                  />
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                    <button
-                      onClick={async () => {
-                        setSaveStatus('saving');
-                        try {
-                          const res = await fetch(`/api/onboarding/batches/${reviewItem.batchId}/bulk-brand`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                              itemIds: [reviewItem.id],
-                              brandHint: _drawerBrandName.trim(),
-                              brandDomain: _drawerBrandDomain.trim(),
-                            }),
-                          });
-                          if (!res.ok) {
-                            const errBody = await res.json().catch(() => ({}));
-                            throw new Error(errBody.error || `HTTP ${res.status}`);
-                          }
-
-                          if (_onRefreshBrandSites) {
-                            _onRefreshBrandSites();
-                          }
-
-                          const detail = await getItemDetail(reviewItem.id);
-                          setReviewItem(detail.item);
-                          await fetchStaged();
-
-                          setSaveStatus('saved');
-                          setTimeout(() => setSaveStatus('idle'), 2000);
-                        } catch (err) {
-                          setSaveStatus('error');
-                          setSaveError(err instanceof Error ? err.message : String(err));
-                        }
-                      }}
-                      disabled={saveStatus === 'saving'}
-                      style={{
-                        padding: '6px 12px',
-                        background: '#2563eb',
-                        color: '#fff',
-                        border: 'none',
-                        borderRadius: 4,
-                        cursor: 'pointer',
-                        fontSize: 12,
-                        fontWeight: 600,
-                      }}
-                    >
-                      {saveStatus === 'saving' ? 'Saving...' : saveStatus === 'saved' ? '✓ Saved!' : 'Save Brand'}
-                    </button>
-                  </div>
-                  {saveStatus === 'error' && saveError && (
-                    <div style={{ color: '#dc2626', fontSize: 11, marginTop: 4 }}>
-                      Failed to save: {saveError}
-                    </div>
-                  )}
-                </div>
+                setEditFields(nextEdit);
+                saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
+                setActiveImageIdx((prev) => Math.max(0, prev - 1));
+              }}
+              onAddManualUrl={(urlToAdd) => {
+                let nextEdit;
+                if (!editFields.primaryImage) {
+                  nextEdit = { ...editFields, primaryImage: urlToAdd };
+                  setActiveImageIdx(0);
+                } else {
+                  const additional = editFields.additionalImages || [];
+                  if (!additional.includes(urlToAdd) && editFields.primaryImage !== urlToAdd) {
+                    nextEdit = {
+                      ...editFields,
+                      additionalImages: [...additional, urlToAdd],
+                    };
+                    setActiveImageIdx((editFields.primaryImage ? 1 : 0) + additional.length);
+                  } else {
+                    nextEdit = editFields;
+                  }
+                }
+                setEditFields(nextEdit);
+                saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
+              }}
+            />
+          }
+          rightColumnContent={
+            <>
+              {reviewItem.stage === 'discovery' && (
+                <DiscoveryStagePanel
+                  reviewItem={reviewItem}
+                  reviewSources={reviewSources}
+                  drawerBrandName={_drawerBrandName}
+                  drawerBrandDomain={_drawerBrandDomain}
+                  setDrawerBrandName={setDrawerBrandName}
+                  setDrawerBrandDomain={setDrawerBrandDomain}
+                  cachedBrandSites={cachedBrandSites}
+                  catalogBrands={_catalogBrands}
+                  onRefreshBrandSites={_onRefreshBrandSites}
+                  onSelectSource={async (sourceId, url) => {
+                    try {
+                      await fetch(`/api/onboarding/items/${reviewItem.id}/select-source`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ sourceId }),
+                      });
+                      setManualUrlInput(url);
+                      const res = await getItemDetail(reviewItem.id);
+                      setReviewItem(res.item);
+                      setReviewSources(res.sources);
+                    } catch (err) {
+                      alert('Failed to select source: ' + String(err));
+                    }
+                  }}
+                  manualUrlInput={manualUrlInput}
+                  setManualUrlInput={setManualUrlInput}
+                  onSetManualUrl={async (url) => {
+                    await setItemUrl(reviewItem.id, url);
+                    const res = await getItemDetail(reviewItem.id);
+                    setReviewItem(res.item);
+                    setManualUrlInput(res.item.sourceUrl || '');
+                    setShowEditUrl(false);
+                  }}
+                  saveStatus={saveStatus}
+                  saveError={saveError}
+                  setSaveStatus={setSaveStatus}
+                  setSaveError={setSaveError}
+                  onUpdateReviewItem={async () => {
+                    const detail = await getItemDetail(reviewItem.id);
+                    setReviewItem(detail.item);
+                    await fetchStaged();
+                  }}
+                />
               )}
 
-              {/* Source URL */}
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                flexShrink: 0,
-              }}>
-                <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: '#374151' }}>Source URL</h3>
-                
-                {/* Discovery: show source candidates */}
-                {reviewItem && reviewItem.stage === 'discovery' && reviewSources.length > 0 && (
-                  <div style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    flexShrink: 0,
-                    marginBottom: 12,
-                  }}>
-                    {/* Expected / consolidated name banner */}
-                    {reviewItem.expectedName && (
-                      <div style={{
-                        background: '#f0f9ff',
-                        border: '1px solid #bae6fd',
-                        borderRadius: 6,
-                        padding: '8px 12px',
-                        marginBottom: 10,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                      }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: '#0369a1' }}>🔍 Searching for:</span>
-                        <span style={{ fontSize: 13, fontWeight: 600, color: '#0c4a6e' }}>{reviewItem.expectedName}</span>
-                        {reviewItem.expectedName !== reviewItem.name && (
-                          <span style={{ fontSize: 10, color: '#6b7280', fontStyle: 'italic' }}>
-                            (consolidated from raw &ldquo;{reviewItem.name}&rdquo;)
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    <p style={{ fontSize: 12, color: '#6b7280', marginBottom: 8 }}>
-                      Search results — click to select the correct product page:
-                    </p>
-                    {(() => {
-                      // Group sources by their search method so the operator can
-                      // see which results came from the bare UPC search (Pass 1)
-                      // vs the consolidated-name search (Pass 2). Sources are
-                      // already sorted by confidence descending in the backend.
-                      const methodLabel = (method: string): { short: string; long: string; bg: string; text: string } => {
-                        if (method === 'shopify_variant') {
-                          return {
-                            short: 'Variant',
-                            long: 'Variant resolution',
-                            bg: '#fef3c7',
-                            text: '#92400e',
-                          };
-                        }
-                        if (method === 'serper_name') {
-                          return {
-                            short: 'Name',
-                            long: `Name search ("${reviewItem.expectedName || reviewItem.name}")`,
-                            bg: '#ede9fe',
-                            text: '#5b21b6',
-                          };
-                        }
-                        if (method === 'serper_upc') {
-                          return {
-                            short: 'UPC',
-                            long: `UPC search ("${reviewItem.upc}")`,
-                            bg: '#dbeafe',
-                            text: '#1e40af',
-                          };
-                        }
-                        // Legacy/unknown method value (e.g. plain 'serper' from older records)
-                        return {
-                          short: 'Other',
-                          long: 'Other search',
-                          bg: '#f3f4f6',
-                          text: '#374151',
-                        };
-                      };
-
-                      type SourceGroup = {
-                        method: string;
-                        items: OnboardingSource[];
-                      };
-
-                      const groupOrder: string[] = ['shopify_variant', 'serper_upc', 'serper_name'];
-                      const groups: SourceGroup[] = [];
-                      for (const method of groupOrder) {
-                        const items = reviewSources.filter(s => s.sourceMethod === method);
-                        if (items.length > 0) groups.push({ method, items });
-                      }
-                      // Catch any sources whose method doesn't match the known set
-                      // so we never silently drop them from the drawer.
-                      const knownMethods = new Set(groupOrder);
-                      const leftovers = reviewSources.filter(s => !knownMethods.has(s.sourceMethod));
-                      if (leftovers.length > 0) {
-                        groups.push({ method: 'other', items: leftovers });
-                      }
-
-                      if (groups.length === 0) {
-                        return (
-                          <div style={{
-                            padding: 12,
-                            border: '1px solid #e5e7eb',
-                            borderRadius: 8,
-                            background: '#f9fafb',
-                            fontSize: 12,
-                            color: '#6b7280',
-                            fontStyle: 'italic',
-                          }}>
-                            No source candidates were returned for this product.
-                          </div>
-                        );
-                      }
-
-                      return (
-                        <div style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 12,
-                          flexShrink: 0,
-                        }}>
-                          {groups.map((group) => {
-                            const label = methodLabel(group.method);
-                            return (
-                              <div
-                                key={group.method}
-                                style={{
-                                  border: '1px solid #e5e7eb',
-                                  borderRadius: 8,
-                                  background: '#fff',
-                                  overflow: 'hidden',
-                                }}
-                              >
-                                {/* Group header */}
-                                <div style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'space-between',
-                                  padding: '6px 10px',
-                                  background: '#f3f4f6',
-                                  borderBottom: '1px solid #e5e7eb',
-                                }}>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                    <span style={{
-                                      fontSize: 10,
-                                      fontWeight: 700,
-                                      textTransform: 'uppercase',
-                                      letterSpacing: '0.04em',
-                                      padding: '2px 6px',
-                                      borderRadius: 4,
-                                      background: label.bg,
-                                      color: label.text,
-                                    }}>
-                                      {label.short}
-                                    </span>
-                                    <span style={{ fontSize: 12, fontWeight: 600, color: '#374151' }}>
-                                      {label.long}
-                                    </span>
-                                  </div>
-                                  <span style={{ fontSize: 11, color: '#6b7280', fontWeight: 500 }}>
-                                    {group.items.length} result{group.items.length === 1 ? '' : 's'}
-                                  </span>
-                                </div>
-                                {/* Group items */}
-                                <div style={{
-                                  display: 'flex',
-                                  flexDirection: 'column',
-                                  gap: 6,
-                                  padding: 8,
-                                  background: '#f9fafb',
-                                }}>
-                                  {(() => {
-                                    type RenderItem =
-                                      | { type: 'standalone'; source: OnboardingSource }
-                                      | { type: 'ambiguous_group'; baseUrl: string; sources: OnboardingSource[] };
-
-                                    const renderItems: RenderItem[] = [];
-                                    const seenBaseUrls = new Set<string>();
-
-                                    for (const src of group.items) {
-                                      let itemBaseUrl = '';
-                                      let isAmb = false;
-                                      if (src.metadataJson) {
-                                        try {
-                                          const meta = JSON.parse(src.metadataJson);
-                                          isAmb = meta.variantResolution?.status === 'ambiguous';
-                                          itemBaseUrl = meta.variantResolution?.baseUrl || '';
-                                        } catch {}
-                                      }
-
-                                      if (isAmb && itemBaseUrl) {
-                                        if (seenBaseUrls.has(itemBaseUrl)) continue;
-                                        seenBaseUrls.add(itemBaseUrl);
-                                        const groupVariants = group.items.filter(x => {
-                                          if (!x.metadataJson) return false;
-                                          try {
-                                            const m = JSON.parse(x.metadataJson);
-                                            return m.variantResolution?.status === 'ambiguous' && m.variantResolution?.baseUrl === itemBaseUrl;
-                                          } catch {
-                                            return false;
-                                          }
-                                        });
-                                        renderItems.push({
-                                          type: 'ambiguous_group',
-                                          baseUrl: itemBaseUrl,
-                                          sources: groupVariants
-                                        });
-                                      } else {
-                                        renderItems.push({
-                                          type: 'standalone',
-                                          source: src
-                                        });
-                                      }
-                                    }
-
-                                    const handleSelect = async (sourceId: string, url: string) => {
-                                      try {
-                                        await fetch(`/api/onboarding/items/${reviewItem.id}/select-source`, {
-                                          method: 'POST',
-                                          headers: { 'Content-Type': 'application/json' },
-                                          body: JSON.stringify({ sourceId }),
-                                        });
-                                        setManualUrlInput(url);
-                                        const res = await getItemDetail(reviewItem.id);
-                                        setReviewItem(res.item);
-                                        setReviewSources(res.sources);
-                                      } catch (err) {
-                                        alert('Failed to select source: ' + String(err));
-                                      }
-                                    };
-
-                                    return renderItems.map((item, idx) => {
-                                      if (item.type === 'standalone') {
-                                        const src = item.source;
-                                        const srcLabel = methodLabel(src.sourceMethod);
-                                        let isResolved = false;
-                                        let variantTitle = '';
-                                        let matchedSignals: string[] = [];
-                                        if (src.metadataJson) {
-                                          try {
-                                            const meta = JSON.parse(src.metadataJson);
-                                            isResolved = meta.variantResolution?.status === 'resolved';
-                                            variantTitle = meta.variantResolution?.variantTitle || '';
-                                            matchedSignals = meta.variantResolution?.matchedSignals || [];
-                                          } catch {}
-                                        }
-
-                                        return (
-                                          <div
-                                            key={src.id}
-                                            onClick={() => handleSelect(src.id, src.url)}
-                                            style={{
-                                              border: '1px solid #e5e7eb',
-                                              borderRadius: 6,
-                                              padding: 10,
-                                              background: src.isSelected ? '#f0fdf4' : '#fff',
-                                              borderColor: src.isSelected ? '#16a34a' : '#e5e7eb',
-                                              cursor: 'pointer',
-                                              textAlign: 'left',
-                                              boxShadow: src.isSelected ? '0 1px 3px rgba(22, 163, 74, 0.1)' : '0 1px 2px rgba(0,0,0,0.05)',
-                                              transition: 'all 0.2s ease-in-out',
-                                            }}
-                                          >
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' }}>
-                                              <strong style={{ fontSize: 13, color: src.isSelected ? '#166534' : '#111827' }}>
-                                                {src.title || src.domain}
-                                              </strong>
-                                              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                {isResolved && (
-                                                  <span style={{
-                                                    fontSize: 9,
-                                                    fontWeight: 700,
-                                                    background: '#fef3c7',
-                                                    color: '#92400e',
-                                                    padding: '1px 5px',
-                                                    borderRadius: 3,
-                                                  }}>
-                                                    Variant Resolved
-                                                  </span>
-                                                )}
-                                                <span style={{
-                                                  fontSize: 9,
-                                                  fontWeight: 700,
-                                                  textTransform: 'uppercase',
-                                                  letterSpacing: '0.04em',
-                                                  padding: '1px 5px',
-                                                  borderRadius: 3,
-                                                  background: srcLabel.bg,
-                                                  color: srcLabel.text,
-                                                }}>
-                                                  {srcLabel.short}
-                                                </span>
-                                                <span style={{ fontSize: 11, fontWeight: 600, color: '#15803d' }}>
-                                                  {src.isSelected ? '✓ Selected' : `${(src.confidence * 100).toFixed(0)}%`}
-                                                </span>
-                                              </span>
-                                            </div>
-                                            <p style={{ margin: '0 0 4px', fontSize: 11, color: '#6b7280', wordBreak: 'break-all' }}>
-                                              {src.url}
-                                            </p>
-                                            {variantTitle && (
-                                              <p style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 600, color: '#4b5563' }}>
-                                                Variant: <span style={{ color: '#1e3a8a' }}>{variantTitle}</span>
-                                              </p>
-                                            )}
-                                            {matchedSignals.length > 0 && (
-                                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
-                                                {matchedSignals.map(sig => (
-                                                  <span key={sig} style={{ fontSize: 9, background: '#f3f4f6', color: '#4b5563', padding: '1px 4px', borderRadius: 3 }}>
-                                                    {sig}
-                                                  </span>
-                                                ))}
-                                              </div>
-                                            )}
-                                            {src.snippet && (
-                                              <p style={{ margin: 0, fontSize: 11, color: '#4b5563', fontStyle: 'italic' }}>
-                                                &ldquo;{src.snippet.slice(0, 150)}{src.snippet.length > 150 ? '...' : ''}&rdquo;
-                                              </p>
-                                            )}
-                                          </div>
-                                        );
-                                      } else {
-                                        const baseDomain = new URL(item.baseUrl).hostname;
-                                        return (
-                                          <div
-                                            key={`group-${idx}`}
-                                            style={{
-                                              border: '1px solid #cbd5e1',
-                                              borderRadius: 8,
-                                              background: '#f8fafc',
-                                              overflow: 'hidden',
-                                              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
-                                            }}
-                                          >
-                                            <div style={{
-                                              padding: '8px 12px',
-                                              background: '#f1f5f9',
-                                              borderBottom: '1px solid #e2e8f0',
-                                              display: 'flex',
-                                              justifyContent: 'space-between',
-                                              alignItems: 'center',
-                                            }}>
-                                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'left' }}>
-                                                <span style={{ fontSize: 12, fontWeight: 700, color: '#334155' }}>
-                                                  {baseDomain}
-                                                </span>
-                                                <span style={{ fontSize: 10, color: '#64748b', wordBreak: 'break-all' }}>
-                                                  {item.baseUrl}
-                                                </span>
-                                              </div>
-                                              <span style={{
-                                                fontSize: 9,
-                                                fontWeight: 700,
-                                                background: '#fee2e2',
-                                                color: '#b91c1c',
-                                                padding: '2px 6px',
-                                                borderRadius: 4,
-                                              }}>
-                                                Ambiguous Variants ({item.sources.length})
-                                              </span>
-                                            </div>
-                                            <div style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                              {item.sources.map((v) => {
-                                                let vTitle = '';
-                                                let matchedSignals: string[] = [];
-                                                if (v.metadataJson) {
-                                                  try {
-                                                    const meta = JSON.parse(v.metadataJson);
-                                                    vTitle = meta.variantResolution?.variantTitle || '';
-                                                    matchedSignals = meta.variantResolution?.matchedSignals || [];
-                                                  } catch {}
-                                                }
-                                                return (
-                                                  <div
-                                                    key={v.id}
-                                                    onClick={() => handleSelect(v.id, v.url)}
-                                                    style={{
-                                                      border: '1px solid #e2e8f0',
-                                                      borderRadius: 6,
-                                                      padding: 8,
-                                                      background: v.isSelected ? '#f0fdf4' : '#fff',
-                                                      borderColor: v.isSelected ? '#16a34a' : '#e2e8f0',
-                                                      cursor: 'pointer',
-                                                      display: 'flex',
-                                                      justifyContent: 'space-between',
-                                                      alignItems: 'center',
-                                                      boxShadow: v.isSelected ? '0 1px 2px rgba(22, 163, 74, 0.05)' : 'none',
-                                                      transition: 'all 0.15s ease-in-out',
-                                                    }}
-                                                  >
-                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'left' }}>
-                                                      <span style={{ fontSize: 12, fontWeight: 600, color: v.isSelected ? '#166534' : '#1e293b' }}>
-                                                        {vTitle || v.title}
-                                                      </span>
-                                                      {matchedSignals.length > 0 && (
-                                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
-                                                          {matchedSignals.map(sig => (
-                                                            <span key={sig} style={{ fontSize: 8, background: '#f1f5f9', color: '#64748b', padding: '1px 3px', borderRadius: 2 }}>
-                                                              {sig}
-                                                            </span>
-                                                          ))}
-                                                        </div>
-                                                      )}
-                                                    </div>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                      <span style={{ fontSize: 11, fontWeight: 500, color: '#64748b' }}>
-                                                        {(v.confidence * 100).toFixed(0)}%
-                                                      </span>
-                                                      <button
-                                                        onClick={(e) => {
-                                                          e.stopPropagation();
-                                                          handleSelect(v.id, v.url);
-                                                        }}
-                                                        style={{
-                                                          fontSize: 10,
-                                                          fontWeight: 600,
-                                                          padding: '2px 6px',
-                                                          borderRadius: 4,
-                                                          background: v.isSelected ? '#16a34a' : '#2563eb',
-                                                          color: '#fff',
-                                                          border: 'none',
-                                                          cursor: 'pointer',
-                                                        }}
-                                                      >
-                                                        {v.isSelected ? 'Selected' : 'Select'}
-                                                      </button>
-                                                    </div>
-                                                  </div>
-                                                );
-                                              })}
-                                            </div>
-                                          </div>
-                                        );
-                                      }
-                                    });
-                                  })()}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-
-                {/* Manual URL input or Clickable URL block */}
-                {reviewItem.stage === 'discovery' || showEditUrl ? (
-                  <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                    <input
-                      type="text"
-                      value={manualUrlInput}
-                      onChange={(e) => setManualUrlInput(e.target.value)}
-                      placeholder="Or paste product page URL manually"
-                      style={{ flex: 1, padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 13 }}
-                    />
-                    <button
-                      onClick={async () => {
-                        if (!manualUrlInput.trim()) return;
-                        await setItemUrl(reviewItem.id, manualUrlInput);
-                        const res = await getItemDetail(reviewItem.id);
-                        setReviewItem(res.item);
-                        setManualUrlInput(res.item.sourceUrl || '');
-                        setShowEditUrl(false);
-                      }}
-                      style={{ padding: '8px 16px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 500 }}
-                    >
-                      Set
-                    </button>
-                    {showEditUrl && (
-                      <button
-                        onClick={() => setShowEditUrl(false)}
-                        style={{ padding: '8px 12px', background: '#fff', border: '1px solid #d1d5db', borderRadius: 6, cursor: 'pointer', fontSize: 13, color: '#4b5563' }}
-                      >
-                        Cancel
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    background: '#f9fafb',
-                    padding: '8px 12px',
-                    borderRadius: 6,
-                    border: '1px solid #e5e7eb',
-                    flexShrink: 0,
-                  }}>
-                    {reviewItem.sourceUrl ? (
-                      <a
-                        href={reviewItem.sourceUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          fontSize: 13,
-                          color: '#2563eb',
-                          textDecoration: 'none',
-                          fontWeight: 500,
-                          wordBreak: 'break-all',
-                        }}
-                        onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none'; }}
-                      >
-                        {reviewItem.sourceUrl} <span style={{ fontSize: 11, marginLeft: 2 }}>↗</span>
-                      </a>
-                    ) : (
-                      <span style={{ fontSize: 13, color: '#9ca3af', fontStyle: 'italic' }}>No URL set</span>
-                    )}
-                    <button
-                      onClick={() => setShowEditUrl(true)}
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: '#6b7280',
-                        fontSize: 11,
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        padding: '2px 6px',
-                        borderRadius: 4,
-                        transition: 'background 0.15s',
-                      }}
-                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#e5e7eb'; e.currentTarget.style.color = '#374151'; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.color = '#6b7280'; }}
-                    >
-                      ✏ Edit
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Extracted product data (shown for extraction+ stages) */}
-              {reviewItem && reviewItem.stage !== 'discovery' && (reviewExtraction || curationFields.curatedTitle || classificationProposals.length > 0) && (
-                <>
-                  {/* Raw extraction results — shown in extraction stage */}
-                  {reviewItem?.stage === 'extraction' && reviewExtraction && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 16, background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0, color: '#1e293b' }}>
-                        📋 Raw Extraction Results
-                      </h3>
-                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                        <tbody>
-                          {reviewExtraction.title && (
-                            <tr>
-                              <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Title</td>
-                              <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9', wordBreak: 'break-word' }}>{reviewExtraction.title}</td>
-                            </tr>
-                          )}
-                          {reviewExtraction.brand && (
-                            <tr>
-                              <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Brand</td>
-                              <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{reviewExtraction.brand}</td>
-                            </tr>
-                          )}
-                          {reviewExtraction.description && (
-                            <tr>
-                              <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>Description</td>
-                              <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9', wordBreak: 'break-word' }}>{reviewExtraction.description.slice(0, 500)}{reviewExtraction.description.length > 500 ? '…' : ''}</td>
-                            </tr>
-                          )}
-                          {reviewExtraction.customFields && Object.keys(reviewExtraction.customFields).length > 0 && (
-                            Object.entries(reviewExtraction.customFields).map(([fieldName, value]) => (
-                              <tr key={fieldName}>
-                                <td style={{ padding: '6px 8px', fontWeight: 600, color: '#475569', width: 120, verticalAlign: 'top', borderBottom: '1px solid #f1f5f9' }}>{fieldName}</td>
-                                <td style={{ padding: '6px 8px', color: '#0f172a', borderBottom: '1px solid #f1f5f9' }}>{value}</td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                      {reviewExtraction.fieldProvenance && Object.keys(reviewExtraction.fieldProvenance).length > 0 && (
-                        <details style={{ fontSize: 11, color: '#94a3b8' }}>
-                          <summary style={{ cursor: 'pointer', fontWeight: 500, color: '#64748b' }}>Field provenance (which source each field came from)</summary>
-                          <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                            {Object.entries(reviewExtraction.fieldProvenance).map(([field, source]) => (
-                              <span key={field} style={{ background: '#f1f5f9', padding: '1px 6px', borderRadius: 4, color: '#64748b' }}>
-                                {field}: <strong>{source}</strong>
-                              </span>
-                            ))}
-                          </div>
-                        </details>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Curated Title */}
-                  {/* Curated Title — only shown in curation+ stages */}
-                  {curationFields.curatedTitle && reviewItem?.stage !== 'extraction' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Extracted Title</h3>
-                      <input
-                        type="text"
-                        value={curationFields.curatedTitle}
-                        onChange={(e) => setCurationFields((p: any) => ({ ...p, curatedTitle: e.target.value, titleSource: 'manual' }))}
-                        onBlur={(e) => {
-                          const nextCuration = { ...curationFields, curatedTitle: e.target.value, titleSource: 'manual' as const };
-                          saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
-                        }}
-                        style={{ width: '100%', padding: '8px', border: '1px solid #c084fc', borderRadius: 6, fontSize: 14, fontWeight: 600, background: '#faf5ff', boxSizing: 'border-box' }}
-                      />
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 11 }}>
-                        <span style={{ color: '#6b7280' }}>Source: {curationFields.titleSource}</span>
-                        {curationFields.curatedAt && (
-                          <span style={{ color: '#9ca3af' }}>· Curated {new Date(curationFields.curatedAt).toLocaleString()}</span>
-                        )}
-                        {curationFields.curationMethod && (
-                          <span style={{ color: '#9ca3af' }}>· Method: {curationFields.curationMethod}</span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Weight — shown in curation+ stages */}
-                  {reviewItem?.stage !== 'extraction' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 12 }}>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Weight</h3>
-                      <input
-                        type="text"
-                        value={curationFields.curatedWeight ?? ''}
-                        onChange={(e) => setCurationFields((p: any) => ({ ...p, curatedWeight: e.target.value }))}
-                        onBlur={(e) => {
-                          const nextCuration = { ...curationFields, curatedWeight: e.target.value };
-                          saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
-                        }}
-                        placeholder="e.g. 15 lbs, 500g"
-                        style={{ width: '100%', padding: '8px', border: '1px solid #c084fc', borderRadius: 6, fontSize: 14, fontWeight: 600, background: '#faf5ff', boxSizing: 'border-box' }}
-                      />
-                    </div>
-                  )}
-
-
-
-                  {/* Suggested Product Type — only in curation stage */}
-                  {curationFields.suggestedProductType && (reviewItem?.stage === 'curation' || reviewItem?.stage === 'review') && (
-                    <div>
-                      <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563' }}>Suggested Product Type</label>
-                      <div style={{ display: 'inline-block', fontSize: 12, fontWeight: 600, color: '#7c3aed', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 6, padding: '4px 10px', marginTop: 4 }}>
-                        {curationFields.suggestedProductType}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Extracted Images Gallery */}
-                  {(() => {
-                    const primaryImage = editFields.primaryImage;
-                    const additionalImages = editFields.additionalImages || [];
-                    const allImages = [
-                      ...(primaryImage ? [{ url: primaryImage, isPrimary: true }] : []),
-                      ...additionalImages.map(img => ({ url: img, isPrimary: false }))
-                    ];
-
-                    const activeIndex = allImages.length > 0 ? Math.min(activeImageIdx, Math.max(0, allImages.length - 1)) : -1;
-                    const activeImage = activeIndex !== -1 ? allImages[activeIndex] : null;
-                    const activeImgSrc = activeImage
-                      ? (activeImage.url.startsWith('products/') ? `/api/onboarding/${activeImage.url}` : activeImage.url)
-                      : '';
-
-                    return (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, flexShrink: 0 }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Product Images & Variants</h3>
-                          <p style={{ fontSize: 12, color: '#6b7280', margin: 0 }}>
-                            Select the primary catalog image or remove incorrect color variants below.
-                          </p>
-                        </div>
-
-                        {allImages.length === 0 ? (
-                          <div
-                            style={{
-                              position: 'relative',
-                              width: '100%',
-                              height: 120,
-                              border: '1px dashed #d1d5db',
-                              borderRadius: 12,
-                              background: '#f9fafb',
-                              display: 'flex',
-                              justifyContent: 'center',
-                              alignItems: 'center',
-                              boxSizing: 'border-box',
-                              padding: 16,
-                              color: '#6b7280',
-                              fontSize: 13,
-                            }}
-                          >
-                            No images available. Add an image URL below to get started.
-                          </div>
-                        ) : (
-                          <>
-                            {/* Main Focused Image View */}
-                            <div
-                              style={{
-                                position: 'relative',
-                                width: '100%',
-                                height: 320,
-                                border: `1px solid ${activeImage?.isPrimary ? '#10b981' : '#e5e7eb'}`,
-                                borderRadius: 12,
-                                background: activeImage?.isPrimary ? '#f0fdf4' : '#f9fafb',
-                                display: 'flex',
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                                boxShadow: activeImage?.isPrimary
-                                  ? '0 4px 12px rgba(16, 185, 129, 0.08)'
-                                  : '0 2px 8px rgba(0,0,0,0.03)',
-                                padding: 16,
-                                boxSizing: 'border-box',
-                              }}
-                            >
-                              {activeImage && (
-                                <img
-                                  src={activeImgSrc}
-                                  alt="Active product view"
-                                  style={{
-                                    maxWidth: '100%',
-                                    maxHeight: '100%',
-                                    objectFit: 'contain',
-                                    borderRadius: 8,
-                                  }}
-                                />
-                              )}
-                              
-                              {/* Image Status Pill overlay */}
-                              {activeImage && (
-                                <span
-                                  style={{
-                                    position: 'absolute',
-                                    top: 12,
-                                    left: 12,
-                                    fontSize: 11,
-                                    fontWeight: 700,
-                                    color: activeImage.isPrimary ? '#065f46' : '#374151',
-                                    background: activeImage.isPrimary ? '#d1fae5' : '#e5e7eb',
-                                    padding: '4px 10px',
-                                    borderRadius: 20,
-                                    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-                                  }}
-                                >
-                                  {activeImage.isPrimary ? '★ Primary Image' : 'Variant Image'}
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Active Image Action Controls */}
-                            {activeImage && (
-                              <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
-                                {!activeImage.isPrimary && (
-                                  <button
-                                    onClick={() => {
-                                      const newPrimary = activeImage.url;
-                                      const oldPrimary = editFields.primaryImage;
-                                      const newAdditional = [
-                                        ...(oldPrimary ? [oldPrimary] : []),
-                                        ...additionalImages.filter(x => x !== newPrimary)
-                                      ];
-                                      const nextEdit = {
-                                        ...editFields,
-                                        primaryImage: newPrimary,
-                                        additionalImages: newAdditional
-                                      };
-                                      setEditFields(nextEdit);
-                                      saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
-                                    }}
-                                    style={{
-                                      padding: '6px 16px',
-                                      fontSize: 12,
-                                      fontWeight: 600,
-                                      background: '#10b981',
-                                      color: '#fff',
-                                      border: 'none',
-                                      borderRadius: 6,
-                                      cursor: 'pointer',
-                                      transition: 'all 0.15s',
-                                      boxShadow: '0 2px 4px rgba(16, 185, 129, 0.2)',
-                                    }}
-                                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#059669'; }}
-                                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#10b981'; }}
-                                  >
-                                    Set as Primary Image
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => {
-                                    let nextEdit;
-                                    if (activeImage.isPrimary) {
-                                      const newPrimary = additionalImages[0] || null;
-                                      const newAdditional = additionalImages.slice(1);
-                                      nextEdit = {
-                                        ...editFields,
-                                        primaryImage: newPrimary,
-                                        additionalImages: newAdditional
-                                      };
-                                    } else {
-                                      nextEdit = {
-                                        ...editFields,
-                                        additionalImages: additionalImages.filter(x => x !== activeImage.url)
-                                      };
-                                    }
-                                    setEditFields(nextEdit);
-                                    saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
-                                    setActiveImageIdx(prev => Math.max(0, prev - 1));
-                                  }}
-                                  style={{
-                                    padding: '6px 16px',
-                                    fontSize: 12,
-                                    fontWeight: 600,
-                                    background: '#fff',
-                                    border: '1px solid #fca5a5',
-                                    color: '#dc2626',
-                                    borderRadius: 6,
-                                    cursor: 'pointer',
-                                    transition: 'all 0.15s',
-                                  }}
-                                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#fee2e2'; }}
-                                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#fff'; }}
-                                >
-                                  Remove This Image
-                                </button>
-                              </div>
-                            )}
-
-                            {/* Thumbnails strip below */}
-                            <div
-                              style={{
-                                display: 'flex',
-                                gap: 10,
-                                overflowX: 'auto',
-                                padding: '4px 2px 8px 2px',
-                                borderTop: '1px solid #f3f4f6',
-                                scrollbarWidth: 'thin',
-                              }}
-                            >
-                              {allImages.map((img, idx) => {
-                                const isCurrent = idx === activeIndex;
-                                const imgSrc = img.url.startsWith('products/') ? `/api/onboarding/${img.url}` : img.url;
-                                return (
-                                  <div
-                                    key={idx}
-                                    onClick={() => setActiveImageIdx(idx)}
-                                    style={{
-                                      position: 'relative',
-                                      width: 64,
-                                      height: 64,
-                                      flexShrink: 0,
-                                      border: isCurrent
-                                        ? '2px solid #7c3aed'
-                                        : img.isPrimary
-                                        ? '2px solid #10b981'
-                                        : '1px solid #e5e7eb',
-                                      borderRadius: 8,
-                                      padding: 2,
-                                      background: '#fff',
-                                      cursor: 'pointer',
-                                      transition: 'all 0.15s',
-                                      boxSizing: 'border-box',
-                                      opacity: isCurrent ? 1 : 0.75,
-                                    }}
-                                    onMouseEnter={(e) => { if (!isCurrent) e.currentTarget.style.opacity = '1'; }}
-                                    onMouseLeave={(e) => { if (!isCurrent) e.currentTarget.style.opacity = '0.75'; }}
-                                  >
-                                    <img
-                                      src={imgSrc}
-                                      alt={`Thumbnail ${idx + 1}`}
-                                      style={{
-                                        width: '100%',
-                                        height: '100%',
-                                        objectFit: 'contain',
-                                        borderRadius: 6,
-                                      }}
-                                    />
-                                    {img.isPrimary && (
-                                      <div
-                                        style={{
-                                          position: 'absolute',
-                                          bottom: -2,
-                                          right: -2,
-                                          width: 12,
-                                          height: 12,
-                                          borderRadius: '50%',
-                                          background: '#10b981',
-                                          border: '2px solid #fff',
-                                        }}
-                                      />
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </>
-                        )}
-
-                        {/* Add Image URL Manually */}
-                        <div style={{ marginTop: 6, borderTop: '1px solid #f3f4f6', paddingTop: 12 }}>
-                          <label style={{ fontSize: 11, fontWeight: 500, color: '#4b5563', display: 'block', marginBottom: 6 }}>
-                            Add Image URL Manually
-                          </label>
-                          <div style={{ display: 'flex', gap: 8 }}>
-                            <input
-                              type="text"
-                              placeholder="https://example.com/image.jpg"
-                              value={manualImageUrl}
-                              onChange={(e) => setManualImageUrl(e.target.value)}
-                              style={{
-                                flex: 1,
-                                padding: '8px 12px',
-                                border: '1px solid #d1d5db',
-                                borderRadius: 6,
-                                fontSize: 13,
-                                boxSizing: 'border-box',
-                              }}
-                            />
-                            <button
-                              onClick={() => {
-                                if (!manualImageUrl.trim()) return;
-                                const url = manualImageUrl.trim();
-                                let nextEdit;
-                                if (!editFields.primaryImage) {
-                                  nextEdit = {
-                                    ...editFields,
-                                    primaryImage: url,
-                                  };
-                                  setActiveImageIdx(0);
-                                } else {
-                                  const additional = editFields.additionalImages || [];
-                                  if (!additional.includes(url) && editFields.primaryImage !== url) {
-                                    nextEdit = {
-                                      ...editFields,
-                                      additionalImages: [...additional, url],
-                                    };
-                                    setActiveImageIdx((editFields.primaryImage ? 1 : 0) + additional.length);
-                                  } else {
-                                    nextEdit = editFields;
-                                  }
-                                }
-                                setEditFields(nextEdit);
-                                if (reviewItem) {
-                                  saveChangesQuietly(reviewItem.id, nextEdit, curationFields, classificationProposals);
-                                }
-                                setManualImageUrl('');
-                              }}
-                              style={{
-                                padding: '8px 16px',
-                                fontSize: 13,
-                                fontWeight: 600,
-                                background: '#7c3aed',
-                                color: '#fff',
-                                border: 'none',
-                                borderRadius: 6,
-                                cursor: 'pointer',
-                                transition: 'background-color 0.15s',
-                              }}
-                              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#6d28d9'; }}
-                              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#7c3aed'; }}
-                            >
-                              Add URL
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  {/* Classification Proposals — only shown in curation+ stages */}
-                  {reviewItem?.stage !== 'extraction' && classificationProposals.filter(p => p.targetId !== 'product_draft_projection').length > 0 && (
-                    <div style={{ padding: 12, background: '#f5f3ff', borderRadius: 8, border: '1px solid #ddd6fe' }}>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px', color: '#7c3aed' }}>🤖 AI Proposals</h3>
-                      {classificationProposals
-                        .filter(p => p.targetId !== 'product_draft_projection')
-                        .map((p) => {
-                        const sc: Record<string, string> = { pending: '#f59e0b', accepted: '#16a34a', rejected: '#dc2626', deferred: '#6b7280', stale: '#9ca3af' };
-                        const tl: Record<string, string> = { primary_product_type: 'Product Type', category_page: 'Page', field_assignment: 'Product Field', configuration_gap: 'Gap', reviewable_abstention: 'Needs Review' };
-                        const fieldMeta = fieldTargetForProposal(p);
-                        const typeOptions = productTypeOptions();
-                        const proposedValues = Array.isArray(p.proposedValue)
-                          ? p.proposedValue.map(String)
-                          : p.proposedValue != null
-                            ? [String(p.proposedValue)]
-                            : [];
-                        const displayTarget = p.proposalType === 'field_assignment'
-                          ? fieldMeta.label
-                          : p.proposalType === 'primary_product_type'
-                            ? 'Product Type'
-                            : p.targetId;
-
-                        return (
-                          <div key={p.id} style={{ padding: '8px 0', borderBottom: '1px solid #ede9fe', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                              <span>
-                                <strong style={{ color: '#5b21b6' }}>{tl[p.proposalType] || p.proposalType}</strong>
-                                {displayTarget && <span style={{ marginLeft: 4 }}>{displayTarget}</span>}
-                                <span style={{ color: sc[p.status], marginLeft: 8, fontWeight: 600 }}>● {p.status}</span>
-                                <span style={{ color: '#6b7280', marginLeft: 8 }}>confidence {Math.round(p.confidence * 100)}%</span>
-                              </span>
-                              <div style={{ display: 'flex', gap: 3 }}>
-                                <button onClick={() => updateProposal(p.id, { status: 'accepted' })} style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #16a34a', background: p.status === 'accepted' ? '#dcfce7' : '#fff', color: '#16a34a', cursor: 'pointer' }}>Accept</button>
-                                <button onClick={() => updateProposal(p.id, { status: 'rejected' })} style={{ padding: '2px 6px', fontSize: 10, borderRadius: 4, border: '1px solid #dc2626', background: p.status === 'rejected' ? '#fee2e2' : '#fff', color: '#dc2626', cursor: 'pointer' }}>Reject</button>
-                              </div>
-                            </div>
-
-                            {p.proposalType === 'field_assignment' && fieldMeta.values.length > 0 && (
-                              fieldMeta.target?.selectionMode === 'multiple' ? (
-                                <select
-                                  multiple
-                                  value={proposedValues}
-                                  onChange={(e) => {
-                                    const values = Array.from(e.currentTarget.selectedOptions).map(option => option.value);
-                                    updateProposal(p.id, { proposedValue: values, status: values.length > 0 ? 'accepted' : p.status });
-                                  }}
-                                  style={{ width: '100%', minHeight: 90, border: '1px solid #c4b5fd', borderRadius: 6, padding: 6, fontSize: 12, background: '#fff' }}
-                                >
-                                  {fieldMeta.values.map(value => <option key={value} value={value}>{value}</option>)}
-                                </select>
-                              ) : (
-                                <select
-                                  value={proposedValues[0] ?? ''}
-                                  onChange={(e) => updateProposal(p.id, { proposedValue: e.target.value, status: e.target.value ? 'accepted' : p.status })}
-                                  style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 6, fontSize: 12, background: '#fff' }}
-                                >
-                                  <option value="">Choose a value…</option>
-                                  {fieldMeta.values.map(value => <option key={value} value={value}>{value}</option>)}
-                                </select>
-                              )
-                            )}
-
-                            {p.proposalType === 'primary_product_type' && typeOptions.length > 0 && (
-                              <select
-                                value={String(p.targetId ?? '')}
-                                onChange={(e) => updateProposal(p.id, { targetId: e.target.value, proposedValue: { productTypeId: e.target.value }, status: e.target.value ? 'accepted' : p.status })}
-                                style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 6, fontSize: 12, background: '#fff' }}
-                              >
-                                <option value="">Choose a product type…</option>
-                                {typeOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-                              </select>
-                            )}
-
-                            {p.proposalType === 'field_assignment' && fieldMeta.values.length === 0 && (
-                              <input
-                                type="text"
-                                value={proposedValues.join(', ')}
-                                onChange={(e) => updateProposal(p.id, { proposedValue: e.target.value, status: e.target.value ? 'accepted' : p.status })}
-                                placeholder="Enter reviewed value"
-                                style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 6, fontSize: 12, boxSizing: 'border-box' }}
-                              />
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-
-
-                  {/* Product Pages — only shown in curation+ stages */}
-                  {reviewItem?.stage !== 'extraction' && storePages.length > 0 && (
-                    <div style={{ marginTop: 16 }}>
-                      <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Product Pages</h3>
-                      
-                      {/* Selected Pages Area */}
-                      {curationFields.suggestedPages && curationFields.suggestedPages.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-                          {curationFields.suggestedPages.map((pageName) => (
-                            <span 
-                              key={pageName} 
-                              style={{ 
-                                display: 'inline-flex', 
-                                alignItems: 'center', 
-                                gap: 4, 
-                                background: '#f3e8ff', 
-                                border: '1px solid #d8b4fe', 
-                                color: '#6b21a8', 
-                                padding: '2px 8px', 
-                                borderRadius: 16, 
-                                fontSize: 12, 
-                                fontWeight: 500 
-                              }}
-                            >
-                              {pageName}
-                              <button 
-                                type="button"
-                                onClick={() => {
-                                  const nextPages = (curationFields.suggestedPages || []).filter((n: string) => n !== pageName);
-                                  const nextCuration = { ...curationFields, suggestedPages: nextPages };
-                                  setCurationFields(nextCuration);
-                                  saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
-                                }}
-                                style={{ 
-                                  background: 'none', 
-                                  border: 'none', 
-                                  color: '#a855f7', 
-                                  cursor: 'pointer', 
-                                  padding: 0, 
-                                  fontSize: 10,
-                                  fontWeight: 'bold',
-                                  lineHeight: 1
-                                }}
-                              >
-                                ✕
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Page Search Input */}
-                      <input 
-                        type="text" 
-                        placeholder="Search pages..." 
-                        value={pageSearchQuery} 
-                        onChange={(e) => setPageSearchQuery(e.target.value)} 
-                        style={{ 
-                          width: '100%', 
-                          padding: '6px 10px', 
-                          border: '1px solid #d1d5db', 
-                          borderRadius: 6, 
-                          fontSize: 12, 
-                          marginBottom: 8, 
-                          boxSizing: 'border-box' 
-                        }} 
-                      />
-
-                      {/* Page List Container */}
-                      <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid #d1d5db', borderRadius: 6, padding: 8 }}>
-                        {storePages
-                          .filter(pageName => pageName.toLowerCase().includes(pageSearchQuery.toLowerCase()))
-                          .map((pageName) => {
-                            const isAssigned = curationFields.suggestedPages?.includes(pageName) ?? false;
-                            return (
-                              <label key={pageName} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', fontSize: 12, cursor: 'pointer' }}>
-                                <input type="checkbox" checked={isAssigned} onChange={(e) => {
-                                  let nextPages;
-                                  if (e.target.checked) {
-                                    nextPages = [...(curationFields.suggestedPages || []), pageName];
-                                  } else {
-                                    nextPages = (curationFields.suggestedPages || []).filter((n: string) => n !== pageName);
-                                  }
-                                  const nextCuration = { ...curationFields, suggestedPages: nextPages };
-                                  setCurationFields(nextCuration);
-                                  saveChangesQuietly(reviewItem.id, editFields, nextCuration, classificationProposals);
-                                }} />
-                                {pageName}
-                              </label>
-                            );
-                          })}
-                      </div>
-                    </div>
-                  )}
-                </>
+              {reviewItem.stage === 'extraction' && (
+                <ExtractionStagePanel
+                  extractionData={reviewExtraction}
+                  sourceUrl={reviewItem.sourceUrl}
+                  showEditUrl={showEditUrl}
+                  setShowEditUrl={setShowEditUrl}
+                  manualUrlInput={manualUrlInput}
+                  setManualUrlInput={setManualUrlInput}
+                  onSetManualUrl={async (url) => {
+                    await setItemUrl(reviewItem.id, url);
+                    const res = await getItemDetail(reviewItem.id);
+                    setReviewItem(res.item);
+                    setManualUrlInput(res.item.sourceUrl || '');
+                  }}
+                />
               )}
-            </div>
 
-            {/* Footer */}
-            <div style={{
-              padding: '16px 24px 24px',
-              borderTop: '1px solid #e5e7eb',
-              display: 'flex',
-              gap: 8,
-              justifyContent: 'flex-end',
-              alignItems: 'center',
-              flexShrink: 0,
-              background: '#fff'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginRight: 'auto' }}>
-                {saveStatus === 'saving' && (
-                  <span style={{ fontSize: 13, color: '#4b5563', display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5, borderColor: '#4b5563', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
-                    Saving...
-                  </span>
-                )}
-                {saveStatus === 'saved' && (
-                  <span style={{ fontSize: 13, color: '#16a34a', fontWeight: 500 }}>
-                    ✓ Saved
-                  </span>
-                )}
-                {saveStatus === 'error' && (
-                  <span style={{ fontSize: 13, color: '#dc2626', fontWeight: 500 }}>
-                    Error: {saveError}
-                  </span>
-                )}
-              </div>
-               <button onClick={closeReview} style={{ padding: '8px 16px', background: '#fff', border: '1px solid #d1d5db', borderRadius: 6, cursor: 'pointer', fontSize: 13, color: '#374151', fontWeight: 500 }}>
-                {reviewItem && ['discovery', 'extraction', 'curation'].includes(reviewItem.stage) ? 'Close' : 'Cancel'}
-              </button>
-              {reviewItem && reviewItem.stage === 'review' && (
-                <button onClick={handleApproveReview} style={{ padding: '8px 16px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-                  ✓ Approve
-                </button>
+              {(reviewItem.stage === 'curation' ||
+                reviewItem.stage === 'review' ||
+                reviewItem.stage === 'promotion') && (
+                <CurationStagePanel
+                  curatedTitle={curationFields.curatedTitle || ''}
+                  titleSource={curationFields.titleSource}
+                  curatedAt={curationFields.curatedAt}
+                  curationMethod={curationFields.curationMethod}
+                  curatedWeight={curationFields.curatedWeight || ''}
+                  brandName={_drawerBrandName || reviewItem.brandHint}
+                  onUpdateBrand={async (newBrandName) => {
+                    const trimmed = newBrandName.trim();
+                    setDrawerBrandName(trimmed);
+                    setReviewItem((prev) => (prev ? { ...prev, brandHint: trimmed || null } : prev));
+                    setSaveStatus('saving');
+                    try {
+                      await updateItem(reviewItem.id, { brandHint: trimmed || null });
+                      await fetchStaged();
+                      setSaveStatus('saved');
+                      setTimeout(() => setSaveStatus('idle'), 1500);
+                    } catch (err) {
+                      setSaveStatus('error');
+                      setSaveError(err instanceof Error ? err.message : String(err));
+                    }
+                  }}
+                  cachedBrandSites={cachedBrandSites}
+                  catalogBrands={_catalogBrands || []}
+                  suggestedProductType={curationFields.suggestedProductType}
+                  classificationProposals={classificationProposals}
+                  proposalControlsDisabled={proposalControlsDisabled}
+                  storePages={storePages}
+                  suggestedPages={curationFields.suggestedPages || []}
+                  pageSearchQuery={pageSearchQuery}
+                  setPageSearchQuery={setPageSearchQuery}
+                  onUpdateTitle={(newTitle) => {
+                    const nextCuration = {
+                      ...curationFields,
+                      curatedTitle: newTitle,
+                      titleSource: 'manual' as const,
+                    };
+                    setCurationFields(nextCuration);
+                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
+                  }}
+                  onUpdateWeight={(newWeight) => {
+                    const nextCuration = {
+                      ...curationFields,
+                      curatedWeight: newWeight,
+                    };
+                    setCurationFields(nextCuration);
+                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
+                  }}
+                  onTogglePage={(pageName, isAssigned) => {
+                    let nextPages: string[];
+                    if (isAssigned) {
+                      nextPages = [...(curationFields.suggestedPages || []), pageName];
+                    } else {
+                      nextPages = (curationFields.suggestedPages || []).filter((n) => n !== pageName);
+                    }
+                    const nextCuration = { ...curationFields, suggestedPages: nextPages };
+                    setCurationFields(nextCuration);
+                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
+                  }}
+                  onRemovePage={(pageName) => {
+                    const nextPages = (curationFields.suggestedPages || []).filter((n) => n !== pageName);
+                    const nextCuration = { ...curationFields, suggestedPages: nextPages };
+                    setCurationFields(nextCuration);
+                    saveItemChangesQuietly(reviewItem.id, editFields, nextCuration);
+                  }}
+                  fieldTargetForProposal={fieldTargetForProposal}
+                  productTypeOptions={productTypeOptions}
+                  getEffectiveProposalValue={getEffectiveProposalValue}
+                  getEffectiveProposalTargetId={getEffectiveProposalTargetId}
+                  getEffectiveProductTypeId={getEffectiveProductTypeId}
+                  withReviewedProposalValue={withReviewedProposalValue}
+                  withReviewedProductTypeId={withReviewedProductTypeId}
+                  updateProposal={updateProposal}
+                />
               )}
-            </div>
-          </div>
-        </>
+            </>
+          }
+        />
       )}
     </div>
   );

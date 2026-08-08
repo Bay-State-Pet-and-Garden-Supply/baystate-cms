@@ -79,7 +79,7 @@ export function getDashboardStatsData(workspaceId: string): DashboardStatsData {
   const customFieldsCount = customFieldsRow?.count ?? 0;
 
   // 9. Connection details
-  const connectionRow = db.query("SELECT cgi_base_url, merchant_id, last_tested_at, last_test_status, last_test_error FROM shopsite_connection WHERE workspace_id = ?").get(workspaceId) as any;
+  const connectionRow = db.query("SELECT cgi_base_url, merchant_id, last_tested_at, last_test_status, last_test_error FROM connection WHERE workspace_id = ?").get(workspaceId) as any;
   const connection = connectionRow ? {
     cgiBaseUrl: connectionRow.cgi_base_url,
     merchantId: connectionRow.merchant_id,

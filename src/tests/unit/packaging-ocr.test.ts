@@ -102,6 +102,34 @@ describe('coercePackagingOcrData', () => {
     expect(result!.confidenceByField).toEqual({ productName: 0.95, species: 0.8, flavorVariety: 0.65 });
   });
 
+  it('normalizes a visible barcode into the upc field (round-5)', () => {
+    const result = coercePackagingOcrData({
+      productName: 'Wormeze Liquid',
+      upc: '0 74580 11054 4',
+      confidenceByField: { upc: 0.9 },
+    });
+    expect(result).not.toBeNull();
+    expect(result!.upc).toBe('074580110544');
+  });
+
+  it('rejects a barcode that is not 8-14 digits (round-5)', () => {
+    const result = coercePackagingOcrData({
+      productName: 'Wormeze Liquid',
+      upc: '12AB',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.upc).toBeNull();
+  });
+
+  it('keeps upc null when no barcode is visible', () => {
+    const result = coercePackagingOcrData({
+      productName: 'Wormeze Liquid',
+      upc: null,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.upc).toBeNull();
+  });
+
   it('clamps confidence values to 0-1 range', () => {
     const result = coercePackagingOcrData({
       productName: 'Test',

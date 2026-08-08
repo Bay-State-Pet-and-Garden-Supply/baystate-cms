@@ -593,7 +593,9 @@ export async function extractProductEvidence(
     });
   }
 
-  // 8. Existing page context
+  // 8. Existing page context — name-only review context with LOW reliability.
+  //    Page context never supports claims or composition (pageContextReliability
+  //    is fixed to 'low' and verified identity is false until a real export).
   if (input.existingPageNames?.length) {
     for (const pageName of input.existingPageNames) {
       evidence.push({
@@ -603,12 +605,16 @@ export async function extractProductEvidence(
         productSku: sku,
         attributeId: null,
         source: 'page_context' as ClassificationEvidence['source'],
-        reliability: 'high' as ClassificationEvidence['reliability'],
+        reliability: 'low' as ClassificationEvidence['reliability'],
         sourceUrl: null,
         sourceField: 'page_name',
         snippet: pageName.slice(0, 300),
         value: pageName,
-        metadata: { provenance: 'existing_assignment' },
+        metadata: {
+          provenance: 'existing_assignment',
+          pageContextReliability: 'low',
+          verifiedPageIdentity: false,
+        },
         capturedAt: now(),
       });
     }
@@ -620,7 +626,9 @@ export async function extractProductEvidence(
     const brandToResolve = typeof input.brand === 'string' ? input.brand : (typeof input.brand === 'object' && input.brand?.value ? String(input.brand.value) : rawBrandStr);
     if (brandToResolve) {
       try {
-        const brands = getCachedBrands(context.workspaceId);
+        const brands = context.snapshot
+          ? context.snapshot.brands
+          : getCachedBrands(context.workspaceId);
         const resolved = resolveBrand(brandToResolve, brands);
         if (resolved) {
           const brandValue = CanonicalBrandEvidenceValueSchema.parse({
@@ -660,7 +668,9 @@ export async function extractProductEvidence(
   const canUseLocalVlm = vlmConfig?.enabled === true;
   let dataPolicy: any = null;
   try {
-    dataPolicy = getCachedDataSharingPolicy(context.workspaceId);
+    dataPolicy = context.snapshot
+      ? context.snapshot.dataSharing
+      : getCachedDataSharingPolicy(context.workspaceId);
   } catch {
     // Use defaults
   }

@@ -10,8 +10,8 @@ import { validateCatalogHealth, getCatalogHealthReport } from '../../server/serv
 import type { Product } from '../../shared/types';
 
 describe('Catalog Health Check', () => {
-  const testDbPath = '/tmp/shopsite-cms-health-test.db';
-  const testWorkspacePath = '/tmp/shopsite-cms-health-workspace';
+  const testDbPath = '/tmp/baystate-cms-health-test.db';
+  const testWorkspacePath = '/tmp/baystate-cms-health-workspace';
   const workspaceId = randomUUID();
 
   beforeAll(() => {

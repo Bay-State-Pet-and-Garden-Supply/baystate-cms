@@ -25,7 +25,7 @@ import { createDrift, listDrift, findDriftById, resolveDrift, hasOpenDriftForSku
 const fixtureDir = path.resolve(import.meta.dirname, '../../tests/fixtures');
 const fixtureXml = fs.readFileSync(path.join(fixtureDir, 'shopsite-products-sample.xml'), 'utf-8');
 
-const testDbPath = '/tmp/shopsite-cms-phase3-test.db';
+const testDbPath = '/tmp/baystate-cms-phase3-test.db';
 
 describe('Phase 3: MIME Upload / Multipart', () => {
 
@@ -203,14 +203,14 @@ describe('Phase 3: XML Safety', () => {
 });
 
 describe('Phase 3: Drift Detection', () => {
-  const testDir = path.join(os.tmpdir(), `shopsite-cms-drift-${Date.now()}`);
+  const testDir = path.join(os.tmpdir(), `baystate-cms-drift-${Date.now()}`);
   const workspaceId = 'test-drift-ws';
 
   beforeAll(() => {
     try { fs.rmSync(testDir, { recursive: true }); } catch { /* ok */ }
     // Init DB for drift repo calls
-    try { fs.unlinkSync('/tmp/shopsite-cms-drift-base.db'); } catch { /* ok */ }
-    initDb('/tmp/shopsite-cms-drift-base.db');
+    try { fs.unlinkSync('/tmp/baystate-cms-drift-base.db'); } catch { /* ok */ }
+    initDb('/tmp/baystate-cms-drift-base.db');
     runMigrations();
 
     // Insert workspace for FK constraint
@@ -242,7 +242,7 @@ describe('Phase 3: Drift Detection', () => {
 
   afterAll(() => {
     try { fs.rmSync(testDir, { recursive: true }); } catch { /* ok */ }
-    try { fs.unlinkSync('/tmp/shopsite-cms-drift-base.db'); } catch { /* ok */ }
+    try { fs.unlinkSync('/tmp/baystate-cms-drift-base.db'); } catch { /* ok */ }
   });
 
   it('should detect drift when remote XML differs from local files', () => {

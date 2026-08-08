@@ -1,75 +1,127 @@
 /**
  * Attribute Applicability Stage
  *
- * Determines which Product Attributes from the attribute profile apply
- * to the current product, given the enabled curation target configuration.
+ * Determines which Product Attributes from the attribute profile apply to the
+ * current product, given the enabled curation target configuration.
  *
- * Product Type is NEVER inferred as internal context. If Product Type is
- * not an enabled curation target, profile filtering is skipped and all
- * selected product-field targets proceed without gating.
+ * Applicability is evaluated deterministically and has explicit states
+ * (see `applicability-evaluator.ts` for the pure evaluation logic):
  *
- * If Product Type IS an enabled target, uses provisional selection
- * (accepted proposals first, then best pending proposal) so attribute
- * applicability works on first-pass curation before human review.
+ * - `applicable` — the attribute may produce decision-eligible proposals.
+ * - `not_applicable` — the attribute is not part of the accepted type's profile.
+ * - `unknown` — the attribute is type-gated but no reviewed (accepted)
+ *   Primary Product Type exists yet. Pending guesses never unlock gating.
+ *
+ * Rules:
+ * - Universal attributes are applicable without any Product Type.
+ * - Profile attributes require a reviewed Product Type.
+ * - Conditions are evaluated only against accepted/reviewed facts; a
+ *   condition whose fact is missing or whose shape is unrecognized evaluates
+ *   to `unknown` (fail closed).
  *
  * Dependencies: primary_product_type_proposal stage.
  */
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
+import type { ProductAttributeConfig } from '../../shared/schemas/classification';
 import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
 import { loadClassificationConfig } from '../config-loader';
-import { resolveEnabledTargets } from '../curation-target-resolver';
-import { selectPrimaryProductTypeProposal } from '../proposal-selection';
+import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
+import { getReviewedPrimaryProductTypeId } from '../proposal-selection';
+import {
+  evaluateAttributeApplicability,
+  evaluateConditions,
+  isUniversalAttribute,
+  type ApplicabilityState,
+  type ApplicabilityInput,
+  type AttributeApplicability,
+} from '../applicability-evaluator';
+
+export type { ApplicabilityState, AttributeApplicability };
+export { evaluateAttributeApplicability, evaluateConditions, isUniversalAttribute };
+export type { ApplicabilityInput };
+
+/**
+ * Evaluate applicability for every product-field curation target in scope.
+ * Returns evaluations keyed by attribute id plus the metadata payload used by
+ * the applicability stage and the attribute proposals stage.
+ */
+export function evaluateTargetApplicability(
+  resolvedProductFields: Array<{ attribute?: ProductAttributeConfig }>,
+  options: {
+    typeTargetEnabled: boolean;
+    acceptedTypeId: string | null;
+    profile: { attributes: Array<{ attributeId: string; applicabilityConditions?: unknown[] }> } | null;
+    reviewedFacts: import('../reviewed-facts').ReviewedFact[];
+  },
+): AttributeApplicability[] {
+  const profileAttributeIds = options.profile
+    ? new Set(options.profile.attributes.map(entry => entry.attributeId))
+    : null;
+
+  return resolvedProductFields
+    .filter(target => target.attribute)
+    .map(target => {
+      const attribute = target.attribute!;
+      const profileEntry = options.profile?.attributes.find(
+        entry => entry.attributeId === attribute.id,
+      );
+      return evaluateAttributeApplicability({
+        attribute,
+        profileAttributeIds,
+        conditions: profileEntry?.applicabilityConditions ?? [],
+        acceptedTypeId: options.acceptedTypeId,
+        typeTargetEnabled: options.typeTargetEnabled,
+        reviewedFacts: options.reviewedFacts,
+      });
+    });
+}
 
 export const attributeApplicabilityStage: StageDefinition = {
   name: 'attribute_applicability',
   requires: ['primary_product_type_proposal'],
   evidenceFrom: [],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
-    const config = loadClassificationConfig(context.workspacePath);
-    const resolved = resolveEnabledTargets(config, context.workspaceId);
+    const resolved = context.snapshot
+      ? resolveTargetsFromSnapshot(context.snapshot)
+      : resolveEnabledTargets(loadClassificationConfig(context.workspacePath), context.workspaceId);
 
-    // If Product Type is not an enabled curation target, skip profile gating.
-    // All selected product-field targets proceed without a profile filter.
-    if (resolved.productTypes.length === 0) {
+    const typeTargetEnabled = resolved.productTypes.length > 0;
+
+    if (resolved.productFields.length === 0 && !typeTargetEnabled) {
       return {
         status: 'succeeded',
         output: {
           evidence: [],
           proposals: [],
           abstained: false,
-          message: 'No Product Type target enabled; profile filtering not applied.',
+          message: 'No curation targets enabled; applicability not evaluated.',
+          metadata: { applicability: [] },
         },
       };
     }
 
-    // Product Type IS enabled — find the selected proposal (accepted or provisional)
-    const typeSelection = selectPrimaryProductTypeProposal(input);
-    const selectedType = typeSelection.proposal;
+    const acceptedTypeId = getReviewedPrimaryProductTypeId(input, context.snapshot);
 
-    if (!selectedType || !selectedType.targetId) {
-      return {
-        status: 'abstained',
-        reason: 'No selected Primary Product Type proposal available. Ensure a primary_product_type_proposal stage runs before this one and produces a proposal.',
-      };
-    }
+    const profiles = context.snapshot
+      ? context.snapshot.attributeProfiles
+      : getCachedAttributeProfiles(context.workspaceId);
+    const profile = acceptedTypeId
+      ? profiles.find(p => p.productTypeId === acceptedTypeId)
+      : null;
 
-    // Find the attribute profile for this product type
-    const profiles = getCachedAttributeProfiles(context.workspaceId);
-    const profile = profiles.find(p => p.productTypeId === selectedType.targetId);
+    const evaluations = evaluateTargetApplicability(
+      resolved.productFields,
+      {
+        typeTargetEnabled,
+        acceptedTypeId,
+        profile: profile ?? null,
+        reviewedFacts: context.snapshot?.reviewedFacts ?? [],
+      },
+    );
 
-    if (!profile || profile.attributes.length === 0) {
-      return {
-        status: 'abstained',
-        reason: `No attribute profile found for product type "${selectedType.targetId}". Configure an attribute profile in store/classification/attribute-profiles.json.`,
-      };
-    }
-
-    // All attributes in the profile are applicable (no conditions implemented yet)
-    const applicable = profile.attributes.map(a => ({
-      attributeId: a.attributeId,
-      required: a.required,
-      cardinality: a.cardinality,
-    }));
+    const applicableCount = evaluations.filter(evaluation => evaluation.state === 'applicable').length;
+    const unknownCount = evaluations.filter(evaluation => evaluation.state === 'unknown').length;
+    const notApplicableCount = evaluations.filter(evaluation => evaluation.state === 'not_applicable').length;
 
     return {
       status: 'succeeded',
@@ -77,7 +129,14 @@ export const attributeApplicabilityStage: StageDefinition = {
         evidence: [],
         proposals: [],
         abstained: false,
-        message: `${applicable.length} attributes applicable for product type "${selectedType.targetId}" (${typeSelection.source}).`,
+        message:
+          `${applicableCount} attributes applicable, ${unknownCount} blocked (no reviewed Product Type or undecided condition), ` +
+          `${notApplicableCount} not applicable for ${acceptedTypeId ?? '(no reviewed type)'}.`,
+        metadata: {
+          applicability: evaluations,
+          acceptedTypeId,
+          typeTargetEnabled,
+        },
       },
     };
   },

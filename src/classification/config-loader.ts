@@ -1,138 +1,771 @@
-import fs from 'fs';
-import path from 'path';
-import { ClassificationConfigSchema } from '../shared/schemas/classification';
-import type { ClassificationConfig } from '../shared/types';
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  AttributeMappingsFileV2Schema,
+  AttributeProfilesFileV2Schema,
+  AttributesFileV2Schema,
+  BrandsFileV2Schema,
+  ClassificationConfigBundleV2Schema,
+  ClassificationFocusedFileNames,
+  ClassificationManifestV2Schema,
+  CurationTargetsFileV2Schema,
+  DataSharingFileV2Schema,
+  GuidanceFileV2Schema,
+  ModelPolicyFileV2Schema,
+  ProductTypesFileV2Schema,
+  type ClassificationConfig,
+  type ClassificationConfigBundleV2,
+  type ClassificationFocusedFileName,
+} from '../shared/schemas/classification';
+import { canonicalJsonFileString, hashCanonicalJson } from '../shared/stable-id';
+import {
+  LegacyClassificationConfigV1Schema,
+  type LegacyClassificationConfigV1,
+} from './config-migrate-v1';
+import {
+  createCatalogEvidenceVerifier,
+  readLiveCatalogFields,
+} from './catalog-evidence';
+import {
+  validateClassificationConfigBundle,
+  type CatalogEvidenceVerifier,
+  type ClassificationConfigValidationOptions,
+} from './config-validation';
 
 const CLASSIFICATION_DIR = 'classification';
 
-/**
- * Resolves the classification directory under the workspace store/ path.
- */
-function classificationDir(workspacePath: string): string {
+export type ClassificationConfigLoadErrorCode =
+  | 'not_configured'
+  | 'missing_file'
+  | 'read_error'
+  | 'write_error'
+  | 'invalid_json'
+  | 'unsupported_version'
+  | 'invalid_config'
+  | 'hash_mismatch';
+
+export class ClassificationConfigLoadError extends Error {
+  constructor(
+    readonly code: ClassificationConfigLoadErrorCode,
+    message: string,
+    readonly filePath: string | null = null,
+    readonly details: unknown = null,
+  ) {
+    super(message);
+    this.name = 'ClassificationConfigLoadError';
+  }
+}
+
+export class ClassificationConfigNotConfiguredError extends ClassificationConfigLoadError {
+  constructor(workspacePath: string) {
+    super(
+      'not_configured',
+      `No classification configuration is present under ${path.join(workspacePath, 'store', CLASSIFICATION_DIR)}.`,
+      null,
+    );
+    this.name = 'ClassificationConfigNotConfiguredError';
+  }
+}
+
+export function classificationDir(workspacePath: string): string {
   return path.join(workspacePath, 'store', CLASSIFICATION_DIR);
 }
 
-/**
- * Ensures the store/classification/ directory exists.
- */
-function ensureClassificationDir(workspacePath: string): void {
-  const dir = classificationDir(workspacePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+interface CheckedDirectory {
+  path: string;
+  realPath: string;
 }
 
-function readJsonFile<T>(filePath: string): T | null {
-  if (!fs.existsSync(filePath)) return null;
+interface ReadFileResult {
+  path: string;
+  bytes: Uint8Array;
+  text: string;
+  value: unknown;
+}
+
+function fsErrorCode(error: unknown): string | null {
+  return error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : null;
+}
+
+function checkedWorkspaceRoot(workspacePath: string): CheckedDirectory {
+  const absolutePath = path.resolve(workspacePath);
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(content) as T;
-  } catch {
-    return null;
+    const stat = fs.lstatSync(absolutePath);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new ClassificationConfigLoadError(
+        'read_error',
+        `Workspace root must be a real directory: ${absolutePath}`,
+        absolutePath,
+      );
+    }
+    return { path: absolutePath, realPath: fs.realpathSync.native(absolutePath) };
+  } catch (error) {
+    if (error instanceof ClassificationConfigLoadError) throw error;
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Unable to inspect workspace root ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
+      absolutePath,
+    );
   }
 }
 
-function writeJsonFile<T>(filePath: string, data: T): void {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+/** Inspect one direct child without ever following a symlinked component. */
+function checkedChildDirectory(parent: CheckedDirectory, name: string): CheckedDirectory | null {
+  const childPath = path.join(parent.path, name);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(childPath);
+  } catch (error) {
+    if (fsErrorCode(error) === 'ENOENT') return null;
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Unable to inspect directory component ${childPath}: ${error instanceof Error ? error.message : String(error)}`,
+      childPath,
+    );
   }
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Directory component must be a real directory: ${childPath}`,
+      childPath,
+    );
+  }
+  try {
+    const realPath = fs.realpathSync.native(childPath);
+    if (path.dirname(realPath) !== parent.realPath) {
+      throw new ClassificationConfigLoadError(
+        'read_error',
+        `Directory component escapes its verified parent: ${childPath}`,
+        childPath,
+      );
+    }
+    return { path: childPath, realPath };
+  } catch (error) {
+    if (error instanceof ClassificationConfigLoadError) throw error;
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Unable to resolve directory component ${childPath}: ${error instanceof Error ? error.message : String(error)}`,
+      childPath,
+    );
+  }
 }
 
-// ─── Default / Stable Seed Files ───────────────────────────────────────────────
+function checkedClassificationDirectory(workspacePath: string): CheckedDirectory {
+  const workspace = checkedWorkspaceRoot(workspacePath);
+  const store = checkedChildDirectory(workspace, 'store');
+  if (!store) throw new ClassificationConfigNotConfiguredError(workspacePath);
+  const dir = checkedChildDirectory(store, CLASSIFICATION_DIR);
+  if (!dir) throw new ClassificationConfigNotConfiguredError(workspacePath);
+  return dir;
+}
 
-const DEFAULT_MANIFEST: Partial<ClassificationConfig>['manifest'] = {
-  schemaVersion: 1,
-  compatibilityVersion: 1,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-  fileVersions: {},
-};
+function createCheckedChildDirectory(parent: CheckedDirectory, name: string): CheckedDirectory {
+  const existing = checkedChildDirectory(parent, name);
+  if (existing) return existing;
+  const childPath = path.join(parent.path, name);
+  try {
+    // Never use recursive mkdir: every ancestor has already been verified as a
+    // real contained directory, and this creates exactly one direct child.
+    fs.mkdirSync(childPath);
+  } catch (error) {
+    throw new ClassificationConfigLoadError(
+      'write_error',
+      `Unable to create classification directory component ${childPath}: ${error instanceof Error ? error.message : String(error)}`,
+      childPath,
+    );
+  }
+  const created = checkedChildDirectory(parent, name);
+  if (!created) {
+    throw new ClassificationConfigLoadError(
+      'write_error',
+      `Classification directory component was not created: ${childPath}`,
+      childPath,
+    );
+  }
+  return created;
+}
 
-const DEFAULT_MODEL_POLICY: Partial<ClassificationConfig>['modelPolicy'] = {
-  defaultProvider: 'ollama',
-  defaultModel: '',
-  stageOverrides: {},
-  imageDataSharing: 'local_only',
-  textDataSharing: 'local_only',
-};
+function checkedClassificationDirectoryForWrite(workspacePath: string): CheckedDirectory {
+  const workspace = checkedWorkspaceRoot(workspacePath);
+  const store = createCheckedChildDirectory(workspace, 'store');
+  return createCheckedChildDirectory(store, CLASSIFICATION_DIR);
+}
 
-const DEFAULT_DATA_SHARING: Partial<ClassificationConfig>['dataSharing'] = {
-  imagePolicy: 'local_only',
-  textPolicy: 'local_only',
-  sensitiveDataFiltering: true,
-  retentionDays: 90,
-};
-
-// ─── Load ──────────────────────────────────────────────────────────────────────
+function decodeUtf8Strict(bytes: Uint8Array, filePath: string): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new ClassificationConfigLoadError(
+      'invalid_json',
+      `Classification file is not valid UTF-8: ${filePath}`,
+      filePath,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
 
 /**
- * Loads all files from store/classification/ and constructs a validated ClassificationConfig.
- * Missing files are replaced with empty defaults so classification can be incrementally
- * configured without requiring every file to exist from day one.
+ * Open a contained regular file once, reject final-component symlinks with
+ * O_NOFOLLOW where the platform supports it, fstat the opened descriptor, and
+ * hash/parse the same bytes. Node has no openat API, so directory replacement
+ * cannot be made impossible here; the realpath/lstat/open/fstat checks minimize
+ * that transitional risk until the atomic config store owns a locked directory.
+ */
+function readRequiredFile(dir: CheckedDirectory, fileName: string): ReadFileResult {
+  if (path.basename(fileName) !== fileName) {
+    throw new ClassificationConfigLoadError('read_error', `Invalid classification filename: ${fileName}`, dir.path);
+  }
+  const filePath = path.join(dir.path, fileName);
+  if (path.dirname(path.resolve(filePath)) !== path.resolve(dir.path)) {
+    throw new ClassificationConfigLoadError('read_error', `Classification file escapes its directory: ${filePath}`, filePath);
+  }
+
+  let descriptor: number | null = null;
+  try {
+    const linkStat = fs.lstatSync(filePath);
+    if (linkStat.isSymbolicLink() || !linkStat.isFile()) {
+      throw new ClassificationConfigLoadError(
+        'read_error',
+        `Classification path is not a real regular file: ${filePath}`,
+        filePath,
+      );
+    }
+    const realPath = fs.realpathSync.native(filePath);
+    if (path.dirname(realPath) !== dir.realPath) {
+      throw new ClassificationConfigLoadError(
+        'read_error',
+        `Classification file escapes its directory: ${filePath}`,
+        filePath,
+      );
+    }
+    const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const openedStat = fs.fstatSync(descriptor);
+    if (!openedStat.isFile()) {
+      throw new ClassificationConfigLoadError(
+        'read_error',
+        `Opened classification path is not a regular file: ${filePath}`,
+        filePath,
+      );
+    }
+    const buffer = fs.readFileSync(descriptor);
+    const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    const text = decodeUtf8Strict(bytes, filePath);
+    let value: unknown;
+    try {
+      value = JSON.parse(text) as unknown;
+    } catch (error) {
+      throw new ClassificationConfigLoadError(
+        'invalid_json',
+        `Invalid JSON in ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+        filePath,
+      );
+    }
+    return { path: filePath, bytes, text, value };
+  } catch (error) {
+    if (error instanceof ClassificationConfigLoadError) throw error;
+    const code = fsErrorCode(error);
+    throw new ClassificationConfigLoadError(
+      code === 'ENOENT' ? 'missing_file' : 'read_error',
+      `${code === 'ENOENT' ? 'Required classification file is missing' : 'Unable to read classification file'} ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+      filePath,
+    );
+  } finally {
+    if (descriptor !== null) {
+      try { fs.closeSync(descriptor); } catch { /* original read result/error wins */ }
+    }
+  }
+}
+
+function readManifest(workspacePath: string): { dir: CheckedDirectory; file: ReadFileResult } {
+  const dir = checkedClassificationDirectory(workspacePath);
+  try {
+    const entries = fs.readdirSync(dir.path);
+    if (!entries.includes('manifest.json')) {
+      if (entries.length === 0) throw new ClassificationConfigNotConfiguredError(workspacePath);
+      throw new ClassificationConfigLoadError(
+        'missing_file',
+        `Classification directory contains files but has no manifest.json: ${dir.path}`,
+        path.join(dir.path, 'manifest.json'),
+      );
+    }
+  } catch (error) {
+    if (error instanceof ClassificationConfigLoadError) throw error;
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Unable to list classification directory ${dir.path}: ${error instanceof Error ? error.message : String(error)}`,
+      dir.path,
+    );
+  }
+  return { dir, file: readRequiredFile(dir, 'manifest.json') };
+}
+
+function manifestVersion(value: unknown, manifestPath: string): number {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ClassificationConfigLoadError('invalid_config', 'Classification manifest must be an object.', manifestPath);
+  }
+  const version = (value as Record<string, unknown>).schemaVersion;
+  if (!Number.isInteger(version)) {
+    throw new ClassificationConfigLoadError('invalid_config', 'Classification manifest schemaVersion must be an integer.', manifestPath);
+  }
+  return Number(version);
+}
+
+function loadLegacyV1FromManifest(
+  workspacePath: string,
+  manifest: ReturnType<typeof readManifest>,
+): LegacyClassificationConfigV1 {
+  const files = Object.fromEntries(
+    ClassificationFocusedFileNames.map(fileName => [fileName, readRequiredFile(manifest.dir, fileName).value]),
+  ) as Record<ClassificationFocusedFileName, unknown>;
+  const candidate = {
+    manifest: manifest.file.value,
+    productTypes: files['product-types.json'],
+    attributes: files['attributes.json'],
+    attributeProfiles: files['attribute-profiles.json'],
+    attributeMappings: files['mappings.json'],
+    curationTargets: files['curation-targets.json'],
+    brands: files['brands.json'],
+    guidance: files['guidance.json'],
+    modelPolicy: files['model-policies.json'],
+    dataSharing: files['data-sharing.json'],
+  };
+  const parsed = LegacyClassificationConfigV1Schema.safeParse(candidate);
+  if (!parsed.success) {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      `Legacy v1 classification configuration is invalid under ${classificationDir(workspacePath)}.`,
+      manifest.file.path,
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
+}
+
+/** Migration-only reader for the complete legacy bare-file bundle. */
+export function loadLegacyV1ConfigForMigration(workspacePath: string): LegacyClassificationConfigV1 {
+  const manifest = readManifest(workspacePath);
+  const version = manifestVersion(manifest.file.value, manifest.file.path);
+  if (version !== 1) {
+    throw new ClassificationConfigLoadError(
+      'unsupported_version',
+      `Expected a legacy v1 classification manifest, found schemaVersion ${version}.`,
+      manifest.file.path,
+    );
+  }
+  return loadLegacyV1FromManifest(workspacePath, manifest);
+}
+
+/**
+ * Explicit temporary runtime path. The canonical catalog is still v1 until the
+ * atomic store and native-v2 runtime milestones land; naming this boundary
+ * prevents it from being mistaken for the long-term active contract.
+ */
+export function loadStrictLegacyV1RuntimeConfig(workspacePath: string): ClassificationConfig {
+  return loadLegacyV1ConfigForMigration(workspacePath) as ClassificationConfig;
+}
+
+function parseEnvelope<T>(
+  file: ReadFileResult,
+  schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: { issues: unknown } } },
+): T {
+  const parsed = schema.safeParse(file.value);
+  if (!parsed.success) {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      `Invalid v2 classification file ${file.path}.`,
+      file.path,
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
+}
+
+export type LoadClassificationConfigBundleV2Options =
+  Omit<ClassificationConfigValidationOptions, 'focusedFileContents' | 'mode'>;
+
+/**
+ * Verified activation context required by the active loader. Milestone 3
+ * supplies the catalog-evidence verifier backed by the committed evidence
+ * artifact; until then active loading fails closed without it.
+ */
+export interface VerifiedActivationContext {
+  /** Attested live Catalog Field set from a product export/field registry. */
+  catalogFields: Iterable<string>;
+  /** Stable IDs from an active, verified Page import. */
+  verifiedPageIds?: Iterable<string>;
+  /** Qualification receipts already verified by the benchmark subsystem. */
+  verifiedQualificationReceiptDigests?: Iterable<string>;
+  /**
+   * Binds manifest.catalogEvidenceHash to the attested field set and source
+   * catalog commit. When omitted, active validation fails closed.
+   */
+  verifyCatalogEvidence?: CatalogEvidenceVerifier;
+  /**
+   * Activation-time tree integrity gate: re-scans the workspace and verifies
+   * the catalog tree still matches the evidence artifact hash. When present,
+   * the config-store runs it before the atomic swap (Milestone 7).
+   */
+  verifyCatalogEvidenceTree?: (expectedArtifactHash: string) => Promise<{ verified: boolean; reason?: string }>;
+}
+
+function loadClassificationConfigBundleV2Internal(
+  workspacePath: string,
+  mode: 'preview' | 'active',
+  options: LoadClassificationConfigBundleV2Options,
+): ClassificationConfigBundleV2 {
+  const manifest = readManifest(workspacePath);
+  const version = manifestVersion(manifest.file.value, manifest.file.path);
+  if (version !== 2) {
+    throw new ClassificationConfigLoadError(
+      'unsupported_version',
+      `Expected classification schemaVersion 2, found ${version}.`,
+      manifest.file.path,
+    );
+  }
+  const manifestParsed = ClassificationManifestV2Schema.safeParse(manifest.file.value);
+  if (!manifestParsed.success) {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      'Invalid v2 classification manifest.',
+      manifest.file.path,
+      manifestParsed.error.issues,
+    );
+  }
+  if (mode === 'preview' && manifestParsed.data.lifecycle === 'active') {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      'A lifecycle-active bundle cannot be returned by the preview loader; use loadActiveClassificationConfigBundleV2 with a verified activation context.',
+      manifest.file.path,
+      ['active_bundle_preview_load'],
+    );
+  }
+  if (mode === 'active' && manifestParsed.data.lifecycle !== 'active') {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      'Only lifecycle-active bundles can be loaded by the active loader.',
+      manifest.file.path,
+      ['active_lifecycle_required'],
+    );
+  }
+
+  const raw = Object.fromEntries(
+    ClassificationFocusedFileNames.map(fileName => [fileName, readRequiredFile(manifest.dir, fileName)]),
+  ) as Record<ClassificationFocusedFileName, ReadFileResult>;
+
+  const productTypesFile = parseEnvelope(raw['product-types.json'], ProductTypesFileV2Schema);
+  const attributesFile = parseEnvelope(raw['attributes.json'], AttributesFileV2Schema);
+  const attributeProfilesFile = parseEnvelope(raw['attribute-profiles.json'], AttributeProfilesFileV2Schema);
+  const attributeMappingsFile = parseEnvelope(raw['mappings.json'], AttributeMappingsFileV2Schema);
+  const curationTargetsFile = parseEnvelope(raw['curation-targets.json'], CurationTargetsFileV2Schema);
+  const brandsFile = parseEnvelope(raw['brands.json'], BrandsFileV2Schema);
+  const guidanceFile = parseEnvelope(raw['guidance.json'], GuidanceFileV2Schema);
+  const modelPolicyFile = parseEnvelope(raw['model-policies.json'], ModelPolicyFileV2Schema);
+  const dataSharingFile = parseEnvelope(raw['data-sharing.json'], DataSharingFileV2Schema);
+  const envelopes = [
+    productTypesFile,
+    attributesFile,
+    attributeProfilesFile,
+    attributeMappingsFile,
+    curationTargetsFile,
+    brandsFile,
+    guidanceFile,
+    modelPolicyFile,
+    dataSharingFile,
+  ];
+  const originHashes = new Set(envelopes.map(envelope => hashCanonicalJson(envelope.bundleOrigin)));
+  if (originHashes.size !== 1) {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      'Focused classification files declare inconsistent bundle origins.',
+      manifest.file.path,
+      ['focused_file_origin_mismatch'],
+    );
+  }
+
+  const structurallyParsed = ClassificationConfigBundleV2Schema.safeParse({
+    manifest: manifestParsed.data,
+    bundleOrigin: productTypesFile.bundleOrigin,
+    productTypes: productTypesFile.entries,
+    attributes: attributesFile.entries,
+    attributeProfiles: attributeProfilesFile.entries,
+    attributeMappings: attributeMappingsFile.entries,
+    curationTargets: curationTargetsFile.entries,
+    brands: brandsFile.entries,
+    guidance: guidanceFile.entries,
+    modelPolicy: modelPolicyFile.policy,
+    dataSharing: dataSharingFile.policy,
+  });
+  if (!structurallyParsed.success) {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      'The v2 classification bundle is structurally invalid.',
+      manifest.file.path,
+      structurallyParsed.error.issues,
+    );
+  }
+
+  const report = validateClassificationConfigBundle(structurallyParsed.data, {
+    ...options,
+    mode,
+    focusedFileContents: Object.fromEntries(
+      ClassificationFocusedFileNames.map(fileName => [fileName, raw[fileName].bytes]),
+    ),
+  });
+  if (!report.valid || !report.config) {
+    const hashFailure = report.findings.some(finding => (
+      finding.code === 'file_hash_mismatch' || finding.code === 'bundle_hash_mismatch'
+    ));
+    throw new ClassificationConfigLoadError(
+      hashFailure ? 'hash_mismatch' : 'invalid_config',
+      `The v2 classification bundle failed ${hashFailure ? 'integrity' : 'semantic'} validation.`,
+      manifest.file.path,
+      report.findings,
+    );
+  }
+  return report.config;
+}
+
+/**
+ * Preview loader. Never returns a lifecycle-active bundle; an on-disk active
+ * bundle fails closed here instead of being inspected as a preview.
+ */
+export function loadClassificationConfigBundleV2Preview(
+  workspacePath: string,
+  options: LoadClassificationConfigBundleV2Options = {},
+): ClassificationConfigBundleV2 {
+  return loadClassificationConfigBundleV2Internal(workspacePath, 'preview', options);
+}
+
+/**
+ * Active loader. Requires the caller-supplied verified activation context;
+ * active loading without catalog/evidence/Page/receipt verification fails
+ * closed. The catalog-evidence binding verifier is supplied by Milestone 3.
+ */
+export function loadActiveClassificationConfigBundleV2(
+  workspacePath: string,
+  activationContext: VerifiedActivationContext,
+): ClassificationConfigBundleV2 {
+  return loadClassificationConfigBundleV2Internal(workspacePath, 'active', {
+    catalogFields: activationContext.catalogFields,
+    verifiedPageIds: activationContext.verifiedPageIds,
+    verifiedQualificationReceiptDigests: activationContext.verifiedQualificationReceiptDigests,
+    verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
+  });
+}
+
+/**
+ * Current legacy runtime API. V1 remains explicit transitional compatibility;
+ * v2 is refused here so native safety/provenance/ML/serialization semantics
+ * cannot be silently adapted away before Milestones 4–5.
  */
 export function loadClassificationConfig(workspacePath: string): ClassificationConfig {
-  const dir = classificationDir(workspacePath);
-  ensureClassificationDir(workspacePath);
-
-  const manifest = readJsonFile<ClassificationConfig['manifest']>(path.join(dir, 'manifest.json'));
-  const productTypes = readJsonFile<ClassificationConfig['productTypes']>(path.join(dir, 'product-types.json')) ?? [];
-  const attributes = readJsonFile<ClassificationConfig['attributes']>(path.join(dir, 'attributes.json')) ?? [];
-  const attributeProfiles = readJsonFile<ClassificationConfig['attributeProfiles']>(path.join(dir, 'attribute-profiles.json')) ?? [];
-  const attributeMappings = readJsonFile<ClassificationConfig['attributeMappings']>(path.join(dir, 'mappings.json')) ?? [];
-  const curationTargets = readJsonFile<ClassificationConfig['curationTargets']>(path.join(dir, 'curation-targets.json')) ?? [];
-  const guidance = readJsonFile<ClassificationConfig['guidance']>(path.join(dir, 'guidance.json')) ?? [];
-  const modelPolicy = readJsonFile<ClassificationConfig['modelPolicy']>(path.join(dir, 'model-policies.json'));
-  const dataSharing = readJsonFile<ClassificationConfig['dataSharing']>(path.join(dir, 'data-sharing.json'));
-  const brands = readJsonFile<ClassificationConfig['brands']>(path.join(dir, 'brands.json')) ?? [];
-
-  const config: ClassificationConfig = {
-    manifest: manifest ?? {
-      ...DEFAULT_MANIFEST,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      fileVersions: {},
-    } as ClassificationConfig['manifest'],
-    productTypes: productTypes as ClassificationConfig['productTypes'],
-    attributes: attributes as ClassificationConfig['attributes'],
-    attributeProfiles: attributeProfiles as ClassificationConfig['attributeProfiles'],
-    attributeMappings: attributeMappings as ClassificationConfig['attributeMappings'],
-    curationTargets: curationTargets as ClassificationConfig['curationTargets'],
-    brands: brands as ClassificationConfig['brands'],
-    guidance: guidance as ClassificationConfig['guidance'],
-    modelPolicy: (modelPolicy ?? DEFAULT_MODEL_POLICY) as ClassificationConfig['modelPolicy'],
-    dataSharing: (dataSharing ?? DEFAULT_DATA_SHARING) as ClassificationConfig['dataSharing'],
-  };
-
-  const parsed = ClassificationConfigSchema.safeParse(config);
-  return parsed.success ? parsed.data : config;
+  const manifest = readManifest(workspacePath);
+  const version = manifestVersion(manifest.file.value, manifest.file.path);
+  if (version === 1) return loadLegacyV1FromManifest(workspacePath, manifest) as ClassificationConfig;
+  if (version === 2) {
+    throw new ClassificationConfigLoadError(
+      'unsupported_version',
+      'V2 configuration is not available through the legacy runtime adapter; use the native v2 snapshot path.',
+      manifest.file.path,
+    );
+  }
+  throw new ClassificationConfigLoadError(
+    'unsupported_version',
+    `Unsupported classification schemaVersion ${version}.`,
+    manifest.file.path,
+  );
 }
 
-// ─── Save ──────────────────────────────────────────────────────────────────────
+// ─── Runtime config authority (Milestone 7) ───────────────────────────────────
 
 /**
- * Persists a full ClassificationConfig into individual files under store/classification/.
+ * The authoritative runtime configuration: strict v1 transitional bundles are
+ * consumed as-is; the ACTIVE v2 bundle is consumed through the verified active
+ * loader. V2 is the authority whenever an active v2 activation exists.
+ */
+export type RuntimeConfigAuthority =
+  | { kind: 'v1'; config: ClassificationConfig }
+  | { kind: 'v2'; bundle: ClassificationConfigBundleV2 };
+
+/**
+ * Load the authoritative runtime configuration. Active v2 loading requires a
+ * verified activation context (catalog fields + catalog-evidence verifier);
+ * without one it fails closed. V1 remains the transitional fallback when no
+ * v2 activation exists.
+ */
+export function loadRuntimeConfigAuthority(
+  workspacePath: string,
+  activationContext?: VerifiedActivationContext,
+): RuntimeConfigAuthority {
+  const manifest = readManifest(workspacePath);
+  const version = manifestVersion(manifest.file.value, manifest.file.path);
+  if (version === 1) {
+    return { kind: 'v1', config: loadLegacyV1FromManifest(workspacePath, manifest) as ClassificationConfig };
+  }
+  if (version === 2) {
+    if (!activationContext) {
+      throw new ClassificationConfigLoadError(
+        'invalid_config',
+        'Active v2 configuration requires a verified activation context (catalog fields and catalog-evidence verifier).',
+        manifest.file.path,
+        ['v2_runtime_context_required'],
+      );
+    }
+    return { kind: 'v2', bundle: loadActiveClassificationConfigBundleV2(workspacePath, activationContext) };
+  }
+  throw new ClassificationConfigLoadError(
+    'unsupported_version',
+    `Unsupported classification schemaVersion ${version}.`,
+    manifest.file.path,
+  );
+}
+
+/**
+ * Build the verified activation context for a workspace from live sources:
+ * the field-registry xmlFields as the attested Catalog Field set, and the
+ * catalog-evidence verifier bound to the committed artifact. Cheap enough for
+ * every runtime load; the full tree re-scan gate is added by the activation
+ * caller through `verifyCatalogEvidenceTree`.
+ */
+export function createRuntimeActivationContext(workspacePath: string): VerifiedActivationContext {
+  return {
+    catalogFields: readLiveCatalogFields(workspacePath),
+    verifyCatalogEvidence: createCatalogEvidenceVerifier(workspacePath),
+  };
+}
+
+/**
+ * Read-only runtime config view: v1 config as-is, or the ACTIVE v2 bundle
+ * (typed as the legacy shape for callers that only read common fields).
+ * Prefer `loadRuntimeConfigAuthority` when the authority kind matters.
+ */
+export function loadRuntimeConfig(workspacePath: string): ClassificationConfig {
+  const authority = loadRuntimeConfigAuthority(workspacePath, createRuntimeActivationContext(workspacePath));
+  return authority.kind === 'v2' ? (authority.bundle as unknown as ClassificationConfig) : authority.config;
+}
+
+/**
+ * Transitional legacy writer retained until Milestone 3 replaces production
+ * writes with the locked, atomic config store. It validates a complete v1
+ * bundle, rejects symlinked/non-regular paths, and is intentionally not the
+ * long-term activation API.
  */
 export function saveClassificationConfig(workspacePath: string, config: ClassificationConfig): void {
-  ensureClassificationDir(workspacePath);
-  const dir = classificationDir(workspacePath);
-
-  writeJsonFile(path.join(dir, 'manifest.json'), config.manifest);
-  writeJsonFile(path.join(dir, 'product-types.json'), config.productTypes);
-  writeJsonFile(path.join(dir, 'attributes.json'), config.attributes);
-  writeJsonFile(path.join(dir, 'attribute-profiles.json'), config.attributeProfiles);
-  writeJsonFile(path.join(dir, 'mappings.json'), config.attributeMappings);
-  writeJsonFile(path.join(dir, 'curation-targets.json'), config.curationTargets);
-  writeJsonFile(path.join(dir, 'brands.json'), config.brands ?? []);
-  writeJsonFile(path.join(dir, 'guidance.json'), config.guidance);
-  writeJsonFile(path.join(dir, 'model-policies.json'), config.modelPolicy);
-  writeJsonFile(path.join(dir, 'data-sharing.json'), config.dataSharing);
+  const parsed = LegacyClassificationConfigV1Schema.safeParse(config);
+  if (!parsed.success) {
+    throw new ClassificationConfigLoadError(
+      'invalid_config',
+      'Refusing to write an incomplete or invalid legacy v1 classification bundle.',
+      path.join(classificationDir(workspacePath), 'manifest.json'),
+      parsed.error.issues,
+    );
+  }
+  const checkedDir = checkedClassificationDirectoryForWrite(workspacePath);
+  const dir = checkedDir.path;
+  const files: Record<string, unknown> = {
+    'manifest.json': parsed.data.manifest,
+    'product-types.json': parsed.data.productTypes,
+    'attributes.json': parsed.data.attributes,
+    'attribute-profiles.json': parsed.data.attributeProfiles,
+    'mappings.json': parsed.data.attributeMappings,
+    'curation-targets.json': parsed.data.curationTargets,
+    'brands.json': parsed.data.brands,
+    'guidance.json': parsed.data.guidance,
+    'model-policies.json': parsed.data.modelPolicy,
+    'data-sharing.json': parsed.data.dataSharing,
+  };
+  const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+  for (const [fileName, value] of Object.entries(files)) {
+    // Re-validate every descendant component immediately before every write.
+    // This cannot remove the platform's lack-of-openat race, but it prevents a
+    // pre-existing or between-file intermediate symlink from ever being used.
+    const currentDir = checkedClassificationDirectory(workspacePath);
+    if (currentDir.realPath !== checkedDir.realPath) {
+      throw new ClassificationConfigLoadError(
+        'write_error',
+        `Classification directory identity changed during write: ${dir}`,
+        dir,
+      );
+    }
+    const filePath = path.join(currentDir.path, fileName);
+    let descriptor: number | null = null;
+    try {
+      // O_NOFOLLOW rejects a final-component symlink at open time where supported.
+      descriptor = fs.openSync(
+        filePath,
+        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | noFollow,
+      );
+      const openedStat = fs.fstatSync(descriptor);
+      if (!openedStat.isFile()) {
+        throw new ClassificationConfigLoadError(
+          'write_error',
+          `Opened classification path is not a regular file: ${filePath}`,
+          filePath,
+        );
+      }
+      fs.writeFileSync(descriptor, canonicalJsonFileString(value), 'utf8');
+    } catch (error) {
+      if (error instanceof ClassificationConfigLoadError) throw error;
+      throw new ClassificationConfigLoadError(
+        'write_error',
+        `Unable to write classification file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+        filePath,
+      );
+    } finally {
+      if (descriptor !== null) {
+        try { fs.closeSync(descriptor); } catch { /* original write result/error wins */ }
+      }
+    }
+  }
 }
 
 /**
- * Returns true if the classification directory exists and contains a manifest.json.
+ * Presence check that preserves typed errors: only a truly absent manifest is
+ * "not configured"; symlinked/non-regular paths and filesystem failures throw
+ * ClassificationConfigLoadError instead of being collapsed to absence.
  */
 export function hasClassificationConfig(workspacePath: string): boolean {
-  return fs.existsSync(path.join(classificationDir(workspacePath), 'manifest.json'));
+  const dir = checkedClassificationDirectory(workspacePath);
+  const manifestPath = path.join(dir.path, 'manifest.json');
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(manifestPath);
+  } catch (error) {
+    // Only the exact absent manifest under verified real workspace/store/
+    // classification directories is "not configured".
+    if (fsErrorCode(error) === 'ENOENT') return false;
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Unable to inspect classification manifest presence at ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+      manifestPath,
+    );
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Classification manifest is not a real regular file: ${manifestPath}`,
+      manifestPath,
+    );
+  }
+  try {
+    const realPath = fs.realpathSync.native(manifestPath);
+    if (path.dirname(realPath) !== dir.realPath) {
+      throw new ClassificationConfigLoadError(
+        'read_error',
+        `Classification manifest escapes its verified directory: ${manifestPath}`,
+        manifestPath,
+      );
+    }
+  } catch (error) {
+    if (error instanceof ClassificationConfigLoadError) throw error;
+    throw new ClassificationConfigLoadError(
+      'read_error',
+      `Unable to resolve classification manifest ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`,
+      manifestPath,
+    );
+  }
+  return true;
 }

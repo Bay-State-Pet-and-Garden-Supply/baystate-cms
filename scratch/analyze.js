@@ -1,5 +1,5 @@
 const Database = require('bun:sqlite').Database;
-const db = new Database('/Users/nickborrello/Desktop/Projects/shopsite-cms/workspaces/Bay State/.shopsite-cms/app.db');
+const db = new Database('/Users/nickborrello/Desktop/Projects/shopsite-cms/workspaces/Bay State/.baystate-cms/app.db');
 
 try {
   const runs = db.query(`SELECT * FROM curation_runs`).all();

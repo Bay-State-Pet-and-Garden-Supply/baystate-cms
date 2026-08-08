@@ -1,5 +1,6 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { getCachedAttributeMappings } from '../../db/repositories/classification-config-repo';
+import { getEffectiveProposalValue, serializeAttributeValue } from '../assignment-projection';
 
 /**
  * Product Draft Projection Stage
@@ -25,7 +26,9 @@ export const productDraftProjectionStage: StageDefinition = {
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
     const accepted = input.acceptedProposals;
     const allProposals = input.allProposals;
-    const mappings = getCachedAttributeMappings(context.workspaceId);
+    const mappings = context.snapshot
+      ? context.snapshot.attributeMappings
+      : getCachedAttributeMappings(context.workspaceId);
 
     // Build a set of target IDs already covered by accepted proposals
     // so we don't double-count when including pending ones.
@@ -40,16 +43,12 @@ export const productDraftProjectionStage: StageDefinition = {
     const fieldAssignments: Record<string, unknown> = {};
     const pendingSupplement: Array<{ targetId: string; value: unknown; confidence: number }> = [];
 
-    // Helper to build a catalog field value from a proposal
+    // The ONE shared serializer: preview, onboarding promotion, and catalog
+    // application all use serializeAttributeValue so a value serializes
+    // identically across every surface.
     const applyMapping = (proposal: any, mapping: any): unknown => {
-      const value = proposal.proposedValue;
-      const format = mapping.serialization?.format ?? 'direct';
-      if (format === 'direct') return value;
-      const sep = mapping.serialization?.separator ?? ', ';
-      const prefix = mapping.serialization?.prefix ?? '';
-      const suffix = mapping.serialization?.suffix ?? '';
-      const values = Array.isArray(value) ? value : [value];
-      return `${prefix}${values.join(sep)}${suffix}`;
+      const value = getEffectiveProposalValue(proposal);
+      return serializeAttributeValue(value, mapping.serialization);
     };
 
     // Process accepted proposals

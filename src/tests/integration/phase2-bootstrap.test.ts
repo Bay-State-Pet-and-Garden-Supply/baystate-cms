@@ -13,7 +13,7 @@ const fixtureDir = path.resolve(import.meta.dirname, '../fixtures');
 const fixtureXml = fs.readFileSync(path.join(fixtureDir, 'shopsite-products-sample.xml'), 'utf-8');
 
 describe('Phase 2: Bootstrap from fixture XML', () => {
-  const testDir = path.join(os.tmpdir(), `shopsite-cms-phase2-${Date.now()}`);
+  const testDir = path.join(os.tmpdir(), `baystate-cms-phase2-${Date.now()}`);
 
   beforeAll(() => {
     try { fs.rmSync(testDir, { recursive: true }); } catch { /* ok */ }

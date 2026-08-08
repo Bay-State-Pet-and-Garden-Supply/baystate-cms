@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { hashJson } from '../../git/deterministic-json';
 import { writeProductFile } from '../../git/workspace-files';
 import { skuToProductFilePath } from '../../git/product-file-path';
@@ -134,18 +136,34 @@ export function approveChangeSet(
 
   // Git commit
   const git = new GitClient(workspacePath);
-  const stagedFiles: string[] = ['products/', 'store/', '.gitignore'];
+  const candidateFiles: string[] = ['products/', 'store/', '.gitignore'];
 
   // Only add changed product files
   for (const sku of committedSkus) {
-    stagedFiles.push(skuToProductFilePath(sku));
+    candidateFiles.push(skuToProductFilePath(sku));
   }
 
+  const stagedFiles = candidateFiles.filter(f => fs.existsSync(path.join(workspacePath, f)));
+
   try {
-    git.add(stagedFiles);
+    if (stagedFiles.length > 0) {
+      git.add(stagedFiles);
+    }
     const commitMessage = `Change set: ${changeSet.title} (${committedSkus.length} product(s))`;
-    git.commit(commitMessage);
-    const commitHash = git.getHeadHash();
+    let commitHash: string;
+    try {
+      git.commit(commitMessage);
+      commitHash = git.getHeadHash();
+    } catch (commitErr) {
+      const stdout = String((commitErr as any)?.stdout?.toString() ?? '');
+      const stderr = String((commitErr as any)?.stderr?.toString() ?? '');
+      const errMsg = `${commitErr instanceof Error ? commitErr.message : String(commitErr)} ${stdout} ${stderr}`;
+      if (errMsg.includes('nothing added to commit') || errMsg.includes('nothing to commit') || errMsg.includes('working tree clean')) {
+        commitHash = git.getHeadHash();
+      } else {
+        throw commitErr;
+      }
+    }
 
     // Update change set status
     updateChangeSetStatus(changeSetId, 'approved', commitHash);

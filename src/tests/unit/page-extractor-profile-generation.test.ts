@@ -154,8 +154,8 @@ describe('page-extractor profile generation (decision 20: proposal-only)', () =>
   let originalEnv: string | undefined;
 
   beforeEach(() => {
-    originalEnv = process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
-    process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = 'true';
+    originalEnv = process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
+    process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = 'true';
     insertProfileGeneration.mockClear();
     updateProfileGenerationStatus.mockClear();
     getLlmConfig.mockClear();
@@ -164,9 +164,9 @@ describe('page-extractor profile generation (decision 20: proposal-only)', () =>
 
   afterEach(() => {
     if (originalEnv === undefined) {
-      delete process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED;
+      delete process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED;
     } else {
-      process.env.SHOPSITE_CMS_PROFILE_GENERATION_ENABLED = originalEnv;
+      process.env.BAYSTATE_CMS_PROFILE_GENERATION_ENABLED = originalEnv;
     }
     vi.unstubAllGlobals();
   });

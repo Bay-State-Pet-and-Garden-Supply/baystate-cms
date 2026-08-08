@@ -9,7 +9,7 @@ import { supplementPrice } from '../../onboarding/price-supplementer';
 import { clearSerperCache } from '../../db/repositories/serper-cache-repo';
 
 describe('Serper Caching Integration', () => {
-  const testDbPath = '/tmp/shopsite-cms-serper-cache-int-test.db';
+  const testDbPath = '/tmp/baystate-cms-serper-cache-int-test.db';
   const originalFetch = global.fetch;
   let fetchCount = 0;
 

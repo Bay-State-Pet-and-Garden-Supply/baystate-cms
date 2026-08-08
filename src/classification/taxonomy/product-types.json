@@ -1,0 +1,156 @@
+[
+  {
+    "id": "dog_food_dry",
+    "name": "Dry Dog Food",
+    "parentCategory": "dog_supplies",
+    "description": "Dry kibble and extruded dry food formulas for dogs.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-1",
+      "google": "4748",
+      "gs1GpcBrick": "10005886"
+    }
+  },
+  {
+    "id": "dog_food_wet",
+    "name": "Wet Dog Food",
+    "parentCategory": "dog_supplies",
+    "description": "Canned, pouch, and loaf wet food formulas for dogs.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-2",
+      "google": "4748",
+      "gs1GpcBrick": "10005886"
+    }
+  },
+  {
+    "id": "dog_treat",
+    "name": "Dog Treat & Chew",
+    "parentCategory": "dog_supplies",
+    "description": "Biscuits, jerky, dental chews, and training treats for dogs.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-3",
+      "google": "500008",
+      "gs1GpcBrick": "10005887"
+    }
+  },
+  {
+    "id": "cat_food_dry",
+    "name": "Dry Cat Food",
+    "parentCategory": "cat_supplies",
+    "description": "Dry kibble formulas for cats.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-4",
+      "google": "4749",
+      "gs1GpcBrick": "10005886"
+    }
+  },
+  {
+    "id": "cat_food_wet",
+    "name": "Wet Cat Food",
+    "parentCategory": "cat_supplies",
+    "description": "Canned, pouch, and pate wet food formulas for cats.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-5",
+      "google": "4749",
+      "gs1GpcBrick": "10005886"
+    }
+  },
+  {
+    "id": "cat_treat",
+    "name": "Cat Treat",
+    "parentCategory": "cat_supplies",
+    "description": "Crunchy, squeezable, and freeze-dried treats for cats.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-6",
+      "google": "500008",
+      "gs1GpcBrick": "10005887"
+    }
+  },
+  {
+    "id": "flea_tick_control",
+    "name": "Flea & Tick Treatment",
+    "parentCategory": "pet_health",
+    "description": "Topical, oral, and collar flea & tick preventatives for pets.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-7",
+      "google": "499971",
+      "gs1GpcBrick": "10005890"
+    }
+  },
+  {
+    "id": "bird_seed_food",
+    "name": "Wild & Pet Bird Seed",
+    "parentCategory": "bird_supplies",
+    "description": "Seed blends, suet cakes, and nectar for wild and pet birds.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/an-8",
+      "google": "4747",
+      "gs1GpcBrick": "10005886"
+    }
+  },
+  {
+    "id": "lawn_fertilizer",
+    "name": "Lawn Fertilizer",
+    "parentCategory": "lawn_garden",
+    "description": "Granular and liquid lawn food and soil nutrients.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/hg-1",
+      "google": "2984",
+      "gs1GpcBrick": "10001712"
+    }
+  },
+  {
+    "id": "grass_seed",
+    "name": "Grass Seed",
+    "parentCategory": "lawn_garden",
+    "description": "Turfgrass seed mixtures and patch repair blends.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/hg-2",
+      "google": "2983",
+      "gs1GpcBrick": "10001713"
+    }
+  },
+  {
+    "id": "weed_control",
+    "name": "Weed & Herbicide Control",
+    "parentCategory": "lawn_garden",
+    "description": "Pre-emergent and post-emergent weed killers for lawns and gardens.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/hg-3",
+      "google": "2988",
+      "gs1GpcBrick": "10001714"
+    }
+  },
+  {
+    "id": "insect_pest_control",
+    "name": "Insect & Pest Control",
+    "parentCategory": "lawn_garden",
+    "description": "Insecticides, repellents, and pest control formulas for lawn & home.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/hg-4",
+      "google": "2989",
+      "gs1GpcBrick": "10001715"
+    }
+  },
+  {
+    "id": "potting_soil",
+    "name": "Potting Soil & Planting Mix",
+    "parentCategory": "lawn_garden",
+    "description": "Potting soil, compost, and soil amendments for indoor & outdoor plants.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/hg-5",
+      "google": "2985",
+      "gs1GpcBrick": "10001716"
+    }
+  },
+  {
+    "id": "hand_garden_tool",
+    "name": "Hand Garden Tool",
+    "parentCategory": "hardware_tools",
+    "description": "Pruners, trowels, rakes, shovels, and manual garden hand tools.",
+    "externalMappings": {
+      "shopify": "gid://shopify/TaxonomyCategory/hg-6",
+      "google": "2976",
+      "gs1GpcBrick": "10001717"
+    }
+  }
+]

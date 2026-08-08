@@ -1,6 +1,6 @@
 import { getDb } from '../db/connection';
 import {
-  saveClassificationConfig,
+  ClassificationConfigNotConfiguredError,
   hasClassificationConfig,
 } from './config-loader';
 import type {
@@ -24,20 +24,36 @@ function toSlug(label: string): string {
 }
 
 /**
- * Migrates existing product_types, product_type_fields, and field_registry
- * tables into a ClassificationConfig stored under store/classification/.
+ * Converts existing product_types, product_type_fields, and field_registry
+ * tables into a ClassificationConfig candidate.
  *
- * Returns a ClassificationConfig representing the inferred configuration.
- * Does NOT overwrite an existing classification config by default.
+ * Candidate-only by design: this function NEVER writes to the active
+ * store/classification/ directory and never calls the config-store. The caller
+ * decides whether the candidate is discarded, migrated to v2, or activated.
+ *
+ * Returns a ClassificationConfig candidate representing the inferred
+ * configuration, or null when a configuration already exists and `overwrite`
+ * is false.
  */
 export function migrateLegacyToClassificationConfig(
   workspacePath: string,
   workspaceId: string,
   overwrite = false,
 ): ClassificationConfig | null {
-  if (!overwrite && hasClassificationConfig(workspacePath)) {
-    console.log('[LegacyMigration] Classification config already exists — skipping migration.');
-    return null;
+  if (!overwrite) {
+    let alreadyConfigured = false;
+    try {
+      alreadyConfigured = hasClassificationConfig(workspacePath);
+    } catch (error) {
+      // Missing store/classification directories are surfaced as a typed
+      // not-configured state by the strict presence checker. Symlink and other
+      // filesystem errors still propagate fail-closed.
+      if (!(error instanceof ClassificationConfigNotConfiguredError)) throw error;
+    }
+    if (alreadyConfigured) {
+      console.log('[LegacyMigration] Classification config already exists — skipping migration.');
+      return null;
+    }
   }
 
   const db = getDb();
@@ -189,7 +205,7 @@ export function migrateLegacyToClassificationConfig(
     }
   }
 
-  // ── Assemble config ──────────────────────────────────────────────────────
+  // ── Assemble candidate ──────────────────────────────────────────────────
   const config: ClassificationConfig = {
     manifest: {
       schemaVersion: 1,
@@ -225,9 +241,9 @@ export function migrateLegacyToClassificationConfig(
     },
   };
 
-  // ── Persist ──────────────────────────────────────────────────────────────
-  saveClassificationConfig(workspacePath, config);
-  console.log(`[LegacyMigration] Migrated ${productTypes.length} product types, ${attributes.length} attributes, ${attributeProfiles.length} profiles, ${attributeMappings.length} mappings to store/classification/`);
+  // Candidate-only: no filesystem or active-directory write is performed here.
+  // Milestone 3+ routes pass the candidate through the config-store.
+  console.log(`[LegacyMigration] Produced candidate with ${productTypes.length} product types, ${attributes.length} attributes, ${attributeProfiles.length} profiles, ${attributeMappings.length} mappings (not activated).`);
 
   return config;
 }

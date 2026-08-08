@@ -20,7 +20,8 @@ import {
   resolveAttributeAllowedValues,
 } from './curation-targets';
 import { getCachedProductTypes } from '../db/repositories/classification-config-repo';
-import { listPages } from '../db/repositories/page-repo';
+import { listVerifiedPageOptions } from '../db/repositories/page-repo';
+import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 
 export interface ResolvedTargetOption {
   value: string;
@@ -101,12 +102,77 @@ export function resolveEnabledTargets(
       }
 
       case 'page': {
-        const storePages = listPages();
-        const options: ResolvedTargetOption[] = storePages.map(p => ({
+        // Only verified identities from the active import are assignment
+        // options. Name-only rows are review context and never resolve here.
+        const verifiedPages = listVerifiedPageOptions(workspaceId);
+        const options: ResolvedTargetOption[] = verifiedPages.map(p => ({
           value: p.id,
           label: p.name,
         }));
         pages.push({ config: target, options });
+        break;
+      }
+    }
+  }
+
+  return {
+    productTypes,
+    productFields,
+    pages,
+    hasAny: productTypes.length > 0 || productFields.length > 0 || pages.length > 0,
+  };
+}
+
+/**
+ * Resolve enabled (or mandatory) curation targets purely from an immutable
+ * runtime snapshot. No DB, workspace-file, or cache reads: product types come
+ * from the snapshot, product-field options from the pre-resolved field-option
+ * lists captured at snapshot build time, and page options only from a verified
+ * page catalog. Without a verified catalog, page targets resolve to no options
+ * (unavailable) rather than falling back to name-only rows.
+ */
+export function resolveTargetsFromSnapshot(snapshot: RuntimeClassificationSnapshot): ResolvedTargets {
+  const allTargets = [...getExplicitCurationTargets(snapshot.config)];
+  for (const target of snapshot.curationTargets ?? []) {
+    if (target.mandatory === true && !allTargets.some(existing => existing.id === target.id)) {
+      allTargets.push(target);
+    }
+  }
+
+  const productTypes: ResolvedTarget[] = [];
+  const productFields: ResolvedTarget[] = [];
+  const pages: ResolvedTarget[] = [];
+
+  for (const target of allTargets) {
+    switch (target.kind) {
+      case 'product_type': {
+        const options: ResolvedTargetOption[] = snapshot.productTypes.map(pt => ({
+          value: pt.id,
+          label: pt.name,
+        }));
+        productTypes.push({ config: target, options });
+        break;
+      }
+
+      case 'product_field': {
+        const attribute = snapshot.attributes.find(candidate => candidate.id === target.attributeId);
+        if (!attribute) continue;
+        const options = snapshot.fieldOptions[target.id] ?? [];
+        productFields.push({ config: target, options, attribute });
+        break;
+      }
+
+      case 'page': {
+        if (snapshot.pages.state !== 'verified') {
+          // Name-only rows are review context, never assignment identities.
+          pages.push({ config: target, options: [] });
+        } else {
+          const options: ResolvedTargetOption[] = snapshot.pages.records.map(page => ({
+            value: page.pageId,
+            label: page.pageName,
+          }));
+          pages.push({ config: target, options });
+        }
         break;
       }
     }

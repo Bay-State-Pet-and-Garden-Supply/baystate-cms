@@ -1,4 +1,4 @@
--- ShopSite CMS SQLite Schema
+-- Baystate CMS SQLite Schema
 -- SQLite is not canonical catalog storage. It is local operational state:
 -- setup, indexing, drafts, validation, sync jobs, logs, and drift.
 
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS workspace (
   baseline_commit TEXT
 );
 
-CREATE TABLE IF NOT EXISTS shopsite_connection (
+CREATE TABLE IF NOT EXISTS connection (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspace(id),
   cgi_base_url TEXT NOT NULL,
@@ -76,16 +76,45 @@ CREATE TABLE IF NOT EXISTS product_type_fields (
   UNIQUE(product_type_id, xml_field)
 );
 
+CREATE TABLE IF NOT EXISTS page_imports (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  parser_format_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('previewed', 'active', 'superseded')),
+  counts_json TEXT NOT NULL,
+  records_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  activated_at TEXT,
+  superseded_at TEXT,
+  activated_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_page_imports_workspace_status ON page_imports(workspace_id, status);
+
 CREATE TABLE IF NOT EXISTS page_index (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
   file_name TEXT,
   parent_id TEXT REFERENCES page_index(id),
   page_hash TEXT NOT NULL,
+  workspace_id TEXT,
+  import_id TEXT REFERENCES page_imports(id),
+  identity_kind TEXT NOT NULL DEFAULT 'unverified_name_only',
+  identity_key TEXT,
+  identity_status TEXT NOT NULL DEFAULT 'unverified',
+  source_hash TEXT,
+  availability TEXT NOT NULL DEFAULT 'unavailable',
+  review_status TEXT NOT NULL DEFAULT 'pending',
   last_synced_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_page_index_name ON page_index(name);
+-- idx_page_index_identity and idx_page_index_import are created by the
+-- page identity migration AFTER the workspace/import/identity columns exist
+-- (an old-shape table would break index creation at schema.sql load).
 
 CREATE TABLE IF NOT EXISTS product_pages (
   product_sku TEXT NOT NULL,
@@ -218,9 +247,98 @@ CREATE INDEX IF NOT EXISTS idx_product_index_title ON product_index(title);
 CREATE INDEX IF NOT EXISTS idx_change_set_items_change_set ON change_set_items(change_set_id);
 CREATE INDEX IF NOT EXISTS idx_sync_jobs_workspace ON sync_jobs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_remote_drift_workspace ON remote_drift(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_remote_drift_ws_sku_status ON remote_drift(workspace_id, sku, status);
+CREATE INDEX IF NOT EXISTS idx_remote_drift_sku ON remote_drift(sku);
 CREATE INDEX IF NOT EXISTS idx_audit_log_workspace ON audit_log(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_catalog_health_proposals_ws ON catalog_health_proposals(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_catalog_health_proposals_status ON catalog_health_proposals(status);
+
+-- ─── Benchmark / Evaluation (frozen Gold + prediction bundles) ────────────────
+
+CREATE TABLE IF NOT EXISTS benchmark_datasets (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  name TEXT NOT NULL,
+  holdout_strategy TEXT NOT NULL DEFAULT 'product_family',
+  split_seed INTEGER NOT NULL,
+  total_examples INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'frozen', 'retired')),
+  family_review_complete INTEGER NOT NULL DEFAULT 0,
+  family_reviewed_by TEXT,
+  family_reviewed_at TEXT,
+  dataset_hash TEXT,
+  frozen_at TEXT,
+  frozen_by TEXT,
+  retired_at TEXT,
+  source_config_hash TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS benchmark_examples (
+  id TEXT PRIMARY KEY,
+  dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+  product_sku TEXT NOT NULL,
+  product_family_id TEXT,
+  split_group TEXT NOT NULL CHECK (split_group IN ('train', 'test', 'holdout')),
+  input_snapshot_json TEXT NOT NULL,
+  gold_labels_json TEXT NOT NULL,
+  example_hash TEXT NOT NULL,
+  reviewer_id TEXT,
+  adjudicated_by TEXT,
+  source_run_id TEXT,
+  source_config_hash TEXT,
+  source_product_hash TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS benchmark_prediction_bundles (
+  id TEXT PRIMARY KEY,
+  dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL,
+  run_label TEXT NOT NULL,
+  split_group TEXT NOT NULL CHECK (split_group IN ('test', 'holdout')),
+  predictions_json TEXT NOT NULL,
+  bundle_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS benchmark_eval_runs (
+  id TEXT PRIMARY KEY,
+  dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+  run_label TEXT NOT NULL,
+  model_config_json TEXT,
+  prediction_bundle_id TEXT,
+  metrics_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS benchmark_qualification_receipts (
+  id TEXT PRIMARY KEY,
+  dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+  dataset_hash TEXT NOT NULL,
+  prediction_bundle_id TEXT NOT NULL,
+  bundle_hash TEXT NOT NULL,
+  holdout_size INTEGER NOT NULL,
+  coverage REAL NOT NULL,
+  min_class_support INTEGER NOT NULL,
+  violation_counts_json TEXT NOT NULL,
+  primary_metric TEXT NOT NULL,
+  delta_lower95 REAL NOT NULL,
+  non_regression_floors_met INTEGER NOT NULL DEFAULT 0,
+  qualified INTEGER NOT NULL DEFAULT 0,
+  reasons_json TEXT NOT NULL,
+  digest TEXT NOT NULL,
+  generated_at TEXT NOT NULL,
+  generated_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_benchmark_datasets_workspace ON benchmark_datasets(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_benchmark_examples_dataset ON benchmark_examples(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_benchmark_examples_split ON benchmark_examples(dataset_id, split_group);
+CREATE INDEX IF NOT EXISTS idx_benchmark_prediction_bundles_dataset ON benchmark_prediction_bundles(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_benchmark_eval_runs_dataset ON benchmark_eval_runs(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_benchmark_qualification_receipts_dataset ON benchmark_qualification_receipts(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_benchmark_qualification_receipts_digest ON benchmark_qualification_receipts(digest);
 
 INSERT OR IGNORE INTO app_meta (key, value) VALUES ('schema_version', '1');
 INSERT OR IGNORE INTO app_meta (key, value) VALUES ('app_version', '0.1.0');

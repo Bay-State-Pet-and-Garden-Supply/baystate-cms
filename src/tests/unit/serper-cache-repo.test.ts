@@ -10,7 +10,7 @@ import {
 } from '../../db/repositories/serper-cache-repo';
 
 describe('Serper Cache Repository', () => {
-  const testDbPath = '/tmp/shopsite-cms-serper-cache-test.db';
+  const testDbPath = '/tmp/baystate-cms-serper-cache-test.db';
 
   beforeAll(() => {
     try { resetDb(); } catch { /* ok */ }

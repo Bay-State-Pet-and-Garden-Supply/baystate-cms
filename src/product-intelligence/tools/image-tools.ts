@@ -456,11 +456,17 @@ function resolveEvidenceFacts(runId: string, evidenceIds: string[]): ResolvedEvi
       value = null;
     }
     let contentHash: string | null;
+    let entityId: string | null = null;
     try {
-      const metadata = row.metadataJson ? (JSON.parse(row.metadataJson) as { contentHash?: unknown }) : null;
+      const metadata = row.metadataJson
+        ? (JSON.parse(row.metadataJson) as { contentHash?: unknown; entityId?: unknown; nodeId?: unknown; entityRef?: unknown })
+        : null;
       contentHash = metadata && typeof metadata.contentHash === 'string' ? metadata.contentHash : null;
+      const rawEntity = metadata ? (metadata.entityId ?? metadata.nodeId ?? metadata.entityRef) : null;
+      entityId = typeof rawEntity === 'string' && rawEntity.trim() !== '' ? rawEntity.trim() : null;
     } catch {
       contentHash = null;
+      entityId = null;
     }
     const source = sources.get(row.sourceId);
     return {
@@ -472,6 +478,7 @@ function resolveEvidenceFacts(runId: string, evidenceIds: string[]): ResolvedEvi
       sourceUrl: source?.url ?? null,
       sourceDomain: source?.domain ?? null,
       contentHash,
+      entityId,
       matchedNamespace,
     };
   });

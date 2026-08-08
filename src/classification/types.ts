@@ -3,6 +3,7 @@ import type {
   ClassificationProposal,
   ClassificationConfigSnapshotRef,
 } from '../shared/types';
+import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 
 // ─── Stage Identity ────────────────────────────────────────────────────────────
 
@@ -74,6 +75,13 @@ export interface StageContext {
   workspacePath: string;
   workspaceId: string;
   configSnapshotRef: ClassificationConfigSnapshotRef;
+  /**
+   * Immutable runtime snapshot resolved once before run creation. When present,
+   * stages MUST consume snapshot data (config, resolved targets, profiles,
+   * mappings, brands, data policy, pages) instead of reloading workspace
+   * classification files or querying mutable caches.
+   */
+  snapshot?: RuntimeClassificationSnapshot;
   /** Current run ID for recording results */
   runId: string;
   /**
@@ -100,6 +108,12 @@ export interface StageContext {
   catalogContext?: {
     sourceProductHash: string;
     existingPageIds: Array<{ pageId: string; pageName: string }>;
+  };
+  /** Retrieval-augmented classification context. */
+  retrievalContext?: {
+    enabled: boolean;
+    topK?: number;
+    minSimilarity?: number;
   };
 }
 

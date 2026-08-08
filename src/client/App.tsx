@@ -11,6 +11,7 @@ import { CatalogHealth } from './components/CatalogHealth';
 import { Onboarding } from './components/Onboarding';
 import { StoreManagerAssistant } from './components/StoreManagerAssistant';
 import { Settings } from './components/Settings';
+import { WeeklyReportModal } from './components/WeeklyReportModal';
 import { AgentLab } from './components/agent-lab/AgentLab';
 
 type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings' | 'agentlab';
@@ -20,6 +21,7 @@ function App() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [selectedSku, setSelectedSku] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
   const hasPushedHistory = useRef(false);
 
   const handleNavigate = (newView: View, replace = false) => {
@@ -178,13 +180,13 @@ function App() {
   };
 
   if (!ready) {
-    return <div style={styles.loading}>Loading ShopSite CMS...</div>;
+    return <div style={styles.loading}>Loading Baystate CMS...</div>;
   }
 
   return (
     <div style={styles.app}>
       <nav style={styles.nav}>
-        <span style={styles.navBrand}>ShopSite CMS</span>
+        <span style={styles.navBrand}>Baystate CMS</span>
         {workspace && workspace.bootstrapStatus === 'complete' && workspace.baselineCommit && (
           <>
             <button
@@ -251,26 +253,28 @@ function App() {
           </>
         )}
         <div style={styles.navSpacer} />
+        <button
+          style={{
+            background: '#eff6ff',
+            color: '#2563eb',
+            border: '1px solid #bfdbfe',
+            borderRadius: 6,
+            padding: '5px 12px',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: 'pointer',
+            marginRight: 16,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+          onClick={() => setShowWeeklyReportModal(true)}
+          title="Generate Weekly Manager Report"
+        >
+          📊 Weekly Report
+        </button>
         <span style={styles.navStatus}>
-          {workspace ? (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              📁 {workspace.name}
-              <button
-                style={{
-                  background: 'none',
-                  border: '1px solid #d1d5db',
-                  borderRadius: 4,
-                  padding: '2px 8px',
-                  fontSize: 12,
-                  cursor: 'pointer',
-                  color: '#4b5563',
-                }}
-                onClick={handleSwitchWorkspace}
-              >
-                Switch
-              </button>
-            </span>
-          ) : '⚙️ No workspace'}
+          {workspace ? `🏪 ${workspace.name}` : '⚙️ Store'}
         </span>
       </nav>
 
@@ -297,8 +301,6 @@ function App() {
 
         {view === 'onboarding' && <Onboarding />}
 
-        {view === 'agentlab' && <AgentLab />}
-
         {view === 'health' && workspace && (
           <CatalogHealth onSelectProduct={handleOpenProduct} />
         )}
@@ -312,6 +314,8 @@ function App() {
         {view === 'syncjobs' && <SyncJobsView />}
 
         {view === 'settings' && <Settings />}
+
+        {view === 'agentlab' && <AgentLab />}
       </main>
 
       <style dangerouslySetInnerHTML={{ __html: `
@@ -429,6 +433,10 @@ function App() {
             </div>
           </div>
         </>
+      )}
+
+      {showWeeklyReportModal && (
+        <WeeklyReportModal onClose={() => setShowWeeklyReportModal(false)} />
       )}
     </div>
   );

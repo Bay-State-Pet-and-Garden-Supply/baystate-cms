@@ -2,12 +2,12 @@
  * Snapshot Artifact Resolver
  *
  * Securely resolves and reads snapshot HTML from the shared filesystem.
- * The extraction worker writes artifacts under .shopsite-cms/artifacts/profile-builder/
+ * The extraction worker writes artifacts under .baystate-cms/artifacts/profile-builder/
  * and the Bun API server reads them through this resolver.
  *
  * MVP deployment constraint:
  * The snapshot worker and Bun API server must share the
- * .shopsite-cms/artifacts filesystem. When they split to separate hosts,
+ * .baystate-cms/artifacts filesystem. When they split to separate hosts,
  * this resolver must be replaced with object-storage or artifact-service lookups.
  *
  * Testability: The artifact root and max bytes can be injected as constructor
@@ -21,7 +21,7 @@ import { resolve, relative, sep, parse } from 'node:path';
 
 const DEFAULT_ARTIFACT_ROOT = resolve(
   process.cwd(),
-  '.shopsite-cms',
+  '.baystate-cms',
   'artifacts',
   'profile-builder',
 );
@@ -71,7 +71,7 @@ export interface ResolvedSnapshotArtifact {
 }
 
 export interface ArtifactResolverOptions {
-  /** Root directory for artifact resolution (default: .shopsite-cms/artifacts/profile-builder). */
+  /** Root directory for artifact resolution (default: .baystate-cms/artifacts/profile-builder). */
   artifactRoot?: string;
   /** Maximum file size in bytes (default: 2_000_000). */
   maxBytes?: number;

@@ -27,12 +27,14 @@ import {
 import { OnboardingSettings } from './OnboardingSettings';
 import { PipelineBoard } from './PipelineBoard';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
+import { WeeklyReportModal } from './WeeklyReportModal';
 import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
 import type { ClassificationProposal, ClassificationEvidence } from '../../shared/schemas/classification';
 import { matchExistingBrand } from '../../shared/brand-matcher';
 
 export function Onboarding() {
   const [showSettings, setShowSettings] = useState(false);
+  const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
   const [batches, setBatches] = useState<OnboardingBatch[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [selectedBatch, setSelectedBatch] = useState<OnboardingBatch | null>(null);
@@ -852,6 +854,12 @@ export function Onboarding() {
         <div style={styles.titleRow}>
           <h1 style={styles.title}>Product Onboarding Pipeline</h1>
           <div style={styles.btnRow}>
+            <button
+              style={{ ...styles.secondaryBtn, background: '#eff6ff', color: '#2563eb', borderColor: '#bfdbfe' }}
+              onClick={() => setShowWeeklyReportModal(true)}
+            >
+              📊 Generate Weekly Report
+            </button>
             <button style={styles.secondaryBtn} onClick={() => setShowSettings(true)}>⚙️ Onboarding Settings</button>
             <button style={styles.primaryBtn} onClick={() => setShowUploadModal(true)}>+ Upload Weekly Spreadsheet</button>
           </div>
@@ -1176,6 +1184,9 @@ export function Onboarding() {
             </div>
           </div>
         )}
+        {showWeeklyReportModal && (
+          <WeeklyReportModal onClose={() => setShowWeeklyReportModal(false)} />
+        )}
       </div>
     );
   }
@@ -1207,6 +1218,9 @@ export function Onboarding() {
             initialProductUrl={profileBuilderSeed?.url}
             onCancel={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}
           />
+        )}
+        {showWeeklyReportModal && (
+          <WeeklyReportModal onClose={() => setShowWeeklyReportModal(false)} />
         )}
       </>
     );

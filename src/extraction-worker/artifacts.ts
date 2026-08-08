@@ -2,7 +2,7 @@
  * Artifact helpers for the extraction worker.
  *
  * All snapshot/profile-tooling artifacts are written under:
- *   <cwd>/.shopsite-cms/artifacts/profile-builder/<domain>/<job-id>/
+ *   <cwd>/.baystate-cms/artifacts/profile-builder/<domain>/<job-id>/
  *
  * The worker writes these files and returns relative paths from the project
  * root. The Bun server decides which references to persist in SQLite.
@@ -16,10 +16,10 @@ const PROJECT_ROOT = resolve(process.cwd());
 
 /**
  * Build the base artifact directory for profile-builder artifacts.
- * The full path is: <PROJECT_ROOT>/.shopsite-cms/artifacts/profile-builder/
+ * The full path is: <PROJECT_ROOT>/.baystate-cms/artifacts/profile-builder/
  */
 function getArtifactsBase(): string {
-  return join(PROJECT_ROOT, '.shopsite-cms', 'artifacts', 'profile-builder');
+  return join(PROJECT_ROOT, '.baystate-cms', 'artifacts', 'profile-builder');
 }
 
 /**

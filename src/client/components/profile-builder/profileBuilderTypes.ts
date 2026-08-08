@@ -180,7 +180,7 @@ export interface ProfileBuilderProps {
   onCancel?: () => void;
 
   /**
-   * Converts artifact refs (e.g. `.shopsite-cms/artifacts/.../screenshot.png`)
+   * Converts artifact refs (e.g. `.baystate-cms/artifacts/.../screenshot.png`)
    * into a browser-readable URL.
    *
    * If omitted or unresolved, ArtifactBrowser shows the ref path and

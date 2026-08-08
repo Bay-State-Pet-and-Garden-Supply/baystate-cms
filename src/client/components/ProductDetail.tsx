@@ -242,7 +242,7 @@ export function ProductDetail({ sku, onBack }: Props) {
   const getPinnedFields = (wsId: string): string[] => {
     if (!wsId) return DEFAULT_PINNED_FIELDS;
     try {
-      const stored = localStorage.getItem(`shopsite_cms_pinned_fields_${wsId}`);
+      const stored = localStorage.getItem(`baystate_cms_pinned_fields_${wsId}`);
       if (stored) return JSON.parse(stored);
     } catch (e) {
       console.error(e);
@@ -260,7 +260,7 @@ export function ProductDetail({ sku, onBack }: Props) {
       newPinned = [...currentPinned, xmlField];
     }
     if (workspaceId) {
-      localStorage.setItem(`shopsite_cms_pinned_fields_${workspaceId}`, JSON.stringify(newPinned));
+      localStorage.setItem(`baystate_cms_pinned_fields_${workspaceId}`, JSON.stringify(newPinned));
     }
     setPinnedFields(newPinned);
   };

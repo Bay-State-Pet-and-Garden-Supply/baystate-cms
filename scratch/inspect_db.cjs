@@ -1,9 +1,9 @@
-const Database = require('bun:sqlite').Database;
+const { Database } = require('bun:sqlite');
 const fs = require('fs');
 
-console.log('--- Inspecting shopsite-cms.db ---');
-if (fs.existsSync('shopsite-cms.db')) {
-  const db = new Database('shopsite-cms.db');
+console.log('--- Inspecting baystate-cms.db ---');
+if (fs.existsSync('baystate-cms.db')) {
+  const db = new Database('baystate-cms.db');
   
   // Workspaces
   try {
@@ -23,7 +23,7 @@ if (fs.existsSync('shopsite-cms.db')) {
     console.log('No field_registry table or error:', err.message);
   }
 } else {
-  console.log('shopsite-cms.db does not exist.');
+  console.log('baystate-cms.db does not exist.');
 }
 
 console.log('--- Inspecting workspaces/Bay State/app.db ---');

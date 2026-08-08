@@ -5,7 +5,7 @@ import { getCurrentWorkspace } from '../../server/services/workspace-service';
 import { listRegistry } from '../../db/repositories/field-registry-repo';
 import { listPages } from '../../db/repositories/page-repo';
 import { getDb } from '../../db/connection';
-import { loadClassificationConfig } from '../../classification/config-loader';
+import { loadRuntimeConfig } from '../../classification/config-loader';
 
 vi.mock('../../server/services/workspace-service', () => ({
   getCurrentWorkspace: vi.fn(),
@@ -24,7 +24,7 @@ vi.mock('../../db/connection', () => ({
 }));
 
 vi.mock('../../classification/config-loader', () => ({
-  loadClassificationConfig: vi.fn(),
+  loadRuntimeConfig: vi.fn(),
 }));
 
 const workspace = {
@@ -135,7 +135,7 @@ beforeEach(() => {
   vi.mocked(getCurrentWorkspace).mockReturnValue(workspace as never);
   vi.mocked(listRegistry).mockReturnValue(registryRows as never);
   vi.mocked(listPages).mockReturnValue(pageRows as never);
-  vi.mocked(loadClassificationConfig).mockReturnValue(config as never);
+  vi.mocked(loadRuntimeConfig).mockReturnValue(config as never);
   vi.mocked(getDb).mockReturnValue(fakeDb as never);
 });
 

@@ -32,7 +32,9 @@ export const verifyCandidatePage: PiToolAdapter = {
   }),
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
-    const netCheck = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest({ runId: ctx.runId, policy: ctx.policy }, url);
+    const gateway = ctx.gateway ?? defaultPolicyGateway;
+    const netCtx = { runId: ctx.runId, policy: ctx.policy };
+    const netCheck = await gateway.checkNetworkRequest(netCtx, url);
     if (!netCheck.allowed) {
       return policyDenied(`network denied: ${netCheck.reasonCode}${netCheck.detail ? ` (${netCheck.detail})` : ''}`);
     }
@@ -42,10 +44,12 @@ export const verifyCandidatePage: PiToolAdapter = {
       brandHint: params.brandHint ? String(params.brandHint) : null,
       officialDomains: params.officialDomains ? (params.officialDomains as string[]) : [],
     };
+    const networkFetch = gateway.buildPiNetworkFetch(netCtx, { dataClassification: 'fetched_content' });
     try {
       const result = await verifyCandidate(
         { url, title: null, confidence: 0, sourceMethod: 'agent_candidate' },
         context,
+        networkFetch,
       );
       if (!result) return noResult(`Could not fetch or parse ${url.slice(0, 80)}`);
       const gtinEvidence = result.signals.upcInPage ? 'gtin_evidence' : 'search_lead';
@@ -383,6 +387,11 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
     // authority and REVOKES any stale record.
     const ambiguousPageUrls = new Set<string>();
 
+    const evidenceBrandsByPageUrl = new Map<
+      string,
+      Array<{ brand: string; evidenceId: string; hash: string; sourceId: string }>
+    >();
+
     // ---- EVIDENCE phase (pre-verification; real OCR shape) --------------
     // extract_packaging_evidence emits targetField 'upc' (image_ocr,
     // contentHash = image bytes) and its brand facts belong to the IMAGE URL
@@ -464,31 +473,23 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
           return { id: evidenceSource.id, url: evidenceSource.url };
         };
         for (const entry of brandBySourceHash.values()) {
-          if (entry.brand === '__ambiguous__') {
-            const pageSource = pageSourceOf(entry.sourceId);
-            if (pageSource) {
-              ambiguousPageUrls.add(pageSource.url);
-              desiredByPageUrl.delete(pageSource.url);
-            }
-            continue; // fail closed
-          }
           const pageSource = pageSourceOf(entry.sourceId);
           if (!pageSource) continue;
-          const existingDesired = desiredByPageUrl.get(pageSource.url);
-          if (existingDesired && existingDesired.brand !== entry.brand) {
-            desiredByPageUrl.delete(pageSource.url); // ambiguity across phases
+          if (entry.brand === '__ambiguous__') {
+            ambiguousPageUrls.add(pageSource.url);
             continue;
           }
-          if (!existingDesired) {
-            desiredByPageUrl.set(pageSource.url, {
-              brand: entry.brand,
-              evidenceId: entry.evidenceId,
-              evidenceHash: entry.hash,
-              evidenceKind: 'evidence',
-              sourceId: pageSource.id,
-              phase: 'evidence',
-              anchorRef: `evidence:${entry.evidenceId}`,
-            });
+          const list = evidenceBrandsByPageUrl.get(pageSource.url) ?? [];
+          list.push({ brand: entry.brand, evidenceId: entry.evidenceId, hash: entry.hash, sourceId: pageSource.id });
+          evidenceBrandsByPageUrl.set(pageSource.url, list);
+        }
+        // Round-13 (review P0-2): Aggregate evidence brands per page URL.
+        // If a page source resolves to multiple distinct evidence brands,
+        // mark it ambiguous before making any decision.
+        for (const [pageUrl, entries] of evidenceBrandsByPageUrl) {
+          const distinctBrands = new Set(entries.map((e) => e.brand));
+          if (distinctBrands.size > 1) {
+            ambiguousPageUrls.add(pageUrl);
           }
         }
       }
@@ -502,23 +503,44 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
     // binding; observedBrand alone is never enough. The binding hash is the
     // brand evidence's hash (the exact bytes for OCR/decoder), never a
     // reconstruction from observedBrand + originalContentHash.
+    const assetBrandsByPageUrl = new Map<string, Array<ResolvedBrand>>();
     try {
       const brands = listQualifiedResolvedBrands(repo, runId, input.gtin.trim());
-      const byUrl = new Map<string, Array<ResolvedBrand>>();
       for (const resolved of brands) {
         if (!resolved.sourcePageUrl) continue;
-        const list = byUrl.get(resolved.sourcePageUrl) ?? [];
+        const list = assetBrandsByPageUrl.get(resolved.sourcePageUrl) ?? [];
         list.push(resolved);
-        byUrl.set(resolved.sourcePageUrl, list);
+        assetBrandsByPageUrl.set(resolved.sourcePageUrl, list);
       }
-      for (const [pageUrl, resolvedList] of byUrl) {
+      for (const [pageUrl, resolvedList] of assetBrandsByPageUrl) {
         const distinctBrands = new Set(resolvedList.map((r) => r.brand));
-        if (distinctBrands.size !== 1) {
-          desiredByPageUrl.delete(pageUrl); // ambiguous — fail closed
+        if (distinctBrands.size > 1) {
           ambiguousPageUrls.add(pageUrl);
-          continue;
         }
-        const resolved = resolvedList[0];
+      }
+    } catch {
+      // Fail closed: asset-based authority is best-effort.
+    }
+
+    // ---- DECISION PHASE (aggregate before decide) ------------------------
+    const candidatePageUrls = new Set([...evidenceBrandsByPageUrl.keys(), ...assetBrandsByPageUrl.keys()]);
+    for (const pageUrl of candidatePageUrls) {
+      if (ambiguousPageUrls.has(pageUrl)) {
+        continue; // ambiguity within a phase -> fail closed
+      }
+      const assetList = assetBrandsByPageUrl.get(pageUrl);
+      const evList = evidenceBrandsByPageUrl.get(pageUrl);
+
+      if (assetList && assetList.length > 0) {
+        const assetBrand = assetList[0].brand;
+        if (evList && evList.length > 0) {
+          const evBrand = evList[0].brand;
+          if (evBrand !== assetBrand) {
+            ambiguousPageUrls.add(pageUrl); // ambiguity across phases
+            continue;
+          }
+        }
+        const resolved = assetList[0];
         let source = repo.listPiSources(runId).find((candidate) => candidate.url === pageUrl);
         if (!source) {
           try {
@@ -530,15 +552,10 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
             });
             source = { id: created.id, url: pageUrl };
           } catch {
-            continue; // no durable anchor, no authority
+            continue;
           }
         }
         const evidenceKind = resolved.brandEvidenceId ? 'evidence' : 'decoder';
-        const existingDesired = desiredByPageUrl.get(pageUrl);
-        if (existingDesired && existingDesired.brand !== resolved.brand) {
-          desiredByPageUrl.delete(pageUrl); // ambiguity across phases
-          continue;
-        }
         desiredByPageUrl.set(pageUrl, {
           brand: resolved.brand,
           evidenceId: resolved.brandEvidenceId,
@@ -548,9 +565,18 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
           phase: 'asset',
           anchorRef: `verified_asset:${resolved.assetId}`,
         });
+      } else if (evList && evList.length > 0) {
+        const ev = evList[0];
+        desiredByPageUrl.set(pageUrl, {
+          brand: ev.brand,
+          evidenceId: ev.evidenceId,
+          evidenceHash: ev.hash,
+          evidenceKind: 'evidence',
+          sourceId: ev.sourceId,
+          phase: 'evidence',
+          anchorRef: `evidence:${ev.evidenceId}`,
+        });
       }
-    } catch {
-      // Fail closed: asset-based authority is best-effort.
     }
 
     // ---- Registry gate + reconcile --------------------------------------

@@ -7,14 +7,14 @@ import { join } from 'path';
 const root = resolve(import.meta.dirname, '..');
 
 // Generate or read a per-dev API token for mutating request security
-const tokenPath = join(root, '.shopsite-cms-dev-token');
+const tokenPath = join(root, '.baystate-cms-dev-token');
 let apiToken: string;
 try {
   if (existsSync(tokenPath)) {
     apiToken = readFileSync(tokenPath, 'utf-8').trim();
   } else {
     apiToken = randomBytes(32).toString('hex');
-    try { mkdirSync(join(root, '.shopsite-cms-dev-token-dir'), { recursive: true }); } catch { /* dir exists */ }
+    try { mkdirSync(join(root, '.baystate-cms-dev-token-dir'), { recursive: true }); } catch { /* dir exists */ }
     writeFileSync(tokenPath, apiToken, { mode: 0o600 });
   }
 } catch {
@@ -27,8 +27,8 @@ const workerToken = randomBytes(32).toString('hex');
 const env = {
   ...process.env,
   NODE_ENV: 'development',
-  SHOPSITE_CMS_API_TOKEN: apiToken,
-  SHOPSITE_CMS_WORKER_TOKEN: workerToken,
+  BAYSTATE_CMS_API_TOKEN: apiToken,
+  BAYSTATE_CMS_WORKER_TOKEN: workerToken,
   HOST: '127.0.0.1',
 };
 
@@ -53,9 +53,9 @@ const worker = spawn(
     stdio: 'inherit',
     env: {
       ...process.env,
-      SHOPSITE_CMS_WORKER_HOST: '127.0.0.1',
-      SHOPSITE_CMS_WORKER_PORT: '3032',
-      SHOPSITE_CMS_WORKER_TOKEN: workerToken,
+      BAYSTATE_CMS_WORKER_HOST: '127.0.0.1',
+      BAYSTATE_CMS_WORKER_PORT: '3032',
+      BAYSTATE_CMS_WORKER_TOKEN: workerToken,
     },
   },
 );
@@ -70,13 +70,13 @@ const vite = spawn(
     env: {
       ...process.env,
       NODE_ENV: 'development',
-      VITE_SHOPSITE_CMS_API_TOKEN: apiToken,
-      SHOPSITE_CMS_WORKER_TOKEN: workerToken,
+      VITE_BAYSTATE_CMS_API_TOKEN: apiToken,
+      BAYSTATE_CMS_WORKER_TOKEN: workerToken,
     },
   },
 );
 
-console.log(`ShopSite CMS dev mode started.`);
+console.log(`Baystate CMS dev mode started.`);
 console.log(`API token: ${apiToken}`);
 console.log(`Server bound to 127.0.0.1:${process.env.PORT ?? '3030'}`);
 console.log(`Worker bound to 127.0.0.1:3032`);

@@ -1,10 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { listFieldRegistry, updateFieldRegistryEntry } from '../api';
+import { listFieldRegistry, updateFieldRegistryEntry, getConnection, saveConnection, testConnection } from '../api';
 
 export function Settings() {
   const [fieldRegistry, setFieldRegistry] = useState<any[]>([]);
   const [loadingFields, setLoadingFields] = useState(false);
   const [savingFields, setSavingFields] = useState(false);
+
+  // Connection settings state
+  const [cgiBaseUrl, setCgiBaseUrl] = useState('');
+  const [merchantId, setMerchantId] = useState('');
+  const [password, setPassword] = useState('');
+  const [passwordConfigured, setPasswordConfigured] = useState(false);
+  const [savingConn, setSavingConn] = useState(false);
+  const [connResult, setConnResult] = useState('');
+  const [connError, setConnError] = useState('');
 
   const [error, setError] = useState('');
 
@@ -20,31 +29,118 @@ export function Settings() {
     }
   };
 
+  const loadConnection = async () => {
+    try {
+      const res = await getConnection();
+      if (res.connection) {
+        setCgiBaseUrl(res.connection.cgiBaseUrl || '');
+        setMerchantId(res.connection.merchantId || '');
+        setPasswordConfigured(res.connection.passwordConfigured);
+      }
+    } catch (err) {
+      console.error('Failed to load connection settings:', err);
+    }
+  };
+
   useEffect(() => {
     void loadFieldRegistry();
+    void loadConnection();
   }, []);
+
+  const handleSaveConnection = async () => {
+    if (!cgiBaseUrl.trim() || !merchantId.trim()) {
+      setConnError('CGI URL and merchant ID are required.');
+      return;
+    }
+    setSavingConn(true);
+    setConnError('');
+    setConnResult('');
+    try {
+      await saveConnection(cgiBaseUrl.trim(), merchantId.trim(), password);
+      const test = await testConnection();
+      setConnResult(`Connection settings saved. ${test.message}`);
+      setPasswordConfigured(true);
+      setPassword('');
+    } catch (err) {
+      setConnError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingConn(false);
+    }
+  };
 
   const styles: Record<string, React.CSSProperties> = {
     container: { padding: 24, maxWidth: 1200, margin: '0 auto' },
     title: { fontSize: 24, fontWeight: 600, margin: '0 0 24px 0', color: '#111827' },
     section: { background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: 24, marginBottom: 24, boxShadow: '0 1px 3px rgba(0,0,0,0.05)' },
     sectionTitle: { fontSize: 18, fontWeight: 600, margin: '0 0 16px 0', color: '#111827' },
-    input: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const },
+    input: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const, marginBottom: 12 },
     select: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const, background: '#fff' },
     primaryBtn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
+    secondaryBtn: { background: '#4b5563', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
     table: { width: '100%', borderCollapse: 'collapse' as const, marginTop: 12, fontSize: 14 },
     th: { borderBottom: '2px solid #e5e7eb', textAlign: 'left' as const, padding: '8px 12px', color: '#4b5563', fontWeight: 600 },
     td: { borderBottom: '1px solid #e5e7eb', padding: '8px 12px', verticalAlign: 'middle' },
     error: { color: '#dc2626', padding: 12, background: '#fef2f2', borderRadius: 6, marginBottom: 20, fontSize: 14 },
+    success: { color: '#16a34a', padding: 12, background: '#f0fdf4', borderRadius: 6, marginBottom: 20, fontSize: 14 },
     hint: { fontSize: 13, color: '#6b7280', margin: '0 0 16px' },
     empty: { fontSize: 14, color: '#9ca3af', fontStyle: 'italic' as const },
   };
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>Workspace Settings</h1>
+      <h1 style={styles.title}>Store Settings</h1>
 
       {error && <div style={styles.error}>{error}</div>}
+
+      {/* Connection & Credentials Section */}
+      <div style={styles.section}>
+        <h2 style={styles.sectionTitle}>ShopSite Connection & Credentials</h2>
+        <p style={styles.hint}>
+          Configure your store's direct ShopSite CGI endpoint and credentials.
+          Credentials can also be set via environment variables (<code>SHOPSITE_CGI_URL</code>, <code>SHOPSITE_MERCHANT_ID</code>, <code>SHOPSITE_PASSWORD</code>).
+        </p>
+
+        {connError && <div style={styles.error}>{connError}</div>}
+        {connResult && <div style={styles.success}>{connResult}</div>}
+
+        <label style={{ display: 'block', fontSize: 13, fontWeight: 500, marginBottom: 4 }}>ShopSite CGI Base URL</label>
+        <input
+          style={styles.input}
+          placeholder="https://store.example.com/cgi-bin/bo/db_xml.cgi"
+          value={cgiBaseUrl}
+          onChange={(e) => setCgiBaseUrl(e.target.value)}
+        />
+
+        <label style={{ display: 'block', fontSize: 13, fontWeight: 500, marginBottom: 4 }}>Merchant / User ID</label>
+        <input
+          style={styles.input}
+          placeholder="Merchant ID"
+          value={merchantId}
+          onChange={(e) => setMerchantId(e.target.value)}
+        />
+
+        <label style={{ display: 'block', fontSize: 13, fontWeight: 500, marginBottom: 4 }}>
+          {passwordConfigured ? 'Password (configured - leave blank to keep existing)' : 'Password'}
+        </label>
+        <input
+          style={styles.input}
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+
+        <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+          <button
+            type="button"
+            style={styles.primaryBtn}
+            onClick={handleSaveConnection}
+            disabled={savingConn}
+          >
+            {savingConn ? 'Testing Connection...' : 'Save & Test Connection'}
+          </button>
+        </div>
+      </div>
 
       {/* Catalog Field Display Labels Section */}
       <div style={styles.section}>

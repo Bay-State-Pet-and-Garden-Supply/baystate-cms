@@ -65,6 +65,7 @@ export function processProductTypeTarget(
         productTypeId: value,
         confidence,
         evidenceIds: evIds,
+        snapshotHash: context.snapshot?.snapshotHash ?? null,
       }),
     task: 'product_type_classification',
   });
@@ -76,17 +77,25 @@ export function processProductTypeTarget(
  * Process a product field (attribute) curation target.
  *
  * Uses alias + exact matching first, then LLM fallback.
+ *
+ * @param options.cardinality - Per-Product-Type cardinality from the accepted
+ *   type's profile; overrides the global target selectionMode when supplied.
  */
 export async function processProductFieldTarget(
   target: ResolvedTarget,
   input: StageInput,
   context: StageContext,
+  options: { cardinality?: 'single' | 'multiple' } = {},
 ): Promise<TargetProcessResult> {
-  const { config: targetConfig, options, attribute } = target;
+  const { config: targetConfig, options: targetOptions, attribute } = target;
+  const options2 = targetOptions;
 
-  if (!options || options.length === 0) {
+  if (!options2 || options2.length === 0) {
     return { proposals: [], message: `No options available for "${targetConfig.label}".` };
   }
+
+  const selectionMode = options.cardinality ?? (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
+  const snapshotHash = context.snapshot?.snapshotHash ?? null;
 
   // ── Brand shortcut: if this target looks like a brand field AND resolved
   // brand evidence exists, use it directly instead of keyword/LLM matching.
@@ -101,7 +110,7 @@ export async function processProductFieldTarget(
       const brandName = parsed.success ? parsed.data.brandName : ((brandEvidence.value as any)?.brandName ?? (brandEvidence.value as any)?.name);
       if (brandName) {
         // Match the resolved brand name to an allowed option if possible
-        const matchedOption = options.find(o =>
+        const matchedOption = options2.find(o =>
           o.label.toLowerCase() === brandName.toLowerCase(),
         );
         const value = matchedOption?.label ?? brandName;
@@ -114,6 +123,7 @@ export async function processProductFieldTarget(
           evidenceIds: [brandEvidence.id],
           isMultiple: false,
           isBulkAcceptable: false, // Guardrail: requires manual review until Issue #10 lands
+          snapshotHash,
         });
         return {
           proposals: [proposal],
@@ -128,8 +138,7 @@ export async function processProductFieldTarget(
     return { proposals: [], message: `No evidence text for "${targetConfig.label}".` };
   }
 
-  const selectionMode = (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
-  const optionStrings = options.map(o => o.label);
+  const optionStrings = options2.map(o => o.label);
 
   // Try deterministic alias/exact matching first
   const aliasMatches = attribute
@@ -170,7 +179,7 @@ export async function processProductFieldTarget(
   if (values.length === 0) {
     const llmResult = await llmRankOptions({
       targetLabel: targetConfig.label,
-      options,
+      options: options2,
       selectionMode,
       evidenceText: text,
       task: 'attribute_value_classification',
@@ -194,6 +203,7 @@ export async function processProductFieldTarget(
     confidence,
     evidenceIds,
     isMultiple: selectionMode === 'multiple',
+    snapshotHash,
   });
 
   return { proposals: [proposal], message: `"${targetConfig.label}": ${values.join(', ')} (${(confidence * 100).toFixed(0)}%)` };
@@ -218,6 +228,7 @@ export async function processPageTarget(
   context: StageContext,
 ): Promise<TargetProcessResult> {
   const { config: targetConfig, options } = target;
+  const snapshotHash = context.snapshot?.snapshotHash ?? null;
 
   if (!options || options.length === 0) {
     return { proposals: [], message: `No options available for "${targetConfig.label}".` };
@@ -226,8 +237,8 @@ export async function processPageTarget(
   const selectionMode = (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
   const maxPages = selectionMode === 'multiple' ? 5 : 1;
 
-  // ── Build page hierarchy from store pages ──────────────────────────────
-  const pageHierarchy = buildPageHierarchy(options);
+  // ── Build page hierarchy from verified store pages ───────────────────
+  const pageHierarchy = buildPageHierarchy(options, context.workspaceId);
 
   // ── Extract product context from evidence and proposals ────────────────
   const productContext = extractProductContext(input.evidence, input.allProposals);
@@ -293,6 +304,7 @@ export async function processPageTarget(
       confidence: p.confidence,
       evidenceIds,
       isBulkAcceptable: (p.isBrandShortcut || p.pageName.startsWith('Brand -')) ? false : undefined,
+      snapshotHash,
     }),
   );
 

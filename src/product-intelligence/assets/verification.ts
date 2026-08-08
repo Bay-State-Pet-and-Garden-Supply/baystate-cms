@@ -450,6 +450,7 @@ export interface ResolvedEvidenceFact {
   sourceUrl: string | null;
   sourceDomain: string | null;
   contentHash: string | null;
+  entityId?: string | null;
   /** Which identifier namespace resolved this row: the row UUID or the
    *  agent-facing deterministic metadata.toolEvidenceId. */
   matchedNamespace?: 'row_id' | 'tool_evidence_id';
@@ -571,6 +572,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
         linkage.originalContentHash === currentImageHash,
     );
   const qualifiedGtinValues = new Set<string>();
+  const qualifiedGtinEntityKeys = new Set<string>();
   for (const fact of usableFacts.filter(isGtinObservationFact)) {
     const raw = fact.value && typeof fact.value === 'object' ? (fact.value as Record<string, unknown>).value : fact.value;
     const digits = normalizeGtinDigits(raw);
@@ -579,8 +581,12 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     const isImageDerived = method === 'image_ocr' || method === 'decoder';
     const byteBound =
       isImageDerived && !!fact.contentHash && currentImageHash !== '' && fact.contentHash === currentImageHash;
+    const structuredGtin = !isImageDerived && !!fact.sourceUrl && !!fact.entityId;
     if (byteBound || linkageCovers(digits)) {
       qualifiedGtinValues.add(digits);
+    }
+    if ((byteBound || linkageCovers(digits) || structuredGtin) && fact.sourceUrl && fact.entityId) {
+      qualifiedGtinEntityKeys.add(`${fact.sourceUrl}::${fact.entityId}`);
     }
   }
   const gtinConflictValues =
@@ -591,26 +597,14 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   // for authority purposes. Only (a) byte-bound image_ocr/decoder brand facts
   // whose content hash equals the exact bytes being inspected, or (b)
   // structured evidence (json_ld/platform/etc.) explicitly entity-linked to
-  // the exact-GTIN product (same source URL as a QUALIFIED exact-GTIN fact)
-  // establish the brand. The QUALIFYING evidence row id + hash are persisted
-  // on the asset — brand provenance is never reconstructed from
+  // the exact-GTIN product (same source URL AND matching entityId as a QUALIFIED
+  // exact-GTIN fact) establish the brand. The QUALIFYING evidence row id + hash
+  // are persisted on the asset — brand provenance is never reconstructed from
   // observedBrand + image hash later.
   const isBrandObservationFact = (fact: ResolvedEvidenceFact): boolean => {
     const key = OBSERVED_FIELD_KEYS[(fact.targetField ?? '').toLowerCase().replace(/[^a-z0-9]/g, '_')];
     return key === 'brand' && fact.value !== null && fact.value !== undefined;
   };
-  const qualifiedGtinSourceUrls = new Set<string>();
-  for (const fact of usableFacts.filter(isGtinObservationFact)) {
-    const raw = fact.value && typeof fact.value === 'object' ? (fact.value as Record<string, unknown>).value : fact.value;
-    const digits = normalizeGtinDigits(raw);
-    const method = (fact.extractionMethod ?? '').toLowerCase();
-    const isImageDerived = method === 'image_ocr' || method === 'decoder';
-    const byteBound =
-      isImageDerived && !!fact.contentHash && currentImageHash !== '' && fact.contentHash === currentImageHash;
-    if ((byteBound || linkageCovers(digits)) && fact.sourceUrl) {
-      qualifiedGtinSourceUrls.add(fact.sourceUrl);
-    }
-  }
   const qualifiedBrandCandidates: Array<{ brand: string; factId: string | null; hash: string | null }> = [];
   let unqualifiedBrandRejected = false;
   for (const fact of usableFacts.filter(isBrandObservationFact)) {
@@ -618,7 +612,11 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     const isImageDerived = method === 'image_ocr' || method === 'decoder';
     const byteBound =
       isImageDerived && !!fact.contentHash && currentImageHash !== '' && fact.contentHash === currentImageHash;
-    const structuredEntityLinked = !isImageDerived && !!fact.sourceUrl && qualifiedGtinSourceUrls.has(fact.sourceUrl);
+    const structuredEntityLinked =
+      !isImageDerived &&
+      !!fact.sourceUrl &&
+      !!fact.entityId &&
+      qualifiedGtinEntityKeys.has(`${fact.sourceUrl}::${fact.entityId}`);
     if (byteBound || structuredEntityLinked) {
       const raw = factValue(fact.value, 'brand') ?? (typeof fact.value === 'string' ? fact.value : null);
       if (raw !== null && raw !== undefined && String(raw).trim() !== '') {
@@ -646,8 +644,10 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
         hash: qualifiedBrandCandidates.find((c) => c.brand.toLowerCase() === qualifiedBrand.toLowerCase())?.hash ?? currentImageHash,
       }
     : { evidenceId: null, hash: null };
+  // Round-13 (review P1-3): observed.brand is ONLY the qualified result (or decoder when no evidence facts exist).
+  // Raw unqualified or conflicting brand facts are excluded from observed.brand.
   const observed: IdentityObservation = {
-    brand: qualifiedBrand ?? fromEvidence.brand ?? decoded.observed.brand ?? null,
+    brand: qualifiedBrand ?? (usableFacts.some(isBrandObservationFact) ? null : (decoded.observed.brand ?? null)),
     productName: fromEvidence.productName ?? decoded.observed.productName ?? null,
     variant: fromEvidence.variant ?? decoded.observed.variant ?? null,
     netContent: fromEvidence.netContent ?? decoded.observed.netContent ?? null,

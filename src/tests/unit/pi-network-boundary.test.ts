@@ -140,6 +140,7 @@ describe('P0-1 transitive network boundary', () => {
     { file: 'src/onboarding/packaging-ocr.ts', needle: 'fetchFn?: NetworkFetch', note: 'extractPackagingOcr params' },
     { file: 'src/onboarding/source-discovery.ts', needle: 'networkFetch?: NetworkFetch', note: 'discoverSources/searchSerper/sitemap/variant chain' },
     { file: 'src/onboarding/vlm-client.ts', needle: 'fetchFn: NetworkFetch = fetch', note: 'callVlm model call' },
+    { file: 'src/onboarding/page-verifier.ts', needle: 'fetchFn: NetworkFetch = fetch', note: 'verifyCandidate' },
   ] as const;
 
   it('every network-owning transport accepts an injected fetch', () => {
@@ -161,6 +162,9 @@ describe('P0-1 transitive network boundary', () => {
     expect(discovery).toContain('buildPiNetworkFetch');
     expect(discovery).toContain('fetchAndParseSitemap');
     expect(discovery).toContain('resolveVariantsForCandidates');
+    const verification = fs.readFileSync('src/product-intelligence/tools/verification-tools.ts', 'utf8');
+    expect(verification).toContain('buildPiNetworkFetch');
+    expect(verification).toContain('verifyCandidate');
     // Round 3: the discovery chain (search_upc / search_product_name) is
     // bound end-to-end — discoverSources receives the gateway transport.
     expect(discovery).toContain('discoverSources');
@@ -178,8 +182,8 @@ describe('P0-1 transitive network boundary', () => {
       // Contextually typed against the gateway's fetchFn so it satisfies
       // Bun's `typeof fetch` (the same pattern as the redirect test above).
       fetchFn: async (input, init) => {
-        void init;
-        calls.push(String(input));
+        const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        calls.push(urlStr);
         return new Response(
           '<html><body><script type="application/ld+json">{"@type":"Product","name":"Wormeze"}</script></body></html>',
           { status: 200, headers: { 'content-type': 'text/html' } },
@@ -199,6 +203,34 @@ describe('P0-1 transitive network boundary', () => {
     expect(calls.length).toBeGreaterThan(0);
     expect(calls[0]).toBe('https://shop.example.com/p');
     expect(['no_result', 'ok']).toContain(result.status);
+  });
+
+  it('verify_candidate_page drives the real fetch through the injected gateway fetch (spy)', async () => {
+    const calls: string[] = [];
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+      fetchFn: async (input) => {
+        const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        calls.push(urlStr);
+        return new Response('<html><head><title>Acme Widget GTIN 01234567890123</title></head><body>UPC 01234567890123 Acme</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        });
+      },
+    });
+
+    const tool = defaultToolRegistry.get('verify_candidate_page');
+    expect(tool).toBeDefined();
+    const result = await tool!.execute(
+      { url: 'https://shop.example.com/verify-product', gtin: '01234567890123', expectedName: 'Acme Widget' },
+      makeCtx({
+        gateway,
+        policy: makePolicy({ dataSharingPolicy: 'cloud_models_and_sources', networkPolicy: 'allowlisted_remote' }),
+      }),
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]).toBe('https://shop.example.com/verify-product');
+    expect(result.status).toBe('ok');
   });
 
   it('lookup_structured_product_database is policy-gated (local_only denies before any network)', async () => {

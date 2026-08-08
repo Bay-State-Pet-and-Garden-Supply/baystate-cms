@@ -373,16 +373,6 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
       }
 
       const nextStage = STAGE_ORDER[currentIdx + 1];
-      if (nextStage === 'review') {
-        const proposals = item.curationData?.classificationProposals || [];
-        const hasPending = proposals.some(
-          (p: any) => p.targetId !== 'product_draft_projection' && p.status !== 'accepted' && p.status !== 'rejected'
-        );
-        if (hasPending) {
-          skipped++;
-          continue;
-        }
-      }
 
       db.query(
         `UPDATE onboarding_items
@@ -598,13 +588,17 @@ export function sendItemsToPreviousStage(
       } else if (item.stage === 'curation') {
         db.query('UPDATE onboarding_items SET curation_data_json = NULL WHERE id = ?').run(id);
       } else if (item.stage === 'review') {
+        // Append-only: supersede the run's decisions instead of deleting them.
+        // Re-review can then re-issue decisions (including exact retries of
+        // previously superseded payloads) as fresh live revisions.
         db.query(`
-          DELETE FROM classification_proposal_decisions
-          WHERE proposal_id IN (
+          UPDATE classification_proposal_decisions
+          SET superseded_at = ?
+          WHERE superseded_at IS NULL AND proposal_id IN (
             SELECT id FROM classification_proposals
             WHERE run_id IN (SELECT id FROM classification_runs WHERE onboarding_item_id = ?)
           )
-        `).run(id);
+        `).run(now, id);
         db.query(`
           UPDATE classification_proposals
           SET status = 'pending'
@@ -726,3 +720,78 @@ function getNextPendingItems(
   ).all(batchId, status, limit) as OnboardingItemRow[];
   return rows.map(mapRowToItem);
 }
+
+export interface WeeklyReportProductItem {
+  id: string;
+  upc: string;
+  name: string;
+  brandHint: string | null;
+  batchName: string;
+  status: string;
+  stage: string;
+  stageStatus: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function getWeeklyReportItems(startDateIso: string, endDateIso: string): WeeklyReportProductItem[] {
+  const db = getDb();
+  const rows = db.query(
+    `SELECT 
+      i.id, i.upc, i.name, i.expected_name, i.coordinated_title, i.brand_hint, i.status, i.stage, i.stage_status, i.created_at, i.updated_at, i.curation_data_json, i.extraction_data_json,
+      b.name as batch_name
+    FROM onboarding_items i
+    LEFT JOIN onboarding_batches b ON i.batch_id = b.id
+    WHERE (i.created_at >= ? AND i.created_at <= ?)
+       OR (i.updated_at >= ? AND i.updated_at <= ?)
+    ORDER BY i.updated_at DESC`
+  ).all(startDateIso, endDateIso, startDateIso, endDateIso) as Array<{
+    id: string;
+    upc: string;
+    name: string;
+    expected_name: string | null;
+    coordinated_title: string | null;
+    brand_hint: string | null;
+    status: string;
+    stage: string;
+    stage_status: string;
+    created_at: string;
+    updated_at: string;
+    curation_data_json: string | null;
+    extraction_data_json: string | null;
+    batch_name: string | null;
+  }>;
+
+  return rows.map(r => {
+    let displayTitle = r.name;
+    if (r.coordinated_title) {
+      displayTitle = r.coordinated_title;
+    } else if (r.curation_data_json) {
+      try {
+        const curation = JSON.parse(r.curation_data_json);
+        if (curation?.curatedTitle) displayTitle = curation.curatedTitle;
+      } catch {}
+    } else if (r.expected_name) {
+      displayTitle = r.expected_name;
+    } else if (r.extraction_data_json) {
+      try {
+        const ext = JSON.parse(r.extraction_data_json);
+        if (ext?.title) displayTitle = ext.title;
+      } catch {}
+    }
+
+    return {
+      id: r.id,
+      upc: r.upc,
+      name: displayTitle,
+      brandHint: r.brand_hint,
+      batchName: r.batch_name || 'Direct Import',
+      status: r.status,
+      stage: r.stage,
+      stageStatus: r.stage_status,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  });
+}
+

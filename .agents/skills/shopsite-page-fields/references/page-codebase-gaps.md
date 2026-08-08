@@ -2,7 +2,7 @@
 
 ## Current Status: Page Support is Absent
 
-The ShopSite CMS codebase has **no page XML support**. Here is exactly what exists, what does not, and what needs to be built.
+The Baystate CMS codebase has **no page XML support**. Here is exactly what exists, what does not, and what needs to be built.
 
 ---
 
@@ -11,8 +11,13 @@ The ShopSite CMS codebase has **no page XML support**. Here is exactly what exis
 | Component | File | Status |
 |-----------|------|--------|
 | Page DB table | `src/db/repositories/` (implied by workspace schema) | Likely but unused; no XML round-trip |
+| Page XML parser | `src/shopsite/page-parser.ts` | ✅ Implemented | Parses a real ShopSite Pages export (root `<ShopSitePages version="15.0">`, `<Response>`, `<Pages>`/`<Page>`); preserves raw fragments + unknown elements; named + numeric entity decoding; emits `exported_guid` verified identities from `<PageID>` |
+| Page identity/import schemas | `src/shared/schemas/page.ts` | ✅ Implemented | `PageIdentity` (exported_guid / exported_file_name / unverified_name_only), `PageRecord`, `PageImport`, preview/activation contracts |
+| Page import seams | `src/shopsite/page-import-service.ts`, `src/db/repositories/page-import-repo.ts`, `src/server/routes/page-routes.ts` | ✅ Implemented | Parser-adapter contract (`PageParserAdapter`; `getPageParserAdapter()` returns the real parser); preview (no DB effect) / atomic activation; `page_imports` table; page_index identity columns |
+| Page XML fixture | `src/tests/fixtures/shopsite-pages-bay-state-redacted.xml` | ✅ Implemented | Redacted 12-page subset of a real 211-page export (home/category/hidden/product pages, ProductLinks, HTML text, numeric entities) |
+| Page XML tests | `src/tests/unit/page-parser.test.ts` | ✅ Implemented | Fixture round-trip, identity mapping, entity decoding, raw preservation; optional full-export test via `SHOP_SITE_PAGES_XML` |
 | ProductOnPages handling | `src/shopsite/product-denormalizer.ts` L134-148 | Preserved as advanced block; page names extracted via regex |
-| Sample page data | (none) | Only product samples exist |
+| Sample product data | `src/tests/fixtures/shopsite-products-sample.xml` | Product samples only |
 
 ---
 
@@ -20,13 +25,10 @@ The ShopSite CMS codebase has **no page XML support**. Here is exactly what exis
 
 | Component | File (planned) | Status | Notes |
 |-----------|----------------|--------|-------|
-| Page XML parser | `src/shopsite/page-parser.ts` | ❌ Does not exist | Follow product-parser.ts pattern |
 | Page normalizer | `src/shopsite/page-normalizer.ts` | ❌ Does not exist | Follow product-normalizer.ts pattern |
-| Page Zod schema | `src/shared/schemas/page.ts` | ❌ Does not exist | Use page-field-catalog.md for field reference |
 | Page denormalizer | `src/shopsite/page-denormalizer.ts` | ❌ Does not exist | Follow product-denormalizer.ts pattern |
 | Page XML builder | `src/shopsite/xml-builder.ts` | Existing (product only) | Would need page-specific handling |
-| Page XML tests | `src/tests/unit/shopsite-page.test.ts` | ❌ Does not exist | Follow shopsite-normalizer.test.ts pattern |
-| Page XML fixture | `src/tests/fixtures/shopsite-pages-sample.xml` | ❌ Does not exist | Need real export from a store |
+| Verified Page activation | `src/shopsite/page-import-service.ts` activate | Pending real import | Activation is implemented and atomic; requires running an actual import (the redacted fixture is test data only) |
 | Page workspace model | `src/shared/schemas/workspace.ts` | May have page fields | Schema-level page identity may exist |
 
 ---

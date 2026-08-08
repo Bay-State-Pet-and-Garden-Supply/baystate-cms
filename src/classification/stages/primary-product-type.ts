@@ -12,7 +12,7 @@
  */
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { loadClassificationConfig } from '../config-loader';
-import { resolveEnabledTargets } from '../curation-target-resolver';
+import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { processProductTypeTarget } from '../curation-target-processor';
 
 export const primaryProductTypeStage: StageDefinition = {
@@ -20,8 +20,9 @@ export const primaryProductTypeStage: StageDefinition = {
   requires: ['evidence_extraction'],
   evidenceFrom: ['evidence_extraction'],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
-    const config = loadClassificationConfig(context.workspacePath);
-    const resolved = resolveEnabledTargets(config, context.workspaceId);
+    const resolved = context.snapshot
+      ? resolveTargetsFromSnapshot(context.snapshot)
+      : resolveEnabledTargets(loadClassificationConfig(context.workspacePath), context.workspaceId);
 
     // If Product Type is not an enabled curation target, return succeeded
     // with empty proposals (NOT abstained, to avoid noisy reviewable_abstention).

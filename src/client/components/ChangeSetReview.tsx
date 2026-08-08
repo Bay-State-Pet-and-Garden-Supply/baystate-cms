@@ -673,7 +673,7 @@ export function ChangeSetReview() {
   const [itemFilter, setItemFilter] = useState<'all' | 'create' | 'update' | 'archive'>('all');
   const [activeTab, setActiveTab] = useState<'diff' | 'json' | 'preview'>('diff');
 
-  const mediaUrl = localStorage.getItem('shopsite_cms_media_url') || '';
+  const mediaUrl = localStorage.getItem('baystate_cms_media_url') || '';
 
   const fetch = async () => {
     try {

@@ -52,13 +52,13 @@ import {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 function getWorkerBaseUrl(): string {
-  const host = process.env.SHOPSITE_CMS_WORKER_HOST ?? '127.0.0.1';
-  const port = process.env.SHOPSITE_CMS_WORKER_PORT ?? '3032';
+  const host = process.env.BAYSTATE_CMS_WORKER_HOST ?? '127.0.0.1';
+  const port = process.env.BAYSTATE_CMS_WORKER_PORT ?? '3032';
   return `http://${host}:${port}`;
 }
 
 function getWorkerToken(): string | null {
-  return process.env.SHOPSITE_CMS_WORKER_TOKEN ?? null;
+  return process.env.BAYSTATE_CMS_WORKER_TOKEN ?? null;
 }
 
 /** Request timeout in ms. Keep it tight so a hung worker doesn't stall the pipeline. */

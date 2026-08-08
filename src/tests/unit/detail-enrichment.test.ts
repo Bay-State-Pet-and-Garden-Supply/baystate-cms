@@ -9,6 +9,7 @@ function makeOcr(overrides: Partial<PackagingOcrData> = {}): PackagingOcrData {
     productName: null,
     brand: null,
     species: [],
+    upc: null,
     flavorVariety: null,
     color: null,
     material: null,

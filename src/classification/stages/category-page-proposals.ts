@@ -4,24 +4,32 @@
  * Thin wrapper around the shared curation target engine. Proposes
  * which existing store Category Pages the product should be assigned to.
  *
- * Only runs when a `page` curation target is enabled. Disabled page
- * targets return succeeded with empty proposals (not abstained) to
- * avoid noisy reviewable_abstention proposals.
+ * Fail-closed gating:
+ * - A `page` curation target must be enabled.
+ * - Page proposals require BOTH a reviewed (accepted) Primary Product Type
+ *   and a verified Page catalog. A pending type guess produces no
+ *   decision-eligible Page proposal; without a verified catalog the stage
+ *   abstains (name-only rows are review context, never assignment identities).
+ *
+ * Disabled page targets return succeeded with empty proposals (not abstained)
+ * to avoid noisy reviewable_abstention proposals.
  *
  * Dependencies: Evidence from evidence_extraction stage.
  */
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { loadClassificationConfig } from '../config-loader';
-import { resolveEnabledTargets } from '../curation-target-resolver';
+import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { processPageTarget } from '../curation-target-processor';
+import { getReviewedPrimaryProductTypeId } from '../proposal-selection';
 
 export const categoryPageProposalsStage: StageDefinition = {
   name: 'category_page_proposals',
-  requires: ['evidence_extraction'],
+  requires: ['evidence_extraction', 'primary_product_type_proposal'],
   evidenceFrom: ['evidence_extraction', 'primary_product_type_proposal'],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
-    const config = loadClassificationConfig(context.workspacePath);
-    const resolved = resolveEnabledTargets(config, context.workspaceId);
+    const resolved = context.snapshot
+      ? resolveTargetsFromSnapshot(context.snapshot)
+      : resolveEnabledTargets(loadClassificationConfig(context.workspacePath), context.workspaceId);
 
     // If page assignment is not an enabled curation target, return
     // succeeded with empty proposals (not abstained).
@@ -37,11 +45,23 @@ export const categoryPageProposalsStage: StageDefinition = {
       };
     }
 
-    // Target exists but no store pages available
+    // Page proposals require a reviewed Primary Product Type whenever the
+    // config makes Product Type a gating target. Pending guesses abstain.
+    if (resolved.productTypes.length > 0) {
+      const acceptedTypeId = getReviewedPrimaryProductTypeId(input, context.snapshot);
+      if (acceptedTypeId === null) {
+        return {
+          status: 'abstained',
+          reason: 'No reviewed Primary Product Type. Page assignment requires an accepted Product Type and a verified Page catalog.',
+        };
+      }
+    }
+
+    // Target exists but no verified store pages available
     if (resolved.pages[0].options.length === 0) {
       return {
         status: 'abstained',
-        reason: 'No store pages available. Sync pages from ShopSite or configure them manually.',
+        reason: 'No verified store pages available. Page assignment requires a verified ShopSite Pages import.',
       };
     }
 

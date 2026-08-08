@@ -1,155 +1,54 @@
 import { Hono } from 'hono';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import os from 'os';
-import {
-  getCurrentWorkspace, createWorkspace, loadWorkspace, closeWorkspace,
-  getRecentWorkspaces, removeRecentWorkspace,
-} from '../services/workspace-service';
+import { getCurrentWorkspace, loadWorkspace } from '../services/workspace-service';
 
-const execPromise = promisify(exec);
 const route = new Hono();
 
 /**
- * GET /api/workspace - Get current workspace.
+ * GET /api/workspace - Get store workspace metadata.
  */
 route.get('/workspace', (c) => {
   const ws = getCurrentWorkspace();
   return c.json({
     workspace: ws ?? null,
-    message: ws ? 'Workspace loaded' : 'No workspace loaded',
+    message: ws ? 'Store loaded' : 'No store loaded',
   });
 });
 
 /**
- * POST /api/workspace/init - Create a new workspace.
+ * POST /api/workspace/init - Deprecated stub for workspace init.
  */
-route.post('/workspace/init', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const { name, path: workspacePath } = body as { name?: string; path?: string };
-
-  if (!name || !workspacePath) {
-    return c.json({ error: 'Both "name" and "path" are required.' }, 400);
-  }
-
-  try {
-    const result = createWorkspace(name, workspacePath);
-    return c.json({
-      success: true,
-      workspace: result.workspace,
-    });
-  } catch (err) {
-    return c.json({
-      error: `Failed to create workspace: ${err instanceof Error ? err.message : String(err)}`,
-    }, 500);
-  }
+route.post('/workspace/init', (c) => {
+  const ws = getCurrentWorkspace();
+  return c.json({ success: true, workspace: ws });
 });
 
 /**
- * POST /api/workspace/open - Open an existing workspace.
+ * POST /api/workspace/open - Deprecated stub for workspace open.
  */
-route.post('/workspace/open', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const { path: workspacePath } = body as { path?: string };
-
-  if (!workspacePath) {
-    return c.json({ error: '"path" is required.' }, 400);
-  }
-
-  try {
-    const workspace = loadWorkspace(workspacePath);
-    if (!workspace) {
-      return c.json({ error: 'No workspace found at this path.' }, 404);
-    }
-    return c.json({ success: true, workspace });
-  } catch (err) {
-    return c.json({
-      error: `Failed to open workspace: ${err instanceof Error ? err.message : String(err)}`,
-    }, 500);
-  }
+route.post('/workspace/open', (c) => {
+  const ws = loadWorkspace();
+  return c.json({ success: true, workspace: ws });
 });
 
 /**
- * POST /api/workspace/pick-directory - Open macOS native folder selector.
- */
-route.post('/workspace/pick-directory', async (c) => {
-  if (os.platform() !== 'darwin') {
-    return c.json({
-      success: false,
-      error: 'unsupported',
-      message: 'Directory picker is only supported on macOS.',
-    }, 400);
-  }
-
-  try {
-    const script = 'POSIX path of (choose folder with prompt "Select Workspace Folder")';
-    const { stdout } = await execPromise(`osascript -e '${script}'`);
-    const selectedPath = stdout.trim();
-    return c.json({ success: true, path: selectedPath });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes('User canceled')) {
-      return c.json({
-        success: false,
-        error: 'cancelled',
-        message: 'Folder selection was cancelled.',
-      });
-    }
-    return c.json({
-      success: false,
-      error: 'failed',
-      message: `Failed to open folder selector: ${message}`,
-    }, 500);
-  }
-});
-
-/**
- * POST /api/workspace/close - Close the current workspace.
+ * POST /api/workspace/close - Deprecated stub for workspace close.
  */
 route.post('/workspace/close', (c) => {
-  try {
-    closeWorkspace();
-    return c.json({ success: true, message: 'Workspace closed' });
-  } catch (err) {
-    return c.json({
-      error: `Failed to close workspace: ${err instanceof Error ? err.message : String(err)}`,
-    }, 500);
-  }
+  return c.json({ success: true, message: 'Store database open' });
 });
 
 /**
- * GET /api/workspace/recent - Get list of recent workspaces.
+ * GET /api/workspace/recent - Deprecated stub.
  */
 route.get('/workspace/recent', (c) => {
-  try {
-    const list = getRecentWorkspaces();
-    return c.json({ success: true, workspaces: list });
-  } catch (err) {
-    return c.json({
-      error: `Failed to get recent workspaces: ${err instanceof Error ? err.message : String(err)}`,
-    }, 500);
-  }
+  return c.json({ success: true, workspaces: [] });
 });
 
 /**
- * POST /api/workspace/recent/remove - Remove a workspace path from the recent list.
+ * POST /api/workspace/recent/remove - Deprecated stub.
  */
-route.post('/workspace/recent/remove', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const { path: workspacePath } = body as { path?: string };
-
-  if (!workspacePath) {
-    return c.json({ error: '"path" is required.' }, 400);
-  }
-
-  try {
-    removeRecentWorkspace(workspacePath);
-    return c.json({ success: true });
-  } catch (err) {
-    return c.json({
-      error: `Failed to remove workspace: ${err instanceof Error ? err.message : String(err)}`,
-    }, 500);
-  }
+route.post('/workspace/recent/remove', (c) => {
+  return c.json({ success: true });
 });
 
 export default route;

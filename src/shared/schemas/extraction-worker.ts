@@ -59,6 +59,13 @@ export const SnapshotRequestSchema = z.object({
   captureNetwork: z.boolean().optional(),
   /** PI-11: one bounded deterministic interaction before re-capture. */
   interaction: InteractionActionSchema.nullable().optional(),
+  /**
+   * P0-1 (round 2): allowed source domains for the run. When present and
+   * non-empty, navigation (initial + redirect hops), rendered sub-resources,
+   * and captured network responses are restricted to these domains
+   * (exact or subdomain-suffix match, case-insensitive).
+   */
+  sourcesAllowlist: z.array(z.string()).optional(),
 });
 
 export type SnapshotRequest = z.infer<typeof SnapshotRequestSchema>;

@@ -19,8 +19,167 @@ export { productDraftProjectionStage } from './stages/draft-projection';
 export { extractProductEvidence, packagingOcrDataToEvidence } from './product-evidence-extractor';
 export type { NormalizedEvidenceInput, EvidenceExtractionResult } from './product-evidence-extractor';
 
+// ─── Catalog Evidence (Milestone 3/7) ─────────────────────────────────────────
+export {
+  scanCatalogEvidence,
+  renderCatalogEvidence,
+  readLiveCatalogFields,
+  createCatalogEvidenceVerifier,
+  verifyCatalogEvidenceTreeIntegrity,
+  gitCommitIsAncestor,
+} from './catalog-evidence';
+export type { CatalogEvidence, CatalogFieldEvidence, CatalogPageObservation } from './catalog-evidence';
+
+// ─── Runtime Config Authority (Milestone 7) ────────────────────────────────────
+export {
+  loadRuntimeConfigAuthority,
+  createRuntimeActivationContext,
+  loadRuntimeConfig,
+} from './config-loader';
+export type { RuntimeConfigAuthority, VerifiedActivationContext } from './config-loader';
+
 // ─── Catalog Product Classification ────────────────────────────────────────────
 export { buildCatalogProductEvidenceInput, computeProductHash } from './catalog-product-source';
 export type { CatalogProductSource } from './catalog-product-source';
 export { createCatalogEvidenceExtractionStage } from './stages/catalog-product-evidence-extraction';
 export { classifyCatalogProduct } from './catalog-product-classifier';
+
+// ─── Immutable Runtime Snapshot ───────────────────────────────────────────────
+export {
+  buildRuntimeSnapshot,
+  deepFreeze,
+  snapshotHash,
+  persistRuntimeSnapshot,
+  getRuntimeSnapshotByHash,
+  runtimeSnapshotHashMatchesConfig,
+  authorityConfigHashMatches,
+  listEffectiveCurationTargets,
+  computeSnapshotFieldOptions,
+} from './runtime-snapshot';
+export type {
+  RuntimeClassificationSnapshot,
+  RuntimeSnapshotInput,
+  PageSnapshotState,
+  PageSnapshotRecord,
+} from './runtime-snapshot';
+
+// ─── Reviewed Facts ────────────────────────────────────────────────────────────
+export { collectReviewedFacts, isFactCompatible, filterCompatibleFacts } from './reviewed-facts';
+export type { ReviewedFact, CollectReviewedFactsInput } from './reviewed-facts';
+
+// ─── Proposal Safety ───────────────────────────────────────────────────────────
+export { validateProposalSafety } from './proposal-safety';
+export type {
+  ProposalSafetyReport,
+  ProposalSafetyFinding,
+  ProposalSafetyContext,
+  SafetyFindingCode,
+} from './proposal-safety';
+
+// ─── Proposal Selection ───────────────────────────────────────────────────────
+export {
+  selectAcceptedPrimaryProductType,
+  selectPrimaryProductTypeProposal,
+  getProductTypeIdFromFact,
+  getReviewedPrimaryProductTypeId,
+} from './proposal-selection';
+export type { ProposalSelection } from './proposal-selection';
+
+// ─── Assignment Projection ────────────────────────────────────────────────────
+export { serializeAttributeValue, validateSerializableValue } from './assignment-projection';
+export type { SerializableValueValidation } from './assignment-projection';
+
+// ─── Dependent Refresh Queue ──────────────────────────────────────────────────
+export { enqueueClassificationRefresh } from '../db/repositories/classification-run-repo';
+
+// ─── Benchmark / Feature Policy (M9) ───────────────────────────────────────────
+export {
+  computePredictionBundleHash,
+  extractPredictionsForSku,
+  validatePredictionBundle,
+  buildPredictionBundle,
+  loadPredictionBundle,
+} from './benchmark-prediction';
+export type {
+  GoldExampleForPrediction,
+  BuildPredictionBundleOptions,
+} from './benchmark-prediction';
+export {
+  evaluateQualificationGate,
+  buildQualificationReceiptPayload,
+  buildQualificationReceiptDigest,
+  createQualificationReceiptId,
+} from './benchmark-qualification';
+export type { QualificationGateOptions, QualificationResult } from './benchmark-qualification';
+export {
+  evaluateFeaturePolicy,
+  evaluateAllFeatures,
+  ALL_ML_FEATURES,
+} from './feature-policy';
+export type { FeatureRequest, FeatureRequestScope, FeaturePolicyOptions } from './feature-policy';
+export {
+  computeMetrics,
+  computePerExamplePrimaryMetric,
+  computePairedBootstrap,
+  seededRandom,
+} from './benchmark-evaluator';
+export type { GoldExampleForEvaluation, ControlledValues, ComputeMetricsOptions, EvaluateBenchmarkOptions, EvaluateBenchmarkResult } from './benchmark-evaluator';
+
+// ─── Retrieval Index (M10) ─────────────────────────────────────────────────────
+export {
+  InMemoryRetrievalIndex,
+  VectorValidationError,
+  assertFiniteVector,
+  assertVectorDimension,
+  embeddingDocumentId,
+  benchmarkEmbeddingDocumentId,
+  computeEmbeddingDocumentHash,
+  buildBenchmarkRetrievalIndex,
+  EMBEDDING_SCHEMA_VERSION,
+} from './retrieval-index';
+export type {
+  VectorEntry,
+  RetrievalIndex,
+  RetrievalHit,
+  RetrievalSearchOptions,
+  EmbeddingNamespace,
+  BenchmarkIndexExample,
+  BuildBenchmarkIndexOptions,
+  BenchmarkIndexBuildResult,
+} from './retrieval-index';
+
+// ─── Embedding Maintenance (M10) ───────────────────────────────────────────────
+export {
+  runEmbeddingMaintenance,
+  computeDesiredEmbeddings,
+  planEmbeddingMaintenance,
+  loadCurrentIndex,
+  EmbeddingMaintenanceLockedError,
+  EmbeddingPolicyDeniedError,
+  EMBEDDING_MODEL,
+  EMBEDDING_PROVIDER,
+  DEFAULT_BATCH_SIZE,
+} from './embedding-maintenance';
+export type {
+  DesiredEmbedding,
+  MaintenancePlan,
+  MaintenanceReport,
+  MaintenanceOptions,
+} from './embedding-maintenance';
+
+// ─── Retrieval / Rerank (M10) ──────────────────────────────────────────────────
+export {
+  findSimilarApprovedProducts,
+  indexApprovedProduct,
+  loadRetrievalIndex,
+  RetrievalPolicyDisabledError,
+  assertProductionRetrievalAllowed,
+} from './product-retrieval';
+export type { SimilarProduct, RetrievalOptions } from './product-retrieval';
+export {
+  rerankPageProposals,
+  rerankPageProposalsVerified,
+  assertVerifiedPageRerankContext,
+  PageRerankBlockedError,
+} from './page-reranker';
+export type { PageProposal, RankedPageProposal, RerankVerifiedOptions } from './page-reranker';

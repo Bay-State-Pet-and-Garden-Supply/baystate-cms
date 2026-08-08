@@ -15,7 +15,7 @@ const fixtureDir = path.resolve(import.meta.dirname, '../../tests/fixtures');
 const fixtureXml = fs.readFileSync(path.join(fixtureDir, 'shopsite-products-sample.xml'), 'utf-8');
 
 describe('Phase 2: Change Sets and Approval', () => {
-  const testDir = path.join(os.tmpdir(), `shopsite-cms-cs-${Date.now()}`);
+  const testDir = path.join(os.tmpdir(), `baystate-cms-cs-${Date.now()}`);
 
   beforeAll(() => {
     try { fs.rmSync(testDir, { recursive: true }); } catch { /* ok */ }

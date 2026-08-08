@@ -32,7 +32,7 @@ export class ShopSiteHttpClient {
   private buildHeaders(extra?: Record<string, string>): Record<string, string> {
     return {
       Authorization: this.authHeader,
-      'User-Agent': 'ShopSiteCMS/0.1.0',
+      'User-Agent': 'BaystateCMS/0.1.0',
       Accept: 'text/xml,application/xml,*/*',
       ...extra,
     };

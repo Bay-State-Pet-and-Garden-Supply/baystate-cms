@@ -124,7 +124,7 @@ describe('ShopSite XML Round-trip & Compatibility', () => {
 
   // Test case 2: Real-world catalog round-trip testing loaded directly from the Bay State workspace
   it('should verify round-trip integrity on actual product files from the Bay State workspace', () => {
-    const bayStateProductsDir = '/Users/nickborrello/Desktop/Projects/shopsite-cms/workspaces/Bay State/products';
+    const bayStateProductsDir = '/Users/nickborrello/Desktop/Projects/baystate-cms/workspaces/Bay State/products';
     
     if (!fs.existsSync(bayStateProductsDir)) {
       console.log(`[Roundtrip Test] Bay State products directory not found at "${bayStateProductsDir}". Skipping real product round-trip assertions.`);
@@ -192,4 +192,75 @@ describe('ShopSite XML Round-trip & Compatibility', () => {
       }
     }
   });
+
+  describe('Explicit Built-in Output Policy & Preservation (Issue #15)', () => {
+    const createBaseProduct = (): Product => ({
+      schemaVersion: 1,
+      id: 'test-builtins-1',
+      sku: 'SKU-BUILTIN-1',
+      status: 'active',
+      core: {
+        name: 'Builtin Policy Test Product',
+        price: '19.99',
+        salePrice: null,
+        description: 'Standard product description text.',
+        inventory: { quantityOnHand: 10, lowStockThreshold: 2, outOfStockLimit: 0 },
+        availability: 'In Stock',
+        weight: '0.5',
+        taxable: true,
+        media: { primary: 'img.jpg', additional: [] },
+        seo: { fileName: '', searchKeywords: '', googleProductCategory: '' },
+      },
+      customFields: {},
+      shopsite: {
+        productId: '100',
+        productGuid: 'guid-100',
+        xmlVersion: '15.0',
+        lastPulledAt: null,
+        lastRemoteHash: null,
+        lastSyncedAt: null,
+        source: { dbname: 'products', uniqueName: 'SKU' },
+        preserved: {
+          unknownElements: {},
+          advancedBlocks: {},
+          rawAttributes: {},
+        },
+      },
+      metadata: { createdAt: '2026-08-04T00:00:00Z', updatedAt: '2026-08-04T00:00:00Z', archivedAt: null },
+    });
+
+    it('should default MinimumQuantity to 0 and ProductType to Tangible when omitted', () => {
+      const prod = createBaseProduct();
+      const res = denormalizeProduct(prod);
+      expect(res.xml).toContain('<MinimumQuantity>0</MinimumQuantity>');
+      expect(res.xml).toContain('<ProductType>Tangible</ProductType>');
+    });
+
+    it('should preserve non-default MinimumQuantity from customFields or preserved unknownElements', () => {
+      const prodCustom = createBaseProduct();
+      prodCustom.customFields['MinimumQuantity'] = '5';
+      expect(denormalizeProduct(prodCustom).xml).toContain('<MinimumQuantity>5</MinimumQuantity>');
+
+      const prodPreserved = createBaseProduct();
+      prodPreserved.shopsite.preserved.unknownElements['MinimumQuantity'] = '10';
+      expect(denormalizeProduct(prodPreserved).xml).toContain('<MinimumQuantity>10</MinimumQuantity>');
+    });
+
+    it('should preserve explicit ShopSite ProductType and NOT overwrite with internal Primary Product Type', () => {
+      const prod = createBaseProduct();
+      prod.customFields['ProductType'] = 'Download';
+      expect(denormalizeProduct(prod).xml).toContain('<ProductType>Download</ProductType>');
+      expect(denormalizeProduct(prod).xml).not.toContain('<ProductType>dog_food_dry</ProductType>');
+    });
+
+    it('should preserve explicit custom/preserved FileName and MoreInformationText', () => {
+      const prod = createBaseProduct();
+      prod.customFields['FileName'] = 'custom-page-name.html';
+      prod.customFields['MoreInformationText'] = 'Custom detail text for more info.';
+      const res = denormalizeProduct(prod);
+      expect(res.xml).toContain('<FileName>custom-page-name.html</FileName>');
+      expect(res.xml).toContain('<MoreInformationText><![CDATA[Custom detail text for more info.]]></MoreInformationText>');
+    });
+  });
 });
+

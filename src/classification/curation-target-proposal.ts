@@ -6,7 +6,7 @@
  *
  * All proposals default to:
  * - status: 'pending' (not auto-accepted)
- * - isBulkAcceptable: confidence >= 0.7
+ * - isBulkAcceptable: false (Issue #10: requires calibrated policy approval)
  * - isStale: false
  * - createdAt: now
  */
@@ -22,6 +22,10 @@ export interface ProductTypeProposalParams {
   confidence: number;
   evidenceIds: string[];
   matchedWords?: string[];
+  /** Explicit override for bulk acceptance (Issue #10) */
+  isBulkAcceptable?: boolean;
+  /** Immutable runtime snapshot hash this proposal was built under. */
+  snapshotHash?: string | null;
 }
 
 /**
@@ -42,9 +46,10 @@ export function buildProductTypeProposal(params: ProductTypeProposalParams): Cla
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
     status: 'pending',
-    isBulkAcceptable: params.confidence >= 0.7,
+    isBulkAcceptable: params.isBulkAcceptable ?? false,
     isStale: false,
     stalenessReason: null,
+    snapshotHash: params.snapshotHash ?? null,
     createdAt: now(),
   };
 }
@@ -58,8 +63,10 @@ export interface FieldAssignmentProposalParams {
   evidenceIds: string[];
   /** Single value or array depending on selectionMode */
   isMultiple: boolean;
-  /** Explicit override for bulk acceptance (e.g. false for brand shortcuts until Issue #10) */
+  /** Explicit override for bulk acceptance (Issue #10) */
   isBulkAcceptable?: boolean;
+  /** Immutable runtime snapshot hash this proposal was built under. */
+  snapshotHash?: string | null;
 }
 
 /**
@@ -83,9 +90,10 @@ export function buildFieldAssignmentProposal(params: FieldAssignmentProposalPara
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
     status: 'pending',
-    isBulkAcceptable: params.isBulkAcceptable ?? (params.confidence >= 0.7),
+    isBulkAcceptable: params.isBulkAcceptable ?? false,
     isStale: false,
     stalenessReason: null,
+    snapshotHash: params.snapshotHash ?? null,
     createdAt: now(),
   };
 }
@@ -96,16 +104,22 @@ export interface CategoryPageProposalParams {
   pageName: string;
   /** Optional stable page ID for identity-based assignment */
   pageId?: string;
+  /** Whether the referenced page identity is verified in the active import */
+  verifiedPageIdentity?: boolean;
   confidence: number;
   evidenceIds: string[];
   /** Explicit override for bulk acceptance */
   isBulkAcceptable?: boolean;
+  /** Immutable runtime snapshot hash this proposal was built under. */
+  snapshotHash?: string | null;
 }
 
 /**
  * Build a `category_page` proposal.
  * Uses pageName as targetId for backward compatibility with existing Review UI.
- * Includes pageId in proposedValue for identity-based promotion.
+ * Includes pageId and the identity-verification flag in proposedValue. An
+ * unverified identity is review context only — serialization consumers must
+ * re-check the active import before writing ProductOnPages.
  */
 export function buildCategoryPageProposal(params: CategoryPageProposalParams): ClassificationProposal {
   return {
@@ -114,13 +128,18 @@ export function buildCategoryPageProposal(params: CategoryPageProposalParams): C
     productSku: params.sku,
     proposalType: 'category_page',
     targetId: params.pageName,
-    proposedValue: { pageId: params.pageId ?? null, pageName: params.pageName },
+    proposedValue: {
+      pageId: params.pageId ?? null,
+      pageName: params.pageName,
+      identityVerified: params.verifiedPageIdentity ?? false,
+    },
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
     status: 'pending',
-    isBulkAcceptable: params.isBulkAcceptable ?? (params.confidence >= 0.7),
+    isBulkAcceptable: params.isBulkAcceptable ?? false,
     isStale: false,
     stalenessReason: null,
+    snapshotHash: params.snapshotHash ?? null,
     createdAt: now(),
   };
 }

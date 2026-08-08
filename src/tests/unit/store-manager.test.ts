@@ -17,8 +17,8 @@ import { getProductWithDraft } from '../../server/services/product-service';
 import type { Product } from '../../shared/types';
 
 describe('Store Manager AI Assistant & Cleanup Tool', () => {
-  const testDbPath = '/tmp/shopsite-cms-store-manager-test.db';
-  const testWorkspacePath = '/tmp/shopsite-cms-store-manager-workspace';
+  const testDbPath = '/tmp/baystate-cms-store-manager-test.db';
+  const testWorkspacePath = '/tmp/baystate-cms-store-manager-workspace';
   const workspaceId = randomUUID();
 
   beforeAll(() => {

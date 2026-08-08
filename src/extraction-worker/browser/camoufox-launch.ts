@@ -6,7 +6,7 @@
  * similar bot-detection systems.
  *
  * The plain Playwright path exists as a documented rollback when
- * SHOPSITE_CMS_WORKER_BROWSER_BACKEND=playwright is set.
+ * BAYSTATE_CMS_WORKER_BROWSER_BACKEND=playwright is set.
  */
 
 import { firefox, chromium, type Browser, type LaunchOptions } from 'playwright';
