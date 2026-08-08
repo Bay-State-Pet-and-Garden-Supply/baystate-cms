@@ -1065,6 +1065,10 @@ function bundleImageReviewFlags(submission: { imageCandidates: Array<{ role?: st
       reasons.push(`image (${role}) verified asset does not resolve to a durable row — image identity/rights unknown`);
       continue;
     }
+    // Round-7 (review P1): comparison is binding-only and non-commerce —
+    // rights status never triggers review telemetry for it. Binding (the
+    // unresolvable-asset check above) still applies to every role.
+    if (role === 'comparison') continue;
     const rights = asset.rightsStatus ?? 'unknown';
     if (rights === 'unknown' || rights === 'restricted') {
       needsReview = true;

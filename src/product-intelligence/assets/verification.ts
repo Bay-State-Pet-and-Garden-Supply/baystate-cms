@@ -383,11 +383,13 @@ export interface VerifiedAgainstSnapshot {
  *  (at tool time) and the terminal validator (at submission time) compute
  *  this from run-derived data, so hash equality proves the asset was verified
  *  against the same immutable product identity. */
-/** Durable provenance a source-kind resolver can chain through: the
- *  discovering page URL and the evidence rows the candidate cites. */
+/** Durable provenance a source-kind resolver can chain through. Round-7:
+ *  the candidateId is the SERVER-CREATED discovery record — sourcePageUrl
+ *  (display only) and evidenceIds (observation only) never select the tier. */
 export type SourceTypeProvenance = {
   sourcePageUrl?: string | null;
   evidenceIds?: string[];
+  candidateId?: string | null;
 };
 
 export function canonicalVerifiedAgainstHash(snapshot: VerifiedAgainstSnapshot): string {
@@ -400,6 +402,11 @@ export interface VerifyImageInput {
   sourcePath?: string | null;
   sourceArtifactId?: string | null;
   extractionMethod?: ExtractionMethod;
+  /** Round-7: the durable server-created discovery record this image came
+   *  from (discover_image_candidates). Provenance authority — the source
+   *  tier/rights resolve from its discovering source, never from
+   *  agent-supplied strings. */
+  candidateId?: string | null;
   /** Round-4: authoritative comparison target, server-derived from the run
    *  input. Agent-supplied expected* fields below are recorded for review
    *  but are NEVER used as comparison targets (non-authoritative hints). */
@@ -483,6 +490,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   const declaredSourceType = deps.sourceTypeResolver?.(input.url, {
     sourcePageUrl: input.sourcePageUrl ?? null,
     evidenceIds: input.evidenceIds ?? [],
+    candidateId: input.candidateId ?? null,
   }) ?? 'unknown';
   // Round-4: the comparison target is the server-derived run identity. When
   // the run input lacks a dimension, that dimension is NOT compared — it is
@@ -537,23 +545,30 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     const key = OBSERVED_FIELD_KEYS[(fact.targetField ?? '').toLowerCase().replace(/[^a-z0-9]/g, '_')];
     return key === 'gtin' && fact.value !== null && fact.value !== undefined;
   };
-  let observedGtinFromEvidence: string | null = fromEvidence.gtin;
-  if (observedGtinFromEvidence) {
-    const gtinFact = usableFacts.find(isGtinObservationFact);
-    const linkageMatch = (input.assetGtinLinkages ?? []).some(
-      (linkage) => normalizeGtinDigits(linkage.gtin) === normalizeGtinDigits(observedGtinFromEvidence),
-    );
-    const method = (gtinFact?.extractionMethod ?? '').toLowerCase();
+  // Round-7 (review P0): qualify EACH GTIN fact independently. A fact's hash
+  // may only authorize ITS OWN value — one fact's byte binding can never make
+  // another fact's value the image's observed GTIN. Qualified values are the
+  // union of (a) byte-bound image_ocr/decoder facts whose content hash equals
+  // the exact bytes being inspected and (b) values covered by a
+  // server-authoritative asset-to-GTIN linkage. Differing qualified values are
+  // a GTIN conflict (never silently picks one).
+  const linkageGtinValues = new Set((input.assetGtinLinkages ?? []).map((linkage) => normalizeGtinDigits(linkage.gtin)));
+  const qualifiedGtinValues = new Set<string>();
+  for (const fact of usableFacts.filter(isGtinObservationFact)) {
+    const raw = fact.value && typeof fact.value === 'object' ? (fact.value as Record<string, unknown>).value : fact.value;
+    const digits = normalizeGtinDigits(raw);
+    if (digits.length < 8 || digits.length > 14) continue;
+    const method = (fact.extractionMethod ?? '').toLowerCase();
     const isImageDerived = method === 'image_ocr' || method === 'decoder';
     const byteBound =
-      isImageDerived &&
-      !!gtinFact?.contentHash &&
-      currentImageHash !== '' &&
-      gtinFact.contentHash === currentImageHash;
-    if (!linkageMatch && !byteBound) {
-      observedGtinFromEvidence = null;
+      isImageDerived && !!fact.contentHash && currentImageHash !== '' && fact.contentHash === currentImageHash;
+    if (byteBound || linkageGtinValues.has(digits)) {
+      qualifiedGtinValues.add(digits);
     }
   }
+  const gtinConflictValues =
+    qualifiedGtinValues.size > 1 ? Array.from(qualifiedGtinValues) : null;
+  const observedGtinFromEvidence = qualifiedGtinValues.size === 1 ? Array.from(qualifiedGtinValues)[0] : null;
   const observed: IdentityObservation = {
     brand: fromEvidence.brand ?? decoded.observed.brand ?? null,
     productName: fromEvidence.productName ?? decoded.observed.productName ?? null,
@@ -625,6 +640,15 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   // a bare 'no observed GTIN'.
   if (gtinEvidenceRejected) {
     identity.reasons.push('observed GTIN evidence is not byte-bound to this image (evidence GTIN without a matching content hash or server-authoritative linkage)');
+  }
+  // Round-7: differing QUALIFIED GTIN values (each byte-bound or linkage
+  // covered in its own right) are a conflicting-GTIN identity failure — the
+  // image is not exact, and the reviewer sees both values. A generic fact's
+  // value is never authorized by another fact's hash.
+  if (gtinConflictValues) {
+    identity.exactProductMatch = false;
+    identity.conflicts.push(`conflicting GTIN evidence: ${gtinConflictValues.join(' vs ')}`);
+    identity.reasons.push(`conflicting qualified GTINs: ${gtinConflictValues.join(' vs ')}`);
   }
   const commerceApproved = computeCommerceApproved({
     rightsStatus,

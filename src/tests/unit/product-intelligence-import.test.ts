@@ -900,11 +900,12 @@ describe('PI-8 onboarding import', () => {
     ]);
   });
 
-  it('accepts a non-commerce-approved supporting image with same-product linkage (round-6 P1)', () => {
+  it('accepts a non-commerce-approved supporting image with same-product linkage — kept out of the commerce set (round-7 P1)', () => {
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
     const a1 = seedAsset(runId, true);
     // Alternate: NOT commerce-approved, but approved rights + exact product
-    // match (the linkage) — the per-role rule allows it into the commerce set.
+    // match (the linkage) — the per-role rule allows it into the bundle, but
+    // it must NOT appear in the commerce-approved id set.
     const alt = seedAsset(runId, false, { sourceUrl: 'https://cdn.example.com/alt.jpg' });
     const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
       imageCandidates: [
@@ -918,7 +919,13 @@ describe('PI-8 onboarding import', () => {
     const result = importRunToOnboarding(runId, { mode: 'create' });
     const item = findItemById(result.item.id);
     const evidence = item?.extractionData?.productIntelligenceEvidence;
-    expect(evidence?.[0]?.approvedImageIds).toEqual([a1.id, alt.id]);
+    // Only genuinely commerce-approved assets appear in approvedImageIds;
+    // the non-commerce supporting asset lives ONLY in the role-bearing set.
+    expect(evidence?.[0]?.approvedImageIds).toEqual([a1.id]);
+    expect(evidence?.[0]?.images).toEqual([
+      { assetId: a1.id, role: 'primary' },
+      { assetId: alt.id, role: 'alternate' },
+    ]);
   });
 
   it('rejects a supporting image without same-product linkage (round-6 P1)', () => {

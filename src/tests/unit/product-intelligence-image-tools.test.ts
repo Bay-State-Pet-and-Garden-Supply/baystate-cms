@@ -16,7 +16,7 @@ import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { upsertReusePolicy } from '../../db/repositories/pi-reuse-policy-repo';
-import { createPiRun, insertPiEvidence, insertPiSource, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, insertPiEvidence, insertPiImageCandidate, insertPiSource, listPiImageCandidatesByRun, listPiSources, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
 import { testPolicy } from './product-intelligence/test-helpers';
@@ -58,6 +58,10 @@ describe('PI-6 image tools', () => {
       configSnapshotHash: 'c',
     });
   }
+  /** Round-7: server-created candidate provenance — the record verify_image_candidate must cite. */
+  function candidateOf(runId: string, imageUrl: string, discoveringSourceId: string | null): string {
+    return insertPiImageCandidate({ runId, imageUrl, discoveringSourceId }).id;
+  }
 
   const toolCtx = (runId: string, overrides: Partial<{ gateway: PolicyGateway }> = {}) => ({
     runId,
@@ -89,7 +93,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     );
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
-      const data = result.data as { candidates: Array<{ url: string; variantReference: string | null; extractionMethod: string; sourcePath: string }> };
+      const data = result.data as { candidates: Array<{ url: string; variantReference: string | null; extractionMethod: string; sourcePath: string; candidateId?: string }> };
       expect(data.candidates).toHaveLength(1);
       expect(data.candidates[0]).toMatchObject({
         variantReference: '123',
@@ -97,6 +101,16 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       });
       expect(data.candidates[0].url.startsWith('https://')).toBe(true);
       expect(result.evidence[0].kind).toBe('image_evidence');
+      // Round-7: discovery SERVER-CREATED a durable candidate record bound to
+      // the discovering page source (its candidateId is what verification cites).
+      expect(data.candidates[0].candidateId).toBeTruthy();
+      const rows = listPiImageCandidatesByRun(run.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].imageUrl).toBe(data.candidates[0].url);
+      expect(rows[0].discoveringSourceId).toBeTruthy();
+      const pageSource = listPiSources(run.id).find((src) => src.url === 'https://shop.example.com/products/stella');
+      expect(pageSource?.sourceType).toBe('other'); // fail-closed neutral tier until typed
+      expect(rows[0].discoveringSourceId).toBe(pageSource?.id);
     }
     transitionPiRunStatus(run.id, 'completed', {});
   });
@@ -136,6 +150,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       defaultToolRegistry.get('verify_image_candidate')!,
       {
         url: 'https://cdn.example.com/i.png',
+        candidateId: candidateOf(run.id, 'https://cdn.example.com/i.png', source.id),
         gtin: '036000291452',
         expectedName: 'Stella Chicken Broth 16 oz',
         netContentValue: 16,
@@ -202,6 +217,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       defaultToolRegistry.get('verify_image_candidate')!,
       {
         url: 'https://cdn.example.com/i.png',
+        candidateId: candidateOf(run.id, 'https://cdn.example.com/i.png', source.id),
         gtin: '036000291452',
         expectedName: 'Stella Chicken Broth 16 oz',
         netContentValue: 16,
@@ -261,7 +277,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       });
       return defaultToolRegistry.dispatch(
         defaultToolRegistry.get('verify_image_candidate')!,
-        { url: 'https://cdn.example.com/i.png', gtin: '036000291452', declaredSourceType: 'supplier', evidenceIds: [gtinRow.id] },
+        { url: 'https://cdn.example.com/i.png', candidateId: candidateOf(run.id, 'https://cdn.example.com/i.png', source.id), gtin: '036000291452', declaredSourceType: 'supplier', evidenceIds: [gtinRow.id] },
         toolCtx(run.id, { gateway }),
       );
     };
@@ -321,6 +337,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       defaultToolRegistry.get('verify_image_candidate')!,
       {
         url: 'https://cdn.example.com/i.png',
+        candidateId: candidateOf(run.id, 'https://cdn.example.com/i.png', source.id),
         gtin: '036000291452',
         expectedName: 'Stella Chicken Broth 16 oz',
         netContentValue: 16,
@@ -399,6 +416,11 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       defaultToolRegistry.get('verify_image_candidate')!,
       {
         url: 'https://cdn.example.com/i.png',
+        // Round-7: provenance authority = the server-created candidate record
+        // (whose discovering source is the manufacturer page). The image-URL
+        // source row below is still the fastest tier hit, but the candidate
+        // binding is what survives without it.
+        candidateId: candidateOf(run.id, 'https://cdn.example.com/i.png', source.id),
         gtin: '036000291452',
         // Round-4: this agent string is IGNORED — the durable source row for
         // the image URL (sourceType 'manufacturer') selects the grant. If the
@@ -433,19 +455,19 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
-  it('resolves source kind through the discovering PAGE row — manufacturer image approval works without a CDN source row (round-5)', async () => {
+  it('resolves source kind through the server-created candidate record — manufacturer image approval works without a CDN source row (round-7)', async () => {
     const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
       .png()
       .toBuffer();
     const gateway = new PolicyGateway({
-      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      resolveHostname: async (hostname) =>
+        hostname.endsWith('example.com') || hostname.endsWith('shopify.com') ? ['93.184.216.34'] : [],
       fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
     const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
-    // Real path: NO source row for the CDN image URL. The tier comes from the
-    // durable provenance chain — the manufacturer product page that
-    // DISCOVERED the image (sourcePageUrl) and the field-level OCR evidence
-    // rows bound to that page's source row.
+    // The manufacturer product page that DISCOVERS the image — the tier comes
+    // from the SERVER-CREATED candidate record's discovering source, never
+    // from an agent-supplied sourcePageUrl.
     const pageSource = insertPiSource({
       runId: run.id,
       url: 'https://brand.example.com/p/stella-broth-16oz',
@@ -470,15 +492,28 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     upsertReusePolicy({
       workspaceId: wsId,
       sourceTier: 'manufacturer',
-      domainPattern: 'cdn.example.com',
+      domainPattern: 'cdn.shopify.com',
       allowed: true,
       terms: 'vendor license',
     });
+    // Discover through the real tool: the server creates the candidate record
+    // and binds it to the page source (by page URL).
+    const html = `<script>var Shopify = Shopify || {};
+Shopify.ProductVariants = [{"id":123,"title":"16 oz","option1":"16 oz","image_id":456}];
+Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</script>`;
+    const discovered = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { pageUrl: 'https://brand.example.com/p/stella-broth-16oz', content: html, sourceType: 'shopify' },
+      toolCtx(run.id),
+    );
+    expect(discovered.status).toBe('ok');
+    const candidateId = ((discovered as { data?: unknown }).data as { candidates: Array<{ candidateId: string; url: string }> }).candidates[0].candidateId;
+    expect(candidateId).toBeTruthy();
     const result = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('verify_image_candidate')!,
       {
-        url: 'https://cdn.example.com/i.png',
-        sourcePageUrl: 'https://brand.example.com/p/stella-broth-16oz',
+        url: 'https://cdn.shopify.com/s/files/a.jpg',
+        candidateId,
         gtin: '036000291452',
         evidenceIds: [gtinRow.id],
       },
@@ -494,9 +529,10 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
         exactProductMatch: boolean;
         observationProvenance: string;
       };
-      // Tier resolved through the page row (no CDN source row needed).
+      // Tier resolved through the candidate record's discovering source (the
+      // manufacturer page) — no CDN source row needed.
       expect(record.rightsStatus).toBe('approved');
-      expect(record.rightsBasis).toBe('grant:manufacturer@cdn.example.com');
+      expect(record.rightsBasis).toBe('grant:manufacturer@cdn.shopify.com');
       expect(record.observationProvenance).toBe('evidence');
       expect(record.exactProductMatch).toBe(true);
       expect(record.commerceApproved).toBe(true);
@@ -504,7 +540,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
-  it('stays restricted when the page row resolves the tier but no reuse grant matches (round-5)', async () => {
+  it('stays restricted when the server-created candidate binds a retailer discovering source (round-7)', async () => {
     const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
       .png()
       .toBuffer();
@@ -513,6 +549,9 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
     const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
+    // The image was discovered on a RETAILER page — the candidate record binds
+    // that retailer source. An agent-supplied sourcePageUrl pointing at a
+    // manufacturer page must NOT change the tier (the old round-5 attack).
     const pageSource = insertPiSource({
       runId: run.id,
       url: 'https://retailer.example.com/p/stella-broth-16oz',
@@ -527,9 +566,8 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       extractionMethod: 'image_ocr',
       metadata: { contentHash: createHash('sha256').update(png).digest('hex') },
     });
-    // Grants exist for OTHER tiers (manufacturer/supplier on the CDN domain) —
-    // the resolved 'retailer' tier must not be granted, so rights stay
-    // restricted (fail closed). The shared test DB already holds a
+    // Grants exist for OTHER tiers on the CDN domain — the resolved 'retailer'
+    // tier must not be granted (fail closed). The shared test DB holds a
     // manufacturer grant from earlier tests; the tier must not match it.
     upsertReusePolicy({
       workspaceId: wsId,
@@ -542,7 +580,10 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       defaultToolRegistry.get('verify_image_candidate')!,
       {
         url: 'https://cdn.example.com/i.png',
-        sourcePageUrl: 'https://retailer.example.com/p/stella-broth-16oz',
+        candidateId: candidateOf(run.id, 'https://cdn.example.com/i.png', pageSource.id),
+        // Attack attempt: the agent claims a manufacturer discovering page.
+        // Round-7: ignored — the candidate record's retailer source decides.
+        sourcePageUrl: 'https://brand.example.com/p/stella-broth-16oz',
         gtin: '036000291452',
         evidenceIds: [gtinRow.id],
       },
@@ -566,6 +607,12 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
     const run = runningRun();
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: 'https://retailer.example.com/p/1',
+      domain: 'retailer.example.com',
+      sourceType: 'retailer',
+    });
     // The shared DB may carry a manufacturer@cdn.example.com grant from an
     // earlier test — use a tier/domain no grant covers so this stays
     // deterministic regardless of execution order.
@@ -573,6 +620,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       defaultToolRegistry.get('verify_image_candidate')!,
       {
         url: 'https://other.example.com/i.png',
+        candidateId: candidateOf(run.id, 'https://other.example.com/i.png', pageSource.id),
         declaredSourceType: 'retailer',
         rightsBasis: 'supplier_authorized_asset',
         rightsEvidenceRef: 'caller-invented-ref',
@@ -595,9 +643,15 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       fetchFn: async () => new Response(new Uint8Array(Buffer.from('definitely not an image')), { status: 200, headers: { 'content-type': 'image/png' } }),
     });
     const run = runningRun();
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
     const result = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('verify_image_candidate')!,
-      { url: 'https://cdn.example.com/corrupt.png', declaredSourceType: 'supplier' },
+      { url: 'https://cdn.example.com/corrupt.png', candidateId: candidateOf(run.id, 'https://cdn.example.com/corrupt.png', pageSource.id), declaredSourceType: 'supplier' },
       toolCtx(run.id, { gateway }),
     );
     expect(result.status).toBe('no_result');
@@ -607,9 +661,15 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
 
   it('denies network access to non-allowlisted destinations through the gateway', async () => {
     const run = runningRun();
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: 'https://blocked.example.com/p/1',
+      domain: 'blocked.example.com',
+      sourceType: 'other',
+    });
     const result = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('verify_image_candidate')!,
-      { url: 'https://blocked.example.com/i.png' },
+      { url: 'https://blocked.example.com/i.png', candidateId: candidateOf(run.id, 'https://blocked.example.com/i.png', pageSource.id) },
       toolCtx(run.id),
     );
     // The default test policy is local_only; the pre-flight must deny before fetch.

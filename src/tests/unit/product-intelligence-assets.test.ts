@@ -698,6 +698,131 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(record.qualityStatus).toBe('low_quality');
       expect(record.commerceApproved).toBe(false);
     });
+
+    it('never borrows one GTIN fact\'s hash to authorize another fact\'s value (round-7 adversarial)', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      const OTHER_GTIN = '0000000000008';
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/borrow.png',
+          sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-y-bytebound', 'ev-x-generic'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => {
+              if (id === 'ev-y-bytebound') {
+                // Byte-bound OCR fact for a DIFFERENT GTIN (Y).
+                return { id, targetField: 'gtin', value: OTHER_GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash };
+              }
+              // Generic null-hash fact for the REQUESTED GTIN (X).
+              return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'network_response', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+            }),
+          sourceTypeResolver: () => 'supplier',
+          reuseGrantResolver: (tier) =>
+            tier === 'supplier' ? { allowed: true as const, grantId: 'grant-borrow-1', sourceTier: 'supplier', domainPattern: '*', terms: null } : null,
+        },
+      );
+      // Only Y qualified (byte-bound). X came from a generic fact — its value
+      // is never authorized by Y's hash. observed = Y, which mismatches the
+      // expected X -> NOT exact.
+      expect(record.observedGtin).toBe(OTHER_GTIN);
+      expect(record.exactProductMatch).toBe(false);
+      expect(record.commerceApproved).toBe(false);
+    });
+
+    it('treats differing qualified GTINs as a conflict (round-7 adversarial)', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      const OTHER_GTIN = '0000000000008';
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/conflict.png',
+          sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-g1', 'ev-g2'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id, index) => ({
+              id,
+              targetField: 'gtin',
+              value: index === 0 ? GTIN : OTHER_GTIN,
+              extractionMethod: 'image_ocr',
+              snippet: null,
+              sourceUrl: PAGE,
+              sourceDomain: 'brand.example.com',
+              contentHash: pngHash,
+            })),
+          sourceTypeResolver: () => 'supplier',
+          reuseGrantResolver: (tier) =>
+            tier === 'supplier' ? { allowed: true as const, grantId: 'grant-conflict-1', sourceTier: 'supplier', domainPattern: '*', terms: null } : null,
+        },
+      );
+      expect(record.observedGtin).toBeNull(); // conflicting set -> no single value
+      expect(record.conflicts.join(' ')).toContain('conflicting GTIN evidence');
+      expect(record.exactProductMatch).toBe(false);
+      expect(record.commerceApproved).toBe(false);
+    });
+
+    it('resolves the source tier only from the server-created candidate record, never the agent-supplied sourcePageUrl (round-7)', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/cand-provenance.png',
+          // Agent lie: points at a manufacturer page.
+          sourcePageUrl: 'https://brand.example.com/p/1',
+          candidateId: 'cand-retailer-1',
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-cand'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
+          // The durable resolver consults ONLY the candidate record.
+          sourceTypeResolver: (_url, provenance) => {
+            if (provenance.candidateId === 'cand-retailer-1') return 'retailer';
+            return null;
+          },
+          // A manufacturer grant exists for the CDN domain — it must NOT apply.
+          reuseGrantResolver: (tier) =>
+            tier === 'manufacturer'
+              ? { allowed: true as const, grantId: 'grant-mfr-1', sourceTier: 'manufacturer', domainPattern: 'cdn.example.com', terms: null }
+              : null,
+        },
+      );
+      expect(record.rightsStatus).toBe('restricted');
+      expect(record.commerceApproved).toBe(false);
+    });
+
+    it('fails closed when no durable candidate provenance resolves (round-7)', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/no-cand.png',
+          sourcePageUrl: PAGE,
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-nocand'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
+          sourceTypeResolver: (_url, provenance) => (provenance.candidateId ? 'supplier' : null),
+          reuseGrantResolver: (tier) =>
+            tier === 'supplier' ? { allowed: true as const, grantId: 'grant-nocand-1', sourceTier: 'supplier', domainPattern: '*', terms: null } : null,
+        },
+      );
+      expect(record.rightsStatus).toBe('restricted');
+      expect(record.commerceApproved).toBe(false);
+    });
   });
 
   // -------------------------------------------------------------------------

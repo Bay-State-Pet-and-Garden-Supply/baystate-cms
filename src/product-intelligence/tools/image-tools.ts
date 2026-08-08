@@ -39,7 +39,7 @@ export const verifyImageCandidateTool: PiToolAdapter = {
     packCount: Type.Optional(Type.Integer({ exclusiveMinimum: 0 })),
     flavor: Type.Optional(boundedString(128, 'Expected flavor')),
     formula: Type.Optional(boundedString(128, 'Expected formula')),
-    sourcePageUrl: Type.Optional(boundedString(512, 'Source page URL')),
+    sourcePageUrl: Type.Optional(boundedString(512, 'Source page URL (display only — round-7: provenance comes from the server-created candidate record)')),
     sourcePath: Type.Optional(boundedString(1024, 'Source path in the source')),
     sourceArtifactId: Type.Optional(boundedString(256, 'Source artifact id')),
     extractionMethod: Type.Optional(
@@ -52,6 +52,7 @@ export const verifyImageCandidateTool: PiToolAdapter = {
         Type.Literal('manual'),
       ]),
     ),
+    candidateId: boundedString(128, 'Durable server-created image-candidate id (from discover_image_candidates) — the provenance that determines source tier'),
     declaredSourceType: Type.Optional(
       boundedString(128, 'Declared source kind: supplier | manufacturer | retailer | licensed_dataset | manual_photography | network_discovered | generated'),
     ),
@@ -93,14 +94,47 @@ export const verifyImageCandidateTool: PiToolAdapter = {
     // comparison target or select a reuse grant.
     const runIdentity = loadRunIdentity(ctx.runId);
 
+    // Round-7 (review P0): provenance authority comes ONLY from the
+    // server-created candidate record. The agent-selected sourcePageUrl and
+    // agent-selected evidence rows can never select the source tier. When the
+    // candidate record (or its discovering source) is unresolved, verification
+    // fails closed: tier 'unknown', rights restricted.
+    const candidateId = params.candidateId ? String(params.candidateId) : null;
+    if (!candidateId) {
+      return errorResult(
+        'image_verification_failed',
+        'candidateId is required: verification provenance must come from a server-created discover_image_candidates record',
+      );
+    }
+    const candidate = loadAssetStore()?.getPiImageCandidate?.(candidateId);
+    const discoveringSource =
+      candidate?.discoveringSourceId
+        ? loadSourceRows(ctx.runId).find((source) => source.id === candidate.discoveringSourceId)
+        : undefined;
+    if (!candidate) {
+      return errorResult('image_verification_failed', `candidateId ${candidateId} does not resolve to a durable discovery record`);
+    }
+    if (!discoveringSource) {
+      return errorResult('image_verification_failed', `candidate ${candidateId} has no durable discovering source (provenance unresolved — fail closed)`);
+    }
+    // The candidate record is a server-created relationship for ONE image:
+    // verifying a different URL against it would let the agent repoint the
+    // provenance at another asset.
+    if (candidate.imageUrl !== url) {
+      return errorResult('image_verification_failed', `candidate ${candidateId} was created for a different image (${candidate.imageUrl}); refusing to verify ${url}`);
+    }
+
     try {
       const record = await verifyImageCandidate(
         {
           url,
-          sourcePageUrl: params.sourcePageUrl ? String(params.sourcePageUrl) : null,
+          // Round-7: provenance is server-derived from the candidate record —
+          // the discovering source's URL, never the agent's sourcePageUrl.
+          sourcePageUrl: discoveringSource.url ?? null,
           sourcePath: params.sourcePath ? String(params.sourcePath) : null,
           sourceArtifactId: params.sourceArtifactId ? String(params.sourceArtifactId) : undefined,
           extractionMethod: params.extractionMethod as ExtractionMethod | undefined,
+          candidateId,
           runIdentity,
           evidenceIds: Array.isArray(params.evidenceIds) ? (params.evidenceIds as unknown[]).map((id) => String(id)) : undefined,
           // Round-6: server-resolved asset-to-GTIN linkage for THIS image
@@ -171,7 +205,7 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
     ]),
     retrievedAt: Type.Optional(Type.String({ format: 'date-time' })),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const pageUrl = String(params.pageUrl ?? '');
     const content = String(params.content ?? '');
     const sourceType = String(params.sourceType ?? '') as 'json_ld' | 'shopify' | 'woocommerce' | 'network_capture';
@@ -183,8 +217,48 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
           { id: evidenceId('discover_image_candidates', `${sourceType}:${pageUrl}`), kind: 'image_evidence', url: pageUrl, method: `image_discovery:${sourceType}` },
         ]);
       }
+      // Round-7 (review P0): the candidate -> discovering-page relationship is
+      // SERVER-CREATED here and persisted durably. verify_image_candidate
+      // requires the returned candidateId and derives source tier / rights
+      // from this record's discovering source — an agent-selected
+      // sourcePageUrl or evidence selection can never choose the tier.
+      let enriched: Array<DiscoveredImageCandidate & { candidateId?: string }> = candidates;
+      try {
+        const store = loadAssetStore();
+        if (store) {
+          const sources = loadSourceRows(ctx.runId);
+          let pageSource = sources.find((source) => source.url === pageUrl);
+          if (!pageSource) {
+            const created = store.insertPiSource({
+              runId: ctx.runId,
+              url: pageUrl,
+              domain: domainOfUrl(pageUrl),
+              sourceType: 'other',
+            }) as LazySourceRow;
+            pageSource = { id: created.id, url: pageUrl, sourceType: 'other' };
+            sources.push(pageSource);
+          }
+          enriched = candidates.map((candidate) => ({
+            ...candidate,
+            candidateId: store.insertPiImageCandidate({
+              runId: ctx.runId,
+              imageUrl: candidate.url,
+              discoveringSourceId: pageSource?.id ?? null,
+              sourceArtifactId: candidate.sourceArtifactId ?? null,
+              sourcePath: candidate.sourcePath ?? null,
+              extractionMethod: candidate.extractionMethod ?? null,
+              variantReference: candidate.variantReference ?? null,
+            }).id,
+          }));
+        }
+      } catch (error) {
+        // No DB (vitest) or persistence failure: candidates return without
+        // durable ids — verification of an unpersisted candidate fails
+        // closed on the missing candidateId.
+        console.warn('[discover_image_candidates] could not persist candidate provenance:', error instanceof Error ? error.message : String(error));
+      }
       return okResult(
-        { candidates, count: candidates.length },
+        { candidates: enriched, count: enriched.length },
         [
           {
             id: evidenceId('discover_image_candidates', `${sourceType}:${pageUrl}`),
@@ -220,6 +294,19 @@ interface LazySourceRow {
   url: string;
   domain: string;
   sourceType?: string | null;
+}
+
+/** Round-7: durable server-created image-candidate record. */
+interface LazyCandidateRow {
+  id: string;
+  runId: string;
+  imageUrl: string;
+  discoveringSourceId: string | null;
+  sourceArtifactId: string | null;
+  sourcePath: string | null;
+  extractionMethod: string | null;
+  variantReference: string | null;
+  createdAt: string;
 }
 
 const lazyRequire = createRequire(import.meta.url);
@@ -363,6 +450,10 @@ let _assetStore:
         exactProductMatch: number | boolean;
         verifiedAgainstJson: string | null;
       }>;
+      // Round-7: server-created image-candidate records.
+      insertPiImageCandidate: (input: Record<string, unknown>) => LazyCandidateRow;
+      getPiImageCandidate: (id: string) => LazyCandidateRow | undefined;
+      listPiImageCandidatesByRun: (runId: string) => LazyCandidateRow[];
     }
   | null
   | undefined;
@@ -462,55 +553,55 @@ function loadRunIdentity(runId: string): VerifiedAgainstSnapshot | null {
  * Agent-declared source types never select a reuse grant — this resolver is
  * the only source of sourceType. */
 function loadSourceTypeResolver(runId: string): (url: string, provenance: SourceTypeProvenance) => string | null {
-  let sources: Array<{ id: string; url: string; sourceType: string | null }> | null = null;
   return (url: string, provenance: SourceTypeProvenance) => {
-    if (sources === null) {
-      try {
-        const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
-        if (!conn.isDbInitialized?.()) {
-          sources = [];
-        } else {
-          const store = loadAssetStore();
-          sources = (store?.listPiSources(runId) ?? []).map((s) => ({
-            id: s.id,
-            url: s.url,
-            sourceType: s.sourceType ?? null,
-          }));
-        }
-      } catch {
-        sources = [];
-      }
-    }
-    const sourceList = sources;
+    const sourceList = loadSourceRows(runId);
     if (sourceList.length === 0) return null;
-    const tierOf = (candidateUrl: string | null | undefined): string | null =>
-      candidateUrl ? (sourceList.find((s) => s.url === candidateUrl)?.sourceType ?? null) : null;
-    // (a) exact image/CDN URL.
-    const exact = tierOf(url);
+    // (a) exact image/CDN URL source row.
+    const exact = sourceList.find((source) => source.url === url)?.sourceType ?? null;
     if (exact) return exact;
-    // (b) discovering page.
-    const page = tierOf(provenance.sourcePageUrl);
-    if (page) return page;
-    // (c) cited evidence rows (row UUID or toolEvidenceId namespace) — the
-    // evidence row's source row carries the tier it was captured through.
-    const evidenceIds = provenance.evidenceIds ?? [];
-    if (evidenceIds.length > 0) {
-      try {
-        const repo = loadEvidenceRepo();
-        const rows = repo.listPiEvidence(runId).filter((row) => evidenceIds.includes(row.id));
-        const seen = new Set(rows.map((row) => row.id));
-        rows.push(...repo.listPiEvidenceByToolEvidenceId(runId, evidenceIds).filter((row) => !seen.has(row.id)));
-        const byId = new Map(sourceList.map((s) => [s.id, s]));
-        for (const row of rows) {
-          const matched = byId.get(row.sourceId);
-          if (matched?.sourceType) return matched.sourceType;
-        }
-      } catch {
-        // evidence lookup failure — fall through to null (fail closed)
+    // (b) Round-7: the SERVER-CREATED candidate record's discovering source.
+    // The sourcePageUrl and evidence rows the caller supplies are display/
+    // observation inputs only — they NEVER select the tier. Only the durable
+    // candidate -> discovering-source relationship (created by
+    // discover_image_candidates) is authoritative.
+    if (provenance.candidateId) {
+      const store = loadAssetStore();
+      const candidate = store?.getPiImageCandidate?.(provenance.candidateId);
+      if (candidate?.discoveringSourceId) {
+        const tier = sourceList.find((source) => source.id === candidate.discoveringSourceId)?.sourceType ?? null;
+        if (tier) return tier;
       }
     }
     return null;
   };
+}
+
+/** Per-run cached source rows (lazy, vitest-safe fail closed). */
+const _sourceRowsCache = new Map<string, Array<{ id: string; url: string; sourceType: string | null }> | null>();
+function loadSourceRows(runId: string): Array<{ id: string; url: string; sourceType: string | null }> {
+  if (_sourceRowsCache.has(runId)) return _sourceRowsCache.get(runId) ?? [];
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) {
+      _sourceRowsCache.set(runId, []);
+      return [];
+    }
+  } catch {
+    _sourceRowsCache.set(runId, []);
+    return [];
+  }
+  try {
+    const store = loadAssetStore();
+    const rows = (store?.listPiSources(runId) ?? []).map((source) => ({
+      id: source.id,
+      url: source.url,
+      sourceType: source.sourceType ?? null,
+    }));
+    _sourceRowsCache.set(runId, rows);
+  } catch {
+    _sourceRowsCache.set(runId, []);
+  }
+  return _sourceRowsCache.get(runId) ?? [];
 }
 
 /** Persist the server-verified record as a durable asset row; returns the

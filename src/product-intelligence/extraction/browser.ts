@@ -225,6 +225,22 @@ function identityIdsOf(payload: Record<string, unknown>): string[] {
   return ids;
 }
 
+/**
+ * Page-primary co-occurrence ids, EXCLUDING GTIN (round-7 P0-3): two
+ * representations of the same recommendation (e.g. embedded JSON data plus
+ * a /api/recommendations response) both carrying the requested GTIN must
+ * never make that GTIN a page-primary identifier — GTIN equality is
+ * identity evidence, not page-context evidence.
+ */
+function nonGtinIdentityIdsOf(payload: Record<string, unknown>): string[] {
+  const ids: string[] = [];
+  for (const key of ['@id', 'id', 'productId', 'handle', 'url', 'sku']) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.length > 0 && value.length <= 512) ids.push(value);
+  }
+  return ids;
+}
+
 /** True for WebPage/ItemPage/ProductPage structured-data nodes. */
 function isPageEntityType(payload: Record<string, unknown>): boolean {
   const t = payload['@type'] ?? payload.type;
@@ -291,18 +307,21 @@ function pagePrimaryEntityIds(snapshot: BrowserSnapshot, canonicalUrl: string): 
     if (product) collectProduct(product);
   }
   if (strongIds.length > 0) return strongIds;
-  // Identity co-occurrence fallback: a sku/id declared by >= 2 payloads is
-  // the page's current product (its leaf JSON-LD plus its API response).
+  // Identity co-occurrence fallback: a NON-GTIN stable id (sku/productId/
+  // handle/canonical @id) declared by >= 2 payloads is the page's current
+  // product (its leaf JSON-LD plus its API response). GTINs are excluded
+  // from the key entirely (round-7 P0-3): a recommendation carrying the
+  // requested UPC must never become primary by repetition.
   const occurrences = new Map<string, number>();
   for (const payload of productLike) {
-    for (const id of identityIdsOf(payload)) {
-      const key = id.length >= 8 && /^\d+$/.test(id) ? `g:${id}` : `s:${id.toLowerCase()}`;
+    for (const id of nonGtinIdentityIdsOf(payload)) {
+      const key = id.toLowerCase();
       occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
     }
   }
   const repeated: string[] = [];
   for (const [key, count] of occurrences) {
-    if (count >= 2) repeated.push(key.startsWith('g:') ? key.slice(2) : key.slice(2));
+    if (count >= 2) repeated.push(key);
   }
   return repeated;
 }
@@ -410,13 +429,19 @@ export function evidenceFromBrowserSnapshot(
   // carry that GTIN. A payload that merely carries the requested GTIN (e.g.
   // a recommendation/cross-sell for the same UPC) is identity evidence, not
   // page-context evidence — it must not prove the page's product is
-  // single-variant. A page with exactly ONE product-like payload makes that
-  // payload primary by definition.
+  // single-variant.
+  // Round-7 P0-3: with an expected GTIN, a page with exactly ONE
+  // product-like payload is NOT primary by definition — the real product may
+  // render as DOM/meta while the only captured structured/network payload is
+  // a cross-sell. Primary/current-page identity requires an independent
+  // page-context marker (mainEntity, canonical @id/url, platform current-
+  // product id, selected-child state, or repeated NON-GTIN stable identity).
   const primaryIds = out.pagePrimaryIds ?? [];
   const totalProductLike = out.stats?.productLikeCount ?? contributions.length;
   const linked = (contribution: VariantSetContribution): boolean => {
     const isPrimary =
-      totalProductLike === 1 || (primaryIds.length > 0 && identityMatchesPrimaryIds(contribution.identity, primaryIds));
+      (expectedDigits === null && totalProductLike === 1) ||
+      (primaryIds.length > 0 && identityMatchesPrimaryIds(contribution.identity, primaryIds));
     if (!isPrimary) return false;
     if (expectedDigits) {
       // When the expected GTIN exists, linkage is GTIN equality — a payload

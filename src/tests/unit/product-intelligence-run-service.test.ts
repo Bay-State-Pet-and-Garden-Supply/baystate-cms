@@ -638,6 +638,73 @@ describe('Product Intelligence run service', () => {
     expect(submissionNeedsReview(approvedResult)).toBe(false);
   });
 
+  it('does not review-signal comparison assets on rights — binding still applies (round-7 P1)', async () => {
+    const runId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify({ gtin: TEST_INPUT.gtin, registerName: TEST_INPUT.registerName }),
+      policyJson: '{}',
+      configSnapshotId: 'seed',
+      configSnapshotHash: 'seed',
+    }).id;
+    const source = insertPiSource({
+      runId,
+      url: 'https://cdn.example.com/cmp.jpg',
+      domain: 'cdn.example.com',
+      sourceType: 'retailer',
+    });
+    // Comparison asset: restricted rights (never a commerce asset) but durably
+    // bound to this run + identity.
+    const cmpId = insertPiAsset({
+      runId,
+      sourceId: source.id,
+      sourceUrl: 'https://cdn.example.com/cmp.jpg',
+      sourceType: 'retailer',
+      sourceArtifactId: 'cmp',
+      extractionMethod: 'image_ocr',
+      retrievedAt: '2026-08-05T00:00:00.000Z',
+      originalContentHash: 'c'.repeat(64),
+      perceptualHash: 'phash-cmp',
+      rightsStatus: 'restricted',
+      exactProductMatch: true,
+      exactVariantMatch: true,
+      qualityStatus: 'usable',
+      commerceApproved: false,
+      conflicts: [],
+      verifiedAgainstJson: JSON.stringify({ runId, gtin: TEST_INPUT.gtin, name: TEST_INPUT.registerName }),
+      verifiedAgainstHash: canonicalVerifiedAgainstHash({ runId, gtin: TEST_INPUT.gtin, name: TEST_INPUT.registerName }),
+      declaredSourceType: 'retailer',
+    }).id;
+    const bundle = bundleWithImage();
+    bundle.imageCandidates[0].verifiedAssetId = cmpId;
+    bundle.imageCandidates[0].role = 'comparison';
+    const result = {
+      schemaVersion: 1,
+      gtin: TEST_INPUT.gtin,
+      inputName: TEST_INPUT.registerName,
+      outcome: 'submitted' as const,
+      submission: bundle,
+    } as unknown as ProductResearchResult;
+    // Restricted rights on a comparison asset is NOT a review reason.
+    expect(submissionNeedsReview(result)).toBe(false);
+    expect(reviewReasons(result)).not.toContain(expect.stringContaining('rights'));
+
+    // Binding still applies: an unresolvable comparison citation flags review.
+    const unresolvable = bundleWithImage();
+    unresolvable.imageCandidates[0].role = 'comparison';
+    unresolvable.imageCandidates[0].verifiedAssetId = '00000000-0000-0000-0000-000000000000';
+    const result2 = {
+      schemaVersion: 1,
+      gtin: TEST_INPUT.gtin,
+      inputName: TEST_INPUT.registerName,
+      outcome: 'submitted' as const,
+      submission: unresolvable,
+    } as unknown as ProductResearchResult;
+    expect(submissionNeedsReview(result2)).toBe(true);
+    expect(reviewReasons(result2).join(' ')).toContain('does not resolve');
+  });
+
   it('enforces retention policy (terminal only, older than cutoff)', async () => {
     const executor = new FakePiExecutor();
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT }, runOpts);

@@ -878,6 +878,78 @@ const ASSET_SELECT = `
   FROM product_intelligence_assets
 `;
 
+// ---------------------------------------------------------------------------
+// Round-7 (review P0): server-CREATED image-candidate provenance. The
+// candidate -> discovering-page relationship is established by the server
+// when discover_image_candidates runs; verify_image_candidate cites the
+// durable record and source tier / rights resolve from its discovering
+// source — never from agent-supplied provenance strings.
+// ---------------------------------------------------------------------------
+
+export interface PiImageCandidateRow {
+  id: string;
+  runId: string;
+  imageUrl: string;
+  discoveringSourceId: string | null;
+  sourceArtifactId: string | null;
+  sourcePath: string | null;
+  extractionMethod: string | null;
+  variantReference: string | null;
+  createdAt: string;
+}
+
+const IMAGE_CANDIDATE_SELECT = `
+  SELECT id, run_id AS runId, image_url AS imageUrl,
+         discovering_source_id AS discoveringSourceId,
+         source_artifact_id AS sourceArtifactId,
+         source_path AS sourcePath,
+         extraction_method AS extractionMethod,
+         variant_reference AS variantReference,
+         created_at AS createdAt
+  FROM pi_image_candidates
+`;
+
+export function insertPiImageCandidate(input: {
+  runId: string;
+  imageUrl: string;
+  discoveringSourceId?: string | null;
+  sourceArtifactId?: string | null;
+  sourcePath?: string | null;
+  extractionMethod?: string | null;
+  variantReference?: string | null;
+}): PiImageCandidateRow {
+  const db = getDb();
+  const id = randomUUID();
+  db.run(
+    `INSERT INTO pi_image_candidates
+     (id, run_id, image_url, discovering_source_id, source_artifact_id,
+      source_path, extraction_method, variant_reference, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      input.runId,
+      input.imageUrl,
+      input.discoveringSourceId ?? null,
+      input.sourceArtifactId ?? null,
+      input.sourcePath ?? null,
+      input.extractionMethod ?? null,
+      input.variantReference ?? null,
+      now(),
+    ],
+  );
+  return db.query(`${IMAGE_CANDIDATE_SELECT} WHERE id = ?`).get(id) as PiImageCandidateRow;
+}
+
+export function getPiImageCandidate(id: string): PiImageCandidateRow | undefined {
+  const db = getDb();
+  return db.query(`${IMAGE_CANDIDATE_SELECT} WHERE id = ?`).get(id) as PiImageCandidateRow | undefined;
+}
+
+export function listPiImageCandidatesByRun(runId: string): PiImageCandidateRow[] {
+  const db = getDb();
+  return db.query(`${IMAGE_CANDIDATE_SELECT} WHERE run_id = ? ORDER BY created_at`).all(runId) as PiImageCandidateRow[];
+}
+
 export function insertPiAsset(input: {
   runId: string;
   sourceId?: string | null;

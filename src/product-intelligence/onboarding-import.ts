@@ -653,7 +653,11 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
         ]);
       }
       images.push({ assetId: id, role });
-      if (role !== 'comparison') approvedImageIds.push(id);
+      // approvedImageIds is the COMMERCE image set: only genuinely
+      // commerce-approved assets appear in it (comparison excluded by role;
+      // supporting assets that are rights-approved but not commerce-approved
+      // live ONLY in the role-bearing images structure).
+      if (role !== 'comparison' && asset.commerceApproved === 1) approvedImageIds.push(id);
     }
 
     // Materialize evidence into the item's extraction data (distinct

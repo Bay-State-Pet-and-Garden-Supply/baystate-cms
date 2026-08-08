@@ -663,7 +663,10 @@ describe('ladder contract adapter + helpers', () => {
       imageCandidates: [],
       networkResponses: [
         {
-          url: 'https://api.example.com/api/product/555555555555',
+          // The current-product API response rides the canonical page URL
+          // (round-7: with an expected GTIN the lone-payload fallback is
+          // disabled, so the canonical-URL linkage is the page-context marker).
+          url: 'https://api.example.com/p/one',
           status: 200,
           responseContentType: 'application/json',
           jsonBody: { product: { title: 'Single Variant 8oz', sku: 'SV-8', brand: 'Single Co', gtin: '555555555555', variants: [{ id: 1, title: '8 oz' }] } },
@@ -885,10 +888,14 @@ describe('ladder contract adapter + helpers', () => {
       warnings: [],
     });
 
-    // (a) expected GTIN + linked single-variant payload -> 'single'.
+    // (a) expected GTIN + linked single-variant payload -> 'single'. The
+    //     payload rides the canonical page URL (page-context marker) and
+    //     carries the expected GTIN (round-7: with an expected GTIN the lone
+    //     payload fallback is disabled, so the canonical-URL linkage is what
+    //     makes it primary).
     const outA = makeOut();
     const evA = evidenceFromBrowserSnapshot(
-      snapshotOf([], [{ url: 'https://u.example.com/api/1', jsonBody: { product: { title: 'T', gtin: '999999999999', variants: [{ id: 1 }] } } }]),
+      snapshotOf([], [{ url: 'https://u.example.com/p/x', jsonBody: { product: { title: 'T', gtin: '999999999999', variants: [{ id: 1 }] } } }]),
       outA,
       { gtin: '999999999999' },
     );
@@ -934,9 +941,11 @@ describe('ladder contract adapter + helpers', () => {
     expect(evE.variantSetEvidence).toBe('none');
 
     // (f) linked multi-variant payload IS a contradiction (parent_page).
+    //     The payload rides the canonical page URL so it is the current
+    //     product (round-7), not a same-GTIN cross-sell.
     const outF = makeOut();
     const evF = evidenceFromBrowserSnapshot(
-      snapshotOf([], [{ url: 'https://u.example.com/api/5', jsonBody: { product: { title: 'T', gtin: '999999999999', variants: [{ id: 1 }, { id: 2 }] } } }]),
+      snapshotOf([], [{ url: 'https://u.example.com/p/x', jsonBody: { product: { title: 'T', gtin: '999999999999', variants: [{ id: 1 }, { id: 2 }] } } }]),
       outF,
       { gtin: '999999999999' },
     );
@@ -1094,6 +1103,187 @@ describe('ladder contract adapter + helpers', () => {
       5000,
       {
         fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://api-pos.example.com/p/x'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('round-7 P0-3: GTIN co-occurrence never makes a cross-sell primary — two representations of Y sharing only the requested GTIN do not settle exact', async () => {
+    // The reviewer's round-7 escape (i): the SAME cross-sell Y appears twice
+    // (embedded JSON data + a /api/recommendations response), sharing ONLY
+    // the requested GTIN (different skus). Round-6's co-occurrence fallback
+    // counted GTINs, so Y's repeated GTIN made it a pagePrimaryId. Round-7
+    // removes GTIN from the co-occurrence key entirely — Y stays non-primary
+    // and cannot prove the page product single-variant.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://rec2.example.com/p/main',
+      finalUrl: 'https://rec2.example.com/p/main',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Primary Product 32oz',
+          sku: 'PR-32',
+          gtin: '777777777777',
+          size: '32 oz',
+          offers: { price: '14.99' },
+        },
+        {
+          // Embedded representation of cross-sell Y — requested GTIN, one variant.
+          '@type': 'Product',
+          name: 'Requested UPC Item',
+          sku: 'RE-1',
+          gtin: '888888888888',
+          variants: [{ id: 1, title: '1 ct' }],
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://rec2.example.com/api/recommendations',
+          status: 200,
+          responseContentType: 'application/json',
+          // API representation of the SAME cross-sell Y — different sku, same GTIN.
+          jsonBody: { product: { title: 'Requested UPC Item', sku: 'RA-1', gtin: '888888888888', variants: [{ id: 1, title: '1 ct' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result } = await runExtractionLadder(
+      'https://rec2.example.com/p/main',
+      { gtin: '888888888888', name: 'Requested UPC Item' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://rec2.example.com/p/main'),
+        browser: { snapshot },
+      },
+    );
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityReasons.join(' ')).toMatch(/unproven|not exact|single-variant/i);
+  });
+
+  it('round-7 P0-3: a lone cross-sell payload is NOT primary when an expected GTIN exists (no totalProductLike===1 fallback)', async () => {
+    // The reviewer's round-7 escape (ii): the page's REAL product renders as
+    // plain DOM/meta; the only captured structured/network payload is the
+    // cross-sell Y (requested GTIN + one variant). Round-6 treated it primary
+    // by definition (totalProductLike === 1). Round-7 disables that fallback
+    // whenever an expected GTIN exists — Y cannot settle exact.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://lone.example.com/p/x',
+      finalUrl: 'https://lone.example.com/p/x',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Requested UPC Item',
+          sku: 'LX-9',
+          gtin: '888888888888',
+          variants: [{ id: 1, title: '1 ct' }],
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result } = await runExtractionLadder(
+      'https://lone.example.com/p/x',
+      { gtin: '888888888888', name: 'Requested UPC Item' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body><h1>Requested UPC Item</h1></body></html>', 'https://lone.example.com/p/x'),
+        browser: { snapshot },
+      },
+    );
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityReasons.join(' ')).toMatch(/unproven|not exact|single-variant/i);
+  });
+
+  it('round-7 P0-3: a lone payload with a canonical page-context marker proves single-variant', async () => {
+    // Positive round-7 case (iii): the lone payload IS the page's current
+    // product via canonical URL/@id linkage (page-context marker) and carries
+    // the requested GTIN + one variant — browser single-variant proof holds.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://canon.example.com/p/y',
+      finalUrl: 'https://canon.example.com/p/y',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          '@id': 'https://canon.example.com/p/y',
+          name: 'Canonical Product 8oz',
+          gtin: '999999999999',
+          size: '8 oz',
+          offers: { price: '6.99' },
+          variants: [{ id: 1, title: '8 oz' }],
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://canon.example.com/p/y',
+      { gtin: '999999999999', name: 'Canonical Product 8oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://canon.example.com/p/y'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('round-7 P0-3: repeated NON-GTIN sku co-occurrence marks the primary (GTIN excluded from the key)', async () => {
+    // Positive round-7 case (iv): the leaf JSON-LD product and the current-
+    // product API response share a non-GTIN sku (co-occurrence, GTIN removed
+    // from the key) — the API payload is primary, its single variant proves
+    // the requested GTIN's page is single-variant.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://sku-pos.example.com/p/z',
+      finalUrl: 'https://sku-pos.example.com/p/z',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Sku Product 12oz',
+          sku: 'SK-12',
+          gtin: '777777777777',
+          size: '12 oz',
+          offers: { price: '9.99' },
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://sku-pos.example.com/api/products/current',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { product: { title: 'Sku Product 12oz', sku: 'SK-12', gtin: '777777777777', variants: [{ id: 1, title: '12 oz' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://sku-pos.example.com/p/z',
+      { gtin: '777777777777', name: 'Sku Product 12oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://sku-pos.example.com/p/z'),
         browser: { snapshot },
       },
     );

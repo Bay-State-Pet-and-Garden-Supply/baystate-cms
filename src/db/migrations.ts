@@ -2000,6 +2000,37 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Round-7 (review P0): server-CREATED image-candidate provenance. The
+  // candidate->discovering-page relationship is established by the server when
+  // discover_image_candidates runs; verify_image_candidate cites the durable
+  // record (candidateId) and the source tier / rights grant resolve from its
+  // discovering source — never from an agent-supplied sourcePageUrl or
+  // agent-selected evidence rows.
+  try {
+    const candidateVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('pi_image_candidates_schema_version') as { value: string } | undefined;
+    if (!candidateVersion) {
+      console.log('[Migrations] Running pi image candidates schema migration...');
+      db.exec(`CREATE TABLE IF NOT EXISTS pi_image_candidates (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+        image_url TEXT NOT NULL,
+        discovering_source_id TEXT REFERENCES product_intelligence_sources(id) ON DELETE SET NULL,
+        source_artifact_id TEXT,
+        source_path TEXT,
+        extraction_method TEXT,
+        variant_reference TEXT,
+        created_at TEXT NOT NULL
+      );`);
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_image_candidates_schema_version', '1');");
+      console.log('[Migrations] Pi image candidates schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Pi image candidates schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;
