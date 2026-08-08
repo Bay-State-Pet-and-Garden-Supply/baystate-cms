@@ -615,25 +615,29 @@ describe('Protected classification operations — model-policy gateway (issue #1
     }
   });
 
-  test('cloud VLM error body and signed image URL are redacted in logs', async () => {
-    // First image fetch returns a 500 so we hit the image-fetch log path;
-    // then the LLM error body path is exercised through the image fetch log.
-    let imageCalls = 0;
+  test('cloud VLM model error body and signed image URL are redacted in logs', async () => {
+    // Image fetch SUCCEEDS with a valid >=1 KiB body; the model call then
+    // returns an error whose body embeds quoted JSON credentials + a Basic
+    // auth segment. The warning log must contain only the redacted reason.
+    let calls = 0;
     const mock = (async (_url: string) => {
-      imageCalls += 1;
-      if (imageCalls === 1) {
-        return new Response('error', { status: 500, headers: { 'content-type': 'text/plain' } });
+      calls += 1;
+      if (calls === 1) {
+        return new Response(Buffer.alloc(2048, 1), { status: 200, headers: { 'content-type': 'image/jpeg' } });
       }
-      // LLM call: redacted error body.
-      return new Response('sk-SECRET-IMG api_key=xyz error body', { status: 401, headers: { 'content-type': 'text/plain' } });
+      // LLM call: 401 with embedded quoted credentials.
+      return new Response(
+        JSON.stringify({ error: { message: 'api_key:"supersecret" token:"tok_abcdef123456"' } }),
+        { status: 401, headers: { 'content-type': 'application/json' } },
+      );
     }) as unknown as typeof fetch;
     globalThis.fetch = mock;
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const view = buildModelPolicyView(
       {
-        defaultProvider: 'ollama',
-        defaultModel: 'qwen2.5vl:latest',
-        providerLocalities: { ollama: 'local' },
+        defaultProvider: 'deepseek',
+        defaultModel: 'deepseek-chat',
+        providerLocalities: { deepseek: 'cloud' },
         stageOverrides: {},
         imageDataSharing: 'cloud_allowed',
         textDataSharing: 'cloud_allowed',
@@ -652,7 +656,11 @@ describe('Protected classification operations — model-policy gateway (issue #1
       await extractPackagingOcrFromCloud({ imageUrl: signedUrl, modelPolicy: view });
       const joined = spy.mock.calls.map(c => String(c[0])).join('\n');
       expect(joined).not.toContain('SECRETSIG');
-      expect(joined).not.toContain('sk-SECRET-IMG');
+      expect(joined).not.toContain('supersecret');
+      expect(joined).not.toContain('tok_abcdef123456');
+      expect(joined).toContain('api_key=[REDACTED]');
+      // Both the image download and the model transport were reached.
+      expect(calls).toBe(2);
     } finally {
       spy.mockRestore();
     }
@@ -680,12 +688,191 @@ describe('Protected classification operations — model-policy gateway (issue #1
       ...view,
       providerLocalities: { ...view.providerLocalities, ollama: 'cloud' },
     } as any;
-    const mock = (async () =>
-      new Response(JSON.stringify({ image: 'data' }), { status: 200, headers: { 'content-type': 'image/jpeg' } })) as unknown as typeof fetch;
+    let fetchCalls = 0;
+    const mock = (async () => {
+      fetchCalls += 1;
+      return new Response(Buffer.alloc(2048, 1), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+    }) as unknown as typeof fetch;
     globalThis.fetch = mock;
     const { extractPackagingOcrFromCloud } = await import('../../onboarding/cloud-vlm-client');
     const result = await extractPackagingOcrFromCloud({ imageUrl: 'https://cdn.example.com/a.jpg', modelPolicy: tampered });
-    // Fail closed: no OCR result from a tampered policy (no transport to LLM).
+    // Fail closed: no OCR result from a tampered policy and ZERO transport —
+    // the image is never downloaded once policy resolution is denied.
     expect(result).toBeNull();
+    expect(fetchCalls).toBe(0);
+  });
+
+  // ── Pass 1c: policy-governed task defaults fail closed ─────────────────
+
+  test('product_curation without a model policy throws policy_absent (zero transport)', () => {
+    // These task names are policy-governed: omitting `modelPolicy` must
+    // never select the legacy DeepSeek → OpenAI → Ollama chain.
+    expect(() => getLlmConfigForTask('product_curation')).toThrow(ModelPolicyDeniedError);
+    expect(() => getLlmConfigForTask('category_classification')).toThrow(ModelPolicyDeniedError);
+    try {
+      getLlmConfigForTask('product_curation');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('policy_absent');
+    }
+    try {
+      getLlmConfigForTask('category_classification');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('policy_absent');
+    }
+  });
+
+  test('product_curation/category_classification route through the frozen policy when provided', async () => {
+    const view = localOnlyOllamaView();
+    const { calls } = stubFetch();
+    const cfg = getLlmConfigForTask('category_classification', { modelPolicy: view });
+    expect(cfg).not.toBeNull();
+    expect(cfg?.provider).toBe('ollama');
+    expect(cfg?.baseUrl).toContain('localhost');
+    const name = await callLlmForTask('category_classification', 'pick one', undefined, {
+      modelPolicy: view,
+      protectedOperation: 'cohort_page_assignment',
+    });
+    expect(name).toBe('mock response');
+    expect(calls.length).toBe(1);
+  });
+
+  test('llmRankOptions with no modelPolicy never calls the LLM (deterministic abstain)', async () => {
+    const { llmRankOptions } = await import('../../classification/curation-target-ranker');
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const result = await llmRankOptions({
+      targetLabel: 'Flavor',
+      options: [{ value: 'Chicken', label: 'Chicken' }],
+      selectionMode: 'single',
+      evidenceText: 'Product evidence for ranking test product here.',
+    });
+    expect(result).toBeNull();
+    expect(fetchCalls).toBe(0);
+  });
+
+  // ── Pass 1c: image policy at the VLM boundary ──────────────────────────
+
+  test('cloud VLM under imageDataSharing local_only is denied before ANY image fetch', async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(Buffer.alloc(2048, 1), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+    }) as unknown as typeof fetch;
+    const view = buildModelPolicyView(
+      {
+        defaultProvider: 'deepseek',
+        defaultModel: 'deepseek-chat',
+        providerLocalities: { deepseek: 'cloud' },
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'cloud_allowed',
+        mlFeatures: {
+          productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        },
+      } as any,
+      { snapshotHash: 'snap-cv-img-local' },
+    );
+    const { extractPackagingOcrFromCloud } = await import('../../onboarding/cloud-vlm-client');
+    const result = await extractPackagingOcrFromCloud({ imageUrl: 'https://cdn.example.com/a.jpg', modelPolicy: view });
+    expect(result).toBeNull();
+    // No image download, no model call — the image never leaves the machine.
+    expect(fetchCalls).toBe(0);
+  });
+
+  test('cloud VLM under imageDataSharing cloud_allowed reaches the model', async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(Buffer.alloc(2048, 1), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      }
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify({ productName: 'Test Product', species: [] }) } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    const view = buildModelPolicyView(
+      {
+        defaultProvider: 'deepseek',
+        defaultModel: 'deepseek-chat',
+        providerLocalities: { deepseek: 'cloud' },
+        stageOverrides: {},
+        imageDataSharing: 'cloud_allowed',
+        textDataSharing: 'cloud_allowed',
+        mlFeatures: {
+          productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        },
+      } as any,
+      { snapshotHash: 'snap-cv-img-cloud' },
+    );
+    const { extractPackagingOcrFromCloud } = await import('../../onboarding/cloud-vlm-client');
+    const result = await extractPackagingOcrFromCloud({ imageUrl: 'https://cdn.example.com/a.jpg', modelPolicy: view });
+    expect(result).not.toBeNull();
+    expect(result?.productName).toBe('Test Product');
+    // Image download + model call both happened.
+    expect(calls).toBe(2);
+  });
+
+  // ── Pass 1c: redaction of quoted/Basic credentials ─────────────────────
+
+  test('redactTransportText strips quoted JSON and Basic credentials', async () => {
+    const { redactTransportText } = await import('../../classification/model-policy-gateway');
+    const quotedJson = '{"error":{"api_key":"supersecret","token":"tok_abcdef123456"}}';
+    expect(redactTransportText(quotedJson)).not.toContain('supersecret');
+    expect(redactTransportText(quotedJson)).not.toContain('tok_abcdef123456');
+    expect(redactTransportText(quotedJson)).toContain('api_key=[REDACTED]');
+
+    const basicAuth = 'Authorization: Basic dXNlcjpwYXNz';
+    expect(redactTransportText(basicAuth)).not.toContain('dXNlcjpwYXNz');
+    expect(redactTransportText(basicAuth)).toContain('[REDACTED]');
+
+    const quotedBasic = '{"authorization":"Basic dXNlcjpwYXNz"}';
+    expect(redactTransportText(quotedBasic)).not.toContain('dXNlcjpwYXNz');
+  });
+
+  test('consolidateProductName logs bounded identifiers only', async () => {
+    const view = localOnlyOllamaView();
+    // Mock transport so the protected LLM path returns immediately.
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: 'mock response' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+    const { consolidateProductName } = await import('../../onboarding/llm-client');
+    const logLines: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logLines.push(args.map(String).join(' '));
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logLines.push(args.map(String).join(' '));
+    });
+    try {
+      // Long raw name with protected tokens; policy denies (local-only + ollama
+      // text policy) so the function falls back to LCS deterministically.
+      const out = await consolidateProductName(
+        '850067859598',
+        [{ title: 'Woof Pupsicle 2.64OZ', snippet: 'pet treat' }],
+        'WOOF PUPSICLE 2.64OZ EXTRA LONG RAW NAME 850067859598',
+        'WOOF',
+        view,
+      );
+      expect(out).not.toBeNull();
+      const joined = logLines.join('\n');
+      // Full UPC, full raw name, and raw protected tokens never appear.
+      expect(joined).not.toContain('850067859598');
+      expect(joined).not.toContain('PUPSICLE 2.64OZ EXTRA LONG RAW NAME');
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
   });
 });

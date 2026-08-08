@@ -194,6 +194,53 @@ describe('resolveModelRoute — locality and endpoint enforcement', () => {
     expect(route.model).toBe('llama3');
     expect(route.fromOverride).toBe(true);
   });
+
+  it('denies a cloud provider for an image-bearing call under image local_only (pass 1c)', () => {
+    const view = buildModelPolicyView(
+      {
+        defaultProvider: 'deepseek',
+        defaultModel: 'deepseek-chat',
+        providerLocalities: { deepseek: 'cloud' },
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'cloud_allowed',
+      } as any,
+      { snapshotHash: 's8' },
+    );
+    // Without requiresImage the text policy is cloud_allowed so the route
+    // resolves; with requiresImage the image policy denies before transport.
+    const textOnly = resolveModelRoute(
+      view,
+      'evidence_extraction',
+      deps({ deepseek: { apiKey: 'sk', baseUrl: 'https://api.deepseek.com' } }),
+    );
+    expect(textOnly.provider).toBe('deepseek');
+    try {
+      resolveModelRoute(
+        view,
+        'evidence_extraction',
+        deps({ deepseek: { apiKey: 'sk', baseUrl: 'https://api.deepseek.com' } }),
+        true,
+      );
+      expect.unreachable('should have thrown for image-bearing call');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('image_local_only_non_local_provider');
+    }
+  });
+
+  it('allows a declared-local provider for an image-bearing call under image local_only (pass 1c)', () => {
+    const view = buildModelPolicyView(
+      {
+        ...OLLAMA_LOCAL_POLICY,
+        imageDataSharing: 'local_only',
+        textDataSharing: 'cloud_allowed',
+      },
+      { snapshotHash: 's9' },
+    );
+    const route = resolveModelRoute(view, 'evidence_extraction', LOCAL_KEYS, true);
+    expect(route.provider).toBe('ollama');
+    expect(route.locality).toBe('local');
+  });
 });
 
 describe('resolveFallbackRoute — explicit fallback only', () => {
@@ -266,6 +313,39 @@ describe('resolveFallbackRoute — explicit fallback only', () => {
     expect(redacted).not.toContain('sk-abcdef1234567890');
     expect(redacted).not.toContain('secret-value');
     expect(redacted.length).toBeLessThanOrEqual(201);
+  });
+
+  it('redactTransportText strips quoted JSON and Basic-auth credentials (pass 1c)', () => {
+    const quotedJson = '{"error":{"api_key":"supersecret","token":"tok_abcdef123456","access_token":"abc","refresh_token":"xyz"}}';
+    const redacted = redactTransportText(quotedJson);
+    expect(redacted).not.toContain('supersecret');
+    expect(redacted).not.toContain('tok_abcdef123456');
+    expect(redacted).not.toContain('abc');
+    expect(redacted).not.toContain('xyz');
+    expect(redacted).toContain('api_key=[REDACTED]');
+    expect(redacted).toContain('token=[REDACTED]');
+
+    // JSON.stringify escaped-quote form (\\" inside string values).
+    const escapedJson = '{"error":{"message":"api_key:\\"supersecret\\" token:\\"tok_abcdef123456\\""}}';
+    const escapedRedacted = redactTransportText(escapedJson);
+    expect(escapedRedacted).not.toContain('supersecret');
+    expect(escapedRedacted).not.toContain('tok_abcdef123456');
+
+    const basicHeader = 'Authorization: Basic dXNlcjpwYXNz';
+    const headerRedacted = redactTransportText(basicHeader);
+    expect(headerRedacted).not.toContain('dXNlcjpwYXNz');
+    expect(headerRedacted).toContain('[REDACTED]');
+
+    const quotedBasic = '{"authorization":"Basic dXNlcjpwYXNz"}';
+    expect(redactTransportText(quotedBasic)).not.toContain('dXNlcjpwYXNz');
+
+    const standaloneBasic = 'Credentials: Basic dXNlcjpwYXNz then more';
+    expect(redactTransportText(standaloneBasic)).not.toContain('dXNlcjpwYXNz');
+
+    const unquoted = 'api_key=plainsecret token=plaintoken';
+    const unquotedRedacted = redactTransportText(unquoted);
+    expect(unquotedRedacted).not.toContain('plainsecret');
+    expect(unquotedRedacted).not.toContain('plaintoken');
   });
 
   it('redactImageUrl strips query strings and hashes', () => {

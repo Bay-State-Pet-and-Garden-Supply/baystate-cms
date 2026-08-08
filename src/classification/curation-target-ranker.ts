@@ -11,7 +11,7 @@
  * Uses `category_classification` task routing for all target kinds
  * to avoid widening task-routing scope in this refactor.
  */
-import { getLlmConfigForTask, callLlmForTask, defaultProtectedOperationForTask, type LlmConfig } from '../onboarding/llm-client';
+import { getLlmConfigForTask, callLlmForTask, defaultProtectedOperationForTask } from '../onboarding/llm-client';
 import type { LlmTask } from '../db/repositories/llm-task-config-repo';
 import { ModelPolicyDeniedError, type ModelPolicyView, type ProtectedOperation } from './model-policy-gateway';
 
@@ -61,15 +61,17 @@ export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmR
 
   if (options.length === 0 || evidenceText.trim().length < 8) return null;
 
-  let operation: ProtectedOperation | null = null;
-  let llmConfig: import('../onboarding/llm-client').LlmConfig | null = null;
+  let operation: ProtectedOperation | null;
+  let llmConfig: import('../onboarding/llm-client').LlmConfig | null;
   try {
     operation =
       params.protectedOperation ??
       defaultProtectedOperationForTask(taskName as LlmTask);
 
-    if (!operation && params.modelPolicy !== undefined) {
-      throw new ModelPolicyDeniedError('policy_absent', 'product_type_ranking');
+    // Protected ranking operation with no frozen policy context: deterministic
+    // abstain. The LLM is never called without a policy (issue #17 pass 1c).
+    if (operation && params.modelPolicy === undefined) {
+      return null;
     }
 
     llmConfig = getLlmConfigForTask(taskName as any, {

@@ -100,28 +100,41 @@ export async function extractPackagingOcrFromCloud(
     return null;
   }
 
-  // 1. Get the image as base64
-  const imageData = await fetchImageAsBase64(imageUrl);
-  if (!imageData) {
-    console.warn(`[CloudVlm] Could not load image: ${redactImageUrl(imageUrl)}`);
-    return null;
-  }
-
-  // 2. Resolve LLM config for the vision task (protected: routed through the
-  //    frozen classification model policy — never the generic fallback).
+  // 0. Resolve the vision route through the frozen policy BEFORE any
+  //    transport. `requiresImage` enforces imageDataSharing at the route
+  //    layer (issue #17 pass 1c): under `imageDataSharing: 'local_only'`
+  //    a non-local provider is denied before the image is downloaded, so an
+  //    image never leaves the machine for an unauthorized call. Omitting the
+  //    policy throws policy_absent — also fail closed before any fetch.
   let config: LlmConfig | null;
   try {
     config = getLlmConfigForTask((task ?? 'classification_evidence_extraction') as LlmTask, {
-      allowFallback: true,
+      allowFallback: false,
       modelPolicy: params.modelPolicy,
       protectedOperation: 'evidence_extraction',
+      requiresImage: true,
     });
-  } catch {
-    config = null;
+  } catch (err: any) {
+    if (err?.code === 'policy_absent') {
+      console.warn('[CloudVlm] No model policy context for cloud VLM; no image fetched.');
+    } else {
+      console.warn(
+        `[CloudVlm] Model policy denied cloud VLM (${err?.code ?? 'error'}); no image fetched.`,
+      );
+    }
+    return null;
   }
 
   if (!config) {
-    console.warn('[CloudVlm] No LLM config available for cloud VLM call.');
+    console.warn('[CloudVlm] No LLM config available for cloud VLM call; no image fetched.');
+    return null;
+  }
+
+  // 1. Get the image as base64 (image transport was already authorized by
+  //    the policy route resolution above).
+  const imageData = await fetchImageAsBase64(imageUrl);
+  if (!imageData) {
+    console.warn(`[CloudVlm] Could not load image: ${redactImageUrl(imageUrl)}`);
     return null;
   }
 
@@ -160,6 +173,7 @@ export async function extractPackagingOcrFromCloud(
         allowFallback: false,
         modelPolicy: params.modelPolicy,
         protectedOperation: 'evidence_extraction',
+        requiresImage: true,
       });
       if (
         !fresh ||
@@ -233,7 +247,7 @@ export async function extractPackagingOcrFromCloud(
 
     return result;
   } catch (err: any) {
-    console.warn(`[CloudVlm] Cloud VLM call failed: ${err.message}`);
+    console.warn(`[CloudVlm] Cloud VLM call failed: ${redactTransportText(err.message)}`);
     return null;
   }
 }

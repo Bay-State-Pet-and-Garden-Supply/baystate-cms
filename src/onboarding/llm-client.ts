@@ -247,6 +247,13 @@ export interface GetLlmConfigForTaskOptions {
   modelPolicy?: ModelPolicyView | null;
   /** Protected operation for policy routing; defaults from the task name. */
   protectedOperation?: ProtectedOperation;
+  /**
+   * Whether the call is image-bearing (vision). When true, the image
+   * data-sharing policy is enforced during route resolution (issue #17
+   * pass 1c): an image never leaves the machine under
+   * `imageDataSharing: 'local_only'` unless the provider is declared local.
+   */
+  requiresImage?: boolean;
 }
 
 /**
@@ -267,6 +274,14 @@ export function defaultProtectedOperationForTask(task: LlmTask): ProtectedOperat
       return 'brand_inference';
     case 'product_name_consolidation':
       return 'discovery_name_consolidation';
+    // Policy-governed task names: both are governed by the workspace
+    // classification model policy. Mapping them here means omitting
+    // `modelPolicy` fails closed (policy_absent) instead of falling through
+    // to the legacy DeepSeek → OpenAI → Ollama chain (issue #17 pass 1c).
+    case 'product_curation':
+      return 'title_consolidation';
+    case 'category_classification':
+      return 'cohort_page_assignment';
     default:
       return null;
   }
@@ -295,6 +310,7 @@ function resolveProtectedConfig(
   task: LlmTask,
   operation: ProtectedOperation,
   view: ModelPolicyView,
+  requiresImage = false,
 ): LlmConfig {
   const route = resolveModelRoute(view, operation, {
     getCredential: (p: string) => {
@@ -302,7 +318,7 @@ function resolveProtectedConfig(
       return c ? { provider: p, apiKey: c.apiKey, baseUrl: c.baseUrl ?? null, model: c.model ?? null } : null;
     },
     defaultBaseUrls: DEFAULT_BASE_URLS as unknown as Readonly<Record<string, string>>,
-  });
+  }, requiresImage);
   return {
     provider: route.provider as LlmProvider,
     apiKey: route.apiKey,
@@ -321,7 +337,7 @@ function resolveProtectedConfig(
 function reassertProtectedRouteBeforeTransport(
   task: LlmTask,
   config: LlmConfig,
-  options: { modelPolicy?: ModelPolicyView | null; protectedOperation?: ProtectedOperation },
+  options: { modelPolicy?: ModelPolicyView | null; protectedOperation?: ProtectedOperation; requiresImage?: boolean },
 ): void {
   const view = options.modelPolicy;
   if (!view) return;
@@ -330,7 +346,7 @@ function reassertProtectedRouteBeforeTransport(
   // Digest + deep-frozen view tamper check.
   assertModelPolicyIntact(view);
   // Re-resolve the route and compare against the config about to be used.
-  const fresh = resolveProtectedConfig(task, operation, view);
+  const fresh = resolveProtectedConfig(task, operation, view, options.requiresImage === true);
   if (
     fresh.provider !== config.provider ||
     fresh.model !== config.model ||
@@ -365,7 +381,7 @@ export function getLlmConfigForTask(
       return null;
     }
     if (options.modelPolicy) {
-      return resolveProtectedConfig(task, operation, options.modelPolicy);
+      return resolveProtectedConfig(task, operation, options.modelPolicy, options.requiresImage === true);
     }
     throw new ModelPolicyDeniedError('policy_absent', operation);
   }
@@ -398,6 +414,8 @@ export interface CallLlmForTaskOptions {
   allowFallback?: boolean;
   /** Optional temperature override (uses the task config's temperature when set). */
   temperature?: number;
+  /** Whether the call is image-bearing (vision); enforces image data-sharing policy. */
+  requiresImage?: boolean;
   /** Frozen classification model-policy view (see GetLlmConfigForTaskOptions). */
   modelPolicy?: ModelPolicyView | null;
   /** Protected operation for policy routing; defaults from the task name. */
@@ -422,6 +440,7 @@ export async function callLlmForTask(
       allowFallback: options.allowFallback,
       modelPolicy: options.modelPolicy,
       protectedOperation: options.protectedOperation,
+      requiresImage: options.requiresImage,
     });
   } catch (err) {
     if (err instanceof MissingLlmTaskConfigError) {
@@ -456,6 +475,7 @@ export async function callLlmForTask(
       reassertProtectedRouteBeforeTransport(task, config, {
         modelPolicy: options.modelPolicy,
         protectedOperation: options.protectedOperation,
+        requiresImage: options.requiresImage,
       });
     }
     const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
@@ -683,7 +703,7 @@ export function verifyAndRestoreProtectedTokens(expectedName: string, rawName: s
 
   if (missing.length > 0) {
     const restored = `${expectedName.trim()} ${missing.join(' ')}`;
-    console.log(`[LLMClient] Restored missing protected tokens: "${missing.join(', ')}" → "${restored}"`);
+    console.log(`[LLMClient] Restored missing protected tokens: "${missing.map(redactIdentifier).join(', ')}" → "${redactIdentifier(restored)}"`);
     return restored;
   }
 
@@ -714,7 +734,7 @@ export async function consolidateProductName(
   // so we can verify they survive. Log only a bounded non-sensitive form.
   const protectedTokens = originalName ? extractProtectedTokens(originalName) : [];
   if (protectedTokens.length > 0) {
-    console.log(`[LLMClient] Protected tokens from raw name "${redactIdentifier(originalName ?? '')}": [${protectedTokens.join(', ')}]`);
+    console.log(`[LLMClient] Protected tokens from raw name "${redactIdentifier(originalName ?? '')}": [${protectedTokens.map(redactIdentifier).join(', ')}]`);
   }
 
   try {
@@ -807,7 +827,10 @@ Register-Aligned Expected Name:`;
       return restored;
     }
   } catch (err) {
-    console.error('[LLMClient] LLM name consolidation failed, falling back to LCS:', err);
+    console.error(
+      '[LLMClient] LLM name consolidation failed, falling back to LCS:',
+      redactTransportText(err instanceof Error ? err.message : String(err)),
+    );
   }
 
   // Fallback to LCS with token guard

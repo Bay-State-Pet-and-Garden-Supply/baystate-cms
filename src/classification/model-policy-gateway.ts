@@ -77,6 +77,7 @@ export type PolicyDenialCode =
   | 'policy_disabled'
   | 'locality_undeclared'
   | 'text_local_only_non_local_provider'
+  | 'image_local_only_non_local_provider'
   | 'endpoint_non_loopback'
   | 'route_unknown'
   | 'credential_missing'
@@ -232,16 +233,33 @@ export function assertModelPolicyIntact(view: ModelPolicyView): void {
 
 /**
  * Bound and redact transport text (provider error bodies, URLs, request
- * identifiers) before it reaches logs or thrown errors (issue #17 pass 1b).
- * Strips bearer tokens, sk-* keys, and credential-looking segments; caps
- * length at `maxLength` chars.
+ * identifiers) before it reaches logs or thrown errors (issue #17 pass 1b,
+ * pass 1c). Strips bearer tokens, Basic-auth base64 segments, sk-* keys, and
+ * quoted/unquoted credential key/value forms for the common secret keys;
+ * caps length at `maxLength` chars.
  */
 export function redactTransportText(text: string, maxLength = 200): string {
   let t = String(text ?? '');
+  // Normalize escaped quotes (JSON.stringify emits \" inside string values)
+  // so the credential patterns below can match quoted key/value forms.
+  t = t.replace(/\\"/g, '"').replace(/\\'/g, "'");
   t = t
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/sk-[A-Za-z0-9_-]{8,}/gi, 'sk-[REDACTED]')
-    .replace(/(api[_-]?key|token|secret|authorization)\s*[=:]\s*\S+/gi, '$1=[REDACTED]');
+    // Authorization: Bearer <token>
+    .replace(/\b[Bb]earer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
+    // Authorization: Basic <base64> (tolerates JSON quoting around the value)
+    .replace(
+      /(["']?)(?:authorization|auth)\1?\s*[=:]\s*["']?basic\s+[A-Za-z0-9+/=]{6,}/gi,
+      'authorization=[REDACTED]',
+    )
+    // Standalone Basic <base64> segments
+    .replace(/\bbasic\s+[A-Za-z0-9+/=]{6,}/gi, 'Basic [REDACTED]')
+    // sk-* secret keys
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/gi, 'sk-[REDACTED]')
+    // Common credential keys in quoted or unquoted key=value / key:"value" forms
+    .replace(
+      /(["']?)(api[_-]?key|apikey|token|access_token|refresh_token|password|secret|authorization|bearer|auth|key)\1?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;"']+)/gi,
+      '$2=[REDACTED]',
+    );
   if (t.length > maxLength) {
     t = `${t.slice(0, maxLength)}…`;
   }
@@ -300,11 +318,19 @@ export function isLoopbackBaseUrl(baseUrl: string): boolean {
   return false;
 }
 
-/** Resolve + validate the primary route for a protected operation. */
+/**
+ * Resolve + validate the primary route for a protected operation.
+ *
+ * When `requiresImage` is true (vision/image-bearing calls), the image
+ * data-sharing policy is enforced alongside the text policy: an image may
+ * never leave the machine under `imageDataSharing: 'local_only'` unless the
+ * resolved provider is declared local.
+ */
 export function resolveModelRoute(
   view: ModelPolicyView,
   operation: ProtectedOperation,
   deps: ModelPolicyGatewayDeps,
+  requiresImage = false,
 ): ModelRoute {
   assertModelPolicyIntact(view);
 
@@ -322,6 +348,7 @@ export function resolveModelRoute(
     override?.fallbackProvider ?? null,
     override?.fallbackModel ?? null,
     Boolean(override?.provider ?? override?.model),
+    requiresImage,
   );
   return route;
 }
@@ -335,6 +362,7 @@ function resolveRoute(
   fallbackProvider: string | null,
   fallbackModel: string | null,
   fromOverride: boolean,
+  requiresImage = false,
 ): ModelRoute {
   if (!provider || !model) {
     throw new ModelPolicyDeniedError('route_unknown', operation, provider || undefined);
@@ -345,6 +373,11 @@ function resolveRoute(
   }
   if (view.textDataSharing === 'local_only' && locality !== 'local') {
     throw new ModelPolicyDeniedError('text_local_only_non_local_provider', operation, provider);
+  }
+  // Image-bearing operations additionally enforce imageDataSharing: an image
+  // may never leave the machine unless the provider is declared local.
+  if (requiresImage && view.imageDataSharing === 'local_only' && locality !== 'local') {
+    throw new ModelPolicyDeniedError('image_local_only_non_local_provider', operation, provider);
   }
 
   const credential = deps.getCredential(provider);
@@ -388,6 +421,7 @@ export function resolveFallbackRoute(
   view: ModelPolicyView,
   operation: ProtectedOperation,
   deps: ModelPolicyGatewayDeps,
+  requiresImage = false,
 ): ModelRoute | null {
   assertModelPolicyIntact(view);
   const stageName = PROTECTED_OPERATION_STAGE[operation];
@@ -398,5 +432,5 @@ export function resolveFallbackRoute(
   if (!fallbackModel) {
     throw new ModelPolicyDeniedError('implicit_fallback_forbidden', operation, fallbackProvider);
   }
-  return resolveRoute(fallbackProvider, fallbackModel, view, operation, deps, null, null, true);
+  return resolveRoute(fallbackProvider, fallbackModel, view, operation, deps, null, null, true, requiresImage);
 }

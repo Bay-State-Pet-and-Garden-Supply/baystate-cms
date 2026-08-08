@@ -26,11 +26,22 @@ const baseParams = {
   ],
   selectionMode: 'single' as const,
   evidenceText: 'Official packaging says chicken recipe for adult dogs.',
+  // Protected ranking requires a frozen policy context (issue #17 pass 1c).
+  modelPolicy: {} as unknown as import('../../classification/model-policy-gateway').ModelPolicyView,
 };
 
 describe('curation target ranker response handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('abstains without any LLM call when no modelPolicy is supplied (pass 1c)', async () => {
+    const { targetLabel, options, selectionMode, evidenceText } = baseParams;
+    await expect(
+      llmRankOptions({ targetLabel, options, selectionMode, evidenceText }),
+    ).resolves.toBeNull();
+    expect(mocks.callLlmForTask).not.toHaveBeenCalled();
+    expect(mocks.getLlmConfigForTask).not.toHaveBeenCalled();
   });
 
   it('does not retry a valid empty abstention', async () => {

@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { getVlmConfig } from '../onboarding/vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from '../onboarding/packaging-ocr';
 import { getLlmConfigForTask, callLlmForTask } from '../onboarding/llm-client';
+import { redactTransportText } from './model-policy-gateway';
 import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
 import { getCachedBrands, getCachedDataSharingPolicy } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from './brand-resolution';
@@ -842,7 +843,7 @@ export async function extractProductEvidence(
           llmStatus = addedLlmEvidence ? 'succeeded' : 'failed';
         } catch (err: any) {
           llmStatus = 'failed';
-          console.warn(`[EvidenceExtraction] LLM extraction failed: ${err.message}`);
+          console.warn(`[EvidenceExtraction] LLM extraction failed: ${redactTransportText(err.message)}`);
         }
       } else {
         llmStatus = 'no_text';

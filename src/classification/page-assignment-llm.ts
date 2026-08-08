@@ -10,6 +10,7 @@
 
 import { type ClassificationEvidence, type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
 import { callLlmForTask } from '../onboarding/llm-client';
+import { redactTransportText } from './model-policy-gateway';
 import type { PageSnapshotRecord } from './runtime-snapshot';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -686,7 +687,7 @@ Use the page's ID for the "pageId" field and its exact name for "pageName".`;
 
     return { pages: normalized };
   } catch (err: any) {
-    console.warn(`[PageAssignmentLLM] LLM call failed: ${err.message}`);
+    console.warn(`[PageAssignmentLLM] LLM call failed: ${redactTransportText(err.message)}`);
     return null;
   }
 }
