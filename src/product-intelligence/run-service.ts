@@ -243,16 +243,23 @@ export function persistToolEvidence(
 }
 
 function sourceTypeOfKind(kind: string | null | undefined): string {
+  // Round-9 (review P0): rights authority NEVER derives from generic evidence
+  // kinds. search_lead/gtin_evidence previously minted 'registry' and
+  // official_evidence minted 'manufacturer' — a registry-official domain for
+  // Brand A could become manufacturer authority while researching Brand B, and
+  // authority depended on which tool created the URL row first. Those kinds now
+  // map to the neutral 'other' tier (never satisfies a grant). Manufacturer/
+  // supplier authority comes ONLY from durable pi_source_authorities records
+  // (established by check_source_priority with a brand-matched registry entry).
   switch (kind) {
     case 'official_evidence':
-      return 'manufacturer';
+    case 'search_lead':
+    case 'gtin_evidence':
+      return 'other';
     case 'supplier_evidence':
       return 'supplier';
     case 'retailer_corroboration':
       return 'retailer';
-    case 'gtin_evidence':
-    case 'search_lead':
-      return 'registry';
     case 'catalog_evidence':
       return 'catalog';
     default:

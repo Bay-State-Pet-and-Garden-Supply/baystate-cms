@@ -180,6 +180,9 @@ export const DiscoveredImageCandidateSchema = z.object({
   extractionMethod: ExtractionMethodSchema,
   variantReference: z.string().max(256).nullable().default(null),
   variantName: z.string().max(256).nullable().default(null),
+  /** Round-9: media-set/entity identity of the enclosing product-like object
+   *  (SKU/productId/@id/variation id) this image was discovered under. */
+  entityId: z.string().max(256).nullable().default(null),
   retrievedAt: z.string(),
 });
 export type DiscoveredImageCandidate = z.infer<typeof DiscoveredImageCandidateSchema>;

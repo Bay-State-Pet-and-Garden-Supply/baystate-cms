@@ -39,6 +39,7 @@ function toCandidate(
   sourceArtifactId: string,
   method: DiscoveredImageCandidate['extractionMethod'],
   variant: { reference: string | null; name: string | null } = { reference: null, name: null },
+  entityId: string | null = null,
 ): DiscoveredImageCandidate | null {
   if (typeof rawUrl !== 'string') return null;
   const url = absolutize(rawUrl, pageUrl);
@@ -51,6 +52,7 @@ function toCandidate(
     extractionMethod: method,
     variantReference: variant.reference,
     variantName: variant.name,
+    entityId,
     retrievedAt: isoNow(),
   };
 }
@@ -65,14 +67,24 @@ function walkImages(
   out: DiscoveredImageCandidate[],
   depth = 0,
   imageContext = false,
+  entityContext: string | null = null,
 ): void {
   if (depth > 8 || out.length >= 64) return;
   if (Array.isArray(node)) {
-    for (const item of node) walkImages(item, pageUrl, sourcePath, artifactId, method, out, depth + 1, imageContext);
+    for (const item of node) walkImages(item, pageUrl, sourcePath, artifactId, method, out, depth + 1, imageContext, entityContext);
     return;
   }
   if (typeof node !== 'object' || node === null) return;
   const record = node as Record<string, unknown>;
+
+  // Round-9 (review P1): the enclosing product-like object's own identity
+  // (SKU/productId/@id/variation id) becomes the MEDIA-SET/ENTITY context for
+  // every image discovered inside its subtree. A nested recommendation /
+  // cross-sell object carries its own identity and therefore OVERRIDES the
+  // inherited context — recommendation images are never attributed to the
+  // page's main product entity.
+  const recordEntity = firstId(record);
+  const entity = recordEntity ?? entityContext;
 
   // Url-bearing nodes inside an image context: { url } / ImageObject.
   const urlValue = (record.url ?? record.contentUrl ?? record.src) as unknown;
@@ -80,7 +92,7 @@ function walkImages(
     const candidate = toCandidate(urlValue, pageUrl, `${sourcePath}[url]`, artifactId, method, {
       reference: firstId(record),
       name: firstString(record, ['name', 'title']),
-    });
+    }, entity);
     if (candidate) out.push(candidate);
   }
 
@@ -93,10 +105,10 @@ function walkImages(
         const candidate = toCandidate(entry, pageUrl, `${sourcePath}.${key}`, artifactId, method, {
           reference: firstId(record),
           name: firstString(record, ['name', 'title']),
-        });
+        }, entity);
         if (candidate) out.push(candidate);
       } else if (entry !== null && typeof entry === 'object') {
-        walkImages(entry, pageUrl, `${sourcePath}.${key}`, artifactId, method, out, depth + 1, true);
+        walkImages(entry, pageUrl, `${sourcePath}.${key}`, artifactId, method, out, depth + 1, true, entity);
       }
     }
   }
@@ -105,13 +117,13 @@ function walkImages(
   for (const [key, value] of Object.entries(record)) {
     if (IMAGE_KEYS.has(key.toLowerCase())) continue;
     if (value !== null && typeof value === 'object') {
-      walkImages(value, pageUrl, sourcePath, artifactId, method, out, depth + 1, false);
+      walkImages(value, pageUrl, sourcePath, artifactId, method, out, depth + 1, false, entity);
     }
   }
 }
 
 function firstId(record: Record<string, unknown>): string | null {
-  for (const key of ['sku', 'gtin', 'mpn', 'id', 'variation_id', 'product_id'] as const) {
+  for (const key of ['@id', 'sku', 'gtin', 'mpn', 'id', 'variation_id', 'product_id'] as const) {
     const value = record[key];
     if (typeof value === 'string' && value.length > 0) return value;
     if (typeof value === 'number') return String(value);
@@ -253,7 +265,7 @@ export function parseShopifyVariantImages(html: string, pageUrl: string, retriev
           const candidate = toCandidate(image, pageUrl, 'product.variants[].image.src', artifactId, 'platform_api', {
             reference: variant.id != null ? String(variant.id) : (variant.sku ?? null),
             name: variant.title ?? ([variant.option1, variant.option2, variant.option3].filter(Boolean).join(' ') || null),
-          });
+          }, variant.id != null ? String(variant.id) : (variant.sku ?? null));
           if (candidate) out.push(candidate);
         }
       }
@@ -294,7 +306,7 @@ export function parseShopifyVariantImages(html: string, pageUrl: string, retriev
         const candidate = toCandidate(src, pageUrl, 'Shopify.ProductVariants[].image', artifactId, 'platform_api', {
           reference: variant.id != null ? String(variant.id) : (variant.sku ?? null),
           name: variant.title ?? ([variant.option1, variant.option2, variant.option3].filter(Boolean).join(' ') || null),
-        });
+        }, variant.id != null ? String(variant.id) : (variant.sku ?? null));
         if (candidate) out.push(candidate);
       }
     }
@@ -352,7 +364,7 @@ export function parseWooCommerceVariantImages(html: string, pageUrl: string, ret
         const candidate = toCandidate(src, pageUrl, 'variations[].image', artifactId, 'platform_api', {
           reference: reference != null ? String(reference) : null,
           name: wooVariantName(variation.attributes),
-        });
+        }, reference != null ? String(reference) : null);
         if (candidate) out.push(candidate);
       }
     }

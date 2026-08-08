@@ -149,11 +149,16 @@ export class PiToolRegistry {
       return policyDenied(`Run ${ctx.runId} is ${run.status}; tools are only callable while running`);
     }
 
-    // 2. Request budget.
+    // 2. Request budget — policy.authoritative (round-9 review P1): the
+    //    IMMUTABLE policy maxToolCalls is the authority at the adapter
+    //    boundary, rejected synchronously before the adapter starts; the
+    //    constructor option is only a fallback for contexts without a policy.
     const used = this.callCounts.get(ctx.runId) ?? 0;
-    const maxCalls = this.options.maxToolCallsPerRun ?? 100;
+    const policyMax = ctx.policy?.maxToolCalls;
+    const maxCalls =
+      typeof policyMax === 'number' && policyMax > 0 ? policyMax : (this.options.maxToolCallsPerRun ?? 100);
     if (used >= maxCalls) {
-      return policyDenied(`Tool-call budget exhausted (${maxCalls})`);
+      return policyDenied(`Tool-call budget exhausted (policy maxToolCalls ${maxCalls})`);
     }
     this.callCounts.set(ctx.runId, used + 1);
 

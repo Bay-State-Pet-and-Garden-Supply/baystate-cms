@@ -14,7 +14,9 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { createPiRun, transitionPiRunStatus, getPiRun } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, transitionPiRunStatus, getPiRun, insertPiSource, listPiSources, listSourceAuthoritiesByRun } from '../../db/repositories/product-intelligence-repo';
+import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
+import { upsertReusePolicy, buildReuseGrantResolver } from '../../db/repositories/pi-reuse-policy-repo';
 import { startProductIntelligenceRun, getPiRunProjection } from '../../product-intelligence/run-service';
 import type { ProductResearchBundle } from '../../product-intelligence/workflow/bundle';
 import { PiToolRegistry } from '../../product-intelligence/tools/registry';
@@ -62,11 +64,11 @@ describe('PiToolRegistry enforcement', () => {
     });
   }
 
-  const toolCtx = (runId: string, overrides: Partial<{ signal: AbortSignal; remainingMs: number }> = {}) => ({
+  const toolCtx = (runId: string, overrides: Partial<{ signal: AbortSignal; remainingMs: number; policy: ReturnType<typeof testPolicy> }> = {}) => ({
     runId,
     workspaceId: wsId,
     workspacePath: '/tmp/pi-tools-workspace',
-    policy: testPolicy(),
+    policy: overrides.policy ?? testPolicy(),
     signal: overrides.signal ?? new AbortController().signal,
     remainingMs: overrides.remainingMs ?? 60_000,
   });
@@ -140,16 +142,35 @@ describe('PiToolRegistry enforcement', () => {
     expect(result.status).toBe('policy_denied');
   });
 
-  it('enforces the per-run tool-call budget', async () => {
-    const registry = new PiToolRegistry({ maxToolCallsPerRun: 2 }).registerAll([...defaultToolRegistry.names().map((n) => defaultToolRegistry.get(n)!)]);
+  it('enforces the per-run tool-call budget from the IMMUTABLE POLICY (round-9 P1)', async () => {
+    // Round-9 (review P1): policy.maxToolCalls is the authority at the adapter
+    // boundary — the constructor option is only a no-policy fallback. Call
+    // N+1 is rejected SYNCHRONOUSLY before the adapter starts.
+    const registry = new PiToolRegistry().registerAll([...defaultToolRegistry.names().map((n) => defaultToolRegistry.get(n)!)]);
     const run = runningRun();
-    const first = await registry.dispatch(registry.get('validate_gtin')!, { gtin: '036000291452' }, toolCtx(run.id));
+    const policy = { ...testPolicy(), maxToolCalls: 2 };
+    const ctx = toolCtx(run.id, { policy });
+    let invoked = 0;
+    const counting = {
+      name: 'count_me',
+      version: '1.0.0',
+      description: 'counts invocations',
+      parameters: { type: 'object', properties: {} } as never,
+      execute: async () => {
+        invoked += 1;
+        return { status: 'ok', data: {}, evidence: [] } as never;
+      },
+    };
+    registry.register(counting);
+    const first = await registry.dispatch(counting, {}, ctx);
     expect(first.status).toBe('ok');
-    const second = await registry.dispatch(registry.get('check_exact_gtin_match')!, { requestedGtin: 'x', extractedGtins: [] }, toolCtx(run.id));
+    const second = await registry.dispatch(counting, {}, ctx);
     expect(second.status).toBe('ok');
-    const third = await registry.dispatch(registry.get('validate_gtin')!, { gtin: '036000291452' }, toolCtx(run.id));
+    const third = await registry.dispatch(counting, {}, ctx);
     expect(third.status).toBe('policy_denied');
-    expect((third as { status: string; reason: string }).reason).toContain('budget');
+    expect((third as { status: string; reason: string }).reason).toContain('policy maxToolCalls 2');
+    // The adapter never started for call N+1.
+    expect(invoked).toBe(2);
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
@@ -184,6 +205,34 @@ describe('PiToolRegistry enforcement', () => {
     const result = await registry.dispatch(hangAdapter, {}, toolCtx(run.id));
     expect(result.status).toBe('error');
     expect((result as { status: string; code: string }).code).toBe('timeout');
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('uses the EFFECTIVE remaining run time for the per-call deadline (round-9 P1)', async () => {
+    // Round-9 (review P1): the per-call timeout is bounded by the run's
+    // effective remaining time (workspace cap vs policy deadline) threaded
+    // from the executor — never a fresh policy-duration budget. remainingMs
+    // in the context drives the deadline when no callTimeoutMs option exists.
+    const registry = new PiToolRegistry();
+    const hangAdapter = {
+      name: 'hang_tool_effective',
+      version: '1.0.0',
+      description: 'hangs',
+      parameters: { type: 'object', properties: {} } as never,
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        return { status: 'ok', data: {}, evidence: [] } as never;
+      },
+    };
+    registry.register(hangAdapter);
+    const run = runningRun();
+    const started = Date.now();
+    const result = await registry.dispatch(hangAdapter, {}, toolCtx(run.id, { remainingMs: 50 }));
+    const elapsed = Date.now() - started;
+    expect(result.status).toBe('error');
+    expect((result as { status: string; code: string }).code).toBe('timeout');
+    // The timeout fired at ~50ms of effective remaining time, not the 60s default.
+    expect(elapsed).toBeLessThan(2_000);
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
@@ -377,3 +426,114 @@ describe('Fixture agent run using only research tools', () => {
 });
 
 export { taxonomyTools };
+
+describe('Round-9 source authority (brand-matched, first-class records)', () => {
+  const testDbPath = path.resolve(import.meta.dirname, 'pi-tools-authority.db');
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+    insertWorkspace({
+      id: wsId,
+      name: 'PI Authority Test',
+      workspacePath: '/tmp/pi-authority-workspace',
+      gitPath: '/tmp/pi-authority-workspace/.git',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
+
+  const makeRun = (brandHint?: string) =>
+    createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify(brandHint ? { gtin: '085000079585', registerName: 'X', brandHint } : { gtin: '085000079585', registerName: 'X' }),
+      policyJson: '{}',
+      configSnapshotId: 'c',
+      configSnapshotHash: 'c',
+    }).id;
+
+  const checkPriority = async (runId: string, url: string) =>
+    defaultToolRegistry.dispatch(defaultToolRegistry.get('check_source_priority')!, { url }, {
+      runId,
+      workspaceId: wsId,
+      workspacePath: '/tmp/pi-tools-workspace',
+      policy: testPolicy(),
+      signal: new AbortController().signal,
+      remainingMs: 60_000,
+    });
+
+  it('Brand A official domain does not establish manufacturer authority while researching Brand B', async () => {
+    upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandB');
+    const out = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(out.status).toBe('ok');
+    const data = (out as { data?: { tier: string; isOfficial: boolean; authorityEstablished?: boolean } }).data!;
+    expect(data.tier).toBe('official'); // the domain IS registry-official (display)
+    expect(data.isOfficial).toBe(true);
+    expect(data.authorityEstablished).toBe(false); // but NOT authority for a different brand
+    // No durable authority record exists for the run.
+    expect(listSourceAuthoritiesByRun(runId).length).toBe(0);
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it('registry brand matching the expected product brand establishes manufacturer authority', async () => {
+    const brandSiteId = upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandA');
+    const out = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(out.status).toBe('ok');
+    const data = (out as { data?: { authorityEstablished?: boolean; authorityType?: string } }).data!;
+    expect(data.authorityEstablished).toBe(true);
+    expect(data.authorityType).toBe('manufacturer');
+    const authorities = listSourceAuthoritiesByRun(runId);
+    expect(authorities.length).toBe(1);
+    expect(authorities[0].authorityType).toBe('manufacturer');
+    expect(authorities[0].brandName).toBe('branda'); // normalized by the registry repo
+    expect(authorities[0].authorityRef).toBe(`brand_site:${brandSiteId.id}`);
+    expect(authorities[0].establishedBy).toBe('check_source_priority');
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it('first-writer regression: an existing neutral source row is UPGRADED to the authority tier', async () => {
+    const brandSiteId = upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandA');
+    // A search tool created the source row FIRST with the neutral tier.
+    const source = insertPiSource({
+      runId,
+      url: 'https://branda.example.com/p/1',
+      domain: 'branda.example.com',
+      sourceType: 'other',
+    });
+    // The reuse grant exists for the manufacturer tier.
+    upsertReusePolicy({ workspaceId: wsId, sourceTier: 'manufacturer', domainPattern: 'branda.example.com', allowed: true, terms: 'authorized' });
+    // Brand-matched authority comes later and must WIN (no first-writer bug).
+    const out = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(out.status).toBe('ok');
+    const upgraded = listPiSources(runId).find((row) => row.id === source.id);
+    expect(upgraded?.sourceType).toBe('manufacturer');
+    const authorities = listSourceAuthoritiesByRun(runId);
+    expect(authorities.length).toBe(1);
+    expect(authorities[0].authorityRef).toBe(`brand_site:${brandSiteId.id}`);
+    // The reuse grant now resolves for the effective manufacturer tier.
+    const grant = buildReuseGrantResolver(wsId)('manufacturer', 'branda.example.com');
+    expect(grant?.grantId).toBeTruthy();
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it("a 'registry' reuse grant cannot authorize a neutral (non-authority) asset tier", () => {
+    upsertReusePolicy({ workspaceId: wsId, sourceTier: 'registry', domainPattern: 'anything.example.com', allowed: true, terms: 'x' });
+    // post-neutralization evidence-kind sources are 'other'; a 'registry' grant
+    // is never consulted for them.
+    const grantForNeutral = buildReuseGrantResolver(wsId)('other', 'anything.example.com');
+    expect(grantForNeutral).toBeNull();
+  });
+});

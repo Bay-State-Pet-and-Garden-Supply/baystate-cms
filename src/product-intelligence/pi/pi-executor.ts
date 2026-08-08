@@ -284,7 +284,22 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
     try {
       // --- Session creation -------------------------------------------------
       try {
-        handle = await this.sessionFactory.createSession(parsedInput.data, parsedContext.data, onSubmission);
+        handle = await this.sessionFactory.createSession(
+          parsedInput.data,
+          parsedContext.data,
+          onSubmission,
+          // Round-9 (review P1): the run's runtime-only execution bounds — the
+          // real AbortSignal (workspace cap + policy deadline composed) and the
+          // EFFECTIVE remaining run time — must reach the research-tool adapters.
+          // The parsed context strips signal by design; passing them here means
+          // an in-flight gateway/browser/OCR adapter is authoritatively
+          // cancelled by the run's signal, and registry timeouts use the
+          // workspace-capped remaining budget, not a fresh policy-duration one.
+          {
+            signal,
+            remainingMs: Math.max(0, effectiveDeadlineMs - (Date.now() - startedAt)),
+          },
+        );
       } catch (error) {
         const code = error instanceof PiSessionError ? error.code : 'session_error';
         state.sessionError = error instanceof Error ? error.message : String(error);

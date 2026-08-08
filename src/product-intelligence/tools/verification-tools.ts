@@ -169,27 +169,104 @@ const KNOWN_RETAILER_DOMAINS = ['chewy.com', 'amazon.com', 'walmart.com', 'targe
  *  sourceKind or officialDomains. The lookup is lazy (createRequire) so this
  *  module stays importable without bun:sqlite (vitest); with no DB the result
  *  fails closed to 'unknown' (the trusted registry is the standing wiring
- *  dependency for manufacturer-tier authority). */
-function trustedOfficialDomain(domain: string): { official: boolean; reason: string } {
+ *  dependency for manufacturer-tier authority). Round-9: the registry match
+ *  carries the brand name + row id so authority can require a brand match.
+ */
+function trustedOfficialDomain(domain: string): { official: boolean; brandName?: string; brandSiteId?: string; reason: string } {
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
     if (!conn.isDbInitialized?.()) {
       return { official: false, reason: 'trusted registry unavailable (no database)' };
     }
     const repo = lazyRequire('../../db/repositories/brand-site-repo') as {
-      listAllBrandSites: () => Array<{ domain: string }>;
+      listAllBrandSites: () => Array<{ domain: string; brandName?: string; id?: string }>;
     };
     const sites = repo.listAllBrandSites();
-    const official = sites.some((site) => {
+    const matched = sites.find((site) => {
       const siteDomain = String(site.domain ?? '').replace(/^www\./, '').toLowerCase();
       return siteDomain !== '' && (domain === siteDomain || domain.endsWith(`.${siteDomain}`));
     });
+    if (!matched) {
+      return { official: false, reason: 'domain is not in the trusted brand-site registry' };
+    }
     return {
-      official,
-      reason: official ? 'domain is in the CMS-managed brand-site registry' : 'domain is not in the trusted brand-site registry',
+      official: true,
+      brandName: typeof matched.brandName === 'string' && matched.brandName.length > 0 ? matched.brandName : undefined,
+      brandSiteId: typeof matched.id === 'string' && matched.id.length > 0 ? matched.id : undefined,
+      reason: 'domain is in the CMS-managed brand-site registry',
     };
   } catch {
     return { official: false, reason: 'trusted registry unavailable (lookup failed)' };
+  }
+}
+
+/** Round-9 (review P0): the run's expected brand (from the operator's brandHint),
+ *  normalized. Returns null when unknown. Lazy + fail-closed so this module
+ *  stays vitest-importable. */
+function loadExpectedBrand(runId: string): string | null {
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) return null;
+    const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
+      getPiRun: (runId: string) => { inputJson?: string } | undefined;
+    };
+    const run = repo.getPiRun(runId);
+    if (!run?.inputJson) return null;
+    const input = JSON.parse(run.inputJson) as { brandHint?: unknown };
+    if (typeof input.brandHint !== 'string' || !input.brandHint.trim()) return null;
+    return input.brandHint.trim().toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** Round-9 (review P0): establish a durable manufacturer authority for a source
+ *  row when the registry brand matches the expected product brand. Lazy + fail
+ *  closed (no DB / no source row → no record). The source row's tier is upgraded
+ *  so existing resolvers observe the authority — the first-writer bug is closed.
+ */
+function establishManufacturerAuthority(runId: string, url: string, brandName: string, brandSiteId?: string): void {
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) return;
+    const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
+      listPiSources: (runId: string) => Array<{ id: string; url: string }>;
+      insertPiSource: (input: { runId: string; url: string; domain: string; sourceType: string }) => { id: string };
+      upsertSourceAuthority: (input: {
+        sourceId: string;
+        authorityType: string;
+        authorityRef?: string | null;
+        brandName?: string | null;
+        establishedBy: string;
+      }) => unknown;
+    };
+    // The authority-establishing call is itself a source-establishing path:
+    // when no source row exists for the URL yet, create a NEUTRAL one first
+    // (never a minted tier) so the authority record has a durable anchor.
+    let source = repo.listPiSources(runId).find((candidate) => candidate.url === url);
+    if (!source) {
+      try {
+        const created = repo.insertPiSource({
+          runId,
+          url,
+          domain: new URL(url).hostname.replace(/^www\./, '').toLowerCase(),
+          sourceType: 'other',
+        });
+        source = { id: created.id, url };
+      } catch {
+        return; // fail closed: no durable anchor, no authority
+      }
+    }
+    repo.upsertSourceAuthority({
+      sourceId: source.id,
+      authorityType: 'manufacturer',
+      authorityRef: brandSiteId ? `brand_site:${brandSiteId}` : null,
+      brandName,
+      establishedBy: 'check_source_priority',
+    });
+  } catch {
+    // Fail closed: authority establishment is best-effort; absence of a record
+    // leaves the source neutral (never a minted tier).
   }
 }
 
@@ -203,7 +280,7 @@ export const checkSourcePriority: PiToolAdapter = {
     officialDomains: Type.Optional(Type.Array(boundedString(256, 'Official domain'), { maxItems: 10 })),
     sourceKind: Type.Optional(Type.Union([Type.Literal('catalog'), Type.Literal('supplier'), Type.Literal('registry'), Type.Literal('retailer'), Type.Literal('manufacturer'), Type.Literal('other')])),
   }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
     let domain: string;
     try {
@@ -217,11 +294,30 @@ export const checkSourcePriority: PiToolAdapter = {
     const isRetailer = KNOWN_RETAILER_DOMAINS.includes(domain);
     const registry = trustedOfficialDomain(domain);
 
+    // Round-9 (review P0): registry-official is DISPLAY-only. Manufacturer
+    // AUTHORITY requires the registry brand to match the run's expected product
+    // brand — an official domain for Brand A researching Brand B never becomes
+    // manufacturer authority. With no expected brand, no authority is
+    // established (fail closed to a neutral source).
+    const expectedBrand = loadExpectedBrand(ctx.runId);
+    const brandMatch =
+      registry.official &&
+      typeof registry.brandName === 'string' &&
+      expectedBrand !== null &&
+      registry.brandName.trim().toLowerCase() === expectedBrand;
+
     let tier: string;
     let reason: string;
     if (registry.official) {
       tier = 'official';
-      reason = registry.reason;
+      if (brandMatch) {
+        reason = `registry brand '${registry.brandName}' matches the expected product brand`;
+        establishManufacturerAuthority(ctx.runId, url, registry.brandName as string, registry.brandSiteId);
+      } else if (expectedBrand !== null) {
+        reason = `registry official but brand '${registry.brandName ?? '?'}' does not match expected product brand '${expectedBrand}' (no authority established)`;
+      } else {
+        reason = 'registry official but the expected product brand is unknown (no authority established)';
+      }
     } else if (isRetailer) {
       tier = 'retailer';
       reason = 'known retailer corroboration';
@@ -230,7 +326,20 @@ export const checkSourcePriority: PiToolAdapter = {
       reason = `${registry.reason}; agent-declared kind '${agentKind}' is not authoritative`;
     }
     return okResult(
-      { url, domain, tier, reason, isOfficial: registry.official, isRetailer, agentKind },
+      {
+        url,
+        domain,
+        tier,
+        reason,
+        isOfficial: registry.official,
+        isRetailer,
+        agentKind,
+        // Round-9: authoritative when a durable authority record was established
+        // (brand-matched manufacturer). Never true for agent-asserted claims.
+        authorityEstablished: brandMatch,
+        authorityType: brandMatch ? 'manufacturer' : undefined,
+        authorityBrand: brandMatch ? registry.brandName : undefined,
+      },
       [{ id: evidenceId('check_source_priority', url), kind: tier === 'official' ? 'official_evidence' : 'search_lead', url, domain, method: 'source_priority_rank' }],
     );
   },

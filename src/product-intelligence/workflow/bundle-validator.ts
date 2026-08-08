@@ -74,6 +74,7 @@ interface LazyAssetRow {
 let _assetRepo: {
   getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
   getPiRun: (runId: string) => { inputJson: string } | undefined;
+  listPiImageCandidatesByRun: (runId: string) => LazyImageCandidateRow[];
 } | undefined;
 
 const lazyRequire = createRequire(import.meta.url);
@@ -81,25 +82,65 @@ const lazyRequire = createRequire(import.meta.url);
 function loadAssetRepo(): {
   getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
   getPiRun: (runId: string) => { inputJson: string } | undefined;
+  listPiImageCandidatesByRun: (runId: string) => LazyImageCandidateRow[];
 } {
   if (!_assetRepo) {
     try {
       const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
       if (!conn.isDbInitialized?.()) {
-        _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
+        _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined, listPiImageCandidatesByRun: () => [] };
         return _assetRepo;
       }
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined, listPiImageCandidatesByRun: () => [] };
       return _assetRepo;
     }
     try {
       _assetRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _assetRepo>;
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined, listPiImageCandidatesByRun: () => [] };
     }
   }
   return _assetRepo;
+}
+
+interface LazyImageCandidateRow {
+  id: string;
+  runId: string;
+  imageUrl: string;
+  discoveringSourceId: string | null;
+  sourceArtifactId: string | null;
+  sourcePath: string | null;
+  extractionMethod: string | null;
+  variantReference: string | null;
+  entityId: string | null;
+  createdAt: string;
+}
+
+/**
+ * Round-9 (review P1): resolve the durable media-set/entity identity of an
+ * asset from its candidate record (join by image URL + artifact id). Returns
+ * null when the candidate cannot be resolved — the linkage fails closed.
+ */
+function candidateEntityIdOf(
+  runId: string | null | undefined,
+  asset: { sourceUrl: string; sourceArtifactId?: string | null } | null | undefined,
+): string | null {
+  if (!runId || !asset) return null;
+  try {
+    const candidates = loadAssetRepo().listPiImageCandidatesByRun(runId);
+    const matched =
+      candidates.find(
+        (c) =>
+          c.imageUrl === asset.sourceUrl &&
+          (asset.sourceArtifactId == null || asset.sourceArtifactId === '' || c.sourceArtifactId === asset.sourceArtifactId),
+      ) ??
+      candidates.find((c) => c.imageUrl === asset.sourceUrl);
+    const entityId = matched?.entityId ?? null;
+    return entityId && entityId.length > 0 ? entityId : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseConflicts(conflictsJson: string | null): string[] {
@@ -300,23 +341,29 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
       if (rightsStatus !== 'approved') {
         issues.push(`${role} image ${image.url} verified asset rights are '${rightsStatus ?? 'unknown'}', not approved (durable reuse grant required)`);
       }
-      // Resolve the primary asset (when one is proposed) for page-linkage.
+      // Resolve the primary asset (when one is proposed) for entity linkage.
       let primaryAsset: LazyAssetRow | null = null;
       const primaryCandidate = primaries[0];
       if (primaryCandidate?.verifiedAssetId) {
         const primaryRows = assetRepo.getPiAssetsByIds([primaryCandidate.verifiedAssetId]);
         if (primaryRows.length > 0) primaryAsset = primaryRows[0];
       }
-      const samePageLinkage =
+      // Round-9 (review P1): 'same discovering page' is PROVENANCE, not
+      // product identity. A supporting image is durably linked to the same
+      // product only when (a) it matches the product/variant exactly, or
+      // (b) its candidate record shares the SAME media-set/entity identity
+      // (SKU/productId/@id/variation id) as the primary's candidate record.
+      // Identical sourcePageUrl alone never suffices; an unresolvable
+      // candidate join fails closed.
+      const entityLinkage =
         !!primaryAsset &&
-        !!primaryAsset.sourcePageUrl &&
-        !!verified.sourcePageUrl &&
-        primaryAsset.sourcePageUrl === verified.sourcePageUrl;
+        candidateEntityIdOf(runId, primaryAsset) !== null &&
+        candidateEntityIdOf(runId, primaryAsset) === candidateEntityIdOf(runId, verified);
       const sameProductLinkage =
-        !!verified.exactProductMatch || verified.exactVariantMatch === 1 || samePageLinkage;
+        !!verified.exactProductMatch || verified.exactVariantMatch === 1 || entityLinkage;
       if (!sameProductLinkage) {
         issues.push(
-          `${role} image ${image.url} verified asset is not durably linked to this product (no exact product/variant match and no shared discovering page with the primary image; usable quality alone is not same-product evidence)`,
+          `${role} image ${image.url} verified asset is not durably linked to this product (no exact product/variant match and no shared media-set/entity identity with the primary image; same discovering page alone is not same-product evidence)`,
         );
       }
       if (verified.qualityStatus === 'invalid') {

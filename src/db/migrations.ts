@@ -2060,6 +2060,82 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Round-9 (review P1): media-set/entity identity on image candidates —
+  // supporting images must be durably linked to the SAME product entity
+  // (SKU/productId/@id/variation id), never merely the same discovering page.
+  try {
+    const entityVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('pi_image_candidates_entity_schema_version') as { value: string } | undefined;
+    if (!entityVersion) {
+      console.log('[Migrations] Running pi image candidates entity-id migration...');
+      db.exec('ALTER TABLE pi_image_candidates ADD COLUMN entity_id TEXT NULL;');
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_image_candidates_entity_schema_version', '1');");
+      console.log('[Migrations] Pi image candidates entity-id migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Pi image candidates entity-id migration failed:', e);
+    throw e;
+  }
+
+  // Round-9 (review P0): first-class durable source authority. Rights tiers
+  // never derive from evidence kinds; check_source_priority (or future
+  // trusted CMS records) establish authority here with a brand-matched
+  // manufacturer/supplier relationship.
+  try {
+    const authorityVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('pi_source_authorities_schema_version') as { value: string } | undefined;
+    if (!authorityVersion) {
+      console.log('[Migrations] Running pi source authorities schema migration...');
+      db.exec(`CREATE TABLE IF NOT EXISTS pi_source_authorities (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL REFERENCES product_intelligence_sources(id) ON DELETE CASCADE,
+        authority_type TEXT NOT NULL,
+        authority_ref TEXT,
+        brand_name TEXT,
+        established_by TEXT NOT NULL,
+        established_at TEXT NOT NULL,
+        UNIQUE(source_id, authority_type)
+      );`);
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_source_authorities_schema_version', '1');");
+      console.log('[Migrations] Pi source authorities schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Pi source authorities schema migration failed:', e);
+    throw e;
+  }
+
+  // Round-9 (review P1-1/P1-5): artifact-driven image discovery. The server
+  // retains bounded page artifacts (content + hash); discover_image_candidates
+  // loads them by artifactId — the agent never supplies artifact bytes — and
+  // each candidate row records the attestation (artifact id + attested hash)
+  // that made the candidate->page relationship trustworthy.
+  try {
+    const artifactVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('pi_artifact_driven_discovery_schema_version') as { value: string } | undefined;
+    if (!artifactVersion) {
+      console.log('[Migrations] Running pi artifact-driven discovery schema migration...');
+      db.exec(`CREATE TABLE IF NOT EXISTS pi_page_artifacts (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id) ON DELETE CASCADE,
+        url TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        content TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );`);
+      db.exec('ALTER TABLE pi_image_candidates ADD COLUMN attestation_artifact_id TEXT NULL;');
+      db.exec('ALTER TABLE pi_image_candidates ADD COLUMN attested_content_hash TEXT NULL;');
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_artifact_driven_discovery_schema_version', '1');");
+      console.log('[Migrations] Pi artifact-driven discovery schema migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Pi artifact-driven discovery schema migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

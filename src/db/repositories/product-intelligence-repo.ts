@@ -915,6 +915,9 @@ export interface PiImageCandidateRow {
   sourcePath: string | null;
   extractionMethod: string | null;
   variantReference: string | null;
+  attestationArtifactId: string | null;
+  attestedContentHash: string | null;
+  entityId: string | null;
   createdAt: string;
 }
 
@@ -925,6 +928,9 @@ const IMAGE_CANDIDATE_SELECT = `
          source_path AS sourcePath,
          extraction_method AS extractionMethod,
          variant_reference AS variantReference,
+         entity_id AS entityId,
+         attestation_artifact_id AS attestationArtifactId,
+         attested_content_hash AS attestedContentHash,
          created_at AS createdAt
   FROM pi_image_candidates
 `;
@@ -937,14 +943,18 @@ export function insertPiImageCandidate(input: {
   sourcePath?: string | null;
   extractionMethod?: string | null;
   variantReference?: string | null;
+  entityId?: string | null;
+  attestationArtifactId?: string | null;
+  attestedContentHash?: string | null;
 }): PiImageCandidateRow {
   const db = getDb();
   const id = randomUUID();
   db.run(
     `INSERT INTO pi_image_candidates
      (id, run_id, image_url, discovering_source_id, source_artifact_id,
-      source_path, extraction_method, variant_reference, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      source_path, extraction_method, variant_reference, entity_id,
+      attestation_artifact_id, attested_content_hash, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runId,
@@ -954,6 +964,9 @@ export function insertPiImageCandidate(input: {
       input.sourcePath ?? null,
       input.extractionMethod ?? null,
       input.variantReference ?? null,
+      input.entityId ?? null,
+      input.attestationArtifactId ?? null,
+      input.attestedContentHash ?? null,
       now(),
     ],
   );
@@ -968,6 +981,63 @@ export function getPiImageCandidate(id: string): PiImageCandidateRow | undefined
 export function listPiImageCandidatesByRun(runId: string): PiImageCandidateRow[] {
   const db = getDb();
   return db.query(`${IMAGE_CANDIDATE_SELECT} WHERE run_id = ? ORDER BY created_at`).all(runId) as PiImageCandidateRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Round-9 (P1-1/P1-5): retained page artifacts for artifact-driven image
+// discovery. The server stores bounded page bytes + hash; the agent never
+// supplies artifact bytes — discovery loads these records by id.
+// ---------------------------------------------------------------------------
+
+export interface PiPageArtifactRow {
+  id: string;
+  runId: string;
+  url: string;
+  contentHash: string;
+  content: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+const PAGE_ARTIFACT_SELECT = `
+  SELECT id, run_id AS runId, url, content_hash AS contentHash,
+         content, size_bytes AS sizeBytes, created_at AS createdAt
+  FROM pi_page_artifacts
+`;
+
+/** Cap for retained page content (bytes). Larger pages are not retained —
+ *  artifact-driven discovery is simply unavailable for them (no artifact id). */
+export const MAX_PI_PAGE_ARTIFACT_BYTES = 2 * 1024 * 1024;
+
+export function insertPiPageArtifact(input: {
+  runId: string;
+  url: string;
+  contentHash: string;
+  content: string;
+}): PiPageArtifactRow {
+  const sizeBytes = Buffer.byteLength(input.content, 'utf8');
+  if (sizeBytes > MAX_PI_PAGE_ARTIFACT_BYTES) {
+    throw new Error(`page artifact exceeds ${MAX_PI_PAGE_ARTIFACT_BYTES} bytes (${sizeBytes}) — not retained`);
+  }
+  const db = getDb();
+  const id = randomUUID();
+  db.run(
+    `INSERT INTO pi_page_artifacts
+     (id, run_id, url, content_hash, content, size_bytes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [id, input.runId, input.url, input.contentHash, input.content, sizeBytes, now()],
+  );
+  return db.query(`${PAGE_ARTIFACT_SELECT} WHERE id = ?`).get(id) as PiPageArtifactRow;
+}
+
+export function getPiPageArtifact(id: string): PiPageArtifactRow | undefined {
+  const db = getDb();
+  return db.query(`${PAGE_ARTIFACT_SELECT} WHERE id = ?`).get(id) as PiPageArtifactRow | undefined;
+}
+
+export function listPiPageArtifactsByRun(runId: string): PiPageArtifactRow[] {
+  const db = getDb();
+  return db.query(`${PAGE_ARTIFACT_SELECT} WHERE run_id = ? ORDER BY created_at`).all(runId) as PiPageArtifactRow[];
 }
 
 export function insertPiAsset(input: {
@@ -1256,4 +1326,109 @@ export function deletePiRunsOlderThan(workspaceId: string, cutoffIso: string): n
     [workspaceId, cutoffIso],
   );
   return Number(matched.c);
+}
+
+// ---------------------------------------------------------------------------
+// Round-9 (review P0): durable source authority. Rights tiers never derive
+// from generic evidence kinds; trusted CMS records (check_source_priority
+// with a brand-matched registry entry) establish authority here. The source
+// row's source_type is upgraded to the authority type so existing resolvers
+// (which read the row) observe the effective tier — the first-writer bug is
+// closed: authority wins regardless of which tool created the row first.
+// ---------------------------------------------------------------------------
+
+export interface PiSourceAuthorityRow {
+  id: string;
+  sourceId: string;
+  authorityType: string;
+  authorityRef: string | null;
+  brandName: string | null;
+  establishedBy: string;
+  establishedAt: string;
+}
+
+export function upsertSourceAuthority(input: {
+  sourceId: string;
+  authorityType: string;
+  authorityRef?: string | null;
+  brandName?: string | null;
+  establishedBy: string;
+}): PiSourceAuthorityRow | null {
+  const db = getDb();
+  const id = randomUUID();
+  const establishedAt = new Date().toISOString();
+  db.run(
+    `INSERT INTO pi_source_authorities
+       (id, source_id, authority_type, authority_ref, brand_name, established_by, established_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source_id, authority_type) DO UPDATE SET
+       authority_ref = excluded.authority_ref,
+       brand_name = excluded.brand_name,
+       established_by = excluded.established_by,
+       established_at = excluded.established_at`,
+    [
+      id,
+      input.sourceId,
+      input.authorityType,
+      input.authorityRef ?? null,
+      input.brandName ?? null,
+      input.establishedBy,
+      establishedAt,
+    ],
+  );
+  // Upgrade the source row's tier so resolvers reading source_type observe
+  // the authority. The source_type CHECK allows the authority tiers.
+  db.run(`UPDATE product_intelligence_sources SET source_type = ? WHERE id = ?`, [
+    input.authorityType,
+    input.sourceId,
+  ]);
+  return {
+    id,
+    sourceId: input.sourceId,
+    authorityType: input.authorityType,
+    authorityRef: input.authorityRef ?? null,
+    brandName: input.brandName ?? null,
+    establishedBy: input.establishedBy,
+    establishedAt,
+  };
+}
+
+export function getSourceAuthorities(sourceId: string): PiSourceAuthorityRow[] {
+  const db = getDb();
+  const rows = db
+    .query(
+      `SELECT id, source_id, authority_type, authority_ref, brand_name, established_by, established_at
+       FROM pi_source_authorities WHERE source_id = ? ORDER BY established_at ASC`,
+    )
+    .all(sourceId) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: String(row.id),
+    sourceId: String(row.source_id),
+    authorityType: String(row.authority_type),
+    authorityRef: row.authority_ref !== null && row.authority_ref !== undefined ? String(row.authority_ref) : null,
+    brandName: row.brand_name !== null && row.brand_name !== undefined ? String(row.brand_name) : null,
+    establishedBy: String(row.established_by),
+    establishedAt: String(row.established_at),
+  }));
+}
+
+export function listSourceAuthoritiesByRun(runId: string): PiSourceAuthorityRow[] {
+  const db = getDb();
+  const rows = db
+    .query(
+      `SELECT a.id, a.source_id, a.authority_type, a.authority_ref, a.brand_name, a.established_by, a.established_at
+       FROM pi_source_authorities a
+       JOIN product_intelligence_sources s ON s.id = a.source_id
+       WHERE s.run_id = ? ORDER BY a.established_at ASC`,
+    )
+    .all(runId) as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    id: String(row.id),
+    sourceId: String(row.source_id),
+    authorityType: String(row.authority_type),
+    authorityRef: row.authority_ref !== null && row.authority_ref !== undefined ? String(row.authority_ref) : null,
+    brandName: row.brand_name !== null && row.brand_name !== undefined ? String(row.brand_name) : null,
+    establishedBy: String(row.established_by),
+    establishedAt: String(row.established_at),
+  }));
 }

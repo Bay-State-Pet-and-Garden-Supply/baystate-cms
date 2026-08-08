@@ -15,6 +15,7 @@ import {
   captureSdkVersion,
   captureToolVersions,
   effectiveToolNames,
+  resolveToolRuntime,
   validateToolAllowlist,
 } from '../../../product-intelligence/pi/pi-session-factory';
 import { TERMINAL_TOOLS, WORKFLOW_SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
@@ -41,6 +42,36 @@ describe('tool version capture (round-8 P1)', () => {
     expect(a[0].version).toBeNull();
     const b = captureToolVersions([{ name: 'submit_product_research_bundle', parameters: { type: 'object', properties: { x: { type: 'string' } } } }]);
     expect(b[0].schemaHash).not.toBe(a[0].schemaHash);
+  });
+});
+
+describe('tool runtime bounds (round-9 P1: cancellation reaches adapters)', () => {
+  it('resolveToolRuntime prefers the executor-provided runtime signal over context, and over a fresh controller', () => {
+    const contextSignal = new AbortController().signal;
+    const runtimeSignal = new AbortController().signal;
+    const ctx = testContext({ signal: contextSignal });
+
+    // Explicit runtime wins (the real executor path always passes it).
+    const withRuntime = resolveToolRuntime(ctx, { signal: runtimeSignal, remainingMs: 1_234 }, 300_000);
+    expect(withRuntime.signal).toBe(runtimeSignal);
+    expect(withRuntime.remainingMs).toBe(1_234);
+
+    // No explicit runtime: the context's signal is used, never a fresh one.
+    const fromContext = resolveToolRuntime(ctx, undefined, 300_000);
+    expect(fromContext.signal).toBe(contextSignal);
+    expect(fromContext.remainingMs).toBe(300_000);
+
+    // Neither: a fresh controller + the policy-deadline fallback.
+    const fallback = resolveToolRuntime(testContext(), undefined, 300_000);
+    expect(fallback.signal.aborted).toBe(false);
+    expect(fallback.remainingMs).toBe(300_000);
+  });
+
+  it('resolveToolRuntime never returns a fresh never-aborted signal when the run was already aborted', () => {
+    const controller = new AbortController();
+    controller.abort();
+    const resolved = resolveToolRuntime(testContext({ signal: controller.signal }), undefined, 300_000);
+    expect(resolved.signal.aborted).toBe(true);
   });
 });
 

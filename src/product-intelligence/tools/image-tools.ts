@@ -21,7 +21,6 @@ import { discoverCandidates } from '../assets/discovery';
 import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation, ProductAssetEvidence } from '../assets/schema';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
-import { sha256Hex } from '../../shared/stable-id';
 import { boundedString } from './registry';
 import type { EvidenceResolver, ResolvedEvidenceFact, ReuseGrantRecord, SourceTypeProvenance, VerifiedAgainstSnapshot } from '../assets/verification';
 
@@ -201,47 +200,42 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
   name: 'discover_image_candidates',
   version: '2.0.0',
   description:
-    'Discover product image candidates from a structured artifact: JSON-LD image values, Shopify or WooCommerce embedded variant-image mappings, or a #29-style network-capture JSON array. Returns normalized candidates with source page, exact source path, artifact id, extraction method, and variant mapping. Network-free.',
+    'Discover product image candidates from a SERVER-RETAINED page artifact (run extract_product_page first, which returns artifactId). ' +
+    'Loads the artifact bytes server-side (the agent never supplies page content), parses JSON-LD image values, Shopify/WooCommerce embedded variant-image mappings, or a network-capture JSON array, ' +
+    'and creates durable candidate records attested to the artifact. Network-free.',
   parameters: Type.Object({
-    pageUrl: boundedString(512, 'Page URL the artifact came from'),
-    content: boundedString(200_000, 'Artifact content: page HTML or embedded state JSON'),
-    sourceType: Type.Union([
-      Type.Literal('json_ld'),
-      Type.Literal('shopify'),
-      Type.Literal('woocommerce'),
-      Type.Literal('network_capture'),
-    ]),
-    retrievedAt: Type.Optional(Type.String({ format: 'date-time' })),
+    artifactId: boundedString(256, 'Durable page artifact id (from extract_product_page)'),
+    sourceType: Type.Optional(
+      Type.Union([
+        Type.Literal('json_ld'),
+        Type.Literal('shopify'),
+        Type.Literal('woocommerce'),
+        Type.Literal('network_capture'),
+      ]),
+    ),
   }),
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
-    const pageUrl = String(params.pageUrl ?? '');
-    const content = String(params.content ?? '');
-    const sourceType = String(params.sourceType ?? '') as 'json_ld' | 'shopify' | 'woocommerce' | 'network_capture';
-    const retrievedAt = params.retrievedAt ? String(params.retrievedAt) : undefined;
-    // Round-8 (review P0): the candidate -> discovering-page relationship must
-    // be ATTESTED to a server-retained artifact. The model-supplied content is
-    // accepted ONLY when its SHA-256 equals a durable evidence row's
-    // contentHash for this page URL — fabricated content supplied against a
-    // real page URL can never mint a durable candidate record (and thus never
-    // selects a rights tier).
-    if (!attestContentToPage(ctx.runId, pageUrl, sha256Hex(content))) {
-      return policyDenied(
-        `content is not attested to a server-retained artifact for page ${pageUrl} (sha256 mismatch — run extract_product_page first)`,
-      );
+    const artifactId = String(params.artifactId ?? '');
+    const sourceType = params.sourceType ? String(params.sourceType) : undefined;
+    // Round-9 (P1-1/P1-5): the candidate -> discovering-page relationship must
+    // originate from a SERVER-RETAINED artifact. No agent-supplied content or
+    // pageUrl can influence provenance — the artifact record (bytes + hash +
+    // url) is the attestation. Fabricated content never reaches this path.
+    const artifact = loadArtifactById(artifactId);
+    if (!artifact) {
+      return noResult(`artifact not found for id ${artifactId.slice(0, 24)} (run extract_product_page first)`);
     }
+    const pageUrl = artifact.url;
+    const content = artifact.content;
+    const parserType = sourceType ?? inferArtifactSourceType(content);
     try {
-      const candidates: DiscoveredImageCandidate[] = discoverCandidates(sourceType, content, pageUrl, retrievedAt);
+      const candidates: DiscoveredImageCandidate[] = discoverCandidates(parserType as DiscoveredImageCandidate['extractionMethod'], content, pageUrl, artifact.createdAt);
       if (candidates.length === 0) {
-        return noResult(`No image candidates found in the ${sourceType} artifact`, [
-          { id: evidenceId('discover_image_candidates', `${sourceType}:${pageUrl}`), kind: 'image_evidence', url: pageUrl, method: `image_discovery:${sourceType}` },
+        return noResult(`No image candidates found in the ${parserType} artifact`, [
+          { id: evidenceId('discover_image_candidates', `${parserType}:${pageUrl}`), kind: 'image_evidence', url: pageUrl, method: `image_discovery:${parserType}` },
         ]);
       }
-      // Round-7 (review P0): the candidate -> discovering-page relationship is
-      // SERVER-CREATED here and persisted durably. verify_image_candidate
-      // requires the returned candidateId and derives source tier / rights
-      // from this record's discovering source — an agent-selected
-      // sourcePageUrl or evidence selection can never choose the tier.
-      let enriched: Array<DiscoveredImageCandidate & { candidateId?: string }> = candidates;
+      let enriched: Array<DiscoveredImageCandidate & { candidateId?: string; artifactId?: string }> = candidates;
       try {
         const store = loadAssetStore();
         if (store) {
@@ -267,7 +261,11 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
               sourcePath: candidate.sourcePath ?? null,
               extractionMethod: candidate.extractionMethod ?? null,
               variantReference: candidate.variantReference ?? null,
+              entityId: candidate.entityId ?? null,
+              attestationArtifactId: artifact.id,
+              attestedContentHash: artifact.contentHash,
             }).id,
+            artifactId: artifact.id,
           }));
         }
       } catch (error) {
@@ -277,13 +275,13 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
         console.warn('[discover_image_candidates] could not persist candidate provenance:', error instanceof Error ? error.message : String(error));
       }
       return okResult(
-        { candidates: enriched, count: enriched.length },
+        { candidates: enriched, count: enriched.length, artifactId },
         [
           {
-            id: evidenceId('discover_image_candidates', `${sourceType}:${pageUrl}`),
+            id: evidenceId('discover_image_candidates', `${parserType}:${pageUrl}`),
             kind: 'image_evidence',
             url: pageUrl,
-            method: `image_discovery:${sourceType}`,
+            method: `image_discovery:${parserType}`,
           },
         ],
       );
@@ -325,6 +323,7 @@ interface LazyCandidateRow {
   sourcePath: string | null;
   extractionMethod: string | null;
   variantReference: string | null;
+  entityId: string | null;
   createdAt: string;
 }
 
@@ -335,6 +334,7 @@ let _evidenceRepo:
       listPiEvidence: (runId: string) => LazyEvidenceRow[];
       listPiSources: (runId: string) => LazySourceRow[];
       listPiEvidenceByToolEvidenceId: (runId: string, toolEvidenceIds: string[]) => LazyEvidenceRow[];
+      getPiPageArtifact: (id: string) => { id: string; url: string; contentHash: string; content: string; createdAt: string | null } | undefined;
     }
   | undefined;
 
@@ -342,6 +342,7 @@ function loadEvidenceRepo(): {
   listPiEvidence: (runId: string) => LazyEvidenceRow[];
   listPiSources: (runId: string) => LazySourceRow[];
   listPiEvidenceByToolEvidenceId: (runId: string, toolEvidenceIds: string[]) => LazyEvidenceRow[];
+  getPiPageArtifact: (id: string) => { id: string; url: string; contentHash: string; content: string; createdAt: string | null } | undefined;
 } {
   if (!_evidenceRepo) {
     try {
@@ -353,6 +354,7 @@ function loadEvidenceRepo(): {
           listPiEvidence: () => [],
           listPiSources: () => [],
           listPiEvidenceByToolEvidenceId: () => [],
+          getPiPageArtifact: () => undefined,
         };
         return _evidenceRepo;
       }
@@ -361,6 +363,7 @@ function loadEvidenceRepo(): {
         listPiEvidence: () => [],
         listPiSources: () => [],
         listPiEvidenceByToolEvidenceId: () => [],
+        getPiPageArtifact: () => undefined,
       };
       return _evidenceRepo;
     }
@@ -523,42 +526,38 @@ function domainOfUrl(url: string): string {
  *  field entries carry metadata.contentHash = sha256 of the fetched page);
  *  fabricated content can never match a hash the server actually recorded.
  *  No DB / no matching row -> fail closed (never persist a candidate). */
-function attestContentToPage(runId: string, pageUrl: string, contentHash: string): boolean {
-  const repo = loadEvidenceRepo();
-  if (!repo) return false;
+/** Round-9 (P1-1/P1-5): load a retained page artifact by id (the attestation
+ *  for artifact-driven discovery). Lazy + fail-closed — no DB (vitest) or
+ *  unknown id returns null, and discovery returns noResult. */
+function loadArtifactById(artifactId: string): { id: string; url: string; contentHash: string; content: string; createdAt: string } | null {
+  if (!artifactId) return null;
   try {
-    const sources = repo.listPiSources(runId);
-    const sourceUrlById = new Map<string, string>();
-    for (const source of sources) {
-      sourceUrlById.set(source.id, normalizeUrlForAttestation(source.url));
-    }
-    const expectedUrl = normalizeUrlForAttestation(pageUrl);
-    const rows = repo.listPiEvidence(runId);
-    for (const row of rows) {
-      if (!row.metadataJson) continue;
-      let metadata: { contentHash?: unknown };
-      try {
-        metadata = JSON.parse(row.metadataJson) as { contentHash?: unknown };
-      } catch {
-        continue;
-      }
-      if (typeof metadata.contentHash !== 'string' || metadata.contentHash !== contentHash) continue;
-      const sourceUrl = sourceUrlById.get(row.sourceId);
-      if (sourceUrl !== undefined && sourceUrl === expectedUrl) return true;
-    }
-    return false;
+    const repo = loadEvidenceRepo();
+    if (!repo) return null;
+    const artifact = repo.getPiPageArtifact?.(artifactId);
+    if (!artifact) return null;
+    return {
+      id: artifact.id,
+      url: artifact.url,
+      contentHash: artifact.contentHash,
+      content: artifact.content,
+      createdAt: artifact.createdAt ?? '',
+    };
   } catch {
-    return false;
+    return null;
   }
 }
 
-function normalizeUrlForAttestation(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.hostname.replace(/^www\./, '').toLowerCase()}${parsed.pathname.replace(/\/$/, '')}${parsed.search}`;
-  } catch {
-    return url;
-  }
+/** Round-9 (P1-1): infer the parser type from the retained artifact's content
+ *  shape when the caller does not supply a sourceType hint. A hint is never
+ *  provenance — it only selects which parser walks the server-retained bytes. */
+function inferArtifactSourceType(content: string): string {
+  const trimmed = content.trimStart();
+  if (/ld\+json|"@type"\s*:/.test(content)) return 'json_ld';
+  if (/Shopify\.ProductVariants|"variants"\s*:.*"handle"|shopify/i.test(content)) return 'shopify';
+  if (/"variations"|woocommerce/i.test(content)) return 'woocommerce';
+  if (trimmed.startsWith('[') || /"url"\s*:.*"method"|networkResponse/i.test(content)) return 'network_capture';
+  return 'json_ld';
 }
 
 function loadAssetGtinLinkages(runId: string, url: string): Array<{ gtin: string; assetId?: string; originalContentHash: string | null }> {

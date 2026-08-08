@@ -15,6 +15,7 @@ import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
 import { getVlmConfig } from '../../onboarding/vlm-client';
 import { sha256Hex } from '../../shared/stable-id';
+import { createRequire } from 'node:module';
 import { sharpImageVerificationAdapter } from '../assets/contract';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import {
@@ -39,6 +40,9 @@ import { HTTP_EXTRACTION_HEADERS, type FetchedPage, type ShopifyProductJson } fr
 import type { LadderOptions } from '../extraction/ladder';
 import type { PolicyGateway } from '../policy/policy-gateway';
 import { boundedString } from './registry';
+
+/** Lazy require keeps this module importable in vitest (no bun:sqlite). */
+const lazyRequire = createRequire(import.meta.url);
 
 // ---------------------------------------------------------------------------
 // Default HTTP extraction adapter (deterministic; PI-11 replaces later)
@@ -195,6 +199,61 @@ export const defaultPageExtractionContract: PageExtractionContract = createLadde
  * revalidation, size/type limits, and audit attribution apply to every
  * PI-initiated page fetch.
  */
+/**
+ * Round-9 (P1-1/P1-5): lazy, fail-closed persistence of retained page
+ * artifacts (bun-only; vitest has no bun:sqlite so no artifact is stored —
+ * the adapter keeps working, discovery simply finds nothing to load).
+ */
+let _artifactRepo: {
+  insertPiPageArtifact: (input: { runId: string; url: string; contentHash: string; content: string }) => { id: string };
+  listPiPageArtifactsByRun: (runId: string) => Array<{ id: string; url: string; contentHash: string }>;
+} | null | undefined = undefined;
+function loadArtifactRepo(): NonNullable<typeof _artifactRepo> | null {
+  if (_artifactRepo !== undefined) return _artifactRepo ?? null;
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) {
+      _artifactRepo = null;
+      return null;
+    }
+  } catch {
+    _artifactRepo = null;
+    return null;
+  }
+  try {
+    _artifactRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _artifactRepo>;
+    return _artifactRepo;
+  } catch {
+    _artifactRepo = null;
+    return null;
+  }
+}
+
+/** Persist the fetched page bytes as a durable artifact (bounded, fail-closed). */
+function persistPageArtifact(runId: string, url: string, html: string, contentHash: string): void {
+  try {
+    const repo = loadArtifactRepo();
+    if (!repo?.insertPiPageArtifact) return;
+    // The repo enforces the 2MB cap (throws); a too-large page simply means
+    // no artifact id — artifact-driven discovery is unavailable for it, by design.
+    repo.insertPiPageArtifact({ runId, url, contentHash, content: html });
+  } catch {
+    // fail closed: no artifact, no artifactId, discovery can't run for it
+  }
+}
+
+/** Resolve the retained artifact id for a completed extraction, if any. */
+function pageArtifactIdForRun(runId: string, finalUrl: string, contentHash: string | null): string | null {
+  if (!contentHash) return null;
+  try {
+    const repo = loadArtifactRepo();
+    const artifacts = repo?.listPiPageArtifactsByRun(runId) ?? [];
+    return artifacts.find((a) => a.url === finalUrl && a.contentHash === contentHash)?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
   const gateway: PolicyGateway = ctx.gateway ?? defaultPolicyGateway;
   const netCtx = { runId: ctx.runId, policy: ctx.policy };
@@ -222,6 +281,12 @@ function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
     if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
     const html = await response.text();
     if (html.length > 5_000_000) throw new Error(`Response too large (${html.length} chars) for ${url}`);
+    // Round-9 (P1-1/P1-5): the server RETAINS the fetched page bytes (bounded)
+    // as a durable artifact so image discovery can be artifact-driven — the
+    // agent never supplies artifact bytes. Persisted here at the actual fetch
+    // seam (lazy, fail-closed: no DB in vitest means no artifact id, which is
+    // fine — discovery just has nothing to load).
+    persistPageArtifact(ctx.runId, response.url || url, html, sha256Hex(html));
     return { html, finalUrl: response.url || url, status: response.status, contentHash: sha256Hex(html) };
   };
   options.fetchShopify = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<ShopifyProductJson> => {
@@ -321,6 +386,10 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
             fetchModes: result.fetchModes,
             contentHash: result.contentHash,
             artifactRef: result.artifactRef,
+            // Round-9 (P1-1/P1-5): the durable artifact id for this page —
+            // discover_image_candidates({ artifactId }) loads the retained
+            // bytes server-side; the agent never supplies artifact content.
+            artifactId: pageArtifactIdForRun(ctx.runId, result.finalUrl, result.contentHash),
             identityStatus: result.identityStatus,
             identityReasons: result.identityReasons,
             fields: result.fields,

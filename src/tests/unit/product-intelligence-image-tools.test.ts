@@ -16,9 +16,10 @@ import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { upsertReusePolicy } from '../../db/repositories/pi-reuse-policy-repo';
-import { createPiRun, insertPiAsset, insertPiEvidence, insertPiImageCandidate, insertPiSource, listPiAssetsByRun, listPiImageCandidatesByRun, listPiSources, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, insertPiAsset, insertPiEvidence, insertPiImageCandidate, insertPiPageArtifact, insertPiSource, listPiAssetsByRun, listPiImageCandidatesByRun, listPiPageArtifactsByRun, listPiSources, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
 import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
+import { discoverCandidates } from '../../product-intelligence/assets/discovery';
 import { verifyImageCandidateTool, discoverImageCandidatesTool } from '../../product-intelligence/tools/image-tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
 import { testPolicy } from './product-intelligence/test-helpers';
@@ -83,35 +84,30 @@ describe('PI-6 image tools', () => {
     expect(defaultToolRegistry.get('discover_image_candidates')?.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it('discovers Shopify variant-image candidates through the registry', async () => {
+  it('discovers Shopify variant-image candidates from a retained artifact (artifact-driven)', async () => {
     const run = runningRun();
     const html = `<script>var Shopify = Shopify || {};
 Shopify.ProductVariants = [{"id":123,"title":"16 oz","option1":"16 oz","image_id":456}];
 Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</script>`;
-    // Round-8 (review P0): the artifact must be ATTESTED to a server-retained
-    // page fetch — seed the durable evidence row carrying the page-bytes hash.
-    const pageSource = insertPiSource({
+    // Round-9 (P1-1): the agent NEVER supplies artifact bytes — the server
+    // retains the fetched page artifact (bytes + hash), and discovery loads it
+    // by id. Seed the durable artifact record directly (in production
+    // extract_product_page persists it at the fetch seam).
+    const artifact = insertPiPageArtifact({
       runId: run.id,
       url: 'https://shop.example.com/products/stella',
-      domain: 'shop.example.com',
-      sourceType: 'other',
-    });
-    insertPiEvidence({
-      runId: run.id,
-      sourceId: pageSource.id,
-      targetField: 'title',
-      value: 'Stella Chicken Broth 16 oz',
-      extractionMethod: 'json_ld',
-      metadata: { contentHash: createHash('sha256').update(html).digest('hex') },
+      contentHash: createHash('sha256').update(html).digest('hex'),
+      content: html,
     });
     const result = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('discover_image_candidates')!,
-      { pageUrl: 'https://shop.example.com/products/stella', content: html, sourceType: 'shopify' },
+      { artifactId: artifact.id, sourceType: 'shopify' },
       toolCtx(run.id),
     );
     expect(result.status).toBe('ok');
     if (result.status === 'ok') {
-      const data = result.data as { candidates: Array<{ url: string; variantReference: string | null; extractionMethod: string; sourcePath: string; candidateId?: string }> };
+      const data = result.data as { candidates: Array<{ url: string; variantReference: string | null; extractionMethod: string; sourcePath: string; candidateId?: string; artifactId?: string }>; artifactId: string };
+      expect(data.artifactId).toBe(artifact.id);
       expect(data.candidates).toHaveLength(1);
       expect(data.candidates[0]).toMatchObject({
         variantReference: '123',
@@ -119,16 +115,65 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       });
       expect(data.candidates[0].url.startsWith('https://')).toBe(true);
       expect(result.evidence[0].kind).toBe('image_evidence');
-      // Round-7: discovery SERVER-CREATED a durable candidate record bound to
-      // the discovering page source (its candidateId is what verification cites).
       expect(data.candidates[0].candidateId).toBeTruthy();
       const rows = listPiImageCandidatesByRun(run.id);
       expect(rows).toHaveLength(1);
       expect(rows[0].imageUrl).toBe(data.candidates[0].url);
       expect(rows[0].discoveringSourceId).toBeTruthy();
+      // Round-9 (P1-5): the candidate row retains the ATTESTATION — which
+      // retained artifact (and bytes hash) established the relationship.
+      expect(rows[0].attestationArtifactId).toBe(artifact.id);
+      expect(rows[0].attestedContentHash).toBe(artifact.contentHash);
       const pageSource = listPiSources(run.id).find((src) => src.url === 'https://shop.example.com/products/stella');
       expect(pageSource?.sourceType).toBe('other'); // fail-closed neutral tier until typed
       expect(rows[0].discoveringSourceId).toBe(pageSource?.id);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('artifact-driven discovery fails closed on an unknown artifactId', async () => {
+    const run = runningRun();
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: 'no-such-artifact-id' },
+      toolCtx(run.id),
+    );
+    expect(result.status).toBe('no_result');
+    // No candidates, no source rows, no candidate rows — nothing durable minted.
+    expect(listPiImageCandidatesByRun(run.id)).toHaveLength(0);
+    expect(listPiSources(run.id).filter((s) => s.url.includes('shop.example.com'))).toHaveLength(0);
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('extract_product_page retains the fetched page artifact and returns artifactId', async () => {
+    const html = `<html><head><script type="application/ld+json">{"@type":"Product","name":"Stella Chicken Broth 16 oz","image":"https://cdn.example.com/stella-16oz.jpg","offers":{"price":"8.99","priceCurrency":"USD"}}</script></head><body>Stella Chicken Broth</body></html>`;
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(html, { status: 200, headers: { 'content-type': 'text/html' } }),
+    });
+    const run = runningRun(JSON.stringify({ gtin: '085000079585', registerName: 'STELLA CHKN BROTH 16OZ', brandHint: 'Stella' }));
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('extract_product_page')!,
+      { url: 'https://brand.example.com/p/stella-broth', gtin: '085000079585', expectedName: 'STELLA CHKN BROTH 16OZ', brandHint: 'Stella' },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const data = result.data as { artifactId?: string | null; contentHash?: string | null };
+      expect(data.artifactId).toBeTruthy();
+      const artifacts = listPiPageArtifactsByRun(run.id);
+      expect(artifacts.length).toBeGreaterThanOrEqual(1);
+      const retained = artifacts.find((a) => a.id === data.artifactId);
+      expect(retained).toBeTruthy();
+      expect(retained?.content).toBe(html);
+      expect(retained?.contentHash).toBe(data.contentHash);
+      // The artifact row feeds discovery: parse images from the retained bytes.
+      const discovery = await defaultToolRegistry.dispatch(
+        defaultToolRegistry.get('discover_image_candidates')!,
+        { artifactId: data.artifactId },
+        toolCtx(run.id),
+      );
+      expect(discovery.status).toBe('ok');
     }
     transitionPiRunStatus(run.id, 'completed', {});
   });
@@ -521,23 +566,19 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     const html = `<script>var Shopify = Shopify || {};
 Shopify.ProductVariants = [{"id":123,"title":"16 oz","option1":"16 oz","image_id":456}];
 Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</script>`;
-    const attestationSource = insertPiSource({
+    // Round-9 (P1-1): discovery is artifact-driven — the server retains the
+    // page bytes and the tool loads them by id; the agent never supplies
+    // content. The pre-typed manufacturer page source (pageSource above) is
+    // what the artifact binds the candidate to.
+    const artifact = insertPiPageArtifact({
       runId: run.id,
       url: 'https://brand.example.com/p/stella-broth-16oz',
-      domain: 'brand.example.com',
-      sourceType: 'manufacturer',
-    });
-    insertPiEvidence({
-      runId: run.id,
-      sourceId: attestationSource.id,
-      targetField: 'title',
-      value: 'Stella Chicken Broth 16 oz',
-      extractionMethod: 'json_ld',
-      metadata: { contentHash: createHash('sha256').update(html).digest('hex') },
+      contentHash: createHash('sha256').update(html).digest('hex'),
+      content: html,
     });
     const discovered = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('discover_image_candidates')!,
-      { pageUrl: 'https://brand.example.com/p/stella-broth-16oz', content: html, sourceType: 'shopify' },
+      { artifactId: artifact.id, sourceType: 'shopify' },
       toolCtx(run.id),
     );
     expect(discovered.status).toBe('ok');
@@ -723,35 +764,27 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
-  it('refuses fabricated content against a real page (round-8 attestation gate)', async () => {
+  it('the agent can no longer supply artifact content or page URLs (round-9)', async () => {
     const run = runningRun();
     const pageUrl = 'https://brand.example.com/p/stella-broth-16oz';
-    const pageSource = insertPiSource({
+    insertPiSource({
       runId: run.id,
       url: pageUrl,
       domain: 'brand.example.com',
       sourceType: 'manufacturer',
     });
-    // The server retains the REAL page-bytes hash in durable evidence.
-    insertPiEvidence({
-      runId: run.id,
-      sourceId: pageSource.id,
-      targetField: 'title',
-      value: 'Stella Chicken Broth 16 oz',
-      extractionMethod: 'json_ld',
-      metadata: { contentHash: 'a'.repeat(64) },
-    });
     const candidatesBefore = listPiImageCandidatesByRun(run.id).length;
     const sourcesBefore = listPiSources(run.id).length;
-    // Fabricated content (its sha256 does not match the retained hash) cannot
-    // mint a durable candidate bound to the manufacturer page.
+    // Fabrication is structurally impossible now: the tool's contract has no
+    // content/pageUrl parameters — submitting them is a schema error, so no
+    // durable candidate or source row can ever be minted from agent bytes.
     const result = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('discover_image_candidates')!,
       { pageUrl, content: '<script>fabricated image B</script>', sourceType: 'shopify' },
       toolCtx(run.id),
     );
-    expect(result.status).toBe('policy_denied');
-    expect((result as { reason?: string }).reason).toContain('attested');
+    expect(result.status).toBe('error');
+    expect(String((result as { message?: string }).message ?? '')).toMatch(/schema|property/i);
     expect(listPiImageCandidatesByRun(run.id)).toHaveLength(candidatesBefore);
     expect(listPiSources(run.id)).toHaveLength(sourcesBefore);
     transitionPiRunStatus(run.id, 'completed', {});
@@ -987,5 +1020,59 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     expect(record.sourceType).toBe('supplier');
     expect(record.rightsStatus).toBe('approved');
     transitionPiRunStatus(run.id, 'completed', {});
+  });
+});
+
+describe('PI-6 discovery parser media-set/entity capture (round-9 P1)', () => {
+  it('tags main-product images with the product entity id', () => {
+    const ld = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'Product',
+      '@id': 'https://brand.example.com/product/MAIN-1',
+      name: 'Main Product',
+      image: 'https://cdn.example.com/main.jpg',
+    });
+    const out = discoverCandidates('json_ld', `<script type="application/ld+json">${ld}</script>`, 'https://brand.example.com/p/1');
+    const main = out.find((c) => c.url === 'https://cdn.example.com/main.jpg');
+    expect(main?.entityId).toBe('https://brand.example.com/product/MAIN-1');
+  });
+
+  it('tags recommendation-nested images with the recommendation entity, not the main product (round-9 P1)', () => {
+    const ld = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'Product',
+      '@id': 'https://brand.example.com/product/MAIN-1',
+      name: 'Main Product',
+      image: 'https://cdn.example.com/main.jpg',
+      relatedProducts: [
+        {
+          '@type': 'Product',
+          '@id': 'https://brand.example.com/product/REC-99',
+          sku: 'REC-99',
+          name: 'You May Also Like',
+          image: 'https://cdn.example.com/rec.jpg',
+        },
+      ],
+    });
+    const out = discoverCandidates('json_ld', `<script type="application/ld+json">${ld}</script>`, 'https://brand.example.com/p/1');
+    const main = out.find((c) => c.url === 'https://cdn.example.com/main.jpg');
+    const rec = out.find((c) => c.url === 'https://cdn.example.com/rec.jpg');
+    expect(main?.entityId).toBe('https://brand.example.com/product/MAIN-1');
+    // The nested recommendation carries its OWN identity — it overrides the
+    // inherited main-product context.
+    expect(rec?.entityId).toBe('https://brand.example.com/product/REC-99');
+  });
+
+  it('tags @graph product images independently (round-9 P1)', () => {
+    const ld = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@graph': [
+        { '@type': 'Product', '@id': 'https://brand.example.com/product/MAIN-1', image: 'https://cdn.example.com/main.jpg' },
+        { '@type': 'Product', '@id': 'https://brand.example.com/product/REC-99', sku: 'REC-99', image: 'https://cdn.example.com/rec.jpg' },
+      ],
+    });
+    const out = discoverCandidates('json_ld', `<script type="application/ld+json">${ld}</script>`, 'https://brand.example.com/p/1');
+    expect(out.find((c) => c.url === 'https://cdn.example.com/main.jpg')?.entityId).toBe('https://brand.example.com/product/MAIN-1');
+    expect(out.find((c) => c.url === 'https://cdn.example.com/rec.jpg')?.entityId).toBe('https://brand.example.com/product/REC-99');
   });
 });

@@ -9,6 +9,11 @@ import { PiProductIntelligenceExecutor } from '../../../product-intelligence/pi/
 import { PiSessionError } from '../../../product-intelligence/pi/pi-session-factory';
 import { createExecutionEventSink } from '../../../product-intelligence/executor';
 import { WORKFLOW_SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
+import type {
+  ProductResearchContext,
+  ProductResearchInput,
+  TerminalResultSubmission,
+} from '../../../product-intelligence/contracts';
 import {
   ABSTENTION_SUBMISSION,
   asPi1Submission,
@@ -374,5 +379,43 @@ describe('PiProductIntelligenceExecutor — allowlisting and prompt construction
     disposeSpy();
     disposeSpy();
     expect(session.disposed).toBe(true);
+  });
+
+  it('threads the runtime signal and effective remaining time into the session factory (round-9 P1)', async () => {
+    // Round-9 (review P1): aborting the Pi session must reach research-tool
+    // adapters — the executor passes the run's REAL AbortSignal and the
+    // effective remaining run time (workspace cap vs policy deadline) to
+    // createSession, so the session factory never substitutes a fresh
+    // never-aborted controller.
+    const runController = new AbortController();
+    const captured: Array<{ signal?: AbortSignal; remainingMs?: number }> = [];
+    const captureFactory = new FakeSessionFactory();
+    const originalCreate = captureFactory.createSession.bind(captureFactory);
+    captureFactory.createSession = (async (
+      input: ProductResearchInput,
+      context: ProductResearchContext,
+      onSubmission: (submission: TerminalResultSubmission) => void,
+      runtime?: { signal?: AbortSignal; remainingMs?: number },
+    ) => {
+      captured.push(runtime ?? {});
+      return originalCreate(input, context, onSubmission);
+    }) as typeof captureFactory.createSession;
+
+    const executor = makeExecutor(captureFactory);
+    const runPromise = executor.startResearch(
+      TEST_INPUT,
+      testContext({ runId: 'run-pi-18', signal: runController.signal }),
+      createExecutionEventSink('run-pi-18'),
+    );
+    await Promise.resolve();
+
+    expect(captured.length).toBe(1);
+    expect(captured[0].signal).toBe(runController.signal); // the real run signal, not a fresh one
+    expect(captured[0].remainingMs).toBeGreaterThan(0);
+    expect(captured[0].remainingMs!).toBeLessThanOrEqual(300_000); // testPolicy deadlineMs
+
+    submitViaTool(captureFactory, validSubmission() as unknown as Parameters<typeof submitViaTool>[1]);
+    captureFactory.created[0].finish();
+    await runPromise;
   });
 });

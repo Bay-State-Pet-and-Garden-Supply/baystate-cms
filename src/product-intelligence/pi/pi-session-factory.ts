@@ -99,12 +99,38 @@ export interface PiSessionHandle {
   dispose(): void;
 }
 
+/** Round-9 (review P1): runtime-only execution bounds threaded from the
+ *  executor — the run's AbortSignal (workspace cap + policy deadline composed)
+ *  and the effective remaining run time in ms. Deliberately NOT part of
+ *  ProductResearchContextSchema (like signal): these are runtime-only. */
+export interface SessionToolRuntime {
+  signal?: AbortSignal;
+  remainingMs?: number;
+}
+
 export interface PiSessionFactory {
   createSession(
     input: ProductResearchInput,
     context: ProductResearchContext,
     onSubmission: (submission: TerminalResultSubmission) => void,
+    runtime?: SessionToolRuntime,
   ): Promise<PiSessionHandle>;
+}
+
+/** Round-9 (review P1): resolve the tool-context execution bounds with
+ *  deterministic precedence — explicit runtime (executor-provided) wins over
+ *  the context's signal, which wins over a fresh controller; the effective
+ *  remaining time falls back to the policy deadline. Pure helper (no SDK),
+ *  unit-testable. */
+export function resolveToolRuntime(
+  context: ProductResearchContext,
+  runtime: SessionToolRuntime | undefined,
+  policyDeadlineMs?: number,
+): { signal: AbortSignal; remainingMs: number } {
+  return {
+    signal: runtime?.signal ?? context.signal ?? new AbortController().signal,
+    remainingMs: runtime?.remainingMs ?? policyDeadlineMs ?? 60_000,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +156,7 @@ export class PiSdkSessionFactory implements PiSessionFactory {
     input: ProductResearchInput,
     context: ProductResearchContext,
     onSubmission: (submission: TerminalResultSubmission) => void,
+    runtime?: SessionToolRuntime,
   ): Promise<PiSessionHandle> {
     const sdk = await importSdk();
     const policy = context.policy;
@@ -187,8 +214,7 @@ export class PiSdkSessionFactory implements PiSessionFactory {
       workspacePath: context.workspacePath,
       allowedTools: policy.researchTools,
       policy,
-      signal: context.signal ?? new AbortController().signal,
-      remainingMs: policy.deadlineMs,
+      ...resolveToolRuntime(context, runtime, policy.deadlineMs),
     });
     if (researchTools && researchTools.length > 0) {
       customToolNames.push(...researchTools.map((tool) => tool.name));

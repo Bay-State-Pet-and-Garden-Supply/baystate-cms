@@ -11,7 +11,7 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { createPiRun, getPiRun, getPiResult, insertPiAsset, insertPiSource, listPiAssetsByRun, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, getPiRun, getPiResult, insertPiAsset, insertPiImageCandidate, insertPiSource, listPiAssetsByRun, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
 import { startProductIntelligenceRun } from '../../product-intelligence/run-service';
 import { buildDefaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
@@ -122,6 +122,21 @@ function seedVerifiedAssetRow(overrides: Record<string, unknown> = {}, runIdOver
     ...(overrides as object),
   });
   return asset.id;
+}
+
+/** Round-9: seed a durable image-candidate record binding an image URL to a
+ *  media-set/entity identity (the join target for supporting-role linkage). */
+function seedCandidateRow(url: string, entityId: string, sourceArtifactId = 'a1'): string {
+  return insertPiImageCandidate({
+    runId: seedRunId(),
+    imageUrl: url,
+    discoveringSourceId: null,
+    sourceArtifactId,
+    sourcePath: 'json_ld.image',
+    extractionMethod: 'json_ld',
+    variantReference: null,
+    entityId,
+  }).id;
 }
 
 function exactMatchBundle(overrides: Record<string, unknown> = {}): ProductResearchBundle {
@@ -687,15 +702,20 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(issues).toContain('not durably linked');
   });
 
-  it('accepts a supporting image sharing the primary discovering page (round-6 P1)', () => {
+  it('accepts a supporting image sharing the primary media-set/entity identity (round-9 P1)', () => {
     const page = 'https://brand.example.com/p/' + GTIN;
     const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page });
     const altId = seedVerifiedAssetRow({
       sourceUrl: 'https://cdn.example.com/alt.jpg',
+      sourceArtifactId: 'a2',
       sourcePageUrl: page,
       exactProductMatch: false,
       exactVariantMatch: null,
     });
+    // Round-9: the same discovering page is PROVENANCE, not product identity —
+    // the supporting image is linked via a shared durable media-set/entity id.
+    seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
+    seedCandidateRow('https://cdn.example.com/alt.jpg', 'PROD-1', 'a2');
     const bundle = exactMatchBundle({
       imageCandidates: [
         validPrimaryImage({ verifiedAssetId: primaryId }),
@@ -705,6 +725,67 @@ describe('PI-4 workflow fixtures through the full stack', () => {
           verifiedAssetId: altId,
           exactProductMatch: false,
           exactVariantMatch: null,
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(true);
+    expect(validation.issues).toEqual([]);
+  });
+
+  it('rejects a supporting image on the same page but a DIFFERENT media-set entity (round-9 P1)', () => {
+    const page = 'https://brand.example.com/p/' + GTIN;
+    // Unique URLs so candidate rows seeded by earlier tests (same memoized
+    // run) cannot satisfy this assertion by accident.
+    const recUrl = 'https://cdn.example.com/rec-alt.jpg';
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page });
+    const altId = seedVerifiedAssetRow({
+      sourceUrl: recUrl,
+      sourceArtifactId: 'a2',
+      sourcePageUrl: page,
+      exactProductMatch: false,
+      exactVariantMatch: null,
+    });
+    // A 'you may also like' recommendation lives on the SAME page but carries
+    // its own media-set entity — identical page is not same-product evidence.
+    seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
+    seedCandidateRow(recUrl, 'REC-99', 'a2');
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({
+          role: 'alternate',
+          url: recUrl,
+          verifiedAssetId: altId,
+          exactProductMatch: false,
+          exactVariantMatch: null,
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.some((issue) => issue.includes('alternate image') && issue.includes('not durably linked to this product'))).toBe(true);
+  });
+
+  it('accepts a supporting image with its own packaging verification (round-9 P1)', () => {
+    const primaryId = seedVerifiedAssetRow({});
+    const altId = seedVerifiedAssetRow({
+      sourceUrl: 'https://cdn.example.com/alt.jpg',
+      sourceArtifactId: 'a2',
+      exactProductMatch: true,
+      exactVariantMatch: true,
+    });
+    // No candidate rows at all — own exact-product verification is itself
+    // the same-product linkage.
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({
+          role: 'alternate',
+          url: 'https://cdn.example.com/alt.jpg',
+          verifiedAssetId: altId,
+          exactProductMatch: true,
+          exactVariantMatch: true,
         }),
       ],
     });
