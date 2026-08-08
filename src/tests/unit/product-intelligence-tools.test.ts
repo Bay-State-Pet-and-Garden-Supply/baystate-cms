@@ -14,7 +14,7 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { createPiRun, transitionPiRunStatus, getPiRun, insertPiSource, listPiSources, listSourceAuthoritiesByRun } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, transitionPiRunStatus, getPiRun, insertPiSource, listPiSources, listSourceAuthoritiesByRun, insertPiAsset, listPiPageArtifactsByRun } from '../../db/repositories/product-intelligence-repo';
 import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { upsertReusePolicy, buildReuseGrantResolver } from '../../db/repositories/pi-reuse-policy-repo';
 import { startProductIntelligenceRun, getPiRunProjection } from '../../product-intelligence/run-service';
@@ -25,6 +25,7 @@ import { taxonomyTools } from '../../product-intelligence/tools/taxonomy-tools';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
 import type { ProductResearchContext, ProductResearchInput, ProductResearchResult } from '../../product-intelligence/contracts';
 import { testPolicy, validBundle } from './product-intelligence/test-helpers';
+import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
 
 const wsId = 'pi-tools-test-workspace';
 
@@ -64,13 +65,14 @@ describe('PiToolRegistry enforcement', () => {
     });
   }
 
-  const toolCtx = (runId: string, overrides: Partial<{ signal: AbortSignal; remainingMs: number; policy: ReturnType<typeof testPolicy> }> = {}) => ({
+  const toolCtx = (runId: string, overrides: Partial<{ signal: AbortSignal; remainingMs: number; deadlineAt: number | null; policy: ReturnType<typeof testPolicy> }> = {}) => ({
     runId,
     workspaceId: wsId,
     workspacePath: '/tmp/pi-tools-workspace',
     policy: overrides.policy ?? testPolicy(),
     signal: overrides.signal ?? new AbortController().signal,
     remainingMs: overrides.remainingMs ?? 60_000,
+    deadlineAt: overrides.deadlineAt === undefined ? null : overrides.deadlineAt,
   });
 
   it('exposes every registered tool under a stable name and version', () => {
@@ -236,9 +238,98 @@ describe('PiToolRegistry enforcement', () => {
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
-  it('cancels adapters when the caller signal aborts', async () => {
+  it('denies dispatch SYNCHRONOUSLY when the run deadline has already elapsed (round-10 P1)', async () => {
+    // A tool beginning at/after the run deadline is denied before the adapter
+    // starts — session abort and adapter abort must not be different
+    // mechanisms.
     const registry = new PiToolRegistry();
-    const slowAdapter = {
+    let invoked = 0;
+    const counting = {
+      name: 'count_dead',
+      version: '1.0.0',
+      description: 'counts invocations',
+      parameters: { type: 'object', properties: {} } as never,
+      execute: async () => {
+        invoked += 1;
+        return { status: 'ok', data: {}, evidence: [] } as never;
+      },
+    };
+    registry.register(counting);
+    const run = runningRun();
+    const result = await registry.dispatch(counting, {}, toolCtx(run.id, { deadlineAt: Date.now() - 1 }));
+    expect(result.status).toBe('error');
+    expect((result as { status: string; code: string }).code).toBe('timeout');
+    expect(invoked).toBe(0);
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('recomputes the per-call budget from the ABSOLUTE deadline at every dispatch (round-10 P1)', async () => {
+    // Two dispatches of the same tool observe budgets tied to their own
+    // deadlineAt — a value frozen at session creation would ignore the delay.
+    const registry = new PiToolRegistry();
+    const hangAdapter = {
+      name: 'hang_deadline',
+      version: '1.0.0',
+      description: 'hangs',
+      parameters: { type: 'object', properties: {} } as never,
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        return { status: 'ok', data: {}, evidence: [] } as never;
+      },
+    };
+    registry.register(hangAdapter);
+    const run = runningRun();
+
+    const started1 = Date.now();
+    const first = await registry.dispatch(hangAdapter, {}, toolCtx(run.id, { deadlineAt: Date.now() + 120 }));
+    const elapsed1 = Date.now() - started1;
+    expect((first as { status: string; code: string }).code).toBe('timeout');
+    expect(elapsed1).toBeGreaterThanOrEqual(60);
+    expect(elapsed1).toBeLessThan(2_000);
+
+    const started2 = Date.now();
+    const second = await registry.dispatch(hangAdapter, {}, toolCtx(run.id, { deadlineAt: Date.now() + 40 }));
+    const elapsed2 = Date.now() - started2;
+    expect((second as { status: string; code: string }).code).toBe('timeout');
+    // The second dispatch, closer to its deadline, times out sooner.
+    expect(elapsed2).toBeGreaterThanOrEqual(20);
+    expect(elapsed2).toBeLessThan(elapsed1);
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('fires the adapter\'s composed AbortSignal at the run deadline (round-10 P1)', async () => {
+    // The adapter's ctx.signal (caller + per-call timeout composed by the
+    // registry) aborts when the run deadline elapses — an in-flight adapter
+    // is authoritatively cancelled by the deadline, not left running.
+    const registry = new PiToolRegistry();
+    const deadlineAware = {
+      name: 'await_signal',
+      version: '1.0.0',
+      description: 'awaits its signal',
+      parameters: { type: 'object', properties: {} } as never,
+      execute: async (_params: never, callCtx: { signal: AbortSignal }) => {
+        await new Promise((resolve) => {
+          callCtx.signal.addEventListener('abort', () => resolve(undefined), { once: true });
+          setTimeout(resolve, 5_000); // safety
+        });
+        return { status: 'no_result', reason: 'signal fired', evidence: [] } as never;
+      },
+    };
+    registry.register(deadlineAware);
+    const run = runningRun();
+    const started = Date.now();
+    const result = await registry.dispatch(deadlineAware, {}, toolCtx(run.id, { deadlineAt: Date.now() + 80 }));
+    const elapsed = Date.now() - started;
+    expect(result.status).toBe('error');
+    expect((result as { status: string; code: string }).code).toBe('timeout');
+    // Fired at the ~80ms deadline, not the 5s safety or 60s default.
+    expect(elapsed).toBeGreaterThanOrEqual(40);
+    expect(elapsed).toBeLessThan(2_000);
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('cancels adapters when the caller signal aborts', async () => {
+    const registry = new PiToolRegistry();    const slowAdapter = {
       name: 'slow_tool',
       version: '1.0.0',
       description: 'slow',
@@ -300,6 +391,33 @@ describe('PiToolRegistry enforcement', () => {
     if (invalid.status === 'ok') {
       expect((invalid.data as { valid: boolean }).valid).toBe(false);
       expect((invalid.data as { issues: string[] }).issues.length).toBe(2);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('extract_product_page payload advertises the TYPED page_html artifact (round-10 P1-6)', async () => {
+    const html = `<html><head><script type="application/ld+json">{"@type":"Product","name":"Stella Chicken Broth 16 oz","image":"https://cdn.example.com/stella-16oz.jpg"}</script></head><body>Stella Chicken Broth</body></html>`;
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(html, { status: 200, headers: { 'content-type': 'text/html' } }),
+    });
+    const run = runningRun();
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('extract_product_page')!,
+      { url: 'https://brand.example.com/p/stella-broth', gtin: '085000079585' },
+      {
+        ...toolCtx(run.id),
+        gateway,
+        policy: testPolicy({ networkPolicy: 'allowlisted_remote', allowedSourceDomains: [] }),
+      },
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const data = result.data as { artifactId?: string | null; artifactType?: string | null };
+      expect(data.artifactId).toBeTruthy();
+      expect(data.artifactType).toBe('page_html');
+      const retained = listPiPageArtifactsByRun(run.id).find((a) => a.id === data.artifactId);
+      expect(retained?.artifactType).toBe('page_html');
     }
     transitionPiRunStatus(run.id, 'completed', {});
   });
@@ -427,7 +545,7 @@ describe('Fixture agent run using only research tools', () => {
 
 export { taxonomyTools };
 
-describe('Round-9 source authority (brand-matched, first-class records)', () => {
+describe('Round-10 source authority (durable exact-GTIN-resolved brand, brandHint demoted)', () => {
   const testDbPath = path.resolve(import.meta.dirname, 'pi-tools-authority.db');
 
   beforeAll(() => {
@@ -451,16 +569,34 @@ describe('Round-9 source authority (brand-matched, first-class records)', () => 
     try { unlinkSync(testDbPath); } catch { /* ok */ }
   });
 
+  const GTIN = '085000079585';
   const makeRun = (brandHint?: string) =>
     createPiRun({
       workspaceId: wsId,
       mode: 'shadow',
       executor: 'pi',
-      inputJson: JSON.stringify(brandHint ? { gtin: '085000079585', registerName: 'X', brandHint } : { gtin: '085000079585', registerName: 'X' }),
+      inputJson: JSON.stringify(brandHint ? { gtin: GTIN, registerName: 'X', brandHint } : { gtin: GTIN, registerName: 'X' }),
       policyJson: '{}',
       configSnapshotId: 'c',
       configSnapshotHash: 'c',
     }).id;
+
+  /** Seed the DURABLE exact-GTIN-linked evidence the authority rule runs on:
+   *  a verified asset whose observed GTIN equals the run's requested GTIN. */
+  const seedResolvedBrand = (runId: string, brand: string, gtin = GTIN) =>
+    insertPiAsset({
+      runId,
+      sourceUrl: 'https://branda.example.com/p/1',
+      sourceType: 'other',
+      extractionMethod: 'manual',
+      retrievedAt: new Date().toISOString(),
+      originalContentHash: 'evidence-hash',
+      rightsStatus: 'unknown',
+      qualityStatus: 'usable',
+      observedBrand: brand,
+      observedGtin: gtin,
+      exactProductMatch: true,
+    });
 
   const checkPriority = async (runId: string, url: string) =>
     defaultToolRegistry.dispatch(defaultToolRegistry.get('check_source_priority')!, { url }, {
@@ -472,7 +608,7 @@ describe('Round-9 source authority (brand-matched, first-class records)', () => 
       remainingMs: 60_000,
     });
 
-  it('Brand A official domain does not establish manufacturer authority while researching Brand B', async () => {
+  it('Brand A official domain does not establish manufacturer authority while researching Brand B (cross-brand)', async () => {
     upsertBrandSite('BrandA', 'branda.example.com', null);
     const runId = makeRun('BrandB');
     const out = await checkPriority(runId, 'https://branda.example.com/p/1');
@@ -486,9 +622,23 @@ describe('Round-9 source authority (brand-matched, first-class records)', () => 
     transitionPiRunStatus(runId, 'completed', {});
   });
 
-  it('registry brand matching the expected product brand establishes manufacturer authority', async () => {
+  it('brandHint matching the registry brand WITHOUT durable GTIN evidence never establishes authority', async () => {
+    upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandA'); // hint == registry brand, but no evidence
+    const out = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(out.status).toBe('ok');
+    const data = (out as { data?: { tier: string; authorityEstablished?: boolean; reason?: string } }).data!;
+    expect(data.tier).toBe('official'); // display only
+    expect(data.authorityEstablished).toBe(false);
+    expect(data.reason).toMatch(/brand hints are untrusted/);
+    expect(listSourceAuthoritiesByRun(runId).length).toBe(0);
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it('registry brand matching the durable exact-GTIN-resolved product brand establishes manufacturer authority', async () => {
     const brandSiteId = upsertBrandSite('BrandA', 'branda.example.com', null);
     const runId = makeRun('BrandA');
+    seedResolvedBrand(runId, 'BrandA');
     const out = await checkPriority(runId, 'https://branda.example.com/p/1');
     expect(out.status).toBe('ok');
     const data = (out as { data?: { authorityEstablished?: boolean; authorityType?: string } }).data!;
@@ -499,13 +649,54 @@ describe('Round-9 source authority (brand-matched, first-class records)', () => 
     expect(authorities[0].authorityType).toBe('manufacturer');
     expect(authorities[0].brandName).toBe('branda'); // normalized by the registry repo
     expect(authorities[0].authorityRef).toBe(`brand_site:${brandSiteId.id}`);
-    expect(authorities[0].establishedBy).toBe('check_source_priority');
+    expect(authorities[0].establishedBy).toBe('check_source_priority:resolved_brand');
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it('resolved product brand differing from the registry brand never establishes authority', async () => {
+    upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandA'); // hint matches, but durable evidence says otherwise
+    seedResolvedBrand(runId, 'BrandB');
+    const out = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(out.status).toBe('ok');
+    const data = (out as { data?: { authorityEstablished?: boolean; reason?: string } }).data!;
+    expect(data.authorityEstablished).toBe(false);
+    expect(data.reason).toMatch(/does not match the durable resolved product brand/);
+    expect(listSourceAuthoritiesByRun(runId).length).toBe(0);
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it('ambiguous resolved brands (two distinct durable brands) fail closed with no authority', async () => {
+    upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandA');
+    seedResolvedBrand(runId, 'BrandA');
+    seedResolvedBrand(runId, 'BrandB');
+    const out = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(out.status).toBe('ok');
+    const data = (out as { data?: { authorityEstablished?: boolean } }).data!;
+    expect(data.authorityEstablished).toBe(false);
+    expect(listSourceAuthoritiesByRun(runId).length).toBe(0);
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it('an absent brandHint does NOT block authority when the durable resolved brand matches the registry', async () => {
+    upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun(); // NO brandHint at all
+    seedResolvedBrand(runId, 'BrandA');
+    const out = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(out.status).toBe('ok');
+    const data = (out as { data?: { authorityEstablished?: boolean } }).data!;
+    expect(data.authorityEstablished).toBe(true);
+    const authorities = listSourceAuthoritiesByRun(runId);
+    expect(authorities.length).toBe(1);
+    expect(authorities[0].authorityType).toBe('manufacturer');
     transitionPiRunStatus(runId, 'completed', {});
   });
 
   it('first-writer regression: an existing neutral source row is UPGRADED to the authority tier', async () => {
     const brandSiteId = upsertBrandSite('BrandA', 'branda.example.com', null);
     const runId = makeRun('BrandA');
+    seedResolvedBrand(runId, 'BrandA');
     // A search tool created the source row FIRST with the neutral tier.
     const source = insertPiSource({
       runId,
@@ -515,7 +706,7 @@ describe('Round-9 source authority (brand-matched, first-class records)', () => 
     });
     // The reuse grant exists for the manufacturer tier.
     upsertReusePolicy({ workspaceId: wsId, sourceTier: 'manufacturer', domainPattern: 'branda.example.com', allowed: true, terms: 'authorized' });
-    // Brand-matched authority comes later and must WIN (no first-writer bug).
+    // Evidence-resolved authority comes later and must WIN (no first-writer bug).
     const out = await checkPriority(runId, 'https://branda.example.com/p/1');
     expect(out.status).toBe('ok');
     const upgraded = listPiSources(runId).find((row) => row.id === source.id);
@@ -536,4 +727,5 @@ describe('Round-9 source authority (brand-matched, first-class records)', () => 
     const grantForNeutral = buildReuseGrantResolver(wsId)('other', 'anything.example.com');
     expect(grantForNeutral).toBeNull();
   });
+
 });

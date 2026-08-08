@@ -69,12 +69,16 @@ interface LazyAssetRow {
   conflictsJson: string;
   /** Round-4: canonical identity hash the asset was verified against. */
   verifiedAgainstHash: string | null;
+  /** Round-10 (review P1): EXACT FK to the pi_image_candidates row this
+   *  asset was verified from (same-run enforced at write time by trigger).
+   *  Null when the asset predates round-10 or was verified without a
+   *  candidate — supporting-role linkage fails closed on it. */
+  candidateId: string | null;
 }
 
 let _assetRepo: {
   getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
   getPiRun: (runId: string) => { inputJson: string } | undefined;
-  listPiImageCandidatesByRun: (runId: string) => LazyImageCandidateRow[];
 } | undefined;
 
 const lazyRequire = createRequire(import.meta.url);
@@ -82,65 +86,36 @@ const lazyRequire = createRequire(import.meta.url);
 function loadAssetRepo(): {
   getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
   getPiRun: (runId: string) => { inputJson: string } | undefined;
-  listPiImageCandidatesByRun: (runId: string) => LazyImageCandidateRow[];
 } {
   if (!_assetRepo) {
     try {
       const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
       if (!conn.isDbInitialized?.()) {
-        _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined, listPiImageCandidatesByRun: () => [] };
+        _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
         return _assetRepo;
       }
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined, listPiImageCandidatesByRun: () => [] };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
       return _assetRepo;
     }
     try {
       _assetRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _assetRepo>;
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined, listPiImageCandidatesByRun: () => [] };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
     }
   }
   return _assetRepo;
 }
 
-interface LazyImageCandidateRow {
-  id: string;
-  runId: string;
-  imageUrl: string;
-  discoveringSourceId: string | null;
-  sourceArtifactId: string | null;
-  sourcePath: string | null;
-  extractionMethod: string | null;
-  variantReference: string | null;
-  entityId: string | null;
-  createdAt: string;
-}
-
-/**
- * Round-9 (review P1): resolve the durable media-set/entity identity of an
- * asset from its candidate record (join by image URL + artifact id). Returns
- * null when the candidate cannot be resolved — the linkage fails closed.
- */
-function candidateEntityIdOf(
-  runId: string | null | undefined,
-  asset: { sourceUrl: string; sourceArtifactId?: string | null } | null | undefined,
-): string | null {
-  if (!runId || !asset) return null;
-  try {
-    const candidates = loadAssetRepo().listPiImageCandidatesByRun(runId);
-    const matched =
-      candidates.find(
-        (c) =>
-          c.imageUrl === asset.sourceUrl &&
-          (asset.sourceArtifactId == null || asset.sourceArtifactId === '' || c.sourceArtifactId === asset.sourceArtifactId),
-      ) ??
-      candidates.find((c) => c.imageUrl === asset.sourceUrl);
-    const entityId = matched?.entityId ?? null;
-    return entityId && entityId.length > 0 ? entityId : null;
-  } catch {
-    return null;
-  }
+/** Round-10 (review P1): the asset's EXACT candidate FK — the pi_image_candidates
+ *  row it was verified from (same-run enforced by the migration trigger at
+ *  write time). Returns null when the asset carries no candidate linkage;
+ *  the supporting-role linkage FAILS CLOSED on a missing FK — the round-9
+ *  heuristic (search candidates by image URL / artifact id) is gone: URL
+ *  similarity can never reconstruct product relationship. */
+function candidateIdOf(asset: { candidateId?: string | null } | null | undefined): string | null {
+  const id = asset?.candidateId;
+  return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
 function parseConflicts(conflictsJson: string | null): string[] {
@@ -348,22 +323,26 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
         const primaryRows = assetRepo.getPiAssetsByIds([primaryCandidate.verifiedAssetId]);
         if (primaryRows.length > 0) primaryAsset = primaryRows[0];
       }
-      // Round-9 (review P1): 'same discovering page' is PROVENANCE, not
+      // Round-9/10 (review P1): 'same discovering page' is PROVENANCE, not
       // product identity. A supporting image is durably linked to the same
       // product only when (a) it matches the product/variant exactly, or
-      // (b) its candidate record shares the SAME media-set/entity identity
-      // (SKU/productId/@id/variation id) as the primary's candidate record.
-      // Identical sourcePageUrl alone never suffices; an unresolvable
-      // candidate join fails closed.
+      // (b) it was verified from the SAME candidate row as the primary image
+      // (exact asset.candidate_id FK equality — a shared candidate row IS the
+      // same media-set/entity by construction). Round-10: the round-9
+      // heuristic join (candidates by image URL/artifact similarity) is
+      // removed — different candidate ids with identical URLs/pages/entities
+      // NEVER link, and a missing FK fails closed. No URL or entity-string
+      // reconstruction is ever consulted.
       const entityLinkage =
         !!primaryAsset &&
-        candidateEntityIdOf(runId, primaryAsset) !== null &&
-        candidateEntityIdOf(runId, primaryAsset) === candidateEntityIdOf(runId, verified);
+        candidateIdOf(primaryAsset) !== null &&
+        candidateIdOf(verified) !== null &&
+        candidateIdOf(primaryAsset) === candidateIdOf(verified);
       const sameProductLinkage =
         !!verified.exactProductMatch || verified.exactVariantMatch === 1 || entityLinkage;
       if (!sameProductLinkage) {
         issues.push(
-          `${role} image ${image.url} verified asset is not durably linked to this product (no exact product/variant match and no shared media-set/entity identity with the primary image; same discovering page alone is not same-product evidence)`,
+          `${role} image ${image.url} verified asset is not durably linked to this product (no exact product/variant match and no shared verified candidate row with the primary image — asset.candidate_id FK mismatch or missing FK; same discovering page alone is not same-product evidence)`,
         );
       }
       if (verified.qualityStatus === 'invalid') {

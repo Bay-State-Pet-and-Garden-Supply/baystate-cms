@@ -257,6 +257,12 @@ function sourceTypeOfKind(kind: string | null | undefined): string {
     case 'gtin_evidence':
       return 'other';
     case 'supplier_evidence':
+      // Round-10 (review cleanup): SUPPLIER is a deliberately separate
+      // trusted authority path — supplier_evidence derives from pre-existing
+      // CMS supplier records (product_suppliers), not from an evidence kind
+      // minting authority. Manufacturer/registry authority exists ONLY
+      // through pi_source_authorities (round-9); supplier tier is defined
+      // here as the second trusted path, documented in the ADR risk register.
       return 'supplier';
     case 'retailer_corroboration':
       return 'retailer';

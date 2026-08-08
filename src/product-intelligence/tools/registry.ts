@@ -32,6 +32,11 @@ export interface SessionToolContext {
   policy: ProductIntelligencePolicy;
   signal: AbortSignal;
   remainingMs: number;
+  /** Round-10 (review P1): absolute epoch-ms deadline (run deadline when a
+   *  workspace cap or policy deadline exists); null means unbounded. When
+   *  present, remaining time is recomputed PER INVOCATION from this — never
+   *  a value frozen at session creation. */
+  deadlineAt?: number | null;
 }
 
 export interface ResearchToolDefinition {
@@ -114,13 +119,20 @@ export class PiToolRegistry {
       promptGuidelines: adapter.promptGuidelines ?? [],
       parameters: adapter.parameters,
       execute: async (_toolCallId: string, rawParams: unknown) => {
+        // Round-10 (review P1): remaining time is recomputed at EVERY tool
+        // invocation from the absolute deadline — a tool starting near the end
+        // of the run inherits a near-zero budget instead of a value frozen at
+        // session creation.
+        const remainingMs =
+          ctx.deadlineAt != null ? Math.max(0, ctx.deadlineAt - Date.now()) : ctx.remainingMs;
         const result = await this.dispatch(adapter, rawParams, {
           runId: ctx.runId,
           workspaceId: ctx.workspaceId,
           workspacePath: ctx.workspacePath,
           policy: ctx.policy,
           signal: ctx.signal,
-          remainingMs: ctx.remainingMs,
+          remainingMs,
+          deadlineAt: ctx.deadlineAt,
         });
         return {
           content: [{ type: 'text', text: serializeToolResult(result) }],
@@ -149,6 +161,19 @@ export class PiToolRegistry {
       return policyDenied(`Run ${ctx.runId} is ${run.status}; tools are only callable while running`);
     }
 
+    // 1.5. Run deadline (round-10 review P1): when an absolute deadline is
+    //      present, recompute the remaining budget HERE, at dispatch time.
+    //      A tool beginning at or after the run deadline is denied
+    //      SYNCHRONOUSLY before the adapter starts — a session abort must not
+    //      be a different mechanism from an adapter abort.
+    const effectiveRemainingMs =
+      ctx.deadlineAt != null
+        ? Math.max(0, ctx.deadlineAt - Date.now())
+        : (ctx.remainingMs ?? this.options.callTimeoutMs ?? 60_000);
+    if (ctx.deadlineAt != null && effectiveRemainingMs <= 0) {
+      return errorResult('timeout', 'Run deadline elapsed before tool dispatch');
+    }
+
     // 2. Request budget — policy.authoritative (round-9 review P1): the
     //    IMMUTABLE policy maxToolCalls is the authority at the adapter
     //    boundary, rejected synchronously before the adapter starts; the
@@ -168,8 +193,12 @@ export class PiToolRegistry {
       return errorResult('invalid_params', parsed.message);
     }
 
-    // 4. Timeout + cancellation.
-    const timeoutMs = Math.max(1, Math.min(this.options.callTimeoutMs ?? ctx.remainingMs, ctx.remainingMs));
+    // 4. Timeout + cancellation. remainingMs was recomputed at dispatch time
+    //    from the absolute deadline (step 1.5); the per-call timeout is bounded
+    //    by it. The adapter receives the COMPOSED signal (caller + per-call
+    //    timeout), so a run-deadline abort and a caller abort reach the
+    //    adapter through the same mechanism.
+    const timeoutMs = Math.max(1, Math.min(this.options.callTimeoutMs ?? effectiveRemainingMs, effectiveRemainingMs));
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const composed = AbortSignal.any([ctx.signal, timeoutSignal]);
     const callCtx: PiToolContext = { ...ctx, signal: composed, remainingMs: timeoutMs };
@@ -184,8 +213,8 @@ export class PiToolRegistry {
         ),
       ]);
     } catch (error) {
-      if (ctx.signal.aborted) return policyDenied('cancelled by caller');
       if (timeoutSignal.aborted) return errorResult('timeout', `Tool ${adapter.name} exceeded ${timeoutMs}ms`);
+      if (ctx.signal.aborted) return policyDenied('cancelled by caller');
       return errorResult('adapter_error', error instanceof Error ? error.message : String(error));
     }
   }

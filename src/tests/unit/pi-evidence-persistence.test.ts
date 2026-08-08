@@ -19,11 +19,15 @@ import {
   listPiEvidence,
   listPiEvidenceByToolEvidenceId,
   listPiSources,
+  listPiPageArtifactsByRun,
   transitionPiRunStatus,
 } from '../../db/repositories/product-intelligence-repo';
 import { PersistingExecutionEventSink, persistToolEvidence, replayPiRun } from '../../product-intelligence/run-service';
 import { buildDefaultPiPolicy } from '../../product-intelligence/run-service';
 import type { ProductIntelligencePolicy } from '../../product-intelligence/contracts';
+import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
+import { defaultToolRegistry } from '../../product-intelligence/tools';
+import { testPolicy } from './product-intelligence/test-helpers';
 
 const workspaceId = 'ws-pi-evidence-test';
 
@@ -375,5 +379,41 @@ describe('PI per-tool evidence persistence (smoke finding A)', () => {
     expect(JSON.parse(byField['size'].valueJson)).toBe('4 oz');
     // Both rows share one deduped source row for the image URL.
     expect(listPiSources(runId)).toHaveLength(1);
+  });
+
+  it('extract_product_page retains a TYPED page_html artifact (round-10 P1-6)', async () => {
+    const html = `<html><head><script type="application/ld+json">{"@type":"Product","name":"Stella Chicken Broth 16 oz","image":"https://cdn.example.com/stella-16oz.jpg","offers":{"price":"8.99","priceCurrency":"USD"}}</script></head><body>Stella Chicken Broth</body></html>`;
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(html, { status: 200, headers: { 'content-type': 'text/html' } }),
+    });
+    const runId = makeRun();
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('extract_product_page')!,
+      { url: 'https://brand.example.com/p/stella-broth', gtin: '085000079585', expectedName: 'STELLA CHKN BROTH 16OZ' },
+      {
+        runId,
+        workspaceId,
+        workspacePath: '/tmp/pi-tools-workspace',
+        policy: testPolicy({ networkPolicy: 'allowlisted_remote', allowedSourceDomains: [] }),
+        gateway,
+        signal: new AbortController().signal,
+        remainingMs: 60_000,
+      },
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const data = result.data as { artifactId?: string | null; artifactType?: string | null; contentHash?: string | null };
+      // The payload carries the typed artifact reference.
+      expect(data.artifactId).toBeTruthy();
+      expect(data.artifactType).toBe('page_html');
+      // The retained row is TYPED page_html (not an untyped default).
+      const retained = listPiPageArtifactsByRun(runId).find((a) => a.id === data.artifactId);
+      expect(retained).toBeTruthy();
+      expect(retained?.artifactType).toBe('page_html');
+      expect(retained?.content).toBe(html);
+      expect(retained?.contentHash ?? null).toBe(data.contentHash ?? null);
+    }
+    transitionPiRunStatus(runId, 'completed', {});
   });
 });

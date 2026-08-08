@@ -200,9 +200,10 @@ function trustedOfficialDomain(domain: string): { official: boolean; brandName?:
   }
 }
 
-/** Round-9 (review P0): the run's expected brand (from the operator's brandHint),
- *  normalized. Returns null when unknown. Lazy + fail-closed so this module
- *  stays vitest-importable. */
+/** Round-9 (review P0): the run's expected brand hint (from the operator's
+ *  brandHint), normalized. Round-10: DISPLAY-ONLY context — brand hints are
+ *  untrusted search hints and NEVER establish authority (see loadResolvedBrand).
+ *  Lazy + fail-closed so this module stays vitest-importable. */
 function loadExpectedBrand(runId: string): string | null {
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
@@ -215,6 +216,31 @@ function loadExpectedBrand(runId: string): string | null {
     const input = JSON.parse(run.inputJson) as { brandHint?: unknown };
     if (typeof input.brandHint !== 'string' || !input.brandHint.trim()) return null;
     return input.brandHint.trim().toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/** Round-10 (review P0): the product brand resolved from DURABLE exact-GTIN
+ *  evidence — verified assets (exact_product_match = 1) whose observed GTIN
+ *  equals the run's requested GTIN. The untrusted brandHint never feeds this.
+ *  Returns null when the brand is unresolved OR ambiguous (multiple distinct
+ *  resolved brands) — both fail closed, so no authority is minted. */
+function loadResolvedBrand(runId: string): string | null {
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) return null;
+    const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
+      getPiRun: (runId: string) => { inputJson?: string } | undefined;
+      listResolvedProductBrands: (runId: string, requestedGtin?: string | null) => string[];
+    };
+    const run = repo.getPiRun(runId);
+    if (!run?.inputJson) return null;
+    const input = JSON.parse(run.inputJson) as { gtin?: unknown };
+    if (typeof input.gtin !== 'string' || !input.gtin.trim()) return null;
+    const brands = repo.listResolvedProductBrands(runId, input.gtin.trim());
+    if (brands.length !== 1) return null;
+    return brands[0];
   } catch {
     return null;
   }
@@ -262,7 +288,7 @@ function establishManufacturerAuthority(runId: string, url: string, brandName: s
       authorityType: 'manufacturer',
       authorityRef: brandSiteId ? `brand_site:${brandSiteId}` : null,
       brandName,
-      establishedBy: 'check_source_priority',
+      establishedBy: 'check_source_priority:resolved_brand',
     });
   } catch {
     // Fail closed: authority establishment is best-effort; absence of a record
@@ -274,7 +300,7 @@ export const checkSourcePriority: PiToolAdapter = {
   name: 'check_source_priority',
   version: '1.0.0',
   description:
-    'Rank a source by authority: only domains in the CMS-managed brand-site registry are official; known retailer domains are retailer corroboration; everything else is unknown. Agent-supplied sourceKind/officialDomains are NEVER authoritative (round-8: they cannot mint manufacturer/supplier authority). Advisory only — the result cannot mint durable source tiers.',
+    'Rank a source by authority: only domains in the CMS-managed brand-site registry are official; known retailer domains are retailer corroboration; everything else is unknown. Agent-supplied sourceKind/officialDomains and the run brandHint are NEVER authoritative (round-10: manufacturer authority is established only when the registry brand matches the product brand resolved from durable exact-GTIN-verified evidence; an unresolved brand leaves the source neutral).',
   parameters: Type.Object({
     url: boundedString(512, 'Source URL'),
     officialDomains: Type.Optional(Type.Array(boundedString(256, 'Official domain'), { maxItems: 10 })),
@@ -294,29 +320,34 @@ export const checkSourcePriority: PiToolAdapter = {
     const isRetailer = KNOWN_RETAILER_DOMAINS.includes(domain);
     const registry = trustedOfficialDomain(domain);
 
-    // Round-9 (review P0): registry-official is DISPLAY-only. Manufacturer
-    // AUTHORITY requires the registry brand to match the run's expected product
-    // brand — an official domain for Brand A researching Brand B never becomes
-    // manufacturer authority. With no expected brand, no authority is
-    // established (fail closed to a neutral source).
-    const expectedBrand = loadExpectedBrand(ctx.runId);
+    // Round-9: registry-official is DISPLAY-only. Round-10 (review P0):
+    // manufacturer AUTHORITY requires the registry brand to match the product
+    // brand resolved from DURABLE exact-GTIN evidence — an official domain for
+    // Brand A researching Brand B (or hint-only Brand A with no evidence) never
+    // becomes manufacturer authority. brandHint is untrusted and may only color
+    // the display reason; with no resolved brand, no authority is established
+    // (fail closed to a neutral source).
+    const resolvedBrand = loadResolvedBrand(ctx.runId);
+    const brandHint = loadExpectedBrand(ctx.runId); // display-only context
     const brandMatch =
       registry.official &&
       typeof registry.brandName === 'string' &&
-      expectedBrand !== null &&
-      registry.brandName.trim().toLowerCase() === expectedBrand;
+      resolvedBrand !== null &&
+      registry.brandName.trim().toLowerCase() === resolvedBrand;
 
     let tier: string;
     let reason: string;
     if (registry.official) {
       tier = 'official';
       if (brandMatch) {
-        reason = `registry brand '${registry.brandName}' matches the expected product brand`;
+        reason = `registry brand '${registry.brandName}' matches the durable exact-GTIN-resolved product brand`;
         establishManufacturerAuthority(ctx.runId, url, registry.brandName as string, registry.brandSiteId);
-      } else if (expectedBrand !== null) {
-        reason = `registry official but brand '${registry.brandName ?? '?'}' does not match expected product brand '${expectedBrand}' (no authority established)`;
+      } else if (resolvedBrand !== null) {
+        reason = `registry official but brand '${registry.brandName ?? '?'}' does not match the durable resolved product brand '${resolvedBrand}' (no authority established)`;
+      } else if (brandHint !== null && typeof registry.brandName === 'string' && registry.brandName.trim().toLowerCase() === brandHint) {
+        reason = `registry official; brandHint '${brandHint}' matches the registry brand but brand hints are untrusted and the product brand is unresolved from durable exact-GTIN evidence (no authority established)`;
       } else {
-        reason = 'registry official but the expected product brand is unknown (no authority established)';
+        reason = 'registry official but the product brand is unresolved from durable exact-GTIN evidence (no authority established)';
       }
     } else if (isRetailer) {
       tier = 'retailer';

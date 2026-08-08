@@ -2136,6 +2136,60 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Round-10 (review P0/P1): run-scoped artifact authority + durable
+  // asset->candidate linkage + typed page artifacts.
+  // - pi_page_artifacts gains artifact_type ('page_html' | 'browser_network_capture').
+  // - Attestation is referentially enforced with a SAME-RUN trigger (a plain
+  //   FK cannot express "artifact must belong to this candidate's run").
+  // - product_intelligence_assets gains candidate_id (exact FK to the
+  //   pi_image_candidates row the asset was verified from), same-run enforced.
+  const artifactColumns = db.query("SELECT name FROM pragma_table_info('pi_page_artifacts') WHERE name = 'artifact_type'").get();
+  if (!artifactColumns) {
+    db.exec("ALTER TABLE pi_page_artifacts ADD COLUMN artifact_type TEXT NOT NULL DEFAULT 'page_html';");
+  }
+  const candidateRunTrigger = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_pi_candidate_attestation_same_run'")
+    .get();
+  if (!candidateRunTrigger) {
+    db.exec(`
+      CREATE TRIGGER trg_pi_candidate_attestation_same_run
+      BEFORE INSERT ON pi_image_candidates
+      WHEN NEW.attestation_artifact_id IS NOT NULL
+      BEGIN
+        SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM pi_page_artifacts WHERE id = NEW.attestation_artifact_id)
+            THEN RAISE(ABORT, 'attestation_artifact_id references a nonexistent pi_page_artifacts row')
+          WHEN (SELECT run_id FROM pi_page_artifacts WHERE id = NEW.attestation_artifact_id) <> NEW.run_id
+            THEN RAISE(ABORT, 'attestation_artifact_id belongs to a different run')
+        END;
+      END;`);
+  }
+  const assetCandidateColumn = db
+    .query("SELECT name FROM pragma_table_info('product_intelligence_assets') WHERE name = 'candidate_id'")
+    .get();
+  if (!assetCandidateColumn) {
+    db.exec('ALTER TABLE product_intelligence_assets ADD COLUMN candidate_id TEXT NULL;');
+  }
+  const assetCandidateTrigger = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_pi_asset_candidate_same_run'")
+    .get();
+  if (!assetCandidateTrigger) {
+    db.exec(`
+      CREATE TRIGGER trg_pi_asset_candidate_same_run
+      BEFORE INSERT ON product_intelligence_assets
+      WHEN NEW.candidate_id IS NOT NULL
+      BEGIN
+        SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM pi_image_candidates WHERE id = NEW.candidate_id)
+            THEN RAISE(ABORT, 'candidate_id references a nonexistent pi_image_candidates row')
+          WHEN (SELECT run_id FROM pi_image_candidates WHERE id = NEW.candidate_id) <> NEW.run_id
+            THEN RAISE(ABORT, 'candidate_id belongs to a different run')
+        END;
+      END;`);
+  }
+  db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('pi_round10_authority_schema_version', '1');");
+  console.log('[Migrations] Pi round-10 authority schema migration complete.');
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

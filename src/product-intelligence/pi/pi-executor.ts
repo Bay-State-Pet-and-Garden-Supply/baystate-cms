@@ -288,16 +288,17 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           parsedInput.data,
           parsedContext.data,
           onSubmission,
-          // Round-9 (review P1): the run's runtime-only execution bounds — the
-          // real AbortSignal (workspace cap + policy deadline composed) and the
-          // EFFECTIVE remaining run time — must reach the research-tool adapters.
-          // The parsed context strips signal by design; passing them here means
-          // an in-flight gateway/browser/OCR adapter is authoritatively
-          // cancelled by the run's signal, and registry timeouts use the
-          // workspace-capped remaining budget, not a fresh policy-duration one.
+          // Round-9/10 (review P1): the run's runtime-only execution bounds —
+          // the COMPOSED AbortSignal (caller + workspace cap + policy deadline
+          // in one signal) and the ABSOLUTE run deadline — must reach the
+          // research-tool adapters. Round-10: we pass `composed`, not the raw
+          // caller signal, so a tool starting near the end of the run aborts
+          // from the run deadline; the registry recomputes remaining time PER
+          // INVOCATION from deadlineAt (never a value frozen at session
+          // creation).
           {
-            signal,
-            remainingMs: Math.max(0, effectiveDeadlineMs - (Date.now() - startedAt)),
+            signal: composed,
+            deadlineAt,
           },
         );
       } catch (error) {

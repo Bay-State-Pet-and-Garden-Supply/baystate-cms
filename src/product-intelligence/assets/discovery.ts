@@ -15,6 +15,94 @@ import type { DiscoveredImageCandidate, NetworkCaptureArtifact } from './schema'
 
 const IMAGE_KEYS = new Set(['image', 'images', 'imageurl', 'featuredimage', 'thumbnail', 'thumbnails', 'productimage', 'primaryimage']);
 
+/** Round-10 (review P1): typed media-set/entity identity. Only
+ *  product/variant-like records may establish one, and only through
+ *  product-scoped platform fields (sku | platform_product_id |
+ *  variation_id). Generic nested id/@id fields NEVER reset product
+ *  identity. */
+export type EntityKind = 'sku' | 'platform_product_id' | 'variation_id';
+
+interface EntityRef {
+  kind: EntityKind;
+  value: string;
+}
+
+/** Compose the durable '{kind}:{value}' form (matches image-tools
+ *  serializeEntityId so the persisted candidate row stores it as-is).
+ *  Sliced to the schema's 256-char cap so a long URL @id never drops the
+ *  whole candidate at zod validation. */
+function composeEntityId(entity: EntityRef | null): string | null {
+  if (!entity) return null;
+  return `${entity.kind}:${entity.value}`.slice(0, 256);
+}
+
+function toIdString(value: unknown): string | null {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+/** Round-10: a record declares a product type when its @type mentions
+ *  Product (schema.org Product / IndividualProduct / ProductModel ...).
+ *  Non-product types (ImageObject, WebPage, Offer, Review, Organization)
+ *  never match. */
+function declaredProductType(record: Record<string, unknown>): boolean {
+  const t = record['@type'];
+  if (typeof t === 'string') return /product/i.test(t);
+  if (Array.isArray(t)) return t.some((x) => typeof x === 'string' && /product/i.test(x));
+  return false;
+}
+
+/** Round-10: a record is product-like when it declares a product @type OR
+ *  carries a name/title PLUS a product signal (price/offers/sku/gtin/
+ *  product-scoped ids/variants). Records that only carry generic identity
+ *  (an @id, an id, a gtin, an mpn) are NOT product-like — a recommendation
+ *  or gallery node never becomes a product entity from a bare id. */
+function isProductLike(record: Record<string, unknown>): boolean {
+  if (declaredProductType(record)) return true;
+  const hasName = firstString(record, ['name', 'title']) !== null;
+  if (!hasName) return false;
+  const productSignals = [
+    'price',
+    'offers',
+    'sku',
+    'gtin',
+    'gtin13',
+    'gtin14',
+    'upc',
+    'mpn',
+    'product_id',
+    'productID',
+    'variation_id',
+    'variants',
+    'itemCondition',
+    'category',
+  ] as const;
+  return productSignals.some((key) => record[key] !== undefined && record[key] !== null);
+}
+
+/** Round-10: the typed entity identity of a record, or null. A product-like
+ *  record's canonical @id/id is the platform product identity (highest
+ *  priority); product-scoped platform fields (variation_id / product_id /
+ *  sku) establish identity by FIELD NAME — their presence is itself a
+ *  product signal. The generic @id/id path is gated behind isProductLike —
+ *  arbitrary nested records with a bare id can no longer reset the inherited
+ *  entity context. gtin/mpn are never entity identity (they identify the
+ *  product, not the media-set). */
+function firstEntityId(record: Record<string, unknown>): EntityRef | null {
+  if (isProductLike(record)) {
+    const id = toIdString(record['@id']) ?? toIdString(record['id']);
+    if (id) return { kind: 'platform_product_id', value: id };
+  }
+  const variationId = toIdString(record['variation_id']);
+  if (variationId) return { kind: 'variation_id', value: variationId };
+  const productId = toIdString(record['product_id'] ?? record['productID']);
+  if (productId) return { kind: 'platform_product_id', value: productId };
+  const sku = toIdString(record['sku']);
+  if (sku) return { kind: 'sku', value: sku };
+  return null;
+}
+
 const SCRIPT_RE = /<script[^>]*>([\s\S]*?)<\/script>/gi;
 
 function isoNow(): string {
@@ -39,7 +127,7 @@ function toCandidate(
   sourceArtifactId: string,
   method: DiscoveredImageCandidate['extractionMethod'],
   variant: { reference: string | null; name: string | null } = { reference: null, name: null },
-  entityId: string | null = null,
+  entity: EntityRef | null = null,
 ): DiscoveredImageCandidate | null {
   if (typeof rawUrl !== 'string') return null;
   const url = absolutize(rawUrl, pageUrl);
@@ -52,7 +140,8 @@ function toCandidate(
     extractionMethod: method,
     variantReference: variant.reference,
     variantName: variant.name,
-    entityId,
+    entityId: composeEntityId(entity),
+    entityKind: entity?.kind ?? null,
     retrievedAt: isoNow(),
   };
 }
@@ -67,7 +156,7 @@ function walkImages(
   out: DiscoveredImageCandidate[],
   depth = 0,
   imageContext = false,
-  entityContext: string | null = null,
+  entityContext: EntityRef | null = null,
 ): void {
   if (depth > 8 || out.length >= 64) return;
   if (Array.isArray(node)) {
@@ -77,13 +166,15 @@ function walkImages(
   if (typeof node !== 'object' || node === null) return;
   const record = node as Record<string, unknown>;
 
-  // Round-9 (review P1): the enclosing product-like object's own identity
-  // (SKU/productId/@id/variation id) becomes the MEDIA-SET/ENTITY context for
-  // every image discovered inside its subtree. A nested recommendation /
-  // cross-sell object carries its own identity and therefore OVERRIDES the
-  // inherited context — recommendation images are never attributed to the
-  // page's main product entity.
-  const recordEntity = firstId(record);
+  // Round-9/10: the enclosing product-like object's own TYPED identity
+  // (sku | platform_product_id | variation_id) becomes the MEDIA-SET/ENTITY
+  // context for every image discovered inside its subtree. A nested
+  // recommendation / cross-sell product record carries its own identity and
+  // therefore OVERRIDES the inherited context — recommendation images are
+  // never attributed to the page's main product entity. Round-10: only
+  // product-like records establish an override; a bare nested id/@id (a
+  // gallery node, a review, a breadcrumb) NEVER resets the inherited entity.
+  const recordEntity = firstEntityId(record);
   const entity = recordEntity ?? entityContext;
 
   // Url-bearing nodes inside an image context: { url } / ImageObject.
@@ -265,7 +356,7 @@ export function parseShopifyVariantImages(html: string, pageUrl: string, retriev
           const candidate = toCandidate(image, pageUrl, 'product.variants[].image.src', artifactId, 'platform_api', {
             reference: variant.id != null ? String(variant.id) : (variant.sku ?? null),
             name: variant.title ?? ([variant.option1, variant.option2, variant.option3].filter(Boolean).join(' ') || null),
-          }, variant.id != null ? String(variant.id) : (variant.sku ?? null));
+          }, variantEntity(variant));
           if (candidate) out.push(candidate);
         }
       }
@@ -306,7 +397,7 @@ export function parseShopifyVariantImages(html: string, pageUrl: string, retriev
         const candidate = toCandidate(src, pageUrl, 'Shopify.ProductVariants[].image', artifactId, 'platform_api', {
           reference: variant.id != null ? String(variant.id) : (variant.sku ?? null),
           name: variant.title ?? ([variant.option1, variant.option2, variant.option3].filter(Boolean).join(' ') || null),
-        }, variant.id != null ? String(variant.id) : (variant.sku ?? null));
+        }, variantEntity(variant));
         if (candidate) out.push(candidate);
       }
     }
@@ -364,7 +455,7 @@ export function parseWooCommerceVariantImages(html: string, pageUrl: string, ret
         const candidate = toCandidate(src, pageUrl, 'variations[].image', artifactId, 'platform_api', {
           reference: reference != null ? String(reference) : null,
           name: wooVariantName(variation.attributes),
-        }, reference != null ? String(reference) : null);
+        }, reference != null ? { kind: 'variation_id', value: String(reference) } : null);
         if (candidate) out.push(candidate);
       }
     }
@@ -390,6 +481,15 @@ function extractWooVariations(node: unknown, out: WooVariation[] = [], depth = 0
     if (value !== null && typeof value === 'object') extractWooVariations(value, out, depth + 1);
   }
   return out;
+}
+
+/** Round-10: Shopify variants are product/variant-like BY CONSTRUCTION — a
+ *  platform variation id establishes a typed 'variation_id' entity; a
+ *  sku-only variant establishes an 'sku' entity. */
+function variantEntity(variant: ShopifyVariant): EntityRef | null {
+  if (variant.id != null) return { kind: 'variation_id', value: String(variant.id) };
+  if (variant.sku != null && variant.sku.length > 0) return { kind: 'sku', value: variant.sku };
+  return null;
 }
 
 function wooVariantName(attributes: WooVariation['attributes']): string | null {

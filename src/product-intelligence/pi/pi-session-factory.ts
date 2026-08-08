@@ -99,13 +99,17 @@ export interface PiSessionHandle {
   dispose(): void;
 }
 
-/** Round-9 (review P1): runtime-only execution bounds threaded from the
- *  executor — the run's AbortSignal (workspace cap + policy deadline composed)
- *  and the effective remaining run time in ms. Deliberately NOT part of
- *  ProductResearchContextSchema (like signal): these are runtime-only. */
+/** Round-9/10 (review P1): runtime-only execution bounds threaded from the
+ *  executor — the run's COMPOSED AbortSignal (workspace cap + policy deadline
+ *  + caller cancellation) and the absolute run deadline in epoch ms.
+ *  Deliberately NOT part of ProductResearchContextSchema (like signal): these
+ *  are runtime-only. remainingMs is kept for back-compat; the registry
+ *  recomputes it PER INVOCATION from deadlineAt when present. */
 export interface SessionToolRuntime {
   signal?: AbortSignal;
   remainingMs?: number;
+  /** Absolute epoch-ms run deadline; null/undefined means unbounded. */
+  deadlineAt?: number | null;
 }
 
 export interface PiSessionFactory {
@@ -117,19 +121,21 @@ export interface PiSessionFactory {
   ): Promise<PiSessionHandle>;
 }
 
-/** Round-9 (review P1): resolve the tool-context execution bounds with
+/** Round-9/10 (review P1): resolve the tool-context execution bounds with
  *  deterministic precedence — explicit runtime (executor-provided) wins over
  *  the context's signal, which wins over a fresh controller; the effective
- *  remaining time falls back to the policy deadline. Pure helper (no SDK),
- *  unit-testable. */
+ *  remaining time falls back to the policy deadline; the absolute deadline
+ *  (when provided) is passed through so the registry recomputes remaining
+ *  time at every invocation. Pure helper (no SDK), unit-testable. */
 export function resolveToolRuntime(
   context: ProductResearchContext,
   runtime: SessionToolRuntime | undefined,
   policyDeadlineMs?: number,
-): { signal: AbortSignal; remainingMs: number } {
+): { signal: AbortSignal; remainingMs: number; deadlineAt: number | null } {
   return {
     signal: runtime?.signal ?? context.signal ?? new AbortController().signal,
     remainingMs: runtime?.remainingMs ?? policyDeadlineMs ?? 60_000,
+    deadlineAt: runtime?.deadlineAt ?? null,
   };
 }
 

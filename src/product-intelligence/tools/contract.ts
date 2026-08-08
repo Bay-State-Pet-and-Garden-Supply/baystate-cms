@@ -39,6 +39,10 @@ export interface PiToolContext {
   signal: AbortSignal;
   /** Milliseconds of run deadline remaining when the call starts. */
   remainingMs: number;
+  /** Round-10 (review P1): absolute epoch-ms run deadline; when present the
+   *  registry recomputes remaining time PER INVOCATION from this instead of
+   *  trusting a value frozen at session creation. */
+  deadlineAt?: number | null;
 }
 
 // ---------------------------------------------------------------------------

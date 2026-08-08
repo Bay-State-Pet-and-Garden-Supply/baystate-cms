@@ -176,7 +176,7 @@ export const verifyImageCandidateTool: PiToolAdapter = {
       // and the server can re-derive identity/rights/quality/commerce-approval
       // from durable fields. Lazy (bun-only): with no DB (vitest) the record
       // returns without a persisted id (fail closed — nothing to cite).
-      const verifiedAssetId = persistVerifiedAsset(ctx.runId, record);
+      const verifiedAssetId = persistVerifiedAsset(ctx.runId, record, candidateId);
       return okResult({ ...record, verifiedAssetId }, [
         {
           id: evidenceId('verify_image_candidate', url),
@@ -201,16 +201,15 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
   version: '2.0.0',
   description:
     'Discover product image candidates from a SERVER-RETAINED page artifact (run extract_product_page first, which returns artifactId). ' +
-    'Loads the artifact bytes server-side (the agent never supplies page content), parses JSON-LD image values, Shopify/WooCommerce embedded variant-image mappings, or a network-capture JSON array, ' +
-    'and creates durable candidate records attested to the artifact. Network-free.',
+    'Loads the artifact bytes server-side (the agent never supplies page content), parses JSON-LD image values or Shopify/WooCommerce embedded variant-image mappings from the retained page HTML, ' +
+    'and creates durable candidate records attested to the artifact. Network-free. Only page_html artifacts are retained today — network captures are not yet a supported artifact type.',
   parameters: Type.Object({
-    artifactId: boundedString(256, 'Durable page artifact id (from extract_product_page)'),
+    artifactId: boundedString(256, 'Durable page artifact id (from extract_product_page, in THIS run)'),
     sourceType: Type.Optional(
       Type.Union([
         Type.Literal('json_ld'),
         Type.Literal('shopify'),
         Type.Literal('woocommerce'),
-        Type.Literal('network_capture'),
       ]),
     ),
   }),
@@ -221,13 +220,28 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
     // originate from a SERVER-RETAINED artifact. No agent-supplied content or
     // pageUrl can influence provenance — the artifact record (bytes + hash +
     // url) is the attestation. Fabricated content never reaches this path.
-    const artifact = loadArtifactById(artifactId);
+    // Round-10 (review P0): artifact lookup is scoped to the CURRENT run —
+    // possession of an artifact UUID from another run/workspace is never
+    // authorization to load its retained content or mint rows in this run.
+    const artifact = loadArtifactForRun(ctx.runId, artifactId);
     if (!artifact) {
-      return noResult(`artifact not found for id ${artifactId.slice(0, 24)} (run extract_product_page first)`);
+      return noResult(`artifact not found for id ${artifactId.slice(0, 24)} in this run (run extract_product_page in THIS run first)`);
+    }
+    // Round-10 (review P1): TYPED artifacts. Only page_html is retained at
+    // the fetch seam today; a browser/network-capture artifact is not a real
+    // retained path yet — JSON.parse()-ing page HTML as a network capture
+    // would silently produce nothing. Fail closed with an honest message.
+    if (artifact.artifactType !== 'page_html') {
+      return noResult(`artifact type '${artifact.artifactType}' is not yet a supported discovery source — only page_html artifacts are retained today (run extract_product_page)`);
     }
     const pageUrl = artifact.url;
     const content = artifact.content;
     const parserType = sourceType ?? inferArtifactSourceType(content);
+    // network_capture is no longer an advertised live path (no retained
+    // artifact backs it); an explicit hint is refused, never parsed.
+    if (parserType === 'network_capture') {
+      return noResult('captured network responses are not yet retained as durable artifacts — only page_html is retained (run extract_product_page); no network_capture candidates exist');
+    }
     try {
       const candidates: DiscoveredImageCandidate[] = discoverCandidates(parserType as DiscoveredImageCandidate['extractionMethod'], content, pageUrl, artifact.createdAt);
       if (candidates.length === 0) {
@@ -261,7 +275,11 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
               sourcePath: candidate.sourcePath ?? null,
               extractionMethod: candidate.extractionMethod ?? null,
               variantReference: candidate.variantReference ?? null,
-              entityId: candidate.entityId ?? null,
+              // Round-10 (review P1): typed entity identity — '{kind}:{value}'
+              // when the parser declares a kind, raw id otherwise (never
+              // fabricated).
+              entityId: serializeEntityId(candidate),
+              // Round-9 (P1-5): attestation comes from the artifact ROW only.
               attestationArtifactId: artifact.id,
               attestedContentHash: artifact.contentHash,
             }).id,
@@ -313,6 +331,16 @@ interface LazySourceRow {
   sourceType?: string | null;
 }
 
+/** Round-10 (review P0/P1): server-retained page artifact row (run-scoped). */
+interface LazyArtifactRow {
+  id: string;
+  url: string;
+  contentHash: string;
+  content: string;
+  artifactType?: string | null;
+  createdAt?: string | null;
+}
+
 /** Round-7: durable server-created image-candidate record. */
 interface LazyCandidateRow {
   id: string;
@@ -334,7 +362,7 @@ let _evidenceRepo:
       listPiEvidence: (runId: string) => LazyEvidenceRow[];
       listPiSources: (runId: string) => LazySourceRow[];
       listPiEvidenceByToolEvidenceId: (runId: string, toolEvidenceIds: string[]) => LazyEvidenceRow[];
-      getPiPageArtifact: (id: string) => { id: string; url: string; contentHash: string; content: string; createdAt: string | null } | undefined;
+      getPiPageArtifactForRun: (runId: string, id: string) => LazyArtifactRow | undefined;
     }
   | undefined;
 
@@ -342,7 +370,7 @@ function loadEvidenceRepo(): {
   listPiEvidence: (runId: string) => LazyEvidenceRow[];
   listPiSources: (runId: string) => LazySourceRow[];
   listPiEvidenceByToolEvidenceId: (runId: string, toolEvidenceIds: string[]) => LazyEvidenceRow[];
-  getPiPageArtifact: (id: string) => { id: string; url: string; contentHash: string; content: string; createdAt: string | null } | undefined;
+  getPiPageArtifactForRun: (runId: string, id: string) => LazyArtifactRow | undefined;
 } {
   if (!_evidenceRepo) {
     try {
@@ -354,7 +382,7 @@ function loadEvidenceRepo(): {
           listPiEvidence: () => [],
           listPiSources: () => [],
           listPiEvidenceByToolEvidenceId: () => [],
-          getPiPageArtifact: () => undefined,
+          getPiPageArtifactForRun: () => undefined,
         };
         return _evidenceRepo;
       }
@@ -363,7 +391,7 @@ function loadEvidenceRepo(): {
         listPiEvidence: () => [],
         listPiSources: () => [],
         listPiEvidenceByToolEvidenceId: () => [],
-        getPiPageArtifact: () => undefined,
+        getPiPageArtifactForRun: () => undefined,
       };
       return _evidenceRepo;
     }
@@ -526,21 +554,24 @@ function domainOfUrl(url: string): string {
  *  field entries carry metadata.contentHash = sha256 of the fetched page);
  *  fabricated content can never match a hash the server actually recorded.
  *  No DB / no matching row -> fail closed (never persist a candidate). */
-/** Round-9 (P1-1/P1-5): load a retained page artifact by id (the attestation
- *  for artifact-driven discovery). Lazy + fail-closed — no DB (vitest) or
- *  unknown id returns null, and discovery returns noResult. */
-function loadArtifactById(artifactId: string): { id: string; url: string; contentHash: string; content: string; createdAt: string } | null {
+/** Round-9 (P1-1/P1-5) + Round-10 (review P0): load a retained page artifact
+ *  by id, SCOPED TO THE CURRENT RUN (artifact UUIDs from other runs are not
+ *  authorization — a foreign artifact can never mint rows in this run).
+ *  Lazy + fail-closed — no DB (vitest) or unknown/foreign id returns null,
+ *  and discovery returns noResult. */
+function loadArtifactForRun(runId: string, artifactId: string): { id: string; url: string; contentHash: string; content: string; artifactType: string; createdAt: string } | null {
   if (!artifactId) return null;
   try {
     const repo = loadEvidenceRepo();
     if (!repo) return null;
-    const artifact = repo.getPiPageArtifact?.(artifactId);
+    const artifact = repo.getPiPageArtifactForRun(runId, artifactId);
     if (!artifact) return null;
     return {
       id: artifact.id,
       url: artifact.url,
       contentHash: artifact.contentHash,
       content: artifact.content,
+      artifactType: artifact.artifactType ?? 'page_html',
       createdAt: artifact.createdAt ?? '',
     };
   } catch {
@@ -548,15 +579,30 @@ function loadArtifactById(artifactId: string): { id: string; url: string; conten
   }
 }
 
+/** Round-10 (review P1): serialize the typed entity identity from the
+ *  parser output. When the parser declares a kind (sku | platform_product_id
+ *  | variation_id) the durable form is '{kind}:{value}'; without a kind the
+ *  parser's raw id is preserved as-is. A kind is NEVER fabricated. */
+function serializeEntityId(candidate: DiscoveredImageCandidate): string | null {
+  const raw = candidate.entityId;
+  if (!raw) return null;
+  const kind = candidate.entityKind;
+  if (!kind) return raw;
+  const prefix = `${kind}:`;
+  return raw.startsWith(prefix) ? raw : `${prefix}${raw}`;
+}
+
 /** Round-9 (P1-1): infer the parser type from the retained artifact's content
  *  shape when the caller does not supply a sourceType hint. A hint is never
- *  provenance — it only selects which parser walks the server-retained bytes. */
+ *  provenance — it only selects which parser walks the server-retained bytes.
+ *  Round-10: network_capture is deliberately NOT inferable here — page_html
+ *  artifacts are never a captured network-response JSON array. */
 function inferArtifactSourceType(content: string): string {
   const trimmed = content.trimStart();
   if (/ld\+json|"@type"\s*:/.test(content)) return 'json_ld';
   if (/Shopify\.ProductVariants|"variants"\s*:.*"handle"|shopify/i.test(content)) return 'shopify';
   if (/"variations"|woocommerce/i.test(content)) return 'woocommerce';
-  if (trimmed.startsWith('[') || /"url"\s*:.*"method"|networkResponse/i.test(content)) return 'network_capture';
+  void trimmed;
   return 'json_ld';
 }
 
@@ -673,8 +719,11 @@ function loadSourceRows(runId: string): Array<{ id: string; url: string; sourceT
  *  resolved sourceType/rights relationship comes from the candidate's
  *  discovering source (record.sourceType is candidate-derived after the
  *  resolver reorder), never from whatever tier this audit row happens to
- *  carry; the tier-resolver ignores it whenever a candidate exists. */
-function persistVerifiedAsset(runId: string, record: ProductAssetEvidence): string | null {
+ *  carry; the tier-resolver ignores it whenever a candidate exists.
+ *  Round-10 (review P1): the verified asset persists its exact candidate FK
+ *  (same-run enforced by trigger) so supporting-role entity linkage joins by
+ *  candidate_id instead of reconstructing candidates heuristically. */
+function persistVerifiedAsset(runId: string, record: ProductAssetEvidence, candidateId: string | null = null): string | null {
   const store = loadAssetStore();
   if (!store) return null;
   try {
@@ -724,6 +773,7 @@ function persistVerifiedAsset(runId: string, record: ProductAssetEvidence): stri
       verifiedAgainstJson: record.verifiedAgainst ? JSON.stringify(record.verifiedAgainst) : null,
       verifiedAgainstHash: record.verifiedAgainstHash ?? null,
       declaredSourceType: record.declaredSourceType ?? record.sourceType ?? null,
+      candidateId,
     }) as { id: string };
     return asset.id;
   } catch {

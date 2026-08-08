@@ -67,6 +67,24 @@ describe('tool runtime bounds (round-9 P1: cancellation reaches adapters)', () =
     expect(fallback.remainingMs).toBe(300_000);
   });
 
+  it('resolveToolRuntime passes the absolute deadline through for per-invocation recompute (round-10 P1)', () => {
+    // The executor now sends { signal: composed, deadlineAt } — the registry
+    // recomputes remaining time at EVERY invocation from deadlineAt, so the
+    // session factory must not freeze a remainingMs value and must forward
+    // the absolute deadline.
+    const runSignal = new AbortController().signal;
+    const deadlineAt = Date.now() + 5_000;
+    const resolved = resolveToolRuntime(testContext(), { signal: runSignal, deadlineAt }, 300_000);
+    expect(resolved.signal).toBe(runSignal);
+    expect(resolved.deadlineAt).toBe(deadlineAt);
+
+    // No deadlineAt: null (unbounded), and the frozen remainingMs fallback
+    // stays only for that unbounded case (back-compat with old contexts).
+    const unbounded = resolveToolRuntime(testContext(), { signal: runSignal }, 300_000);
+    expect(unbounded.deadlineAt).toBeNull();
+    expect(unbounded.remainingMs).toBe(300_000);
+  });
+
   it('resolveToolRuntime never returns a fresh never-aborted signal when the run was already aborted', () => {
     const controller = new AbortController();
     controller.abort();

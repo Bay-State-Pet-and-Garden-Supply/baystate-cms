@@ -611,6 +611,12 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       expect(record.observationProvenance).toBe('evidence');
       expect(record.exactProductMatch).toBe(true);
       expect(record.commerceApproved).toBe(true);
+      // Round-10 (review P1): the verified asset persists its exact candidate
+      // FK — supporting-role entity linkage joins by candidate_id instead of
+      // reconstructing candidates heuristically.
+      const assetRow = listPiAssetsByRun(run.id).find((a) => a.id === (result.data as { verifiedAssetId?: string | null }).verifiedAssetId);
+      expect(assetRow).toBeTruthy();
+      expect((assetRow as { candidateId?: string | null }).candidateId).toBe(candidateId);
     }
     transitionPiRunStatus(run.id, 'completed', {});
   });
@@ -1021,10 +1027,148 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     expect(record.rightsStatus).toBe('approved');
     transitionPiRunStatus(run.id, 'completed', {});
   });
+
+  describe('PI-6 round-10: run-scoped artifacts, typed artifact gates, exact candidate FK (review P0/P1)', () => {
+
+  it('refuses a FOREIGN-RUN artifact: possession of an artifact UUID is not authorization (round-10 P0)', async () => {
+    const runA = runningRun();
+    const runB = runningRun();
+    const html = `<script>var Shopify = Shopify || {};
+Shopify.ProductVariants = [{"id":123,"title":"16 oz","option1":"16 oz","image_id":456}];
+Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</script>`;
+    // Run A retains its own artifact (in production extract_product_page does
+    // this at the fetch seam).
+    const artifactA = insertPiPageArtifact({
+      runId: runA.id,
+      url: 'https://shop.example.com/products/stella',
+      contentHash: createHash('sha256').update(html).digest('hex'),
+      content: html,
+    });
+    // Run B knows artifact A's UUID. Artifact lookup is run-scoped now — the
+    // foreign id must never mint current-run candidates or a source row.
+    const foreign = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: artifactA.id, sourceType: 'shopify' },
+      toolCtx(runB.id),
+    );
+    expect(foreign.status).toBe('no_result');
+    expect(String((foreign as { reason?: string }).reason ?? '')).toMatch(/in this run/i);
+    expect(listPiImageCandidatesByRun(runB.id)).toHaveLength(0);
+    expect(listPiSources(runB.id).filter((s) => s.url.includes('shop.example.com'))).toHaveLength(0);
+    // Positive proof: the SAME artifact still works from its OWN run.
+    const sameRun = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: artifactA.id, sourceType: 'shopify' },
+      toolCtx(runA.id),
+    );
+    expect(sameRun.status).toBe('ok');
+    if (sameRun.status === 'ok') {
+      const rows = listPiImageCandidatesByRun(runA.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].attestationArtifactId).toBe(artifactA.id);
+      expect(rows[0].attestedContentHash).toBe(artifactA.contentHash);
+    }
+    transitionPiRunStatus(runA.id, 'completed', {});
+    transitionPiRunStatus(runB.id, 'completed', {});
+  });
+
+  it('fails closed on a non-page_html artifact type — network captures are not yet a retained artifact path (round-10 P1)', async () => {
+    const run = runningRun();
+    const capture = JSON.stringify([{ url: 'https://cdn.example.com/x.jpg', method: 'GET', response: { status: 200 } }]);
+    const artifact = insertPiPageArtifact({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      contentHash: createHash('sha256').update(capture).digest('hex'),
+      content: capture,
+      artifactType: 'browser_network_capture',
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: artifact.id },
+      toolCtx(run.id),
+    );
+    expect(result.status).toBe('no_result');
+    expect(String((result as { reason?: string }).reason ?? '')).toMatch(/not yet a supported discovery source/i);
+    // Nothing durable minted — JSON.parse()-ing HTML as a capture would have
+    // silently produced nothing; this fails honestly instead.
+    expect(listPiImageCandidatesByRun(run.id)).toHaveLength(0);
+    expect(listPiSources(run.id).filter((s) => s.url.includes('brand.example.com'))).toHaveLength(0);
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('network_capture is no longer an advertised discovery sourceType (round-10 P1)', async () => {
+    const run = runningRun();
+    const html = '<html><head><script type="application/ld+json">{"@type":"Product","name":"Stella Broth"}</script></head><body>stella</body></html>';
+    const artifact = insertPiPageArtifact({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      contentHash: createHash('sha256').update(html).digest('hex'),
+      content: html,
+    });
+    // The schema no longer advertises network_capture — submitting it is a
+    // schema error, and nothing durable is minted.
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: artifact.id, sourceType: 'network_capture' },
+      toolCtx(run.id),
+    );
+    expect(result.status).toBe('error');
+    expect(listPiImageCandidatesByRun(run.id)).toHaveLength(0);
+    expect(listPiSources(run.id).filter((s) => s.url.includes('brand.example.com'))).toHaveLength(0);
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('persists the typed entity identity on the candidate row (round-10 P1)', async () => {
+    const run = runningRun();
+    const ld = JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'Product',
+      sku: 'SKU-123',
+      name: 'Stella Chicken Broth 16 oz',
+      image: 'https://cdn.example.com/stella.jpg',
+    });
+    const html = `<script type="application/ld+json">${ld}</script>`;
+    const artifact = insertPiPageArtifact({
+      runId: run.id,
+      url: 'https://brand.example.com/p/stella-16oz',
+      contentHash: createHash('sha256').update(html).digest('hex'),
+      content: html,
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: artifact.id },
+      toolCtx(run.id),
+    );
+    expect(result.status).toBe('ok');
+    // The durable candidate row carries the serialized typed entity. The
+    // parser emits a typed kind when it can classify the record; the durable
+    // form is '{kind}:{value}' (never fabricated, raw id preserved when no
+    // kind is declared).
+    const parsed = discoverCandidates('json_ld', html, 'https://brand.example.com/p/stella-16oz');
+    const parsedEntity = parsed[0]?.entityId ?? null;
+    const parsedKind = parsed[0]?.entityKind ?? null;
+    const expectedEntityId =
+      parsedEntity === null
+        ? null
+        : parsedKind
+          ? parsedEntity.startsWith(`${parsedKind}:`)
+            ? parsedEntity
+            : `${parsedKind}:${parsedEntity}`
+          : parsedEntity;
+    const rows = listPiImageCandidatesByRun(run.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].entityId).toBe(expectedEntityId);
+    if (parsedKind) {
+      expect(rows[0].entityId).toMatch(new RegExp(`^${parsedKind}:`));
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
 });
 
-describe('PI-6 discovery parser media-set/entity capture (round-9 P1)', () => {
-  it('tags main-product images with the product entity id', () => {
+});
+
+describe('PI-6 discovery parser media-set/entity capture (round-9 P1, round-10 typed)', () => {
+  it('tags main-product images with the typed product entity id', () => {
     const ld = JSON.stringify({
       '@context': 'https://schema.org',
       '@type': 'Product',
@@ -1034,7 +1178,10 @@ describe('PI-6 discovery parser media-set/entity capture (round-9 P1)', () => {
     });
     const out = discoverCandidates('json_ld', `<script type="application/ld+json">${ld}</script>`, 'https://brand.example.com/p/1');
     const main = out.find((c) => c.url === 'https://cdn.example.com/main.jpg');
-    expect(main?.entityId).toBe('https://brand.example.com/product/MAIN-1');
+    // Round-10: entity identity is TYPED — a declared-product @id is the
+    // platform_product_id, serialized as '{kind}:{value}'.
+    expect(main?.entityKind).toBe('platform_product_id');
+    expect(main?.entityId).toBe('platform_product_id:https://brand.example.com/product/MAIN-1');
   });
 
   it('tags recommendation-nested images with the recommendation entity, not the main product (round-9 P1)', () => {
@@ -1057,10 +1204,12 @@ describe('PI-6 discovery parser media-set/entity capture (round-9 P1)', () => {
     const out = discoverCandidates('json_ld', `<script type="application/ld+json">${ld}</script>`, 'https://brand.example.com/p/1');
     const main = out.find((c) => c.url === 'https://cdn.example.com/main.jpg');
     const rec = out.find((c) => c.url === 'https://cdn.example.com/rec.jpg');
-    expect(main?.entityId).toBe('https://brand.example.com/product/MAIN-1');
+    expect(main?.entityId).toBe('platform_product_id:https://brand.example.com/product/MAIN-1');
     // The nested recommendation carries its OWN identity — it overrides the
-    // inherited main-product context.
-    expect(rec?.entityId).toBe('https://brand.example.com/product/REC-99');
+    // inherited main-product context. Its canonical @id (not its sku) is the
+    // platform product identity.
+    expect(rec?.entityKind).toBe('platform_product_id');
+    expect(rec?.entityId).toBe('platform_product_id:https://brand.example.com/product/REC-99');
   });
 
   it('tags @graph product images independently (round-9 P1)', () => {
@@ -1072,7 +1221,7 @@ describe('PI-6 discovery parser media-set/entity capture (round-9 P1)', () => {
       ],
     });
     const out = discoverCandidates('json_ld', `<script type="application/ld+json">${ld}</script>`, 'https://brand.example.com/p/1');
-    expect(out.find((c) => c.url === 'https://cdn.example.com/main.jpg')?.entityId).toBe('https://brand.example.com/product/MAIN-1');
-    expect(out.find((c) => c.url === 'https://cdn.example.com/rec.jpg')?.entityId).toBe('https://brand.example.com/product/REC-99');
+    expect(out.find((c) => c.url === 'https://cdn.example.com/main.jpg')?.entityId).toBe('platform_product_id:https://brand.example.com/product/MAIN-1');
+    expect(out.find((c) => c.url === 'https://cdn.example.com/rec.jpg')?.entityId).toBe('platform_product_id:https://brand.example.com/product/REC-99');
   });
 });

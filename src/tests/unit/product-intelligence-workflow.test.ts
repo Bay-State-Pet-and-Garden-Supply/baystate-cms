@@ -702,20 +702,22 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(issues).toContain('not durably linked');
   });
 
-  it('accepts a supporting image sharing the primary media-set/entity identity (round-9 P1)', () => {
+  it('accepts a supporting image sharing the primary verified candidate row (round-10 P1)', () => {
     const page = 'https://brand.example.com/p/' + GTIN;
-    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page });
+    // Round-10: same-product linkage is the EXACT candidate FK — the
+    // supporting asset must be verified from the SAME candidate row as the
+    // primary. Different candidate rows with the same entity string never
+    // link anymore (the round-9 entity-string reconstruction is gone).
+    const sharedCandidateId = seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: sharedCandidateId });
     const altId = seedVerifiedAssetRow({
       sourceUrl: 'https://cdn.example.com/alt.jpg',
       sourceArtifactId: 'a2',
       sourcePageUrl: page,
       exactProductMatch: false,
       exactVariantMatch: null,
+      candidateId: sharedCandidateId,
     });
-    // Round-9: the same discovering page is PROVENANCE, not product identity —
-    // the supporting image is linked via a shared durable media-set/entity id.
-    seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
-    seedCandidateRow('https://cdn.example.com/alt.jpg', 'PROD-1', 'a2');
     const bundle = exactMatchBundle({
       imageCandidates: [
         validPrimaryImage({ verifiedAssetId: primaryId }),
@@ -733,29 +735,62 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(validation.issues).toEqual([]);
   });
 
-  it('rejects a supporting image on the same page but a DIFFERENT media-set entity (round-9 P1)', () => {
+  it('rejects a supporting image on the same page from a DIFFERENT candidate row (round-10 P1)', () => {
     const page = 'https://brand.example.com/p/' + GTIN;
     // Unique URLs so candidate rows seeded by earlier tests (same memoized
     // run) cannot satisfy this assertion by accident.
     const recUrl = 'https://cdn.example.com/rec-alt.jpg';
-    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page });
+    // Two distinct candidate rows — even sharing the SAME entity string and
+    // the same page, a different candidate id is NOT the same media-set
+    // relationship; URL/entity similarity never links them.
+    const primaryCandidateId = seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
+    const recCandidateId = seedCandidateRow(recUrl, 'PROD-1', 'a2');
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: primaryCandidateId });
     const altId = seedVerifiedAssetRow({
       sourceUrl: recUrl,
       sourceArtifactId: 'a2',
       sourcePageUrl: page,
       exactProductMatch: false,
       exactVariantMatch: null,
+      candidateId: recCandidateId,
     });
-    // A 'you may also like' recommendation lives on the SAME page but carries
-    // its own media-set entity — identical page is not same-product evidence.
-    seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
-    seedCandidateRow(recUrl, 'REC-99', 'a2');
     const bundle = exactMatchBundle({
       imageCandidates: [
         validPrimaryImage({ verifiedAssetId: primaryId }),
         validPrimaryImage({
           role: 'alternate',
           url: recUrl,
+          verifiedAssetId: altId,
+          exactProductMatch: false,
+          exactVariantMatch: null,
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.some((issue) => issue.includes('alternate image') && issue.includes('not durably linked to this product'))).toBe(true);
+  });
+
+  it('rejects a supporting image with a MISSING candidate FK and no exact match (round-10 P1)', () => {
+    const page = 'https://brand.example.com/p/' + GTIN;
+    // Same page, same entity, but NEITHER asset carries a candidate_id FK
+    // (pre-round-10 assets) and the supporting image has no exact match —
+    // the round-6/9 'same discovering page' path is fully removed: without
+    // the exact FK the linkage fails closed.
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page });
+    const altId = seedVerifiedAssetRow({
+      sourceUrl: 'https://cdn.example.com/alt.jpg',
+      sourceArtifactId: 'a2',
+      sourcePageUrl: page,
+      exactProductMatch: false,
+      exactVariantMatch: null,
+    });
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({
+          role: 'alternate',
+          url: 'https://cdn.example.com/alt.jpg',
           verifiedAssetId: altId,
           exactProductMatch: false,
           exactVariantMatch: null,

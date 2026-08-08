@@ -205,8 +205,14 @@ export const defaultPageExtractionContract: PageExtractionContract = createLadde
  * the adapter keeps working, discovery simply finds nothing to load).
  */
 let _artifactRepo: {
-  insertPiPageArtifact: (input: { runId: string; url: string; contentHash: string; content: string }) => { id: string };
-  listPiPageArtifactsByRun: (runId: string) => Array<{ id: string; url: string; contentHash: string }>;
+  insertPiPageArtifact: (input: {
+    runId: string;
+    url: string;
+    contentHash: string;
+    content: string;
+    artifactType?: string;
+  }) => { id: string };
+  listPiPageArtifactsByRun: (runId: string) => Array<{ id: string; url: string; contentHash: string; artifactType?: string }>;
 } | null | undefined = undefined;
 function loadArtifactRepo(): NonNullable<typeof _artifactRepo> | null {
   if (_artifactRepo !== undefined) return _artifactRepo ?? null;
@@ -229,14 +235,17 @@ function loadArtifactRepo(): NonNullable<typeof _artifactRepo> | null {
   }
 }
 
-/** Persist the fetched page bytes as a durable artifact (bounded, fail-closed). */
-function persistPageArtifact(runId: string, url: string, html: string, contentHash: string): void {
+/** Persist the fetched page bytes as a durable, TYPED artifact (bounded,
+ *  fail-closed). Round-10 (P1-6): the type is explicit at the seam — fetched
+ *  page HTML is retained as 'page_html'. No other artifact type is produced
+ *  here yet (see the browser-capture note in gatewayBoundLadderOptions). */
+function persistPageArtifact(runId: string, url: string, html: string, contentHash: string, artifactType = 'page_html'): void {
   try {
     const repo = loadArtifactRepo();
     if (!repo?.insertPiPageArtifact) return;
     // The repo enforces the 2MB cap (throws); a too-large page simply means
     // no artifact id — artifact-driven discovery is unavailable for it, by design.
-    repo.insertPiPageArtifact({ runId, url, contentHash, content: html });
+    repo.insertPiPageArtifact({ runId, url, contentHash, content: html, artifactType });
   } catch {
     // fail closed: no artifact, no artifactId, discovery can't run for it
   }
@@ -286,7 +295,15 @@ function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
     // agent never supplies artifact bytes. Persisted here at the actual fetch
     // seam (lazy, fail-closed: no DB in vitest means no artifact id, which is
     // fine — discovery just has nothing to load).
-    persistPageArtifact(ctx.runId, response.url || url, html, sha256Hex(html));
+    // Round-10 (P1-6): retained as TYPED artifact 'page_html'. The ladder's
+    // rendered/browser path that could capture network responses (src/
+    // product-intelligence/extraction/browser.ts) is NOT wired to retention
+    // yet — no durable 'browser_network_capture' artifact exists, so
+    // discover_image_candidates stays page_html-only. When a browser
+    // network-capture path is added, it should persist here with
+    // artifactType 'browser_network_capture' (same bounded, fail-closed
+    // persistPageArtifact). NOT IMPLEMENTED — by design, fail-closed.
+    persistPageArtifact(ctx.runId, response.url || url, html, sha256Hex(html), 'page_html');
     return { html, finalUrl: response.url || url, status: response.status, contentHash: sha256Hex(html) };
   };
   options.fetchShopify = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<ShopifyProductJson> => {
@@ -390,6 +407,8 @@ function buildExtractProductPage(contract: PageExtractionContract): PiToolAdapte
             // discover_image_candidates({ artifactId }) loads the retained
             // bytes server-side; the agent never supplies artifact content.
             artifactId: pageArtifactIdForRun(ctx.runId, result.finalUrl, result.contentHash),
+            // Round-10 (P1-6): the retained artifact is TYPED 'page_html'.
+            artifactType: pageArtifactIdForRun(ctx.runId, result.finalUrl, result.contentHash) ? 'page_html' : null,
             identityStatus: result.identityStatus,
             identityReasons: result.identityReasons,
             fields: result.fields,

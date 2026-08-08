@@ -153,6 +153,10 @@ describe('PI-6 image asset pipeline', () => {
       }
       const variant = candidates.find((c) => c.url === 'https://cdn.example.com/v16.jpg');
       expect(variant?.variantReference).toBe('SKU-16');
+      // Round-10: variant records establish TYPED entity identity from their
+      // product-scoped sku field.
+      expect(variant?.entityKind).toBe('sku');
+      expect(variant?.entityId).toBe('sku:SKU-16');
     });
 
     it('preserves Shopify variant-to-image mappings from embedded state', () => {
@@ -166,6 +170,10 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(candidates[0].extractionMethod).toBe('platform_api');
       expect(candidates[0].sourcePath).toContain('ProductVariants');
       expect(candidates[0].url.startsWith('https://')).toBe(true); // protocol-relative resolved
+      // Round-10: Shopify variant ids are platform variation ids — typed
+      // 'variation_id' entity identity.
+      expect(candidates[0].entityKind).toBe('variation_id');
+      expect(candidates[0].entityId).toBe('variation_id:123');
     });
 
     it('preserves Shopify inline product JSON variant images', () => {
@@ -186,6 +194,9 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(candidates.map((c) => c.variantReference).sort()).toEqual(['1001', '1002']);
       expect(candidates.map((c) => c.variantName).sort()).toEqual(['16oz / chicken', '8oz / chicken']);
       expect(candidates[0].extractionMethod).toBe('platform_api');
+      // Round-10: WooCommerce variation ids are typed 'variation_id' entities.
+      expect(candidates[0].entityKind).toBe('variation_id');
+      expect(candidates[0].entityId).toBe('variation_id:1001');
     });
 
     it('normalizes network-capture responses with network_response method', () => {
@@ -214,6 +225,45 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
         expect(candidate.extractionMethod).toBe('network_response');
         expect(candidate.sourcePath).toContain('network:https://api.example.com');
       }
+    });
+
+    it('round-10: typed product entity identity — main product, recommendations, and generic ids', () => {
+      const html = `<script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"Product",
+         "@id":"https://shop.example.com/products/stella-broth",
+         "name":"Stella Broth","offers":{"price":"19.99"},
+         "image":["https://cdn.example.com/main.jpg"],
+         "images":[
+           {"@id":"#img-g1","url":"https://cdn.example.com/gallery-1.jpg"},
+           {"@id":"#img-g2","url":"https://cdn.example.com/gallery-2.jpg"}
+         ],
+         "recommendations":[
+           {"@type":"Product","@id":"https://shop.example.com/products/rec-1",
+            "name":"Rec One","offers":{"price":"9.99"},
+            "image":"https://cdn.example.com/rec-1.jpg"}
+         ],
+         "related":[
+           {"id":"widget-9","image":"https://cdn.example.com/widget-9.jpg"}
+         ]}
+      </script>`;
+      const candidates = parseJsonLdImages(html, PAGE, '2026-08-05T00:00:00.000Z');
+      const byUrl = new Map(candidates.map((c) => [c.url, c]));
+      const mainEntity = 'platform_product_id:https://shop.example.com/products/stella-broth';
+      // Main product image carries the product's typed @id entity.
+      expect(byUrl.get('https://cdn.example.com/main.jpg')?.entityKind).toBe('platform_product_id');
+      expect(byUrl.get('https://cdn.example.com/main.jpg')?.entityId).toBe(mainEntity);
+      // Gallery ImageObjects (own @id, NOT product-like) INHERIT the entity —
+      // their bare ids never reset the inherited context.
+      expect(byUrl.get('https://cdn.example.com/gallery-1.jpg')?.entityId).toBe(mainEntity);
+      expect(byUrl.get('https://cdn.example.com/gallery-2.jpg')?.entityId).toBe(mainEntity);
+      // A recommendation is its OWN product-like record — its images are
+      // attributed to ITS product entity, never the main product's.
+      expect(byUrl.get('https://cdn.example.com/rec-1.jpg')?.entityKind).toBe('platform_product_id');
+      expect(byUrl.get('https://cdn.example.com/rec-1.jpg')?.entityId).toBe('platform_product_id:https://shop.example.com/products/rec-1');
+      // A nested record carrying ONLY a generic id (no product-like fields)
+      // never resets the inherited entity.
+      expect(byUrl.get('https://cdn.example.com/widget-9.jpg')?.entityId).toBe(mainEntity);
+      expect(byUrl.get('https://cdn.example.com/widget-9.jpg')?.entityKind).toBe('platform_product_id');
     });
 
     it('returns [] for malformed input and routes through discoverCandidates', () => {

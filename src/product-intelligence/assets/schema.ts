@@ -180,9 +180,14 @@ export const DiscoveredImageCandidateSchema = z.object({
   extractionMethod: ExtractionMethodSchema,
   variantReference: z.string().max(256).nullable().default(null),
   variantName: z.string().max(256).nullable().default(null),
-  /** Round-9: media-set/entity identity of the enclosing product-like object
-   *  (SKU/productId/@id/variation id) this image was discovered under. */
+  /** Round-9/10: media-set/entity identity of the enclosing product-like
+   *  object this image was discovered under. Round-10: TYPED — only
+   *  product/variant-like records establish it (sku | platform_product_id |
+   *  variation_id); arbitrary nested id/@id fields never reset product
+   *  identity. Serialized as the string form of {kind, value}. */
   entityId: z.string().max(256).nullable().default(null),
+  /** Round-10: typed form of entityId (same value, structured). */
+  entityKind: z.enum(['sku', 'platform_product_id', 'variation_id']).nullable().default(null),
   retrievedAt: z.string(),
 });
 export type DiscoveredImageCandidate = z.infer<typeof DiscoveredImageCandidateSchema>;

@@ -381,41 +381,56 @@ describe('PiProductIntelligenceExecutor — allowlisting and prompt construction
     expect(session.disposed).toBe(true);
   });
 
-  it('threads the runtime signal and effective remaining time into the session factory (round-9 P1)', async () => {
-    // Round-9 (review P1): aborting the Pi session must reach research-tool
-    // adapters — the executor passes the run's REAL AbortSignal and the
-    // effective remaining run time (workspace cap vs policy deadline) to
-    // createSession, so the session factory never substitutes a fresh
-    // never-aborted controller.
+  it('threads the COMPOSED run signal and absolute deadline into the session factory (round-10 P1)', async () => {
+    // Round-10 (review P1): aborting the Pi session must reach research-tool
+    // adapters — the executor passes the COMPOSED AbortSignal (caller + run
+    // deadline in one) and the ABSOLUTE deadline (epoch ms), NOT the raw
+    // caller signal, so a tool starting near the end of the run aborts from
+    // the run deadline. remaining time is recomputed per invocation from
+    // deadlineAt by the registry.
     const runController = new AbortController();
-    const captured: Array<{ signal?: AbortSignal; remainingMs?: number }> = [];
+    const captured: Array<{ signal?: AbortSignal; remainingMs?: number; deadlineAt?: number | null }> = [];
     const captureFactory = new FakeSessionFactory();
     const originalCreate = captureFactory.createSession.bind(captureFactory);
     captureFactory.createSession = (async (
       input: ProductResearchInput,
       context: ProductResearchContext,
       onSubmission: (submission: TerminalResultSubmission) => void,
-      runtime?: { signal?: AbortSignal; remainingMs?: number },
+      runtime?: { signal?: AbortSignal; remainingMs?: number; deadlineAt?: number | null },
     ) => {
       captured.push(runtime ?? {});
       return originalCreate(input, context, onSubmission);
     }) as typeof captureFactory.createSession;
 
     const executor = makeExecutor(captureFactory);
+    const deadlineMs = 120;
+    const startedAt = Date.now();
     const runPromise = executor.startResearch(
       TEST_INPUT,
-      testContext({ runId: 'run-pi-18', signal: runController.signal }),
+      testContext({ runId: 'run-pi-18', signal: runController.signal }, { deadlineMs }),
       createExecutionEventSink('run-pi-18'),
     );
     await Promise.resolve();
 
     expect(captured.length).toBe(1);
-    expect(captured[0].signal).toBe(runController.signal); // the real run signal, not a fresh one
-    expect(captured[0].remainingMs).toBeGreaterThan(0);
-    expect(captured[0].remainingMs!).toBeLessThanOrEqual(300_000); // testPolicy deadlineMs
+    // The COMPOSED signal, not the raw caller signal: distinct object, and it
+    // must fire from the RUN DEADLINE even though the caller never aborts.
+    expect(captured[0].signal).toBeDefined();
+    expect(captured[0].signal).not.toBe(runController.signal);
+    expect(captured[0].signal!.aborted).toBe(false);
+    // Absolute deadline ≈ startedAt + effectiveDeadlineMs (workspace cap vs
+    // policy deadline).
+    expect(typeof captured[0].deadlineAt).toBe('number');
+    expect(captured[0].deadlineAt!).toBeGreaterThanOrEqual(startedAt + deadlineMs - 25);
+    expect(captured[0].deadlineAt!).toBeLessThanOrEqual(startedAt + deadlineMs + 25);
 
-    submitViaTool(captureFactory, validSubmission() as unknown as Parameters<typeof submitViaTool>[1]);
-    captureFactory.created[0].finish();
+    // The run deadline fires the composed signal WITHOUT caller abort: a tool
+    // in flight at the deadline is authoritatively cancelled.
+    await new Promise((resolve) => setTimeout(resolve, deadlineMs + 150));
+    expect(captured[0].signal!.aborted).toBe(true);
+    expect(runController.signal.aborted).toBe(false);
+
+    // The run settles (session aborted at the deadline).
     await runPromise;
   });
 });

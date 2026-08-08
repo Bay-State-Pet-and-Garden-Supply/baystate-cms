@@ -894,7 +894,8 @@ const ASSET_SELECT = `
          quality_status AS qualityStatus, commerce_approved AS commerceApproved,
          conflicts_json AS conflictsJson, payload_json AS payloadJson, created_at AS createdAt,
          verified_against_json AS verifiedAgainstJson, verified_against_hash AS verifiedAgainstHash,
-         declared_source_type AS declaredSourceType
+         declared_source_type AS declaredSourceType,
+         candidate_id AS candidateId
   FROM product_intelligence_assets
 `;
 
@@ -996,12 +997,15 @@ export interface PiPageArtifactRow {
   contentHash: string;
   content: string;
   sizeBytes: number;
+  /** Round-10 (P1-6): 'page_html' today; future browser-network captures get 'browser_network_capture'. */
+  artifactType?: string;
   createdAt: string;
 }
 
 const PAGE_ARTIFACT_SELECT = `
   SELECT id, run_id AS runId, url, content_hash AS contentHash,
-         content, size_bytes AS sizeBytes, created_at AS createdAt
+         content, size_bytes AS sizeBytes, artifact_type AS artifactType,
+         created_at AS createdAt
   FROM pi_page_artifacts
 `;
 
@@ -1014,6 +1018,7 @@ export function insertPiPageArtifact(input: {
   url: string;
   contentHash: string;
   content: string;
+  artifactType?: string;
 }): PiPageArtifactRow {
   const sizeBytes = Buffer.byteLength(input.content, 'utf8');
   if (sizeBytes > MAX_PI_PAGE_ARTIFACT_BYTES) {
@@ -1023,9 +1028,9 @@ export function insertPiPageArtifact(input: {
   const id = randomUUID();
   db.run(
     `INSERT INTO pi_page_artifacts
-     (id, run_id, url, content_hash, content, size_bytes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [id, input.runId, input.url, input.contentHash, input.content, sizeBytes, now()],
+     (id, run_id, url, content_hash, content, size_bytes, artifact_type, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, input.runId, input.url, input.contentHash, input.content, sizeBytes, input.artifactType ?? 'page_html', now()],
   );
   return db.query(`${PAGE_ARTIFACT_SELECT} WHERE id = ?`).get(id) as PiPageArtifactRow;
 }
@@ -1033,6 +1038,16 @@ export function insertPiPageArtifact(input: {
 export function getPiPageArtifact(id: string): PiPageArtifactRow | undefined {
   const db = getDb();
   return db.query(`${PAGE_ARTIFACT_SELECT} WHERE id = ?`).get(id) as PiPageArtifactRow | undefined;
+}
+
+/** Round-10 (review P0): artifact lookup is scoped to the CURRENT run —
+ *  possession of an artifact UUID from another run/workspace is never
+ *  authorization to load its retained content or mint rows in this run. */
+export function getPiPageArtifactForRun(runId: string, id: string): PiPageArtifactRow | undefined {
+  const db = getDb();
+  return db.query(`${PAGE_ARTIFACT_SELECT} WHERE id = ? AND run_id = ?`).get(id, runId) as
+    | PiPageArtifactRow
+    | undefined;
 }
 
 export function listPiPageArtifactsByRun(runId: string): PiPageArtifactRow[] {
@@ -1073,6 +1088,9 @@ export function insertPiAsset(input: {
   verifiedAgainstJson?: string | null;
   verifiedAgainstHash?: string | null;
   declaredSourceType?: string | null;
+  /** Round-10 (review P1): exact FK to the pi_image_candidates row this
+   *  asset was verified from (same-run enforced by trigger). */
+  candidateId?: string | null;
 }): PiAssetRow {
   const db = getDb();
   const id = randomUUID();
@@ -1085,8 +1103,9 @@ export function insertPiAsset(input: {
       observed_variant, observed_net_content_json, observed_pack_count,
       observed_gtin, exact_product_match, exact_variant_match, quality_status,
       commerce_approved, conflicts_json, payload_json, created_at,
-      verified_against_json, verified_against_hash, declared_source_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      verified_against_json, verified_against_hash, declared_source_type,
+      candidate_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runId,
@@ -1120,6 +1139,7 @@ export function insertPiAsset(input: {
       input.verifiedAgainstJson ?? null,
       input.verifiedAgainstHash ?? null,
       input.declaredSourceType ?? null,
+      input.candidateId ?? null,
     ],
   );
   return db.query(`${ASSET_SELECT} WHERE id = ?`).get(id) as PiAssetRow;
@@ -1382,15 +1402,50 @@ export function upsertSourceAuthority(input: {
     input.authorityType,
     input.sourceId,
   ]);
-  return {
-    id,
-    sourceId: input.sourceId,
-    authorityType: input.authorityType,
-    authorityRef: input.authorityRef ?? null,
-    brandName: input.brandName ?? null,
-    establishedBy: input.establishedBy,
-    establishedAt,
-  };
+  // Round-10 (review cleanup): an upsert must return the DURABLE row — when
+  // ON CONFLICT retained an existing row, the pre-insert UUID was never
+  // persisted. Re-read the surviving row by (source_id, authority_type).
+  const durable = db
+    .query(
+      `SELECT id, source_id AS sourceId, authority_type AS authorityType,
+              authority_ref AS authorityRef, brand_name AS brandName,
+              established_by AS establishedBy, established_at AS establishedAt
+       FROM pi_source_authorities
+       WHERE source_id = ? AND authority_type = ?`,
+    )
+    .get(input.sourceId, input.authorityType) as PiSourceAuthorityRow | undefined;
+  return (
+    durable ?? {
+      id,
+      sourceId: input.sourceId,
+      authorityType: input.authorityType,
+      authorityRef: input.authorityRef ?? null,
+      brandName: input.brandName ?? null,
+      establishedBy: input.establishedBy,
+      establishedAt,
+    }
+  );
+}
+
+/** Round-10 (review P0): the canonical product brand resolved from DURABLE
+ *  exact-GTIN-linked evidence — verified assets whose exact_product_match=1
+ *  and whose observed GTIN equals the run's requested GTIN. Returns distinct
+ *  normalized observed brands; empty when the brand is unresolved. The
+ *  run's untrusted brandHint NEVER appears here (hints cannot mint
+ *  authority). */
+export function listResolvedProductBrands(runId: string, requestedGtin?: string | null): string[] {
+  if (!requestedGtin) return [];
+  const db = getDb();
+  const rows = db
+    .query(
+      `SELECT observed_brand AS brand FROM product_intelligence_assets
+       WHERE run_id = ? AND exact_product_match = 1
+         AND observed_gtin = ? AND observed_brand IS NOT NULL
+         AND trim(observed_brand) <> ''
+       GROUP BY lower(trim(observed_brand))`,
+    )
+    .all(runId, requestedGtin) as Array<{ brand: string }>;
+  return rows.map((r) => r.brand.trim().toLowerCase());
 }
 
 export function getSourceAuthorities(sourceId: string): PiSourceAuthorityRow[] {
