@@ -586,8 +586,68 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   const gtinConflictValues =
     qualifiedGtinValues.size > 1 ? Array.from(qualifiedGtinValues) : null;
   const observedGtinFromEvidence = qualifiedGtinValues.size === 1 ? Array.from(qualifiedGtinValues)[0] : null;
+  // Round-12 (review P0-3): the BRAND observation is QUALIFIED like the GTIN.
+  // A hash-less brand fact from anywhere can never become the observed brand
+  // for authority purposes. Only (a) byte-bound image_ocr/decoder brand facts
+  // whose content hash equals the exact bytes being inspected, or (b)
+  // structured evidence (json_ld/platform/etc.) explicitly entity-linked to
+  // the exact-GTIN product (same source URL as a QUALIFIED exact-GTIN fact)
+  // establish the brand. The QUALIFYING evidence row id + hash are persisted
+  // on the asset — brand provenance is never reconstructed from
+  // observedBrand + image hash later.
+  const isBrandObservationFact = (fact: ResolvedEvidenceFact): boolean => {
+    const key = OBSERVED_FIELD_KEYS[(fact.targetField ?? '').toLowerCase().replace(/[^a-z0-9]/g, '_')];
+    return key === 'brand' && fact.value !== null && fact.value !== undefined;
+  };
+  const qualifiedGtinSourceUrls = new Set<string>();
+  for (const fact of usableFacts.filter(isGtinObservationFact)) {
+    const raw = fact.value && typeof fact.value === 'object' ? (fact.value as Record<string, unknown>).value : fact.value;
+    const digits = normalizeGtinDigits(raw);
+    const method = (fact.extractionMethod ?? '').toLowerCase();
+    const isImageDerived = method === 'image_ocr' || method === 'decoder';
+    const byteBound =
+      isImageDerived && !!fact.contentHash && currentImageHash !== '' && fact.contentHash === currentImageHash;
+    if ((byteBound || linkageCovers(digits)) && fact.sourceUrl) {
+      qualifiedGtinSourceUrls.add(fact.sourceUrl);
+    }
+  }
+  const qualifiedBrandCandidates: Array<{ brand: string; factId: string | null; hash: string | null }> = [];
+  let unqualifiedBrandRejected = false;
+  for (const fact of usableFacts.filter(isBrandObservationFact)) {
+    const method = (fact.extractionMethod ?? '').toLowerCase();
+    const isImageDerived = method === 'image_ocr' || method === 'decoder';
+    const byteBound =
+      isImageDerived && !!fact.contentHash && currentImageHash !== '' && fact.contentHash === currentImageHash;
+    const structuredEntityLinked = !isImageDerived && !!fact.sourceUrl && qualifiedGtinSourceUrls.has(fact.sourceUrl);
+    if (byteBound || structuredEntityLinked) {
+      const raw = factValue(fact.value, 'brand') ?? (typeof fact.value === 'string' ? fact.value : null);
+      if (raw !== null && raw !== undefined && String(raw).trim() !== '') {
+        qualifiedBrandCandidates.push({
+          brand: String(raw).trim(),
+          factId: fact.id ?? null,
+          hash: fact.contentHash ?? currentImageHash,
+        });
+      }
+    } else if (!fact.contentHash) {
+      unqualifiedBrandRejected = true;
+    }
+  }
+  const distinctQualifiedBrands = new Set(qualifiedBrandCandidates.map((c) => c.brand.toLowerCase()));
+  const qualifiedBrand: string | null =
+    distinctQualifiedBrands.size === 1 ? qualifiedBrandCandidates.find((c) => c.brand.toLowerCase() === [...distinctQualifiedBrands][0])!.brand : null;
+  // The qualifying binding: prefer the byte-bound/structured evidence row;
+  // a deterministic decoder brand is bytes-bound by construction.
+  const brandEvidence = qualifiedBrand
+    ? {
+        evidenceId:
+          qualifiedBrandCandidates.find(
+            (c) => c.brand.toLowerCase() === qualifiedBrand.toLowerCase() && c.factId !== null,
+          )?.factId ?? null,
+        hash: qualifiedBrandCandidates.find((c) => c.brand.toLowerCase() === qualifiedBrand.toLowerCase())?.hash ?? currentImageHash,
+      }
+    : { evidenceId: null, hash: null };
   const observed: IdentityObservation = {
-    brand: fromEvidence.brand ?? decoded.observed.brand ?? null,
+    brand: qualifiedBrand ?? fromEvidence.brand ?? decoded.observed.brand ?? null,
     productName: fromEvidence.productName ?? decoded.observed.productName ?? null,
     variant: fromEvidence.variant ?? decoded.observed.variant ?? null,
     netContent: fromEvidence.netContent ?? decoded.observed.netContent ?? null,
@@ -623,7 +683,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
 
   if (!decoded.verified) {
     return {
-      ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted, verifiedAgainstHash, runIdentity),
+      ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted, verifiedAgainstHash, runIdentity, brandEvidence),
       exactProductMatch: false,
       exactVariantMatch: null,
       qualityStatus: 'invalid',
@@ -667,6 +727,15 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     identity.conflicts.push(`conflicting GTIN evidence: ${gtinConflictValues.join(' vs ')}`);
     identity.reasons.push(`conflicting qualified GTINs: ${gtinConflictValues.join(' vs ')}`);
   }
+  // Round-12 (review P0-3): surface when evidence brand facts were dropped
+  // for lack of qualification — the reviewer sees the distinction instead of
+  // a bare 'no observed brand'.
+  if (unqualifiedBrandRejected && !qualifiedBrand) {
+    identity.reasons.push('observed brand evidence is not qualified (a hash-less or unlinked brand fact cannot establish the brand)');
+  }
+  if (qualifiedBrand === null && distinctQualifiedBrands.size > 1) {
+    identity.reasons.push('conflicting qualified brand evidence — brand unresolved (fail closed)');
+  }
   const commerceApproved = computeCommerceApproved({
     rightsStatus,
     exactProductMatch: identity.exactProductMatch,
@@ -676,7 +745,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   });
 
   return {
-    ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted, verifiedAgainstHash, runIdentity),
+    ...baseRecord(input, declaredSourceType, retrievedAt, decoded, observed, observationProvenance, agentAsserted, verifiedAgainstHash, runIdentity, brandEvidence),
     exactProductMatch: identity.exactProductMatch,
     exactVariantMatch: identity.exactVariantMatch,
     qualityStatus: decoded.qualityStatus,
@@ -780,6 +849,7 @@ function baseRecord(
   agentAsserted: IdentityObservation | null,
   verifiedAgainstHash: string | null,
   verifiedAgainst: VerifiedAgainstSnapshot | null,
+  brandEvidence?: { evidenceId: string | null; hash: string | null } | null,
 ): Omit<
   ProductAssetEvidence,
   'exactProductMatch' | 'exactVariantMatch' | 'qualityStatus' | 'rightsStatus' | 'rightsBasis' | 'rightsEvidenceRef' | 'commerceApproved' | 'conflicts'
@@ -807,6 +877,8 @@ function baseRecord(
     verifiedAgainstHash,
     verifiedAgainst: (verifiedAgainst ?? null) as Record<string, unknown> | null,
     declaredSourceType,
+    brandEvidenceId: brandEvidence?.evidenceId ?? null,
+    brandEvidenceHash: brandEvidence?.hash ?? null,
   };
 }
 
@@ -823,6 +895,8 @@ function failRecord(input: VerifyImageInput, declaredSourceType: string, retriev
     originalContentHash: '',
     perceptualHash: null,
     variantReference: null,
+    brandEvidenceId: null,
+    brandEvidenceHash: null,
     rightsStatus: 'restricted',
     rightsBasis: null,
     rightsEvidenceRef: null,

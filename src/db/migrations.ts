@@ -2228,6 +2228,19 @@ export function runMigrations(): void {
     console.log('[Migrations] Pi round-11 authority schema migration complete.');
   }
 
+  // Round-12 (review P0-3): assets retain the QUALIFYING brand evidence
+  // binding — the exact evidence row + hash that established the observed
+  // brand (never reconstructed from observedBrand + image hash later).
+  const assetBrandEvidence = db
+    .query("SELECT name FROM pragma_table_info('product_intelligence_assets') WHERE name = 'brand_evidence_id'")
+    .get();
+  if (!assetBrandEvidence) {
+    db.exec('ALTER TABLE product_intelligence_assets ADD COLUMN brand_evidence_id TEXT NULL;');
+    db.exec('ALTER TABLE product_intelligence_assets ADD COLUMN brand_evidence_hash TEXT NULL;');
+    db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('pi_round12_brand_evidence_schema_version', '1');");
+    console.log('[Migrations] Pi round-12 brand-evidence schema migration complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

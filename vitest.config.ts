@@ -75,6 +75,7 @@ export default defineConfig({
       'src/tests/unit/pi-search-benchmark.test.ts',
       'src/tests/unit/pi-evidence-persistence.test.ts',
       'src/tests/unit/pi-authority-lifecycle.test.ts',
+      'src/tests/unit/pi-supplier-boundary.test.ts',
       'src/tests/unit/pi-approved-policies.test.ts',
       'src/tests/unit/pi-network-boundary.test.ts',
       'src/tests/unit/pi-review-decisions.test.ts',

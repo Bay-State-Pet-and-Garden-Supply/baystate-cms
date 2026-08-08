@@ -599,6 +599,10 @@ describe('Round-10 source authority (durable exact-GTIN-resolved brand, brandHin
       observedBrand: brand,
       observedGtin: gtin,
       exactProductMatch: true,
+      // Round-12 (P0-3): the QUALIFIED brand binding — without it the brand
+      // is unqualified and can never resolve manufacturer authority.
+      brandEvidenceId: `evidence-${brand.toLowerCase()}`,
+      brandEvidenceHash: 'evidence-hash',
     });
 
   const checkPriority = async (runId: string, url: string) =>
@@ -653,15 +657,14 @@ describe('Round-10 source authority (durable exact-GTIN-resolved brand, brandHin
     expect(authorities[0].brandName).toBe('branda'); // normalized by the registry repo
     expect(authorities[0].authorityRef).toBe(`brand_site:${brandSiteId.id}`);
     expect(authorities[0].establishedBy).toBe('check_source_priority:resolved_brand');
-    // Round-11 (review P1): the authority RETAINS the evidence that resolved
-    // the brand — the verified asset id + content hash — so the record says
-    // "Brand A observed from evidence E on asset bytes H whose GTIN X was
-    // independently exact" rather than merely "asset row says exact X + A".
+    // Round-11/12 (review P1/P0-3): the authority RETAINS the QUALIFYING
+    // brand evidence binding — the evidence row id + hash that established
+    // the brand (never a reconstruction from observedBrand + image hash).
     const asset = listPiAssetsByRun(runId).find((a) => a.observedBrand === 'BrandA');
     expect(asset).toBeTruthy();
-    expect(authorities[0].brandEvidenceId).toBe(asset?.id);
+    expect(authorities[0].brandEvidenceId).toBe('evidence-branda');
     expect(authorities[0].brandEvidenceHash).toBe('evidence-hash');
-    expect(authorities[0].brandEvidenceKind).toBe('verified_asset');
+    expect(authorities[0].brandEvidenceKind).toBe('evidence');
     transitionPiRunStatus(runId, 'completed', {});
   });
 
@@ -676,13 +679,13 @@ describe('Round-10 source authority (durable exact-GTIN-resolved brand, brandHin
     expect(listSourceAuthoritiesByRun(runId).length).toBe(0);
     // (2) The agent verifies an image; the exact-GTIN asset (with a brand)
     //     now exists. The next authority evaluation succeeds.
-    const asset = seedResolvedBrand(runId, 'BrandA');
+    seedResolvedBrand(runId, 'BrandA');
     const second = await checkPriority(runId, 'https://branda.example.com/p/1');
     expect(second.status).toBe('ok');
     expect((second as { data?: { authorityEstablished?: boolean } }).data?.authorityEstablished).toBe(true);
     const authorities = listSourceAuthoritiesByRun(runId);
     expect(authorities.length).toBe(1);
-    expect(authorities[0].brandEvidenceId).toBe(asset.id);
+    expect(authorities[0].brandEvidenceId).toBe('evidence-branda');
     transitionPiRunStatus(runId, 'completed', {});
   });
 
@@ -759,6 +762,28 @@ describe('Round-10 source authority (durable exact-GTIN-resolved brand, brandHin
     // is never consulted for them.
     const grantForNeutral = buildReuseGrantResolver(wsId)('other', 'anything.example.com');
     expect(grantForNeutral).toBeNull();
+  });
+
+  it('source-scoped authority reporting: manufacturer authority on one source never reports for another (round-12 P1-3)', async () => {
+    upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandA');
+    seedResolvedBrand(runId, 'BrandA');
+    // Source A (registry-official + durable resolved brand) gets authority.
+    const outA = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(outA.status).toBe('ok');
+    expect((outA as { data?: { authorityEstablished?: boolean } }).data?.authorityEstablished).toBe(true);
+    const authorities = listSourceAuthoritiesByRun(runId);
+    expect(authorities.length).toBe(1);
+    expect(authorities[0].authorityType).toBe('manufacturer');
+    // Source B in the SAME run — unrelated domain, no evidence, no registry
+    // row — must NOT inherit source A's authority (previously a run-wide
+    // .some() made check_source_priority report authorityEstablished=true).
+    const outB = await checkPriority(runId, 'https://other.example.com/p/x');
+    expect(outB.status).toBe('ok');
+    const dataB = (outB as { data?: { authorityEstablished?: boolean; tier?: string } }).data!;
+    expect(dataB.authorityEstablished).toBe(false);
+    expect(dataB.tier).toBe('unknown');
+    transitionPiRunStatus(runId, 'completed', {});
   });
 
 });
@@ -844,17 +869,26 @@ describe('Workspace-scoped onboarding research reads (round-11 P0)', () => {
     transitionPiRunStatus(runA, 'completed', {});
   });
 
-  it('same-workspace supplier lookup returns supplier_evidence and the matching source', async () => {
+  it('same-workspace supplier lookup returns LEADS only (round-12 P0-1: tool name never mints supplier authority)', async () => {
     seedOnboardingSource(wsId, GTIN_A, 'https://supplier-a.example.com/p/1', 'supplier-a.example.com');
     const runA = makeRun(GTIN_A, wsId);
     const out = await dispatchLookup(runA, wsId, 'lookup_supplier_product', GTIN_A);
     expect(out.status).toBe('ok');
     if (out.status === 'ok') {
-      const data = out.data as { sources: Array<{ url: string }>; crossGtinLead?: boolean };
+      const data = out.data as { sources: Array<{ url: string }>; crossGtinLead?: boolean; leadOnly?: boolean };
       expect(data.sources.map((s) => s.url)).toContain('https://supplier-a.example.com/p/1');
       expect(data.crossGtinLead).toBe(false);
+      // Round-12: an ordinary onboarding source (source_method serper) has no
+      // first-class trusted supplier relationship — the result is a LEAD.
+      expect(data.leadOnly).toBe(true);
     }
-    expect(out.evidence?.every((e) => e.kind === 'supplier_evidence')).toBe(true);
+    // Never supplier_evidence: the evidence kind alone cannot mint the
+    // durable supplier tier.
+    expect(out.evidence ?? []).not.toHaveLength(0);
+    expect(out.evidence?.every((e) => e.kind === 'catalog_evidence')).toBe(true);
+    expect(out.evidence?.some((e) => e.kind === 'supplier_evidence')).toBe(false);
+    // And no durable supplier-tier source row exists for the run.
+    expect(listPiSources(runA).some((row) => row.sourceType === 'supplier')).toBe(false);
     transitionPiRunStatus(runA, 'completed', {});
   });
 

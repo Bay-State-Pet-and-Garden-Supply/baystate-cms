@@ -880,6 +880,9 @@ export interface PiAssetRow {
   /** Round-10/11: exact pi_image_candidates FK the asset was verified from
    *  (same-run + image_url === source_url enforced by trigger). */
   candidateId: string | null;
+  /** Round-12: qualifying brand evidence binding (row id + content hash). */
+  brandEvidenceId?: string | null;
+  brandEvidenceHash?: string | null;
 }
 
 const ASSET_SELECT = `
@@ -898,7 +901,8 @@ const ASSET_SELECT = `
          conflicts_json AS conflictsJson, payload_json AS payloadJson, created_at AS createdAt,
          verified_against_json AS verifiedAgainstJson, verified_against_hash AS verifiedAgainstHash,
          declared_source_type AS declaredSourceType,
-         candidate_id AS candidateId
+         candidate_id AS candidateId, brand_evidence_id AS brandEvidenceId,
+         brand_evidence_hash AS brandEvidenceHash
   FROM product_intelligence_assets
 `;
 
@@ -1094,6 +1098,12 @@ export function insertPiAsset(input: {
   /** Round-10 (review P1): exact FK to the pi_image_candidates row this
    *  asset was verified from (same-run enforced by trigger). */
   candidateId?: string | null;
+  /** Round-12 (review P0-3): the QUALIFYING brand evidence binding — the
+   *  exact evidence row + content hash that established the observed brand
+   *  (byte-bound OCR/decoder observation or entity-linked structured
+   *  evidence). Never reconstructed from observedBrand later. */
+  brandEvidenceId?: string | null;
+  brandEvidenceHash?: string | null;
 }): PiAssetRow {
   const db = getDb();
   const id = randomUUID();
@@ -1107,8 +1117,8 @@ export function insertPiAsset(input: {
       observed_gtin, exact_product_match, exact_variant_match, quality_status,
       commerce_approved, conflicts_json, payload_json, created_at,
       verified_against_json, verified_against_hash, declared_source_type,
-      candidate_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      candidate_id, brand_evidence_id, brand_evidence_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.runId,
@@ -1143,6 +1153,8 @@ export function insertPiAsset(input: {
       input.verifiedAgainstHash ?? null,
       input.declaredSourceType ?? null,
       input.candidateId ?? null,
+      input.brandEvidenceId ?? null,
+      input.brandEvidenceHash ?? null,
     ],
   );
   return db.query(`${ASSET_SELECT} WHERE id = ?`).get(id) as PiAssetRow;
@@ -1465,6 +1477,10 @@ export interface ResolvedProductBrand {
   assetId: string;
   contentHash: string;
   sourcePageUrl: string | null;
+  /** Round-12 (review P0-3): the QUALIFYING brand evidence binding persisted
+   *  on the asset (evidence row id + content hash), never reconstructed. */
+  brandEvidenceId: string | null;
+  brandEvidenceHash: string | null;
 }
 export function listResolvedProductBrands(runId: string, requestedGtin?: string | null): ResolvedProductBrand[] {
   if (!requestedGtin) return [];
@@ -1472,7 +1488,8 @@ export function listResolvedProductBrands(runId: string, requestedGtin?: string 
   const rows = db
     .query(
       `SELECT observed_brand AS brand, id AS assetId,
-              original_content_hash AS contentHash, source_page_url AS sourcePageUrl
+              original_content_hash AS contentHash, source_page_url AS sourcePageUrl,
+              brand_evidence_id AS brandEvidenceId, brand_evidence_hash AS brandEvidenceHash
        FROM product_intelligence_assets
        WHERE run_id = ? AND exact_product_match = 1
          AND observed_gtin = ? AND observed_brand IS NOT NULL
@@ -1484,6 +1501,8 @@ export function listResolvedProductBrands(runId: string, requestedGtin?: string 
     assetId: string;
     contentHash: string;
     sourcePageUrl: string | null;
+    brandEvidenceId: string | null;
+    brandEvidenceHash: string | null;
   }>;
   // One resolution per normalized brand, newest asset wins.
   const byBrand = new Map<string, ResolvedProductBrand>();
@@ -1495,10 +1514,27 @@ export function listResolvedProductBrands(runId: string, requestedGtin?: string 
         assetId: r.assetId,
         contentHash: r.contentHash,
         sourcePageUrl: r.sourcePageUrl,
+        brandEvidenceId: r.brandEvidenceId,
+        brandEvidenceHash: r.brandEvidenceHash,
       });
     }
   }
   return [...byBrand.values()];
+}
+
+/** Round-12 (review P1-2): REVOKE a source authority when the current
+ *  evidence no longer supports it (ambiguous brand, registry mismatch, or
+ *  unresolved). Deletes the authority row and downgrades the source row's
+ *  tier back to neutral 'other' — but ONLY when the source's current tier
+ *  equals the revoked authority tier (never clobbering a tier set by
+ *  another path). */
+export function revokeSourceAuthority(sourceId: string, authorityType: string): void {
+  const db = getDb();
+  db.run(`DELETE FROM pi_source_authorities WHERE source_id = ? AND authority_type = ?`, [sourceId, authorityType]);
+  db.run(`UPDATE product_intelligence_sources SET source_type = 'other' WHERE id = ? AND source_type = ?`, [
+    sourceId,
+    authorityType,
+  ]);
 }
 
 export function getSourceAuthorities(sourceId: string): PiSourceAuthorityRow[] {

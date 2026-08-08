@@ -797,6 +797,11 @@ function persistVerifiedAsset(runId: string, record: ProductAssetEvidence, candi
       verifiedAgainstHash: record.verifiedAgainstHash ?? null,
       declaredSourceType: record.declaredSourceType ?? record.sourceType ?? null,
       candidateId,
+      // Round-12 (review P0-3): retain the QUALIFYING brand evidence binding
+      // (evidence row id + hash) so authority provenance is never
+      // reconstructed from observedBrand + image hash later.
+      brandEvidenceId: record.brandEvidenceId ?? null,
+      brandEvidenceHash: record.brandEvidenceHash ?? null,
     }) as { id: string };
     return asset.id;
   } catch {

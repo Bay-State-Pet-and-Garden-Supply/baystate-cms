@@ -16,19 +16,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import path from 'node:path';
-import { initDb, closeDb, getDb, resetDb } from '../../db/connection';
+import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { createPiRun } from '../../db/repositories/product-intelligence-repo';
-import {
-  insertPiAsset,
-  insertPiEvidence,
-  insertPiImageCandidate,
-  insertPiPageArtifact,
-  listPiAssetsByRun,
-  listPiSources,
-  listSourceAuthoritiesByRun,
-} from '../../db/repositories/product-intelligence-repo';
+import { listPiAssetsByRun, listPiSources, listSourceAuthoritiesByRun, listPiEvidence } from '../../db/repositories/product-intelligence-repo';
 import { upsertReusePolicy } from '../../db/repositories/pi-reuse-policy-repo';
+import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { findWorkspace, insertWorkspace } from '../../db/repositories/workspace-repo';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy';
@@ -93,6 +86,18 @@ describe('PI authority lifecycle (round-11 integration)', () => {
       fetchFn: async (input: string | URL | Request) => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
         if (url.includes('/p/stella')) {
+          if (url.includes('retailer.example.com')) {
+            const retailerHtml = `<html><head><script type="application/ld+json">${JSON.stringify({
+              '@type': 'Product',
+              '@id': 'https://retailer.example.com/p/stella#product',
+              name: 'Stella Chicken Broth 16 oz',
+              brand: { '@type': 'Brand', name: 'Stella' },
+              sku: 'STL-16',
+              gtin: GTIN,
+              image: FRONT_URL,
+            })}</script></head><body>Stella Chicken Broth 16 oz — retailer listing</body></html>`;
+            return new Response(retailerHtml, { status: 200, headers: { 'content-type': 'text/html' } });
+          }
           const html = `<html><head><script type="application/ld+json">${JSON.stringify({
             '@type': 'Product',
             '@id': `${PAGE_URL}#product`,
@@ -139,6 +144,10 @@ describe('PI authority lifecycle (round-11 integration)', () => {
       allowed: true,
       terms: 'vendor license',
     });
+    // P0-2: the trusted registry entry is what makes brand.example.com a
+    // manufacturer source — product evidence alone resolves the BRAND; the
+    // registry resolves who OWNS the source.
+    upsertBrandSite('Stella', 'brand.example.com', null);
 
     // (1) Workflow ranks the source BEFORE any verification: no exact
     //     evidence exists -> authority fails closed (recoverable).
@@ -158,10 +167,6 @@ describe('PI authority lifecycle (round-11 integration)', () => {
       { url: PAGE_URL, gtin: GTIN, expectedName: 'STELLA CHKN BROTH 16OZ' },
       toolCtx({ gateway: gateway() }),
     );
-    if (extracted.status !== 'ok') {
-      // eslint-disable-next-line no-console
-      console.error('extract status:', extracted.status, JSON.stringify((extracted as { data?: unknown }).data ?? {}).slice(0, 400));
-    }
     expect(extracted.status).toBe('ok');
     const extractData = (extracted as { data?: { artifactId?: string | null } }).data ?? {};
     expect(extractData.artifactId).toBeTruthy();
@@ -192,35 +197,37 @@ describe('PI authority lifecycle (round-11 integration)', () => {
     expect(pageSource).toBeTruthy();
     expect(pageSource?.sourceType).toBe('other');
 
-    // (4) OCR/VERIFY the PRIMARY: hash-bound exact GTIN + brand evidence
-    //     make the durable brand resolvable; the persist seam runs the
-    //     deterministic authority refresh.
+    // (4) OCR/VERIFY the PRIMARY: feed the REAL extract_packaging_evidence
+    //     evidence shape through the PersistingExecutionEventSink — target
+    //     field 'upc' (not 'gtin'), url = the IMAGE URL (not the page URL),
+    //     method image_ocr, contentHash = the image bytes. The sink persists
+    //     the source (image URL) + evidence rows; the deterministic authority
+    //     refresh resolves the PAGE source through the candidate record and
+    //     attaches the authority there.
     const pngHash = createHash('sha256').update(png).digest('hex');
-    const gtinRow = insertPiEvidence({
-      runId,
-      sourceId: pageSource!.id,
-      targetField: 'gtin',
-      value: GTIN,
-      extractionMethod: 'image_ocr',
-      metadata: { contentHash: pngHash },
+    const ocrSink = new PersistingExecutionEventSink(runId);
+    ocrSink.emit('tool_call_finished', {
+      toolName: 'extract_packaging_evidence',
+      // Matches the real extract_packaging_evidence payload shape (field-level
+      // entries with field/value/method/url/contentHash).
+      evidence: [
+        { id: 'ev-ocr-upc', field: 'upc', value: GTIN, url: FRONT_URL, domain: 'cdn.example.com', method: 'image_ocr', contentHash: pngHash },
+        { id: 'ev-ocr-brand', field: 'brand', value: 'Stella', url: FRONT_URL, domain: 'cdn.example.com', method: 'image_ocr', contentHash: pngHash },
+      ] as never,
     });
-    const brandRow = insertPiEvidence({
-      runId,
-      sourceId: pageSource!.id,
-      targetField: 'brand',
-      value: 'Stella',
-      extractionMethod: 'image_ocr',
-      // Same image bytes as the GTIN observation: the evidence-phase
-      // authority refresh binds the brand to the exact-GTIN image.
-      metadata: { contentHash: pngHash },
-    });
+    const ocrEvidenceRows = listPiEvidence(runId);
+    const ocrUpcRow = ocrEvidenceRows.find((row) => row.targetField === 'upc');
+    const ocrBrandRow = ocrEvidenceRows.find((row) => row.targetField === 'brand');
+    expect(ocrUpcRow).toBeTruthy();
+    expect(ocrBrandRow).toBeTruthy();
+    expect((JSON.parse(ocrUpcRow!.metadataJson ?? '{}') as { contentHash?: string }).contentHash).toBe(pngHash);
     const verified = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('verify_image_candidate')!,
       {
         url: FRONT_URL,
         candidateId: frontCandidateId,
         gtin: GTIN,
-        evidenceIds: [gtinRow.id, brandRow.id],
+        evidenceIds: ['ev-ocr-upc', 'ev-ocr-brand'],
       },
       toolCtx({ gateway: gateway() }),
     );
@@ -239,9 +246,13 @@ describe('PI authority lifecycle (round-11 integration)', () => {
     expect(frontAsset).toBeTruthy();
     expect(frontAsset?.candidateId).toBe(frontCandidateId);
     expect(frontAsset).not.toBeNull();
-    expect(authorities[0].brandEvidenceId).toBe(frontAsset!.id);
-    expect(authorities[0].brandEvidenceHash).toBe(frontAsset!.originalContentHash);
-    expect(authorities[0].brandEvidenceKind).toBe('verified_asset');
+    // P0-3: the authority retains the QUALIFYING brand evidence binding —
+    // the OCR brand row + the image-bytes hash it was bound to (never a
+    // reconstruction from observedBrand + image hash).
+    expect(authorities[0].brandEvidenceId).toBe(ocrBrandRow!.id);
+    expect(authorities[0].brandEvidenceHash).toBe(pngHash);
+    expect(authorities[0].brandEvidenceKind).toBe('evidence');
+    expect(authorities[0].authorityRef).toBe(`verified_asset:${frontAsset!.id}`);
     expect(listPiSources(runId).find((source) => source.url === PAGE_URL)?.sourceType).toBe('manufacturer');
 
     // (6) RE-VERIFY the SUPPORTING nutrition image: separate candidate row
@@ -277,13 +288,8 @@ describe('PI authority lifecycle (round-11 integration)', () => {
     // (8) SUBMIT the terminal bundle: primary (commerce) + nutrition
     //     (supporting alternate) — the validator accepts the media-set
     //     linkage, and persistence preserves the exact candidate FK.
-    const frontEvidence = insertPiEvidence({
-      runId,
-      sourceId: pageSource!.id,
-      targetField: 'brand',
-      value: 'Stella',
-      extractionMethod: 'image_ocr',
-    });
+    // Identity citation for the bundle — the durable OCR brand observation.
+    const frontEvidence = ocrBrandRow!;
     const bundle: ProductResearchBundle = {
       schemaVersion: 1,
       gtin: GTIN,
@@ -326,6 +332,110 @@ describe('PI authority lifecycle (round-11 integration)', () => {
     // The supporting nutrition asset survived terminal persistence with its
     // exact relationship intact.
     expect(persistedNutrition?.rightsStatus).toBe('approved');
+  });
+
+  it('retailer page with exact GTIN + brand NEVER becomes manufacturer authority (round-12 P0-2 adversarial)', async () => {
+    const RETAIL_URL = 'https://retailer.example.com/p/stella';
+    const retailPngHash = createHash('sha256').update(png).digest('hex');
+    const retailRunId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify({ gtin: GTIN, registerName: 'Stella Chicken Broth 16 oz' }),
+      policyJson: '{}',
+      configSnapshotId: 'c',
+      configSnapshotHash: 'c',
+    }).id;
+    // A manufacturer reuse grant EXISTS for the CDN — it must NOT apply.
+    upsertReusePolicy({
+      workspaceId: wsId,
+      sourceTier: 'manufacturer',
+      domainPattern: 'cdn.example.com',
+      allowed: true,
+      terms: 'vendor license',
+    });
+    // The registry entry is for brand.example.com ONLY — retailer.example.com
+    // is NOT a trusted official source for 'Stella' (nor for anything else).
+
+    const retailCtx = (overrides: { gateway?: PolicyGateway } = {}) => ({
+      runId: retailRunId,
+      workspaceId: wsId,
+      workspacePath: '/tmp/pi-authority-lifecycle-workspace',
+      policy: testPolicy({ networkPolicy: 'allowlisted_remote', allowedSourceDomains: [] }),
+      gateway: overrides.gateway,
+      signal: new AbortController().signal,
+      remainingMs: 60_000,
+    });
+
+    // (1) EXTRACT the retailer page (contains exact GTIN + Brand A).
+    const extracted = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('extract_product_page')!,
+      { url: RETAIL_URL, gtin: GTIN, expectedName: 'STELLA CHKN BROTH 16OZ' },
+      retailCtx({ gateway: gateway() }),
+    );
+    expect(extracted.status).toBe('ok');
+    const retailArtifactId = ((extracted as { data?: { artifactId?: string | null } }).data ?? {}).artifactId;
+    expect(retailArtifactId).toBeTruthy();
+
+    // (2) DISCOVER the manufacturer CDN image through the real tool.
+    const discovered = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: retailArtifactId },
+      retailCtx(),
+    );
+    expect(discovered.status).toBe('ok');
+    const retailCandidates = (discovered as { data?: { candidates: Array<{ candidateId: string; url: string }> } }).data
+      ?.candidates ?? [];
+    const retailCandidate = retailCandidates.find((c) => c.url === FRONT_URL);
+    expect(retailCandidate).toBeTruthy();
+    const retailPageSource = listPiSources(retailRunId).find((source) => source.url === RETAIL_URL);
+    expect(retailPageSource).toBeTruthy();
+    expect(retailPageSource?.sourceType).toBe('other');
+
+    // (3) OCR evidence (real shape): exact GTIN + Brand A, bytes-bound.
+    const retailSink = new PersistingExecutionEventSink(retailRunId);
+    retailSink.emit('tool_call_finished', {
+      toolName: 'extract_packaging_evidence',
+      evidence: [
+        { id: 'ev-ret-upc', field: 'upc', value: GTIN, url: FRONT_URL, domain: 'cdn.example.com', method: 'image_ocr', contentHash: retailPngHash },
+        { id: 'ev-ret-brand', field: 'brand', value: 'Stella', url: FRONT_URL, domain: 'cdn.example.com', method: 'image_ocr', contentHash: retailPngHash },
+      ] as never,
+    });
+
+    // (4) VERIFY: exact GTIN + Brand A resolve — but the retailer page is NOT
+    //     in the trusted registry, so no manufacturer authority, the source
+    //     stays 'other', and the manufacturer reuse grant NEVER applies.
+    const verified = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: FRONT_URL,
+        candidateId: retailCandidate!.candidateId,
+        gtin: GTIN,
+        evidenceIds: ['ev-ret-upc', 'ev-ret-brand'],
+      },
+      retailCtx({ gateway: gateway() }),
+    );
+    expect(verified.status).toBe('ok');
+    const record = (verified as { data?: { exactProductMatch?: boolean; rightsStatus?: string; commerceApproved?: boolean } }).data ?? {};
+    expect(record.exactProductMatch).toBe(true); // identity is exact…
+    expect(record.rightsStatus).toBe('restricted'); // …but reuse is NOT approved via a manufacturer grant
+    expect(record.commerceApproved).toBe(false);
+
+    // (5) No durable manufacturer authority exists; the page stays neutral.
+    expect(listSourceAuthoritiesByRun(retailRunId).length).toBe(0);
+    expect(listPiSources(retailRunId).find((source) => source.url === RETAIL_URL)?.sourceType).toBe('other');
+
+    // (6) check_source_priority reports the truth: official=false, no authority.
+    const checked = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('check_source_priority')!,
+      { url: RETAIL_URL },
+      retailCtx(),
+    );
+    expect(checked.status).toBe('ok');
+    const checkData = (checked as { data?: { tier?: string; isOfficial?: boolean; authorityEstablished?: boolean } }).data ?? {};
+    expect(checkData.isOfficial).toBe(false);
+    expect(checkData.authorityEstablished).toBe(false);
+    expect(listPiSources(retailRunId).find((source) => source.url === RETAIL_URL)?.sourceType).toBe('other');
   });
 });
 

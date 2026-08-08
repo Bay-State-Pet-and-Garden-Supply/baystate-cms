@@ -134,6 +134,12 @@ export const ProductAssetEvidenceSchema = z.object({
   declaredSourceType: z.string().nullish(),
   /** Round-10/11: exact pi_image_candidates FK the asset was verified from. */
   candidateId: z.string().nullish(),
+  /** Round-12 (review P0-3): the QUALIFYING brand evidence binding — the
+   *  evidence row id + content hash that actually established the observed
+   *  brand (byte-bound OCR/decoder observation from the same image, or
+   *  structured evidence entity-linked to the exact-GTIN product). */
+  brandEvidenceId: z.string().nullish(),
+  brandEvidenceHash: z.string().nullish(),
 });
 export type ProductAssetEvidence = z.infer<typeof ProductAssetEvidenceSchema>;
 

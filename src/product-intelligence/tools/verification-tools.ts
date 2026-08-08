@@ -235,30 +235,85 @@ interface ResolvedBrand {
   assetId: string;
   contentHash: string;
   sourcePageUrl: string | null;
+  /** Round-12 (review P0-3): the QUALIFYING brand evidence binding persisted
+   *  on the asset — never reconstructed from observedBrand + image hash. */
+  brandEvidenceId: string | null;
+  brandEvidenceHash: string | null;
 }
+
+/** Round-12 (review P0-3): an asset's brand is authority-qualified ONLY when
+ *  the asset retains a qualifying binding: either a durable brand evidence
+ *  row id (byte-bound OCR/decoder observation or structured evidence
+ *  entity-linked to the exact-GTIN product) or a bytes-bound hash that
+ *  equals the verified image bytes (deterministic decoder output). An asset
+ *  whose observedBrand came from an unqualified hash-less fact carries no
+ *  binding and can never resolve the product brand for authority. */
+function hasQualifiedBrandBinding(resolved: {
+  brandEvidenceId?: string | null;
+  brandEvidenceHash?: string | null;
+  contentHash: string;
+}): boolean {
+  if (typeof resolved.brandEvidenceId === 'string' && resolved.brandEvidenceId.length > 0) return true;
+  return (
+    typeof resolved.brandEvidenceHash === 'string' &&
+    resolved.brandEvidenceHash.length > 0 &&
+    resolved.brandEvidenceHash === resolved.contentHash
+  );
+}
+
+/** Round-12 (review P0-3): exact-GTIN assets whose brand is QUALIFIED (see
+ *  hasQualifiedBrandBinding) — the only durable basis for resolving the
+ *  canonical product brand. Lazy + fail closed. */
+function listQualifiedResolvedBrands(
+  repo: {
+    listResolvedProductBrands: (runId: string, requestedGtin?: string | null) => Array<ResolvedBrand>;
+  },
+  runId: string,
+  requestedGtin: string,
+): ResolvedBrand[] {
+  return repo.listResolvedProductBrands(runId, requestedGtin).filter(hasQualifiedBrandBinding);
+}
+
 function loadResolvedBrand(runId: string): ResolvedBrand | null {
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
     if (!conn.isDbInitialized?.()) return null;
     const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
       getPiRun: (runId: string) => { inputJson?: string } | undefined;
-      listResolvedProductBrands: (runId: string, requestedGtin?: string | null) => Array<{
-        brand: string;
-        assetId: string;
-        contentHash: string;
-        sourcePageUrl: string | null;
-      }>;
+      listResolvedProductBrands: (runId: string, requestedGtin?: string | null) => Array<ResolvedBrand>;
     };
     const run = repo.getPiRun(runId);
     if (!run?.inputJson) return null;
     const input = JSON.parse(run.inputJson) as { gtin?: unknown };
     if (typeof input.gtin !== 'string' || !input.gtin.trim()) return null;
-    const brands = repo.listResolvedProductBrands(runId, input.gtin.trim());
+    const brands = listQualifiedResolvedBrands(repo, runId, input.gtin.trim());
     if (brands.length !== 1) return null;
     return brands[0];
   } catch {
     return null;
   }
+}
+
+/** Round-12 (review P0-2): a source page is an AUTHORITATIVE manufacturer
+ *  source for a brand ONLY when its domain is in the trusted brand-site
+ *  registry AND the registry entry's brand equals the resolved product
+ *  brand. Product evidence resolves WHICH brand the product is; only the
+ *  trusted registry resolves WHO owns the source. Shared by
+ *  check_source_priority and the deterministic authority refresh so both
+ *  paths agree. */
+function registryBrandMatches(pageUrl: string, brand: string): { matches: boolean; brandName?: string; brandSiteId?: string } {
+  let domain: string;
+  try {
+    domain = new URL(pageUrl).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return { matches: false };
+  }
+  const registry = trustedOfficialDomain(domain);
+  if (!registry.official || typeof registry.brandName !== 'string' || !registry.brandName.trim()) {
+    return { matches: false };
+  }
+  const match = registry.brandName.trim().toLowerCase() === String(brand).trim().toLowerCase();
+  return { matches: match, brandName: registry.brandName, brandSiteId: registry.brandSiteId };
 }
 
 /** Round-11 (review P1): DETERMINISTIC server-side authority establishment —
@@ -277,13 +332,17 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
     if (!conn.isDbInitialized?.()) return;
     const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
       getPiRun: (runId: string) => { inputJson?: string } | undefined;
-      listResolvedProductBrands: (runId: string, requestedGtin?: string | null) => Array<{
-        brand: string;
-        assetId: string;
-        contentHash: string;
-        sourcePageUrl: string | null;
+      listResolvedProductBrands: (runId: string, requestedGtin?: string | null) => Array<ResolvedBrand>;
+      listPiEvidence: (runId: string) => Array<{
+        id: string;
+        sourceId: string;
+        targetField: string;
+        valueJson: string;
+        metadataJson: string | null;
       }>;
-      listPiSources: (runId: string) => Array<{ id: string; url: string }>;
+      listPiSources: (runId: string) => Array<{ id: string; url: string; sourceType?: string | null }>;
+      listPiImageCandidatesByRun: (runId: string) => Array<{ imageUrl: string; discoveringSourceId: string | null }>;
+      listSourceAuthoritiesByRun: (runId: string) => Array<{ sourceId: string; authorityType: string }>;
       insertPiSource: (input: { runId: string; url: string; domain: string; sourceType: string }) => { id: string };
       upsertSourceAuthority: (input: {
         sourceId: string;
@@ -295,34 +354,51 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
         brandEvidenceHash?: string | null;
         brandEvidenceKind?: string | null;
       }) => unknown;
+      revokeSourceAuthority: (sourceId: string, authorityType: string) => void;
     };
     const run = repo.getPiRun(runId);
     if (!run?.inputJson) return;
     const input = JSON.parse(run.inputJson) as { gtin?: unknown };
     if (typeof input.gtin !== 'string' || !input.gtin.trim()) return;
-    // Round-11 (review P1): EVIDENCE phase — BEFORE any exact asset exists
-    // (the workflow's ordering: check_source_priority -> ... -> OCR ->
-    // verify), the pre-verification evidence rows already carry the durable
-    // observations: a hash-bound exact GTIN (value === the run's immutable
-    // GTIN) and a brand observation bound to the SAME image bytes (same
-    // contentHash) on the same source. Authority established here makes the
-    // FIRST verification observe the manufacturer tier — the reviewer's
-    // sequence: exact GTIN + trustworthy brand resolved -> server evaluates
-    // known source authorities -> rights verification reads current rows.
-    const evidenceRepo = repo as typeof repo & {
-      listPiEvidence: (runId: string) => Array<{
-        id: string;
-        sourceId: string;
-        targetField: string;
-        valueJson: string;
-        metadataJson: string | null;
-      }>;
-    };
+    const runGtinDigits = input.gtin.trim().replace(/\D/g, '');
+
+    // Round-12 (review P1-2): RECONCILER. Compute the DESIRED manufacturer
+    // authority per page source from the current durable evidence, then
+    // establish, replace, or revoke so the stored authority always matches
+    // what the current evidence + trusted registry actually support.
+    // desiredByPageUrl: pageUrl -> { brand, evidenceId, evidenceHash, evidenceKind, source }
+    interface DesiredAuthority {
+      brand: string;
+      evidenceId: string | null;
+      evidenceHash: string | null;
+      evidenceKind: string;
+      sourceId: string;
+      phase: 'evidence' | 'asset';
+      anchorRef: string;
+    }
+    const desiredByPageUrl = new Map<string, DesiredAuthority>();
+    // Round-12 (review P1-2): a page source whose CURRENT evidence resolves
+    // to multiple distinct brands is AMBIGUOUS — ambiguity anywhere (evidence
+    // phase, asset phase, or across both) EXCLUDES the source from desired
+    // authority and REVOKES any stale record.
+    const ambiguousPageUrls = new Set<string>();
+
+    // ---- EVIDENCE phase (pre-verification; real OCR shape) --------------
+    // extract_packaging_evidence emits targetField 'upc' (image_ocr,
+    // contentHash = image bytes) and its brand facts belong to the IMAGE URL
+    // source. A hash-bound exact GTIN + a brand observation bound to the
+    // SAME bytes on the same source resolve the product brand BEFORE any
+    // exact asset exists — so the FIRST verification observes the tier.
+    // Round-12 (review P1-1): accept 'upc' as the GTIN target field and
+    // resolve the PAGE source through the candidate record
+    // (imageUrl -> discoveringSourceId) when the evidence source is an image.
     try {
-      const evidence = evidenceRepo.listPiEvidence?.(runId) ?? [];
+      const evidence = repo.listPiEvidence(runId);
       const gtinHashes = new Map<string, { sourceId: string; hash: string }>();
       for (const row of evidence) {
-        if (row.targetField !== 'gtin' || !row.metadataJson) continue;
+        const field = (row.targetField ?? '').toLowerCase();
+        if (field !== 'gtin' && field !== 'upc') continue;
+        if (!row.metadataJson) continue;
         let value: unknown;
         try {
           value = JSON.parse(row.valueJson);
@@ -330,7 +406,7 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
           continue;
         }
         const normalized = String(value ?? '').replace(/\D/g, '');
-        if (normalized !== input.gtin.trim().replace(/\D/g, '')) continue;
+        if (normalized !== runGtinDigits) continue;
         let hash: string | null = null;
         try {
           const meta = JSON.parse(row.metadataJson) as { contentHash?: unknown };
@@ -345,7 +421,7 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
         // Brand observations bound to the same image bytes + same source.
         const brandBySourceHash = new Map<string, { sourceId: string; hash: string; brand: string; evidenceId: string }>();
         for (const row of evidence) {
-          if (row.targetField !== 'brand' || !row.metadataJson) continue;
+          if ((row.targetField ?? '').toLowerCase() !== 'brand' || !row.metadataJson) continue;
           let hash: string | null = null;
           try {
             const meta = JSON.parse(row.metadataJson) as { contentHash?: unknown };
@@ -371,67 +447,160 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
             brandBySourceHash.set(key, { ...existing, brand: '__ambiguous__' });
           }
         }
+        const sources = repo.listPiSources(runId);
+        const candidates = repo.listPiImageCandidatesByRun(runId);
+        // Resolve the PAGE source for an evidence source: OCR evidence rows
+        // belong to the IMAGE URL source; the authority attaches to the
+        // candidate's DISCOVERING page source. Evidence seeded directly on a
+        // page source resolves to itself.
+        const pageSourceOf = (sourceId: string): { id: string; url: string } | undefined => {
+          const evidenceSource = sources.find((candidate) => candidate.id === sourceId);
+          if (!evidenceSource) return undefined;
+          const candidate = candidates.find((c) => c.imageUrl === evidenceSource.url);
+          if (candidate?.discoveringSourceId) {
+            const page = sources.find((source) => source.id === candidate.discoveringSourceId);
+            if (page) return page;
+          }
+          return { id: evidenceSource.id, url: evidenceSource.url };
+        };
         for (const entry of brandBySourceHash.values()) {
-          if (entry.brand === '__ambiguous__') continue; // fail closed
-          const source = repo.listPiSources(runId).find((candidate) => candidate.id === entry.sourceId);
-          if (!source) continue;
-          repo.upsertSourceAuthority({
-            sourceId: source.id,
-            authorityType: 'manufacturer',
-            authorityRef: `evidence:${entry.evidenceId}`,
-            brandName: entry.brand,
-            establishedBy: 'verified_evidence',
-            brandEvidenceId: entry.evidenceId,
-            brandEvidenceHash: entry.hash,
-            brandEvidenceKind: 'evidence',
-          });
+          if (entry.brand === '__ambiguous__') {
+            const pageSource = pageSourceOf(entry.sourceId);
+            if (pageSource) {
+              ambiguousPageUrls.add(pageSource.url);
+              desiredByPageUrl.delete(pageSource.url);
+            }
+            continue; // fail closed
+          }
+          const pageSource = pageSourceOf(entry.sourceId);
+          if (!pageSource) continue;
+          const existingDesired = desiredByPageUrl.get(pageSource.url);
+          if (existingDesired && existingDesired.brand !== entry.brand) {
+            desiredByPageUrl.delete(pageSource.url); // ambiguity across phases
+            continue;
+          }
+          if (!existingDesired) {
+            desiredByPageUrl.set(pageSource.url, {
+              brand: entry.brand,
+              evidenceId: entry.evidenceId,
+              evidenceHash: entry.hash,
+              evidenceKind: 'evidence',
+              sourceId: pageSource.id,
+              phase: 'evidence',
+              anchorRef: `evidence:${entry.evidenceId}`,
+            });
+          }
         }
       }
     } catch {
       // Fail closed: evidence-based authority is best-effort.
     }
 
-    // Asset phase: exact verified assets (stronger provenance — runs last so
-    // the asset-backed record wins the upsert over the pre-verification
-    // evidence record).
-    const brands = repo.listResolvedProductBrands(runId, input.gtin.trim());
-    // Group by source page URL; a URL resolving to multiple distinct brands is
-    // ambiguous and never minted.
-    const byUrl = new Map<string, Array<{ brand: string; assetId: string; contentHash: string }>>();
-    for (const resolved of brands) {
-      if (!resolved.sourcePageUrl) continue;
-      const list = byUrl.get(resolved.sourcePageUrl) ?? [];
-      list.push({ brand: resolved.brand, assetId: resolved.assetId, contentHash: resolved.contentHash });
-      byUrl.set(resolved.sourcePageUrl, list);
-    }
-    for (const [pageUrl, resolvedList] of byUrl) {
-      const distinctBrands = new Set(resolvedList.map((r) => r.brand));
-      if (distinctBrands.size !== 1) continue; // ambiguous source — fail closed
-      const resolved = resolvedList[0];
-      let source = repo.listPiSources(runId).find((candidate) => candidate.url === pageUrl);
-      if (!source) {
-        try {
-          const created = repo.insertPiSource({
-            runId,
-            url: pageUrl,
-            domain: new URL(pageUrl).hostname.replace(/^www\./, '').toLowerCase(),
-            sourceType: 'other',
-          });
-          source = { id: created.id, url: pageUrl };
-        } catch {
-          continue; // no durable anchor, no authority
+    // ---- ASSET phase (stronger provenance — wins over evidence) ---------
+    // Exact verified assets with a QUALIFIED brand binding. Round-12
+    // (review P0-3): the asset must retain the qualifying brand evidence
+    // binding; observedBrand alone is never enough. The binding hash is the
+    // brand evidence's hash (the exact bytes for OCR/decoder), never a
+    // reconstruction from observedBrand + originalContentHash.
+    try {
+      const brands = listQualifiedResolvedBrands(repo, runId, input.gtin.trim());
+      const byUrl = new Map<string, Array<ResolvedBrand>>();
+      for (const resolved of brands) {
+        if (!resolved.sourcePageUrl) continue;
+        const list = byUrl.get(resolved.sourcePageUrl) ?? [];
+        list.push(resolved);
+        byUrl.set(resolved.sourcePageUrl, list);
+      }
+      for (const [pageUrl, resolvedList] of byUrl) {
+        const distinctBrands = new Set(resolvedList.map((r) => r.brand));
+        if (distinctBrands.size !== 1) {
+          desiredByPageUrl.delete(pageUrl); // ambiguous — fail closed
+          ambiguousPageUrls.add(pageUrl);
+          continue;
         }
+        const resolved = resolvedList[0];
+        let source = repo.listPiSources(runId).find((candidate) => candidate.url === pageUrl);
+        if (!source) {
+          try {
+            const created = repo.insertPiSource({
+              runId,
+              url: pageUrl,
+              domain: new URL(pageUrl).hostname.replace(/^www\./, '').toLowerCase(),
+              sourceType: 'other',
+            });
+            source = { id: created.id, url: pageUrl };
+          } catch {
+            continue; // no durable anchor, no authority
+          }
+        }
+        const evidenceKind = resolved.brandEvidenceId ? 'evidence' : 'decoder';
+        const existingDesired = desiredByPageUrl.get(pageUrl);
+        if (existingDesired && existingDesired.brand !== resolved.brand) {
+          desiredByPageUrl.delete(pageUrl); // ambiguity across phases
+          continue;
+        }
+        desiredByPageUrl.set(pageUrl, {
+          brand: resolved.brand,
+          evidenceId: resolved.brandEvidenceId,
+          evidenceHash: resolved.brandEvidenceHash,
+          evidenceKind,
+          sourceId: source.id,
+          phase: 'asset',
+          anchorRef: `verified_asset:${resolved.assetId}`,
+        });
+      }
+    } catch {
+      // Fail closed: asset-based authority is best-effort.
+    }
+
+    // ---- Registry gate + reconcile --------------------------------------
+    // A source page is manufacturer-authoritative ONLY when the trusted
+    // brand-site registry entry for its domain matches the resolved product
+    // brand (review P0-2). Product evidence resolves the brand; the registry
+    // resolves who owns the source. No match -> no authority -> REVOKE any
+    // stale record.
+    for (const [pageUrl, desired] of desiredByPageUrl) {
+      if (ambiguousPageUrls.has(pageUrl)) {
+        // Current evidence is ambiguous about WHICH brand this source is —
+        // no authority until it resolves (fail closed, stale record revoked).
+        repo.revokeSourceAuthority(desired.sourceId, 'manufacturer');
+        continue;
+      }
+      const registry = registryBrandMatches(pageUrl, desired.brand);
+      if (!registry.matches) {
+        // Current evidence resolves a brand, but this page is not a trusted
+        // official source for that brand (retailer page, wrong brand, or no
+        // registry row) -> never an authority.
+        repo.revokeSourceAuthority(desired.sourceId, 'manufacturer');
+        continue;
       }
       repo.upsertSourceAuthority({
-        sourceId: source.id,
+        sourceId: desired.sourceId,
         authorityType: 'manufacturer',
-        authorityRef: `verified_asset:${resolved.assetId}`,
-        brandName: resolved.brand,
-        establishedBy: 'verified_asset_evidence',
-        brandEvidenceId: resolved.assetId,
-        brandEvidenceHash: resolved.contentHash,
-        brandEvidenceKind: 'verified_asset',
+        authorityRef: desired.anchorRef,
+        brandName: desired.brand,
+        establishedBy:
+          desired.phase === 'asset'
+            ? desired.evidenceKind === 'decoder'
+              ? 'verified_asset_decoder_brand'
+              : 'verified_asset_evidence'
+            : 'verified_evidence',
+        brandEvidenceId: desired.evidenceId,
+        brandEvidenceHash: desired.evidenceHash,
+        brandEvidenceKind: desired.evidenceKind,
       });
+    }
+
+    // ---- Revocation sweep (review P1-2) ----------------------------------
+    // Any existing manufacturer authority whose source no longer has a
+    // DESIRED entry (evidence deleted, assets removed, or the source became
+    // ambiguous) is revoked and the source tier downgraded.
+    for (const authority of repo.listSourceAuthoritiesByRun(runId)) {
+      if (authority.authorityType !== 'manufacturer') continue;
+      const source = repo.listPiSources(runId).find((candidate) => candidate.id === authority.sourceId);
+      if (!source || !desiredByPageUrl.has(source.url) || ambiguousPageUrls.has(source.url)) {
+        repo.revokeSourceAuthority(authority.sourceId, 'manufacturer');
+      }
     }
   } catch {
     // Fail closed: authority establishment is best-effort; absence of a record
@@ -447,12 +616,20 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
  *  tier is upgraded so existing resolvers observe the authority — the
  *  first-writer bug is closed.
  */
+/** Round-12 (review P0-3): the qualified brand binding — the durable
+ *  evidence row id + hash that actually established the brand (never a
+ *  reconstruction from observedBrand + image hash). */
+interface BrandBinding {
+  evidenceId: string | null;
+  evidenceHash: string | null;
+  evidenceKind: string;
+}
 function establishManufacturerAuthority(
   runId: string,
   url: string,
   brandName: string,
   brandSiteId?: string,
-  evidence?: { assetId: string; contentHash: string } | null,
+  binding?: BrandBinding | null,
 ): void {
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
@@ -494,9 +671,9 @@ function establishManufacturerAuthority(
       authorityRef: brandSiteId ? `brand_site:${brandSiteId}` : null,
       brandName,
       establishedBy: 'check_source_priority:resolved_brand',
-      brandEvidenceId: evidence?.assetId ?? null,
-      brandEvidenceHash: evidence?.contentHash ?? null,
-      brandEvidenceKind: evidence ? 'verified_asset' : null,
+      brandEvidenceId: binding?.evidenceId ?? null,
+      brandEvidenceHash: binding?.evidenceHash ?? null,
+      brandEvidenceKind: binding?.evidenceKind ?? null,
     });
   } catch {
     // Fail closed: authority establishment is best-effort; absence of a record
@@ -511,19 +688,23 @@ function establishManufacturerAuthority(
  *  registry-match it just evaluated — so an evidence-derived authority (no
  *  registry row needed) is truthfully surfaced. Lazy + fail closed (no DB ->
  *  false). */
+/** Round-11 (review P1): does a DURABLE manufacturer authority exist for
+ *  THIS source URL already (established deterministically from verified
+ *  product evidence, or via a registry-brand match)? Round-12 (review P1-3):
+ *  the check is SOURCE-SCOPED — a manufacturer authority on an unrelated
+ *  source in the same run must never report authorityEstablished for this
+ *  URL. Lazy + fail closed (no DB -> false). */
 function hasDurableManufacturerAuthority(runId: string, url: string): boolean {
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
     if (!conn.isDbInitialized?.()) return false;
     const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
       listPiSources: (runId: string) => Array<{ id: string; url: string }>;
-      listSourceAuthoritiesByRun: (runId: string) => Array<{ authorityType: string }>;
+      getSourceAuthorities: (sourceId: string) => Array<{ authorityType: string }>;
     };
     const source = repo.listPiSources(runId).find((candidate) => candidate.url === url);
     if (!source) return false;
-    return repo
-      .listSourceAuthoritiesByRun(runId)
-      .some((authority) => authority.authorityType === 'manufacturer');
+    return repo.getSourceAuthorities(source.id).some((authority) => authority.authorityType === 'manufacturer');
   } catch {
     return false;
   }
@@ -557,16 +738,14 @@ export const checkSourcePriority: PiToolAdapter = {
     // manufacturer AUTHORITY requires the registry brand to match the product
     // brand resolved from DURABLE exact-GTIN evidence — an official domain for
     // Brand A researching Brand B (or hint-only Brand A with no evidence) never
-    // becomes manufacturer authority. brandHint is untrusted and may only color
-    // the display reason; with no resolved brand, no authority is established
-    // (fail closed to a neutral source).
+    // becomes manufacturer authority. Round-12 (review P0-3): the resolved
+    // brand is itself QUALIFIED — exact assets must retain the qualifying
+    // brand evidence binding (never observedBrand alone). brandHint is
+    // untrusted and may only color the display reason.
     const resolvedBrand = loadResolvedBrand(ctx.runId);
     const brandHint = loadExpectedBrand(ctx.runId); // display-only context
-    const brandMatch =
-      registry.official &&
-      typeof registry.brandName === 'string' &&
-      resolvedBrand !== null &&
-      registry.brandName.trim().toLowerCase() === resolvedBrand.brand;
+    const registryBrand = registryBrandMatches(url, resolvedBrand?.brand ?? '');
+    const brandMatch = resolvedBrand !== null && registryBrand.matches;
     // Round-11 (review P1): a durable authority may already exist (established
     // deterministically from verified product evidence without any registry
     // row) — it is reported truthfully regardless of this call's brand match.
@@ -577,10 +756,11 @@ export const checkSourcePriority: PiToolAdapter = {
     if (registry.official) {
       tier = 'official';
       if (brandMatch) {
-        reason = `registry brand '${registry.brandName}' matches the durable exact-GTIN-resolved product brand`;
-        establishManufacturerAuthority(ctx.runId, url, registry.brandName as string, registry.brandSiteId, {
-          assetId: resolvedBrand.assetId,
-          contentHash: resolvedBrand.contentHash,
+        reason = `registry brand '${registryBrand.brandName}' matches the durable exact-GTIN-resolved product brand`;
+        establishManufacturerAuthority(ctx.runId, url, resolvedBrand!.brand, registryBrand.brandSiteId, {
+          evidenceId: resolvedBrand!.brandEvidenceId,
+          evidenceHash: resolvedBrand!.brandEvidenceHash,
+          evidenceKind: resolvedBrand!.brandEvidenceId ? 'evidence' : 'decoder',
         });
       } else if (resolvedBrand !== null) {
         reason = `registry official but brand '${registry.brandName ?? '?'}' does not match the durable resolved product brand '${resolvedBrand.brand}' (no authority established)`;
@@ -611,7 +791,7 @@ export const checkSourcePriority: PiToolAdapter = {
         // agent-asserted claims.
         authorityEstablished: brandMatch || durableAuthority,
         authorityType: brandMatch || durableAuthority ? 'manufacturer' : undefined,
-        authorityBrand: brandMatch ? registry.brandName : durableAuthority ? resolvedBrand?.brand : undefined,
+        authorityBrand: brandMatch ? registryBrand.brandName : durableAuthority ? resolvedBrand?.brand : undefined,
       },
       [{ id: evidenceId('check_source_priority', url), kind: tier === 'official' ? 'official_evidence' : 'search_lead', url, domain, method: 'source_priority_rank' }],
     );
