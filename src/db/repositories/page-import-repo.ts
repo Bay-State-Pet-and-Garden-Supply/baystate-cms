@@ -18,7 +18,7 @@ import { PageImportSchema, PageRecordSchema } from '../../shared/schemas/page';
 
 const now = () => new Date().toISOString();
 
-function mapImportRow(row: Record<string, any>): PageImport {
+export function mapImportRow(row: Record<string, any>): PageImport {
   return PageImportSchema.parse({
     id: String(row.id),
     workspaceId: String(row.workspace_id),

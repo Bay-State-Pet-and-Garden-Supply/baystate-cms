@@ -50,6 +50,24 @@ interface ResolvedCorrection {
   revisedTargetId?: string | null;
 }
 
+/**
+ * A reviewed category_page value must be either a legacy page-name string or
+ * an object with a non-empty `pageName` (and, when present, a string `pageId`).
+ * Any other shape is rejected BEFORE a decision row is written so a Page ID
+ * can never be accepted into a page-name field via an unvalidated revision.
+ */
+function isValidCategoryPageValue(value: unknown): boolean {
+  if (typeof value === 'string') return value.length > 0;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.pageName !== 'string' || record.pageName.length === 0) return false;
+  if (record.pageId !== undefined && record.pageId !== null
+    && (typeof record.pageId !== 'string' || record.pageId.length === 0)) {
+    return false;
+  }
+  return true;
+}
+
 function resolveCorrection(
   decision: DecisionInput,
   proposalType: string,
@@ -62,6 +80,12 @@ function resolveCorrection(
   const hasRevisedTargetId = hasCanonicalTarget || hasLegacyTarget;
   const revisedValue = hasCanonicalValue ? decision.revisedValue : decision.proposedValue;
   const revisedTargetId = hasCanonicalTarget ? decision.revisedTargetId : decision.targetId;
+
+  if (proposalType === 'category_page' && hasRevisedValue && revisedValue !== null) {
+    if (!isValidCategoryPageValue(revisedValue)) {
+      return { ok: false, reason: `Decision ${decision.proposalId} has an invalid Category Page value.` };
+    }
+  }
 
   if (proposalType !== 'primary_product_type' || (!hasRevisedValue && !hasRevisedTargetId)) {
     return {

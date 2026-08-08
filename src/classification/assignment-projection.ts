@@ -1,5 +1,6 @@
 import type { AttributeMappingConfig, ClassificationProposal, ProductAttributeConfig } from '../shared/types';
 import type { SerializationConfigV2 } from '../shared/schemas/classification';
+import { pageNameFromPageValue } from '../shared/proposal-display';
 
 /** Return the reviewed correction when present, including an explicit null. */
 export function getEffectiveProposalValue(proposal: ClassificationProposal): unknown {
@@ -290,7 +291,9 @@ export function buildAssignmentProjection(
         continue;
       }
       const pv = getEffectiveProposalValue(proposal) as Record<string, unknown> | undefined;
-      const pageName = pv?.pageName ? String(pv.pageName) : String(targetId);
+      // Display name comes from the value only — never the Page ID (the
+      // target is the stable identity for new proposals).
+      const pageName = pageNameFromPageValue(pv);
       const pageId = pv?.pageId ? String(pv.pageId) : null;
       if (verifiedPageIds) {
         // Fail closed: without a verified identity in the active import the
@@ -299,6 +302,12 @@ export function buildAssignmentProjection(
           skipped.push({ proposalId: proposal.id, targetId, reason: 'Page identity unverified' });
           continue;
         }
+      }
+      if (!pageName) {
+        // A verified page without a display name is a visible skip; the Page
+        // ID must never be emitted as a page name.
+        skipped.push({ proposalId: proposal.id, targetId, reason: 'Page display name missing' });
+        continue;
       }
       if (!currentPageNames.includes(pageName) && !proposedPages.includes(pageName)) {
         proposedPages.push(pageName);

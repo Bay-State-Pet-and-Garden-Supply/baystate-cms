@@ -196,7 +196,6 @@ export function exportBenchmark(
           // Page ID (issue #17 D1).
           const pageName = pageNameFromPageValue(
             decision.hasRevisedValue ? decision.revisedValue : proposal.proposedValue,
-            effectiveTarget,
           );
           if (pageName) pageAssignments.push({ pageName, pageId: null });
         }

@@ -1391,6 +1391,15 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Unique verified-identity index: a name is never an identity key, and each
+  // (workspace, import, identity kind, identity key) tuple is unique. Created
+  // outside the guarded page_identity block (idempotent) so databases that
+  // already ran that migration still get the index. The in-code capture check
+  // rejects duplicates even where this index cannot be created.
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_page_index_identity_unique ON page_index(workspace_id, import_id, identity_kind, identity_key);',
+  );
+
   // ── Product Intelligence Migration (PI-2) ──────────────────────────────────
   //
   // Durable data model for Product Intelligence runs (epic #28, issue #19):

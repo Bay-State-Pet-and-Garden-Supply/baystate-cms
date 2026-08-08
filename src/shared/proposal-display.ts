@@ -20,33 +20,36 @@ export interface PageProposalLike {
 }
 
 /**
- * Page display name from a category_page effective value, with legacy
- * fallbacks. New shape: `{ pageId, pageName, identityVerified }`. Legacy
- * shape: the value itself is the page name; the target was the name too.
+ * Page display name from a category_page effective value.
  *
- * Returns `null` (never a Page ID) when no display name is present.
+ * New shape: `{ pageId, pageName, identityVerified }` — the display name is
+ * `pageName`. Legacy shape: the value itself is the page name string.
+ *
+ * Returns `null` (NEVER a Page ID) when no display name is present. The
+ * target/identity ID is deliberately not consulted: for new proposals the
+ * target is the stable Page ID, so falling back to it would place an identity
+ * into a page-name field.
  */
-export function pageNameFromPageValue(
-  value: unknown,
-  fallbackTargetId?: string | null,
-): string | null {
+export function pageNameFromPageValue(value: unknown): string | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const pageName = (value as Record<string, unknown>).pageName;
-    if (typeof pageName === 'string' && pageName.length > 0) return pageName;
+    if (typeof pageName === 'string' && pageName.trim().length > 0) return pageName;
+    // An object without a valid pageName has no display name; the caller must
+    // handle null (skip/visible-unavailable) — never substitute the identity.
+    return null;
   }
-  if (typeof value === 'string' && value.length > 0) return value;
-  const fallback = fallbackTargetId ?? null;
-  return fallback && fallback.length > 0 ? fallback : null;
+  if (typeof value === 'string' && value.trim().length > 0) return value;
+  return null;
 }
 
 /**
  * Display name for a category_page proposal, honoring the reviewed correction
- * when present (same precedence as `getEffectiveProposalValue`).
+ * when present (same precedence as `getEffectiveProposalValue`). Never returns
+ * a Page ID — only `pageName` (new shape) or a legacy string value.
  */
 export function getPageDisplayName(proposal: PageProposalLike): string | null {
   const effective = proposal.hasRevisedValue ? proposal.revisedValue : proposal.proposedValue;
-  const target = proposal.hasRevisedTargetId ? proposal.revisedTargetId ?? null : proposal.targetId ?? null;
-  return pageNameFromPageValue(effective, target);
+  return pageNameFromPageValue(effective);
 }
 
 /**

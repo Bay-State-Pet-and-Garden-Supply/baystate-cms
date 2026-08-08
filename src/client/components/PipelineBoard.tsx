@@ -1855,7 +1855,6 @@ export function PipelineBoard({
                   fieldTargetForProposal={fieldTargetForProposal}
                   productTypeOptions={productTypeOptions}
                   getEffectiveProposalValue={getEffectiveProposalValue}
-                  getEffectiveProposalTargetId={getEffectiveProposalTargetId}
                   getEffectiveProductTypeId={getEffectiveProductTypeId}
                   withReviewedProposalValue={withReviewedProposalValue}
                   withReviewedProductTypeId={withReviewedProductTypeId}

@@ -267,7 +267,7 @@ describe('buildAssignmentProjection', () => {
     expect(result.skipped).toHaveLength(1);
   });
 
-  it('skips page proposals for already-assigned pages', () => {
+  it('skips page proposals for already-assigned pages and for nameless values', () => {
     const proposals: ClassificationProposal[] = [
       {
         id: 'p7', runId: 'r1', productSku: 'SKU001',
@@ -277,12 +277,28 @@ describe('buildAssignmentProjection', () => {
         isBulkAcceptable: false, isStale: false, stalenessReason: null,
         createdAt: new Date().toISOString(),
       },
+      {
+        id: 'p8', runId: 'r1', productSku: 'SKU001',
+        proposalType: 'category_page', targetId: 'Dog Food',
+        proposedValue: { pageName: 'Dog Food' }, confidence: 0.9,
+        evidenceIds: [], status: 'accepted',
+        isBulkAcceptable: false, isStale: false, stalenessReason: null,
+        createdAt: new Date().toISOString(),
+      },
     ];
 
     const result = buildAssignmentProjection(proposals, currentCustomFields, currentPageNames, mappings);
     expect(result.pages.proposed).toEqual([]);
-    expect(result.skipped).toHaveLength(1);
-    expect(result.skipped[0].reason).toContain('already assigned');
+    // The empty-object value has no display name — the Page ID target must
+    // never be substituted (issue #17 pass 3c).
+    const namelessSkip = result.skipped.find(skip => skip.proposalId === 'p7');
+    expect(namelessSkip).toBeDefined();
+    expect(namelessSkip!.reason).toBe('Page display name missing');
+    // A named value that matches an existing page is skipped as already
+    // assigned.
+    const assignedSkip = result.skipped.find(skip => skip.proposalId === 'p8');
+    expect(assignedSkip).toBeDefined();
+    expect(assignedSkip!.reason).toContain('already assigned');
   });
 
   it('deduplicates by catalog field (first proposal wins)', () => {

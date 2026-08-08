@@ -173,4 +173,42 @@ describe('buildAssignmentProjection — skipped assignments stay visible and do 
     expect(noTargetSkip).toBeDefined();
     expect(noTargetSkip!.reason).toBe('No attribute target');
   });
+
+  it('never emits a Page ID as a page name in the projection', () => {
+    // A category_page proposal with a verified pageId but no pageName must be
+    // a visible skip — the stable Page ID is never a display name.
+    const pageProposal = makeProposal({
+      id: 'p-page',
+      proposalType: 'category_page',
+      targetId: 'page-id-123',
+      proposedValue: { pageId: 'page-id-123' },
+    });
+    const projection = buildAssignmentProjection(
+      [pageProposal],
+      {},
+      [],
+      mappings,
+      new Set(['page-id-123']),
+    );
+    expect(projection.pages.proposed).toEqual([]);
+    const skip = projection.skipped.find(skip => skip.proposalId === 'p-page');
+    expect(skip).toBeDefined();
+    expect(skip!.reason).toBe('Page display name missing');
+
+    // A well-formed value with pageName still projects the display name.
+    const goodProposal = makeProposal({
+      id: 'p-page-good',
+      proposalType: 'category_page',
+      targetId: 'page-id-456',
+      proposedValue: { pageId: 'page-id-456', pageName: 'Dog Food' },
+    });
+    const goodProjection = buildAssignmentProjection(
+      [goodProposal],
+      {},
+      [],
+      mappings,
+      new Set(['page-id-456']),
+    );
+    expect(goodProjection.pages.proposed).toEqual(['Dog Food']);
+  });
 });

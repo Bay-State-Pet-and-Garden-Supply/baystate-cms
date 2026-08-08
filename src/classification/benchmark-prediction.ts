@@ -77,7 +77,6 @@ export function extractPredictionsForSku(
       // stable Page ID (issue #17 D1).
       const pageName = pageNameFromPageValue(
         decision.hasRevisedValue ? decision.revisedValue : proposal.proposedValue,
-        effectiveTarget,
       );
       if (pageName) pageAssignments.push(pageName);
     } else if (proposal.proposalType === 'field_assignment' && effectiveTarget) {

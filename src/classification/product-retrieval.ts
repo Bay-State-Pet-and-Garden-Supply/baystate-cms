@@ -189,7 +189,6 @@ export async function findSimilarApprovedProducts(
             // (issue #17 D1).
             const pageName = pageNameFromPageValue(
               decision.hasRevisedValue ? decision.revisedValue : proposal.proposedValue,
-              target || null,
             );
             if (pageName) acceptedPages.push(pageName);
           } else if (proposal.proposalType === 'field_assignment' && target) {

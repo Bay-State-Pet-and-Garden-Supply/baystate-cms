@@ -359,9 +359,18 @@ export async function promoteItems(
           } else if (proposal.proposalType === 'category_page' && targetId) {
             const pv = getEffectiveProposalValue(proposal);
             const pageId = getPageIdentityId(proposal);
-            const pageName = pageNameFromPageValue(pv, targetId) ?? '';
+            const pageName = pageNameFromPageValue(pv);
             if (!pageId || !verifiedPageIds.has(pageId)) {
-              skippedPageRefs.push({ proposalId: proposal.id, pageName });
+              skippedPageRefs.push({ proposalId: proposal.id, pageName: pageName ?? '' });
+              continue;
+            }
+            // A verified page with no display name is a visible skip — the
+            // Page ID must never be serialized as a page name.
+            if (!pageName) {
+              skippedPageRefs.push({
+                proposalId: proposal.id,
+                pageName: `[page ${pageId} missing display name]`,
+              });
               continue;
             }
             classificationPageNames.push(pageName);

@@ -10,6 +10,7 @@ import { authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from './
 import { mergeProductOnPages } from '../shopsite/product-page-assignments';
 import { getActiveVerifiedPageIds } from '../shopsite/page-import-service';
 import { getEffectiveProposalTargetId, getEffectiveProposalValue, serializeAttributeValue } from './assignment-projection';
+import { pageNameFromPageValue } from '../shared/proposal-display';
 import { computeProductHash } from './catalog-product-source';
 import type { Product } from '../shared/types';
 
@@ -136,13 +137,21 @@ export async function applyCatalogClassification(
     const targetId = getEffectiveProposalTargetId(proposal);
     if (!targetId) continue;
     const pv = getEffectiveProposalValue(proposal) as Record<string, unknown> | undefined;
-    const pageName = pv?.pageName ? String(pv.pageName) : String(targetId);
+    // Display name comes from the value only — never the Page ID (the target
+    // is the stable identity for new proposals).
+    const pageName = pageNameFromPageValue(pv);
     const pageId = pv?.pageId ? String(pv.pageId) : null;
     if (!pageId || !verifiedPageIds.has(pageId)) {
       skipped.push({
         proposalId: proposal.id,
         reason: 'Page identity unverified (name-only or not in the active verified import)',
       });
+      continue;
+    }
+    if (!pageName) {
+      // A verified page without a display name is a visible skip; the Page ID
+      // must never be serialized as a page name.
+      skipped.push({ proposalId: proposal.id, reason: 'Page display name missing' });
       continue;
     }
     if (!additionalPages.includes(pageName)) {

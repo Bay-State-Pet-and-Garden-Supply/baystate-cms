@@ -1457,4 +1457,94 @@ describe('Draft Promoter Service', () => {
     // Bogus page must never be serialized into ProductOnPages.
     expect(pagesXml ?? '').not.toContain('Bogus Page');
   });
+
+  it('skips (non-blocking) a verified page whose proposal has no display name — never serializes the Page ID as a name', async () => {
+    // Build a verified page in the active import, then seed an accepted
+    // category_page proposal whose value carries only the stable Page ID
+    // (no pageName). The Page ID must never be serialized as a page name.
+    activatePageImportFromRecords({
+      workspaceId: wsId,
+      sourceHash: 'a'.repeat(64),
+      parserFormatVersion: 'pages-xml-1',
+      records: [{
+        identity: { kind: 'exported_guid', key: 'nameless-1', status: 'verified' },
+        name: 'Nameless Page',
+        parentRef: null,
+        availability: 'available',
+      }],
+      activatedBy: 'test',
+    });
+    const verifiedRows = listVerifiedPageOptions(wsId);
+    const verifiedNameless = verifiedRows.find(r => r.name === 'Nameless Page');
+    expect(verifiedNameless).toBeDefined();
+
+    const batch = createBatch({ workspaceId: wsId, name: 'Nameless Pages', fileName: 'np.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [{ upc: '999000000003', name: 'Nameless Product', price: '$7.00', rowNumber: 1, brandHint: 'Test Brand' }]);
+    const item = items[0];
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'Nameless Product',
+      brand: 'Test Brand',
+      description: 'Promotion nameless-page test.',
+      bulletPoints: [],
+      primaryImage: 'products/999000000003/images/primary.jpg',
+      additionalImages: [],
+      price: '$7.00',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: `https://example.test/999000000003`,
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const db = getDb();
+    db.query("UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(
+      JSON.stringify(extractionData),
+      JSON.stringify({ curatedTitle: 'Nameless Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, curatedAt: new Date().toISOString(), curationMethod: 'auto' }),
+      item.id,
+    );
+
+    const runId = 'run-nameless-page';
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO classification_runs
+       (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, 'completed', ?)`,
+      [runId, wsId, item.id, item.upc, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ curatedTitle: 'Nameless Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, classificationRunId: runId, curatedAt: now, curationMethod: 'auto' }), item.id],
+    );
+    const proposalId = 'prop-nameless-page';
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, ?, 'category_page', ?, ?, 1.0, 'accepted', ?)`,
+      // targetId is the stable Page ID; proposedValue lacks pageName on purpose.
+      [proposalId, runId, item.upc, verifiedNameless!.id, JSON.stringify({ pageId: verifiedNameless!.id }), now],
+    );
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      [`decision-${proposalId}`, proposalId, `decision-token-${proposalId}`, now],
+    );
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    // A nameless verified page is a visible, non-blocking skip.
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const changeSetItem = db.query(
+      'SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1',
+    ).get(item.upc) as { draft_json: string };
+    const draft = JSON.parse(changeSetItem.draft_json);
+    const pagesXml = draft.shopsite?.preserved?.unknownElements?.ProductOnPages;
+    // The Page ID must never be serialized as a page name.
+    expect(pagesXml ?? '').not.toContain(verifiedNameless!.id);
+    // And without a display name no page content is written at all.
+    expect(pagesXml ?? '').toBe('');
+  });
 });

@@ -112,9 +112,10 @@ CREATE TABLE IF NOT EXISTS page_index (
 );
 
 CREATE INDEX IF NOT EXISTS idx_page_index_name ON page_index(name);
--- idx_page_index_identity and idx_page_index_import are created by the
--- page identity migration AFTER the workspace/import/identity columns exist
--- (an old-shape table would break index creation at schema.sql load).
+-- idx_page_index_identity, idx_page_index_import, and
+-- idx_page_index_identity_unique are created by the page identity migration
+-- AFTER the workspace/import/identity columns exist (an old-shape table would
+-- break index creation at schema.sql load).
 
 CREATE TABLE IF NOT EXISTS product_pages (
   product_sku TEXT NOT NULL,

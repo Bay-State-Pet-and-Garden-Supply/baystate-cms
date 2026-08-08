@@ -245,6 +245,57 @@ describe('onboarding decision routes', () => {
     expect(Array.isArray(body.issues)).toBe(true);
   });
 
+  it('rejects an invalid category_page revised value before any decision row is written', async () => {
+    const seeded = seedReviewItem('SKU-PAGE-SHAPE');
+    const db = getDb();
+    const now = new Date().toISOString();
+    // Seed a category_page proposal whose target is a stable Page ID.
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, is_bulk_acceptable, is_stale, created_at)
+       VALUES (?, ?, ?, 'category_page', 'page-1', ?, 0.9, 'pending', 0, 0, ?)`,
+      ['proposal-category-page', seeded.runId, seeded.sku,
+        JSON.stringify({ pageId: 'page-1', pageName: 'Dog Food' }), now],
+    );
+
+    // A revision that is an object WITHOUT a pageName (a bare Page ID) must be
+    // rejected so a Page ID can never be accepted into a page-name field.
+    const invalidResponse = await makeApp().request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions: [{
+        proposalId: 'proposal-category-page',
+        decision: 'accepted',
+        revisedValue: { pageId: 'page-2' },
+        actionToken: 'page-shape-token',
+        expectedRevisionId: null,
+      }] }),
+    });
+    expect(invalidResponse.status).toBe(400);
+    const invalidBody = await invalidResponse.json() as any;
+    expect(invalidBody.code).toBe('invalid_decisions');
+    expect(invalidBody.error).toMatch(/invalid Category Page value/i);
+    const count = db.query(
+      'SELECT COUNT(*) AS count FROM classification_proposal_decisions WHERE proposal_id = ?',
+    ).get('proposal-category-page') as { count: number };
+    expect(count.count).toBe(0);
+
+    // A valid string (legacy name) revision is still accepted.
+    const validResponse = await makeApp().request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions: [{
+        proposalId: 'proposal-category-page',
+        decision: 'accepted',
+        revisedValue: 'Toys',
+        actionToken: 'page-shape-token-2',
+        expectedRevisionId: null,
+      }] }),
+    });
+    expect(validResponse.status).toBe(200);
+  });
+
   it('keeps predictions immutable and makes exact action-token retries idempotent', async () => {
     const seeded = seedReviewItem();
     const payload = {

@@ -28,7 +28,6 @@ interface CurationStagePanelProps {
   fieldTargetForProposal: (proposal: ClassificationProposal) => { target: CurationTargetConfig | null; values: string[]; label: string };
   productTypeOptions: () => { label: string; value: string }[];
   getEffectiveProposalValue: (proposal: ClassificationProposal) => any;
-  getEffectiveProposalTargetId: (proposal: ClassificationProposal) => string | null;
   getEffectiveProductTypeId: (proposal: ClassificationProposal) => string | null;
   withReviewedProposalValue: (proposal: ClassificationProposal, reviewedValue: unknown) => ClassificationProposal;
   withReviewedProductTypeId: (proposal: ClassificationProposal, reviewedProductTypeId: string | null) => ClassificationProposal;
@@ -59,7 +58,6 @@ export function CurationStagePanel({
   fieldTargetForProposal,
   productTypeOptions,
   getEffectiveProposalValue,
-  getEffectiveProposalTargetId,
   getEffectiveProductTypeId,
   withReviewedProposalValue,
   withReviewedProductTypeId,
@@ -187,7 +185,7 @@ export function CurationStagePanel({
                   ? fieldMeta.label
                   : p.proposalType === 'primary_product_type'
                   ? 'Product Type'
-                  : pageNameFromPageValue(effectiveValue, getEffectiveProposalTargetId(p)) ?? '';
+                  : pageNameFromPageValue(effectiveValue) ?? '';
 
               return (
                 <div key={p.id} style={{ padding: '10px 0', borderBottom: '1px solid #ede9fe', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>

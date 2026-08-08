@@ -188,6 +188,59 @@ describe('captureVerifiedPageSnapshot (issue #17 D1)', () => {
     expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/name mismatch/i);
   });
 
+  it('throws when a verified row source hash is NULL (no NULL exemption)', () => {
+    activate([verifiedRecord('1', 'Dog Food')]);
+    const db = getDb();
+    // An activated verified row must carry the authoritative non-null import
+    // hash; NULL is drift and must fail closed.
+    db.run('UPDATE page_index SET source_hash = NULL WHERE identity_key = ?', ['1']);
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/source hash mismatch/i);
+  });
+
+  it('throws when an UNAVAILABLE verified row has a tampered parent (any-availability drift)', () => {
+    activate([
+      verifiedRecord('1', 'Dog Food'),
+      verifiedRecord('2', 'Hidden Parent', null, 'unavailable'),
+    ]);
+    const db = getDb();
+    // Give the unavailable verified row a parent it must not have: parent
+    // validation applies to ALL verified rows before availability filtering.
+    const row1 = db.query('SELECT id FROM page_index WHERE identity_key = ?').get('1') as { id: string };
+    db.run('UPDATE page_index SET parent_id = ? WHERE identity_key = ?', [row1.id, '2']);
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/unexpected parent/i);
+  });
+
+  it('throws on duplicate identity-key rows (strict 1:1 even without the unique index)', () => {
+    activate([verifiedRecord('1', 'Dog Food')]);
+    const db = getDb();
+    // Simulate an older database where the unique identity index is absent:
+    // the in-code Set-based check must still reject duplicates.
+    db.exec('DROP INDEX IF EXISTS idx_page_index_identity_unique');
+    const existing = db.query('SELECT * FROM page_index WHERE identity_key = ?').get('1') as Record<string, any>;
+    // Insert a second verified row with the SAME identity key (bypassing the
+    // unique index, e.g. on an older database that predates it).
+    db.run(
+      `INSERT INTO page_index
+       (id, name, file_name, parent_id, page_hash, workspace_id, import_id, identity_kind, identity_key, identity_status, source_hash, availability, review_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, 'available', 'imported', ?, ?)`,
+      [
+        'duplicate-extra-row',
+        existing.name,
+        existing.file_name,
+        existing.parent_id,
+        existing.page_hash,
+        existing.workspace_id,
+        existing.import_id,
+        existing.identity_kind,
+        existing.identity_key,
+        existing.source_hash,
+        new Date().toISOString(),
+        new Date().toISOString(),
+      ],
+    );
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/duplicate page_index rows/i);
+  });
+
   it('exposes the same records for both run boundaries via the shared builder', () => {
     activate([verifiedRecord('1', 'Dog Food')]);
     const snap = captureVerifiedPageSnapshot(workspaceId);
