@@ -249,4 +249,67 @@ describe('captureVerifiedPageSnapshot (issue #17 D1)', () => {
     const snap2 = captureVerifiedPageSnapshot(workspaceId);
     expect(JSON.stringify(snap)).toBe(JSON.stringify(snap2));
   });
+
+  it('throws on duplicate identity records in records_json even with equal counts and distinct rows (strict bijection)', () => {
+    // Exact reviewer counterexample: records_json identities [A,A] while the
+    // verified child rows are [A,B]. Counts match (2 == 2) and no child-row
+    // key is duplicated, but the authoritative records contain a duplicate
+    // identity that would alias row A twice and leave row B unconsumed.
+    activate([verifiedRecord('1', 'Dog Food'), verifiedRecord('2', 'Dog Toys')]);
+    const db = getDb();
+    const records = JSON.parse(
+      (db.query('SELECT records_json FROM page_imports WHERE workspace_id = ?').get(workspaceId) as { records_json: string }).records_json,
+    ) as PageRecord[];
+    // Tamper records_json: replace the second record's identity key '2' with
+    // '1' so identities are [A,A] while child rows remain [A,B].
+    const tampered = JSON.parse(JSON.stringify(records));
+    tampered[1].identity.key = '1';
+    tampered[1].name = tampered[0].name;
+    db.run('UPDATE page_imports SET records_json = ? WHERE workspace_id = ?', [
+      JSON.stringify(tampered),
+      workspaceId,
+    ]);
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/duplicate identity records/i);
+  });
+
+  it('throws on duplicate identity records in records_json even when child rows are also duplicated (counts match)', () => {
+    // records [A,A] + child rows [A,A]: the duplicate-record check must fire
+    // (not silently pass because the duplicate-row check catches it first).
+    activate([verifiedRecord('1', 'Dog Food'), verifiedRecord('2', 'Dog Toys')]);
+    const db = getDb();
+    const records = JSON.parse(
+      (db.query('SELECT records_json FROM page_imports WHERE workspace_id = ?').get(workspaceId) as { records_json: string }).records_json,
+    ) as PageRecord[];
+    const tampered = JSON.parse(JSON.stringify(records));
+    tampered[1].identity.key = '1';
+    tampered[1].name = tampered[0].name;
+    db.run('UPDATE page_imports SET records_json = ? WHERE workspace_id = ?', [
+      JSON.stringify(tampered),
+      workspaceId,
+    ]);
+    // Also duplicate the child row (simulating an older DB without the
+    // unique index) so both checks are exercised on the same fixture.
+    db.exec('DROP INDEX IF EXISTS idx_page_index_identity_unique');
+    const existing = db.query('SELECT * FROM page_index WHERE identity_key = ?').get('1') as Record<string, any>;
+    db.run(
+      `INSERT INTO page_index
+       (id, name, file_name, parent_id, page_hash, workspace_id, import_id, identity_kind, identity_key, identity_status, source_hash, availability, review_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, 'available', 'imported', ?, ?)`,
+      [
+        'dup-record-row-a',
+        existing.name,
+        existing.file_name,
+        existing.parent_id,
+        existing.page_hash,
+        existing.workspace_id,
+        existing.import_id,
+        existing.identity_kind,
+        existing.identity_key,
+        existing.source_hash,
+        new Date().toISOString(),
+        new Date().toISOString(),
+      ],
+    );
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/duplicate identity records/i);
+  });
 });

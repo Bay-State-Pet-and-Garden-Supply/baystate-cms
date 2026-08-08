@@ -113,9 +113,27 @@ export function captureVerifiedPageSnapshot(workspaceId: string): VerifiedPageSn
 
     const verifiedRecords = records.filter(r => r.identity.status === 'verified');
 
-    // Strict 1:1 by identity key. Duplicate keys are rejected in code (even
-    // if the unique identity index is absent on an older database) so the
-    // capture never silently merges or aliases two rows to one record.
+    // Strict 1:1 by identity key — THREE independent checks so the capture is
+    // a true bijection and can never alias or drop rows:
+    //   1. Duplicate identity keys INSIDE the authoritative records_json are
+    //      rejected (e.g. records [A,A]); otherwise two records could alias
+    //      the same row.
+    //   2. Duplicate identity keys among the child page_index rows are
+    //      rejected (even if the unique identity index is absent on an older
+    //      database).
+    //   3. After per-record validation, every child-row key must have been
+    //      consumed exactly once — an extra unconsumed row is drift.
+    const recordKeys = new Set<string>();
+    for (const record of verifiedRecords) {
+      const key = `${record.identity.kind}:${record.identity.key}`;
+      if (recordKeys.has(key)) {
+        throw new Error(
+          `Verified Page import changed during capture: duplicate identity records for "${key}" in the active import.`,
+        );
+      }
+      recordKeys.add(key);
+    }
+
     const rowsByKey = new Map<string, typeof rows>();
     for (const row of rows) {
       const key = `${row.identity_kind}:${row.identity_key}`;
@@ -143,6 +161,12 @@ export function captureVerifiedPageSnapshot(workspaceId: string): VerifiedPageSn
     // non-null import hash), and parent metadata — BEFORE filtering by
     // availability, so drift on an unavailable verified row is still a
     // capture-time error.
+    // Every child-row key consumed exactly once: track which rows the
+    // per-record validation below actually matches. If a verified row exists
+    // for this import but no verified record references it, the catalog is
+    // non-bijective (an unconsumed extra row) and capture must fail closed.
+    const consumedRowKeys = new Set<string>();
+
     for (const record of verifiedRecords) {
       const key = `${record.identity.kind}:${record.identity.key}`;
       const row = rowsByKey.get(key)?.[0];
@@ -187,6 +211,21 @@ export function captureVerifiedPageSnapshot(workspaceId: string): VerifiedPageSn
           `Verified Page import changed during capture: unexpected parent for identity "${key}".`,
         );
       }
+      consumedRowKeys.add(key);
+    }
+
+    // Bijection tail check: every distinct child-row key must have been
+    // consumed by exactly one verified record. Combined with the duplicate
+    // record/row checks above, this proves a strict 1:1 correspondence — an
+    // equal-count alias case (records [A,A] + rows [A,B]) is rejected either
+    // here (row B unconsumed) or by the duplicate-record check (records A,A).
+    const allRowKeys = new Set(rowsByKey.keys());
+    if (consumedRowKeys.size !== allRowKeys.size) {
+      const unconsumed = [...allRowKeys].filter(k => !consumedRowKeys.has(k));
+      throw new Error(
+        `Verified Page import changed during capture: page_index row(s) without a matching verified record ` +
+          `in the active import (${unconsumed.join(', ')}).`,
+      );
     }
 
     const out: PageSnapshotRecord[] = [];
