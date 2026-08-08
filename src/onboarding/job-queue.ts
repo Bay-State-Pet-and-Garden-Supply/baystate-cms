@@ -10,6 +10,7 @@ import {
 } from '../db/repositories/onboarding-item-repo';
 import { randomUUID } from 'node:crypto';
 import { discoverSources } from './source-discovery';
+import { captureModelPolicySnapshot } from './model-policy-snapshot';
 import {
   insertSources,
   deleteSourcesByItem,
@@ -171,6 +172,11 @@ export class OnboardingWorker {
   private async processDiscovery(item: any): Promise<void> {
     console.log(`[OnboardingWorker] Discovery for ${item.name} (${item.upc})`);
 
+    // Protected discovery calls route through the frozen classification
+    // model policy (issue #17 item A). No valid policy ⇒ disabled ⇒ the
+    // discovery helpers use deterministic fallbacks.
+    const policySnapshot = captureModelPolicySnapshot(this.workspacePath);
+
     try {
       const existingSources = listSourcesByItem(item.id);
       const upcSources = existingSources.filter(s => s.sourceMethod === 'serper_upc');
@@ -179,6 +185,7 @@ export class OnboardingWorker {
         price: item.price ? parseFloat(item.price) : null,
         existingExpectedName: item.expectedName,
         existingUpcCandidates: upcSources.length > 0 ? upcSources : null,
+        modelPolicy: policySnapshot.state === 'configured' ? policySnapshot.view : null,
       });
       const sources = discovery.candidates;
       const consolidatedName = discovery.consolidatedName;

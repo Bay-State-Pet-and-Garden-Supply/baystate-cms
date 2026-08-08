@@ -1,0 +1,342 @@
+/**
+ * Classification model-policy gateway (issue #17 work item A).
+ *
+ * Enforces the workspace's frozen classification model policy at the LLM
+ * transport boundary for protected classification/onboarding operations.
+ *
+ * Fail-closed invariants (non-negotiable):
+ * - `fetch` is never invoked when policy is absent/tampered, text policy is
+ *   `local_only` with a non-`local` provider, locality is undeclared, the
+ *   resolved endpoint is not loopback/local-process, the route is unknown,
+ *   the credential is missing, or the fallback is not explicit.
+ * - A provider name never implies locality; a `local` declaration does not
+ *   excuse a remote base URL.
+ * - The frozen policy is re-checked at the transport boundary.
+ *
+ * Provider/model for protected operations resolve from
+ * `stageOverrides[stageName]` or the snapshot default. `llm_task_configs` and
+ * the `model` column on `api_keys` never select provider/model for protected
+ * calls; `api_keys` supplies only the credential/base URL for the
+ * already-authorized provider.
+ */
+import { sha256Hex } from '../shared/stable-id';
+import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
+
+export type ProviderLocality = 'local' | 'cloud' | 'hybrid';
+
+export type ProtectedOperation =
+  | 'evidence_extraction'
+  | 'product_type_ranking'
+  | 'attribute_ranking'
+  | 'page_assignment'
+  | 'cohort_page_assignment'
+  | 'title_consolidation'
+  | 'cohort_title_consolidation'
+  | 'distributor_copy_consolidation'
+  | 'discovery_name_consolidation'
+  | 'brand_inference'
+  | 'sitemap_selection';
+
+export const PROTECTED_OPERATIONS: readonly ProtectedOperation[] = [
+  'evidence_extraction',
+  'product_type_ranking',
+  'attribute_ranking',
+  'page_assignment',
+  'cohort_page_assignment',
+  'title_consolidation',
+  'cohort_title_consolidation',
+  'distributor_copy_consolidation',
+  'discovery_name_consolidation',
+  'brand_inference',
+  'sitemap_selection',
+];
+
+/**
+ * Classification stage key used for `stageOverrides` lookup per protected
+ * operation. `null` means the operation is not tied to a classification
+ * stage and resolves from the snapshot default provider/model.
+ */
+export const PROTECTED_OPERATION_STAGE: Readonly<Record<ProtectedOperation, string | null>> = {
+  evidence_extraction: 'evidence_extraction',
+  product_type_ranking: 'primary_product_type_proposal',
+  attribute_ranking: 'product_attribute_proposals',
+  page_assignment: 'category_page_proposals',
+  cohort_page_assignment: 'category_page_proposals',
+  title_consolidation: 'name_consolidation',
+  cohort_title_consolidation: 'name_consolidation',
+  distributor_copy_consolidation: 'name_consolidation',
+  discovery_name_consolidation: 'name_consolidation',
+  brand_inference: null,
+  sitemap_selection: null,
+};
+
+/** Stable denial reason codes (typed; serializable). */
+export type PolicyDenialCode =
+  | 'policy_absent'
+  | 'policy_tampered'
+  | 'policy_disabled'
+  | 'locality_undeclared'
+  | 'text_local_only_non_local_provider'
+  | 'endpoint_non_loopback'
+  | 'route_unknown'
+  | 'credential_missing'
+  | 'implicit_fallback_forbidden'
+  | 'provider_unknown';
+
+export class ModelPolicyDeniedError extends Error {
+  readonly code: PolicyDenialCode;
+  readonly operation: ProtectedOperation;
+  readonly provider?: string;
+
+  constructor(code: PolicyDenialCode, operation: ProtectedOperation, provider?: string, detail?: string) {
+    const providerPart = provider ? ` provider="${provider}"` : '';
+    super(`Model policy denied ${operation} (${code})${providerPart}${detail ? `: ${detail}` : ''}`);
+    this.name = 'ModelPolicyDeniedError';
+    this.code = code;
+    this.operation = operation;
+    this.provider = provider;
+  }
+}
+
+export interface StageOverrideView {
+  provider?: string;
+  model?: string;
+  fallbackProvider: string | null;
+  fallbackModel: string | null;
+}
+
+/**
+ * Immutable, digest-bound view of the classification model policy. The digest
+ * covers every routing-relevant field (provider/model/locality/overrides and
+ * both data-sharing policies); it is recomputed at the transport boundary so
+ * tampering after snapshot creation is detected.
+ */
+export interface ModelPolicyView {
+  readonly defaultProvider: string;
+  readonly defaultModel: string;
+  readonly providerLocalities: Readonly<Record<string, ProviderLocality>>;
+  readonly stageOverrides: Readonly<Record<string, StageOverrideView>>;
+  readonly textDataSharing: 'local_only' | 'cloud_allowed';
+  readonly imageDataSharing: 'local_only' | 'cloud_allowed';
+  /** Optional binding to the runtime snapshot hash (tamper detection). */
+  readonly snapshotHash?: string;
+  readonly policyDigest: string;
+}
+
+export interface ModelPolicyViewOptions {
+  /** Bind the digest to a runtime snapshot hash; required for run-bound views. */
+  snapshotHash?: string;
+}
+
+export interface ProviderCredential {
+  provider: string;
+  apiKey: string;
+  baseUrl: string | null;
+  model: string | null;
+}
+
+export interface ModelRoute {
+  provider: string;
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+  locality: ProviderLocality;
+  /** Explicit paired fallback from the stage override, or null. */
+  fallbackProvider: string | null;
+  fallbackModel: string | null;
+  /** True when provider/model came from a stage override rather than the default. */
+  fromOverride: boolean;
+}
+
+export interface ModelPolicyGatewayDeps {
+  /** Credential lookup keyed by provider name (api_keys service name). */
+  getCredential(provider: string): ProviderCredential | null;
+  /** Default base URL per provider when the credential has none configured. */
+  defaultBaseUrls: Readonly<Record<string, string>>;
+  /** Optional override for the loopback test (defaults to isLoopbackBaseUrl). */
+  isLoopback?: (baseUrl: string) => boolean;
+}
+
+const DEFAULT_IS_LOOPBACK = isLoopbackBaseUrl;
+
+/** Build a canonical, frozen policy view with a content-addressed digest. */
+export function buildModelPolicyView(
+  policy: ModelPolicyConfigV2,
+  options: ModelPolicyViewOptions = {},
+): ModelPolicyView {
+  const providerLocalities: Record<string, ProviderLocality> = {};
+  for (const [provider, locality] of Object.entries(policy.providerLocalities)) {
+    providerLocalities[provider] = locality;
+  }
+  const stageOverrides: Record<string, StageOverrideView> = {};
+  for (const [stageName, override] of Object.entries(policy.stageOverrides)) {
+    stageOverrides[stageName] = {
+      provider: override.provider,
+      model: override.model,
+      fallbackProvider: override.fallbackProvider,
+      fallbackModel: override.fallbackModel,
+    };
+  }
+
+  const digestPayload = {
+    defaultProvider: policy.defaultProvider,
+    defaultModel: policy.defaultModel,
+    providerLocalities,
+    stageOverrides,
+    textDataSharing: policy.textDataSharing,
+    imageDataSharing: policy.imageDataSharing,
+    ...(options.snapshotHash ? { snapshotHash: options.snapshotHash } : {}),
+  };
+  const policyDigest = sha256Hex(JSON.stringify(digestPayload));
+
+  const view: ModelPolicyView = Object.freeze({
+    defaultProvider: policy.defaultProvider,
+    defaultModel: policy.defaultModel,
+    providerLocalities,
+    stageOverrides,
+    textDataSharing: policy.textDataSharing,
+    imageDataSharing: policy.imageDataSharing,
+    ...(options.snapshotHash ? { snapshotHash: options.snapshotHash } : {}),
+    policyDigest,
+  });
+  return view;
+}
+
+/**
+ * Re-compute the digest from the current view and fail when it no longer
+ * matches the frozen digest (policy tampering between snapshot and transport).
+ */
+export function assertModelPolicyIntact(view: ModelPolicyView): void {
+  if (!view) return;
+  const recomputed = buildModelPolicyView(
+    view as unknown as ModelPolicyConfigV2,
+    view.snapshotHash ? { snapshotHash: view.snapshotHash } : {},
+  );
+  if (recomputed.policyDigest !== view.policyDigest) {
+    throw new ModelPolicyDeniedError('policy_tampered', 'evidence_extraction');
+  }
+}
+
+/**
+ * True when the base URL resolves to the local machine (localhost, 127.0.0.1,
+ * ::1) over http/https. Non-loopback hosts, bare domains without a scheme,
+ * file/data schemes, and invalid URLs are false (fail closed).
+ */
+export function isLoopbackBaseUrl(baseUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') return true;
+  if (host.endsWith('.localhost')) return true;
+  // Loopback ranges: 127.0.0.0/8
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) {
+    return host.split('.').every(part => Number(part) <= 255);
+  }
+  return false;
+}
+
+/** Resolve + validate the primary route for a protected operation. */
+export function resolveModelRoute(
+  view: ModelPolicyView,
+  operation: ProtectedOperation,
+  deps: ModelPolicyGatewayDeps,
+): ModelRoute {
+  assertModelPolicyIntact(view);
+
+  const stageName = PROTECTED_OPERATION_STAGE[operation];
+  const override = stageName ? view.stageOverrides[stageName] : undefined;
+  const provider = override?.provider ?? view.defaultProvider;
+  const model = override?.model ?? view.defaultModel;
+
+  const route = resolveRoute(
+    provider,
+    model,
+    view,
+    operation,
+    deps,
+    override?.fallbackProvider ?? null,
+    override?.fallbackModel ?? null,
+    Boolean(override?.provider ?? override?.model),
+  );
+  return route;
+}
+
+function resolveRoute(
+  provider: string,
+  model: string,
+  view: ModelPolicyView,
+  operation: ProtectedOperation,
+  deps: ModelPolicyGatewayDeps,
+  fallbackProvider: string | null,
+  fallbackModel: string | null,
+  fromOverride: boolean,
+): ModelRoute {
+  if (!provider || !model) {
+    throw new ModelPolicyDeniedError('route_unknown', operation, provider || undefined);
+  }
+  const locality = view.providerLocalities[provider];
+  if (!locality) {
+    throw new ModelPolicyDeniedError('locality_undeclared', operation, provider);
+  }
+  if (view.textDataSharing === 'local_only' && locality !== 'local') {
+    throw new ModelPolicyDeniedError('text_local_only_non_local_provider', operation, provider);
+  }
+
+  const credential = deps.getCredential(provider);
+  if (!credential) {
+    throw new ModelPolicyDeniedError('credential_missing', operation, provider);
+  }
+
+  const baseUrl = (credential.baseUrl || deps.defaultBaseUrls[provider] || '').replace(/\/+$/, '');
+  if (!baseUrl) {
+    throw new ModelPolicyDeniedError('route_unknown', operation, provider, 'no base URL resolved');
+  }
+
+  // A declared-local provider must always resolve to a loopback endpoint,
+  // regardless of data-sharing policy. A provider name never implies locality.
+  if (locality === 'local') {
+    const isLoopback = deps.isLoopback ?? DEFAULT_IS_LOOPBACK;
+    if (!isLoopback(baseUrl)) {
+      throw new ModelPolicyDeniedError('endpoint_non_loopback', operation, provider, baseUrl);
+    }
+  }
+
+  return {
+    provider,
+    model,
+    baseUrl,
+    apiKey: credential.apiKey,
+    locality,
+    fallbackProvider,
+    fallbackModel,
+    fromOverride,
+  };
+}
+
+/**
+ * Validate the explicit paired fallback (from the stage override) with the
+ * same locality/endpoint rules. Returns null when no fallback is declared.
+ * Implicit generic fallback is impossible: without an explicit fallback pair,
+ * there is no fallback route at all.
+ */
+export function resolveFallbackRoute(
+  view: ModelPolicyView,
+  operation: ProtectedOperation,
+  deps: ModelPolicyGatewayDeps,
+): ModelRoute | null {
+  assertModelPolicyIntact(view);
+  const stageName = PROTECTED_OPERATION_STAGE[operation];
+  const override = stageName ? view.stageOverrides[stageName] : undefined;
+  const fallbackProvider = override?.fallbackProvider ?? null;
+  const fallbackModel = override?.fallbackModel ?? null;
+  if (!fallbackProvider) return null;
+  if (!fallbackModel) {
+    throw new ModelPolicyDeniedError('implicit_fallback_forbidden', operation, fallbackProvider);
+  }
+  return resolveRoute(fallbackProvider, fallbackModel, view, operation, deps, null, null, true);
+}

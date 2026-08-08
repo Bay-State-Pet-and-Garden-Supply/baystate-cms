@@ -45,7 +45,8 @@ const PRODUCT_STOP_WORDS = new Set([
  */
 export async function inferBrandFromSearchResults(
   upc: string,
-  searchResults: Array<{ title: string; snippet: string; link: string }>
+  searchResults: Array<{ title: string; snippet: string; link: string }>,
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<BrandInferenceResult | null> {
   if (searchResults.length === 0) {
     return null;
@@ -53,7 +54,7 @@ export async function inferBrandFromSearchResults(
 
   // 1. Try LLM Inference first if configured/available
   try {
-    const llmResult = await inferBrandViaLlm(upc, searchResults);
+    const llmResult = await inferBrandViaLlm(upc, searchResults, modelPolicy);
     if (llmResult) {
       // Find matching domain for the LLM-inferred brand
       const inferredDomain = inferDomainForBrand(llmResult.brand, searchResults);
@@ -88,7 +89,8 @@ export async function inferBrandFromSearchResults(
  */
 async function inferBrandViaLlm(
   upc: string,
-  searchResults: Array<{ title: string; snippet: string; link: string }>
+  searchResults: Array<{ title: string; snippet: string; link: string }>,
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<{ brand: string; confidence: number } | null> {
   const resultsText = searchResults
     .slice(0, 5)
@@ -119,7 +121,11 @@ Respond ONLY with a JSON object in this format (do not include markdown block ma
 }
 `;
 
-  const response = await callLlmForTask('brand_inference', prompt, systemPrompt, { allowFallback: true });
+  const response = await callLlmForTask('brand_inference', prompt, systemPrompt, {
+    allowFallback: true,
+    modelPolicy,
+    protectedOperation: 'brand_inference',
+  });
   if (!response) return null;
 
   try {

@@ -40,6 +40,8 @@ export interface PageAssignmentParams {
   maxPages: number;
   /** Sibling products in the same family — read-only identity hints */
   siblingProducts?: Array<{ sku: string; name: string }>;
+  /** Frozen classification model-policy view (issue #17 item A). */
+  modelPolicy?: import('./model-policy-gateway').ModelPolicyView | null;
 }
 
 export interface PageAssignmentResult {
@@ -656,7 +658,7 @@ Use the page's ID for the "pageId" field and its exact name for "pageName".`;
       'category_page_assignment',
       prompt,
       systemPrompt,
-      { allowFallback: true },
+      { allowFallback: true, modelPolicy: params.modelPolicy, protectedOperation: 'page_assignment' },
     );
 
     if (!response) return null;

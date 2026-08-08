@@ -33,6 +33,14 @@ import {
   type LlmTaskConfig,
 } from '../db/repositories/llm-task-config-repo';
 import { extractConsensusName } from './lcs-extractor';
+import {
+  ModelPolicyDeniedError,
+  resolveModelRoute,
+  resolveFallbackRoute,
+  assertModelPolicyIntact,
+  type ModelPolicyView,
+  type ProtectedOperation,
+} from '../classification/model-policy-gateway';
 
 // ── LLM Concurrency Gate ──────────────────────────────────────────────────────
 // Local Ollama models buckle under parallel requests. Serialize so only one
@@ -221,37 +229,121 @@ export interface GetLlmConfigForTaskOptions {
    * the generic `getLlmConfig()`. Defaults to `true` for non-profile
    * tasks and `false` for profile tasks. Pass an explicit value to
    * override the per-task default.
+   *
+   * IGNORED for protected classification operations when `modelPolicy`
+   * is provided: protected calls never use the generic fallback chain.
    */
   allowFallback?: boolean;
+  /**
+   * Frozen classification model-policy view (issue #17 item A).
+   * - A view: route selection uses the policy (stage override or default),
+   *   locality/endpoint checks, and the explicit paired fallback only.
+   * - `null` (explicit disabled): protected calls resolve to no config
+   *   (deterministic fallback, no transport).
+   * - `undefined` with a protected task: denied (policy_absent) — every
+   *   protected call site must thread an explicit policy context.
+   */
+  modelPolicy?: ModelPolicyView | null;
+  /** Protected operation for policy routing; defaults from the task name. */
+  protectedOperation?: ProtectedOperation;
 }
 
 /**
- * Resolve the LLM config for a specific AI task. Resolution order:
+ * The default protected operation for a task, or `null` when the task is not
+ * a classification/onboarding protected operation.
+ */
+export function defaultProtectedOperationForTask(task: LlmTask): ProtectedOperation | null {
+  switch (task) {
+    case 'classification_evidence_extraction':
+      return 'evidence_extraction';
+    case 'product_type_classification':
+      return 'product_type_ranking';
+    case 'attribute_value_classification':
+      return 'attribute_ranking';
+    case 'category_page_assignment':
+      return 'page_assignment';
+    case 'product_curation':
+      return 'title_consolidation';
+    case 'product_name_consolidation':
+      return 'discovery_name_consolidation';
+    case 'brand_inference':
+      return 'brand_inference';
+    default:
+      return null;
+  }
+}
+
+function credentialForProvider(provider: string): {
+  apiKey: string;
+  baseUrl: string | null;
+  model: string | null;
+} | null {
+  if (provider !== 'deepseek' && provider !== 'openai' && provider !== 'ollama') {
+    // Unknown providers have no credential store; fail closed upstream via
+    // locality_undeclared unless the caller resolves them explicitly.
+    return null;
+  }
+  return resolveProviderCredential(provider);
+}
+
+/**
+ * Resolve a protected call through the frozen model policy. Throws
+ * `ModelPolicyDeniedError` on any policy/endpoint/credential denial.
+ */
+function resolveProtectedConfig(
+  task: LlmTask,
+  operation: ProtectedOperation,
+  view: ModelPolicyView,
+): LlmConfig {
+  const route = resolveModelRoute(view, operation, {
+    getCredential: (p: string) => {
+      const c = credentialForProvider(p as LlmProvider);
+      return c ? { provider: p, apiKey: c.apiKey, baseUrl: c.baseUrl ?? null, model: c.model ?? null } : null;
+    },
+    defaultBaseUrls: DEFAULT_BASE_URLS as unknown as Readonly<Record<string, string>>,
+  });
+  return {
+    provider: route.provider as LlmProvider,
+    apiKey: route.apiKey,
+    baseUrl: route.baseUrl,
+    model: route.model,
+  };
+}
+
+/**
+ * Resolve the LLM config for a specific AI task.
  *
- * 1. Look up `llm_task_configs` for the task.
- * 2. If found, resolve the matching provider credential from
- *    `api_keys` and return the merged `LlmConfig`.
- * 3. If the task config is missing:
- *    - Profile tasks (`profile_generation`, `profile_revision`):
- *      throw `MissingLlmTaskConfigError` (fail-closed) unless
- *      `allowFallback: true` is explicitly passed.
- *    - Other tasks: return the generic `getLlmConfig()` if
- *      `allowFallback !== false`; otherwise `null`.
+ * Protected classification operations resolve exclusively through the frozen
+ * model policy (`modelPolicy`), never through `llm_task_configs` or the
+ * generic DeepSeek → OpenAI → Ollama fallback. Non-protected tasks keep the
+ * legacy resolution order unchanged.
  *
- * @throws {MissingLlmTaskConfigError} When a profile task is
- *   requested with no task config and no fallback.
+ * @throws {MissingLlmTaskConfigError} When a profile task is requested with
+ *   no task config and no fallback.
+ * @throws {ModelPolicyDeniedError} When a protected task is called without an
+ *   explicit policy view (policy_absent) or the policy denies the route.
  */
 export function getLlmConfigForTask(
   task: LlmTask,
   options: GetLlmConfigForTaskOptions = {},
 ): LlmConfig | null {
+  const operation = options.protectedOperation ?? defaultProtectedOperationForTask(task);
+
+  if (operation !== null) {
+    if (options.modelPolicy === null) {
+      // Explicit disabled policy: deterministic fallback, no transport.
+      return null;
+    }
+    if (options.modelPolicy) {
+      return resolveProtectedConfig(task, operation, options.modelPolicy);
+    }
+  }
+
+  // Non-protected tasks or calls without explicit modelPolicy: legacy resolution order.
   const taskConfig = getLlmTaskConfig(task);
   if (taskConfig) {
     const built = buildConfigFromTaskConfig(taskConfig);
     if (built) return built;
-    // Task config exists but provider credential is missing.
-    // Fall through to the fallback path (which will likely also fail
-    // closed for profile tasks).
   }
 
   const requiresExplicit = PROFILE_TASKS_REQUIRE_EXPLICIT.has(task);
@@ -275,6 +367,10 @@ export interface CallLlmForTaskOptions {
   allowFallback?: boolean;
   /** Optional temperature override (uses the task config's temperature when set). */
   temperature?: number;
+  /** Frozen classification model-policy view (see GetLlmConfigForTaskOptions). */
+  modelPolicy?: ModelPolicyView | null;
+  /** Protected operation for policy routing; defaults from the task name. */
+  protectedOperation?: ProtectedOperation;
 }
 
 /**
@@ -291,15 +387,24 @@ export async function callLlmForTask(
 ): Promise<string | null> {
   let config: LlmConfig | null;
   try {
-    config = getLlmConfigForTask(task, { allowFallback: options.allowFallback });
+    config = getLlmConfigForTask(task, {
+      allowFallback: options.allowFallback,
+      modelPolicy: options.modelPolicy,
+      protectedOperation: options.protectedOperation,
+    });
   } catch (err) {
     if (err instanceof MissingLlmTaskConfigError) {
-      // Re-throw so the caller can map this to a failed audit row.
       throw err;
     }
     throw err;
   }
   if (!config) return null;
+
+  // Re-assert the frozen policy immediately before transport (issue #17 item
+  // A): validation at activation alone is insufficient.
+  if (options.modelPolicy) {
+    assertModelPolicyIntact(options.modelPolicy);
+  }
 
   // Resolve the task's temperature override (if any). Caller-provided
   // options.temperature wins over the task config's stored value.
@@ -559,6 +664,7 @@ export async function consolidateProductName(
   searchResults: Array<{ title: string; snippet: string }>,
   originalName?: string,
   brandHint?: string | null,
+  modelPolicy?: ModelPolicyView | null,
 ): Promise<string | null> {
   if (searchResults.length === 0 && !originalName) return null;
 
@@ -575,8 +681,16 @@ export async function consolidateProductName(
     try {
       config = getLlmConfigForTask('product_name_consolidation', {
         allowFallback: true,
+        modelPolicy,
+        protectedOperation: 'discovery_name_consolidation',
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof ModelPolicyDeniedError) {
+        console.log(`[LLMClient] Model policy denied name consolidation (${err.code}); falling back to LCS`);
+        const titles = searchResults.map(r => r.title);
+        if (originalName) titles.push(originalName);
+        return lcsWithTokenGuard(titles, originalName);
+      }
       useTaskConfig = false;
       config = getLlmConfig();
     }
@@ -631,7 +745,11 @@ Register-Aligned Expected Name:`;
 
     console.log(`[LLMClient] Calling LLM (${config.provider}:${config.model}) for UPC ${upc}`);
     const name = useTaskConfig
-      ? await callLlmForTask('product_name_consolidation', prompt, systemPrompt, { allowFallback: true })
+      ? await callLlmForTask('product_name_consolidation', prompt, systemPrompt, {
+          allowFallback: true,
+          modelPolicy,
+          protectedOperation: 'discovery_name_consolidation',
+        })
       : await callLlm(prompt, systemPrompt);
     if (name == null) {
       throw new Error('LLM call returned null');

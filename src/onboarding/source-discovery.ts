@@ -85,6 +85,11 @@ export async function discoverSources(
      * default global fetch.
      */
     networkFetch?: NetworkFetch;
+    /**
+     * Frozen classification model-policy view (issue #17 item A). Protected
+     * brand-inference and name-consolidation calls route through it.
+     */
+    modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null;
   }
 ): Promise<{
   candidates: InsertSourceData[];
@@ -147,7 +152,7 @@ export async function discoverSources(
       title: r.title,
       snippet: r.snippet,
       link: r.link
-    })));
+    })), options?.modelPolicy);
     if (inferredBrand) {
       console.log(`[SourceDiscovery] ✓ Inferred brand for UPC ${upc}: "${inferredBrand.brand}" with confidence ${inferredBrand.confidence.toFixed(2)} (source: ${inferredBrand.source})`);
       activeBrandHint = inferredBrand.brand;
@@ -228,6 +233,7 @@ export async function discoverSources(
       upcResults.map(r => ({ title: r.title, snippet: r.snippet })),
       name,
       activeBrandHint,
+      options?.modelPolicy,
     );
   }
 

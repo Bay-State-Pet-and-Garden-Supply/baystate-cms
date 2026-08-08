@@ -10,11 +10,13 @@ import { randomUUID } from 'node:crypto';
 import { getVlmConfig } from '../onboarding/vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from '../onboarding/packaging-ocr';
 import { getLlmConfigForTask, callLlmForTask } from '../onboarding/llm-client';
+import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
 import { getCachedBrands, getCachedDataSharingPolicy } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from './brand-resolution';
 import type { StageInput, StageContext } from './types';
 import type { ClassificationEvidence } from '../shared/types';
 import { CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
+import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
 import type { PackagingOcrData, OcrAttemptOutcome } from '../shared/schemas/onboarding';
 export type { OcrAttemptOutcome };
 
@@ -767,7 +769,20 @@ export async function extractProductEvidence(
 
   // 3. LLM-based text extraction for richer attributes (decoupled from OCR)
   if (canUseCloudText) {
-    const llmConfig = getLlmConfigForTask('classification_evidence_extraction', { allowFallback: true });
+    // Protected operation: route through the frozen classification policy
+    // (issue #17 item A). Without a snapshot, no policy exists → disabled →
+    // no transport.
+    const evidencePolicyView = context.snapshot
+      ? modelPolicyViewFromConfig(
+          context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+          context.snapshot.snapshotHash,
+        )
+      : null;
+    const llmConfig = getLlmConfigForTask('classification_evidence_extraction', {
+      allowFallback: true,
+      modelPolicy: evidencePolicyView,
+      protectedOperation: 'evidence_extraction',
+    });
     if (llmConfig) {
       const titleStr = typeof titleInfo.value === 'string' ? titleInfo.value : '';
       const descStr = typeof descInfo.value === 'string' ? descInfo.value : '';
@@ -782,7 +797,11 @@ export async function extractProductEvidence(
         try {
           const prompt = `Extract the following attributes from this product text. Return ONLY valid JSON with these keys (omit any you cannot determine): {"flavor": "..." | null, "color": "..." | null, "material": "..." | null, "size": "..." | null, "lifeStage": "..." | null, "breedSize": "..." | null, "productForm": "..." | null, "healthConcern": "..." | null, "ingredientKeywords": ["..."]}. Do not guess. Only include values that are explicitly mentioned.\n\nProduct text:\n${allText.slice(0, 3000)}`;
 
-          const response = await callLlmForTask('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', { allowFallback: true });
+          const response = await callLlmForTask('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', {
+            allowFallback: true,
+            modelPolicy: evidencePolicyView,
+            protectedOperation: 'evidence_extraction',
+          });
           if (response == null) {
             throw new Error('LLM call returned null');
           }

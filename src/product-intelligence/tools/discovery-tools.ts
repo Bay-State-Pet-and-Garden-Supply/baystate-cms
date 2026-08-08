@@ -104,7 +104,9 @@ const searchUpc: PiToolAdapter = {
         params.brandHint ? String(params.brandHint) : null,
         // P0-1 (round 3): the discovery chain (Serper + sitemap + variant
         // pages) rides the gateway-bound transport — pre-check + transport.
-        { networkFetch: discoveryNetworkFetch(ctx) },
+        // Protected classification calls are explicitly disabled behind the
+        // PI policy gateway (issue #17 item A).
+        { networkFetch: discoveryNetworkFetch(ctx), modelPolicy: null },
       );
       if (candidates.length === 0) return noResult(`No search candidates for UPC ${gtin}`);
       return okResult(
@@ -150,6 +152,9 @@ const searchProductName: PiToolAdapter = {
       const { candidates } = await discoverSources(gtin || name, name, params.brandHint ? String(params.brandHint) : null, {
         // P0-1 (round 3): same gateway-bound transport as search_upc.
         networkFetch: discoveryNetworkFetch(ctx),
+        // Protected classification calls are explicitly disabled behind the
+        // PI policy gateway (issue #17 item A): deterministic fallbacks only.
+        modelPolicy: null,
       });
       if (candidates.length === 0) return noResult(`No search candidates for "${name.slice(0, 60)}"`);
       return okResult(
@@ -218,7 +223,7 @@ const searchBrandSitemap: PiToolAdapter = {
         ),
       );
       if (sitemap.urls.length === 0) return noResult(`No sitemap URLs found for ${domain}`);
-      const matches = await matchSitemapUrls(sitemap.urls, name || gtin, null, gtin, domain);
+      const matches = await matchSitemapUrls(sitemap.urls, name || gtin, null, gtin, domain, null, null);
       if (matches.length === 0) return noResult(`Sitemap for ${domain} has no matches for ${gtin}`);
       return okResult(
         { domain, sourceUrl: sitemap.sourceUrl, matches: matches.slice(0, 11) },

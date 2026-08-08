@@ -20,6 +20,8 @@ import {
 } from './curation-target-matcher';
 import { enrichProductDetails } from './detail-enrichment';
 import { llmRankOptions } from './curation-target-ranker';
+import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
+import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
 import {
   buildProductTypeProposal,
   buildFieldAssignmentProposal,
@@ -183,6 +185,13 @@ export async function processProductFieldTarget(
       selectionMode,
       evidenceText: text,
       task: 'attribute_value_classification',
+      modelPolicy: context.snapshot
+        ? modelPolicyViewFromConfig(
+            context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+            context.snapshot.snapshotHash,
+          )
+        : null,
+      protectedOperation: 'attribute_ranking',
     });
 
     if (llmResult && llmResult.values.length > 0) {
@@ -263,6 +272,12 @@ export async function processPageTarget(
       pages: pageHierarchy,
       selectionMode,
       maxPages,
+      modelPolicy: context.snapshot
+        ? modelPolicyViewFromConfig(
+            context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+            context.snapshot.snapshotHash,
+          )
+        : null,
     });
     const member = coordinated.get(input.sku);
     if (!member || member.status === 'abstained') {
@@ -282,6 +297,12 @@ export async function processPageTarget(
       pages: pageHierarchy,
       selectionMode,
       maxPages,
+      modelPolicy: context.snapshot
+        ? modelPolicyViewFromConfig(
+            context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+            context.snapshot.snapshotHash,
+          )
+        : null,
     });
   }
 
@@ -372,6 +393,13 @@ async function processTargetInternal(
     selectionMode,
     evidenceText: text,
     task: builder.task,
+    modelPolicy: context.snapshot
+      ? modelPolicyViewFromConfig(
+          context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+          context.snapshot.snapshotHash,
+        )
+      : null,
+    protectedOperation: builder.task === 'category_page_assignment' ? 'page_assignment' : 'product_type_ranking',
   });
 
   if (!llmResult || llmResult.values.length === 0) {

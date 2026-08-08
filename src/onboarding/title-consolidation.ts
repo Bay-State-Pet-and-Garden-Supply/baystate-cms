@@ -77,8 +77,15 @@ export interface TitleResult {
  * The LLM prompt rules have been updated from the original `finalizeTitle()`
  * to preserve variant attributes and enforce consistent formatting.
  */
-export async function consolidateProductTitle(signals: TitleSignals): Promise<TitleResult> {
-  const llmConfig = getLlmConfigForTask('product_curation', { allowFallback: true });
+export async function consolidateProductTitle(
+  signals: TitleSignals,
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+): Promise<TitleResult> {
+  const llmConfig = getLlmConfigForTask('product_curation', {
+    allowFallback: true,
+    modelPolicy,
+    protectedOperation: 'title_consolidation',
+  });
 
   // If LLM is not configured, prefer spreadsheet name (has variant tokens like LG, SM, YELLOW)
   // over web title which may strip them. OCR title still wins when available.
@@ -106,7 +113,11 @@ export async function consolidateProductTitle(signals: TitleSignals): Promise<Ti
       distributorBrands: signals.distributorBrands,
     });
 
-    const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', { allowFallback: true });
+    const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', {
+      allowFallback: true,
+      modelPolicy,
+      protectedOperation: 'title_consolidation',
+    });
     if (cleanTitle && cleanTitle.length > 2) {
       console.log(`[TitleConsolidation] LLM consolidated title: "${cleanTitle}"`);
       return { title: cleanTitle, source: 'llm' };

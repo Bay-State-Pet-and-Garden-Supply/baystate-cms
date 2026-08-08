@@ -102,6 +102,7 @@ export async function matchSitemapUrls(
   upc: string,
   domain: string,
   productUrlPattern?: string | null,
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<SitemapMatchResult[]> {
   const results: SitemapMatchResult[] = [];
 
@@ -187,7 +188,7 @@ export async function matchSitemapUrls(
     upc,
     candidateOverlaps: new Map(scored.map(c => [c.url, c.overlap.ratio])),
   };
-  const selectedUrl = await selectWithLlm(scored.map(c => c.url), matchName, llmContext);
+  const selectedUrl = await selectWithLlm(scored.map(c => c.url), matchName, llmContext, modelPolicy);
 
   if (selectedUrl) {
     console.log(`[SitemapMatcher] LLM selected ${selectedUrl} for UPC ${upc}.`);
@@ -400,6 +401,7 @@ async function selectWithLlm(
   candidates: string[],
   productName: string,
   context?: SitemapLlmContext,
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<string | null> {
   if (candidates.length < 2) {
     // With 0 or 1 candidate, there is nothing to disambiguate.
@@ -413,6 +415,8 @@ async function selectWithLlm(
   try {
     config = getLlmConfigForTask('product_name_consolidation', {
       allowFallback: true,
+      modelPolicy,
+      protectedOperation: 'sitemap_selection',
     });
   } catch (err) {
     console.warn(
@@ -487,6 +491,8 @@ async function selectWithLlm(
     raw = await callLlmForTask('product_name_consolidation', prompt, systemPrompt, {
       allowFallback: true,
       temperature: 0,
+      modelPolicy,
+      protectedOperation: 'sitemap_selection',
     });
   } catch (err) {
     console.warn(

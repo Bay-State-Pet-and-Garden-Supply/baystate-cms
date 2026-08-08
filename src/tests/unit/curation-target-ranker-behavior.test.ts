@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../onboarding/llm-client', () => ({
   callLlmForTask: mocks.callLlmForTask,
   getLlmConfigForTask: mocks.getLlmConfigForTask,
+  defaultProtectedOperationForTask: () => 'product_type_ranking',
 }));
 
 import { llmRankOptions } from '../../classification/curation-target-ranker';

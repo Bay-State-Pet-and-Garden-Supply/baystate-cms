@@ -63,7 +63,11 @@ function stripControlCharacters(value: string): string {
  * item. Only title-significant fields participate; stage status, updatedAt,
  * curationData, and OCR fields do not change the key.
  */
-function buildCacheKey(batchId: string, items: OnboardingItem[]): string {
+function buildCacheKey(
+  batchId: string,
+  items: OnboardingItem[],
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+): string {
   const fingerprints: FingerprintInput[] = items.map(item => ({
     id: item.id,
     upc: item.upc,
@@ -74,11 +78,16 @@ function buildCacheKey(batchId: string, items: OnboardingItem[]): string {
   }));
   fingerprints.sort((a, b) => a.id.localeCompare(b.id));
 
-  const llmConfig = getLlmConfigForTask('product_curation', { allowFallback: true });
+  const llmConfig = getLlmConfigForTask('product_curation', {
+    allowFallback: true,
+    modelPolicy,
+    protectedOperation: 'cohort_title_consolidation',
+  });
   const modelIdentity = llmConfig
     ? {
         provider: llmConfig.provider,
         model: llmConfig.model,
+        policyDigest: modelPolicy?.policyDigest ?? null,
       }
     : null;
   return `${batchId}\u0000${JSON.stringify({ fingerprints, modelIdentity, formatRules: FORMAT_RULES })}`;
@@ -98,8 +107,9 @@ function buildCacheKey(batchId: string, items: OnboardingItem[]): string {
 export function coordinateCohortItemsOnce(
   batchId: string,
   items: OnboardingItem[],
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<Map<string, CoordinatedTitle>> {
-  const key = buildCacheKey(batchId, items);
+  const key = buildCacheKey(batchId, items, modelPolicy);
 
   const existing = cohortCache.get(key);
   if (existing) return existing;
@@ -114,7 +124,7 @@ export function coordinateCohortItemsOnce(
     }
   }
 
-  const promise = coordinateCohortItems(items);
+  const promise = coordinateCohortItems(items, modelPolicy);
   cohortCache.set(key, promise);
   return promise;
 }
@@ -277,6 +287,7 @@ function validateCohortResponse(
 // fallow-ignore-next-line unused-export — used by tests
 export async function coordinateCohortItems(
   items: OnboardingItem[],
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<Map<string, CoordinatedTitle>> {
   const result = new Map<string, CoordinatedTitle>();
 
@@ -288,7 +299,7 @@ export async function coordinateCohortItems(
     if (groupItems.length <= 1) continue;
 
     try {
-      const groupResult = await coordinateGroup(groupItems);
+      const groupResult = await coordinateGroup(groupItems, modelPolicy);
       for (const [upc, ct] of groupResult) {
         result.set(upc, ct);
       }
@@ -340,8 +351,13 @@ function groupByProductLine(
  */
 async function coordinateGroup(
   items: OnboardingItem[],
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<Map<string, CoordinatedTitle>> {
-  const llmConfig = getLlmConfigForTask('product_curation', { allowFallback: true });
+  const llmConfig = getLlmConfigForTask('product_curation', {
+    allowFallback: true,
+    modelPolicy,
+    protectedOperation: 'cohort_title_consolidation',
+  });
   if (!llmConfig) {
     throw new Error('No LLM configured for product_curation');
   }
@@ -372,7 +388,7 @@ async function coordinateGroup(
     'product_curation',
     prompt,
     'You are a clean product taxonomy assistant.',
-    { allowFallback: true },
+    { allowFallback: true, modelPolicy, protectedOperation: 'cohort_title_consolidation' },
   );
 
   if (!response || response.length < 2) {

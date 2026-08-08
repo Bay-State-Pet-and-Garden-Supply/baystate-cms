@@ -80,6 +80,7 @@ export async function consolidateDistributorCopy(
   attempts: EvidenceAttempt[],
   itemName: string,
   brandHint: string | null,
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
 ): Promise<ConsolidationResult> {
   const foundAttempts = attempts.filter(a => a.outcome === 'found');
   if (foundAttempts.length === 0) {
@@ -156,7 +157,11 @@ export async function consolidateDistributorCopy(
   }
 
   // Try LLM consolidation
-  const llmConfig = getLlmConfigForTask('product_curation', { allowFallback: true });
+  const llmConfig = getLlmConfigForTask('product_curation', {
+    allowFallback: true,
+    modelPolicy,
+    protectedOperation: 'distributor_copy_consolidation',
+  });
   if (llmConfig && descriptions.length > 0) {
     const prompt = buildConsolidationPrompt(descriptions, itemName, brandHint);
     try {
@@ -164,7 +169,7 @@ export async function consolidateDistributorCopy(
         'product_curation',
         prompt,
         'You are a product copy editor. Synthesize only the facts provided — never invent claims, specifications, or usage details.',
-        { allowFallback: true },
+        { allowFallback: true, modelPolicy, protectedOperation: 'distributor_copy_consolidation' },
       );
       if (consolidated && consolidated.length > 10 && consolidated.length < 5000) {
         return {
