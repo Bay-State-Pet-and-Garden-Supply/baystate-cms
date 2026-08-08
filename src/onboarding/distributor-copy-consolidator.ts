@@ -11,6 +11,7 @@
  */
 
 import { getLlmConfigForTask, callLlmForTask } from './llm-client';
+import { redactTransportText } from '../classification/model-policy-gateway';
 import type { EvidenceAttempt } from '../shared/schemas/distributor-evidence';
 import { ProductIdentityEvidenceSchema } from '../shared/schemas/distributor-evidence';
 
@@ -183,7 +184,7 @@ export async function consolidateDistributorCopy(
         };
       }
     } catch (err: any) {
-      console.warn(`[DistributorCopyConsolidator] LLM consolidation failed: ${err.message}`);
+      console.warn(`[DistributorCopyConsolidator] LLM consolidation failed: ${redactTransportText(err.message)}`);
     }
   }
 

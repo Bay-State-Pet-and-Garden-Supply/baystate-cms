@@ -666,6 +666,76 @@ describe('Protected classification operations — model-policy gateway (issue #1
     }
   });
 
+  test('a doubly-stringified provider error body is redacted in the thrown error (pass 1d)', async () => {
+    // Provider body is JSON.stringify'd twice; the api_key only appears after
+    // peeling multiple escaped-quote layers. The thrown LLM error must never
+    // contain the secret.
+    const nestedBody = JSON.stringify({
+      error: { message: JSON.stringify(JSON.stringify({ api_key: 'supersecret' })) },
+    });
+    const mock = (async () =>
+      new Response(nestedBody, {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+    globalThis.fetch = mock;
+    const view = localOnlyOllamaView();
+    try {
+      await callLlmForTask('classification_evidence_extraction', 'hello', 'system', {
+        allowFallback: true,
+        modelPolicy: view,
+        protectedOperation: 'evidence_extraction',
+      });
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      expect(message).not.toContain('supersecret');
+      expect(message).toContain('LLM API request failed');
+    }
+  });
+
+  test('cloud VLM image-fetch exception logs a bounded redacted reason (pass 1d)', async () => {
+    // The image DOWNLOAD itself throws with a credential-bearing message
+    // (quoted JSON + Basic auth). The warning must contain only the redacted
+    // bounded reason, never the credentials.
+    const mock = (async () => {
+      throw new Error('{"api_key":"supersecret"} Authorization: Basic dXNlcjpwYXNz');
+    }) as unknown as typeof fetch;
+    globalThis.fetch = mock;
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const view = buildModelPolicyView(
+      {
+        defaultProvider: 'deepseek',
+        defaultModel: 'deepseek-chat',
+        providerLocalities: { deepseek: 'cloud' },
+        stageOverrides: {},
+        imageDataSharing: 'cloud_allowed',
+        textDataSharing: 'cloud_allowed',
+        mlFeatures: {
+          productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        },
+      } as any,
+      { snapshotHash: 'snap-cv-fetch-1' },
+    );
+    try {
+      const { extractPackagingOcrFromCloud } = await import('../../onboarding/cloud-vlm-client');
+      const result = await extractPackagingOcrFromCloud({
+        imageUrl: 'https://cdn.example.com/img/1.jpg',
+        modelPolicy: view,
+      });
+      expect(result).toBeNull();
+      const joined = spy.mock.calls.map(c => String(c[0])).join('\n');
+      expect(joined).not.toContain('supersecret');
+      expect(joined).not.toContain('dXNlcjpwYXNz');
+      expect(joined).toContain('[CloudVlm] Failed to fetch image');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('cloud VLM with a tampered policy view is denied before transport', async () => {
     const view = buildModelPolicyView(
       {

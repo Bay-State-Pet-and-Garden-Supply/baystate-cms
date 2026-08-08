@@ -1,4 +1,5 @@
 import { getDb } from '../db/connection';
+import { redactTransportText } from './model-policy-gateway';
 import { curateItemWithPipeline } from '../onboarding/product-curator';
 
 /**
@@ -91,7 +92,7 @@ export async function processRefreshQueue(
       );
       processed++;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactTransportText(err instanceof Error ? err.message : String(err));
       db.run(
         "UPDATE classification_refresh_queue SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?",
         [msg, new Date().toISOString(), row.id],

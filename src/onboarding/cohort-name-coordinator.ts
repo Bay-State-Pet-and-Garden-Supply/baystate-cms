@@ -15,6 +15,7 @@
  * Singletons are never coordinated and return absent.
  */
 import { getLlmConfigForTask, callLlmForTask } from './llm-client';
+import { redactTransportText } from '../classification/model-policy-gateway';
 import { normalizeBrand, extractNameStem } from './product-line-grouper';
 import { buildCohortPrompt, FORMAT_RULES } from './title-prompt-template';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
@@ -305,7 +306,7 @@ export async function coordinateCohortItems(
       }
     } catch (err: any) {
       console.warn(
-        `[CohortCoordinator] Coordination failed for group, using fallbacks: ${err.message}`,
+        `[CohortCoordinator] Coordination failed for group, using fallbacks: ${redactTransportText(err.message)}`,
       );
       // All-or-nothing: deterministic fallback for every sibling
       for (const item of groupItems) {

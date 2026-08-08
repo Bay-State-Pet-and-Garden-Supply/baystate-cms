@@ -12,6 +12,7 @@
  */
 
 import { getVlmConfig, callVlm } from './vlm-client';
+import { redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
 import { PackagingOcrDataSchema } from '../shared/schemas/onboarding';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
 import { sha256Hex } from '../shared/stable-id';
@@ -103,7 +104,7 @@ async function fetchRemoteImageAsBase64(url: string, fetchFn: NetworkFetch = fet
 
     return buffer.toString('base64');
   } catch (err: any) {
-    console.warn(`[PackagingOcr] Failed to fetch remote image ${url}: ${err.message}`);
+    console.warn(`[PackagingOcr] Failed to fetch remote image ${redactImageUrl(url)}: ${redactTransportText(err.message)}`);
     return null;
   }
 }
@@ -381,7 +382,7 @@ export async function extractPackagingOcr(
   try {
     rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn);
   } catch (err: any) {
-    console.warn(`[PackagingOcr] VLM call failed for ${sku ?? imageUrl}: ${err.message}`);
+    console.warn(`[PackagingOcr] VLM call failed for ${sku ?? redactImageUrl(imageUrl ?? '')}: ${redactTransportText(err.message)}`);
     return null;
   }
 

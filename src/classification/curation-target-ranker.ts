@@ -13,7 +13,12 @@
  */
 import { getLlmConfigForTask, callLlmForTask, defaultProtectedOperationForTask } from '../onboarding/llm-client';
 import type { LlmTask } from '../db/repositories/llm-task-config-repo';
-import { ModelPolicyDeniedError, type ModelPolicyView, type ProtectedOperation } from './model-policy-gateway';
+import {
+  ModelPolicyDeniedError,
+  redactTransportText,
+  type ModelPolicyView,
+  type ProtectedOperation,
+} from './model-policy-gateway';
 
 export interface LlmRankOptionsParams {
   /** Human-readable label for the target kind (e.g. "product type", "flavor", "category page") */
@@ -154,7 +159,7 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     const confidence = Math.max(0.35, Math.min(0.85, parsed.confidence ?? 0.55));
     return { values, confidence };
   } catch (err: any) {
-    console.warn(`[CurationTargetRanker] LLM ranking failed for "${targetLabel}": ${err.message}`);
+    console.warn(`[CurationTargetRanker] LLM ranking failed for "${targetLabel}": ${redactTransportText(err.message)}`);
     return null;
   }
 }

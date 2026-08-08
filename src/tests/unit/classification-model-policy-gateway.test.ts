@@ -348,6 +348,41 @@ describe('resolveFallbackRoute — explicit fallback only', () => {
     expect(unquotedRedacted).not.toContain('plaintoken');
   });
 
+  it('redactTransportText strips doubly-stringified (nested-escape) credentials (pass 1d)', () => {
+    // Provider bodies may be nested JSON.stringify'd; the credential only
+    // appears after peeling multiple escaped-quote layers.
+    const doubleNested = JSON.stringify({
+      error: { message: JSON.stringify(JSON.stringify({ api_key: 'supersecret' })) },
+    });
+    const doubleRedacted = redactTransportText(doubleNested);
+    expect(doubleRedacted).not.toContain('supersecret');
+    expect(doubleRedacted).toContain('api_key=[REDACTED]');
+  });
+
+  it('redactTransportText strips triply-stringified credentials and nested tokens/Basic (pass 1d)', () => {
+    const tripleNested = JSON.stringify({
+      error: { message: JSON.stringify(JSON.stringify(JSON.stringify({ token: 'tok_nested123456' }))) },
+    });
+    const tripleRedacted = redactTransportText(tripleNested);
+    expect(tripleRedacted).not.toContain('tok_nested123456');
+    expect(tripleRedacted).toContain('token=[REDACTED]');
+
+    const nestedBasic = JSON.stringify({
+      error: { message: JSON.stringify(JSON.stringify({ authorization: 'Basic dXNlcjpwYXNz' })) },
+    });
+    const basicRedacted = redactTransportText(nestedBasic);
+    expect(basicRedacted).not.toContain('dXNlcjpwYXNz');
+    expect(basicRedacted).toContain('[REDACTED]');
+  });
+
+  it('redactTransportText leaves benign quoted content usable (safe direction only)', () => {
+    // Over-redaction is acceptable, but normal non-secret values must survive.
+    const benign = 'Normal error: the value is "quoted" and fine';
+    const redacted = redactTransportText(benign);
+    expect(redacted).toContain('Normal error');
+    expect(redacted).toContain('quoted');
+  });
+
   it('redactImageUrl strips query strings and hashes', () => {
     const url = 'https://cdn.example.com/img/1.jpg?Signature=abc&Expires=123#frag';
     const redacted = redactImageUrl(url);

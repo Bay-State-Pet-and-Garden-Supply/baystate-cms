@@ -31,6 +31,7 @@
 import * as cheerio from 'cheerio';
 import type { Element } from 'domhandler';
 import { getLlmConfig, callLlm, callLlmForTask, getLlmConfigForTask, MissingLlmTaskConfigError, type LlmConfig } from './llm-client';
+import { redactTransportText } from '../classification/model-policy-gateway';
 import {
   buildStableSelector,
   isLikelyGeneratedId,
@@ -997,7 +998,7 @@ export async function generateExtractorProfile(
   try {
     raw = await callLlmForTask('profile_generation', prompt, SYSTEM_PROMPT, { allowFallback: false });
   } catch (err) {
-    console.warn('[ProfileGenerator] LLM call failed:', err instanceof Error ? err.message : String(err));
+    console.warn('[ProfileGenerator] LLM call failed:', redactTransportText(err instanceof Error ? err.message : String(err)));
     return null;
   }
   if (raw == null) {

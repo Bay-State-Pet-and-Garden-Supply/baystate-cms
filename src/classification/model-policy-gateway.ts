@@ -240,26 +240,45 @@ export function assertModelPolicyIntact(view: ModelPolicyView): void {
  */
 export function redactTransportText(text: string, maxLength = 200): string {
   let t = String(text ?? '');
-  // Normalize escaped quotes (JSON.stringify emits \" inside string values)
-  // so the credential patterns below can match quoted key/value forms.
-  t = t.replace(/\\"/g, '"').replace(/\\'/g, "'");
-  t = t
-    // Authorization: Bearer <token>
-    .replace(/\b[Bb]earer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
-    // Authorization: Basic <base64> (tolerates JSON quoting around the value)
-    .replace(
-      /(["']?)(?:authorization|auth)\1?\s*[=:]\s*["']?basic\s+[A-Za-z0-9+/=]{6,}/gi,
-      'authorization=[REDACTED]',
-    )
-    // Standalone Basic <base64> segments
-    .replace(/\bbasic\s+[A-Za-z0-9+/=]{6,}/gi, 'Basic [REDACTED]')
-    // sk-* secret keys
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}/gi, 'sk-[REDACTED]')
-    // Common credential keys in quoted or unquoted key=value / key:"value" forms
-    .replace(
-      /(["']?)(api[_-]?key|apikey|token|access_token|refresh_token|password|secret|authorization|bearer|auth|key)\1?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;"']+)/gi,
-      '$2=[REDACTED]',
-    );
+  // Iteratively peel escaped-quote layers and re-apply the credential
+  // patterns until a fixpoint (bounded), so any depth of nested
+  // JSON.stringify escaping is scrubbed (issue #17 pass 1d). Provider
+  // error bodies may be doubly/triply stringified; a single unescape pass
+  // leaves the credential in a form the patterns cannot match.
+  const MAX_UNESCAPE_PASSES = 5;
+  for (let i = 0; i < MAX_UNESCAPE_PASSES; i++) {
+    // Halve escape depth per pass: collapse 4-backslash, 2-backslash, and
+    // 1-backslash quoted forms so deeply nested stringification (any depth
+    // of JSON.stringify escaping) is peeled within the bounded passes.
+    const unescaped = t
+      .replace(/\\\\\\"/g, '\\"') // 4 backslashes + " -> \"
+      .replace(/\\\\"/g, '"') // 2 backslashes + " -> "
+      .replace(/\\"/g, '"') // 1 backslash + " -> "
+      .replace(/\\\\\\'/g, "\\'")
+      .replace(/\\\\'/g, "'")
+      .replace(/\\'/g, "'");
+    const next = unescaped
+      // Authorization: Bearer <token>
+      .replace(/\b[Bb]earer\s+[A-Za-z0-9._~+/=-]+/g, 'Bearer [REDACTED]')
+      // Authorization: Basic <base64> (tolerates JSON quoting around the value)
+      .replace(
+        /(["']?)(?:authorization|auth)\1?\s*[=:]\s*["']?basic\s+[A-Za-z0-9+/=]{6,}/gi,
+        'authorization=[REDACTED]',
+      )
+      // Standalone Basic <base64> segments
+      .replace(/\bbasic\s+[A-Za-z0-9+/=]{6,}/gi, 'Basic [REDACTED]')
+      // sk-* secret keys
+      .replace(/\bsk-[A-Za-z0-9_-]{8,}/gi, 'sk-[REDACTED]')
+      // Common credential keys in quoted or unquoted key=value / key:"value" forms
+      .replace(
+        /(["']?)(api[_-]?key|apikey|token|access_token|refresh_token|password|secret|authorization|bearer|auth|key)\1?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s,;"']+)/gi,
+        '$2=[REDACTED]',
+      );
+    if (next === t && unescaped === t) {
+      break;
+    }
+    t = next;
+  }
   if (t.length > maxLength) {
     t = `${t.slice(0, maxLength)}…`;
   }

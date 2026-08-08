@@ -71,7 +71,7 @@ async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeTy
 
     return { base64: buffer.toString('base64'), mimeType: contentType };
   } catch (err: any) {
-    console.warn(`[CloudVlm] Failed to fetch image ${logUrl}: ${err.message}`);
+    console.warn(`[CloudVlm] Failed to fetch image ${logUrl}: ${redactTransportText(err.message)}`);
     return null;
   }
 }

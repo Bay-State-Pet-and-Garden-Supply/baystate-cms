@@ -1,5 +1,6 @@
 import { getApiKey } from '../db/repositories/api-key-repo';
 import { getCachedSerperResults, insertSerperCache } from '../db/repositories/serper-cache-repo';
+import { redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
 
 interface SupplementalPrice {
   price: string | null;
@@ -105,7 +106,7 @@ export async function supplementPrice(
           };
         }
       } catch (err: any) {
-        console.warn(`[PriceSupplementer] Fast HTTP extraction failed for ${url}: ${err.message}`);
+        console.warn(`[PriceSupplementer] Fast HTTP extraction failed for ${redactImageUrl(url)}: ${redactTransportText(err.message)}`);
       }
     }
   } catch (err) {

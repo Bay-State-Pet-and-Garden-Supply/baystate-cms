@@ -8,6 +8,7 @@
  * name-consolidation classification stage without duplicating LLM prompts.
  */
 import { getLlmConfigForTask, callLlmForTask } from './llm-client';
+import { redactTransportText } from '../classification/model-policy-gateway';
 import { buildPerItemPrompt } from './title-prompt-template';
 
 export interface TitleSignals {
@@ -123,7 +124,7 @@ export async function consolidateProductTitle(
       return { title: cleanTitle, source: 'llm' };
     }
   } catch (err: any) {
-    console.warn(`[TitleConsolidation] LLM title consolidation failed: ${err.message}`);
+    console.warn(`[TitleConsolidation] LLM title consolidation failed: ${redactTransportText(err.message)}`);
   }
 
   // Fallback: spreadsheet name has the richest variant tokens

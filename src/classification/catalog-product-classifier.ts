@@ -9,6 +9,7 @@
  */
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from './config-loader';
 import { captureVerifiedPageSnapshot, toPageSnapshotState } from './page-snapshot';
+import { redactTransportText } from './model-policy-gateway';
 import { assertClassificationReady } from './readiness';
 import { syncConfigToCache, createConfigSnapshot, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
 import {
@@ -190,7 +191,8 @@ export async function classifyCatalogProduct(
     return { runId: run.id, success: true };
 
   } catch (err) {
-    completeRun(run.id, 'failed', err instanceof Error ? err.message : String(err));
-    return { runId: run.id, success: false, error: err instanceof Error ? err.message : String(err) };
+    const reason = redactTransportText(err instanceof Error ? err.message : String(err));
+    completeRun(run.id, 'failed', reason);
+    return { runId: run.id, success: false, error: reason };
   }
 }

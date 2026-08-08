@@ -1,5 +1,5 @@
 import { callLlmForTask, getLlmConfigForTask } from '../onboarding/llm-client';
-import type { ModelPolicyView } from './model-policy-gateway';
+import { redactTransportText, type ModelPolicyView } from './model-policy-gateway';
 import type { ProductLineItemSnapshot } from './types';
 import {
   normalizePageAssignments,
@@ -149,7 +149,7 @@ async function coordinate(params: CohortPageCoordinationParams): Promise<Map<str
       { allowFallback: true, modelPolicy: params.modelPolicy, protectedOperation: 'cohort_page_assignment' },
     );
   } catch (error) {
-    return abstainAll(params.products, `Cohort page LLM call failed: ${error instanceof Error ? error.message : String(error)}`);
+    return abstainAll(params.products, `Cohort page LLM call failed: ${redactTransportText(error instanceof Error ? error.message : String(error))}`);
   }
   if (!raw) return abstainAll(params.products, 'Cohort page LLM returned an empty response.');
   if (params.products.some(product => !hasExactlyOneTopLevelKey(raw!, product.sku))) {

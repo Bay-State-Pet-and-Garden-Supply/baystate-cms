@@ -23,6 +23,7 @@ import { getDb } from '../db/connection';
 import * as embeddingRepo from '../db/repositories/embedding-repo';
 import * as classRunRepo from '../db/repositories/classification-run-repo';
 import { fetchEmbedding } from './embedding-client';
+import { redactTransportText } from './model-policy-gateway';
 import {
   InMemoryRetrievalIndex,
   VectorValidationError,
@@ -347,7 +348,7 @@ export async function applyMaintenancePlan(
       });
       appliedUpserts++;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactTransportText(err instanceof Error ? err.message : String(err));
       errors.push(`SKU ${d.sku}: ${msg}`);
     }
   }

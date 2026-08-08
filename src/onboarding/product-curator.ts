@@ -28,7 +28,7 @@ import {
 } from '../classification';
 import { consolidateDistributorCopy } from './distributor-copy-consolidator';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
-import type { ModelPolicyView } from '../classification/model-policy-gateway';
+import { redactTransportText, type ModelPolicyView } from '../classification/model-policy-gateway';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
 import { determineProductGroup } from './product-line-grouper';
 import type { ProductLineItemSnapshot, StageDefinition } from '../classification/types';
@@ -326,7 +326,7 @@ export async function curateItemWithPipeline(
         }
       } catch (err) {
         console.warn(
-          `[ProductCurator] Cohort title coordination failed for ${item.upc}; using deterministic fallback: ${err instanceof Error ? err.message : String(err)}`,
+          `[ProductCurator] Cohort title coordination failed for ${item.upc}; using deterministic fallback: ${redactTransportText(err instanceof Error ? err.message : String(err))}`,
         );
         preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
         preComputedTitleSource = 'cohort_fallback';
@@ -507,7 +507,7 @@ export async function curateItemWithPipeline(
         curatedDescription = consolidation.curatedDescription;
         curatedDescriptionSourceAttemptIds = consolidation.sourceAttemptIds;
       } catch (err: any) {
-        console.warn(`[ProductCurator] Distributor copy consolidation failed: ${err.message}`);
+        console.warn(`[ProductCurator] Distributor copy consolidation failed: ${redactTransportText(err.message)}`);
         // Fall through — curatedDescription stays null
       }
     }
@@ -554,8 +554,8 @@ export async function curateItemWithPipeline(
       })),
     };
   } catch (err) {
-    console.error(`[ProductCurator] Classification pipeline failed:`, err);
-    completeRun(run.id, 'failed', err instanceof Error ? err.message : String(err));
+    console.error(`[ProductCurator] Classification pipeline failed:`, redactTransportText(err instanceof Error ? err.message : String(err)));
+    completeRun(run.id, 'failed', redactTransportText(err instanceof Error ? err.message : String(err)));
     throw err;
   }
 }

@@ -657,7 +657,7 @@ export async function extractProductEvidence(
           });
         }
       } catch (err: any) {
-        console.warn(`[EvidenceExtraction] Brand resolution failed: ${err.message}`);
+        console.warn(`[EvidenceExtraction] Brand resolution failed: ${redactTransportText(err.message)}`);
       }
     }
   }
@@ -721,7 +721,7 @@ export async function extractProductEvidence(
           console.warn(`[EvidenceExtraction] VLM OCR returned no text content for image ${i + 1}/${imageUrls.length} of SKU ${sku}`);
         }
       } catch (err: any) {
-        console.warn(`[EvidenceExtraction] VLM OCR failed for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${err.message}`);
+        console.warn(`[EvidenceExtraction] VLM OCR failed for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${redactTransportText(err.message)}`);
       }
     }
 
@@ -774,7 +774,7 @@ export async function extractProductEvidence(
         console.log(`[EvidenceExtraction] Added ${cloudEvidence.length} evidence entries from cloud packaging OCR`);
       }
     } catch (err: any) {
-      console.warn(`[EvidenceExtraction] Cloud packaging OCR failed: ${err.message}`);
+      console.warn(`[EvidenceExtraction] Cloud packaging OCR failed: ${redactTransportText(err.message)}`);
     }
   }
 

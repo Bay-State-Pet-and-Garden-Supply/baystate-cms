@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { ClassificationStageName, StageDefinition, StageContext, StageInput, StageOutput, PipelineRunResult } from './types';
 import type { ClassificationEvidence, ClassificationProposal } from '../shared/types';
 import { snapshotHash } from './runtime-snapshot';
+import { redactTransportText } from './model-policy-gateway';
 import { validateProposalSafety } from './proposal-safety';
 
 const now = () => new Date().toISOString();
@@ -219,7 +220,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           stageName,
           'failed',
           undefined,
-          err instanceof Error ? err.message : String(err),
+          redactTransportText(err instanceof Error ? err.message : String(err)),
         );
       }
       throw err;
