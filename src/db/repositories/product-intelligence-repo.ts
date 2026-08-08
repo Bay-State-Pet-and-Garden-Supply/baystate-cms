@@ -877,6 +877,9 @@ export interface PiAssetRow {
   /** Round-4: durable source-kind derived from the source row at
    *  verification time (never the agent's declared string). */
   declaredSourceType: string | null;
+  /** Round-10/11: exact pi_image_candidates FK the asset was verified from
+   *  (same-run + image_url === source_url enforced by trigger). */
+  candidateId: string | null;
 }
 
 const ASSET_SELECT = `
@@ -1365,6 +1368,10 @@ export interface PiSourceAuthorityRow {
   brandName: string | null;
   establishedBy: string;
   establishedAt: string;
+  /** Round-11: the durable evidence that established the brand. */
+  brandEvidenceId: string | null;
+  brandEvidenceHash: string | null;
+  brandEvidenceKind: string | null;
 }
 
 export function upsertSourceAuthority(input: {
@@ -1373,19 +1380,26 @@ export function upsertSourceAuthority(input: {
   authorityRef?: string | null;
   brandName?: string | null;
   establishedBy: string;
+  brandEvidenceId?: string | null;
+  brandEvidenceHash?: string | null;
+  brandEvidenceKind?: string | null;
 }): PiSourceAuthorityRow | null {
   const db = getDb();
   const id = randomUUID();
   const establishedAt = new Date().toISOString();
   db.run(
     `INSERT INTO pi_source_authorities
-       (id, source_id, authority_type, authority_ref, brand_name, established_by, established_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+       (id, source_id, authority_type, authority_ref, brand_name, established_by,
+        established_at, brand_evidence_id, brand_evidence_hash, brand_evidence_kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(source_id, authority_type) DO UPDATE SET
        authority_ref = excluded.authority_ref,
        brand_name = excluded.brand_name,
        established_by = excluded.established_by,
-       established_at = excluded.established_at`,
+       established_at = excluded.established_at,
+       brand_evidence_id = excluded.brand_evidence_id,
+       brand_evidence_hash = excluded.brand_evidence_hash,
+       brand_evidence_kind = excluded.brand_evidence_kind`,
     [
       id,
       input.sourceId,
@@ -1394,6 +1408,9 @@ export function upsertSourceAuthority(input: {
       input.brandName ?? null,
       input.establishedBy,
       establishedAt,
+      input.brandEvidenceId ?? null,
+      input.brandEvidenceHash ?? null,
+      input.brandEvidenceKind ?? null,
     ],
   );
   // Upgrade the source row's tier so resolvers reading source_type observe
@@ -1409,7 +1426,9 @@ export function upsertSourceAuthority(input: {
     .query(
       `SELECT id, source_id AS sourceId, authority_type AS authorityType,
               authority_ref AS authorityRef, brand_name AS brandName,
-              established_by AS establishedBy, established_at AS establishedAt
+              established_by AS establishedBy, established_at AS establishedAt,
+              brand_evidence_id AS brandEvidenceId, brand_evidence_hash AS brandEvidenceHash,
+              brand_evidence_kind AS brandEvidenceKind
        FROM pi_source_authorities
        WHERE source_id = ? AND authority_type = ?`,
     )
@@ -1423,6 +1442,9 @@ export function upsertSourceAuthority(input: {
       brandName: input.brandName ?? null,
       establishedBy: input.establishedBy,
       establishedAt,
+      brandEvidenceId: input.brandEvidenceId ?? null,
+      brandEvidenceHash: input.brandEvidenceHash ?? null,
+      brandEvidenceKind: input.brandEvidenceKind ?? null,
     }
   );
 }
@@ -1433,26 +1455,58 @@ export function upsertSourceAuthority(input: {
  *  normalized observed brands; empty when the brand is unresolved. The
  *  run's untrusted brandHint NEVER appears here (hints cannot mint
  *  authority). */
-export function listResolvedProductBrands(runId: string, requestedGtin?: string | null): string[] {
+export interface ResolvedProductBrand {
+  /** Normalized (lowercased) brand value. */
+  brand: string;
+  /** Durable evidence anchor: the verified asset id + its original content
+   *  hash (round-11: authority retains the evidence that established the
+   *  brand — "Brand A observed from evidence E on asset bytes H whose GTIN X
+   *  was independently exact"). */
+  assetId: string;
+  contentHash: string;
+  sourcePageUrl: string | null;
+}
+export function listResolvedProductBrands(runId: string, requestedGtin?: string | null): ResolvedProductBrand[] {
   if (!requestedGtin) return [];
   const db = getDb();
   const rows = db
     .query(
-      `SELECT observed_brand AS brand FROM product_intelligence_assets
+      `SELECT observed_brand AS brand, id AS assetId,
+              original_content_hash AS contentHash, source_page_url AS sourcePageUrl
+       FROM product_intelligence_assets
        WHERE run_id = ? AND exact_product_match = 1
          AND observed_gtin = ? AND observed_brand IS NOT NULL
          AND trim(observed_brand) <> ''
-       GROUP BY lower(trim(observed_brand))`,
+       ORDER BY created_at DESC`,
     )
-    .all(runId, requestedGtin) as Array<{ brand: string }>;
-  return rows.map((r) => r.brand.trim().toLowerCase());
+    .all(runId, requestedGtin) as Array<{
+    brand: string;
+    assetId: string;
+    contentHash: string;
+    sourcePageUrl: string | null;
+  }>;
+  // One resolution per normalized brand, newest asset wins.
+  const byBrand = new Map<string, ResolvedProductBrand>();
+  for (const r of rows) {
+    const key = r.brand.trim().toLowerCase();
+    if (!byBrand.has(key)) {
+      byBrand.set(key, {
+        brand: key,
+        assetId: r.assetId,
+        contentHash: r.contentHash,
+        sourcePageUrl: r.sourcePageUrl,
+      });
+    }
+  }
+  return [...byBrand.values()];
 }
 
 export function getSourceAuthorities(sourceId: string): PiSourceAuthorityRow[] {
   const db = getDb();
   const rows = db
     .query(
-      `SELECT id, source_id, authority_type, authority_ref, brand_name, established_by, established_at
+      `SELECT id, source_id, authority_type, authority_ref, brand_name, established_by,
+              established_at, brand_evidence_id, brand_evidence_hash, brand_evidence_kind
        FROM pi_source_authorities WHERE source_id = ? ORDER BY established_at ASC`,
     )
     .all(sourceId) as Array<Record<string, unknown>>;
@@ -1464,6 +1518,9 @@ export function getSourceAuthorities(sourceId: string): PiSourceAuthorityRow[] {
     brandName: row.brand_name !== null && row.brand_name !== undefined ? String(row.brand_name) : null,
     establishedBy: String(row.established_by),
     establishedAt: String(row.established_at),
+    brandEvidenceId: row.brand_evidence_id ? String(row.brand_evidence_id) : null,
+    brandEvidenceHash: row.brand_evidence_hash ? String(row.brand_evidence_hash) : null,
+    brandEvidenceKind: row.brand_evidence_kind ? String(row.brand_evidence_kind) : null,
   }));
 }
 
@@ -1471,7 +1528,8 @@ export function listSourceAuthoritiesByRun(runId: string): PiSourceAuthorityRow[
   const db = getDb();
   const rows = db
     .query(
-      `SELECT a.id, a.source_id, a.authority_type, a.authority_ref, a.brand_name, a.established_by, a.established_at
+      `SELECT a.id, a.source_id, a.authority_type, a.authority_ref, a.brand_name, a.established_by, a.established_at,
+              a.brand_evidence_id, a.brand_evidence_hash, a.brand_evidence_kind
        FROM pi_source_authorities a
        JOIN product_intelligence_sources s ON s.id = a.source_id
        WHERE s.run_id = ? ORDER BY a.established_at ASC`,
@@ -1485,5 +1543,8 @@ export function listSourceAuthoritiesByRun(runId: string): PiSourceAuthorityRow[
     brandName: row.brand_name !== null && row.brand_name !== undefined ? String(row.brand_name) : null,
     establishedBy: String(row.established_by),
     establishedAt: String(row.established_at),
+    brandEvidenceId: row.brand_evidence_id ? String(row.brand_evidence_id) : null,
+    brandEvidenceHash: row.brand_evidence_hash ? String(row.brand_evidence_hash) : null,
+    brandEvidenceKind: row.brand_evidence_kind ? String(row.brand_evidence_kind) : null,
   }));
 }

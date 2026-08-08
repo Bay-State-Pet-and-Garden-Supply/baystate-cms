@@ -16,7 +16,7 @@ import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { upsertReusePolicy } from '../../db/repositories/pi-reuse-policy-repo';
-import { createPiRun, insertPiAsset, insertPiEvidence, insertPiImageCandidate, insertPiPageArtifact, insertPiSource, listPiAssetsByRun, listPiImageCandidatesByRun, listPiPageArtifactsByRun, listPiSources, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, insertPiAsset, insertPiEvidence, insertPiImageCandidate, insertPiPageArtifact, insertPiSource, listPiAssetsByRun, listPiImageCandidatesByRun, listPiPageArtifactsByRun, listPiSources, listSourceAuthoritiesByRun, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
 import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { discoverCandidates } from '../../product-intelligence/assets/discovery';
@@ -1164,6 +1164,144 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     transitionPiRunStatus(run.id, 'completed', {});
   });
 });
+  it('round-11 release-blocker: verify -> deterministic authority -> re-verify observes manufacturer rights (stale source cache removed)', async () => {
+    const GTIN = '036000291452';
+    const PAGE_URL = 'https://brand.example.com/p/stella-broth-16oz';
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) =>
+        hostname.endsWith('example.com') || hostname.endsWith('shopify.com') ? ['93.184.216.34'] : [],
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun(JSON.stringify({ gtin: GTIN, registerName: 'Stella Chicken Broth 16 oz' }));
+    upsertReusePolicy({
+      workspaceId: wsId,
+      sourceTier: 'manufacturer',
+      domainPattern: 'cdn.shopify.com',
+      allowed: true,
+      terms: 'vendor license',
+    });
+
+    // (1) The workflow ranks sources BEFORE any verification — no exact
+    //     evidence exists, so authority fails closed (this was the reviewer's
+    //     starting point; the failure itself is recoverable).
+    const first = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('check_source_priority')!,
+      { url: PAGE_URL },
+      toolCtx(run.id),
+    );
+    expect(first.status).toBe('ok');
+    expect((first as { data?: { authorityEstablished?: boolean } }).data?.authorityEstablished).toBe(false);
+    expect(listSourceAuthoritiesByRun(run.id).length).toBe(0);
+
+    // (2) Discover through the real tool: the server creates the candidate
+    //     bound to the page source (sourceType 'other' at this point) and
+    //     retains the attestation.
+    const html = `<script>var Shopify = Shopify || {};
+Shopify.ProductVariants = [{"id":123,"title":"16 oz","option1":"16 oz","image_id":456}];
+Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</script>`;
+    const artifact = insertPiPageArtifact({
+      runId: run.id,
+      url: PAGE_URL,
+      contentHash: createHash('sha256').update(html).digest('hex'),
+      content: html,
+    });
+    const discovered = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { artifactId: artifact.id, sourceType: 'shopify' },
+      toolCtx(run.id),
+    );
+    expect(discovered.status).toBe('ok');
+    const candidateId = ((discovered as { data?: unknown }).data as { candidates: Array<{ candidateId: string; url: string }> }).candidates[0].candidateId;
+    expect(candidateId).toBeTruthy();
+    const pageSource = listPiSources(run.id).find((source) => source.url === PAGE_URL);
+    expect(pageSource).toBeTruthy();
+    expect(pageSource?.sourceType).toBe('other');
+
+    // (3) Verify the primary image: exact GTIN (hash-bound evidence) + the
+    //     OCR/structured brand + GTIN observations make the durable brand
+    //     resolvable. The persist seam then runs the DETERMINISTIC authority
+    //     refresh server-side.
+    const gtinRow = insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource!.id,
+      targetField: 'gtin',
+      value: GTIN,
+      extractionMethod: 'image_ocr',
+      metadata: { contentHash: createHash('sha256').update(png).digest('hex') },
+    });
+    // The durable BRAND observation: evidence rows are the only authority —
+    // agent-asserted observedBrand is recorded but never becomes the asset's
+    // observed brand, so the brand must come from an evidence fact.
+    const brandRow = insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource!.id,
+      targetField: 'brand',
+      value: 'Stella',
+      extractionMethod: 'image_ocr',
+    });
+    const verified = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.shopify.com/s/files/a.jpg',
+        candidateId,
+        gtin: GTIN,
+        evidenceIds: [gtinRow.id, brandRow.id],
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(verified.status).toBe('ok');
+
+    // (4) The authority is now established deterministically from the verified
+    //     evidence and is EVIDENCE-PROVENANCED (asset id + content hash).
+    const authorities = listSourceAuthoritiesByRun(run.id);
+    expect(authorities.length).toBe(1);
+    expect(authorities[0].authorityType).toBe('manufacturer');
+    expect(authorities[0].brandName).toBe('stella');
+    expect(authorities[0].establishedBy).toBe('verified_asset_evidence');
+    const asset = listPiAssetsByRun(run.id).find((a) => a.observedBrand === 'Stella');
+    expect(asset).toBeTruthy();
+    expect(authorities[0].brandEvidenceId).toBe(asset?.id);
+    expect(authorities[0].brandEvidenceHash).toBe(asset?.originalContentHash);
+    expect(authorities[0].brandEvidenceKind).toBe('verified_asset');
+    // The page source tier was upgraded so resolvers observe the authority.
+    expect(listPiSources(run.id).find((source) => source.url === PAGE_URL)?.sourceType).toBe('manufacturer');
+
+    // (5) RE-VERIFY: rights resolution reads FRESH source rows (the stale
+    //     module cache was removed) — the manufacturer grant now applies.
+    const reverified = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.shopify.com/s/files/a.jpg',
+        candidateId,
+        gtin: GTIN,
+        evidenceIds: [gtinRow.id],
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(reverified.status).toBe('ok');
+    if (reverified.status === 'ok') {
+      const record = reverified.data as { rightsStatus: string; commerceApproved: boolean; exactProductMatch: boolean };
+      expect(record.exactProductMatch).toBe(true);
+      expect(record.rightsStatus).toBe('approved');
+      expect(record.commerceApproved).toBe(true);
+    }
+
+    // (6) check_source_priority on the same source now reports the durable
+    //     authority (the reviewer's step 4 — no stale tier left behind).
+    const second = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('check_source_priority')!,
+      { url: PAGE_URL },
+      toolCtx(run.id),
+    );
+    expect(second.status).toBe('ok');
+    const secondData = (second as { data?: { authorityEstablished?: boolean } }).data;
+    expect(secondData?.authorityEstablished).toBe(true);
+
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
 
 });
 

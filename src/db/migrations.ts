@@ -2190,6 +2190,44 @@ export function runMigrations(): void {
   db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('pi_round10_authority_schema_version', '1');");
   console.log('[Migrations] Pi round-10 authority schema migration complete.');
 
+  // Round-11 (review P0/P1s): workspace authority + evidence-provenanced
+  // brand authority.
+  // - trg_pi_asset_candidate_same_run is strengthened: the candidate's
+  //   image_url must equal the asset's source_url (the invariant the live
+  //   verifier already enforces becomes a storage invariant too).
+  // - pi_source_authorities retains the evidence that resolved the brand
+  //   (verified asset id + content hash + evidence kind) so an authority
+  //   record is a durable statement "Brand A was observed from evidence E
+  //   on asset bytes H whose GTIN X was independently exact".
+  const round11 = db
+    .query("SELECT value FROM app_meta WHERE key = 'pi_round11_authority_schema_version'")
+    .get() as { value: string } | undefined;
+  if (!round11) {
+    db.exec('DROP TRIGGER IF EXISTS trg_pi_asset_candidate_same_run;');
+    db.exec(`
+      CREATE TRIGGER trg_pi_asset_candidate_same_run
+      BEFORE INSERT ON product_intelligence_assets
+      WHEN NEW.candidate_id IS NOT NULL
+      BEGIN
+        SELECT CASE
+          WHEN NOT EXISTS (SELECT 1 FROM pi_image_candidates WHERE id = NEW.candidate_id)
+            THEN RAISE(ABORT, 'candidate_id references a nonexistent pi_image_candidates row')
+          WHEN (SELECT run_id FROM pi_image_candidates WHERE id = NEW.candidate_id) <> NEW.run_id
+            THEN RAISE(ABORT, 'candidate_id belongs to a different run')
+          WHEN (SELECT image_url FROM pi_image_candidates WHERE id = NEW.candidate_id) <> NEW.source_url
+            THEN RAISE(ABORT, 'candidate image_url must equal the asset source_url')
+        END;
+      END;`);
+    const authCols = db.query("SELECT name FROM pragma_table_info('pi_source_authorities')").all() as Array<{ name: string }>;
+    if (!authCols.some((c) => c.name === 'brand_evidence_id')) {
+      db.exec('ALTER TABLE pi_source_authorities ADD COLUMN brand_evidence_id TEXT NULL;');
+      db.exec('ALTER TABLE pi_source_authorities ADD COLUMN brand_evidence_hash TEXT NULL;');
+      db.exec('ALTER TABLE pi_source_authorities ADD COLUMN brand_evidence_kind TEXT NULL;');
+    }
+    db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('pi_round11_authority_schema_version', '1');");
+    console.log('[Migrations] Pi round-11 authority schema migration complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

@@ -132,6 +132,8 @@ export const ProductAssetEvidenceSchema = z.object({
   /** Round-4: durable source-kind derived from the source row at
    *  verification time (never the agent's declared string). */
   declaredSourceType: z.string().nullish(),
+  /** Round-10/11: exact pi_image_candidates FK the asset was verified from. */
+  candidateId: z.string().nullish(),
 });
 export type ProductAssetEvidence = z.infer<typeof ProductAssetEvidenceSchema>;
 

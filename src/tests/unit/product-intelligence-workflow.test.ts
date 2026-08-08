@@ -11,7 +11,7 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { createPiRun, getPiRun, getPiResult, insertPiAsset, insertPiImageCandidate, insertPiSource, listPiAssetsByRun, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, getPiRun, getPiResult, insertPiAsset, insertPiImageCandidate, insertPiPageArtifact, insertPiSource, listPiAssetsByRun, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
 import { startProductIntelligenceRun } from '../../product-intelligence/run-service';
 import { buildDefaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
@@ -124,18 +124,62 @@ function seedVerifiedAssetRow(overrides: Record<string, unknown> = {}, runIdOver
   return asset.id;
 }
 
-/** Round-9: seed a durable image-candidate record binding an image URL to a
- *  media-set/entity identity (the join target for supporting-role linkage). */
-function seedCandidateRow(url: string, entityId: string, sourceArtifactId = 'a1'): string {
+/** Round-9/11: seed a durable image-candidate record binding an image URL
+ *  to a typed media-set/entity identity (the join target for
+ *  supporting-role linkage). The candidate carries the server-created
+ *  media-set components (attestation artifact + discovering source) that
+ *  the round-11 linkage compares. An artifact id MUST reference a real
+ *  pi_page_artifacts row (the round-10 same-run trigger enforces it), so
+ *  callers pass an id returned by seedPageArtifact(). */
+function seedCandidateRow(
+  url: string,
+  entityId: string | null,
+  opts: { sourceArtifactId?: string; discoveringSourceId?: string | null; attestationArtifactId?: string | null } = {},
+): string {
   return insertPiImageCandidate({
     runId: seedRunId(),
     imageUrl: url,
-    discoveringSourceId: null,
-    sourceArtifactId,
+    discoveringSourceId: opts.discoveringSourceId ?? null,
+    sourceArtifactId: opts.sourceArtifactId ?? 'a1',
     sourcePath: 'json_ld.image',
     extractionMethod: 'json_ld',
     variantReference: null,
     entityId,
+    attestationArtifactId: opts.attestationArtifactId ?? null,
+  }).id;
+}
+
+/** Round-11: create a REAL retained page-artifact row with a deterministic
+ *  id (candidates reference it via attestation_artifact_id; the same-run
+ *  trigger requires it to exist). Returns the id. */
+function seedPageArtifact(id: string): string {
+  // Unique per-call url so the rewrite below targets exactly the row just
+  // inserted (created_at timestamps can tie within a millisecond).
+  const url = `https://brand.example.com/p/${GTIN}?artifact=${id}`;
+  insertPiPageArtifact({
+    runId: seedRunId(),
+    url,
+    contentHash: 'b'.repeat(64),
+    content: '<html><body>artifact</body></html>',
+    artifactType: 'page_html',
+  });
+  // insertPiPageArtifact generates its own UUID — rewrite to the caller's
+  // deterministic id so candidates can reference it by a stable value.
+  const rows = getDb().query('SELECT id FROM pi_page_artifacts WHERE url = ?').all(url) as Array<{ id: string }>;
+  if (rows.length === 0) throw new Error('artifact row was not created');
+  getDb().run('UPDATE pi_page_artifacts SET id = ? WHERE id = ?', [id, rows[0].id]);
+  return id;
+}
+
+/** Round-11: seed a REAL discovering-source row for candidate media-set
+ *  tuples (pi_image_candidates.discovering_source_id is an FK to
+ *  product_intelligence_sources). Returns the generated source id. */
+function seedDiscoveringSource(url: string): string {
+  return insertPiSource({
+    runId: seedRunId(),
+    url,
+    domain: new URL(url).hostname.replace(/^www\./, ''),
+    sourceType: 'other',
   }).id;
 }
 
@@ -702,28 +746,42 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(issues).toContain('not durably linked');
   });
 
-  it('accepts a supporting image sharing the primary verified candidate row (round-10 P1)', () => {
+  it('accepts a supporting image sharing the primary candidate ENTITY/MEDIA-SET tuple (round-11 P1)', () => {
     const page = 'https://brand.example.com/p/' + GTIN;
-    // Round-10: same-product linkage is the EXACT candidate FK — the
-    // supporting asset must be verified from the SAME candidate row as the
-    // primary. Different candidate rows with the same entity string never
-    // link anymore (the round-9 entity-string reconstruction is gone).
-    const sharedCandidateId = seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
-    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: sharedCandidateId });
+    // Round-11: one candidate row == one image URL (enforced by the
+    // production verifier AND by the DB trigger: candidate.image_url must
+    // equal the asset source_url). A primary front image and its nutrition
+    // panel therefore ALWAYS live on DIFFERENT candidate rows — they link
+    // through the server-created media-set tuple (same typed entity, same
+    // retained page artifact, same discovering source), never candidate-ID
+    // equality.
+    const artifactId = seedPageArtifact('round11-art-1');
+    const discoveringSourceId = seedDiscoveringSource('https://brand.example.com/p/' + GTIN);
+    const primaryCandidateId = seedCandidateRow('https://cdn.example.com/front-1.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId,
+      attestationArtifactId: artifactId,
+    });
+    const nutritionCandidateId = seedCandidateRow('https://cdn.example.com/nutrition-1.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId,
+      attestationArtifactId: artifactId,
+    });
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: primaryCandidateId, sourceUrl: 'https://cdn.example.com/front-1.jpg' });
     const altId = seedVerifiedAssetRow({
-      sourceUrl: 'https://cdn.example.com/alt.jpg',
-      sourceArtifactId: 'a2',
+      sourceUrl: 'https://cdn.example.com/nutrition-1.jpg',
+      sourceArtifactId: 'a1',
       sourcePageUrl: page,
       exactProductMatch: false,
       exactVariantMatch: null,
-      candidateId: sharedCandidateId,
+      candidateId: nutritionCandidateId,
     });
     const bundle = exactMatchBundle({
       imageCandidates: [
-        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({ verifiedAssetId: primaryId, url: 'https://cdn.example.com/front-1.jpg' }),
         validPrimaryImage({
           role: 'alternate',
-          url: 'https://cdn.example.com/alt.jpg',
+          url: 'https://cdn.example.com/nutrition-1.jpg',
           verifiedAssetId: altId,
           exactProductMatch: false,
           exactVariantMatch: null,
@@ -735,19 +793,26 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(validation.issues).toEqual([]);
   });
 
-  it('rejects a supporting image on the same page from a DIFFERENT candidate row (round-10 P1)', () => {
+  it('rejects a supporting image on the same page from a DIFFERENT candidate entity (round-11 P1)', () => {
     const page = 'https://brand.example.com/p/' + GTIN;
-    // Unique URLs so candidate rows seeded by earlier tests (same memoized
-    // run) cannot satisfy this assertion by accident.
-    const recUrl = 'https://cdn.example.com/rec-alt.jpg';
-    // Two distinct candidate rows — even sharing the SAME entity string and
-    // the same page, a different candidate id is NOT the same media-set
-    // relationship; URL/entity similarity never links them.
-    const primaryCandidateId = seedCandidateRow('https://cdn.example.com/primary.jpg', 'PROD-1', 'a1');
-    const recCandidateId = seedCandidateRow(recUrl, 'PROD-1', 'a2');
-    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: primaryCandidateId });
+    // Same page, same retained artifact, same discovering source — but the
+    // two candidates carry DIFFERENT typed product entities (a cross-sell /
+    // recommendation image). Entity mismatch means no same-product linkage.
+    const artifactId = seedPageArtifact('round11-art-2');
+    const discoveringSourceId = seedDiscoveringSource('https://brand.example.com/p/' + GTIN);
+    const primaryCandidateId = seedCandidateRow('https://cdn.example.com/front-2.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId,
+      attestationArtifactId: artifactId,
+    });
+    const recCandidateId = seedCandidateRow('https://cdn.example.com/rec-2.jpg', 'sku:REC-99', {
+      sourceArtifactId: 'a2',
+      discoveringSourceId,
+      attestationArtifactId: artifactId,
+    });
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: primaryCandidateId, sourceUrl: 'https://cdn.example.com/front-2.jpg' });
     const altId = seedVerifiedAssetRow({
-      sourceUrl: recUrl,
+      sourceUrl: 'https://cdn.example.com/rec-2.jpg',
       sourceArtifactId: 'a2',
       sourcePageUrl: page,
       exactProductMatch: false,
@@ -759,7 +824,7 @@ describe('PI-4 workflow fixtures through the full stack', () => {
         validPrimaryImage({ verifiedAssetId: primaryId }),
         validPrimaryImage({
           role: 'alternate',
-          url: recUrl,
+          url: 'https://cdn.example.com/rec-2.jpg',
           verifiedAssetId: altId,
           exactProductMatch: false,
           exactVariantMatch: null,
@@ -771,12 +836,145 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(validation.issues.some((issue) => issue.includes('alternate image') && issue.includes('not durably linked to this product'))).toBe(true);
   });
 
-  it('rejects a supporting image with a MISSING candidate FK and no exact match (round-10 P1)', () => {
+  it('rejects a supporting image with the same entity but a DIFFERENT attestation artifact (round-11 P1)', () => {
+    const page = 'https://brand.example.com/p/' + GTIN;
+    // Same typed entity + same discovering source, but the supporting
+    // candidate's retained page artifact differs — the media-set tuple
+    // differs, so the relationship is not the same.
+    const primaryArtifact = seedPageArtifact('round11-art-3a');
+    const altArtifact = seedPageArtifact('round11-art-3b');
+    const discoveringSourceId = seedDiscoveringSource('https://brand.example.com/p/' + GTIN);
+    const primaryCandidateId = seedCandidateRow('https://cdn.example.com/front-3.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId,
+      attestationArtifactId: primaryArtifact,
+    });
+    const altCandidateId = seedCandidateRow('https://cdn.example.com/panel-3.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId,
+      attestationArtifactId: altArtifact,
+    });
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: primaryCandidateId, sourceUrl: 'https://cdn.example.com/front-3.jpg' });
+    const altId = seedVerifiedAssetRow({
+      sourceUrl: 'https://cdn.example.com/panel-3.jpg',
+      sourceArtifactId: 'a1',
+      sourcePageUrl: page,
+      exactProductMatch: false,
+      exactVariantMatch: null,
+      candidateId: altCandidateId,
+    });
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({
+          role: 'alternate',
+          url: 'https://cdn.example.com/panel-3.jpg',
+          verifiedAssetId: altId,
+          exactProductMatch: false,
+          exactVariantMatch: null,
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.some((issue) => issue.includes('alternate image') && issue.includes('not durably linked to this product'))).toBe(true);
+  });
+
+  it('rejects a supporting image with the same entity but a DIFFERENT discovering source (round-11 P1)', () => {
+    const page = 'https://brand.example.com/p/' + GTIN;
+    // Same typed entity + same retained artifact, but the candidates were
+    // discovered by different sources — different media-set tuple.
+    const artifactId = seedPageArtifact('round11-art-4');
+    const primarySourceId = seedDiscoveringSource('https://brand.example.com/p/' + GTIN);
+    const altSourceId = seedDiscoveringSource('https://other.example.com/p/' + GTIN);
+    const primaryCandidateId = seedCandidateRow('https://cdn.example.com/front-4.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId: primarySourceId,
+      attestationArtifactId: artifactId,
+    });
+    const altCandidateId = seedCandidateRow('https://cdn.example.com/panel-4.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId: altSourceId,
+      attestationArtifactId: artifactId,
+    });
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: primaryCandidateId, sourceUrl: 'https://cdn.example.com/front-4.jpg' });
+    const altId = seedVerifiedAssetRow({
+      sourceUrl: 'https://cdn.example.com/panel-4.jpg',
+      sourceArtifactId: 'a1',
+      sourcePageUrl: page,
+      exactProductMatch: false,
+      exactVariantMatch: null,
+      candidateId: altCandidateId,
+    });
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({
+          role: 'alternate',
+          url: 'https://cdn.example.com/panel-4.jpg',
+          verifiedAssetId: altId,
+          exactProductMatch: false,
+          exactVariantMatch: null,
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.some((issue) => issue.includes('alternate image') && issue.includes('not durably linked to this product'))).toBe(true);
+  });
+
+  it('rejects a supporting image whose candidate has NO typed product entity (round-11 P1)', () => {
+    const page = 'https://brand.example.com/p/' + GTIN;
+    // Fail closed: a candidate with a null entity id — or a raw untyped id
+    // ('PROD-1' without a kind prefix) — cannot establish the typed
+    // media-set identity; same-page provenance alone never links.
+    const artifactId = seedPageArtifact('round11-art-5');
+    const discoveringSourceId = seedDiscoveringSource('https://brand.example.com/p/' + GTIN);
+    const primaryCandidateId = seedCandidateRow('https://cdn.example.com/front-5.jpg', 'sku:PROD-1', {
+      sourceArtifactId: 'a1',
+      discoveringSourceId,
+      attestationArtifactId: artifactId,
+    });
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page, candidateId: primaryCandidateId, sourceUrl: 'https://cdn.example.com/front-5.jpg' });
+    for (const untypedEntity of [null, 'PROD-1']) {
+      const altCandidateId = seedCandidateRow(`https://cdn.example.com/panel-5-${untypedEntity ?? 'null'}.jpg`, untypedEntity, {
+        sourceArtifactId: 'a1',
+        discoveringSourceId,
+        attestationArtifactId: artifactId,
+      });
+      const altUrl = `https://cdn.example.com/panel-5-${untypedEntity ?? 'null'}.jpg`;
+      const altId = seedVerifiedAssetRow({
+        sourceUrl: altUrl,
+        sourceArtifactId: 'a1',
+        sourcePageUrl: page,
+        exactProductMatch: false,
+        exactVariantMatch: null,
+        candidateId: altCandidateId,
+      });
+      const bundle = exactMatchBundle({
+        imageCandidates: [
+          validPrimaryImage({ verifiedAssetId: primaryId }),
+          validPrimaryImage({
+            role: 'alternate',
+            url: altUrl,
+            verifiedAssetId: altId,
+            exactProductMatch: false,
+            exactVariantMatch: null,
+          }),
+        ],
+      });
+      const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+      expect(validation.valid).toBe(false);
+      expect(validation.issues.some((issue) => issue.includes('alternate image') && issue.includes('not durably linked to this product'))).toBe(true);
+    }
+  });
+
+  it('rejects a supporting image with a MISSING candidate FK and no exact match (round-10/11 P1)', () => {
     const page = 'https://brand.example.com/p/' + GTIN;
     // Same page, same entity, but NEITHER asset carries a candidate_id FK
     // (pre-round-10 assets) and the supporting image has no exact match —
     // the round-6/9 'same discovering page' path is fully removed: without
-    // the exact FK the linkage fails closed.
+    // the exact FK the media-set linkage fails closed.
     const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page });
     const altId = seedVerifiedAssetRow({
       sourceUrl: 'https://cdn.example.com/alt.jpg',

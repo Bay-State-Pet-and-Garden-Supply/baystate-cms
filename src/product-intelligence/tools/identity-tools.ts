@@ -18,10 +18,66 @@ import { defaultPolicyGateway } from '../policy';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied, upcCheckDigit } from './contract';
 import { boundedString } from './registry';
+import { getPiRun } from '../../db/repositories/product-intelligence-repo';
 
 function normalizeGtin(raw: string): string | null {
   const digits = raw.replace(/\D/g, '');
   return digits.length >= 8 && digits.length <= 14 ? digits : null;
+}
+
+/**
+ * Round-11 (review P0): the run's IMMUTABLE requested GTIN (from the run
+ * input the operator supplied). Null when unavailable — fail closed: a run
+ * whose input cannot be read never gets supplier-authoritative results.
+ * Mirrors verification-tools' loadExpectedBrand pattern.
+ */
+function loadRunGtin(runId: string): string | null {
+  try {
+    const run = getPiRun(runId);
+    if (!run?.inputJson) return null;
+    const input = JSON.parse(run.inputJson) as { gtin?: unknown };
+    const digits = typeof input.gtin === 'string' ? input.gtin.replace(/\D/g, '') : '';
+    return digits.length >= 8 && digits.length <= 14 ? digits : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Round-11 (review P0): prove an onboarding item belongs to the current
+ * workspace (item -> batch -> workspace). Foreign or missing items are
+ * INVISIBLE to research tools — possession of an item id is never
+ * authorization. Fail closed: an unreadable ownership check denies.
+ */
+function onboardingItemInWorkspace(itemId: string, workspaceId: string): boolean {
+  try {
+    const row = getDb()
+      .query(
+        `SELECT i.id FROM onboarding_items i
+         JOIN onboarding_batches b ON i.batch_id = b.id
+         WHERE i.id = ? AND b.workspace_id = ?`,
+      )
+      .get(itemId, workspaceId) as { id: string } | undefined;
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Round-11 (review P0): onboarding_sources does not (yet) carry a
+ * source_kind column in the migrated schema. When a future migration adds
+ * it, the supplier/distributor filter reactivates; today the kind is
+ * advisory only. The workspace + GTIN boundary is the security boundary
+ * regardless.
+ */
+function hasSourceKindColumn(): boolean {
+  try {
+    const cols = getDb().query("SELECT name FROM pragma_table_info('onboarding_sources')").all() as Array<{ name: string }>;
+    return cols.some((c) => c.name === 'source_kind');
+  } catch {
+    return false;
+  }
 }
 
 export const validateGtin: PiToolAdapter = {
@@ -80,21 +136,40 @@ const lookupExistingOnboardingEvidence: PiToolAdapter = {
   name: 'lookup_existing_onboarding_evidence',
   version: '1.0.0',
   description:
-    'Look up previously collected onboarding evidence for an item (discovery sources, extraction attempts, selected source). Returns a safe projection or no_result.',
+    'Look up previously collected onboarding evidence for an item (discovery sources, extraction attempts, selected source). ' +
+    'WORKSPACE-SCOPED (round-11): the item must belong to the current workspace — foreign items are denied with policy_denied. ' +
+    'Returns a safe projection or no_result.',
   parameters: Type.Object({
     onboardingItemId: boundedString(128, 'Onboarding item id'),
     upc: Type.Optional(boundedString(64, 'UPC to filter by')),
   }),
-  async execute(params: Record<string, unknown>, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params: Record<string, unknown>, ctx: PiToolContext): Promise<PiToolResult> {
     const itemId = String(params.onboardingItemId ?? '');
-    const attempts = getEvidenceAttemptsForItem(itemId);
+    // Round-11 (review P0): resolve ownership FIRST. An arbitrary caller-
+    // supplied onboarding item id must belong to the current workspace or
+    // the read is denied outright.
+    if (!onboardingItemInWorkspace(itemId, ctx.workspaceId)) {
+      return policyDenied(`onboarding item ${itemId} does not belong to the current workspace`);
+    }
+    // Fail closed: when the evidence-attempts store is unavailable (the
+    // table is not part of every migrated deployment), treat it as 'no
+    // attempts recorded' — sources are still returned and the tool never
+    // crashes or leaks.
+    let attempts: Awaited<ReturnType<typeof getEvidenceAttemptsForItem>> = [];
+    try {
+      attempts = getEvidenceAttemptsForItem(itemId);
+    } catch {
+      // attempts stays [] — fail closed.
+    }
     const db = getDb();
     const sources = db
       .query(
-        `SELECT id, url, domain, source_kind AS sourceKind, upc, selected
-         FROM onboarding_sources
-         WHERE item_id = ? ${params.upc ? 'AND upc = ?' : ''}
-         ORDER BY created_at DESC LIMIT 25`,
+        `SELECT s.id, s.url, s.domain, s.source_method AS sourceKind, i.upc AS upc,
+                s.is_selected AS selected, s.created_at AS createdAt
+         FROM onboarding_sources s
+         JOIN onboarding_items i ON s.item_id = i.id
+         WHERE s.item_id = ? ${params.upc ? 'AND i.upc = ?' : ''}
+         ORDER BY s.created_at DESC LIMIT 25`,
       )
       .all(...(params.upc ? [itemId, String(params.upc)] : [itemId])) as Array<Record<string, unknown>>;
     if (attempts.length === 0 && sources.length === 0) {
@@ -132,26 +207,58 @@ function lookupSourceByKind(kind: 'supplier' | 'distributor'): PiToolAdapter {
     name: `lookup_${kind}_product`,
     version: '1.0.0',
     description:
-      `Look up ${kind} catalog data for a GTIN from previously collected onboarding sources of that kind. ` +
+      `Look up ${kind} catalog data for a GTIN from previously collected onboarding sources of that kind ` +
+      'WITHIN THE CURRENT WORKSPACE. Workspace-scoped (round-11): sources belonging to other workspaces are invisible. ' +
+      "GTIN-bound: results are supplier-authoritative evidence ONLY when the requested GTIN equals the run's immutable " +
+      'input GTIN; cross-GTIN results are returned as LEADS (catalog_evidence), never supplier authority. ' +
       'Returns source URLs, titles, and evidence references or no_result.',
     parameters: Type.Object({ gtin: boundedString(64, 'GTIN/UPC') }),
-    async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+    async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
       const gtin = String(params.gtin ?? '');
       const db = getDb();
+      // Round-11 (review P0): EVERY onboarding-backed research read resolves
+      // through the current workspace — join source -> item -> batch/
+      // workspace. A workspace-A run can never observe workspace-B sources,
+      // so supplier_evidence cannot leak cross-workspace. The GTIN match is
+      // made against the ITEM's upc (the only truthful GTIN linkage in the
+      // migrated schema); a source_kind predicate applies only when a future
+      // migration adds the column.
+      const sourceKindFilter = hasSourceKindColumn() ? ' AND s.source_kind = ?' : '';
+      const args: unknown[] = [ctx.workspaceId, gtin];
+      if (sourceKindFilter) args.push(kind);
       const rows = db
         .query(
-          `SELECT DISTINCT s.url, s.domain, s.title, s.source_kind AS sourceKind, s.created_at AS createdAt
+          `SELECT DISTINCT s.url, s.domain, s.title, i.upc AS upc, s.created_at AS createdAt
            FROM onboarding_sources s
-           WHERE s.upc = ? AND s.source_kind = ?
+           JOIN onboarding_items i ON s.item_id = i.id
+           JOIN onboarding_batches b ON i.batch_id = b.id
+           WHERE b.workspace_id = ? AND i.upc = ?${sourceKindFilter}
            ORDER BY s.created_at DESC LIMIT 20`,
         )
-        .all(gtin, kind) as Array<{ url: string; domain: string; title: string | null; sourceKind: string; createdAt: string }>;
-      if (rows.length === 0) return noResult(`No ${kind} source found for ${gtin}`);
+        .all(...(args as string[])) as Array<{ url: string; domain: string; title: string | null; upc: string | null; createdAt: string }>;
+      if (rows.length === 0) return noResult(`No ${kind} source found for ${gtin} in the current workspace`);
+      // Round-11 (review P0): GTIN binding for the trusted supplier path —
+      // supplier-authoritative evidence ONLY when the requested GTIN equals
+      // the run's immutable input GTIN. Cross-GTIN exploration is a LEAD
+      // (catalog_evidence), never supplier authority. Fail closed: when the
+      // run input cannot be read, no supplier-authoritative result.
+      const runGtin = loadRunGtin(ctx.runId);
+      const gtinMatches = runGtin !== null && runGtin === normalizeGtin(gtin);
       return okResult(
-        { gtin, kind, sources: rows },
+        {
+          gtin,
+          kind,
+          sources: rows,
+          crossGtinLead: !gtinMatches,
+          warning: gtinMatches
+            ? undefined
+            : runGtin === null
+              ? "the run's immutable input GTIN is unavailable — results are leads, not supplier-authoritative evidence"
+              : `requested GTIN ${gtin} differs from the run's immutable GTIN ${runGtin} — results are leads, not supplier-authoritative evidence`,
+        },
         rows.map((row) => ({
           id: evidenceId(`lookup_${kind}_product`, `${gtin}:${row.url}`),
-          kind: 'supplier_evidence' as const,
+          kind: gtinMatches ? ('supplier_evidence' as const) : ('catalog_evidence' as const),
           url: row.url,
           domain: row.domain,
           method: `${kind}_source_lookup`,

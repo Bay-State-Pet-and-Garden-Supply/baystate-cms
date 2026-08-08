@@ -963,6 +963,11 @@ export function persistBundleAssets(
       verifiedAgainstJson: v.verifiedAgainstJson ?? null,
       verifiedAgainstHash: v.verifiedAgainstHash ?? null,
       declaredSourceType: v.declaredSourceType ?? v.sourceType ?? null,
+      // Round-11 (review P1): preserve the exact candidate FK across terminal
+      // persistence — the tool-time verified asset's candidateId is the
+      // relationship round-10 introduced; dropping it here would lose it.
+      // The round-11 trigger re-validates candidate.image_url == source_url.
+      candidateId: v.candidateId ?? null,
     });
     sink.emitDomain('asset.added', {
       sourceUrl: v.sourceUrl,
@@ -1034,6 +1039,7 @@ export function assetEvidenceFromRow(row: PiAssetRow): ProductAssetEvidence {
     conflicts: JSON.parse(row.conflictsJson) as string[],
     payload: row.payloadJson ? (JSON.parse(row.payloadJson) as Record<string, unknown>) : {},
     createdAt: row.createdAt,
+    candidateId: row.candidateId ?? null,
   };
 }
 

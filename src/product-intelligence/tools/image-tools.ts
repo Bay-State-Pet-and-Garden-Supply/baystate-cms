@@ -18,6 +18,7 @@ import { createRequire } from 'node:module';
 import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import { parseNetContent, verifyImageCandidate } from '../assets/verification';
 import { discoverCandidates } from '../assets/discovery';
+import { refreshResolvedAuthoritiesForRun } from './verification-tools';
 import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation, ProductAssetEvidence } from '../assets/schema';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
@@ -125,6 +126,17 @@ export const verifyImageCandidateTool: PiToolAdapter = {
     }
 
     try {
+      // Round-11 (review P1): authority establishment is a DETERMINISTIC
+      // server consequence — run it BEFORE the rights decision so this
+      // verification observes the fresh source tier. Pre-verification
+      // evidence (hash-bound exact GTIN + same-bytes brand) resolves the
+      // brand without requiring an existing exact asset; the post-persist
+      // call below upgrades the record to asset-provenanced.
+      try {
+        refreshResolvedAuthoritiesForRun(ctx.runId);
+      } catch {
+        // fail closed: no authority -> rights stay restricted
+      }
       // Round-8 (review P1): discovery provenance (sourcePath/sourceArtifactId/
       // extractionMethod) comes from the SERVER-CREATED candidate row — never
       // from agent parameters. The agent's sourcePath/sourceArtifactId/
@@ -177,6 +189,19 @@ export const verifyImageCandidateTool: PiToolAdapter = {
       // from durable fields. Lazy (bun-only): with no DB (vitest) the record
       // returns without a persisted id (fail closed — nothing to cite).
       const verifiedAssetId = persistVerifiedAsset(ctx.runId, record, candidateId);
+      // Round-11 (review P1 release blocker): authority establishment is a
+      // DETERMINISTIC server consequence of verified product evidence — the
+      // exact asset now exists, so the server re-evaluates source authorities
+      // (evidence-provenanced pi_source_authorities + source-tier upgrade).
+      // Best-effort: a failure never fails the verification. The rights tier
+      // of THIS result was computed from pre-persistence evidence; a
+      // SUBSEQUENT verification reads the fresh source rows (the stale cache
+      // was removed) and observes the upgraded manufacturer tier.
+      try {
+        refreshResolvedAuthoritiesForRun(ctx.runId);
+      } catch {
+        // fail closed: no authority refresh -> next verification stays neutral
+      }
       return okResult({ ...record, verifiedAssetId }, [
         {
           id: evidenceId('verify_image_candidate', url),
@@ -683,32 +708,30 @@ function loadSourceTypeResolver(runId: string): (url: string, provenance: Source
   };
 }
 
-/** Per-run cached source rows (lazy, vitest-safe fail closed). */
-const _sourceRowsCache = new Map<string, Array<{ id: string; url: string; sourceType: string | null }> | null>();
+/** Round-10/11: per-run source rows are read from the DB on EVERY call —
+ *  the module-level cache was REMOVED (round-11 review P1) because it froze
+ *  sourceType forever: after deterministic authority establishment upgrades a
+ *  source to manufacturer, rights resolution must observe the fresh tier on
+ *  the next verification. Local sqlite reads are cheap; correctness wins. */
 function loadSourceRows(runId: string): Array<{ id: string; url: string; sourceType: string | null }> {
-  if (_sourceRowsCache.has(runId)) return _sourceRowsCache.get(runId) ?? [];
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
     if (!conn.isDbInitialized?.()) {
-      _sourceRowsCache.set(runId, []);
       return [];
     }
   } catch {
-    _sourceRowsCache.set(runId, []);
     return [];
   }
   try {
     const store = loadAssetStore();
-    const rows = (store?.listPiSources(runId) ?? []).map((source) => ({
+    return (store?.listPiSources(runId) ?? []).map((source) => ({
       id: source.id,
       url: source.url,
       sourceType: source.sourceType ?? null,
     }));
-    _sourceRowsCache.set(runId, rows);
   } catch {
-    _sourceRowsCache.set(runId, []);
+    return [];
   }
-  return _sourceRowsCache.get(runId) ?? [];
 }
 
 /** Persist the server-verified record as a durable asset row; returns the

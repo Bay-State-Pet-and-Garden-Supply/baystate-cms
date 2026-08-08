@@ -15,9 +15,11 @@ import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { canonicalVerifiedAgainstHash } from '../../product-intelligence/assets/verification';
 import {
   createPiRun,
+  getPiImageCandidate,
   getPiRun,
   getPiResult,
   insertPiAsset,
+  insertPiImageCandidate,
   insertPiSource,
   listPiAssetsByRun,
   listPiEvents,
@@ -524,6 +526,76 @@ describe('Product Intelligence run service', () => {
     const imageSource = sources.find((s) => s.url === 'https://cdn.example.com/primary.jpg');
     expect(imageSource?.licenseRef).toBe('grant:supplier@cdn.example.com');
     expect(imageSource?.termsRef).toBe('grant:supplier@cdn.example.com');
+  });
+
+  it('preserves the exact candidate FK through terminal persistence (round-11 P1-4)', async () => {
+    const runId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify(TEST_INPUT),
+      policyJson: '{}',
+      configSnapshotId: 'seed',
+      configSnapshotHash: 'seed',
+    }).id;
+    // A real candidate row (one row = one image URL; the round-11 trigger
+    // requires candidate.image_url === asset.source_url, which the live
+    // verifier already enforces — mirror that state here).
+    const candidate = insertPiImageCandidate({
+      runId,
+      imageUrl: 'https://cdn.example.com/primary.jpg',
+      entityId: 'sku:7449053000110',
+      extractionMethod: 'json_ld',
+    });
+    expect(getPiImageCandidate(candidate.id)?.id).toBe(candidate.id);
+    const verifiedHash = canonicalVerifiedAgainstHash({
+      runId,
+      gtin: TEST_INPUT.gtin,
+      name: TEST_INPUT.registerName,
+    });
+    const seedSource = insertPiSource({
+      runId,
+      url: 'https://cdn.example.com/primary.jpg',
+      domain: 'cdn.example.com',
+      sourceType: 'manufacturer',
+    });
+    // The tool-time verified asset carries the exact candidate FK.
+    const assetId = insertPiAsset({
+      runId,
+      sourceId: seedSource.id,
+      sourceUrl: 'https://cdn.example.com/primary.jpg',
+      sourceType: 'manufacturer',
+      sourceArtifactId: 'a1',
+      extractionMethod: 'image_ocr',
+      retrievedAt: '2026-08-05T00:00:00.000Z',
+      originalContentHash: 'b'.repeat(64),
+      rightsStatus: 'approved',
+      rightsBasis: 'grant:manufacturer@cdn.example.com',
+      rightsEvidenceRef: 'grant:manufacturer@cdn.example.com',
+      exactProductMatch: true,
+      qualityStatus: 'usable',
+      commerceApproved: true,
+      conflicts: [],
+      verifiedAgainstJson: JSON.stringify({ runId, gtin: TEST_INPUT.gtin, name: TEST_INPUT.registerName }),
+      verifiedAgainstHash: verifiedHash,
+      declaredSourceType: 'manufacturer',
+      candidateId: candidate.id,
+    }).id;
+
+    const bundle = bundleWithImage();
+    bundle.imageCandidates[0].verifiedAssetId = assetId;
+    const validation = validateTerminalSubmission(bundle, TEST_INPUT.gtin, wsId, runId);
+    expect(validation.valid).toBe(true);
+
+    const sink = { emitDomain: () => undefined } as unknown as PersistingExecutionEventSink;
+    persistBundleAssets(runId, bundle, sink);
+
+    // The bundle-persisted COPY keeps the exact candidate FK (round-11:
+    // terminal persistence must not drop the round-10 relationship).
+    const persisted = listPiAssetsByRun(runId).find((a) => a.id !== assetId);
+    expect(persisted).toBeTruthy();
+    expect(persisted?.candidateId).toBe(candidate.id);
+    expect(persisted?.sourceUrl).toBe('https://cdn.example.com/primary.jpg');
   });
 
   it('drops bundle image candidates that cite nothing durable (round-3 adversarial)', async () => {

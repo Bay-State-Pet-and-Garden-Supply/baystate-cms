@@ -14,8 +14,11 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { createPiRun, transitionPiRunStatus, getPiRun, insertPiSource, listPiSources, listSourceAuthoritiesByRun, insertPiAsset, listPiPageArtifactsByRun } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, transitionPiRunStatus, getPiRun, insertPiSource, listPiSources, listSourceAuthoritiesByRun, insertPiAsset, listPiAssetsByRun, listPiPageArtifactsByRun } from '../../db/repositories/product-intelligence-repo';
 import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
+import { createBatch } from '../../db/repositories/onboarding-batch-repo';
+import { insertItems } from '../../db/repositories/onboarding-item-repo';
+import { insertSources } from '../../db/repositories/onboarding-source-repo';
 import { upsertReusePolicy, buildReuseGrantResolver } from '../../db/repositories/pi-reuse-policy-repo';
 import { startProductIntelligenceRun, getPiRunProjection } from '../../product-intelligence/run-service';
 import type { ProductResearchBundle } from '../../product-intelligence/workflow/bundle';
@@ -650,6 +653,36 @@ describe('Round-10 source authority (durable exact-GTIN-resolved brand, brandHin
     expect(authorities[0].brandName).toBe('branda'); // normalized by the registry repo
     expect(authorities[0].authorityRef).toBe(`brand_site:${brandSiteId.id}`);
     expect(authorities[0].establishedBy).toBe('check_source_priority:resolved_brand');
+    // Round-11 (review P1): the authority RETAINS the evidence that resolved
+    // the brand — the verified asset id + content hash — so the record says
+    // "Brand A observed from evidence E on asset bytes H whose GTIN X was
+    // independently exact" rather than merely "asset row says exact X + A".
+    const asset = listPiAssetsByRun(runId).find((a) => a.observedBrand === 'BrandA');
+    expect(asset).toBeTruthy();
+    expect(authorities[0].brandEvidenceId).toBe(asset?.id);
+    expect(authorities[0].brandEvidenceHash).toBe('evidence-hash');
+    expect(authorities[0].brandEvidenceKind).toBe('verified_asset');
+    transitionPiRunStatus(runId, 'completed', {});
+  });
+
+  it('check_source_priority before any exact-GTIN evidence fails closed; evidence later unlocks authority (round-11 release-blocker regression)', async () => {
+    upsertBrandSite('BrandA', 'branda.example.com', null);
+    const runId = makeRun('BrandA');
+    // (1) The workflow ranks sources BEFORE verification — no exact asset
+    //     exists yet, so no resolved brand and no authority (fail closed).
+    const first = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(first.status).toBe('ok');
+    expect((first as { data?: { authorityEstablished?: boolean } }).data?.authorityEstablished).toBe(false);
+    expect(listSourceAuthoritiesByRun(runId).length).toBe(0);
+    // (2) The agent verifies an image; the exact-GTIN asset (with a brand)
+    //     now exists. The next authority evaluation succeeds.
+    const asset = seedResolvedBrand(runId, 'BrandA');
+    const second = await checkPriority(runId, 'https://branda.example.com/p/1');
+    expect(second.status).toBe('ok');
+    expect((second as { data?: { authorityEstablished?: boolean } }).data?.authorityEstablished).toBe(true);
+    const authorities = listSourceAuthoritiesByRun(runId);
+    expect(authorities.length).toBe(1);
+    expect(authorities[0].brandEvidenceId).toBe(asset.id);
     transitionPiRunStatus(runId, 'completed', {});
   });
 
@@ -728,4 +761,188 @@ describe('Round-10 source authority (durable exact-GTIN-resolved brand, brandHin
     expect(grantForNeutral).toBeNull();
   });
 
+});
+
+describe('Workspace-scoped onboarding research reads (round-11 P0)', () => {
+  const testDbPath = path.resolve(import.meta.dirname, 'pi-tools-workspace.db');
+  const wsB = 'pi-tools-test-workspace-B';
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+    insertWorkspace({
+      id: wsId,
+      name: 'PI Workspace A',
+      workspacePath: '/tmp/pi-ws-a',
+      gitPath: '/tmp/pi-ws-a/.git',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    insertWorkspace({
+      id: wsB,
+      name: 'PI Workspace B',
+      workspacePath: '/tmp/pi-ws-b',
+      gitPath: '/tmp/pi-ws-b/.git',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
+
+  const GTIN_A = '085000079585';
+  const GTIN_B = '036000291452';
+
+  /** Seed an onboarding source for a GTIN under a workspace (item -> batch -> workspace). */
+  const seedOnboardingSource = (workspaceId: string, upc: string, url: string, domain: string) => {
+    const batch = createBatch({ workspaceId, name: 'seed', fileName: 'seed.csv', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc, name: `seed-${upc}`, rowNumber: 1 }]);
+    const [source] = insertSources(item.id, [
+      { url, title: `${upc} title`, domain, confidence: 0.9 },
+    ]);
+    return { batchId: batch.id, itemId: item.id, sourceId: source.id };
+  };
+
+  const makeRun = (gtin: string | null, workspaceId: string) =>
+    createPiRun({
+      workspaceId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify(gtin ? { gtin, registerName: 'X' } : { registerName: 'X' }),
+      policyJson: '{}',
+      configSnapshotId: 'c',
+      configSnapshotHash: 'c',
+    }).id;
+
+  const dispatchLookup = (runId: string, workspaceId: string, tool: string, gtin: string) =>
+    defaultToolRegistry.dispatch(defaultToolRegistry.get(tool)!, { gtin }, {
+      runId,
+      workspaceId,
+      workspacePath: '/tmp/pi-tools-workspace',
+      policy: testPolicy(),
+      signal: new AbortController().signal,
+      remainingMs: 60_000,
+      deadlineAt: null,
+    });
+
+  it('a workspace-A run NEVER sees workspace-B onboarding sources (no supplier evidence leaks)', async () => {
+    seedOnboardingSource(wsB, GTIN_A, 'https://supplier-b.example.com/p/1', 'supplier-b.example.com');
+    const runA = makeRun(GTIN_A, wsId);
+    const out = await dispatchLookup(runA, wsId, 'lookup_supplier_product', GTIN_A);
+    expect(out.status).toBe('no_result');
+    expect(out.evidence ?? []).toHaveLength(0);
+    // No durable source row was minted for run A by a foreign-workspace read.
+    expect(listPiSources(runA)).toHaveLength(0);
+    transitionPiRunStatus(runA, 'completed', {});
+  });
+
+  it('same-workspace supplier lookup returns supplier_evidence and the matching source', async () => {
+    seedOnboardingSource(wsId, GTIN_A, 'https://supplier-a.example.com/p/1', 'supplier-a.example.com');
+    const runA = makeRun(GTIN_A, wsId);
+    const out = await dispatchLookup(runA, wsId, 'lookup_supplier_product', GTIN_A);
+    expect(out.status).toBe('ok');
+    if (out.status === 'ok') {
+      const data = out.data as { sources: Array<{ url: string }>; crossGtinLead?: boolean };
+      expect(data.sources.map((s) => s.url)).toContain('https://supplier-a.example.com/p/1');
+      expect(data.crossGtinLead).toBe(false);
+    }
+    expect(out.evidence?.every((e) => e.kind === 'supplier_evidence')).toBe(true);
+    transitionPiRunStatus(runA, 'completed', {});
+  });
+
+  it('GTIN binding: a cross-GTIN lookup returns a LEAD (catalog_evidence), never supplier authority', async () => {
+    seedOnboardingSource(wsId, GTIN_B, 'https://supplier-b-cross.example.com/p/1', 'supplier-b-cross.example.com');
+    const runA = makeRun(GTIN_A, wsId); // run immutable gtin = GTIN_A
+    const out = await dispatchLookup(runA, wsId, 'lookup_supplier_product', GTIN_B); // requests GTIN_B
+    expect(out.status).toBe('ok');
+    if (out.status === 'ok') {
+      const data = out.data as { crossGtinLead?: boolean; warning?: string };
+      expect(data.crossGtinLead).toBe(true);
+      expect(data.warning).toContain(GTIN_A);
+    }
+    expect(out.evidence?.every((e) => e.kind === 'catalog_evidence')).toBe(true);
+    expect(out.evidence?.some((e) => e.kind === 'supplier_evidence')).toBe(false);
+    transitionPiRunStatus(runA, 'completed', {});
+  });
+
+  it('GTIN binding fails closed when the run input cannot be read (leads only, never supplier authority)', async () => {
+    seedOnboardingSource(wsId, GTIN_B, 'https://supplier-nogtin.example.com/p/1', 'supplier-nogtin.example.com');
+    const runNoInput = makeRun(null, wsId); // inputJson without a gtin
+    const out = await dispatchLookup(runNoInput, wsId, 'lookup_supplier_product', GTIN_B);
+    expect(out.status).toBe('ok');
+    if (out.status === 'ok') {
+      const data = out.data as { crossGtinLead?: boolean; warning?: string };
+      expect(data.crossGtinLead).toBe(true);
+      expect(data.warning).toContain('unavailable');
+    }
+    expect(out.evidence?.every((e) => e.kind === 'catalog_evidence')).toBe(true);
+    transitionPiRunStatus(runNoInput, 'completed', {});
+  });
+
+  it('lookup_existing_onboarding_evidence denies a FOREIGN item with policy_denied', async () => {
+    const { itemId } = seedOnboardingSource(wsB, GTIN_A, 'https://wsb.example.com/p/1', 'wsb.example.com');
+    const runA = makeRun(GTIN_A, wsId);
+    const out = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('lookup_existing_onboarding_evidence')!,
+      { onboardingItemId: itemId },
+      {
+        runId: runA,
+        workspaceId: wsId,
+        workspacePath: '/tmp/pi-tools-workspace',
+        policy: testPolicy(),
+        signal: new AbortController().signal,
+        remainingMs: 60_000,
+        deadlineAt: null,
+      },
+    );
+    expect(out.status).toBe('policy_denied');
+    expect((out as { status: string; reason: string }).reason).toContain('does not belong to the current workspace');
+    transitionPiRunStatus(runA, 'completed', {});
+  });
+
+  it('lookup_existing_onboarding_evidence reads a SAME-workspace item and returns its sources', async () => {
+    const { itemId } = seedOnboardingSource(wsId, GTIN_A, 'https://wsa.example.com/p/1', 'wsa.example.com');
+    const runA = makeRun(GTIN_A, wsId);
+    const out = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('lookup_existing_onboarding_evidence')!,
+      { onboardingItemId: itemId },
+      {
+        runId: runA,
+        workspaceId: wsId,
+        workspacePath: '/tmp/pi-tools-workspace',
+        policy: testPolicy(),
+        signal: new AbortController().signal,
+        remainingMs: 60_000,
+        deadlineAt: null,
+      },
+    );
+    expect(out.status).toBe('ok');
+    if (out.status === 'ok') {
+      const data = out.data as { sources: Array<{ url: string }> };
+      expect(data.sources.map((s) => s.url)).toContain('https://wsa.example.com/p/1');
+    }
+    transitionPiRunStatus(runA, 'completed', {});
+  });
+
+  it('lookup_distributor_product is workspace-scoped too', async () => {
+    seedOnboardingSource(wsB, GTIN_A, 'https://dist-b.example.com/p/1', 'dist-b.example.com');
+    seedOnboardingSource(wsId, GTIN_A, 'https://dist-a.example.com/p/1', 'dist-a.example.com');
+    const runA = makeRun(GTIN_A, wsId);
+    const out = await dispatchLookup(runA, wsId, 'lookup_distributor_product', GTIN_A);
+    expect(out.status).toBe('ok');
+    if (out.status === 'ok') {
+      const data = out.data as { sources: Array<{ url: string }> };
+      expect(data.sources.map((s) => s.url)).toContain('https://dist-a.example.com/p/1');
+      expect(data.sources.map((s) => s.url)).not.toContain('https://dist-b.example.com/p/1');
+    }
+    transitionPiRunStatus(runA, 'completed', {});
+  });
 });

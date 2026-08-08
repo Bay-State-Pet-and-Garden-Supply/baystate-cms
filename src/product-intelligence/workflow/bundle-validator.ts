@@ -76,8 +76,25 @@ interface LazyAssetRow {
   candidateId: string | null;
 }
 
+/** Round-11 (review P1): the EXACT candidate row resolved from an asset's
+ *  candidate FK — the server-created record binding one image URL to its
+ *  media-set identity. One candidate row == one image URL (the production
+ *  verifier enforces candidate.imageUrl === verified image URL and persists
+ *  that exact candidateId), so a primary front image and its nutrition panel
+ *  ALWAYS live on different candidate rows and can only link through the
+ *  resolved entity/media-set relationship, never through candidate-ID
+ *  equality. */
+interface LazyCandidateRow {
+  id: string;
+  imageUrl: string;
+  discoveringSourceId: string | null;
+  attestationArtifactId: string | null;
+  entityId: string | null;
+}
+
 let _assetRepo: {
   getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
+  getPiImageCandidate: (id: string) => LazyCandidateRow | undefined;
   getPiRun: (runId: string) => { inputJson: string } | undefined;
 } | undefined;
 
@@ -85,23 +102,24 @@ const lazyRequire = createRequire(import.meta.url);
 
 function loadAssetRepo(): {
   getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
+  getPiImageCandidate: (id: string) => LazyCandidateRow | undefined;
   getPiRun: (runId: string) => { inputJson: string } | undefined;
 } {
   if (!_assetRepo) {
     try {
       const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
       if (!conn.isDbInitialized?.()) {
-        _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
+        _assetRepo = { getPiAssetsByIds: () => [], getPiImageCandidate: () => undefined, getPiRun: () => undefined };
         return _assetRepo;
       }
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiImageCandidate: () => undefined, getPiRun: () => undefined };
       return _assetRepo;
     }
     try {
       _assetRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _assetRepo>;
     } catch {
-      _assetRepo = { getPiAssetsByIds: () => [], getPiRun: () => undefined };
+      _assetRepo = { getPiAssetsByIds: () => [], getPiImageCandidate: () => undefined, getPiRun: () => undefined };
     }
   }
   return _assetRepo;
@@ -116,6 +134,67 @@ function loadAssetRepo(): {
 function candidateIdOf(asset: { candidateId?: string | null } | null | undefined): string | null {
   const id = asset?.candidateId;
   return typeof id === 'string' && id.length > 0 ? id : null;
+}
+
+/** Round-11 (review P1): typed product/media-set entity identity. Only
+ *  product/variant-like records establish it — the parser emits
+ *  entity_id as '{kind}:{value}' with kind in the three known kinds.
+ *  Raw/untyped ids (or ids outside the known kinds) yield null (fail
+ *  closed: generic nested id/@id never reset product identity). */
+const ENTITY_KINDS = new Set(['sku', 'platform_product_id', 'variation_id']);
+function parseCandidateEntity(entityId: string | null): { kind: string; value: string } | null {
+  if (!entityId) return null;
+  const colon = entityId.indexOf(':');
+  if (colon <= 0) return null;
+  const kind = entityId.slice(0, colon);
+  const value = entityId.slice(colon + 1);
+  if (!ENTITY_KINDS.has(kind) || !value.trim()) return null;
+  return { kind, value };
+}
+
+/** Round-11 (review P1): the media-set tuple that determines whether two
+ *  assets belong to the same product — {entityKind, entityValue,
+ *  attestationArtifactId, discoveringSourceId}, all server-created. Null
+ *  when any component is missing (unresolvable candidate, untyped entity,
+ *  no attestation artifact, or no discovering source) — linkage fails
+ *  closed. Candidate-ID equality is NEVER consulted. */
+function candidateMediaSetTuple(candidate: LazyCandidateRow | undefined): string | null {
+  if (!candidate) return null;
+  const entity = parseCandidateEntity(candidate.entityId);
+  if (!entity) return null;
+  if (!candidate.attestationArtifactId || !candidate.discoveringSourceId) return null;
+  return `${entity.kind}:${entity.value}|${candidate.attestationArtifactId}|${candidate.discoveringSourceId}`;
+}
+
+/** Round-11 (review P1): an asset's media-set tuple resolved through its
+ *  exact candidate FK. Null when the FK is missing or the tuple is
+ *  incomplete. */
+function resolvedMediaSetTuple(
+  asset: LazyAssetRow | null | undefined,
+  repo: ReturnType<typeof loadAssetRepo>,
+): string | null {
+  const candidateId = candidateIdOf(asset);
+  if (!candidateId) return null;
+  return candidateMediaSetTuple(repo.getPiImageCandidate(candidateId));
+}
+
+/** Round-11 (review P1): human-readable per-asset diagnostic naming WHICH
+ *  component of the entity/media-set relationship failed, for role-named
+ *  issue messages. */
+function candidateMediaSetDiagnostic(
+  asset: LazyAssetRow | null | undefined,
+  repo: ReturnType<typeof loadAssetRepo>,
+): string {
+  const candidateId = candidateIdOf(asset);
+  if (!candidateId) return 'no candidate FK';
+  const candidate = repo.getPiImageCandidate(candidateId);
+  if (!candidate) return `candidate row ${candidateId} unresolvable`;
+  const entity = parseCandidateEntity(candidate.entityId);
+  if (!entity) return `candidate ${candidateId} has no typed product entity`;
+  if (!candidate.attestationArtifactId || !candidate.discoveringSourceId) {
+    return `candidate ${candidateId} lacks attestation artifact or discovering source`;
+  }
+  return `${entity.kind}:${entity.value} @artifact ${candidate.attestationArtifactId} @source ${candidate.discoveringSourceId}`;
 }
 
 function parseConflicts(conflictsJson: string | null): string[] {
@@ -323,26 +402,26 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
         const primaryRows = assetRepo.getPiAssetsByIds([primaryCandidate.verifiedAssetId]);
         if (primaryRows.length > 0) primaryAsset = primaryRows[0];
       }
-      // Round-9/10 (review P1): 'same discovering page' is PROVENANCE, not
-      // product identity. A supporting image is durably linked to the same
-      // product only when (a) it matches the product/variant exactly, or
-      // (b) it was verified from the SAME candidate row as the primary image
-      // (exact asset.candidate_id FK equality — a shared candidate row IS the
-      // same media-set/entity by construction). Round-10: the round-9
-      // heuristic join (candidates by image URL/artifact similarity) is
-      // removed — different candidate ids with identical URLs/pages/entities
-      // NEVER link, and a missing FK fails closed. No URL or entity-string
-      // reconstruction is ever consulted.
+      // Round-11 (review P1): 'same discovering page' is PROVENANCE, not
+      // product identity, and candidate-ID equality is IMPOSSIBLE for
+      // legitimate primary+nutrition/alternate pairs (one candidate row ==
+      // one image URL, enforced by the verifier and by the DB trigger). A
+      // supporting image is durably linked to the same product only when
+      // (a) it matches the product/variant exactly, or (b) it was verified
+      // from a candidate whose server-created MEDIA-SET TUPLE — {entityKind,
+      // entityValue, attestationArtifactId, discoveringSourceId} — equals
+      // the primary's tuple (same typed product entity, same retained page
+      // artifact, same discovering source). Any missing component (FK,
+      // candidate row, typed entity, artifact, or source) fails closed.
+      const primaryTuple = resolvedMediaSetTuple(primaryAsset, assetRepo);
+      const verifiedTuple = resolvedMediaSetTuple(verified, assetRepo);
       const entityLinkage =
-        !!primaryAsset &&
-        candidateIdOf(primaryAsset) !== null &&
-        candidateIdOf(verified) !== null &&
-        candidateIdOf(primaryAsset) === candidateIdOf(verified);
+        !!primaryAsset && primaryTuple !== null && verifiedTuple !== null && primaryTuple === verifiedTuple;
       const sameProductLinkage =
         !!verified.exactProductMatch || verified.exactVariantMatch === 1 || entityLinkage;
       if (!sameProductLinkage) {
         issues.push(
-          `${role} image ${image.url} verified asset is not durably linked to this product (no exact product/variant match and no shared verified candidate row with the primary image — asset.candidate_id FK mismatch or missing FK; same discovering page alone is not same-product evidence)`,
+          `${role} image ${image.url} verified asset is not durably linked to this product (no exact product/variant match; entity/media-set linkage failed: primary [${candidateMediaSetDiagnostic(primaryAsset, assetRepo)}] vs supporting [${candidateMediaSetDiagnostic(verified, assetRepo)}])`,
         );
       }
       if (verified.qualityStatus === 'invalid') {
