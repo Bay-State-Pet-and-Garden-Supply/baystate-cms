@@ -7,7 +7,7 @@ import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { listChangeSets, listChangeSetItems } from '../../db/repositories/change-set-repo';
-import { getProductPageAssignments, assignProductToPageId } from '../../db/repositories/page-repo';
+import { assignProductToPageId } from '../../db/repositories/page-repo';
 import { type ExtractionData, ExtractionDataSchema } from '../../shared/schemas/onboarding';
 
 describe('Draft Promoter Service', () => {
@@ -39,8 +39,26 @@ describe('Draft Promoter Service', () => {
     try { rmSync(tempWorkspaceDir, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  function seedAcceptedCategoryProposal(db: any, sku: string, pageName: string) {
-    const runId = `run-${sku}`;
+  function seedAttributeMapping(db: any, attributeId: string, catalogField: string) {
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO classification_attribute_mappings
+       (workspace_id, id, attribute_id, catalog_field, serialization_json, is_stale, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        wsId,
+        `map-${attributeId}`,
+        attributeId,
+        catalogField,
+        JSON.stringify({ format: 'direct', separator: ', ', prefix: '', suffix: '' }),
+        now,
+        now,
+      ],
+    );
+  }
+
+  function seedAcceptedCategoryProposal(db: any, sku: string, pageName: string, runOverride?: string) {
+    const runId = runOverride ?? `run-${sku}`;
     const now = new Date().toISOString();
     const item = db.query(
       'SELECT id, curation_data_json FROM onboarding_items WHERE upc = ? ORDER BY created_at DESC LIMIT 1',
@@ -70,6 +88,12 @@ describe('Draft Promoter Service', () => {
       `INSERT OR IGNORE INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [proposalId, runId, sku, 'category_page', pageName, JSON.stringify({ pageId, pageName }), 1.0, 'accepted', now]
+    );
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      [`decision-${proposalId}`, proposalId, `decision-token-${proposalId}`, now]
     );
   }
 
@@ -829,6 +853,12 @@ describe('Draft Promoter Service', () => {
                'cat-food-wet', 1, 'type-corrected-token', ?)`,
       [JSON.stringify({ productTypeId: 'cat-food-wet' }), now],
     );
+    db.run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES ('decision-page-corrected', 'proposal-page-corrected', 'accepted', 'page-corrected-token', ?)`,
+      [now],
+    );
 
     const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
@@ -927,6 +957,17 @@ describe('Draft Promoter Service', () => {
           now,
         ],
       );
+      db.run(
+        `INSERT INTO classification_proposal_decisions
+         (id, proposal_id, decision, decision_key, created_at)
+         VALUES (?, ?, 'accepted', ?, ?)`,
+        [
+          `decision-page-history-${scenario.suffix}`,
+          `proposal-page-history-${scenario.suffix}`,
+          `page-history-token-${scenario.suffix}`,
+          now,
+        ],
+      );
 
       const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
       expect(result.failures).toHaveLength(0);
@@ -940,7 +981,7 @@ describe('Draft Promoter Service', () => {
     }
   });
 
-  it('ignores a persisted classification run linked to another onboarding item', async () => {
+  it('fails promotion when the persisted classification run belongs to another onboarding item', async () => {
     const { batch, item, curationData } = seedPromotionReadyItem(
       'Foreign Product Type Run',
       'TYPE-FOREIGN-001',
@@ -973,15 +1014,12 @@ describe('Draft Promoter Service', () => {
       [runId, item.upc, JSON.stringify({ productTypeId: 'dog-food-dry' }), now],
     );
 
+    // A present run pointer that fails ownership validation blocks promotion
+    // entirely — it never downgrades to a legacy branch.
     const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    expect(result.failures).toHaveLength(0);
-    expect(result.count).toBe(1);
-    const history = db.query(
-      `SELECT event_json FROM classification_history_events
-       WHERE product_sku = ? AND event_type = 'promotion'
-       ORDER BY created_at DESC LIMIT 1`,
-    ).get(item.upc) as { event_json: string };
-    expect(JSON.parse(history.event_json).acceptedProductType).toBeNull();
+    expect(result.count).toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0].error).toContain('Invalid classification run pointer');
   });
 
   it('resolves brand from product title when brandHint is missing', async () => {
@@ -1040,5 +1078,230 @@ describe('Draft Promoter Service', () => {
 
     const draft = JSON.parse(changeSetItem.draft_json);
     expect(draft.customFields.ProductField16).toBe('Greenies');
+  });
+
+  it('applies nothing when an active run has only deferred proposals', async () => {
+    const { batch, item, curationData } = seedPromotionReadyItem(
+      'Deferred Only',
+      'DEFERRED-ONLY-001',
+    );
+    const db = getDb();
+    const now = new Date().toISOString();
+    const runId = 'run-deferred-only';
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, source_kind, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?, ?)`,
+      [runId, wsId, item.id, item.upc, now, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ ...curationData, classificationRunId: runId }), item.id],
+    );
+    // Deferred field proposal with a live deferred decision — never promoted.
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, created_at)
+       VALUES ('prop-deferred-field', ?, ?, 'field_assignment', 'flavor', '"AI Guess"', 0.8, 'deferred', ?)`,
+      [runId, item.upc, now],
+    );
+    db.run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES ('decision-deferred-field', 'prop-deferred-field', 'deferred', 'deferred-token', ?)`,
+      [now],
+    );
+    // Accepted page proposal with a live accepted decision.
+    seedAcceptedCategoryProposal(db, item.upc, 'Dog Food', runId);
+    seedAttributeMapping(db, 'flavor', 'ProductField23');
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const changeSetItem = db.query(
+      `SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1`,
+    ).get(item.upc) as { draft_json: string };
+    const draft = JSON.parse(changeSetItem.draft_json);
+    // The AI-suggested deferred field value must not be serialized.
+    expect(draft.customFields['ProductField23']).toBeUndefined();
+  });
+
+  it('serializes only accepted proposals when an active run mixes accepted and deferred', async () => {
+    const { batch, item, curationData } = seedPromotionReadyItem(
+      'Mixed Decisions',
+      'MIXED-DEC-001',
+    );
+    const db = getDb();
+    const now = new Date().toISOString();
+    const runId = 'run-mixed-dec';
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, source_kind, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?, ?)`,
+      [runId, wsId, item.id, item.upc, now, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ ...curationData, classificationRunId: runId }), item.id],
+    );
+    // Deferred flavor proposal.
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, created_at)
+       VALUES ('prop-mixed-deferred', ?, ?, 'field_assignment', 'flavor', '"AI Guess"', 0.8, 'deferred', ?)`,
+      [runId, item.upc, now],
+    );
+    db.run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES ('decision-mixed-deferred', 'prop-mixed-deferred', 'deferred', 'mixed-deferred-token', ?)`,
+      [now],
+    );
+    // Accepted flavor proposal with revised value.
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, created_at)
+       VALUES ('prop-mixed-accepted', ?, ?, 'field_assignment', 'flavor', '"AI Guess"', 0.8, 'accepted', ?)`,
+      [runId, item.upc, now],
+    );
+    db.run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, revised_value_json, decision_key, created_at)
+       VALUES ('decision-mixed-accepted', 'prop-mixed-accepted', 'accepted', '"Salmon"', 'mixed-accepted-token', ?)`,
+      [now],
+    );
+    seedAcceptedCategoryProposal(db, item.upc, 'Cat Food', runId);
+    seedAttributeMapping(db, 'flavor', 'ProductField23');
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const changeSetItem = db.query(
+      `SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1`,
+    ).get(item.upc) as { draft_json: string };
+    const draft = JSON.parse(changeSetItem.draft_json);
+    expect(draft.customFields['ProductField23']).toBe('Salmon');
+  });
+
+  it('excludes an accepted-status proposal without a live accepted decision', async () => {
+    const { batch, item, curationData } = seedPromotionReadyItem(
+      'Spoofed Accepted',
+      'SPOOF-ACC-001',
+    );
+    const db = getDb();
+    const now = new Date().toISOString();
+    const runId = 'run-spoof-accepted';
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, source_kind, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?, ?)`,
+      [runId, wsId, item.id, item.upc, now, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ ...curationData, classificationRunId: runId }), item.id],
+    );
+    // Proposal status says accepted but no decision row exists (spoofed).
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+        confidence, status, created_at)
+       VALUES ('prop-spoof', ?, ?, 'field_assignment', 'flavor', '"Spoof"', 0.9, 'accepted', ?)`,
+      [runId, item.upc, now],
+    );
+    // The page proposal is a genuine accepted decision so the rest of the draft proceeds.
+    seedAcceptedCategoryProposal(db, item.upc, 'Dog Treats', runId);
+    seedAttributeMapping(db, 'flavor', 'ProductField23');
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const changeSetItem = db.query(
+      `SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1`,
+    ).get(item.upc) as { draft_json: string };
+    const draft = JSON.parse(changeSetItem.draft_json);
+    expect(draft.customFields['ProductField23']).toBeUndefined();
+  });
+
+  it('promotes legacy embedded proposals only when status is exactly accepted', async () => {
+    const { batch, item } = seedPromotionReadyItem(
+      'Legacy Embedded',
+      'LEGACY-EMB-001',
+    );
+    const db = getDb();
+    // No classificationRunId — a genuine legacy item. Embedded proposals in the
+    // curation JSON are the only classification input.
+    const legacyProposals = [
+      {
+        id: 'legacy-acc',
+        proposalType: 'field_assignment',
+        targetId: 'flavor',
+        proposedValue: 'Beef',
+        status: 'accepted',
+      },
+      {
+        id: 'legacy-pending',
+        proposalType: 'field_assignment',
+        targetId: 'species',
+        proposedValue: 'Dog',
+        status: 'pending',
+      },
+      {
+        id: 'legacy-rejected',
+        proposalType: 'field_assignment',
+        targetId: 'life_stage',
+        proposedValue: 'Puppy',
+        status: 'rejected',
+      },
+      {
+        id: 'legacy-stale',
+        proposalType: 'field_assignment',
+        targetId: 'food_form',
+        proposedValue: 'Kibble',
+        status: 'stale',
+      },
+      {
+        id: 'legacy-deferred',
+        proposalType: 'field_assignment',
+        targetId: 'health_benefits',
+        proposedValue: 'Joint',
+        status: 'deferred',
+      },
+      {
+        id: 'legacy-page',
+        proposalType: 'category_page',
+        targetId: 'Toys',
+        proposedValue: { pageId: 'page-toys', pageName: 'Toys' },
+        status: 'accepted',
+      },
+    ];
+    const curation = db.query(
+      'SELECT curation_data_json FROM onboarding_items WHERE id = ?',
+    ).get(item.id) as { curation_data_json: string };
+    const parsed = JSON.parse(curation.curation_data_json);
+    parsed.classificationProposals = legacyProposals;
+    parsed.classificationRunId = null;
+    db.run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [
+      JSON.stringify(parsed),
+      item.id,
+    ]);
+    seedAttributeMapping(db, 'flavor', 'ProductField23');
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const changeSetItem = db.query(
+      `SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1`,
+    ).get(item.upc) as { draft_json: string };
+    const draft = JSON.parse(changeSetItem.draft_json);
+    expect(draft.customFields['ProductField23']).toBe('Beef');
+    // None of the pending/rejected/stale/deferred embedded proposals may appear.
+    expect(draft.customFields['ProductField17']).toBeUndefined();
+    expect(draft.customFields['ProductField18']).toBeUndefined();
+    expect(draft.customFields['ProductField22']).toBeUndefined();
+    expect(draft.customFields['ProductField21']).toBeUndefined();
   });
 });

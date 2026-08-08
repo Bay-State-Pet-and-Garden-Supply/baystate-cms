@@ -1,10 +1,8 @@
 import { listPages } from '../db/repositories/page-repo';
 import { convertToLbs } from '../shared/weight-converter';
-import { callLlmForTask, getLlmConfigForTask } from './llm-client';
 import { coordinateCohortItemsOnce, formatDeterministicTitle } from './cohort-name-coordinator';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import { getEvidenceAttemptsByIdsForItem } from '../db/repositories/onboarding-evidence-repo';
-import { extractPackagingOcr } from './packaging-ocr';
 import { getDb } from '../db/connection';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../classification/config-loader';
 import { createConfigSnapshot, syncConfigToCache, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
@@ -26,7 +24,6 @@ import {
   categoryPageProposalsStage,
   productDraftProjectionStage,
 } from '../classification';
-import { consolidateProductTitle } from './title-consolidation';
 import { consolidateDistributorCopy } from './distributor-copy-consolidator';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
 import { determineProductGroup } from './product-line-grouper';
@@ -78,131 +75,6 @@ function validatePageAssignmentsBySpecies(
     }
     return isCompatible;
   });
-}
-
-/**
- * Run VLM OCR on the primary image as a fallback, persisting results back
- * to the item's extraction_data_json so classification stages can consume
- * the same data without duplicate VLM calls.
- */
-async function runAndPersistOcrFallback(
-  itemId: string,
-  primaryImage: string,
-  workspacePath: string,
-  ext: Record<string, unknown>,
-): Promise<string | null> {
-  console.log(`[ProductCurator] Running fallback packaging OCR for item ${itemId}`);
-  const ocrData = await extractPackagingOcr({
-    imageUrl: primaryImage,
-    workspacePath,
-    imageSourceUrl: primaryImage,
-  });
-
-  if (ocrData) {
-    // Persist to the item's extraction_data_json so future runs skip OCR
-    try {
-      const updatedExt = { ...ext, packagingOcrData: ocrData, packagingTitle: ocrData.productName };
-      const db = getDb();
-      const now = new Date().toISOString();
-      db.query(
-        'UPDATE onboarding_items SET extraction_data_json = ?, updated_at = ? WHERE id = ?',
-      ).run(JSON.stringify(updatedExt), now, itemId);
-      console.log(`[ProductCurator] Persisted fallback OCR data for item ${itemId}`);
-    } catch (err: any) {
-      console.warn(`[ProductCurator] Failed to persist fallback OCR: ${err.message}`);
-    }
-
-    return ocrData.productName;
-  }
-
-  return null;
-}
-
-/**
-  workspacePath: string,
-  options: { skipLegacyClassification?: boolean } = {},
-): Promise<CurationData> {
-  const ext = item.extractionData;
-  if (!ext) {
-    throw new Error('Cannot curate item without extraction data.');
-  }
-
-  console.log(`[ProductCurator] Starting curation for: "${item.name}"`);
-
-  // Step 1: Packaging OCR — use cached data first, fall back to live OCR
-  let ocrTitle: string | null = ext.packagingOcrData?.productName ?? ext.packagingTitle ?? null;
-  if (!ocrTitle && ext.primaryImage) {
-    ocrTitle = await runAndPersistOcrFallback(item.id, ext.primaryImage, workspacePath, ext as unknown as Record<string, unknown>);
-  }
-
-  // Step 1.5: Fallback brand resolution from item name if brandHint is missing
-  let activeBrandHint = item.brandHint;
-  if (!activeBrandHint && item.name) {
-    try {
-      const workspace = findWorkspace();
-      if (workspace) {
-        const brands = getCachedBrands(workspace.id);
-        const resolved = resolveBrand(item.name, brands);
-        if (resolved?.brandName) {
-          activeBrandHint = resolved.brandName;
-          updateItemBrandHint(item.id, activeBrandHint);
-          console.log(`[ProductCurator] Resolved brand "${activeBrandHint}" from title for item ${item.upc}`);
-        }
-      }
-    } catch (err: any) {
-      console.warn(`[ProductCurator] Title brand resolution failed: ${err.message}`);
-    }
-  }
-
-  // Step 2: Title finalization (uses shared helper)
-  const finalized = await consolidateProductTitle({
-    name: item.name,
-    brandHint: activeBrandHint,
-    webTitle: ext.title,
-    ocrTitle: ocrTitle,
-    ocrWeight: ext.packagingOcrData?.weight ?? null,
-    ocrSize: ext.packagingOcrData?.size ?? null,
-  });
-
-  // Step 3: Page & Category Classification. The modular pipeline can disable
-  // this legacy free-form classification so only manager-selected targets are
-  // filled during curation.
-  const classification = options.skipLegacyClassification
-    ? { suggestedPages: [], suggestedProductType: null }
-    : await classifyProduct(finalized.title, ext.description);
-
-  // Synthesize search keywords from curated data
-  const searchKeywords = synthesizeSearchKeywords({
-    title: finalized.title,
-    brand: item.brandHint,
-    description: ext.description,
-    suggestedPages: classification.suggestedPages,
-    suggestedProductType: classification.suggestedProductType,
-    species: ext.packagingOcrData?.species,
-    lifeStage: ext.packagingOcrData?.lifeStage,
-    productForm: ext.packagingOcrData?.productForm,
-  });
-
-  return {
-    curatedTitle: finalized.title,
-    searchKeywords,
-    packagingOcrTitle: ocrTitle,
-    curatedWeight: convertToLbs(
-      ext.packagingOcrData?.weight || ext.weight || extractWeightFromName(item.name) || null,
-    ),
-    titleSource: finalized.source,
-    suggestedPages: classification.suggestedPages,
-    suggestedProductType: classification.suggestedProductType,
-    curatedAt: new Date().toISOString(),
-    curationMethod: 'auto',
-    // Phase 1 classification containers (defaulted)
-    classificationRunId: null,
-    classificationConfigSnapshot: null,
-    classificationEvidence: [],
-    classificationProposals: [],
-    classificationDecisions: [],
-    classificationHistory: [],
-  };
 }
 
 /**
@@ -584,7 +456,6 @@ export async function curateItemWithPipeline(
     // it does not feed back into classification.
     let curatedDescription: string | null = null;
     let curatedDescriptionSourceAttemptIds: string[] = [];
-    let curationWarnings: string[] = [];
 
     const distAttemptIds: string[] = Array.isArray(ext.distributorEvidenceAttemptIds)
       ? ext.distributorEvidenceAttemptIds
@@ -604,7 +475,6 @@ export async function curateItemWithPipeline(
         );
         curatedDescription = consolidation.curatedDescription;
         curatedDescriptionSourceAttemptIds = consolidation.sourceAttemptIds;
-        curationWarnings = consolidation.warnings;
       } catch (err: any) {
         console.warn(`[ProductCurator] Distributor copy consolidation failed: ${err.message}`);
         // Fall through — curatedDescription stays null

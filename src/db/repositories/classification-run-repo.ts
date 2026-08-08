@@ -259,8 +259,12 @@ export function getAcceptedProposals(productSku: string, runId?: string): Classi
           FROM classification_proposal_decisions d
           WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
           ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
-        FROM classification_proposals p WHERE p.product_sku = ? AND p.run_id = ? AND p.status = ?`)
-      .all(productSku, runId, 'accepted') as Record<string, any>[];
+        FROM classification_proposals p
+        WHERE p.product_sku = ? AND p.run_id = ? AND p.status = ?
+          AND (SELECT d.decision FROM classification_proposal_decisions d
+               WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+               ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) = ?`)
+      .all(productSku, runId, 'accepted', 'accepted') as Record<string, any>[];
     return rows.map(mapProposal);
   }
   const rows = getDb()
@@ -281,8 +285,12 @@ export function getAcceptedProposals(productSku: string, runId?: string): Classi
         FROM classification_proposal_decisions d
         WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
         ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
-      FROM classification_proposals p WHERE p.product_sku = ? AND p.status = ?`)
-    .all(productSku, 'accepted') as Record<string, any>[];
+      FROM classification_proposals p
+      WHERE p.product_sku = ? AND p.status = ?
+        AND (SELECT d.decision FROM classification_proposal_decisions d
+             WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
+             ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) = ?`)
+    .all(productSku, 'accepted', 'accepted') as Record<string, any>[];
   console.warn(`[ClassificationRunRepo] getAcceptedProposals called without runId for SKU ${productSku} — results are unscoped and may span multiple runs.`);
   return rows.map(mapProposal);
 }

@@ -14,7 +14,6 @@ import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
 import {
   getAcceptedProposals,
-  getProposalsByRun,
   getValidatedOnboardingRun,
   recordHistoryEvent,
 } from '../db/repositories/classification-run-repo';
@@ -308,21 +307,36 @@ export async function promoteItems(
       const skippedPageRefs: Array<{ proposalId: string; pageName: string }> = [];
       let acceptedProductType: string | null = null;
 
-      const activeRunId = getValidatedOnboardingRun(
-        item.curationData?.classificationRunId,
-        batch.workspaceId,
-        item.id,
-        item.upc,
-      )?.id ?? null;
-      // Curation JSON is only a run pointer. Promotion accepts classification
-      // data after validating workspace, exact item, SKU, and onboarding source.
-      const acceptedProposals = activeRunId
+      // Curation JSON is only a run pointer. A PRESENT pointer must resolve to
+      // a valid, owned run or the item fails closed — it never downgrades to a
+      // legacy branch. A genuinely absent pointer keeps narrow legacy
+      // compatibility using only embedded proposals whose status is exactly
+      // 'accepted' (pending/rejected/deferred/stale are ignored).
+      const runPointer = item.curationData?.classificationRunId ?? null;
+      let activeRunId: string | null = null;
+      if (runPointer) {
+        const validatedRun = getValidatedOnboardingRun(
+          runPointer,
+          batch.workspaceId,
+          item.id,
+          item.upc,
+        );
+        if (!validatedRun) {
+          const errMsg = 'Invalid classification run pointer — promotion blocked';
+          console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+          completePromotionStage(item.id, false, errMsg);
+          failures.push({ itemId: item.id, error: errMsg });
+          continue;
+        }
+        activeRunId = validatedRun.id;
+      }
+      // Accepted-only: a valid run contributes only proposals whose latest live
+      // decision is 'accepted' (never deferred/rejected/pending/decisionless).
+      const activeProposals = activeRunId
         ? getAcceptedProposals(item.upc, activeRunId)
-        : [];
-      const nonRejectedProposals = activeRunId
-        ? getProposalsByRun(activeRunId).filter(p => p.status !== 'rejected')
-        : (item.curationData?.classificationProposals || []).filter((p: any) => p.status !== 'rejected');
-      const activeProposals = acceptedProposals.length > 0 ? acceptedProposals : nonRejectedProposals;
+        : (item.curationData?.classificationProposals || []).filter(
+            (p: any) => p.status === 'accepted',
+          );
       // Only identities verified in the currently active Page import are
       // serializable. Without an active import the set is empty — fail closed.
       const verifiedPageIds = getActiveVerifiedPageIds(batch.workspaceId);

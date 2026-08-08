@@ -893,4 +893,44 @@ describe('proposal-review-service (catalog product)', () => {
     const gateAfter = validateCatalogReviewCompletionGate({ workspaceId, productSku: 'SKU-GATED', runId: run.id });
     expect(gateAfter.ok).toBe(true);
   });
+
+  it('getAcceptedProposals requires a live accepted decision, never a spoofed status column', () => {
+    const run = createRun(workspaceId, 'SKU-ACCEPTED', null, null, { sourceKind: 'catalog_product' });
+    const now = new Date().toISOString();
+    // Spoofed: status column says accepted but no decision row exists.
+    getDb().run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, 'SKU-ACCEPTED', 'field_assignment', '"Spoof"', 0.9, 'accepted', ?)`,
+      ['prop-accepted-spoof', run.id, now],
+    );
+    // Deferred: live decision is deferred.
+    getDb().run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, 'SKU-ACCEPTED', 'field_assignment', '"Deferred"', 0.8, 'deferred', ?)`,
+      ['prop-accepted-deferred', run.id, now],
+    );
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES ('dec-accepted-deferred', 'prop-accepted-deferred', 'deferred', 'deferred-key', ?)`,
+      [now],
+    );
+    // Genuine: status accepted AND a live accepted decision.
+    getDb().run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, 'SKU-ACCEPTED', 'field_assignment', '"Chicken"', 0.9, 'accepted', ?)`,
+      ['prop-accepted-live', run.id, now],
+    );
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES ('dec-accepted-live', 'prop-accepted-live', 'accepted', 'live-key', ?)`,
+      [now],
+    );
+    completeRun(run.id, 'completed');
+
+    const accepted = getAcceptedProposals('SKU-ACCEPTED', run.id);
+    expect(accepted.map((p: any) => p.id)).toEqual(['prop-accepted-live']);
+    expect(accepted[0].proposedValue).toBe('Chicken');
+  });
 });
