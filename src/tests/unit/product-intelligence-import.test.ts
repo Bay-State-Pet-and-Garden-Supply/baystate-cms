@@ -141,7 +141,7 @@ describe('PI-8 onboarding import', () => {
     }
   });
 
-  function seedAsset(runId: string, commerceApproved: boolean) {
+  function seedAsset(runId: string, commerceApproved: boolean, overrides: Record<string, unknown> = {}) {
     return insertPiAsset({
       runId,
       sourceId: null,
@@ -170,6 +170,7 @@ describe('PI-8 onboarding import', () => {
       commerceApproved,
       conflicts: [],
       payload: {},
+      ...(overrides as object),
     });
   }
 
@@ -872,5 +873,73 @@ describe('PI-8 onboarding import', () => {
     expect(evidence?.[0]?.evidence).toContainEqual(
       expect.objectContaining({ field: 'description', value: 'Chicken Bone Broth', evidenceId: 'ev-desc-1' }),
     );
+  });
+
+  it('excludes comparison images from the commerce set and preserves roles (round-6 P1)', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const a1 = seedAsset(runId, true);
+    const cmp = seedAsset(runId, false, { sourceUrl: 'https://cdn.example.com/cmp.jpg', exactProductMatch: false, exactVariantMatch: null });
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        { sourceId: 'src-1', sourceArtifactId: 'a1', url: 'https://cdn.example.com/i.jpg', role: 'primary', verifiedAssetId: a1.id },
+        { sourceId: 'src-9', sourceArtifactId: 'cmp', url: 'https://cdn.example.com/cmp.jpg', role: 'comparison', verifiedAssetId: cmp.id },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+
+    const result = importRunToOnboarding(runId, { mode: 'create' });
+    const item = findItemById(result.item.id);
+    const evidence = item?.extractionData?.productIntelligenceEvidence;
+    // Comparison is bound but NEVER part of the commerce image set.
+    expect(evidence?.[0]?.approvedImageIds).toEqual([a1.id]);
+    // Roles are preserved end-to-end.
+    expect(evidence?.[0]?.images).toEqual([
+      { assetId: a1.id, role: 'primary' },
+      { assetId: cmp.id, role: 'comparison' },
+    ]);
+  });
+
+  it('accepts a non-commerce-approved supporting image with same-product linkage (round-6 P1)', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const a1 = seedAsset(runId, true);
+    // Alternate: NOT commerce-approved, but approved rights + exact product
+    // match (the linkage) — the per-role rule allows it into the commerce set.
+    const alt = seedAsset(runId, false, { sourceUrl: 'https://cdn.example.com/alt.jpg' });
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        { sourceId: 'src-1', sourceArtifactId: 'a1', url: 'https://cdn.example.com/i.jpg', role: 'primary', verifiedAssetId: a1.id },
+        { sourceId: 'src-2', sourceArtifactId: 'a2', url: 'https://cdn.example.com/alt.jpg', role: 'alternate', verifiedAssetId: alt.id },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+
+    const result = importRunToOnboarding(runId, { mode: 'create' });
+    const item = findItemById(result.item.id);
+    const evidence = item?.extractionData?.productIntelligenceEvidence;
+    expect(evidence?.[0]?.approvedImageIds).toEqual([a1.id, alt.id]);
+  });
+
+  it('rejects a supporting image without same-product linkage (round-6 P1)', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const a1 = seedAsset(runId, true);
+    // Alternate: no exact/variant match, no discovering page — usable quality
+    // is not same-product evidence, so import fails closed.
+    const alt = seedAsset(runId, false, {
+      sourceUrl: 'https://cdn.example.com/alt.jpg',
+      sourcePageUrl: null,
+      exactProductMatch: false,
+      exactVariantMatch: null,
+    });
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        { sourceId: 'src-1', sourceArtifactId: 'a1', url: 'https://cdn.example.com/i.jpg', role: 'primary', verifiedAssetId: a1.id },
+        { sourceId: 'src-2', sourceArtifactId: 'a2', url: 'https://cdn.example.com/alt.jpg', role: 'alternate', verifiedAssetId: alt.id },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+    expect(() => importRunToOnboarding(runId, { mode: 'create' })).toThrow(/not durably linked/);
   });
 });

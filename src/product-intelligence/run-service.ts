@@ -1078,7 +1078,7 @@ function bundleImageReviewFlags(submission: { imageCandidates: Array<{ role?: st
   return { needsReview, reasons };
 }
 
-function submissionNeedsReview(result: ProductResearchResult): boolean {
+export function submissionNeedsReview(result: ProductResearchResult): boolean {
   const submission = result.submission;
   if (!submission) return false;
   // Historical PI-1 envelopes (only reachable through parsed old rows;
@@ -1097,7 +1097,7 @@ function submissionNeedsReview(result: ProductResearchResult): boolean {
   return false; // insufficient-evidence abstention
 }
 
-function reviewReasons(result: ProductResearchResult): string[] {
+export function reviewReasons(result: ProductResearchResult): string[] {
   const reasons: string[] = [];
   const submission = result.submission;
   if (!submission) return reasons;

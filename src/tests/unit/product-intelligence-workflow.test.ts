@@ -655,6 +655,85 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(validation.issues).toEqual([]);
   });
 
+  it('rejects a supporting image with usable quality but NO same-product linkage (round-6 P1)', () => {
+    // The round-5 escape: exactProductMatch=false + qualityStatus='usable'
+    // passed. Usable image quality is NOT evidence the image belongs to this
+    // product — exact/variant match or a shared discovering page is required.
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: 'https://brand.example.com/p/' + GTIN });
+    const altId = seedVerifiedAssetRow({
+      sourceUrl: 'https://cdn.example.com/alt.jpg',
+      sourcePageUrl: null,
+      exactProductMatch: false,
+      exactVariantMatch: null,
+      qualityStatus: 'usable',
+    });
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({
+          role: 'alternate',
+          url: 'https://cdn.example.com/alt.jpg',
+          verifiedAssetId: altId,
+          exactProductMatch: false,
+          exactVariantMatch: null,
+          qualityStatus: 'usable',
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(false);
+    const issues = validation.issues.join(' ');
+    expect(issues).toContain('alternate image');
+    expect(issues).toContain('not durably linked');
+  });
+
+  it('accepts a supporting image sharing the primary discovering page (round-6 P1)', () => {
+    const page = 'https://brand.example.com/p/' + GTIN;
+    const primaryId = seedVerifiedAssetRow({ sourcePageUrl: page });
+    const altId = seedVerifiedAssetRow({
+      sourceUrl: 'https://cdn.example.com/alt.jpg',
+      sourcePageUrl: page,
+      exactProductMatch: false,
+      exactVariantMatch: null,
+    });
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: primaryId }),
+        validPrimaryImage({
+          role: 'alternate',
+          url: 'https://cdn.example.com/alt.jpg',
+          verifiedAssetId: altId,
+          exactProductMatch: false,
+          exactVariantMatch: null,
+        }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(true);
+    expect(validation.issues).toEqual([]);
+  });
+
+  it('treats comparison images as binding-only, never commerce (round-6 P1)', () => {
+    // A comparison asset may be restricted rights / non-exact — the validator
+    // binds it (run/url/identity checks) but applies no approval rules.
+    const cmpId = seedVerifiedAssetRow({
+      sourceUrl: 'https://cdn.example.com/cmp.jpg',
+      rightsStatus: 'restricted',
+      exactProductMatch: false,
+      exactVariantMatch: null,
+      commerceApproved: false,
+    });
+    const bundle = exactMatchBundle({
+      imageCandidates: [
+        validPrimaryImage({ verifiedAssetId: seedVerifiedAssetRow() }),
+        validPrimaryImage({ role: 'comparison', url: 'https://cdn.example.com/cmp.jpg', verifiedAssetId: cmpId }),
+      ],
+    });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId, seedRunId());
+    expect(validation.valid).toBe(true);
+    expect(validation.issues).toEqual([]);
+  });
+
   it('blocks parent-product-only verified assets as primary (exactVariantMatch false)', () => {
     const verifiedId = seedVerifiedAssetRow({ exactVariantMatch: false, commerceApproved: false });
     const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetId: verifiedId })] });

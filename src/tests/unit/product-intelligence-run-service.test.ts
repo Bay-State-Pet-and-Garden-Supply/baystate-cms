@@ -32,8 +32,10 @@ import {
   persistBundleAssets,
   PersistingExecutionEventSink,
   replayPiEvents,
+  reviewReasons,
   runRetentionCleanup,
   startProductIntelligenceRun,
+  submissionNeedsReview,
   assetEvidenceFromRow,
 } from '../../product-intelligence/run-service';
 import { validateTerminalSubmission } from '../../product-intelligence/workflow/bundle-validator';
@@ -537,6 +539,103 @@ describe('Product Intelligence run service', () => {
     // row is written.
     expect(run?.status).toBe('failed');
     expect(listPiAssetsByRun(started.run.id).length).toBe(0);
+  });
+
+  it('derives review signaling from the durable asset row, never the deprecated candidate fields (round-6 P1)', () => {
+    // Round-6 (review P1): submissionNeedsReview/reviewReasons must read the
+    // SERVER-RESOLVED asset row. Here the candidate's agent-supplied fields
+    // CLAIM approved rights + exact match while the durable row is restricted.
+    const runId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify({ gtin: TEST_INPUT.gtin, registerName: TEST_INPUT.registerName }),
+      policyJson: '{}',
+      configSnapshotId: 'seed',
+      configSnapshotHash: 'seed',
+    }).id;
+    const source = insertPiSource({
+      runId,
+      url: 'https://cdn.example.com/primary.jpg',
+      domain: 'cdn.example.com',
+      sourceType: 'supplier',
+      licenseRef: 'grant:supplier@cdn.example.com',
+      termsRef: 'grant:supplier@cdn.example.com',
+    });
+    const assetId = insertPiAsset({
+      runId,
+      sourceId: source.id,
+      sourceUrl: 'https://cdn.example.com/primary.jpg',
+      sourceType: 'supplier',
+      sourceArtifactId: 'a1',
+      extractionMethod: 'image_ocr',
+      retrievedAt: '2026-08-05T00:00:00.000Z',
+      originalContentHash: 'b'.repeat(64),
+      perceptualHash: 'phash-img-1',
+      rightsStatus: 'restricted',
+      rightsBasis: 'grant:supplier@cdn.example.com',
+      rightsEvidenceRef: 'grant:supplier@cdn.example.com',
+      exactProductMatch: true,
+      exactVariantMatch: true,
+      qualityStatus: 'usable',
+      commerceApproved: false,
+      conflicts: [],
+      verifiedAgainstJson: JSON.stringify({ runId, gtin: TEST_INPUT.gtin, name: TEST_INPUT.registerName }),
+      verifiedAgainstHash: canonicalVerifiedAgainstHash({ runId, gtin: TEST_INPUT.gtin, name: TEST_INPUT.registerName }),
+      declaredSourceType: 'supplier',
+    }).id;
+    const bundle = bundleWithImage();
+    bundle.imageCandidates[0].verifiedAssetId = assetId;
+    // The candidate still claims supplier_authorized/exact (deprecated fields).
+    const result = {
+      schemaVersion: 1,
+      gtin: TEST_INPUT.gtin,
+      inputName: TEST_INPUT.registerName,
+      outcome: 'submitted' as const,
+      submission: bundle,
+    } as unknown as ProductResearchResult;
+    expect(submissionNeedsReview(result)).toBe(true);
+    expect(reviewReasons(result).join(' ')).toContain('durable asset rights');
+
+    // Negative: agent fields CLAIM unknown/not-exact but the durable row is
+    // approved + exact — no review is triggered by the image.
+    insertPiAsset({
+      runId,
+      sourceId: source.id,
+      sourceUrl: 'https://cdn.example.com/primary.jpg',
+      sourceType: 'supplier',
+      sourceArtifactId: 'a2',
+      extractionMethod: 'image_ocr',
+      retrievedAt: '2026-08-05T00:00:00.000Z',
+      originalContentHash: 'b'.repeat(64),
+      perceptualHash: 'phash-img-2',
+      rightsStatus: 'approved',
+      rightsBasis: 'grant:supplier@cdn.example.com',
+      rightsEvidenceRef: 'grant:supplier@cdn.example.com',
+      exactProductMatch: true,
+      exactVariantMatch: true,
+      qualityStatus: 'usable',
+      commerceApproved: true,
+      conflicts: [],
+      verifiedAgainstJson: JSON.stringify({ runId, gtin: TEST_INPUT.gtin, name: TEST_INPUT.registerName }),
+      verifiedAgainstHash: canonicalVerifiedAgainstHash({ runId, gtin: TEST_INPUT.gtin, name: TEST_INPUT.registerName }),
+      declaredSourceType: 'supplier',
+    });
+    const approvedId = listPiAssetsByRun(runId).find((a) => a.sourceArtifactId === 'a2')!.id;
+    const approvedBundle = bundleWithImage();
+    approvedBundle.imageCandidates[0].verifiedAssetId = approvedId;
+    approvedBundle.imageCandidates[0].rightsStatus = 'unknown';
+    approvedBundle.imageCandidates[0].exactProductMatch = false;
+    const approvedResult = {
+      schemaVersion: 1,
+      gtin: TEST_INPUT.gtin,
+      inputName: TEST_INPUT.registerName,
+      outcome: 'submitted' as const,
+      submission: approvedBundle,
+    } as unknown as ProductResearchResult;
+    // The row is approved + exact — the lying candidate fields do NOT trigger
+    // review.
+    expect(submissionNeedsReview(approvedResult)).toBe(false);
   });
 
   it('enforces retention policy (terminal only, older than cutoff)', async () => {
