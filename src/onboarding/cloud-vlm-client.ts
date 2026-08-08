@@ -9,6 +9,12 @@
  * `dataSharing.imagePolicy === 'cloud_allowed'`.
  */
 import { getLlmConfigForTask, type LlmConfig } from './llm-client';
+import {
+  assertModelPolicyIntact,
+  redactImageUrl,
+  redactTransportText,
+  type ModelPolicyView,
+} from '../classification/model-policy-gateway';
 import { PACKAGING_OCR_PROMPT, parseJsonFromVlmResponse, coercePackagingOcrData } from './packaging-ocr';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
 import type { LlmTask } from '../db/repositories/llm-task-config-repo';
@@ -21,15 +27,17 @@ export interface CloudVlmParams {
   /** Provider/model override (defaults to llm_task_configs or fallback) */
   task?: string;
   /** Frozen classification model-policy view (issue #17 item A). */
-  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null;
+  modelPolicy?: ModelPolicyView | null;
 }
 
 // ─── Image Fetching ───────────────────────────────────────────────────────────
 
 /**
  * Fetch a remote image, validate size, and return base64 + MIME type.
+ * Logged URLs are redacted (query strings can carry signed credentials).
  */
 async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeType: string } | null> {
+  const logUrl = redactImageUrl(url);
   try {
     const response = await fetch(url, {
       headers: {
@@ -41,7 +49,7 @@ async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeTy
     });
 
     if (!response.ok) {
-      console.warn(`[CloudVlm] HTTP ${response.status} fetching image: ${url}`);
+      console.warn(`[CloudVlm] HTTP ${response.status} fetching image: ${logUrl}`);
       return null;
     }
 
@@ -49,7 +57,7 @@ async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeTy
 
     // Skip SVGs and other non-raster formats
     if (contentType.includes('svg')) {
-      console.warn(`[CloudVlm] Skipping SVG image: ${url}`);
+      console.warn(`[CloudVlm] Skipping SVG image: ${logUrl}`);
       return null;
     }
 
@@ -57,13 +65,13 @@ async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeTy
 
     // Skip tiny files (likely icons/spacers)
     if (buffer.length < 1024) {
-      console.warn(`[CloudVlm] Image too small (${buffer.length}b), skipping: ${url}`);
+      console.warn(`[CloudVlm] Image too small (${buffer.length}b), skipping: ${logUrl}`);
       return null;
     }
 
     return { base64: buffer.toString('base64'), mimeType: contentType };
   } catch (err: any) {
-    console.warn(`[CloudVlm] Failed to fetch image ${url}: ${err.message}`);
+    console.warn(`[CloudVlm] Failed to fetch image ${logUrl}: ${err.message}`);
     return null;
   }
 }
@@ -95,13 +103,13 @@ export async function extractPackagingOcrFromCloud(
   // 1. Get the image as base64
   const imageData = await fetchImageAsBase64(imageUrl);
   if (!imageData) {
-    console.warn(`[CloudVlm] Could not load image: ${imageUrl}`);
+    console.warn(`[CloudVlm] Could not load image: ${redactImageUrl(imageUrl)}`);
     return null;
   }
 
   // 2. Resolve LLM config for the vision task (protected: routed through the
   //    frozen classification model policy — never the generic fallback).
-  let config: LlmConfig | null = null;
+  let config: LlmConfig | null;
   try {
     config = getLlmConfigForTask((task ?? 'classification_evidence_extraction') as LlmTask, {
       allowFallback: true,
@@ -136,13 +144,33 @@ export async function extractPackagingOcrFromCloud(
     max_tokens: 2048,
   };
 
-  // 4. Call the API
+  // 4. Call the API — re-assert the frozen policy at the transport boundary
+  //    (issue #17 pass 1b): policy tampering or route drift denies the call.
   const baseUrl = config.baseUrl.replace(/\/+$/, '');
   const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
 
   console.log(`[CloudVlm] Calling ${config.provider}:${config.model} for packaging OCR`);
 
   try {
+    if (params.modelPolicy) {
+      assertModelPolicyIntact(params.modelPolicy);
+      // Re-resolve the protected route from the frozen policy and compare it
+      // against the config about to be used.
+      const fresh = getLlmConfigForTask((task ?? 'classification_evidence_extraction') as LlmTask, {
+        allowFallback: false,
+        modelPolicy: params.modelPolicy,
+        protectedOperation: 'evidence_extraction',
+      });
+      if (
+        !fresh ||
+        fresh.provider !== config.provider ||
+        fresh.model !== config.model ||
+        fresh.baseUrl !== config.baseUrl
+      ) {
+        throw new Error('Cloud VLM route drifted from the frozen model policy');
+      }
+    }
+
     const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
@@ -155,7 +183,7 @@ export async function extractPackagingOcrFromCloud(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.warn(`[CloudVlm] API request failed (${config.provider}): ${response.status} - ${errorText.slice(0, 200)}`);
+      console.warn(`[CloudVlm] API request failed (${config.provider}): ${response.status} - ${redactTransportText(errorText)}`);
       return null;
     }
 

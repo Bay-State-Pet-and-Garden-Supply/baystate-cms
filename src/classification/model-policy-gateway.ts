@@ -159,6 +159,17 @@ export interface ModelPolicyGatewayDeps {
 
 const DEFAULT_IS_LOOPBACK = isLoopbackBaseUrl;
 
+/** Recursively deep-freeze a value (plain objects and arrays only). */
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object') {
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 /** Build a canonical, frozen policy view with a content-addressed digest. */
 export function buildModelPolicyView(
   policy: ModelPolicyConfigV2,
@@ -189,11 +200,13 @@ export function buildModelPolicyView(
   };
   const policyDigest = sha256Hex(JSON.stringify(digestPayload));
 
+  // Deep-freeze every nested map so the view cannot be tampered with between
+  // snapshot creation and the transport boundary (issue #17 pass 1b).
   const view: ModelPolicyView = Object.freeze({
     defaultProvider: policy.defaultProvider,
     defaultModel: policy.defaultModel,
-    providerLocalities,
-    stageOverrides,
+    providerLocalities: deepFreeze(providerLocalities),
+    stageOverrides: deepFreeze(stageOverrides),
     textDataSharing: policy.textDataSharing,
     imageDataSharing: policy.imageDataSharing,
     ...(options.snapshotHash ? { snapshotHash: options.snapshotHash } : {}),
@@ -215,6 +228,53 @@ export function assertModelPolicyIntact(view: ModelPolicyView): void {
   if (recomputed.policyDigest !== view.policyDigest) {
     throw new ModelPolicyDeniedError('policy_tampered', 'evidence_extraction');
   }
+}
+
+/**
+ * Bound and redact transport text (provider error bodies, URLs, request
+ * identifiers) before it reaches logs or thrown errors (issue #17 pass 1b).
+ * Strips bearer tokens, sk-* keys, and credential-looking segments; caps
+ * length at `maxLength` chars.
+ */
+export function redactTransportText(text: string, maxLength = 200): string {
+  let t = String(text ?? '');
+  t = t
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+    .replace(/sk-[A-Za-z0-9_-]{8,}/gi, 'sk-[REDACTED]')
+    .replace(/(api[_-]?key|token|secret|authorization)\s*[=:]\s*\S+/gi, '$1=[REDACTED]');
+  if (t.length > maxLength) {
+    t = `${t.slice(0, maxLength)}…`;
+  }
+  return t;
+}
+
+/**
+ * Redact a URL for logging: strip query string and hash (signed URLs carry
+ * credentials in the query), keep scheme+host+path.
+ */
+export function redactImageUrl(url: string): string {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    // Non-URL string: keep a bounded prefix, never query-looking content.
+    return url.split(/[?#]/)[0].slice(0, 120);
+  }
+}
+
+/**
+ * Bounded, non-sensitive identifier for logs (never the raw UPC/name/token).
+ * Returns a short prefix + length so the operator can correlate without
+ * exposing the value.
+ */
+export function redactIdentifier(id: string): string {
+  if (!id) return '';
+  const s = String(id);
+  if (s.length <= 8) return '[id]';
+  return `${s.slice(0, 4)}…(${s.length})`;
 }
 
 /**

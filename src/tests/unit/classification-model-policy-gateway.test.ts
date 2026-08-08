@@ -9,6 +9,9 @@ import {
   assertModelPolicyIntact,
   buildModelPolicyView,
   isLoopbackBaseUrl,
+  redactIdentifier,
+  redactImageUrl,
+  redactTransportText,
   resolveFallbackRoute,
   resolveModelRoute,
   type ModelPolicyGatewayDeps,
@@ -241,5 +244,42 @@ describe('resolveFallbackRoute — explicit fallback only', () => {
     } catch (err) {
       expect((err as ModelPolicyDeniedError).code).toBe('implicit_fallback_forbidden');
     }
+  });
+
+  it('deep-freezes the policy view so nested maps cannot be tampered with', () => {
+    const view = buildModelPolicyView(OLLAMA_LOCAL_POLICY, { snapshotHash: 'deep-freeze-1' });
+    expect(Object.isFrozen(view)).toBe(true);
+    expect(Object.isFrozen(view.providerLocalities)).toBe(true);
+    expect(Object.isFrozen(view.stageOverrides)).toBe(true);
+    // Mutation attempts fail (the digest would also be invalidated).
+    expect(() => {
+      (view.providerLocalities as Record<string, string>).ollama = 'cloud';
+    }).toThrow();
+    expect(view.providerLocalities.ollama).toBe('local');
+    // assertModelPolicyIntact still passes on the intact frozen view.
+    expect(() => assertModelPolicyIntact(view)).not.toThrow();
+  });
+
+  it('redactTransportText strips credentials and bounds length', () => {
+    const text = 'Bearer sk-abcdef1234567890 with api_key=secret-value and a lot of extra content'.repeat(3);
+    const redacted = redactTransportText(text);
+    expect(redacted).not.toContain('sk-abcdef1234567890');
+    expect(redacted).not.toContain('secret-value');
+    expect(redacted.length).toBeLessThanOrEqual(201);
+  });
+
+  it('redactImageUrl strips query strings and hashes', () => {
+    const url = 'https://cdn.example.com/img/1.jpg?Signature=abc&Expires=123#frag';
+    const redacted = redactImageUrl(url);
+    expect(redacted).not.toContain('Signature=abc');
+    expect(redacted).not.toContain('#frag');
+    expect(redacted).toBe('https://cdn.example.com/img/1.jpg');
+  });
+
+  it('redactIdentifier returns a bounded non-sensitive form', () => {
+    expect(redactIdentifier('850067859598')).toContain('…');
+    expect(redactIdentifier('850067859598')).not.toContain('5067859');
+    expect(redactIdentifier('short')).toBe('[id]');
+    expect(redactIdentifier('')).toBe('');
   });
 });

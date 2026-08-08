@@ -36,8 +36,9 @@ import { extractConsensusName } from './lcs-extractor';
 import {
   ModelPolicyDeniedError,
   resolveModelRoute,
-  resolveFallbackRoute,
   assertModelPolicyIntact,
+  redactIdentifier,
+  redactTransportText,
   type ModelPolicyView,
   type ProtectedOperation,
 } from '../classification/model-policy-gateway';
@@ -262,6 +263,10 @@ export function defaultProtectedOperationForTask(task: LlmTask): ProtectedOperat
       return 'attribute_ranking';
     case 'category_page_assignment':
       return 'page_assignment';
+    case 'brand_inference':
+      return 'brand_inference';
+    case 'product_name_consolidation':
+      return 'discovery_name_consolidation';
     default:
       return null;
   }
@@ -304,6 +309,35 @@ function resolveProtectedConfig(
     baseUrl: route.baseUrl,
     model: route.model,
   };
+}
+
+/**
+ * Re-assert the frozen policy IMMEDIATELY before transport (issue #17 pass
+ * 1b): re-checks policy integrity AND re-resolves the protected route,
+ * failing closed when the route/locality changed after the queue wait or
+ * when the policy was tampered with. Only the explicit paired fallback may
+ * ever be selected; implicit generic fallback is impossible.
+ */
+function reassertProtectedRouteBeforeTransport(
+  task: LlmTask,
+  config: LlmConfig,
+  options: { modelPolicy?: ModelPolicyView | null; protectedOperation?: ProtectedOperation },
+): void {
+  const view = options.modelPolicy;
+  if (!view) return;
+  const operation = options.protectedOperation ?? defaultProtectedOperationForTask(task);
+  if (!operation) return;
+  // Digest + deep-frozen view tamper check.
+  assertModelPolicyIntact(view);
+  // Re-resolve the route and compare against the config about to be used.
+  const fresh = resolveProtectedConfig(task, operation, view);
+  if (
+    fresh.provider !== config.provider ||
+    fresh.model !== config.model ||
+    fresh.baseUrl !== config.baseUrl
+  ) {
+    throw new ModelPolicyDeniedError('policy_tampered', operation, fresh.provider);
+  }
 }
 
 /**
@@ -416,6 +450,14 @@ export async function callLlmForTask(
 
   await acquireLlmSlot(config.provider);
   try {
+    // Re-assert the frozen policy immediately at the transport boundary
+    // (after the queue wait): tampering or route drift denies the call.
+    if (options.modelPolicy) {
+      reassertProtectedRouteBeforeTransport(task, config, {
+        modelPolicy: options.modelPolicy,
+        protectedOperation: options.protectedOperation,
+      });
+    }
     const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
     const requestBody: Record<string, unknown> = {
       model: config.model,
@@ -440,7 +482,10 @@ export async function callLlmForTask(
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`LLM API request failed (${config.provider}): ${response.status} - ${text}`);
+      // Never embed the raw provider error body in the thrown error.
+      throw new Error(
+        `LLM API request failed (${config.provider}): ${response.status} - ${redactTransportText(text)}`,
+      );
     }
 
     const data = (await response.json()) as {
@@ -496,7 +541,7 @@ export async function callLlm(
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`LLM API request failed (${config.provider}): ${response.status} - ${text}`);
+      throw new Error(`LLM API request failed (${config.provider}): ${response.status} - ${redactTransportText(text)}`);
     }
 
     const data = (await response.json()) as {
@@ -666,30 +711,32 @@ export async function consolidateProductName(
   if (searchResults.length === 0 && !originalName) return null;
 
   // Extract protected tokens from the raw register name BEFORE any LLM call
-  // so we can verify they survive.
+  // so we can verify they survive. Log only a bounded non-sensitive form.
   const protectedTokens = originalName ? extractProtectedTokens(originalName) : [];
   if (protectedTokens.length > 0) {
-    console.log(`[LLMClient] Protected tokens from raw name "${originalName}": [${protectedTokens.join(', ')}]`);
+    console.log(`[LLMClient] Protected tokens from raw name "${redactIdentifier(originalName ?? '')}": [${protectedTokens.join(', ')}]`);
   }
 
   try {
-    let useTaskConfig = true;
     let config: LlmConfig | null = null;
     try {
       config = getLlmConfigForTask('product_name_consolidation', {
         allowFallback: true,
         modelPolicy,
-        ...(modelPolicy !== undefined ? { protectedOperation: 'discovery_name_consolidation' } : {}),
+        protectedOperation: 'discovery_name_consolidation',
       });
     } catch (err) {
+      // Protected operation (discovery_name_consolidation): fail closed on
+      // EVERY resolution failure. Never select the generic DeepSeek → OpenAI
+      // → Ollama chain, even when the caller omitted a policy context.
       if (err instanceof ModelPolicyDeniedError) {
         console.log(`[LLMClient] Model policy denied name consolidation (${err.code}); falling back to LCS`);
-        const titles = searchResults.map(r => r.title);
-        if (originalName) titles.push(originalName);
-        return lcsWithTokenGuard(titles, originalName);
+      } else {
+        console.log('[LLMClient] Name consolidation policy resolution failed; falling back to LCS');
       }
-      useTaskConfig = false;
-      config = getLlmConfig();
+      const titles = searchResults.map(r => r.title);
+      if (originalName) titles.push(originalName);
+      return lcsWithTokenGuard(titles, originalName);
     }
     if (!config) {
       console.log('[LLMClient] No LLM config found, falling back to LCS name extraction');
@@ -740,14 +787,12 @@ Rules:
 
 Register-Aligned Expected Name:`;
 
-    console.log(`[LLMClient] Calling LLM (${config.provider}:${config.model}) for UPC ${upc}`);
-    const name = useTaskConfig
-      ? await callLlmForTask('product_name_consolidation', prompt, systemPrompt, {
-          allowFallback: true,
-          modelPolicy,
-          ...(modelPolicy !== undefined ? { protectedOperation: 'discovery_name_consolidation' } : {}),
-        })
-      : await callLlm(prompt, systemPrompt);
+    console.log(`[LLMClient] Calling LLM (${config.provider}:${config.model}) for UPC ${redactIdentifier(upc)}`);
+    const name = await callLlmForTask('product_name_consolidation', prompt, systemPrompt, {
+      allowFallback: true,
+      modelPolicy,
+      protectedOperation: 'discovery_name_consolidation',
+    });
     if (name == null) {
       throw new Error('LLM call returned null');
     }

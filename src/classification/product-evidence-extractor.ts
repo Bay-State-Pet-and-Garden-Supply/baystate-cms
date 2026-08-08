@@ -746,9 +746,19 @@ export async function extractProductEvidence(
   if (!localOcrSucceeded && input.primaryImage && canUseCloudImages) {
     cloudStatus = 'failed';
     try {
+      // Protected operation: route through the frozen classification policy
+      // (issue #17 pass 1b). Without a snapshot, no policy exists → disabled
+      // → no transport.
+      const evidencePolicyView = context.snapshot
+        ? modelPolicyViewFromConfig(
+            context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+            context.snapshot.snapshotHash,
+          )
+        : null;
       const { extractPackagingOcrFromCloud } = await import('../onboarding/cloud-vlm-client');
       const cloudOcrResult = await extractPackagingOcrFromCloud({
         imageUrl: String(input.primaryImage),
+        modelPolicy: evidencePolicyView,
       });
 
       if (cloudOcrResult && hasOcrContent(cloudOcrResult)) {

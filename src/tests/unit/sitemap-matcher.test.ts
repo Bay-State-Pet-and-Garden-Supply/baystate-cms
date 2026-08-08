@@ -22,6 +22,7 @@ import {
   deleteLlmTaskConfig,
   upsertLlmTaskConfig,
 } from '../../db/repositories/llm-task-config-repo';
+import { buildModelPolicyView } from '../../classification/model-policy-gateway';
 import { matchSitemapUrls } from '../../onboarding/sitemap-matcher';
 import * as llmClient from '../../onboarding/llm-client';
 
@@ -52,6 +53,27 @@ describe('Sitemap Matcher', () => {
     // Seed at least one provider credential so the LLM call has a config.
     upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'llama3');
   });
+
+  /** Local-only Ollama policy view (protected sitemap_selection routing). */
+  function localOnlyOllamaView() {
+    return buildModelPolicyView(
+      {
+        defaultProvider: 'ollama',
+        defaultModel: 'qwen2.5vl:latest',
+        providerLocalities: { ollama: 'local' },
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'local_only',
+        mlFeatures: {
+          productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        },
+      } as any,
+      { snapshotHash: 'snap-sitemap-1' },
+    );
+  }
 
   afterAll(() => {
     closeDb();
@@ -350,6 +372,7 @@ describe('Sitemap Matcher', () => {
     });
     // Have the LLM return the first URL.
     const { calls } = stubFetch(urls[0]);
+    const policyView = localOnlyOllamaView();
 
     const result = await matchSitemapUrls(
       urls,
@@ -357,6 +380,8 @@ describe('Sitemap Matcher', () => {
       null,
       upc,
       'mywoof.com',
+      null,
+      policyView,
     );
 
     expect(calls.length).toBe(1);
@@ -383,6 +408,7 @@ describe('Sitemap Matcher', () => {
     });
     // The LLM returns garbage that does not match any URL.
     stubFetch('I am not a URL');
+    const policyView = localOnlyOllamaView();
 
     const result = await matchSitemapUrls(
       urls,
@@ -390,6 +416,8 @@ describe('Sitemap Matcher', () => {
       null,
       upc,
       'mywoof.com',
+      null,
+      policyView,
     );
 
     expect(result.every(r => r.matchType === 'token_overlap')).toBe(true);
@@ -406,6 +434,7 @@ describe('Sitemap Matcher', () => {
       model: 'llama3:8b',
     });
     const { calls } = stubFetch('https://mywoof.com/products/poomergency');
+    const policyView = localOnlyOllamaView();
 
     const result = await matchSitemapUrls(
       urls,
@@ -413,6 +442,8 @@ describe('Sitemap Matcher', () => {
       null,
       upc,
       'mywoof.com',
+      null,
+      policyView,
     );
 
     // With only one candidate, the LLM is intentionally not called
@@ -436,6 +467,7 @@ describe('Sitemap Matcher', () => {
     });
     // LLM response has surrounding quotes and trailing punctuation.
     stubFetch('  "https://mywoof.com/products/lavender".  ');
+    const policyView = localOnlyOllamaView();
 
     const result = await matchSitemapUrls(
       urls,
@@ -443,6 +475,8 @@ describe('Sitemap Matcher', () => {
       null,
       upc,
       'mywoof.com',
+      null,
+      policyView,
     );
 
     expect(result.length).toBe(1);
@@ -476,5 +510,56 @@ describe('Sitemap Matcher', () => {
     expect(result.every(r => r.matchType === 'token_overlap')).toBe(true);
     expect(result[0].url).toBe('https://mywoof.com/products/poomergency');
     expect(result[0].sourceMethod).toBe('sitemap_name');
+  });
+
+  test('an explicit null policy (PI path) disables LLM sitemap selection with zero transport', async () => {
+    const upc = '850067859598';
+    const urls = [
+      'https://mywoof.com/products/widget',
+      'https://mywoof.com/products/poomergency',
+      'https://mywoof.com/products/lavender',
+    ];
+    const { calls } = stubFetch('https://mywoof.com/products/lavender');
+
+    // Product Intelligence passes modelPolicy:null so sitemap selection is
+    // disabled behind the PI gateway (issue #17 pass 1b) — the matcher must
+    // fall back to token overlap with zero LLM transport.
+    const result = await matchSitemapUrls(
+      urls,
+      'WOOF POOMERGENCY LAVENDER',
+      null,
+      upc,
+      'mywoof.com',
+      null,
+      null,
+    );
+
+    expect(calls.length).toBe(0);
+    expect(result.every(r => r.matchType === 'token_overlap')).toBe(true);
+    expect(result[0].url).toBe('https://mywoof.com/products/poomergency');
+  });
+
+  test('sitemap selection without any policy context fails closed to token overlap', async () => {
+    const upc = '850067859598';
+    const urls = [
+      'https://mywoof.com/products/widget',
+      'https://mywoof.com/products/poomergency',
+      'https://mywoof.com/products/lavender',
+    ];
+    const { calls } = stubFetch('https://mywoof.com/products/lavender');
+
+    // No policy at all (omitted): sitemap_selection is protected, so the
+    // omission must fail closed to token overlap, never legacy routing.
+    const result = await matchSitemapUrls(
+      urls,
+      'WOOF POOMERGENCY LAVENDER',
+      null,
+      upc,
+      'mywoof.com',
+    );
+
+    expect(calls.length).toBe(0);
+    expect(result.every(r => r.matchType === 'token_overlap')).toBe(true);
+    expect(result[0].url).toBe('https://mywoof.com/products/poomergency');
   });
 });

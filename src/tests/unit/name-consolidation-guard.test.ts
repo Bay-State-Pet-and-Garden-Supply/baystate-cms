@@ -10,9 +10,11 @@
  * resolve LLM configuration.
  */
 import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
+import { unlinkSync } from 'node:fs';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import { buildModelPolicyView } from '../../classification/model-policy-gateway';
 import {
   extractProtectedTokens,
   normalizeProtectedToken,
@@ -62,14 +64,38 @@ beforeAll(() => {
   // Seed a fallback API key so getLlmConfig() finds one (for tests
   // that exercise the LLM path rather than the LCS fallback).
   upsertApiKey('deepseek', 'sk-test-key', null, 'deepseek-chat');
+  upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'llama3');
 });
+
+/**
+ * Local-only Ollama policy view: protected discovery_name_consolidation
+ * routes to the mocked local transport (issue #17 pass 1b).
+ */
+function localOnlyPolicyView() {
+  return buildModelPolicyView(
+    {
+      defaultProvider: 'ollama',
+      defaultModel: 'qwen2.5vl:latest',
+      providerLocalities: { ollama: 'local' },
+      stageOverrides: {},
+      imageDataSharing: 'local_only',
+      textDataSharing: 'local_only',
+      mlFeatures: {
+        productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+      },
+    } as any,
+    { snapshotHash: 'snap-guard-1' },
+  );
+}
 
 afterAll(() => {
   globalThis.fetch = originalFetch;
   try { closeDb(); } catch { /* ok */ }
   try {
     // Clean up the test DB file
-    const { unlinkSync } = require('node:fs');
     unlinkSync(TEST_DB_PATH);
     unlinkSync(TEST_DB_PATH + '-shm');
     unlinkSync(TEST_DB_PATH + '-wal');
@@ -283,6 +309,7 @@ describe('consolidateProductName with mocked LLM', () => {
       [{ title: 'Instinct Original Pâté Salmon Cat Food', snippet: 'Salmon recipe' }],
       'INSTINCT CAT PATE SLMN SPLIT CUP 2.64OZ',
       'Instinct',
+      localOnlyPolicyView(),
     );
 
     // LLM returned "Instinct Cat Pâté Salmon Split Cup" (no size).
@@ -298,6 +325,7 @@ describe('consolidateProductName with mocked LLM', () => {
       [{ title: 'Instinct Original Pâté Salmon Cat Food 2.64 oz', snippet: 'Salmon recipe' }],
       'INSTINCT CAT PATE SLMN SPLIT CUP 2.64OZ',
       'Instinct',
+      localOnlyPolicyView(),
     );
 
     expect(result).toBe('Instinct Cat Pâté Salmon Split Cup 2.64 oz');
@@ -311,6 +339,7 @@ describe('consolidateProductName with mocked LLM', () => {
       [{ title: 'Woof Lavender Pupsicle - 3 Pack', snippet: 'Dental chew' }],
       'WOOF LAVENDER PUPSICLE 3PK',
       'Woof',
+      localOnlyPolicyView(),
     );
 
     expect(result).toBe('Woof Lavender Pupsicle 3-Pack');
@@ -324,6 +353,7 @@ describe('consolidateProductName with mocked LLM', () => {
       [{ title: 'Woof Pupsicle Lavender Small', snippet: 'Dental chew' }],
       'WOOF PUPSICLE LAVENDER SM',
       'Woof',
+      localOnlyPolicyView(),
     );
 
     expect(result).toBe('Woof Pupsicle Lavender Small');
@@ -337,6 +367,7 @@ describe('consolidateProductName with mocked LLM', () => {
       [{ title: 'Instinct Beef Pate Can', snippet: 'Beef recipe' }],
       'INSTINCT BEEF PATE CAN 10.5OZ 12PK',
       'Instinct',
+      localOnlyPolicyView(),
     );
 
     const lower = result!.toLowerCase();
@@ -360,6 +391,7 @@ describe('consolidateProductName with mocked LLM', () => {
       [{ title: 'Instinct Original Wet Cat Food 3 oz', snippet: 'Cat food' }],
       'INSTINCT WET CAT FOOD 3OZ',
       'Instinct',
+      localOnlyPolicyView(),
     );
 
     // LLM returned empty, so it falls to LCS. The LCS guard should still

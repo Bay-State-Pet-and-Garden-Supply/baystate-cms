@@ -256,6 +256,7 @@ export async function discoverSources(
           upc,
           primaryDomain,
           prepared.productUrlPattern,
+          options?.modelPolicy,
         );
         sitemapCandidates = matches.map(convertSitemapMatchToCandidate);
       } catch (err) {

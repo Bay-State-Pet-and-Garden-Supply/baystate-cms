@@ -124,7 +124,7 @@ Respond ONLY with a JSON object in this format (do not include markdown block ma
   const response = await callLlmForTask('brand_inference', prompt, systemPrompt, {
     allowFallback: true,
     modelPolicy,
-    ...(modelPolicy !== undefined ? { protectedOperation: 'brand_inference' } : {}),
+    protectedOperation: 'brand_inference',
   });
   if (!response) return null;
 

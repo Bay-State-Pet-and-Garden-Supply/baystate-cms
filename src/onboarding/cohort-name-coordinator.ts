@@ -81,7 +81,7 @@ function buildCacheKey(
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
     modelPolicy,
-    ...(modelPolicy !== undefined ? { protectedOperation: 'cohort_title_consolidation' } : {}),
+    protectedOperation: 'cohort_title_consolidation',
   });
   const modelIdentity = llmConfig
     ? {
@@ -356,7 +356,7 @@ async function coordinateGroup(
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
     modelPolicy,
-    ...(modelPolicy !== undefined ? { protectedOperation: 'cohort_title_consolidation' } : {}),
+    protectedOperation: 'cohort_title_consolidation',
   });
   if (!llmConfig) {
     throw new Error('No LLM configured for product_curation');
@@ -391,7 +391,7 @@ async function coordinateGroup(
     {
       allowFallback: true,
       modelPolicy,
-      ...(modelPolicy !== undefined ? { protectedOperation: 'cohort_title_consolidation' } : {}),
+      protectedOperation: 'cohort_title_consolidation',
     },
   );
 

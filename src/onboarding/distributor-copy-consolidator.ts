@@ -160,7 +160,7 @@ export async function consolidateDistributorCopy(
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
     modelPolicy,
-    ...(modelPolicy !== undefined ? { protectedOperation: 'distributor_copy_consolidation' } : {}),
+    protectedOperation: 'distributor_copy_consolidation',
   });
   if (llmConfig && descriptions.length > 0) {
     const prompt = buildConsolidationPrompt(descriptions, itemName, brandHint);
@@ -172,7 +172,7 @@ export async function consolidateDistributorCopy(
         {
           allowFallback: true,
           modelPolicy,
-          ...(modelPolicy !== undefined ? { protectedOperation: 'distributor_copy_consolidation' } : {}),
+          protectedOperation: 'distributor_copy_consolidation',
         },
       );
       if (consolidated && consolidated.length > 10 && consolidated.length < 5000) {

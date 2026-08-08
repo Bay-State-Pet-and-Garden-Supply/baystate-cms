@@ -25,11 +25,14 @@ import {
   productDraftProjectionStage,
 } from '../classification';
 import { consolidateDistributorCopy } from './distributor-copy-consolidator';
+import { modelPolicyViewFromConfig } from './model-policy-snapshot';
+import type { ModelPolicyView } from '../classification/model-policy-gateway';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
 import { determineProductGroup } from './product-line-grouper';
 import type { ProductLineItemSnapshot, StageDefinition } from '../classification/types';
 import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
+import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
 
 // ─── Page Assignment Validation ───────────────────────────────────────────────
 
@@ -160,6 +163,18 @@ export async function curateItemWithPipeline(
   });
   const { id: runtimeSnapId, hash: runtimeSnapHash } = persistRuntimeSnapshot(runtimeSnapshot);
 
+  // Frozen model-policy view for every protected helper invocation in this
+  // curation run (issue #17 pass 1b). V2 active bundles carry locality
+  // attestation; v1/absent policies produce an explicit disabled view so
+  // protected calls use deterministic fallbacks and never legacy routing.
+  const runModelPolicyView: ModelPolicyView | null =
+    authority.kind === 'v2' && runtimeSnapshot.modelPolicy
+      ? modelPolicyViewFromConfig(
+          runtimeSnapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+          runtimeSnapshot.snapshotHash,
+        )
+      : null;
+
   // Fail any existing running classification runs for this onboarding item to ensure
   // we do not violate the UNIQUE constraint from a stale run.
   if (item.id) {
@@ -284,7 +299,7 @@ export async function curateItemWithPipeline(
     let preComputedTitleSource: 'llm_cohort' | 'cohort_fallback' | undefined;
     if ((productLineGroup?.siblingSkus.length ?? 0) >= 2) {
       try {
-        const coordinated = await coordinateCohortItemsOnce(item.batchId, batchItemsForCoordination);
+        const coordinated = await coordinateCohortItemsOnce(item.batchId, batchItemsForCoordination, runModelPolicyView);
         const selected = coordinated.get(item.upc);
         if (selected) {
           preComputedTitle = selected.title;
@@ -472,6 +487,7 @@ export async function curateItemWithPipeline(
           distAttempts,
           item.name,
           item.brandHint,
+          runModelPolicyView,
         );
         curatedDescription = consolidation.curatedDescription;
         curatedDescriptionSourceAttemptIds = consolidation.sourceAttemptIds;
