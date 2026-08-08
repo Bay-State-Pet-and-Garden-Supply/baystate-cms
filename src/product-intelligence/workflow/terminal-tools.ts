@@ -77,16 +77,21 @@ export const BundleTypeBoxSchema = Type.Object({
         sourceArtifactId: Type.String({ minLength: 1 }),
         url: Type.String({ format: 'uri' }),
         role: Type.Union([Type.Literal('primary'), Type.Literal('alternate'), Type.Literal('nutrition'), Type.Literal('ingredients'), Type.Literal('comparison')]),
-        exactProductMatch: Type.Boolean(),
+        verifiedAssetIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        // Deprecated round-3 fields (historical parsing only; server-derived
+        // from verifiedAssetIds — never authoritative).
+        exactProductMatch: Type.Optional(Type.Boolean()),
         exactVariantMatch: Type.Optional(Type.Union([Type.Null(), Type.Boolean()])),
         variantReference: Type.Optional(Type.Union([Type.String({ maxLength: 256 }), Type.Null()])),
-        rightsStatus: Type.Union([
-          Type.Literal('supplier_authorized'),
-          Type.Literal('manufacturer_authorized'),
-          Type.Literal('licensed_dataset'),
-          Type.Literal('retailer_authorized'),
-          Type.Literal('unknown'),
-        ]),
+        rightsStatus: Type.Optional(
+          Type.Union([
+            Type.Literal('supplier_authorized'),
+            Type.Literal('manufacturer_authorized'),
+            Type.Literal('licensed_dataset'),
+            Type.Literal('retailer_authorized'),
+            Type.Literal('unknown'),
+          ]),
+        ),
         evidenceIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
         sourcePageUrl: Type.Optional(Type.Union([Type.String({ format: 'uri' }), Type.Null()])),
         sourcePath: Type.Optional(Type.Union([Type.String({ maxLength: 1024 }), Type.Null()])),
@@ -109,7 +114,7 @@ export const BundleTypeBoxSchema = Type.Object({
         qualityStatus: Type.Optional(
           Type.Union([Type.Literal('usable'), Type.Literal('low_quality'), Type.Literal('invalid')]),
         ),
-        commerceApproved: Type.Boolean(),
+        commerceApproved: Type.Optional(Type.Boolean()),
         observedNetContent: Type.Optional(
           Type.Union([
             Type.Null(),

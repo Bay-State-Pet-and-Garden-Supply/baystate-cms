@@ -376,6 +376,7 @@ describe('AgentRunInspector — onboarding import (PI-8)', () => {
         resultHash: 'hash',
         supersedesDecisionId: null,
         reviewer: 'user',
+        reviewerActor: { actorType: 'local_operator', authentication: 'local_ui', displayLabel: 'user' },
         note: null,
         createdAt: '2026-01-01T00:01:00Z',
       },

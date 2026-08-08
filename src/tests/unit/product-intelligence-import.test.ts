@@ -14,6 +14,7 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
+import { createReviewDecision } from '../../db/repositories/pi-review-decision-repo';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { findItemById, insertItems, listItemsByBatch } from '../../db/repositories/onboarding-item-repo';
 import {
@@ -24,6 +25,7 @@ import {
   insertPiEvidence,
   insertPiResult,
   insertPiSource,
+  getPiResult,
   listPiImportsByRun,
   transitionPiRunStatus,
 } from '../../db/repositories/product-intelligence-repo';
@@ -63,6 +65,19 @@ function envelopeWithTitle(title: string, extra: Record<string, unknown> = {}) {
     productProposal: { fields: [{ field: 'title', value: title, evidenceIds: ['ev-gtin-1'] }] },
     ...extra,
   };
+}
+
+/** Seed a durable human approval bound to the run's stored result hash
+ *  (round-3 finding 7: importRunToOnboarding enforces this internally, so
+ *  every direct-call test must approve its run first). */
+function approveRun(runId: string): void {
+  const stored = getPiResult(runId);
+  createReviewDecision({
+    runId,
+    decision: 'approve',
+    resultHash: stored?.resultHash ?? '',
+    reviewer: 'tester',
+  });
 }
 
 /** Seed a durable field-level evidence row + source (P1-1 normalized world). */
@@ -160,6 +175,7 @@ describe('PI-8 onboarding import', () => {
 
   it('create: batch + item created from a reviewed run with approved images only', () => {
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    approveRun(runId);
     seedAsset(runId, true);
     seedAsset(runId, false);
 
@@ -183,6 +199,7 @@ describe('PI-8 onboarding import', () => {
 
   it('create is idempotent: second import is a no-op on the same item', () => {
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    approveRun(runId);
     const first = importRunToOnboarding(runId, { mode: 'create' });
     const second = importRunToOnboarding(runId, { mode: 'create' });
     expect(second.created).toBe(false);
@@ -201,6 +218,7 @@ describe('PI-8 onboarding import', () => {
         },
       }),
     });
+    approveRun(runId);
     const batch = createBatch({ workspaceId: wsId, name: 'augment seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Existing Product', rowNumber: 1 }]);
 
@@ -227,6 +245,7 @@ describe('PI-8 onboarding import', () => {
         ],
       },
     });
+    approveRun(runId);
     const batch = createBatch({ workspaceId: wsId, name: 'conflict seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Manual Title', price: '9.99', rowNumber: 1 }]);
 
@@ -244,6 +263,7 @@ describe('PI-8 onboarding import', () => {
 
   it('deletePiRun marks imports stale and the promotion gate rejects a missing origin', () => {
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Title'));
+    approveRun(runId);
     const { item } = importRunToOnboarding(runId, { mode: 'create' });
     const gateBefore = verifyImportedResultGate(findItemById(item.id) as never);
     expect(gateBefore).toEqual({ ok: true });
@@ -258,6 +278,7 @@ describe('PI-8 onboarding import', () => {
 
   it('promotion gate rejects a mismatched result hash and passes normal items', async () => {
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Title'));
+    approveRun(runId);
     const { item } = importRunToOnboarding(runId, { mode: 'create' });
     const { getDb } = await import('../../db/connection');
     const db = getDb();
@@ -285,6 +306,7 @@ describe('PI-8 onboarding import', () => {
     overrideProductIntelligenceFlags({ ...DEFAULT_PRODUCT_INTELLIGENCE_FLAGS, productIntelligenceEnabled: true, allowOnboardingImport: true, shadowOnly: true });
     try {
       const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Title'));
+      approveRun(runId);
       expect(() => importRunToOnboarding(runId, { mode: 'create' })).toThrow(/shadow/i);
     } finally {
       overrideProductIntelligenceFlags({ productIntelligenceEnabled: true, piEnabled: true, shadowOnly: false, allowOnboardingImport: true, allowBatchRuns: false });
@@ -293,7 +315,9 @@ describe('PI-8 onboarding import', () => {
 
   it('a newer run import does not silently replace an older import', () => {
     const runA = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Title A'));
+    approveRun(runA);
     const runB = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Title B'));
+    approveRun(runB);
     const batch = createBatch({ workspaceId: wsId, name: 'newer seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
 
@@ -319,6 +343,7 @@ describe('PI-8 onboarding import', () => {
   it('failures are atomic: no import rows or batches on a gate failure', () => {
     // Mismatched UPC on augment -> nothing written.
     const runId = makeCompletedRun('036000291452', 'OTHER PRODUCT', envelopeWithTitle('Other'));
+    approveRun(runId);
     const batch = createBatch({ workspaceId: wsId, name: 'atomic seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
     expect(() => importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id })).toThrow(/UPC does not match/);
@@ -351,6 +376,7 @@ describe('PI-8 onboarding import', () => {
         ],
       },
     });
+    approveRun(runId);
     const source = insertPiSource({
       runId,
       url: 'https://brand.example.com/p/wormeze',
@@ -405,6 +431,7 @@ describe('PI-8 onboarding import', () => {
         ],
       },
     });
+    approveRun(runId);
     seedFieldEvidence(runId, 'netContent', '16 oz', 'ev-nc-1'); // size intentionally not seeded
     const batch = createBatch({ workspaceId: wsId, name: 'fail seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
@@ -433,6 +460,7 @@ describe('PI-8 onboarding import', () => {
 
     // No durable rows -> fail closed, nothing written.
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelope);
+    approveRun(runId);
     const batch = createBatch({ workspaceId: wsId, name: 'legacy seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
     let caught: unknown = null;
@@ -446,6 +474,7 @@ describe('PI-8 onboarding import', () => {
 
     // A durable legacy submission row (metadata.submissionEvidenceId) resolves.
     const runId2 = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelope);
+    approveRun(runId2);
     const source2 = insertPiSource({
       runId: runId2,
       url: 'https://supplier.example.com/p/x',
@@ -474,6 +503,7 @@ describe('PI-8 onboarding import', () => {
       ...validSubmission(),
       productProposal: { fields: [{ field: 'netContent', value: '16 oz', evidenceIds: ['ev-nc-1'] }] },
     });
+    approveRun(runId);
     seedFieldEvidence(runId, 'netContent', '16 oz', 'ev-nc-1');
     const batch = createBatch({ workspaceId: wsId, name: 'nofab seed', fileName: 'seed', totalItems: 1 });
     const [item] = insertItems(batch.id, [{ upc: '085000079585', name: 'Item', rowNumber: 1 }]);
@@ -488,10 +518,84 @@ describe('PI-8 onboarding import', () => {
     expect(sourceIds.some((id) => id === runId)).toBe(false);
   });
 
+  it('R3F6: substring hole closed — a 4+ char fragment of the evidence is NOT equivalent', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      productProposal: { fields: [{ field: 'title', value: 'Broth', evidenceIds: ['ev-t-1'] }] },
+    });
+    approveRun(runId);
+    const batch = createBatch({ workspaceId: wsId, name: 'r3f6 seed', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: '', rowNumber: 1 }]);
+    seedFieldEvidence(runId, 'title', 'Stella Chicken Bone Broth 16 oz', 'ev-t-1');
+    expect(() => importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id })).toThrow(/value mismatch/);
+  });
+
+  it('R3F6: normalized equality passes for whitespace/case differences', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      productProposal: { fields: [{ field: 'title', value: 'Stella & Chewy', evidenceIds: ['ev-t-1'] }] },
+    });
+    approveRun(runId);
+    const batch = createBatch({ workspaceId: wsId, name: 'r3f6 seed2', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: '', rowNumber: 1 }]);
+    seedFieldEvidence(runId, 'title', '  Stella & Chewy  ', 'ev-t-1');
+    const result = importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    expect(result.created).toBe(true);
+    const refreshed = findItemById(item.id);
+    expect(refreshed?.extractionData?.productIntelligenceEvidence?.[0]?.evidence.map((e) => e.field)).toContain('title');
+  });
+
+  it('R3F6: GTIN canonicalization — digits-only comparison', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      productProposal: { fields: [{ field: 'gtin', value: '085000079585', evidenceIds: ['ev-g-1'] }] },
+    });
+    approveRun(runId);
+    const batch = createBatch({ workspaceId: wsId, name: 'r3f6 seed3', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: '', rowNumber: 1 }]);
+    seedFieldEvidence(runId, 'gtin', '0850000 79585', 'ev-g-1');
+    const result = importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    expect(result.created).toBe(true);
+  });
+
+  it('R3F6: size numeric-prefix equivalence tolerates unit formatting', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      productProposal: { fields: [{ field: 'size', value: '16oz', evidenceIds: ['ev-s-1'] }] },
+    });
+    approveRun(runId);
+    const batch = createBatch({ workspaceId: wsId, name: 'r3f6 seed4', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: '', rowNumber: 1 }]);
+    seedFieldEvidence(runId, 'size', '16 oz', 'ev-s-1');
+    const result = importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    expect(result.created).toBe(true);
+  });
+
+  it('R3F6: different size quantities are NOT equivalent', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', {
+      productProposal: { fields: [{ field: 'size', value: '32oz', evidenceIds: ['ev-s-1'] }] },
+    });
+    approveRun(runId);
+    const batch = createBatch({ workspaceId: wsId, name: 'r3f6 seed5', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: '', rowNumber: 1 }]);
+    seedFieldEvidence(runId, 'size', '16 oz', 'ev-s-1');
+    expect(() => importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id })).toThrow(/value mismatch/);
+  });
+
+  it('R3F7: the approval gate is service-authoritative — direct callers without a durable approval are refused', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    seedFieldEvidence(runId, 'title', 'Stella & Chewys Chicken Broth 16 oz', 'ev-gtin-1');
+    const batch = createBatch({ workspaceId: wsId, name: 'r3f7 seed', fileName: 'seed', totalItems: 1 });
+    const [item] = insertItems(batch.id, [{ upc: '085000079585', name: '', rowNumber: 1 }]);
+    // No approval decision yet -> the SERVICE refuses (not just the route).
+    expect(() => importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id })).toThrow(/no durable approval/);
+    // A matching approval unblocks the same call.
+    approveRun(runId);
+    const result = importRunToOnboarding(runId, { mode: 'augment', onboardingItemId: item.id });
+    expect(result.created).toBe(true);
+  });
+
   it('route: 403 when disabled, 201 create, 200 idempotent, 404 cross-workspace', async () => {
     // Reset flags to defaults first: import disabled.
     overrideProductIntelligenceFlags(DEFAULT_PRODUCT_INTELLIGENCE_FLAGS);
     const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Title'));
+    approveRun(runId);
     const disabled = await app.request(`http://localhost/api/product-intelligence/runs/${runId}/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -561,6 +665,7 @@ describe('PI-8 onboarding import', () => {
         fields: [{ field: 'description', value: 'Stella Chicken Treats', evidenceIds: ['ev-desc-1'] }],
       },
     });
+    approveRun(runId);
     seedFieldEvidence(runId, 'description', 'Stella & Chewy Chicken Bone Broth', 'ev-desc-1');
 
     let caught: unknown;
@@ -581,6 +686,7 @@ describe('PI-8 onboarding import', () => {
     const runId = makeCompletedRun('085000079585', 'REGISTER', {
       productProposal: { fields: [{ field: 'description', value: 'Chicken Broth', evidenceIds: [] }] },
     });
+    approveRun(runId);
 
     let caught: unknown;
     try {
@@ -598,6 +704,7 @@ describe('PI-8 onboarding import', () => {
     const runId = makeCompletedRun('085000079585', 'REGISTER', {
       productProposal: { fields: [{ field: 'size', value: '16 oz', evidenceIds: ['ev-size-1'] }] },
     });
+    approveRun(runId);
     // Evidence row exists for the cited id but its targetField is description.
     seedFieldEvidence(runId, 'description', '16 oz', 'ev-size-1');
 
@@ -619,6 +726,7 @@ describe('PI-8 onboarding import', () => {
         fields: [{ field: 'description', value: 'Stella & Chewy', evidenceIds: ['ev-desc-1'] }],
       },
     });
+    approveRun(runId);
     seedFieldEvidence(runId, 'description', '  Stella & Chewy  ', 'ev-desc-1');
 
     const result = importRunToOnboarding(runId, { mode: 'create' });
@@ -634,6 +742,7 @@ describe('PI-8 onboarding import', () => {
         fields: [{ field: 'description', value: 'Chicken Bone Broth', evidenceIds: ['ev-desc-1'] }],
       },
     });
+    approveRun(runId);
     seedFieldEvidence(runId, 'description', 'Chicken Bone Broth', 'ev-desc-1');
 
     const result = importRunToOnboarding(runId, { mode: 'create' });

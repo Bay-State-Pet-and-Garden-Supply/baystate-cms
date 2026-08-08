@@ -107,6 +107,23 @@ describe('P1-2 durable review decisions', () => {
     expect(listReviewDecisions(runId)).toHaveLength(2);
   });
 
+  it('concurrent decisions never fork the chain (transactional read-latest + insert)', async () => {
+    const runId = makeTerminalRun();
+    const stored = getPiResult(runId)!;
+    const [a, b] = await Promise.all([
+      Promise.resolve().then(() => createReviewDecision({ runId, decision: 'approve', resultHash: stored.resultHash, reviewer: 'a' })),
+      Promise.resolve().then(() => createReviewDecision({ runId, decision: 'reject', resultHash: stored.resultHash, reviewer: 'b' })),
+    ]);
+    const rows = listReviewDecisions(runId);
+    // Exactly two rows and ONE linear supersede edge — no forked chain.
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.supersedesDecisionId !== null)).toHaveLength(1);
+    expect(a.supersedesDecisionId === b.id || b.supersedesDecisionId === a.id).toBe(true);
+    const latest = getLatestReviewDecision(runId)!;
+    expect([a.id, b.id]).toContain(latest.id);
+    expect(latest.supersedesDecisionId).toBe(rows.find((r) => r.id !== latest.id)!.id);
+  });
+
   it('hasApprovalForResult requires the latest decision to approve the exact hash', () => {
     const runId = makeTerminalRun();
     const stored = getPiResult(runId)!;

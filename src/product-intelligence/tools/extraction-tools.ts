@@ -33,7 +33,7 @@ import {
   type PageExtractionResult,
 } from './contract';
 import { createLadderExtractionContract } from '../extraction/ladder';
-import { defaultLadderOptions, setSnapshotSourcesAllowlist } from '../extraction/wiring';
+import { defaultLadderOptions } from '../extraction/wiring';
 import { HTTP_EXTRACTION_HEADERS, type FetchedPage, type ShopifyProductJson } from '../extraction/platforms';
 import type { LadderOptions } from '../extraction/ladder';
 import type { PolicyGateway } from '../policy/policy-gateway';
@@ -197,15 +197,14 @@ export const defaultPageExtractionContract: PageExtractionContract = createLadde
 function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
   const gateway: PolicyGateway = ctx.gateway ?? defaultPolicyGateway;
   const netCtx = { runId: ctx.runId, policy: ctx.policy };
-  const options = defaultLadderOptions();
-  // P0-1 (round 2): hand the run's allowed-source-domains to the browser
-  // worker so its rendered navigation, redirects, and captured subresources
-  // enforce the same source allowlist as the server-side gateway.
-  setSnapshotSourcesAllowlist(
+  // Round-3 finding 3: the run's allowed-source-domains are captured in the
+  // per-run snapshot closure (no module-global policy state), so concurrent
+  // runs never execute under each other's browser allowlist.
+  const sourcesAllowlist =
     ctx.policy.allowedSourceDomains && ctx.policy.allowedSourceDomains.length > 0
       ? ctx.policy.allowedSourceDomains
-      : undefined,
-  );
+      : undefined;
+  const options = defaultLadderOptions(sourcesAllowlist);
   options.fetchPage = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<FetchedPage> => {
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;

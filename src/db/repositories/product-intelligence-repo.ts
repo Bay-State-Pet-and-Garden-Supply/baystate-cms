@@ -54,6 +54,11 @@ export interface PiRunRow {
   originRunId: string | null;
   /** PI-10 replay depth: 0 for originals, +1 per replay hop. */
   replayDepth: number;
+  /** Review finding 7: the approved-policy record this run's policy was
+   *  derived from, and the reducing overrides applied (atomic with insert). */
+  basePolicyId: string | null;
+  basePolicyVersion: number | null;
+  policyOverridesJson: string | null;
 }
 
 export interface CreatePiRunInput {
@@ -76,6 +81,10 @@ export interface CreatePiRunInput {
   /** PI-10: deterministic replays insert an already-terminal run. */
   status?: 'completed';
   completedAt?: string | null;
+  /** Review finding 7: approved-policy lineage, atomic with the insert. */
+  basePolicyId?: string | null;
+  basePolicyVersion?: number | null;
+  policyOverridesJson?: string | null;
 }
 
 export function createPiRun(input: CreatePiRunInput): PiRunRow {
@@ -88,8 +97,8 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
      (id, workspace_id, onboarding_item_id, mode, status, executor, input_json,
       policy_json, config_snapshot_id, config_snapshot_hash, code_commit,
       prompt_hash, pi_version, extension_versions_json, started_at, completed_at,
-      origin_run_id, replay_depth)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      origin_run_id, replay_depth, base_policy_id, base_policy_version, policy_overrides_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.workspaceId,
@@ -109,6 +118,9 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
       completedAt,
       input.originRunId ?? null,
       input.replayDepth ?? 0,
+      input.basePolicyId ?? null,
+      input.basePolicyVersion ?? null,
+      input.policyOverridesJson ?? null,
     ],
   );
   return getPiRun(id) as PiRunRow;
@@ -124,7 +136,9 @@ const RUN_SELECT = `
          error_code AS errorCode, error_message AS errorMessage,
          estimated_cost AS estimatedCost, actual_cost AS actualCost,
          token_usage_json AS tokenUsageJson,
-         origin_run_id AS originRunId, replay_depth AS replayDepth
+         origin_run_id AS originRunId, replay_depth AS replayDepth,
+         base_policy_id AS basePolicyId, base_policy_version AS basePolicyVersion,
+         policy_overrides_json AS policyOverridesJson
   FROM product_intelligence_runs
 `;
 
@@ -934,6 +948,16 @@ export function insertPiAsset(input: {
 export function listPiAssetsByRun(runId: string): PiAssetRow[] {
   const db = getDb();
   return db.query(`${ASSET_SELECT} WHERE run_id = ? ORDER BY created_at ASC`).all(runId) as PiAssetRow[];
+}
+
+/** Round-3 (review finding 5): resolve durable verified asset rows by id,
+ *  independent of run — the terminal bundle cites server-verified asset ids
+ *  and the validator/persistence re-derive authority from these rows. */
+export function getPiAssetsByIds(ids: string[]): PiAssetRow[] {
+  if (ids.length === 0) return [];
+  const db = getDb();
+  const placeholders = ids.map(() => '?').join(', ');
+  return db.query(`${ASSET_SELECT} WHERE id IN (${placeholders})`).all(...ids) as PiAssetRow[];
 }
 
 export function countPiAssets(runId: string): number {

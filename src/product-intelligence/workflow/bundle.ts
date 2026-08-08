@@ -72,17 +72,47 @@ export const ImageQualityStatusSchema = z.enum(['usable', 'low_quality', 'invali
  * source, source path, artifact id, extraction method, and content hash, and
  * primary candidates must satisfy the deterministic commerce-approval rules
  * (see bundle-validator).
+ *
+ * Round-3 (review finding 5): AUTHORITY is never agent-supplied. The
+ * candidate's `verifiedAssetIds` cite durable server-verified asset rows
+ * (persisted by verify_image_candidate); the validator and the persistence
+ * layer re-derive identity, rights, quality, content hash, and
+ * commerce-approval from those rows. The legacy authoritative fields below
+ * (exactProductMatch … commerceApproved) remain only as OPTIONAL fields for
+ * parsing historical bundles; they are never trusted by validation or
+ * persistence.
  */
 export const BundleImageCandidateSchema = z.object({
   sourceId: z.string().min(1),
   sourceArtifactId: z.string().min(1),
   url: z.string().url(),
   role: ImageRoleSchema,
-  /** Exact-product match is a separate decision from exact-variant match. */
-  exactProductMatch: z.boolean(),
-  exactVariantMatch: z.boolean().nullable().default(null),
+  /** Durable server-verified asset row ids (verify_image_candidate output). */
+  verifiedAssetIds: z.array(z.string().min(1)).default([]),
+  // ── Deprecated (round-3): present only for historical bundle parsing ──────
+  // Every field below was previously agent-supplied and authoritative. It is
+  // now IGNORED by validation and persistence; the server resolves the real
+  // values from the cited verified asset rows.
+  /** @deprecated server-derived from verifiedAssetIds */
+  exactProductMatch: z.boolean().optional(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  exactVariantMatch: z.boolean().nullable().optional(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  rightsStatus: ImageRightsStatusSchema.optional(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  rightsBasis: z.string().max(512).nullish(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  rightsEvidenceRef: z.string().max(512).nullish(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  originalContentHash: z.string().min(1).nullish(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  perceptualHash: z.string().nullish(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  qualityStatus: ImageQualityStatusSchema.optional(),
+  /** @deprecated server-derived from verifiedAssetIds */
+  commerceApproved: z.boolean().optional(),
+  // ──────────────────────────────────────────────────────────────────────────
   variantReference: z.string().max(256).nullish(),
-  rightsStatus: ImageRightsStatusSchema,
   // PI-6 provenance and verification fields.
   /** Evidence ids (e.g. verify_image_candidate output) backing this candidate. */
   evidenceIds: z.array(z.string().min(1)).default([]),
@@ -92,16 +122,6 @@ export const BundleImageCandidateSchema = z.object({
   sourcePath: z.string().max(1024).nullish(),
   extractionMethod: ImageExtractionMethodSchema.nullish(),
   retrievedAt: z.string().datetime().nullish(),
-  /** Approved reuse basis; primary images must carry one. */
-  rightsBasis: z.string().max(512).nullish(),
-  rightsEvidenceRef: z.string().max(512).nullish(),
-  /** SHA-256 of the original fetched bytes (from verify/inspect output). */
-  originalContentHash: z.string().min(1).nullish(),
-  /** dHash of the decoded pixels (duplicate detection across runs). */
-  perceptualHash: z.string().nullish(),
-  qualityStatus: ImageQualityStatusSchema.default('usable'),
-  /** Deterministic flag; the validator recomputes it from the candidate fields. */
-  commerceApproved: z.boolean(),
   observedNetContent: NetContentSchema.nullable().default(null),
   observedPackCount: z.number().int().positive().nullable().default(null),
   /** Deterministic visible-package conflict reasons (net content, pack count, ...). */

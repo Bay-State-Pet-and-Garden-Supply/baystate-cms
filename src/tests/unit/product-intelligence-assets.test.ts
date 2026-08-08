@@ -10,6 +10,7 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/23
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { createHash } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -476,6 +477,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
     });
 
     it('binds OCR-method evidence to the image content hash', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
       const record = await verifyImageCandidate(
         {
           url: 'https://cdn.example.com/ocr.png',
@@ -487,7 +489,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
         {
           ...deps(gatewayReturning(solidPng)),
           evidenceResolver: (ids) =>
-            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: 'persisted-content-hash' })),
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
           reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-hash-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
         },
       );
@@ -495,6 +497,32 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(record.extractionMethod).toBe('image_ocr');
       expect(record.originalContentHash).toMatch(/^[0-9a-f]{64}$/);
       expect(record.observationProvenance).toBe('evidence');
+    });
+
+    it('drops OCR evidence whose content hash does not match the bytes being inspected (round-3 adversarial)', async () => {
+      // Evidence recorded against image A (hash X) must never authorize
+      // identity for image B (the current bytes hash differently).
+      const wrongHash = '0'.repeat(64);
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/ocr.png',
+          sourcePageUrl: PAGE,
+          extractionMethod: 'image_ocr',
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-ocr'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: wrongHash })),
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-hash-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
+        },
+      );
+      // The mismatching-hash OCR fact is dropped: provenance falls back to
+      // the decoder and no exact match can be claimed from image A's facts.
+      expect(record.observationProvenance).toBe('decoder');
+      expect(record.exactProductMatch).toBe(false);
+      expect(record.commerceApproved).toBe(false);
     });
 
     it('blocks commerce approval on a net-content conflict even with a reuse grant', async () => {

@@ -18,7 +18,7 @@ import { createRequire } from 'node:module';
 import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
 import { parseNetContent, verifyImageCandidate } from '../assets/verification';
 import { discoverCandidates } from '../assets/discovery';
-import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation } from '../assets/schema';
+import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation, ProductAssetEvidence } from '../assets/schema';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { boundedString } from './registry';
@@ -129,7 +129,13 @@ export const verifyImageCandidateTool: PiToolAdapter = {
           { id: evidenceId('verify_image_candidate', url), kind: 'image_evidence', url, method: 'image_verification_pipeline', contentHash: evidenceContentHash },
         ]);
       }
-      return okResult(record, [
+      // Round-3 (review finding 5): persist the server-verified record as a
+      // durable asset row so the terminal bundle can cite it (verifiedAssetIds)
+      // and the server can re-derive identity/rights/quality/commerce-approval
+      // from durable fields. Lazy (bun-only): with no DB (vitest) the record
+      // returns without a persisted id (fail closed — nothing to cite).
+      const verifiedAssetId = persistVerifiedAsset(ctx.runId, record);
+      return okResult({ ...record, verifiedAssetId }, [
         {
           id: evidenceId('verify_image_candidate', url),
           kind: 'image_evidence',
@@ -331,5 +337,114 @@ function loadReuseGrantResolver(workspaceId: string): (sourceTier: string, domai
 }
 
 export const imageTools: PiToolAdapter[] = [verifyImageCandidateTool, discoverImageCandidatesTool];
+
+// ---------------------------------------------------------------------------
+// Round-3 (review finding 5): durable persistence of server-verified records.
+// The terminal bundle cites these asset row ids; the validator and the
+// persistence layer re-derive authority from the rows (never from agent
+// claims). Lazy require — real runs execute under bun; with no DB (vitest)
+// persistence is skipped and verifiedAssetId is null (nothing to cite).
+// ---------------------------------------------------------------------------
+interface LazySourceRow {
+  id: string;
+  url: string;
+}
+
+let _assetStore:
+  | {
+      insertPiSource: (input: Record<string, unknown>) => LazySourceRow;
+      listPiSources: (runId: string) => LazySourceRow[];
+      insertPiAsset: (input: Record<string, unknown>) => { id: string };
+    }
+  | null
+  | undefined;
+
+function loadAssetStore(): NonNullable<typeof _assetStore> | null {
+  if (_assetStore !== undefined) return _assetStore ?? null;
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) {
+      _assetStore = null;
+      return null;
+    }
+  } catch {
+    _assetStore = null;
+    return null;
+  }
+  try {
+    _assetStore = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _assetStore>;
+    return _assetStore;
+  } catch {
+    _assetStore = null;
+    return null;
+  }
+}
+
+function domainOfUrl(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return 'unknown';
+  }
+}
+
+/** Persist the server-verified record as a durable asset row; returns the
+ *  row id (the id the terminal bundle cites in verifiedAssetIds) or null
+ *  when no DB is available. Only usable records are persisted (invalid
+ *  images are never primary material and carry no id to cite). */
+function persistVerifiedAsset(runId: string, record: ProductAssetEvidence): string | null {
+  const store = loadAssetStore();
+  if (!store) return null;
+  try {
+    const existing = store.listPiSources(runId).find((source) => source.url === record.sourceUrl);
+    const source =
+      existing ??
+      (store.insertPiSource({
+        runId,
+        url: record.sourceUrl,
+        domain: domainOfUrl(record.sourceUrl),
+        sourceType: record.sourceType,
+        gtinMatchStatus: record.exactProductMatch ? 'exact' : 'unknown',
+        variantMatchStatus: record.exactVariantMatch === true ? 'exact' : record.exactVariantMatch === false ? 'conflicting' : 'unknown',
+        retrievedAt: record.retrievedAt ?? null,
+        licenseRef: record.rightsEvidenceRef ?? null,
+        termsRef: record.rightsBasis ?? null,
+      }) as LazySourceRow);
+    const asset = store.insertPiAsset({
+      runId,
+      sourceId: source.id,
+      sourceUrl: record.sourceUrl,
+      sourcePageUrl: record.sourcePageUrl ?? null,
+      sourceType: record.sourceType,
+      sourcePath: record.sourcePath ?? null,
+      sourceArtifactId: record.sourceArtifactId ?? null,
+      extractionMethod: record.extractionMethod ?? 'manual',
+      retrievedAt: record.retrievedAt ?? new Date().toISOString(),
+      originalContentHash: record.originalContentHash,
+      perceptualHash: record.perceptualHash ?? null,
+      variantReference: record.variantReference ?? null,
+      rightsStatus: record.rightsStatus,
+      rightsBasis: record.rightsBasis ?? null,
+      rightsEvidenceRef: record.rightsEvidenceRef ?? null,
+      observedBrand: record.observedBrand ?? null,
+      observedProductName: record.observedProductName ?? null,
+      observedVariant: record.observedVariant ?? null,
+      observedNetContent: record.observedNetContent ?? null,
+      observedPackCount: record.observedPackCount ?? null,
+      observedGtin: record.observedGtin ?? null,
+      exactProductMatch: record.exactProductMatch,
+      exactVariantMatch: record.exactVariantMatch ?? null,
+      qualityStatus: record.qualityStatus,
+      commerceApproved: record.commerceApproved,
+      conflicts: record.conflicts ?? [],
+      payload: record,
+    }) as { id: string };
+    return asset.id;
+  } catch {
+    // Persistence is best-effort at the tool boundary; a failure here must
+    // never surface as a verification error (the record is still returned).
+    return null;
+  }
+}
 
 export { parseNetContent };

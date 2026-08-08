@@ -11,7 +11,7 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { getPiRun, getPiResult, listPiAssetsByRun, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, getPiRun, getPiResult, insertPiAsset, insertPiSource, listPiAssetsByRun, listPiConflicts } from '../../db/repositories/product-intelligence-repo';
 import { startProductIntelligenceRun } from '../../product-intelligence/run-service';
 import { buildDefaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
@@ -41,6 +41,7 @@ function validPrimaryImage(overrides: Partial<BundleImageCandidate> = {}): Bundl
     sourceArtifactId: 'a1',
     url: 'https://cdn.example.com/primary.jpg',
     role: 'primary',
+    verifiedAssetIds: [],
     exactProductMatch: true,
     exactVariantMatch: true,
     variantReference: null,
@@ -61,6 +62,58 @@ function validPrimaryImage(overrides: Partial<BundleImageCandidate> = {}): Bundl
     conflicts: [],
     ...overrides,
   };
+}
+
+/** Round-3: seed a DURABLE server-verified asset row (the authority a
+ *  terminal candidate must cite). Returns the row id. The row's fields are
+ *  what validation/persistence derive from — the candidate's own claims are
+ *  ignored. A real run row backs the asset (FK to product_intelligence_runs). */
+let _seedRunId: string | null = null;
+function seedRunId(): string {
+  if (!_seedRunId) {
+    _seedRunId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: '{}',
+      policyJson: '{}',
+      configSnapshotId: 'seed',
+      configSnapshotHash: 'seed',
+    }).id;
+  }
+  return _seedRunId;
+}
+function seedVerifiedAssetRow(overrides: Record<string, unknown> = {}): string {
+  const backingRunId = seedRunId();
+  const source = insertPiSource({
+    runId: backingRunId,
+    url: 'https://cdn.example.com/primary.jpg',
+    domain: 'cdn.example.com',
+    sourceType: 'supplier',
+    licenseRef: 'grant:supplier@cdn.example.com',
+    termsRef: 'supplier_authorized_asset',
+  });
+  const asset = insertPiAsset({
+    runId: backingRunId,
+    sourceId: source.id,
+    sourceUrl: 'https://cdn.example.com/primary.jpg',
+    sourceType: 'supplier',
+    sourceArtifactId: 'a1',
+    extractionMethod: 'image_ocr',
+    retrievedAt: '2026-08-05T00:00:00.000Z',
+    originalContentHash: 'a'.repeat(64),
+    perceptualHash: 'deadbeef',
+    rightsStatus: 'approved',
+    rightsBasis: 'grant:supplier@cdn.example.com',
+    rightsEvidenceRef: 'grant:supplier@cdn.example.com',
+    exactProductMatch: true,
+    exactVariantMatch: true,
+    qualityStatus: 'usable',
+    commerceApproved: true,
+    conflicts: [],
+    ...(overrides as object),
+  });
+  return asset.id;
 }
 
 function exactMatchBundle(overrides: Record<string, unknown> = {}): ProductResearchBundle {
@@ -123,7 +176,7 @@ class StubExtractionContract implements PageExtractionContract {
 // ---------------------------------------------------------------------------
 
 type WorkflowScenario =
-  | { kind: 'success' }
+  | { kind: 'success'; verifiedAssetId?: string }
   | { kind: 'parent_page_only' }
   | { kind: 'wrong_variant' }
   | { kind: 'conflicting_size'; submitResearchComplete: boolean }
@@ -241,14 +294,21 @@ class WorkflowFixtureExecutor implements ProductIntelligenceExecutor {
             this.scenario.kind === 'invalid_taxonomy_id'
               ? [{ targetId: 'pt-invented', selectedOptionId: 'pt-invented', evidenceIds: [pageEvidenceId], disposition: 'proposed' }]
               : [],
-          imageCandidates: [
-            validPrimaryImage({
-              evidenceIds: [pageEvidenceId],
-              sourcePageUrl: url,
-              observedNetContent: { value: 16, unit: 'oz' },
-              observedPackCount: 1,
-            }),
-          ],
+          // Only the success scenario proposes a primary image (and only by
+          // citing a durable verified asset); the failure scenarios keep the
+          // bundle focused on the identity/taxonomy assertions they test.
+          imageCandidates:
+            this.scenario.kind === 'success'
+              ? [
+                  validPrimaryImage({
+                    verifiedAssetIds: this.scenario.verifiedAssetId ? [this.scenario.verifiedAssetId] : [],
+                    evidenceIds: [pageEvidenceId],
+                    sourcePageUrl: url,
+                    observedNetContent: { value: 16, unit: 'oz' },
+                    observedPackCount: 1,
+                  }),
+                ]
+              : [],
           conflicts,
           disposition:
             this.scenario.kind === 'conflicting_size'
@@ -324,9 +384,13 @@ describe('PI-4 workflow fixtures through the full stack', () => {
   }
 
   it('completes a research_complete run for an exact-match page (fixture passes terminal schema)', async () => {
+    // Round-3: the terminal image cites a DURABLE server-verified asset row;
+    // the persisted asset derives its identity/rights/commerce fields from
+    // that row, never from agent-supplied claims.
+    const verifiedId = seedVerifiedAssetRow();
     const contract = new StubExtractionContract();
     contract.results.set(`https://brand.example.com/p/${GTIN}`, pageResult({ url: `https://brand.example.com/p/${GTIN}`, gtins: [{ value: GTIN, method: 'meta' }], identityStatus: 'exact_match', identityReasons: ['exact GTIN present'] }));
-    const runId = await runScenario(contract, { kind: 'success' });
+    const runId = await runScenario(contract, { kind: 'success', verifiedAssetId: verifiedId });
 
     expect(getPiRun(runId)?.status).toBe('completed');
     const result = getPiResult(runId);
@@ -334,13 +398,31 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     const parsed = JSON.parse(result!.resultJson) as ProductResearchResult;
     expect(isWorkflowSubmission(parsed.submission)).toBe(true);
     expect(parsed.submission && 'disposition' in parsed.submission && parsed.submission.disposition).toBe('research_complete');
-    // The valid primary image candidate is persisted as a durable asset record
-    // with commerce approval and rights provenance (PI-6).
+    // The primary image candidate is persisted ONLY because it cites the
+    // durable verified asset row — and its authoritative fields are the
+    // row's server-side values, not the candidate's claims.
     const assets = listPiAssetsByRun(runId);
     expect(assets.length).toBe(1);
     expect(assets[0].rightsStatus).toBe('approved');
     expect(assets[0].commerceApproved).toBe(1);
-    expect(assets[0].rightsEvidenceRef).toBe('ev:supplier-1');
+    expect(assets[0].rightsEvidenceRef).toBe('grant:supplier@cdn.example.com');
+    expect(assets[0].exactProductMatch).toBe(1);
+  });
+
+  it('blocks a fabricated terminal image candidate whose verified asset does not exist (round-3 adversarial)', async () => {
+    const contract = new StubExtractionContract();
+    contract.results.set(`https://brand.example.com/p/${GTIN}`, pageResult({ url: `https://brand.example.com/p/${GTIN}`, gtins: [{ value: GTIN, method: 'meta' }], identityStatus: 'exact_match', identityReasons: ['exact GTIN present'] }));
+    const runId = await runScenario(contract, {
+      kind: 'success',
+      // Made-up asset id + the candidate's own plausible-looking claims —
+      // none of it resolves to a durable verified record.
+      verifiedAssetId: 'made-up-verified-asset-id',
+    });
+    const run = getPiRun(runId);
+    // The validator rejects the fabricated primary (no resolvable durable
+    // asset) so the run fails validation and nothing is persisted.
+    expect(run?.status).toBe('failed');
+    expect(listPiAssetsByRun(runId).length).toBe(0);
   });
 
   it('blocks parent-product-only pages submitted as research_complete (validation_error)', async () => {
@@ -407,7 +489,7 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(validateTerminalSubmission(resolved, GTIN, wsId).valid).toBe(true);
   });
 
-  it('rejects invented taxonomy ids and unknown-rights primary images', () => {
+  it('rejects invented taxonomy ids and uncited primary images', () => {
     const bundle = {
       schemaVersion: 1,
       gtin: GTIN,
@@ -416,7 +498,7 @@ describe('PI-4 workflow fixtures through the full stack', () => {
       commerceFacts: [],
       classificationProposals: [{ targetId: 'pt-invented', selectedOptionId: 'pt-invented', evidenceIds: ['ev-1'], disposition: 'proposed' }],
       imageCandidates: [
-        { sourceId: 's1', sourceArtifactId: 'a1', url: 'https://x.example/i.jpg', role: 'primary', exactProductMatch: true, exactVariantMatch: null, variantReference: null, rightsStatus: 'unknown' },
+        { sourceId: 's1', sourceArtifactId: 'a1', url: 'https://x.example/i.jpg', role: 'primary', exactProductMatch: true, exactVariantMatch: null, variantReference: null, rightsStatus: 'unknown', verifiedAssetIds: [] },
       ],
       conflicts: [],
       disposition: 'research_complete',
@@ -424,7 +506,8 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(false);
     expect(validation.issues.join(' ')).toContain('pt-invented');
-    expect(validation.issues.join(' ')).toContain('rights');
+    // Round-3: an uncited primary fails even when its claims look plausible.
+    expect(validation.issues.join(' ')).toContain('verified asset id');
   });
 
   it('accepts valid taxonomy proposals against seeded config', () => {
@@ -434,92 +517,85 @@ describe('PI-4 workflow fixtures through the full stack', () => {
     expect(validateTerminalSubmission(bundle, GTIN, wsId).valid).toBe(true);
   });
 
-  it('accepts a valid primary image candidate (PI-6)', () => {
-    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage()] });
+  it('accepts a valid primary image candidate citing a durable verified asset (PI-6, round-3)', () => {
+    const verifiedId = seedVerifiedAssetRow();
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] })] });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(true);
     expect(validation.issues).toEqual([]);
   });
 
-  it('blocks parent-product-only images as primary (exactVariantMatch false)', () => {
-    const bundle = exactMatchBundle({
-      imageCandidates: [validPrimaryImage({ exactVariantMatch: false, commerceApproved: false })],
-    });
+  it('rejects a fabricated primary image citing a nonexistent verified asset (round-3 adversarial)', () => {
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: ['made-up-asset-id'] })] });
+    const validation = validateTerminalSubmission(bundle, GTIN, wsId);
+    expect(validation.valid).toBe(false);
+    expect(validation.issues.join(' ')).toContain('no resolvable durable verified asset');
+  });
+
+  it('blocks parent-product-only verified assets as primary (exactVariantMatch false)', () => {
+    const verifiedId = seedVerifiedAssetRow({ exactVariantMatch: false, commerceApproved: false });
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] })] });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(false);
     expect(validation.issues.join(' ')).toContain('exact variant');
   });
 
-  it('blocks primary images with conflicting visible-package evidence', () => {
-    const bundle = exactMatchBundle({
-      imageCandidates: [validPrimaryImage({ conflicts: ['pack_count_mismatch: observed pack count 2 vs expected 1'], commerceApproved: false })],
-    });
+  it('blocks primary verified assets with conflicting visible-package evidence', () => {
+    const verifiedId = seedVerifiedAssetRow({ conflicts: ['pack_count_mismatch: observed pack count 2 vs expected 1'], commerceApproved: false });
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] })] });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(false);
     expect(validation.issues.join(' ')).toContain('conflicting visible-package evidence');
   });
 
-  it('rejects a commerceApproved assertion that does not match the verified status', () => {
-    const bundle = exactMatchBundle({
-      imageCandidates: [validPrimaryImage({ conflicts: ['pack_count_mismatch'], commerceApproved: true })],
-    });
+  it('rejects a verified asset whose stored commerce approval contradicts its own fields', () => {
+    // The row's fields recompute to approved, but the row was persisted with
+    // commerceApproved false — a contradiction that must surface.
+    const verifiedId = seedVerifiedAssetRow({ commerceApproved: false });
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] })] });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(false);
-    expect(validation.issues.join(' ')).toContain('commerceApproved assertion');
+    expect(validation.issues.join(' ')).toContain('stored commerce approval');
   });
 
   it('rejects more than one primary image', () => {
+    const verifiedId = seedVerifiedAssetRow();
     const bundle = exactMatchBundle({
-      imageCandidates: [validPrimaryImage(), validPrimaryImage({ url: 'https://cdn.example.com/second.jpg' })],
+      imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] }), validPrimaryImage({ url: 'https://cdn.example.com/second.jpg', verifiedAssetIds: [verifiedId] })],
     });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(false);
     expect(validation.issues.join(' ')).toContain('at most one primary image');
   });
 
-  it('rejects a primary image without a content hash (missing extraction provenance)', () => {
-    const bundle = exactMatchBundle({
-      imageCandidates: [validPrimaryImage({ originalContentHash: undefined, commerceApproved: false })],
-    });
+  it('rejects a verified asset without a content hash (missing extraction provenance)', () => {
+    const verifiedId = seedVerifiedAssetRow({ originalContentHash: '' });
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] })] });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(false);
-    expect(validation.issues.join(' ')).toContain('content hash');
+    expect(validation.issues.join(' ')).toContain('no content hash');
   });
 
-  it('blocks a retailer-sourced primary without an explicit approved basis (retailer-only image)', () => {
-    const bundle = exactMatchBundle({
-      imageCandidates: [
-        validPrimaryImage({
-          rightsStatus: 'retailer_authorized',
-          rightsBasis: undefined,
-          rightsEvidenceRef: undefined,
-          commerceApproved: false,
-        }),
-      ],
-    });
+  it('blocks a primary verified asset whose rights are not approved (no durable reuse grant)', () => {
+    const verifiedId = seedVerifiedAssetRow({ rightsStatus: 'restricted', rightsBasis: null, rightsEvidenceRef: null, commerceApproved: false });
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] })] });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(false);
-    expect(validation.issues.join(' ')).toContain('rights basis and evidence reference');
+    expect(validation.issues.join(' ')).toContain('not approved');
   });
 
-  it('accepts a retailer-sourced primary WITH an explicit approved basis and reference', () => {
-    const bundle = exactMatchBundle({
-      imageCandidates: [
-        validPrimaryImage({
-          rightsStatus: 'retailer_authorized',
-          rightsBasis: 'retailer_explicit_permission',
-          rightsEvidenceRef: 'ev:retailer-license-1',
-        }),
-      ],
-    });
+  it('accepts a primary verified asset with an approved rights grant', () => {
+    const verifiedId = seedVerifiedAssetRow();
+    const bundle = exactMatchBundle({ imageCandidates: [validPrimaryImage({ verifiedAssetIds: [verifiedId] })] });
     const validation = validateTerminalSubmission(bundle, GTIN, wsId);
     expect(validation.valid).toBe(true);
   });
 
   it('accepts alternate/retailer images without blocking (non-primary roles unconstrained)', () => {
+    const verifiedId = seedVerifiedAssetRow();
     const bundle = exactMatchBundle({
       imageCandidates: [
-        validPrimaryImage(),
+        validPrimaryImage({ verifiedAssetIds: [verifiedId] }),
         {
           sourceId: 's2',
           sourceArtifactId: 'a2',

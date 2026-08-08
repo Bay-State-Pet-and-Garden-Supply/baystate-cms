@@ -469,11 +469,14 @@ router.post('/product-intelligence/runs/:id/review', async (c) => {
   if (decision !== 'approve' && decision !== 'reject') {
     return c.json({ error: "decision must be 'approve' or 'reject'" }, 400);
   }
-  // Review finding 8: reviewer identity is NEVER client-asserted. The only
-  // auth boundary is the optional shared API token on mutating routes — a
-  // caller-typed string is a display label, not an authenticated identity.
-  const authHeader = c.req.header('Authorization');
-  const authentication = authHeader !== undefined && authHeader.startsWith('Bearer ') ? 'shared_api_token' : 'local_ui';
+  // Review finding 8 (round 3): reviewer identity is NEVER client-asserted.
+  // 'shared_api_token' is claimed ONLY when a token is actually configured
+  // AND the request presented it — a fake bearer header with no configured
+  // token must not inflate the audit record.
+  const configuredToken = process.env.BAYSTATE_CMS_API_TOKEN;
+  const authHeader = c.req.header('Authorization') ?? '';
+  const authenticatedWithToken = configuredToken !== undefined && configuredToken !== '' && authHeader === `Bearer ${configuredToken}`;
+  const authentication = authenticatedWithToken ? 'shared_api_token' : 'local_ui';
   const reviewerJson = JSON.stringify({
     actorType: 'local_operator',
     actorId: null,

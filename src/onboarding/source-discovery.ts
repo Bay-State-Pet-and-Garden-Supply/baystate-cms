@@ -57,6 +57,10 @@ interface SerperResponse {
   searchParameters?: { q: string };
 }
 
+/** Minimal structural fetch signature — lets Product Intelligence inject the
+ *  policy-gateway bound transport (P0-1); onboarding keeps the global fetch. */
+type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 /**
  * Discover candidate product page URLs using Serper.dev.
  *
@@ -74,6 +78,13 @@ export async function discoverSources(
     price?: number | null;
     existingExpectedName?: string | null;
     existingUpcCandidates?: OnboardingSource[] | null;
+    /**
+     * P0-1 (round 3): injected transport so Product Intelligence can bind
+     * every HTTP call in the discovery chain (Serper, sitemap, variant-page
+     * fetches) to the policy gateway. The onboarding pipeline keeps the
+     * default global fetch.
+     */
+    networkFetch?: NetworkFetch;
   }
 ): Promise<{
   candidates: InsertSourceData[];
@@ -106,7 +117,7 @@ export async function discoverSources(
   // Otherwise, we'll kick it off dynamically after brand/domain inference.
   let primaryDomain: string | null = activeBrandDomains[0] ?? null;
   let sitemapFetchPromise: Promise<SitemapFetched | null> = primaryDomain
-    ? fetchSitemapForDiscovery(primaryDomain)
+    ? fetchSitemapForDiscovery(primaryDomain, options?.networkFetch)
     : Promise.resolve(null);
 
   // ── Pass 1: Bare UPC search ───────────────────────────────────────────
@@ -122,7 +133,7 @@ export async function discoverSources(
     }));
   } else {
     try {
-      upcResults = await searchSerper(apiKeyRow.api_key, upc);
+      upcResults = await searchSerper(apiKeyRow.api_key, upc, options?.networkFetch);
     } catch (err) {
       console.error(`[SourceDiscovery] Pass 1 UPC search failed:`, err);
     }
@@ -166,7 +177,7 @@ export async function discoverSources(
       // If we now have a domain, fetch sitemap in parallel
       primaryDomain = activeBrandDomains[0] ?? null;
       if (primaryDomain) {
-        sitemapFetchPromise = fetchSitemapForDiscovery(primaryDomain);
+        sitemapFetchPromise = fetchSitemapForDiscovery(primaryDomain, options?.networkFetch);
       }
     } else {
       console.log(`[SourceDiscovery] ✗ Could not infer brand for UPC ${upc}. Proceeding without brand.`);
@@ -324,7 +335,7 @@ export async function discoverSources(
           // Sleep slightly to avoid Serper rate-limiting
           await new Promise(r => setTimeout(r, 200));
 
-          const results = await searchSerper(apiKeyRow.api_key, q.query);
+          const results = await searchSerper(apiKeyRow.api_key, q.query, options?.networkFetch);
           for (const result of results) {
             if (seenUrls.has(result.link)) continue;
             seenUrls.add(result.link);
@@ -367,6 +378,9 @@ export async function discoverSources(
     brandHint: activeBrandHint ?? null,
     brandDomains: activeBrandDomains,
     price: options?.price,
+    // P0-1 (round 3): the variant resolver's page fetches ride the same
+    // injected transport as the Serper + sitemap calls above.
+    fetchFn: options?.networkFetch,
   });
 
   // Sort by confidence descending
@@ -416,14 +430,17 @@ export async function discoverSources(
 /**
  * Execute a Serper.dev search query.
  */
-async function searchSerper(apiKey: string, query: string): Promise<SerperSearchResult[]> {
+async function searchSerper(apiKey: string, query: string, networkFetch?: NetworkFetch): Promise<SerperSearchResult[]> {
   const cached = getCachedSerperResults(query);
   if (cached) {
     console.log(`[SourceDiscovery] Using cached Serper results for query: "${query}"`);
     return cached;
   }
 
-  const response = await fetch('https://google.serper.dev/search', {
+  // P0-1 (round 3): the real Serper HTTP rides the injected transport when
+  // provided (PI callers bind it to the policy gateway); the onboarding
+  // pipeline keeps the default global fetch.
+  const response = await (networkFetch ?? fetch)('https://google.serper.dev/search', {
     method: 'POST',
     headers: {
       'X-API-KEY': apiKey,
@@ -640,6 +657,7 @@ interface SitemapFetched {
  */
 async function fetchSitemapForDiscovery(
   domain: string,
+  networkFetch?: NetworkFetch,
 ): Promise<SitemapFetched | null> {
   try {
     const cached = getCachedSitemapUrls(domain);
@@ -655,7 +673,9 @@ async function fetchSitemapForDiscovery(
     // Cache miss — fetch (and best-effort cache) the sitemap.
     const profile = findProfileByDomain(domain);
     const productUrlPattern = profile?.sitemapProductUrlPattern ?? null;
-    const result = await fetchAndParseSitemap(domain, productUrlPattern);
+    // P0-1 (round 3): thread the injected transport into the sitemap fetcher
+    // (it already accepts fetchFn); default = global fetch for onboarding.
+    const result = await fetchAndParseSitemap(domain, productUrlPattern, networkFetch);
     if (result.urls.length > 0) {
       try {
         insertSitemapCache(domain, result.urls, result.sourceUrl);

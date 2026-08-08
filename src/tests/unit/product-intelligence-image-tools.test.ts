@@ -8,6 +8,7 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/23
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { createHash } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
@@ -122,7 +123,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       targetField: 'gtin',
       value: '036000291452',
       extractionMethod: 'image_ocr',
-      metadata: { contentHash: 'ocr-content-hash' },
+      metadata: { contentHash: createHash('sha256').update(png).digest('hex') },
     });
     insertPiEvidence({
       runId: run.id,
@@ -188,7 +189,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       targetField: 'gtin',
       value: '036000291452',
       extractionMethod: 'image_ocr',
-      metadata: { contentHash: 'ocr-content-hash' },
+      metadata: { contentHash: createHash('sha256').update(png).digest('hex') },
     });
     insertPiEvidence({
       runId: run.id,
@@ -252,7 +253,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       targetField: 'gtin',
       value: '036000291452',
       extractionMethod: 'image_ocr',
-      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456', contentHash: 'ocr-content-hash' },
+      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456', contentHash: createHash('sha256').update(png).digest('hex') },
     });
     insertPiEvidence({
       runId: run.id,

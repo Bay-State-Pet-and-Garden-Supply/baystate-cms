@@ -367,6 +367,30 @@ export function importRunToOnboarding(
   });
 }
 
+export interface PiReviewerActor {
+  actorType: string;
+  authentication: string;
+  displayLabel: string | null;
+}
+
+/** Parse the server-stored reviewer (JSON actor object; tolerate legacy plain strings). */
+function parseReviewerActor(reviewer: string): PiReviewerActor {
+  try {
+    const parsed: unknown = JSON.parse(reviewer);
+    if (parsed && typeof parsed === 'object') {
+      const actor = parsed as Record<string, unknown>;
+      return {
+        actorType: typeof actor.actorType === 'string' ? actor.actorType : 'unknown',
+        authentication: typeof actor.authentication === 'string' ? actor.authentication : 'unknown',
+        displayLabel: typeof actor.displayLabel === 'string' ? actor.displayLabel : null,
+      };
+    }
+  } catch {
+    // fall through to legacy plain-string handling
+  }
+  return { actorType: 'unknown', authentication: 'unknown', displayLabel: reviewer };
+}
+
 export interface PiReviewDecision {
   id: string;
   runId: string;
@@ -374,6 +398,8 @@ export interface PiReviewDecision {
   resultHash: string;
   supersedesDecisionId: string | null;
   reviewer: string;
+  /** Structured reviewer actor (parsed from the server-side JSON). */
+  reviewerActor: PiReviewerActor;
   note: string | null;
   createdAt: string;
 }
@@ -384,20 +410,30 @@ export interface PiRunReviewState {
   approved: boolean;
 }
 
+/** Hydrate a raw wire decision (reviewer is a JSON string) with the parsed actor. */
+function hydrateReviewDecision(raw: PiReviewDecision): PiReviewDecision {
+  return { ...raw, reviewerActor: parseReviewerActor(raw.reviewer) };
+}
+
 /** POST /product-intelligence/runs/:id/review — durable approve/reject (P1-2). */
-export function reviewPiRun(
+export async function reviewPiRun(
   runId: string,
   body: { decision: 'approve' | 'reject'; reviewer: string; note?: string },
 ): Promise<{ decision: PiReviewDecision }> {
-  return request<{ decision: PiReviewDecision }>(`/product-intelligence/runs/${encodeURIComponent(runId)}/review`, {
+  const res = await request<{ decision: PiReviewDecision }>(`/product-intelligence/runs/${encodeURIComponent(runId)}/review`, {
     method: 'POST',
     body: JSON.stringify(body),
   });
+  return { decision: hydrateReviewDecision(res.decision) };
 }
 
 /** GET /product-intelligence/runs/:id/review — latest decision + approval state. */
-export function getPiRunReview(runId: string): Promise<PiRunReviewState> {
-  return request<PiRunReviewState>(`/product-intelligence/runs/${encodeURIComponent(runId)}/review`);
+export async function getPiRunReview(runId: string): Promise<PiRunReviewState> {
+  const res = await request<PiRunReviewState>(`/product-intelligence/runs/${encodeURIComponent(runId)}/review`);
+  return {
+    ...res,
+    decision: res.decision ? hydrateReviewDecision(res.decision) : null,
+  };
 }
 
 

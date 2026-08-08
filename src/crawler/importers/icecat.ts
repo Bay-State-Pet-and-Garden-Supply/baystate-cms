@@ -45,10 +45,16 @@ export async function fetchOpenIcecatByGtin(
 
   const icecatUser = username || 'OpenIcecatUser';
 
-  // Try GreenCore/icecat SDK first
-  try {
-    const client = new Icecat(icecatUser, 'dummy_password');
-    const product = await client.openCatalog.getProduct('EN', cleanGtin);
+  // Try GreenCore/icecat SDK first — ONLY when no transport was injected.
+  // The SDK owns its HTTP internally (client.openCatalog.getProduct) and
+  // cannot be policy-gated, so Product Intelligence callers (which always
+  // pass a gateway-bound fetchFn) bypass it entirely and use the REST
+  // endpoint through the injected transport. The onboarding/crawler path
+  // keeps the SDK behaviour unchanged.
+  if (fetchFn === fetch) {
+    try {
+      const client = new Icecat(icecatUser, 'dummy_password');
+      const product = await client.openCatalog.getProduct('EN', cleanGtin);
 
     if (product && typeof product.getTitle === 'function' && product.getTitle()) {
       const title = product.getTitle();
@@ -89,6 +95,7 @@ export async function fetchOpenIcecatByGtin(
     }
   } catch {
     // Fall back to direct JSON REST endpoint if SDK call throws
+  }
   }
 
   // Fallback to direct REST endpoint

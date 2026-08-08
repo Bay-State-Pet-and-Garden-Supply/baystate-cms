@@ -69,17 +69,21 @@ export function createReviewDecision(input: {
   supersedesDecisionId?: string | null;
 }): PiReviewDecisionRow {
   const db = getDb();
-  const latest = input.supersedesDecisionId === undefined ? getLatestReviewDecision(input.runId) : undefined;
-  const supersedes = input.supersedesDecisionId !== undefined ? input.supersedesDecisionId : (latest?.id ?? null);
-  const id = randomUUID();
-  db.run(
-    `INSERT INTO pi_review_decisions (id, run_id, decision, result_hash, supersedes_decision_id, reviewer, note, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, input.runId, input.decision, input.resultHash, supersedes, input.reviewer, input.note ?? null, now()],
-  );
-  return mapRow(
-    db.query(`${ROW_SELECT} WHERE id = ?`).get(id) as Record<string, unknown>,
-  );
+  // Round-3 atomicity: read-latest + insert inside ONE transaction so two
+  // concurrent reviews can never fork the append-only chain (each insert
+  // sees the linear predecessor and the chain stays a single lineage).
+  const insert = db.transaction((): PiReviewDecisionRow => {
+    const latest = input.supersedesDecisionId === undefined ? getLatestReviewDecision(input.runId) : undefined;
+    const supersedes = input.supersedesDecisionId !== undefined ? input.supersedesDecisionId : (latest?.id ?? null);
+    const id = randomUUID();
+    db.run(
+      `INSERT INTO pi_review_decisions (id, run_id, decision, result_hash, supersedes_decision_id, reviewer, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, input.runId, input.decision, input.resultHash, supersedes, input.reviewer, input.note ?? null, now()],
+    );
+    return mapRow(db.query(`${ROW_SELECT} WHERE id = ?`).get(id) as Record<string, unknown>);
+  });
+  return insert();
 }
 
 /** True iff the LATEST decision for the run approves exactly this result hash. */

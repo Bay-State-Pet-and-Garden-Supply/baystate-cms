@@ -32,6 +32,27 @@ interface Props {
 
 type NarrowTab = 'progress' | 'listing' | 'evidence' | 'review';
 
+const REVIEW_STATE_PREFIX = {
+  approve: 'Approved',
+  reject: 'Rejected',
+} as const;
+
+/** Human label for a durable review decision (structured actor, never raw JSON). */
+function reviewerDisplay(decision: { reviewerActor?: { displayLabel: string | null; authentication: string } }): string {
+  const actor = decision.reviewerActor;
+  if (!actor) return 'unknown reviewer';
+  if (actor.displayLabel && actor.displayLabel.trim() !== '') return actor.displayLabel.trim();
+  return actor.authentication === 'shared_api_token' ? 'API token operator' : 'local operator';
+}
+
+function formatReviewState(decision: {
+  decision: 'approve' | 'reject';
+  reviewerActor?: { displayLabel: string | null; authentication: string };
+  createdAt: string;
+}): string {
+  return `${REVIEW_STATE_PREFIX[decision.decision]} by ${reviewerDisplay(decision)} (${new Date(decision.createdAt).toLocaleString()})`;
+}
+
 export function AgentRunInspector({ runId, onBack }: Props) {
   const { run: projection, error, loading, refresh } = useProductIntelligenceRun(runId);
   const { events } = useProductIntelligenceEvents(runId);
@@ -58,7 +79,7 @@ export function AgentRunInspector({ runId, onBack }: Props) {
         setReviewApproved(res.approved);
         setReviewState(
           res.decision
-            ? `${res.decision.decision === 'approve' ? 'Approved' : 'Rejected'} by ${res.decision.reviewer} (${new Date(res.decision.createdAt).toLocaleString()})`
+            ? formatReviewState(res.decision)
             : null,
         );
       })
@@ -167,7 +188,7 @@ export function AgentRunInspector({ runId, onBack }: Props) {
       const res = await reviewPiRun(runId, { decision, reviewer: 'user' });
       setReviewApproved(res.decision.decision === 'approve');
       setReviewState(
-        `${res.decision.decision === 'approve' ? 'Approved' : 'Rejected'} by ${res.decision.reviewer} (${new Date(res.decision.createdAt).toLocaleString()})`,
+        formatReviewState(res.decision),
       );
       refresh();
     } catch (err) {

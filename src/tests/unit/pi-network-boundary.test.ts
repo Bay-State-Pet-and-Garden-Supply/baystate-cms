@@ -31,9 +31,16 @@ import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { discoveryTools } from '../../product-intelligence/tools/discovery-tools';
 import { fetchPageHtml, HTTP_EXTRACTION_HEADERS } from '../../product-intelligence/extraction/platforms';
 import { ManagedFallbackRegistry } from '../../product-intelligence/extraction/managed-fallback';
+import { snapshotRequestFor } from '../../product-intelligence/extraction/wiring';
+import { resolveDestinationAndCheck } from '../../extraction-worker/routes/snapshot';
 import { policyDenied, type PiToolContext } from '../../product-intelligence/tools/contract';
 import type { ProductIntelligencePolicy } from '../../product-intelligence/contracts';
 import { sha256Hex } from '../../shared/stable-id';
+import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import { discoverSources } from '../../onboarding/source-discovery';
+import { fetchOpenIcecatByGtin } from '../../crawler/importers/icecat';
+import { callVlm } from '../../onboarding/vlm-client';
+import { extractPackagingOcr } from '../../onboarding/packaging-ocr';
 
 const workspaceId = 'ws-pi-network-boundary';
 
@@ -131,6 +138,8 @@ describe('P0-1 transitive network boundary', () => {
     { file: 'src/onboarding/variant-url-resolver.ts', needle: 'fetchFn?: NetworkFetch', note: 'resolveVariantsForCandidates' },
     { file: 'src/crawler/importers/icecat.ts', needle: 'fetchFn: NetworkFetch = fetch', note: 'fetchOpenIcecatByGtin' },
     { file: 'src/onboarding/packaging-ocr.ts', needle: 'fetchFn?: NetworkFetch', note: 'extractPackagingOcr params' },
+    { file: 'src/onboarding/source-discovery.ts', needle: 'networkFetch?: NetworkFetch', note: 'discoverSources/searchSerper/sitemap/variant chain' },
+    { file: 'src/onboarding/vlm-client.ts', needle: 'fetchFn: NetworkFetch = fetch', note: 'callVlm model call' },
   ] as const;
 
   it('every network-owning transport accepts an injected fetch', () => {
@@ -152,6 +161,11 @@ describe('P0-1 transitive network boundary', () => {
     expect(discovery).toContain('buildPiNetworkFetch');
     expect(discovery).toContain('fetchAndParseSitemap');
     expect(discovery).toContain('resolveVariantsForCandidates');
+    // Round 3: the discovery chain (search_upc / search_product_name) is
+    // bound end-to-end — discoverSources receives the gateway transport.
+    expect(discovery).toContain('discoverSources');
+    expect(discovery).toContain('discoveryNetworkFetch');
+    expect(discovery).toContain('networkFetch: discoveryNetworkFetch(ctx)');
     // The worker payload schema carries the run's allowed source domains.
     const workerSchema = fs.readFileSync('src/shared/schemas/extraction-worker.ts', 'utf8');
     expect(workerSchema).toContain('sourcesAllowlist');
@@ -211,11 +225,38 @@ describe('P0-1 transitive network boundary', () => {
       const networkCapable = /(?<![a-z_])fetch\(|discoverSources|fetchAndParseSitemap|resolveVariantsForCandidates|extractPackagingOcr|searchSerper/.test(block);
       if (networkCapable) {
         expect(
-          /checkNetworkRequest|gatewayFetch|buildPiNetworkFetch|policyDenied/.test(block),
+          /checkNetworkRequest|gatewayFetch|buildPiNetworkFetch|policyDenied|discoveryNetworkFetch/.test(block),
           `discovery adapter ${tool.name} reaches the network without a gateway gate`,
         ).toBe(true);
       }
     }
+  });
+
+  it('the discovery chain rides the injected transport end-to-end (search_upc spy)', async () => {
+    upsertApiKey('serper', 'test-serper-key');
+    const calls: string[] = [];
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+      fetchFn: async (input) => {
+        calls.push(String(input));
+        return new Response(JSON.stringify({ organic: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    // search_upc under a permissive policy: the pre-check passes and the
+    // DISCOVERY CHAIN's HTTP must ride the gateway's spy — never a raw fetch.
+    const tool = defaultToolRegistry.get('search_upc');
+    const result = await tool!.execute(
+      { gtin: '745801105447', name: 'Feline Wormeze Liquid' },
+      makeCtx({
+        gateway,
+        policy: makePolicy({ dataSharingPolicy: 'cloud_models_and_sources', networkPolicy: 'allowlisted_remote' }),
+      }),
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    // The Serper query rode the gateway spy; every discovery-chain HTTP call
+    // (Serper, candidate variant fetches) went through the spy — none raw.
+    expect(calls[0]).toBe('https://google.serper.dev/search');
+    expect(['no_result', 'ok', 'error']).toContain(result.status);
   });
 });
 
@@ -333,6 +374,26 @@ describe('P0-1 discovery tools fail closed through the policy', () => {
     expect((result as { reason: string }).reason).toMatch(/web search denied/);
   });
 
+  it('search_upc under local_only never invokes the transport (spy fetch uncalled)', async () => {
+    const calls: string[] = [];
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+      fetchFn: async (input) => {
+        calls.push(String(input));
+        return new Response('{}', { status: 200 });
+      },
+    });
+    const tool = defaultToolRegistry.get('search_upc');
+    const result = await tool!.execute(
+      { gtin: '745801105447', name: 'Feline Wormeze Liquid' },
+      makeCtx({ gateway, policy: makePolicy({ dataSharingPolicy: 'local_only', networkPolicy: 'allowlisted_remote' }) }),
+    );
+    expect(result.status).toBe('policy_denied');
+    // Round 3: the denied pre-check stops the call BEFORE the discovery
+    // chain's transport can fire — zero bytes leave the process.
+    expect(calls.length).toBe(0);
+  });
+
   it('search_product_name returns policy_denied under local_only', async () => {
     const tool = defaultToolRegistry.get('search_product_name');
     const result = await tool!.execute({ name: 'Wormeze' }, makeCtx({ policy: makePolicy({ dataSharingPolicy: 'local_only' }) }));
@@ -369,6 +430,116 @@ describe('P0-1 discovery tools fail closed through the policy', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Round 3: discovery-chain, Icecat-SDK, and VLM transport injection
+// ---------------------------------------------------------------------------
+
+describe('P0-1 round-3 transport injection', () => {
+  it('discoverSources performs its Serper HTTP through the injected transport (spy)', async () => {
+    upsertApiKey('serper', 'test-serper-key');
+    const calls: string[] = [];
+    const spy: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (input, _init) => {
+      calls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          organic: [{ title: 'Feline Wormeze Liquid 4 oz', link: 'https://brand.example.com/p/wormeze-4oz', snippet: 'wormer', position: 1 }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const { candidates } = await discoverSources('745801105447', 'Feline Wormeze Liquid', null, {
+      // Skip the LLM name-consolidation call for a deterministic test.
+      existingExpectedName: 'Feline Wormeze Liquid',
+      networkFetch: spy,
+    });
+    expect(calls.length).toBeGreaterThan(0);
+    // The Serper query rode the injected transport; the spy also performs the
+    // variant-resolution fetches (fetchFn threading) — every discovery-chain
+    // HTTP goes through the injected transport, never a raw global fetch.
+    expect(calls.some((url) => url === 'https://google.serper.dev/search')).toBe(true);
+    expect(candidates.length).toBeGreaterThan(0);
+  });
+
+  it('fetchOpenIcecatByGtin with an injected fetch uses the REST path via the spy (SDK skipped)', async () => {
+    const calls: string[] = [];
+    const spy: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (input, _init) => {
+      calls.push(String(input));
+      return new Response(
+        JSON.stringify({
+          data: {
+            GeneralInfo: {
+              Title: 'Feline Wormeze Liquid',
+              Brand: 'Durvet',
+              GTIN: ['745801105447'],
+              Category: { Name: { Value: 'Wormer' } },
+              Description: { LongDesc: 'Cat dewormer' },
+            },
+            Image: { HighPic: 'https://cdn.example.com/wormeze.jpg' },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+    const evidence = await fetchOpenIcecatByGtin('745801105447', 'testuser', spy);
+    expect(evidence).not.toBeNull();
+    expect(evidence?.title).toBe('Feline Wormeze Liquid');
+    expect(calls.length).toBe(1);
+    // The gateway-compatible REST endpoint — NOT the SDK (whose HTTP cannot
+    // be policy-gated).
+    expect(calls[0]).toContain('live.icecat.biz');
+  });
+
+  it('callVlm performs the model HTTP through the injected fetch (spy)', async () => {
+    const calls: string[] = [];
+    const spy: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (input, _init) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ message: { content: '{"productName":"Wormeze"}' } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const content = await callVlm(
+      'extract',
+      'aW1hZ2U=',
+      { baseUrl: 'http://localhost:11434', model: 'qwen2.5vl:latest', enabled: true },
+      spy,
+    );
+    expect(content).toBe('{"productName":"Wormeze"}');
+    expect(calls).toEqual(['http://localhost:11434/api/chat']);
+  });
+
+  it('extractPackagingOcr threads the injected fetch into BOTH the image download and the VLM call', async () => {
+    upsertApiKey('ollama_vlm', 'enabled', 'http://localhost:11434', 'qwen2.5vl:latest');
+    const calls: string[] = [];
+    const spy: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (input, _init) => {
+      calls.push(String(input));
+      const url = String(input);
+      if (url.includes('/api/chat')) {
+        return new Response(JSON.stringify({ message: { content: '{"productName":"Feline Wormeze Liquid"}' } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      // The image download: >= 1KB non-SVG bytes.
+      return new Response(new Uint8Array(2048).fill(7), { status: 200, headers: { 'content-type': 'image/png' } });
+    };
+    const ocr = await extractPackagingOcr({
+      imageUrl: 'https://cdn.example.com/wormeze.jpg',
+      sku: '745801105447',
+      fetchFn: spy,
+    });
+    expect(ocr).not.toBeNull();
+    expect(ocr?.productName).toBe('Feline Wormeze Liquid');
+    expect(calls).toContain('https://cdn.example.com/wormeze.jpg');
+    expect(calls).toContain('http://localhost:11434/api/chat');
+  });
+
+  it('packaging-ocr passes the injected fetch into callVlm (source-level)', () => {
+    const source = fs.readFileSync('src/onboarding/packaging-ocr.ts', 'utf8');
+    expect(source).toContain('callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, fetchFn)');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Transport seams accept the injected (gateway-bound) fetch
 // ---------------------------------------------------------------------------
 
@@ -399,6 +570,40 @@ describe('P0-1 transport seams', () => {
     );
     await registry.fetch('https://shop.example.com/p', new AbortController().signal, 5000);
     expect(typeof receivedFetchFn).toBe('function');
+  });
+
+  // ---------------------------------------------------------------------
+  // Round-3 finding 3: no module-global browser-policy state, and the
+  // extraction-worker DNS check fails closed.
+  // ---------------------------------------------------------------------
+
+  it('per-run snapshot payloads carry their own source allowlist (no shared state)', () => {
+    const runA = snapshotRequestFor({ url: 'https://a.example.com/p', captureNetwork: true }, ['a.example.com']);
+    const runB = snapshotRequestFor({ url: 'https://b.example.com/p', captureNetwork: true }, ['b.example.com']);
+    expect(runA.sourcesAllowlist).toEqual(['a.example.com']);
+    expect(runB.sourcesAllowlist).toEqual(['b.example.com']);
+    // Distinct arrays — a mutation of one run's policy must never leak into
+    // the other run's payload.
+    expect(runA.sourcesAllowlist).not.toBe(runB.sourcesAllowlist);
+    runA.sourcesAllowlist!.push('contaminated.example.com');
+    expect(runB.sourcesAllowlist).toEqual(['b.example.com']);
+  });
+
+  it('no module-scope browser-allowlist state remains in the ladder wiring', async () => {
+    const wiring = await Bun.file('src/product-intelligence/extraction/wiring.ts').text();
+    expect(wiring).not.toContain('snapshotSourcesAllowlist');
+    expect(wiring).not.toContain('setSnapshotSourcesAllowlist');
+  });
+
+  it('extraction-worker DNS destination check fails closed and denies private-resolving hosts', async () => {
+    // A hostname that resolves (via /etc/hosts) to a loopback address.
+    const localhostBlock = await resolveDestinationAndCheck('http://localhost/p');
+    expect(localhostBlock).not.toBeNull();
+    expect(localhostBlock).toContain('private');
+    // NXDOMAIN / resolver failure must DENY, not allow (fail closed).
+    const nxDomainBlock = await resolveDestinationAndCheck('http://no-such-host-round3.invalid/p');
+    expect(nxDomainBlock).not.toBeNull();
+    expect(nxDomainBlock).toContain('fail closed');
   });
 });
 

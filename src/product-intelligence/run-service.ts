@@ -45,6 +45,7 @@ import {
   createPiRun,
   deletePiRun,
   deletePiRunsOlderThan,
+  getPiAssetsByIds,
   getPiResult,
   getPiRun,
   insertPiAsset,
@@ -535,11 +536,14 @@ export async function startProductIntelligenceRun(
     codeCommit: captureCodeCommit(),
     originRunId: input.originRunId ?? null,
     replayDepth: input.originRunId ? (getPiRun(input.originRunId)?.replayDepth ?? 0) + 1 : 0,
+    // Review finding 7 + round-3 atomicity: the run row is BORN with its
+    // approved-policy lineage (base record + reducing overrides) — no
+    // post-insert UPDATE, so reruns reauthorize the base record rather than
+    // a resolved configId that has no approved-policy row.
+    basePolicyId: input.basePolicyId ?? null,
+    basePolicyVersion: input.basePolicyVersion ?? null,
+    policyOverridesJson: input.policyOverridesJson ?? null,
   });
-  // Review finding 7: persist the approved-policy lineage (base record +
-  // reducing overrides) so reruns reauthorize the base record rather than a
-  // resolved configId that has no approved-policy row.
-  setRunPolicyLineage(run.id, input.basePolicyId ?? null, input.basePolicyVersion ?? null, input.policyOverridesJson ?? null);
   activeControllers.set(run.id, controller);
 
   const context: ProductResearchContext = {
@@ -862,58 +866,92 @@ function persistBundleAssets(
   const runRow = getPiRun(runId);
   if (runRow) {
     const pendingBytes = submission.imageCandidates
-      .filter((candidate) => candidate.originalContentHash)
+      .filter((candidate) => (candidate.originalContentHash ?? undefined) !== undefined)
       .reduce((sum, candidate) => sum + JSON.stringify(candidate).length, 0);
     checkPiStorageBudget(runRow.workspaceId, pendingBytes);
   }
   const existingSources = listPiSources(runId);
   for (const candidate of submission.imageCandidates) {
-    if (!candidate.originalContentHash) continue;
-    let source = existingSources.find((s) => s.url === candidate.url);
+    // Round-3 (review finding 5): authority comes ONLY from durable
+    // server-verified asset rows. A candidate whose verifiedAssetIds resolve
+    // to nothing is dropped — agent-supplied identity/rights/commerce claims
+    // are never written into durable asset rows.
+    const verified = getPiAssetsByIds(candidate.verifiedAssetIds ?? []);
+    if (verified.length === 0) {
+      sink.emitDomain('asset.rejected', {
+        url: candidate.url,
+        reason: 'no durable server-verified asset resolves from the cited ids',
+      });
+      continue;
+    }
+    const v = verified[0];
+    let source = existingSources.find((s) => s.id === v.sourceId) ?? existingSources.find((s) => s.url === v.sourceUrl);
     if (!source) {
       source = insertPiSource({
         runId,
-        url: candidate.url,
-        domain: domainOf(candidate.url),
-        sourceType: sourceTypeOf(candidate),
-        gtinMatchStatus: candidate.exactProductMatch ? 'exact' : 'unknown',
-        variantMatchStatus: candidate.exactVariantMatch === true ? 'exact' : candidate.exactVariantMatch === false ? 'conflicting' : 'unknown',
-        retrievedAt: candidate.retrievedAt ?? null,
-        licenseRef: candidate.rightsEvidenceRef ?? null,
-        termsRef: candidate.rightsBasis ?? null,
+        url: v.sourceUrl,
+        domain: domainOf(v.sourceUrl),
+        sourceType: v.sourceType,
+        gtinMatchStatus: v.exactProductMatch ? 'exact' : 'unknown',
+        variantMatchStatus: v.exactVariantMatch === 1 ? 'exact' : v.exactVariantMatch === 0 ? 'conflicting' : 'unknown',
+        retrievedAt: v.retrievedAt ?? null,
+        licenseRef: v.rightsEvidenceRef ?? null,
+        termsRef: v.rightsBasis ?? null,
       });
       existingSources.push(source);
     }
     insertPiAsset({
       runId,
       sourceId: source.id,
-      sourceUrl: candidate.url,
-      sourcePageUrl: candidate.sourcePageUrl ?? null,
-      sourceType: source.sourceType,
-      sourcePath: candidate.sourcePath ?? null,
-      sourceArtifactId: candidate.sourceArtifactId,
-      extractionMethod: candidate.extractionMethod ?? 'manual',
-      retrievedAt: candidate.retrievedAt ?? new Date().toISOString(),
-      originalContentHash: candidate.originalContentHash,
-      perceptualHash: candidate.perceptualHash ?? null,
-      variantReference: candidate.variantReference ?? null,
-      rightsStatus: rightsStatusOf(candidate),
-      rightsBasis: candidate.rightsBasis ?? null,
-      rightsEvidenceRef: candidate.rightsEvidenceRef ?? null,
-      observedNetContent: candidate.observedNetContent ?? null,
-      observedPackCount: candidate.observedPackCount ?? null,
-      exactProductMatch: candidate.exactProductMatch,
-      exactVariantMatch: candidate.exactVariantMatch ?? null,
-      qualityStatus: candidate.qualityStatus ?? 'usable',
-      commerceApproved: candidate.commerceApproved,
-      conflicts: candidate.conflicts ?? [],
+      sourceUrl: v.sourceUrl,
+      sourcePageUrl: v.sourcePageUrl ?? null,
+      sourceType: v.sourceType,
+      sourcePath: v.sourcePath ?? null,
+      sourceArtifactId: v.sourceArtifactId ?? candidate.sourceArtifactId,
+      extractionMethod: v.extractionMethod ?? 'manual',
+      retrievedAt: v.retrievedAt ?? new Date().toISOString(),
+      originalContentHash: v.originalContentHash,
+      perceptualHash: v.perceptualHash ?? null,
+      variantReference: v.variantReference ?? candidate.variantReference ?? null,
+      rightsStatus: v.rightsStatus as 'approved' | 'restricted' | 'unknown',
+      rightsBasis: v.rightsBasis ?? null,
+      rightsEvidenceRef: v.rightsEvidenceRef ?? null,
+      observedBrand: v.observedBrand ?? null,
+      observedProductName: v.observedProductName ?? null,
+      observedVariant: v.observedVariant ?? null,
+      observedNetContent: parseObservedNetContent(v.observedNetContentJson),
+      observedPackCount: v.observedPackCount ?? null,
+      observedGtin: v.observedGtin ?? null,
+      exactProductMatch: !!v.exactProductMatch,
+      exactVariantMatch: v.exactVariantMatch === 1 ? true : v.exactVariantMatch === 0 ? false : null,
+      qualityStatus: v.qualityStatus as 'usable' | 'low_quality' | 'invalid',
+      commerceApproved: !!v.commerceApproved,
+      conflicts: parseConflictsJson(v.conflictsJson),
       payload: candidate,
     });
     sink.emitDomain('asset.added', {
-      sourceUrl: candidate.url,
-      rightsStatus: rightsStatusOf(candidate),
-      commerceApproved: candidate.commerceApproved,
+      sourceUrl: v.sourceUrl,
+      rightsStatus: v.rightsStatus,
+      commerceApproved: !!v.commerceApproved,
     });
+  }
+}
+
+function parseConflictsJson(json: string): string[] {
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseObservedNetContent(json: string | null): unknown {
+  if (!json) return null;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
   }
 }
 
@@ -962,37 +1000,6 @@ export function assetEvidenceFromRow(row: PiAssetRow): ProductAssetEvidence {
     payload: row.payloadJson ? (JSON.parse(row.payloadJson) as Record<string, unknown>) : {},
     createdAt: row.createdAt,
   };
-}
-
-function sourceTypeOf(candidate: { rightsStatus: BundleImageCandidate['rightsStatus'] }): string {
-  switch (candidate.rightsStatus) {
-    case 'supplier_authorized':
-      return 'supplier';
-    case 'manufacturer_authorized':
-      return 'manufacturer';
-    case 'licensed_dataset':
-      return 'registry'; // product_intelligence_sources.source_type vocabulary; rights stay independent
-    case 'retailer_authorized':
-      return 'retailer';
-    default:
-      return 'other';
-  }
-}
-
-// The bundle enum has no 'restricted' member; restricted outcomes (e.g. a
-// retailer without a basis) flatten to 'unknown' here. The verification
-// pipeline itself (verify_image_candidate) DOES express 'restricted' in its
-// asset records — only the agent-submitted bundle path coarsens.
-function rightsStatusOf(candidate: { rightsStatus: BundleImageCandidate['rightsStatus'] }): 'approved' | 'restricted' | 'unknown' {
-  switch (candidate.rightsStatus) {
-    case 'supplier_authorized':
-    case 'manufacturer_authorized':
-    case 'licensed_dataset':
-    case 'retailer_authorized':
-      return 'approved';
-    default:
-      return 'unknown';
-  }
 }
 
 function submissionDisposition(submission: HistoricalTerminalSubmission): 'submitted' | 'abstained' {
@@ -1231,20 +1238,7 @@ export const MAX_PI_REPLAY_DEPTH = 16;
  * or not found.
  */
 
-/** Persist the approved-policy lineage for a run (review finding 7). */
-function setRunPolicyLineage(
-  runId: string,
-  basePolicyId: string | null,
-  basePolicyVersion: number | null,
-  policyOverridesJson: string | null,
-): void {
-  getDb().run(
-    'UPDATE product_intelligence_runs SET base_policy_id = ?, base_policy_version = ?, policy_overrides_json = ? WHERE id = ?',
-    [basePolicyId, basePolicyVersion, policyOverridesJson, runId],
-  );
-}
-
-/** Read the approved-policy lineage for a run (review finding 7). */
+/** Read the approved-policy lineage for a run (review finding 7). *//** Read the approved-policy lineage for a run (review finding 7). */
 function getRunPolicyLineage(
   runId: string,
 ): { basePolicyId: string | null; basePolicyVersion: number | null; policyOverridesJson: string | null } {
@@ -1299,6 +1293,12 @@ export async function replayPiRun(
       extensionVersionsJson: origin.extensionVersionsJson,
       originRunId: origin.id,
       replayDepth: origin.replayDepth + 1,
+      // Round-3 atomicity: deterministic replay inherits the ORIGIN's
+      // approved-policy lineage at insert time (reproduces evidence, not
+      // authority — the lineage is re-evaluated on any real rerun).
+      basePolicyId: origin.basePolicyId ?? null,
+      basePolicyVersion: origin.basePolicyVersion ?? null,
+      policyOverridesJson: origin.policyOverridesJson ?? null,
       status: 'completed',
     });
     // Reconstruct the terminal result from the stored row (deterministic).
@@ -1313,10 +1313,6 @@ export async function replayPiRun(
     // the replayed run's inspector matches the original (new ids, preserved
     // metadata incl. metadata.toolEvidenceId).
     clonePiEvidenceRows(origin.id, replay.id);
-    // Review finding 7: the replay copies the origin's approved-policy
-    // lineage so a rerun-of-replay reauthorizes the same base record.
-    const originLineage = getRunPolicyLineage(origin.id);
-    setRunPolicyLineage(replay.id, originLineage.basePolicyId, originLineage.basePolicyVersion, originLineage.policyOverridesJson);
     appendPiEvent(replay.id, 0, 'replay', {
       mode: 'deterministic',
       originRunId: origin.id,

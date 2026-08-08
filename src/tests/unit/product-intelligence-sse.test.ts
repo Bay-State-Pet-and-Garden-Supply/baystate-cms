@@ -12,7 +12,7 @@ import path from 'node:path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { appendPiEvent, createPiRun, deletePiRun, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { appendPiEvent, createPiRun, deletePiRun, insertPiResult, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
 import app from '../../server/app';
 
 const wsId = 'pi-sse-test-workspace';
@@ -196,5 +196,62 @@ describe('Product Intelligence SSE stream', () => {
     // retention/maintenance-only; reject lives on POST /runs/:id/review.
     const response = await app.request(`http://localhost/api/product-intelligence/runs/${run.id}`, { method: 'DELETE' });
     expect(response.status).toBe(404);
+  });
+
+  it('records honest review actor authentication (round-3): shared_api_token only when a token is configured AND matches', async () => {
+    const run = makeRun();
+    insertPiResult({
+      runId: run.id,
+      schemaVersion: 1,
+      disposition: 'submitted',
+      result: { runId: run.id, outcome: 'submitted', executor: 'pi', executorVersion: '1.0.0', piVersion: '0.83.0', extensionVersions: [], configId: 'cfg', durationMs: 5, submission: null, failure: null, events: [] },
+    });
+    transitionPiRunStatus(run.id, 'completed', {});
+    const url = `http://localhost/api/product-intelligence/runs/${run.id}/review`;
+    const reviewBody = (decision: string) =>
+      JSON.stringify({ decision, reviewer: 'alice', note: 'actor test' });
+
+    // Case 1: token configured + matching bearer → shared_api_token.
+    const prevToken = process.env.BAYSTATE_CMS_API_TOKEN;
+    process.env.BAYSTATE_CMS_API_TOKEN = 'tok-123';
+    try {
+      const res = await app.request(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer tok-123' },
+        body: reviewBody('approve'),
+      });
+      expect(res.status).toBe(201);
+      const data = (await res.json()) as { decision: { reviewer: string } };
+      expect(JSON.parse(data.decision.reviewer).authentication).toBe('shared_api_token');
+    } finally {
+      process.env.BAYSTATE_CMS_API_TOKEN = prevToken;
+    }
+
+    // Case 2: no token configured + fake bearer header → local_ui (never token auth).
+    delete process.env.BAYSTATE_CMS_API_TOKEN;
+    const res2 = await app.request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer faketoken' },
+      body: reviewBody('reject'),
+    });
+    expect(res2.status).toBe(201);
+    const data2 = (await res2.json()) as { decision: { reviewer: string } };
+    expect(JSON.parse(data2.decision.reviewer).authentication).toBe('local_ui');
+
+    // Case 3: no token configured, no header → local_ui.
+    const res3 = await app.request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: reviewBody('approve'),
+    });
+    expect(res3.status).toBe(201);
+    const data3 = (await res3.json()) as { decision: { reviewer: string } };
+    expect(JSON.parse(data3.decision.reviewer).authentication).toBe('local_ui');
+
+    // Linear chain preserved across the three decisions.
+    const latest = await app.request(url);
+    const latestData = (await latest.json()) as { decision: { decision: string; supersedesDecisionId: string | null } };
+    expect(latestData.decision.decision).toBe('approve');
+    expect(latestData.decision.supersedesDecisionId).toBeTruthy();
   });
 });

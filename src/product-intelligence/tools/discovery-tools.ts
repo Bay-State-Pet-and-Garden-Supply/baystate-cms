@@ -20,6 +20,9 @@ import type { InsertSourceData } from '../../db/repositories/onboarding-source-r
 import type { PiToolAdapter, PiToolContext, PiToolEvidence, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { defaultPolicyGateway } from '../policy';
+
+/** Structural fetch signature (mirrors the onboarding transport seams). */
+type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 import { boundedString } from './registry';
 
 function toLeadEvidence(toolName: string, candidates: InsertSourceData[]): PiToolEvidence[] {
@@ -31,6 +34,27 @@ function toLeadEvidence(toolName: string, candidates: InsertSourceData[]): PiToo
     method: c.sourceMethod ?? 'search',
     snippet: c.title ? c.title.slice(0, 200) : undefined,
   }));
+}
+
+/**
+ * P0-1 (round 3): a transport for the discovery chain (Serper + sitemap +
+ * variant-page fetches) bound to the policy gateway, with per-URL data
+ * classification: the Serper endpoint is 'search_query' (denied under
+ * local_only / cloud_models_only at the transport level too, not only via the
+ * pre-check), everything else (sitemap/variant pages) is 'fetched_content'.
+ * The pre-checks in gateSearchQuery/gateSitemapFetch stay as defense-in-depth;
+ * this transport is the actual HTTP boundary.
+ */
+function discoveryNetworkFetch(ctx: PiToolContext): NetworkFetch {
+  const gateway = ctx.gateway ?? defaultPolicyGateway;
+  const netCtx = { runId: ctx.runId, policy: ctx.policy };
+  return async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const isSearch = url.startsWith(SERPER_SEARCH_URL);
+    return gateway.gatewayFetch(netCtx, url, init ?? {}, {
+      dataClassification: isSearch ? 'search_query' : 'fetched_content',
+    });
+  };
 }
 
 /**
@@ -78,7 +102,9 @@ const searchUpc: PiToolAdapter = {
         gtin,
         name || gtin,
         params.brandHint ? String(params.brandHint) : null,
-        {},
+        // P0-1 (round 3): the discovery chain (Serper + sitemap + variant
+        // pages) rides the gateway-bound transport — pre-check + transport.
+        { networkFetch: discoveryNetworkFetch(ctx) },
       );
       if (candidates.length === 0) return noResult(`No search candidates for UPC ${gtin}`);
       return okResult(
@@ -121,7 +147,10 @@ const searchProductName: PiToolAdapter = {
     const gate = await gateSearchQuery(ctx);
     if (!gate.allowed) return policyDenied(gate.reason);
     try {
-      const { candidates } = await discoverSources(gtin || name, name, params.brandHint ? String(params.brandHint) : null, {});
+      const { candidates } = await discoverSources(gtin || name, name, params.brandHint ? String(params.brandHint) : null, {
+        // P0-1 (round 3): same gateway-bound transport as search_upc.
+        networkFetch: discoveryNetworkFetch(ctx),
+      });
       if (candidates.length === 0) return noResult(`No search candidates for "${name.slice(0, 60)}"`);
       return okResult(
         { name, candidates: candidates.slice(0, 20).map((c) => ({ url: c.url, domain: c.domain, title: c.title, sourceMethod: c.sourceMethod })) },

@@ -351,7 +351,7 @@ export async function extractPackagingOcr(
   console.log(`[PackagingOcr] Running OCR on ${sku ?? imageUrl} using ${vlmConfig.model}`);
   let rawResponse: string;
   try {
-    rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig);
+    rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, fetchFn);
   } catch (err: any) {
     console.warn(`[PackagingOcr] VLM call failed for ${sku ?? imageUrl}: ${err.message}`);
     return null;

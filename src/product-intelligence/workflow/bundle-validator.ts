@@ -26,6 +26,7 @@ import {
 } from '../../db/repositories/classification-config-repo';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
 import { computeCommerceApproved } from '../assets/rights';
+import { createRequire } from 'node:module';
 import type {
   IdentityConflictSubmission,
   InsufficientEvidenceSubmission,
@@ -42,6 +43,64 @@ export function isWorkflowSubmission(value: unknown): value is TerminalSubmissio
     'recommendedDisposition' in candidate ||
     ('reason' in candidate && 'actionableNextStep' in candidate)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Round-3 (review finding 5): durable verified-asset resolution for primary
+// images. Lazy require keeps this module importable in vitest (no bun:sqlite
+// in the module graph); with no DB the resolver fails closed — primary images
+// citing anything cannot validate, which is the safe direction.
+// ---------------------------------------------------------------------------
+interface LazyAssetRow {
+  id: string;
+  sourceUrl: string;
+  rightsStatus: 'approved' | 'restricted' | 'unknown';
+  rightsBasis: string | null;
+  rightsEvidenceRef: string | null;
+  originalContentHash: string;
+  perceptualHash: string | null;
+  exactProductMatch: number;
+  exactVariantMatch: number | null;
+  qualityStatus: string;
+  commerceApproved: number;
+  conflictsJson: string;
+}
+
+let _assetRepo: { getPiAssetsByIds: (ids: string[]) => LazyAssetRow[] } | undefined;
+
+const lazyRequire = createRequire(import.meta.url);
+
+function loadAssetRepo(): { getPiAssetsByIds: (ids: string[]) => LazyAssetRow[] } {
+  if (!_assetRepo) {
+    try {
+      const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+      if (!conn.isDbInitialized?.()) {
+        _assetRepo = { getPiAssetsByIds: () => [] };
+        return _assetRepo;
+      }
+    } catch {
+      _assetRepo = { getPiAssetsByIds: () => [] };
+      return _assetRepo;
+    }
+    try {
+      _assetRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
+        getPiAssetsByIds: (ids: string[]) => LazyAssetRow[];
+      };
+    } catch {
+      _assetRepo = { getPiAssetsByIds: () => [] };
+    }
+  }
+  return _assetRepo;
+}
+
+function parseConflicts(conflictsJson: string | null): string[] {
+  if (!conflictsJson) return [];
+  try {
+    const parsed = JSON.parse(conflictsJson);
+    return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 export interface BundleValidationResult {
@@ -118,64 +177,65 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
     }
   }
 
-  // Images (PI-6): primary images must satisfy the deterministic
-  // commerce-approval rules — provenance is preserved, evidence is cited,
-  // rights are established with a referenced basis, and conflicting
-  // visible-package evidence blocks primary use. The commerceApproved flag
-  // the agent asserts is recomputed from the candidate's own fields.
+  // Images (PI-6, round-3): primary-image authority resolves from DURABLE
+  // server-verified asset rows cited by `verifiedAssetIds` — agent-supplied
+  // exactProductMatch/rightsStatus/rightsBasis/rightsEvidenceRef/
+  // originalContentHash/qualityStatus/commerceApproved are IGNORED. The
+  // deterministic commerce-approval rules then re-run over the resolved
+  // server-side fields.
   const primaries = bundle.imageCandidates.filter((image) => image.role === 'primary');
   if (primaries.length > 1) {
     issues.push(`at most one primary image may be proposed (got ${primaries.length})`);
   }
+  const assetRepo = loadAssetRepo();
   for (const image of bundle.imageCandidates) {
     if (image.role !== 'primary') continue;
-    // Defaults are applied by the zod schema at submission time; the validator
-    // itself stays defensive for direct-call paths.
-    const evidenceIds = image.evidenceIds ?? [];
-    const conflicts = image.conflicts ?? [];
-    const qualityStatus = image.qualityStatus ?? 'usable';
-    const exactVariantMatch = image.exactVariantMatch ?? null;
-    if (image.rightsStatus === 'unknown') {
-      issues.push(`primary image ${image.url} has unknown rights status`);
+    const verifiedAssetIds = image.verifiedAssetIds ?? [];
+    if (verifiedAssetIds.length === 0) {
+      issues.push(`primary image ${image.url} cites no verified asset id (authority must resolve from a durable server-verified asset)`);
+      continue;
     }
-    const authorized = ['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized'].includes(image.rightsStatus);
-    if (authorized && (!image.rightsBasis || !image.rightsEvidenceRef)) {
-      issues.push(`primary image ${image.url} declares ${image.rightsStatus} rights without a rights basis and evidence reference`);
+    const assets = assetRepo.getPiAssetsByIds(verifiedAssetIds);
+    if (assets.length === 0) {
+      issues.push(`primary image ${image.url} cites no resolvable durable verified asset (ids: ${verifiedAssetIds.join(', ')})`);
+      continue;
     }
-    if (!image.exactProductMatch) {
-      issues.push(`primary image ${image.url} is not marked as an exact product match`);
+    const verified = assets[0];
+    const rightsStatus = verified.rightsStatus;
+    if (rightsStatus === 'unknown') {
+      issues.push(`primary image ${image.url} verified asset has unknown rights status`);
+    } else if (rightsStatus !== 'approved') {
+      issues.push(`primary image ${image.url} verified asset rights are '${rightsStatus}', not approved (durable reuse grant required)`);
     }
-    if (exactVariantMatch === false) {
-      issues.push(`primary image ${image.url} is marked as not an exact variant match (parent-product-only images cannot be primary)`);
+    if (!verified.exactProductMatch) {
+      issues.push(`primary image ${image.url} verified asset is not an exact product match`);
     }
-    if (evidenceIds.length === 0) {
-      issues.push(`primary image ${image.url} cites no evidence ids`);
+    if (verified.exactVariantMatch === 0) {
+      issues.push(`primary image ${image.url} verified asset is not an exact variant match (parent-product-only images cannot be primary)`);
     }
-    if (!image.originalContentHash) {
-      issues.push(`primary image ${image.url} has no content hash (extraction provenance is required)`);
-    } else if (!/^[0-9a-f]{64}$/.test(image.originalContentHash)) {
-      issues.push(`primary image ${image.url} content hash is not a SHA-256 hex digest (${image.originalContentHash.slice(0, 24)}...)`);
+    if (!verified.originalContentHash) {
+      issues.push(`primary image ${image.url} verified asset has no content hash (extraction provenance is required)`);
+    } else if (!/^[0-9a-f]{64}$/.test(verified.originalContentHash)) {
+      issues.push(`primary image ${image.url} verified asset content hash is not a SHA-256 hex digest (${verified.originalContentHash.slice(0, 24)}...)`);
     }
-    if (qualityStatus !== 'usable') {
-      issues.push(`primary image ${image.url} quality is '${qualityStatus}', not 'usable'`);
+    if (verified.qualityStatus !== 'usable') {
+      issues.push(`primary image ${image.url} verified asset quality is '${verified.qualityStatus}', not 'usable'`);
     }
+    const conflicts = parseConflicts(verified.conflictsJson);
     if (conflicts.length > 0) {
-      issues.push(`primary image ${image.url} has conflicting visible-package evidence: ${conflicts.join('; ')}`);
+      issues.push(`primary image ${image.url} verified asset has conflicting visible-package evidence: ${conflicts.join('; ')}`);
     }
     const recomputed = computeCommerceApproved({
-      rightsStatus:
-        image.rightsStatus === 'unknown'
-          ? 'unknown'
-          : ['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized'].includes(image.rightsStatus)
-            ? 'approved'
-            : 'restricted',
-      exactProductMatch: image.exactProductMatch,
-      exactVariantMatch,
-      qualityStatus,
+      rightsStatus: rightsStatus === 'unknown' ? 'unknown' : rightsStatus === 'approved' ? 'approved' : 'restricted',
+      exactProductMatch: !!verified.exactProductMatch,
+      exactVariantMatch: verified.exactVariantMatch === 1 ? true : verified.exactVariantMatch === 0 ? false : null,
+      qualityStatus: (verified.qualityStatus ?? 'usable') as 'usable' | 'low_quality' | 'invalid',
       conflicts,
     });
-    if (image.commerceApproved !== recomputed) {
-      issues.push(`primary image ${image.url} commerceApproved assertion (${image.commerceApproved}) does not match verified status (${recomputed})`);
+    if (!recomputed) {
+      issues.push(`primary image ${image.url} verified asset does not satisfy the deterministic commerce-approval rules`);
+    } else if (verified.commerceApproved !== (recomputed ? 1 : 0)) {
+      issues.push(`primary image ${image.url} stored commerce approval (${verified.commerceApproved}) does not match the recomputed verified status (${recomputed})`);
     }
   }
 

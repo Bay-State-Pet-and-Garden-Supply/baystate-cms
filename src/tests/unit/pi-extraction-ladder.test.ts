@@ -132,7 +132,7 @@ describe('platform payload parsers', () => {
 });
 
 describe('extraction ladder', () => {
-  it('extracts a JSON-LD page with exact GTIN identity (affirmative single-offer proof, settled after the platform layer)', async () => {
+  it('extracts a JSON-LD page with exact GTIN identity (structured corroboration alone is not exact_match — probable_match)', async () => {
     const fetchPage = vi.fn(async () => fetched(JSON_LD_HTML, 'https://example.com/p/stella-broth-16oz'));
     const fetchShopify = vi.fn(async () => {
       throw new Error('should not be called');
@@ -144,7 +144,11 @@ describe('extraction ladder', () => {
       5000,
       { fetchPage, fetchShopify },
     );
-    expect(result.identityStatus).toBe('exact_match');
+    // P0-5 round 3: a JSON-LD single-offer claim is CORROBORATION only —
+    // without a platform payload or rendered browser affirmatively seeing the
+    // variant set, the identity settles below exact_match.
+    expect(result.identityStatus).toBe('probable_match');
+    expect(result.identityReasons.join(' ')).toContain('variant status unproven');
     expect(result.gtins.map((g) => g.value)).toContain('085000079585');
     expect(result.productName).toContain('Chicken Broth');
     expect(result.sku).toBe('SC-BROTH-16');
@@ -276,7 +280,9 @@ describe('extraction ladder', () => {
       { fetchPage: async () => fetched(conflictingHtml, 'https://conflict.example.com/p/x') },
     );
     expect(result.conflicts.some((c) => c.field === 'gtin')).toBe(true);
-    expect(result.identityStatus).toBe('exact_match'); // exact GTIN still wins
+    // P0-5 round 3: exact GTIN is represented but structured corroboration
+    // alone cannot settle exact identity.
+    expect(result.identityStatus).toBe('probable_match');
   });
 
   it('fails retrieval into a durable conflict rather than throwing', async () => {
@@ -443,7 +449,7 @@ describe('ladder contract adapter + helpers', () => {
       signal: new AbortController().signal,
       timeoutMs: 5000,
     });
-    expect(result.identityStatus).toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match'); // structured corroboration only (P0-5 round 3)
     expect(result.fields.every((f) => f.method.length > 0)).toBe(true);
   });
 
@@ -471,7 +477,7 @@ describe('ladder contract adapter + helpers', () => {
       5000,
       { fetchPage: async () => fetched(html, 'https://wrapped.example.com/p/x') },
     );
-    expect(result.identityStatus).toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match'); // structured corroboration only (P0-5 round 3)
     expect(result.productName).toBe('Wrapped Product 4oz');
   });
 
@@ -486,7 +492,7 @@ describe('ladder contract adapter + helpers', () => {
       5000,
       { fetchPage: async () => fetched(html, 'https://charset.example.com/p/x') },
     );
-    expect(result.identityStatus).toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match'); // structured corroboration only (P0-5 round 3)
   });
 
   it('falls back from a failed Shopify .js fetch to embedded Next.js state (Hydrogen)', async () => {
@@ -641,7 +647,9 @@ describe('ladder contract adapter + helpers', () => {
     );
     expect(layersUsed).toContain('managed_browser');
     expect(layersUsed).toContain('managed_parsed');
-    expect(result.identityStatus).toBe('exact_match');
+    // P0-5 round 3: managed-fallback HTML is corroboration only — without a
+    // platform payload or browser snapshot, the identity stays below exact.
+    expect(result.identityStatus).toBe('probable_match');
   });
 
   it('the managed registry is safety-first: empty allowedDomains never matches', async () => {
@@ -766,8 +774,21 @@ describe('ladder contract adapter + helpers', () => {
     process.env.BAYSTATE_CMS_PI_LLM_BASE_URL = 'http://localhost:11434';
     process.env.BAYSTATE_CMS_PI_LLM_MODEL = 'qwen2.5vl:latest';
     try {
-      // Exact GTIN + 3+ fields from JSON-LD -> settled; layer 8 must not run.
+      // A rendered-browser leaf claim affirmatively proves single-variant
+      // (P0-5 round 3: raw-HTML JSON-LD alone would NOT settle), so the
+      // identity is settled and layer 8 must not run.
       const complete = vi.fn(async () => ({ values: [{ field: 'brand', value: 'Fake Brand', directSupport: true }] }));
+      const snapshot: BrowserSnapshotFn = async () => ({
+        url: 'https://settled.example.com/p/x',
+        finalUrl: 'https://settled.example.com/p/x',
+        jsonLd: [{ '@type': 'Product', name: "Stella & Chewy's Chicken Broth 16oz", sku: 'SC-BROTH-16', gtin: '085000079585', offers: { price: '6.99' } }],
+        embeddedProductData: [],
+        imageCandidates: [],
+        networkResponses: [],
+        interaction: null,
+        pageStructureSignals: [],
+        warnings: [],
+      });
     const { result, layersUsed } = await runExtractionLadder(
       'https://settled.example.com/p/x',
       { gtin: '085000079585', name: 'Stella & Chewy\'s Chicken Broth 16oz' },
@@ -775,11 +796,12 @@ describe('ladder contract adapter + helpers', () => {
       5000,
       {
         fetchPage: async () => fetched(JSON_LD_HTML, 'https://settled.example.com/p/x'),
+        browser: { snapshot },
         llm: { adapter: new LlmExtractionAdapter({ client: { complete } }) },
       },
     );
       expect(complete).not.toHaveBeenCalled();
-      // The settled early-exit returns before layers 5-8 entirely.
+      // The browser-affirmative proof settles after layer 5; layers 6-8 never run.
       expect(layersUsed.some((layer) => layer.startsWith('llm'))).toBe(false);
       expect(result.deterministicOnly).toBe(true);
     } finally {
@@ -941,5 +963,68 @@ describe('ladder contract adapter + helpers', () => {
     }, out);
     expect(out.variantSignals).toHaveLength(0);
     expect(out.fields.some((f) => f.field === 'variant_selection')).toBe(true);
+  });
+
+  it('does not exact-match an unknown storefront when the browser reveals multiple variants (P0-5 round 3 adversarial)', async () => {
+    // Generic storefront (no platform adapter) emits a leaf single-offer
+    // JSON-LD claim for the RENDERED child; the browser snapshot reveals a
+    // multi-variant product. Structured corroboration must not settle the
+    // identity before an available browser layer runs.
+    const unknownHtml = `<html><head><title>Wormeze Feline 4oz</title>
+<script type="application/ld+json">{"@type":"Product","name":"Wormeze Feline 4oz","sku":"W-4","gtin":"745801105447","offers":{"price":"8.99"}}</script>
+</head><body></body></html>`;
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://unknown.example.com/p/wormeze-4oz',
+      finalUrl: 'https://unknown.example.com/p/wormeze-4oz',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Wormeze Feline Anthelmintic',
+          gtin: '745801105447',
+          variants: [
+            { id: 1, title: '2 oz' },
+            { id: 2, title: '4 oz' },
+          ],
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: ['variant-selector detected'],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://unknown.example.com/p/wormeze-4oz',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched(unknownHtml, 'https://unknown.example.com/p/wormeze-4oz'),
+        browser: { snapshot },
+      },
+    );
+    // The browser layer RAN and revealed >1 variants: the structured JSON-LD
+    // corroboration cannot survive the contradiction.
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+
+  it('does not exact-match an unknown storefront without a browser: structured corroboration alone is insufficient (P0-5 round 3)', async () => {
+    const unknownHtml = `<html><head><title>Wormeze Feline 4oz</title>
+<script type="application/ld+json">{"@type":"Product","name":"Wormeze Feline 4oz","sku":"W-4","gtin":"745801105447","offers":{"price":"8.99"}}</script>
+</head><body></body></html>`;
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://unknown.example.com/p/wormeze-4oz',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      { fetchPage: async () => fetched(unknownHtml, 'https://unknown.example.com/p/wormeze-4oz') },
+    );
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match');
+    expect(result.identityReasons.join(' ')).toContain('variant status unproven');
+    expect(layersUsed).not.toContain('browser');
   });
 });

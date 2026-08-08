@@ -36,6 +36,7 @@ import {
   type PiImportRow,
   type PiSourceRow,
 } from '../db/repositories/product-intelligence-repo';
+import { assertRunApprovedForImport } from './review-gate';
 import type { ExtractionData, OnboardingItem } from '../shared/schemas/onboarding';
 import { getProductIntelligenceFlags } from './flags';
 import { isPiKillSwitchEnabled } from './evaluation/rollout';
@@ -153,22 +154,59 @@ function parseCleanNumber(value: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Evidence is ground truth (security review finding 4): the proposed value
- *  must equal the evidence value after normalization (strings) or numerically
- *  (clean numbers), or be a substantial fragment of the evidence value. */
-function valuesEquivalent(proposed: unknown, evidenceRow: PiEvidenceRow): boolean {
+/** Narrow field-specific canonicalization keys (round-3 finding 6): these are
+ *  the ONLY fields allowed looser-than-exact equality. Everything else must
+ *  match exactly under normalization. */
+const SIZE_LIKE_FIELDS = new Set([
+  'size', 'netcontent', 'netweight', 'weight', 'volume', 'capacity',
+  'packcount', 'count', 'quantity',
+]);
+
+/** Leading numeric value of a string that may carry a unit suffix; null when
+ *  the string does not START with a number ('16 oz' -> 16, '16oz' -> 16). */
+function numericPrefix(value: string): number | null {
+  const m = /^[+-]?(\d+\.?\d*|\.\d+)/.exec(value.trim());
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Evidence is ground truth (security review findings 4 + round-3 finding 6):
+ *  the proposed value must equal the evidence value under NORMALIZED
+ *  EQUALITY, with only the narrowly defined field-specific canonicalizations
+ *  below. No substring, no partial, no 'substantial fragment' acceptance. */
+function valuesEquivalent(proposed: unknown, evidenceRow: PiEvidenceRow, field: string): boolean {
   const evidenceText = evidenceValueOf(evidenceRow);
   if (evidenceText === null || evidenceText === '') return false;
   const proposedText = String(proposed ?? '');
   if (proposedText.trim() === '') return false;
+  const key = normalizeFieldKey(field);
+
+  // GTIN/UPC: digits-only comparison (barcodes carry arbitrary
+  // spacing/separators; digits are the identity).
+  if (key.includes('gtin') || key.includes('upc')) {
+    const pd = digitsOf(proposedText);
+    const ed = digitsOf(evidenceText);
+    return pd !== '' && pd === ed;
+  }
+
+  // Size / net-content style fields: numeric-prefix equivalence tolerates
+  // unit formatting ('16 oz' vs '16oz') but never different quantities.
+  if (SIZE_LIKE_FIELDS.has(key)) {
+    const pNum = numericPrefix(proposedText);
+    const eNum = numericPrefix(evidenceText);
+    if (pNum !== null && eNum !== null) return pNum === eNum;
+    return normalizeValue(proposedText) === normalizeValue(evidenceText);
+  }
+
   const p = normalizeValue(proposedText);
   const e = normalizeValue(evidenceText);
   if (p === e) return true;
+  // Pure numeric values compare numerically ('8.99' vs '8.990'); anything
+  // with a unit suffix must match exactly outside the size-like fields.
   const pNum = parseCleanNumber(p);
   const eNum = parseCleanNumber(e);
   if (pNum !== null && eNum !== null) return pNum === eNum;
-  // Substantial fragment of the evidence value (evidence is the ground truth).
-  if (p.length >= 4 && e.includes(p)) return true;
   return false;
 }
 
@@ -179,8 +217,9 @@ function valuesEquivalent(proposed: unknown, evidenceRow: PiEvidenceRow): boolea
  *       eligible; a targetField match alone never resolves.
  *   (b) FIELD MATCH — the cited row's targetField must normalize to the
  *       proposed field name.
- *   (c) VALUE EQUIVALENCE — the proposed value must equal (or be a
- *       substantial fragment of) the evidence row's stored value.
+ *   (c) VALUE EQUIVALENCE — the proposed value must equal the evidence row's
+ *       stored value under normalized equality (field-specific
+ *       canonicalization only; no substring acceptance).
  *  Returns { row } on success or { reason } describing the failing rule.
  *  The caller fails closed on any { reason }. */
 function resolveFieldEvidence(
@@ -218,7 +257,7 @@ function resolveFieldEvidence(
   if (normalizeFieldKey(cited.targetField) !== normalizeFieldKey(field)) {
     return { reason: `field mismatch: cited row targets '${cited.targetField}'` };
   }
-  if (!valuesEquivalent(proposalValue, cited)) {
+  if (!valuesEquivalent(proposalValue, cited, field)) {
     const proposed = String(proposalValue ?? '').slice(0, 60);
     const evidenceText = (evidenceValueOf(cited) ?? '').slice(0, 60);
     return { reason: `value mismatch: proposed '${proposed}' vs evidence '${evidenceText}'` };
@@ -392,6 +431,11 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
   const db = getDb();
   return db.transaction(() => {
     const parsed = parseRun(runId);
+    // Round-3 finding 7: the durable approval gate lives in the SERVICE, so
+    // every caller path (HTTP route, tests, future internal callers) is bound
+    // to a human review decision for the exact stored result. The HTTP route's
+    // own pre-check remains as defense-in-depth.
+    assertRunApprovedForImport(runId);
     const { gtinDigits, registerName, resultHash, envelope } = parsed;
 
     let item: OnboardingItem | undefined;

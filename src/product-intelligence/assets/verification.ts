@@ -409,8 +409,17 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   // resolved), with deterministic pixel-decoder output filling gaps. The
   // caller-supplied `observed` (agent assertion) is recorded separately and
   // never participates in identity classification.
+  // Round-3 (review finding 5): byte-hash binding — OCR/decoder evidence is
+  // authoritative for THIS image only when its recorded content hash matches
+  // the bytes being inspected. Evidence with a mismatching hash (image A's
+  // facts used to authorize image B) is dropped. Facts without a hash (e.g.
+  // page extraction) remain usable.
   const evidenceFacts = deps.evidenceResolver ? deps.evidenceResolver(input.evidenceIds ?? []) : [];
-  const fromEvidence = observationFromFacts(evidenceFacts);
+  const currentImageHash = decoded.image?.contentHash ?? '';
+  const usableFacts = currentImageHash
+    ? evidenceFacts.filter((fact) => !fact.contentHash || fact.contentHash === currentImageHash)
+    : evidenceFacts;
+  const fromEvidence = observationFromFacts(usableFacts);
   const observed: IdentityObservation = {
     brand: fromEvidence.brand ?? decoded.observed.brand ?? null,
     productName: fromEvidence.productName ?? decoded.observed.productName ?? null,
@@ -429,7 +438,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
         gtin: input.observed.gtin ?? null,
       }
     : null;
-  const observationProvenance: ObservationProvenance = evidenceFacts.length > 0 ? 'evidence' : agentAsserted ? 'agent_asserted' : 'decoder';
+  const observationProvenance: ObservationProvenance = usableFacts.length > 0 ? 'evidence' : agentAsserted ? 'agent_asserted' : 'decoder';
 
   // Rights resolve ONLY from a durable reuse grant. Declared source tier +
   // basis strings prove where the asset came from, never authorization.

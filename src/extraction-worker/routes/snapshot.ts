@@ -515,9 +515,12 @@ async function installNetworkCapture(
     if (!contentType.includes('json')) return;
     const reqUrl = response.url();
     // P0-1: never capture responses from private/link-local destinations or
-    // destinations outside the run's allowed source domains.
+    // destinations outside the run's allowed source domains. Round-3: DNS
+    // resolution applies to captured sub-resources too, and lookup failure
+    // fails closed (an unresolvable destination is never captured).
     if (isPrivateOrLinkLocalUrl(reqUrl)) return;
     if (!isDestinationAllowed(reqUrl, sourcesAllowlist)) return;
+    if ((await resolveDestinationAndCheck(reqUrl)) !== null) return;
     // Requirement: filter to relevant product data — never analytics,
     // cart/account/checkout/session, or personalization endpoints, and
     // never record query strings (session tokens live there).
@@ -747,12 +750,32 @@ function isDestinationAllowed(rawUrl: string, sourcesAllowlist: string[] | undef
  * not by itself deny (the literal floor already ran); the authoritative
  * DNS SSRF check remains at the tool-boundary gateway.
  */
-async function isDnsDestinationPrivate(hostname: string): Promise<boolean> {
+/**
+ * Round-3 finding 3: shared DNS destination check for navigation (initial +
+ * redirect hops) AND intercepted sub-requests/captured responses. Returns a
+ * denial reason or null. FAILS CLOSED: a DNS lookup error (NXDOMAIN,
+ * timeout, resolver failure) DENIES the destination — an unresolvable
+ * hostname is never allowed to proceed on the assumption it might be public.
+ * Literal IPs are handled by the literal floor (isPrivateOrLinkLocalUrl) and
+ * skip DNS.
+ */
+export async function resolveDestinationAndCheck(rawUrl: string): Promise<string | null> {
+  let hostname: string;
+  try {
+    hostname = new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return null; // unparseable/non-http — the literal floor already rejects it
+  }
+  const isIpLiteral = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':');
+  if (isIpLiteral) return null;
   try {
     const records = await lookup(hostname, { all: true });
-    return records.some((record) => isPrivateOrLinkLocalUrl(`http://${record.address}/`));
+    if (records.some((record) => isPrivateOrLinkLocalUrl(`http://${record.address}/`))) {
+      return `Blocked destination resolving to a private address: ${rawUrl}`;
+    }
+    return null;
   } catch {
-    return false;
+    return `Blocked destination: DNS resolution failed for ${hostname} (fail closed): ${rawUrl}`;
   }
 }
 
@@ -763,14 +786,8 @@ async function isNavigationBlocked(rawUrl: string, sourcesAllowlist: string[] | 
   if (!isDestinationAllowed(rawUrl, sourcesAllowlist)) {
     return `Blocked destination outside allowed source domains: ${rawUrl}`;
   }
-  try {
-    const hostname = new URL(rawUrl).hostname;
-    if (await isDnsDestinationPrivate(hostname)) {
-      return `Blocked destination resolving to a private address: ${rawUrl}`;
-    }
-  } catch {
-    // Unparseable URL — the literal floor already rejected it.
-  }
+  const dnsBlocked = await resolveDestinationAndCheck(rawUrl);
+  if (dnsBlocked) return dnsBlocked;
   return null;
 }
 
@@ -999,12 +1016,17 @@ async function doRenderedSnapshot(
       // P0-1: abort navigation/sub-resources to private or link-local
       // destinations and to hosts outside the run's allowed source domains
       // (defense in depth on top of the tool-boundary gateway check; redirect
-      // hops and sub-requests are covered here too).
+      // hops and sub-requests are covered here too). Round-3: DNS resolution
+      // applies to intercepts as well, and lookup failure fails closed.
       if (isPrivateOrLinkLocalUrl(reqUrl)) {
         await route.abort();
         return;
       }
       if (!isDestinationAllowed(reqUrl, sourcesAllowlist)) {
+        await route.abort();
+        return;
+      }
+      if ((await resolveDestinationAndCheck(reqUrl)) !== null) {
         await route.abort();
         return;
       }

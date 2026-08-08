@@ -13,8 +13,11 @@ import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import {
+  createPiRun,
   getPiRun,
   getPiResult,
+  insertPiAsset,
+  insertPiSource,
   listPiAssetsByRun,
   listPiEvents,
   listPiEvidence,
@@ -52,6 +55,7 @@ function bundleWithImage(): ProductResearchBundle {
         sourceArtifactId: 'a1',
         url: 'https://cdn.example.com/primary.jpg',
         role: 'primary',
+        verifiedAssetIds: [],
         exactProductMatch: true,
         exactVariantMatch: true,
         variantReference: null,
@@ -438,9 +442,52 @@ describe('Product Intelligence run service', () => {
     expect(metrics.sourceCount).toBe(0);
   });
 
-  it('persists bundle image candidates as durable assets with rights provenance (PI-6)', async () => {
+  it('persists bundle image candidates from the cited durable verified asset (round-3)', async () => {
+    // Round-3: the terminal candidate cites a DURABLE server-verified asset
+    // row; every authoritative field in the persisted asset derives from that
+    // row, never from agent-supplied claims.
+    const seedRunId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: '{}',
+      policyJson: '{}',
+      configSnapshotId: 'seed',
+      configSnapshotHash: 'seed',
+    }).id;
+    const seedSource = insertPiSource({
+      runId: seedRunId,
+      url: 'https://cdn.example.com/primary.jpg',
+      domain: 'cdn.example.com',
+      sourceType: 'supplier',
+      licenseRef: 'grant:supplier@cdn.example.com',
+      termsRef: 'supplier_authorized_asset',
+    });
+    const seedAsset = insertPiAsset({
+      runId: seedRunId,
+      sourceId: seedSource.id,
+      sourceUrl: 'https://cdn.example.com/primary.jpg',
+      sourceType: 'supplier',
+      sourceArtifactId: 'a1',
+      extractionMethod: 'image_ocr',
+      retrievedAt: '2026-08-05T00:00:00.000Z',
+      originalContentHash: 'b'.repeat(64),
+      perceptualHash: 'phash-img-1',
+      rightsStatus: 'approved',
+      rightsBasis: 'grant:supplier@cdn.example.com',
+      rightsEvidenceRef: 'grant:supplier@cdn.example.com',
+      observedNetContent: { value: 16, unit: 'oz' },
+      observedPackCount: 1,
+      exactProductMatch: true,
+      exactVariantMatch: true,
+      qualityStatus: 'usable',
+      commerceApproved: true,
+      conflicts: [],
+    });
     const executor = new FakePiExecutor();
-    executor.submission = bundleWithImage();
+    const bundle = bundleWithImage();
+    bundle.imageCandidates[0].verifiedAssetIds = [seedAsset.id];
+    executor.submission = bundle;
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT, mode: 'shadow' }, runOpts);
     await started.completed;
 
@@ -451,15 +498,17 @@ describe('Product Intelligence run service', () => {
     expect(assets[0]).toMatchObject({
       rightsStatus: 'approved',
       commerceApproved: true,
-      extractionMethod: 'media_api',
+      // Server-derived from the verified row — the candidate's own
+      // 'media_api'/'ev:supplier-1' claims are ignored.
+      extractionMethod: 'image_ocr',
       originalContentHash: 'b'.repeat(64),
     });
-    expect(assets[0].rightsEvidenceRef).toBe('ev:supplier-1');
-    // The candidate's source row carries the license/terms refs.
+    expect(assets[0].rightsEvidenceRef).toBe('grant:supplier@cdn.example.com');
+    // The source row carries the grant record's license/terms refs.
     const sources = listPiSources(started.run.id);
     const imageSource = sources.find((s) => s.url === 'https://cdn.example.com/primary.jpg');
-    expect(imageSource?.licenseRef).toBe('ev:supplier-1');
-    expect(imageSource?.termsRef).toBe('supplier_authorized_asset');
+    expect(imageSource?.licenseRef).toBe('grant:supplier@cdn.example.com');
+    expect(imageSource?.termsRef).toBe('grant:supplier@cdn.example.com');
     // The projection exposes assets for the Agent Lab image review surface.
     const projection = getPiRunProjection(started.run.id);
     expect(projection?.assets).toHaveLength(1);
@@ -468,6 +517,21 @@ describe('Product Intelligence run service', () => {
     const comparison = createPiComparison({ runId: started.run.id, baselineType: 'legacy', baselineRef: 'legacy-run-xyz' });
     const metrics = JSON.parse((comparison as { metricsJson: string }).metricsJson);
     expect(metrics.imageCount).toBe(1);
+  });
+
+  it('drops bundle image candidates that cite nothing durable (round-3 adversarial)', async () => {
+    // The old bypass: an agent-manufactured image with plausible-looking
+    // rights/hash/exact-match/commerce claims and NO verified record. It must
+    // not persist as an approved asset.
+    const executor = new FakePiExecutor();
+    executor.submission = bundleWithImage(); // verifiedAssetIds: []
+    const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT, mode: 'shadow' }, runOpts);
+    await started.completed;
+    const run = getPiRun(started.run.id);
+    // Validation rejects the uncited primary, so the run fails and no asset
+    // row is written.
+    expect(run?.status).toBe('failed');
+    expect(listPiAssetsByRun(started.run.id).length).toBe(0);
   });
 
   it('enforces retention policy (terminal only, older than cutoff)', async () => {

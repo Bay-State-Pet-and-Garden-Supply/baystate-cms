@@ -9,47 +9,55 @@
  */
 import { createRequire } from 'node:module';
 import type { LadderOptions } from './ladder';
-import type { BrowserSnapshot, BrowserSnapshotFn } from './browser';
+import type { BrowserSnapshot, BrowserSnapshotFn, BrowserSnapshotRequest } from './browser';
 
 const lazyRequire = createRequire(import.meta.url);
 
 /**
- * P0-1 (round 2): the run's allowed-source-domains forwarded to the browser
- * worker so rendered navigation, redirect hops, and captured subresources
- * enforce the same source allowlist as the server-side policy gateway. Set
- * per ladder construction by the caller that holds the run policy; a fresh
- * value replaces the previous run's (single-worker server model).
+ * Round-3 finding 3: the per-run allowed-source-domains are captured in the
+ * per-run snapshot closure — there is NO module-level policy state. This
+ * factory builds the exact payload a run sends to the worker snapshot
+ * endpoint; exported so tests can assert per-run isolation without invoking
+ * the worker.
  */
-let snapshotSourcesAllowlist: string[] | undefined;
+export function snapshotRequestFor(
+  request: BrowserSnapshotRequest,
+  sourcesAllowlist: string[] | undefined,
+): {
+  url: string;
+  runtime: 'rendered';
+  captureScreenshot: false;
+  captureNetwork: boolean;
+  sourcesAllowlist?: string[];
+  interaction: InteractionPayload | null;
+} {
+  return {
+    url: request.url,
+    runtime: 'rendered',
+    captureScreenshot: false,
+    captureNetwork: request.captureNetwork,
+    sourcesAllowlist,
+    interaction: request.interaction ?? null,
+  };
+}
 
-export function setSnapshotSourcesAllowlist(allowlist: string[] | undefined): void {
-  snapshotSourcesAllowlist = allowlist;
+interface InteractionPayload {
+  type: string;
+  selector?: string;
+  optionLabel?: string;
+  settleMs?: number;
 }
 
 /** Worker snapshot client, lazily loaded (null when unavailable). */
-function lazySnapshotFn(): BrowserSnapshotFn | null {
+function lazySnapshotFn(sourcesAllowlist: string[] | undefined): BrowserSnapshotFn | null {
   try {
     const client = lazyRequire('../../server/extraction-worker-client') as {
-      snapshotPage?: (request: {
-        url: string;
-        runtime: 'rendered';
-        captureScreenshot: boolean;
-        captureNetwork?: boolean;
-        sourcesAllowlist?: string[];
-        interaction?: { type: string; selector?: string; optionLabel?: string; settleMs?: number } | null;
-      }) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
+      snapshotPage?: (request: ReturnType<typeof snapshotRequestFor>) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
     };
     const snapshotPage = client.snapshotPage;
     if (!snapshotPage) return null;
     return async (request): Promise<BrowserSnapshot> => {
-      const result = await snapshotPage({
-        url: request.url,
-        runtime: 'rendered',
-        captureScreenshot: false,
-        captureNetwork: request.captureNetwork,
-        sourcesAllowlist: snapshotSourcesAllowlist,
-        interaction: request.interaction ?? null,
-      });
+      const result = await snapshotPage(snapshotRequestFor(request, sourcesAllowlist));
       if (!result.ok) throw new Error(result.error);
       const data = result.data as {
         finalUrl: string;
@@ -99,7 +107,7 @@ function lazySnapshotFn(): BrowserSnapshotFn | null {
 }
 
 /** Default ladder options for the server: browser layer wired to the worker. */
-export function defaultLadderOptions(): LadderOptions {
-  const snapshot = lazySnapshotFn();
+export function defaultLadderOptions(sourcesAllowlist?: string[]): LadderOptions {
+  const snapshot = lazySnapshotFn(sourcesAllowlist);
   return snapshot ? { browser: { snapshot } } : {};
 }

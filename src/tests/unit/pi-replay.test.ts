@@ -19,7 +19,7 @@ import { createPiRun, getPiResult, getPiRun, insertPiResult, listPiComparisons, 
 import { seedDefaultApprovedPolicy, getActiveDefaultApprovedPolicy } from '../../db/repositories/pi-approved-policy-repo';
 import { replayPiRun } from '../../product-intelligence/run-service';
 import { assertReducingOverride, computePolicyConfigId } from '../../product-intelligence/policy';
-import { validSubmission, validBundle } from './product-intelligence/test-helpers';
+import { validBundle } from './product-intelligence/test-helpers';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
 import { ProductIntelligencePolicySchema, type ProductIntelligencePolicy } from '../../product-intelligence/contracts';
 
@@ -101,6 +101,10 @@ function makeOverrideTerminalRun(): { id: string; policyConfigId: string } {
     configSnapshotHash: resolved.configId,
     promptHash: 'prompt-hash-1',
     piVersion: '0.83.0',
+    // Round-3 atomicity: lineage is set at insert, never post-hoc.
+    basePolicyId: baseRow.id,
+    basePolicyVersion: baseRow.version,
+    policyOverridesJson: JSON.stringify(overrides),
   });
   insertPiResult({
     runId: run.id,
@@ -120,10 +124,6 @@ function makeOverrideTerminalRun(): { id: string; policyConfigId: string } {
       events: [],
     },
   });
-  getDb().run(
-    'UPDATE product_intelligence_runs SET base_policy_id = ?, base_policy_version = ?, policy_overrides_json = ? WHERE id = ?',
-    [baseRow.id, baseRow.version, JSON.stringify(overrides), run.id],
-  );
   transitionPiRunStatus(run.id, 'completed', {});
   return { id: run.id, policyConfigId: resolved.configId };
 }
@@ -327,6 +327,11 @@ describe('PI-10 replay modes', () => {
   it('reauthorizes an override run by its BASE approved record (review finding 7)', async () => {
     seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
     const origin = makeOverrideTerminalRun();
+    // Round-3 atomicity: the override run was BORN with its lineage (no
+    // post-insert UPDATE) — the row carries it from creation.
+    const originRow = getPiRun(origin.id)!;
+    expect(originRow.basePolicyId).toBeTruthy();
+    expect(originRow.policyOverridesJson).toContain('maxToolCalls');
     const executor = new FakeExecutor();
     const { run, mode } = await replayPiRun(origin.id, { mode: 'rerun', executor });
     expect(mode).toBe('rerun');
@@ -337,6 +342,17 @@ describe('PI-10 replay modes', () => {
       | { basePolicyId: string | null }
       | undefined;
     expect(lineage?.basePolicyId).toBeTruthy();
+  });
+
+  it('deterministic replay inherits the origin lineage atomically at insert', async () => {
+    seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
+    const origin = makeOverrideTerminalRun();
+    const { run } = await replayPiRun(origin.id, { mode: 'deterministic' });
+    const originRow = getPiRun(origin.id)!;
+    const replayRow = getPiRun(run.id)!;
+    // The replayed run is born with the origin's base lineage (no UPDATE).
+    expect(replayRow.basePolicyId).toBe(originRow.basePolicyId);
+    expect(replayRow.policyOverridesJson).toBe(originRow.policyOverridesJson);
   });
 
   it('refuses an override run whose BASE policy record is revoked (review finding 7)', async () => {

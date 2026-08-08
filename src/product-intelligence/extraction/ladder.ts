@@ -105,19 +105,36 @@ export async function runExtractionLadder(
   let variant: { name?: string; id?: string; sku?: string } | null = null;
   let finalUrl = url;
   let contentHash: string | null = null;
-  // P0-5 positive proof accumulator: singleVariantProof only becomes true on
-  // AFFIRMATIVE evidence (structured leaf-product declaration, platform API
-  // reporting exactly one variant, browser JSON-LD leaf declaration). The
-  // absence of variant UI or signals is never treated as proof.
-  let singleVariantProof = false;
+  // P0-5 proof accumulator (round 3): proof strength is tracked by SOURCE.
+  // A JSON-LD single-offer claim is CORROBORATION (structured) — it records
+  // the page's self-declared single-variant state but NEVER settles exact
+  // identity on its own. Only a platform payload or a rendered-browser
+  // snapshot that affirmatively sees the variant set (platform/browser)
+  // provides sufficient single-variant proof. Absence of variant UI or
+  // signals is never treated as proof.
+  type VariantProofSource = 'platform' | 'browser' | 'structured' | 'none';
+  const PROOF_STRENGTH: Record<Exclude<VariantProofSource, 'none'>, number> = {
+    platform: 3,
+    browser: 2,
+    structured: 1,
+  };
+  let variantProofSource: VariantProofSource = 'none';
+  const noteProof = (source: Exclude<VariantProofSource, 'none'>): void => {
+    if (PROOF_STRENGTH[source] > (PROOF_STRENGTH[variantProofSource as Exclude<VariantProofSource, 'none'>] ?? 0)) {
+      variantProofSource = source;
+    }
+  };
   const selectedVariantLinkage = (): boolean => variantSignals.some((s) => s.kind === 'variant_match');
   // P0-5 round 2: an affirmative contradiction — platform/browser revealing
   // multiple variants (parent_page) or a variant mismatch — invalidates any
-  // structured-only single-variant proof. Absence-based claims never survive
-  // a layer that actually sees the variant set.
+  // proof claim. Structured corroboration never survives a layer that
+  // actually sees the variant set.
   const contradictoryVariant = (): boolean =>
     variantSignals.some((s) => s.kind === 'parent_page' || s.kind === 'variant_mismatch');
-  const effectiveSingleVariantProof = (): boolean => singleVariantProof && !contradictoryVariant();
+  // Only platform/browser sources are sufficient; structured corroboration
+  // never produces exact identity on its own (P0-5 round 3).
+  const effectiveSingleVariantProof = (): boolean =>
+    (variantProofSource === 'platform' || variantProofSource === 'browser') && !contradictoryVariant();
 
   const addField = (field: string, value: string | null | undefined, method: string, sourcePath?: string): void => {
     if (value === null || value === undefined) return;
@@ -175,7 +192,8 @@ export async function runExtractionLadder(
   contentHash = page.contentHash;
 
   const signals = parseStructuredSignals(page.html);
-  singleVariantProof ||= structuredSingleVariantProof(page.html);
+  // JSON-LD single-offer = corroboration only (never sufficient on its own).
+  if (structuredSingleVariantProof(page.html)) noteProof('structured');
   for (const product of signals.jsonLdProducts) {
     if (product.name) addField('product_name', product.name, 'json_ld', 'JSON-LD Product.name');
     if (product.sku) addField('sku', product.sku, 'json_ld', 'JSON-LD Product.sku');
@@ -220,7 +238,7 @@ export async function runExtractionLadder(
             variantSignals.push({ kind: 'parent_page' });
           } else if (productJson.variants.length === 1) {
             // Platform API affirmatively reports exactly one variant.
-            singleVariantProof = true;
+            noteProof('platform');
           }
           const first = productJson.variants[0];
           if (first) {
@@ -266,7 +284,7 @@ export async function runExtractionLadder(
                   variantSignals.push({ kind: 'parent_page' });
                 } else if (product.variants.length === 1) {
                   // Platform API affirmatively reports exactly one variant.
-                  singleVariantProof = true;
+                  noteProof('platform');
                 }
               }
             }
@@ -340,7 +358,7 @@ export async function runExtractionLadder(
               variantSignals.push({ kind: 'parent_page' });
             } else if (product.variants.length === 1) {
               // Platform API affirmatively reports exactly one variant.
-              singleVariantProof = true;
+              noteProof('platform');
             }
           }
         }
@@ -383,7 +401,7 @@ export async function runExtractionLadder(
               variantSignals.push({ kind: 'parent_page' });
             } else if (product.variants.length === 1) {
               // Platform API affirmatively reports exactly one variant.
-              singleVariantProof = true;
+              noteProof('platform');
             }
           }
         }
@@ -425,12 +443,14 @@ export async function runExtractionLadder(
   brand ??= fields.find((f) => f.field === 'brand')?.value ?? null;
   size ??= fields.find((f) => f.field === 'size')?.value ?? null;
 
-  // Early exit (P0-5 round 2): settle only AFTER the platform layer had a
-  // chance to reveal multiple variants. Structured-only proof no longer exits
-  // before platform/browser layers run, so a multi-variant storefront that
-  // renders leaf JSON-LD for the displayed child cannot be settled too early;
-  // an affirmative contradiction (parent_page/variant_mismatch) invalidates
-  // the proof via effectiveSingleVariantProof().
+  // Early exit (P0-5 round 3): settle only on AFFIRMATIVE proof — a platform
+  // payload reporting exactly one variant, a rendered-browser snapshot's own
+  // single-variant data, or positive selected-variant linkage. Structured
+  // JSON-LD single-offer claims are CORROBORATION ONLY and never settle the
+  // identity here; the ladder falls through so an available browser layer
+  // gets the chance to reveal client-state variants before exact_match. An
+  // affirmative contradiction (parent_page/variant_mismatch) invalidates the
+  // proof via effectiveSingleVariantProof().
   if (exactGtinMatch(expected.gtin, gtins) && fields.length >= 3 && (effectiveSingleVariantProof() || selectedVariantLinkage())) {
     return {
       result: assembleResult(false),
@@ -440,7 +460,8 @@ export async function runExtractionLadder(
 
   // ---------------------------------------------------------------------
   // Layers 5-8: escalate only when deterministic layers did not settle the
-  // identity. Exact GTIN + healthy field count means the page is the product.
+  // identity. Settling requires exact GTIN + healthy field count + AFFIRMATIVE
+  // single-variant proof (platform/browser) or selected-variant linkage.
   // ---------------------------------------------------------------------
   let llmContributed = false;
   let browserSignals: string[] = [];
@@ -456,8 +477,10 @@ export async function runExtractionLadder(
       const browserOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
       const browserMethods = evidenceFromBrowserSnapshot(snapshot, browserOut);
       // Rendered JSON-LD retains the page's affirmative leaf-product claim
-      // (review P0-5): @type Product with no hasVariant/variants keys.
-      if (snapshot.jsonLd.some(jsonLdLeafProductProof)) singleVariantProof = true;
+      // (review P0-5): @type Product with no hasVariant/variants keys. The
+      // browser is a variant-revealing layer, so its leaf claim is sufficient
+      // proof — unlike raw-HTML structured corroboration.
+      if (snapshot.jsonLd.some(jsonLdLeafProductProof)) noteProof('browser');
       if (browserMethods.length > 0) layersUsed.push('browser_parsed');
       if (snapshot.warnings.length > 0) layersUsed.push('browser_warnings');
       browserSignals = snapshot.pageStructureSignals ?? [];
@@ -507,7 +530,10 @@ export async function runExtractionLadder(
       const managed: ManagedPage = await options.managedFallback.fetch(finalUrl, signal, timeoutMs);
       fetchModes.push('managed_browser');
       const managedSignals = parseStructuredSignals(managed.html);
-      singleVariantProof ||= structuredSingleVariantProof(managed.html);
+      // Managed-fallback HTML is corroboration only — the managed provider is
+      // a rendered browser, but its HTML may be JS-stripped, so it never
+      // settles identity on its own (P0-5 round 3).
+      if (structuredSingleVariantProof(managed.html)) noteProof('structured');
       const managedOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals };
       for (const product of managedSignals.jsonLdProducts) {
         evidenceFromProductPayload(

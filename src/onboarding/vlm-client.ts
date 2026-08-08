@@ -1,5 +1,9 @@
 import { getApiKey } from '../db/repositories/api-key-repo';
 
+/** Minimal structural fetch signature — lets callers inject the PI
+ *  policy-gateway bound fetch (P0-1). */
+export type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export interface VlmConfig {
   baseUrl: string;
   model: string;
@@ -33,7 +37,15 @@ export function getVlmConfig(): VlmConfig | null {
 export async function callVlm(
   prompt: string,
   imageBase64: string,
-  configOverride?: VlmConfig
+  configOverride?: VlmConfig,
+  /**
+   * P0-1 (round 3): injected transport so Product Intelligence can bind the
+   * VLM model call (a PI-reachable external side effect) to the policy
+   * gateway — destination policy, local_only enforcement, and audit apply to
+   * the configured VLM base URL. The onboarding/curation pipeline keeps the
+   * default global fetch.
+   */
+  fetchFn: NetworkFetch = fetch,
 ): Promise<string> {
   const config = configOverride || getVlmConfig();
   if (!config || !config.enabled) {
@@ -45,7 +57,7 @@ export async function callVlm(
 
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetchFn(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
