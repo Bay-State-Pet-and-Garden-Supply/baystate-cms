@@ -312,4 +312,33 @@ describe('captureVerifiedPageSnapshot (issue #17 D1)', () => {
     );
     expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/duplicate identity records/i);
   });
+
+  it('throws on an unconsumed extra child row (records [A] + rows [A,B])', () => {
+    // One authoritative verified record but TWO verified child rows for the
+    // same import: the extra row must reach the consumedRowKeys tail check and
+    // throw the unconsumed-row diagnostic (never a shadowing count error).
+    activate([verifiedRecord('1', 'Dog Food')]);
+    const db = getDb();
+    const existing = db.query('SELECT * FROM page_index WHERE identity_key = ?').get('1') as Record<string, any>;
+    db.run(
+      `INSERT INTO page_index
+       (id, name, file_name, parent_id, page_hash, workspace_id, import_id, identity_kind, identity_key, identity_status, source_hash, availability, review_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, 'available', 'imported', ?, ?)`,
+      [
+        'extra-unconsumed-row-b',
+        'Dog Toys',
+        existing.file_name,
+        existing.parent_id,
+        existing.page_hash,
+        existing.workspace_id,
+        existing.import_id,
+        existing.identity_kind,
+        '2',
+        existing.source_hash,
+        new Date().toISOString(),
+        new Date().toISOString(),
+      ],
+    );
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/without a matching verified record/i);
+  });
 });

@@ -149,12 +149,11 @@ export function captureVerifiedPageSnapshot(workspaceId: string): VerifiedPageSn
       }
     }
 
-    if (rows.length !== verifiedRecords.length) {
-      throw new Error(
-        `Verified Page import changed during capture: active import "${active.id}" has ` +
-          `${verifiedRecords.length} verified record(s) but ${rows.length} verified page_index row(s).`,
-      );
-    }
+    // NOTE: there is deliberately NO separate raw-count guard here. The
+    // per-record 'no page_index row' check below handles missing rows, and the
+    // consumedRowKeys tail check handles every extra-row case (equal-count
+    // aliases AND count mismatches like records [A] + rows [A,B]), so the tail
+    // stays operational rather than being shadowed by an earlier count error.
 
     // Validate EVERY verified record against its row — name, availability,
     // source hash (never NULL-exempt: an activated row has an authoritative
