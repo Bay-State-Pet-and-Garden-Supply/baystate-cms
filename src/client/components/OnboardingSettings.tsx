@@ -8,10 +8,12 @@ import {
   getOpenaiModels,
   getCurationTargets,
   saveCurationTargets,
+  getClassificationReadiness,
 
   type ApiKeyDisplay,
   type CurationTargetsResponse,
 } from '../onboarding-api';
+import { readinessViewFromReport } from '../classification-readiness-view';
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
 import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
@@ -61,6 +63,8 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
   const [curationTargetsDraft, setCurationTargetsDraft] = useState<CurationTargetConfig[]>([]);
   const [curationTargetsLoading, setCurationTargetsLoading] = useState(false);
   const [curationTargetsSaving, setCurationTargetsSaving] = useState(false);
+  // Classification readiness for the curation targets section.
+  const [readinessView, setReadinessView] = useState<ReturnType<typeof readinessViewFromReport> | null>(null);
 
   // Worker health & profile builder overlay state
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthResponse | null>(null);
@@ -133,6 +137,12 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setCurationTargetsLoading(false);
+    }
+    try {
+      const readiness = await getClassificationReadiness();
+      setReadinessView(readinessViewFromReport(readiness.readiness));
+    } catch {
+      setReadinessView(readinessViewFromReport(null));
     }
   };
 
@@ -603,6 +613,16 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
         <p style={styles.hint}>
           Choose exactly which classifications the curation stage should fill. Product fields use the existing values in the synced live catalog as controlled options; pages can be single- or multi-select.
         </p>
+
+        {readinessView && !readinessView.isReady && (
+          <div style={{ marginBottom: 12, padding: 12, background: '#fff7ed', border: '1px solid #fdba74', borderRadius: 8, fontSize: 13 }}>
+            <div style={{ color: '#9a3412', fontWeight: 600 }}>⚠ Classification is not ready</div>
+            {readinessView.capabilities.page.reason && (
+              <div style={{ color: '#7c2d12', marginTop: 2 }}>Category Pages: {readinessView.capabilities.page.reason}</div>
+            )}
+            <div style={{ color: '#7c2d12', marginTop: 2 }}>{readinessView.summary.join(' ')}</div>
+          </div>
+        )}
 
         {!curationTargetState ? (
           <p style={styles.empty}>{curationTargetsLoading ? 'Loading curation targets…' : 'No curation target data loaded yet.'}</p>

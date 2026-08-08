@@ -10,6 +10,7 @@ import {
 } from '../../classification/curation-targets';
 
 import { evaluateClassificationReadiness } from '../../classification/config-validation';
+import { ClassificationReadinessReportSchema } from '../../shared/schemas/classification';
 
 const router = new Hono();
 
@@ -24,14 +25,26 @@ router.get('/classification/readiness', (c) => {
   }
 
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
-    const activationContext = createRuntimeActivationContext(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
+    const activationContext = createRuntimeActivationContext(ws.workspacePath, ws.id);
     const readiness = evaluateClassificationReadiness(config, {
       mode: config.manifest?.schemaVersion === 2 ? 'active' : 'preview',
       catalogFields: activationContext.catalogFields,
       verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
+      verifiedPageIds: activationContext.verifiedPageIds,
     });
-    return c.json({ readiness });
+    const parsed = ClassificationReadinessReportSchema.safeParse({
+      ...readiness,
+      capabilities: {
+        productType: { ...readiness.capabilities.productType, reason: readiness.capabilities.productType.reason ?? null },
+        productFields: { ...readiness.capabilities.productFields, reason: readiness.capabilities.productFields.reason ?? null },
+        categoryPages: { ...readiness.capabilities.categoryPages, reason: readiness.capabilities.categoryPages.reason ?? null },
+      },
+    });
+    if (!parsed.success) {
+      return c.json({ error: 'Readiness report failed schema validation.', issues: parsed.error.issues }, 500);
+    }
+    return c.json({ readiness: parsed.data });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
@@ -48,7 +61,7 @@ router.get('/classification/config', (c) => {
   }
 
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     return c.json({ config });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
@@ -93,7 +106,7 @@ router.get('/classification/curation-targets', (c) => {
   }
 
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     const candidates = listCurationTargetCandidates(ws.id, config);
     return c.json({ targets: config.curationTargets ?? [], candidates });
   } catch (err) {

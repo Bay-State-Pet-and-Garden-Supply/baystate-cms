@@ -175,7 +175,7 @@ export class OnboardingWorker {
     // Protected discovery calls route through the frozen classification
     // model policy (issue #17 item A). No valid policy ⇒ disabled ⇒ the
     // discovery helpers use deterministic fallbacks.
-    const policySnapshot = captureModelPolicySnapshot(this.workspacePath);
+    const policySnapshot = captureModelPolicySnapshot(this.workspacePath, undefined, this.workspaceId);
 
     try {
       const existingSources = listSourcesByItem(item.id);

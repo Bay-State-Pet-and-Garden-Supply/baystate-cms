@@ -26,6 +26,7 @@ import {
   createCatalogEvidenceVerifier,
   readLiveCatalogFields,
 } from './catalog-evidence';
+import { listVerifiedPageOptions } from '../db/repositories/page-repo';
 import {
   validateClassificationConfigBundle,
   type CatalogEvidenceVerifier,
@@ -514,7 +515,16 @@ function loadClassificationConfigBundleV2Internal(
       ClassificationFocusedFileNames.map(fileName => [fileName, raw[fileName].bytes]),
     ),
   });
-  if (!report.valid || !report.config) {
+  // An enabled Page target without a verified Page catalog is a NOT-READY
+  // condition, not a corrupt bundle: the run-start readiness gate (issue #17 L)
+  // blocks run creation, while configuration UI/readiness can still load and
+  // report the finding. All other error findings remain fatal.
+  const toleratedNotReady = (finding: { severity: string; code: string }) =>
+    finding.code === 'verified_page_catalog_required';
+  const fatalFindings = report.findings.filter(
+    finding => finding.severity === 'error' && !toleratedNotReady(finding),
+  );
+  if (fatalFindings.length > 0) {
     const hashFailure = report.findings.some(finding => (
       finding.code === 'file_hash_mismatch' || finding.code === 'bundle_hash_mismatch'
     ));
@@ -525,7 +535,10 @@ function loadClassificationConfigBundleV2Internal(
       report.findings,
     );
   }
-  return report.config;
+  // When the only error findings were tolerated not-ready conditions the
+  // validation report carries no `config`; the structurally parsed bundle is
+  // authoritative in that case.
+  return report.config ?? structurallyParsed.data;
 }
 
 /**
@@ -625,15 +638,20 @@ export function loadRuntimeConfigAuthority(
 
 /**
  * Build the verified activation context for a workspace from live sources:
- * the field-registry xmlFields as the attested Catalog Field set, and the
- * catalog-evidence verifier bound to the committed artifact. Cheap enough for
- * every runtime load; the full tree re-scan gate is added by the activation
- * caller through `verifyCatalogEvidenceTree`.
+ * the field-registry xmlFields as the attested Catalog Field set, the
+ * catalog-evidence verifier bound to the committed artifact, and the verified
+ * Page IDs from the active import (stable identities only — name-only rows
+ * never enter). Production run/route callers MUST pass the workspace ID so
+ * Page identity is never inferred from a path; when omitted, verifiedPageIds
+ * is absent and an enabled Page target fails active validation (fail closed).
+ * Cheap enough for every runtime load; the full tree re-scan gate is added by
+ * the activation caller through `verifyCatalogEvidenceTree`.
  */
-export function createRuntimeActivationContext(workspacePath: string): VerifiedActivationContext {
+export function createRuntimeActivationContext(workspacePath: string, workspaceId?: string): VerifiedActivationContext {
   return {
     catalogFields: readLiveCatalogFields(workspacePath),
     verifyCatalogEvidence: createCatalogEvidenceVerifier(workspacePath),
+    ...(workspaceId ? { verifiedPageIds: listVerifiedPageOptions(workspaceId).map(page => page.id) } : {}),
   };
 }
 
@@ -641,9 +659,14 @@ export function createRuntimeActivationContext(workspacePath: string): VerifiedA
  * Read-only runtime config view: v1 config as-is, or the ACTIVE v2 bundle
  * (typed as the legacy shape for callers that only read common fields).
  * Prefer `loadRuntimeConfigAuthority` when the authority kind matters.
+ * `workspaceId` is required for the verified Page context when the active
+ * bundle enables Page assignment.
  */
-export function loadRuntimeConfig(workspacePath: string): ClassificationConfig {
-  const authority = loadRuntimeConfigAuthority(workspacePath, createRuntimeActivationContext(workspacePath));
+export function loadRuntimeConfig(workspacePath: string, workspaceId: string): ClassificationConfig {
+  const authority = loadRuntimeConfigAuthority(
+    workspacePath,
+    createRuntimeActivationContext(workspacePath, workspaceId),
+  );
   return authority.kind === 'v2' ? (authority.bundle as unknown as ClassificationConfig) : authority.config;
 }
 

@@ -1,5 +1,7 @@
 import { listPages } from '../db/repositories/page-repo';
 import { convertToLbs } from '../shared/weight-converter';
+import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../classification/page-snapshot';
+import { assertClassificationReady } from '../classification/readiness';
 import { coordinateCohortItemsOnce, formatDeterministicTitle } from './cohort-name-coordinator';
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
 import { getEvidenceAttemptsByIdsForItem } from '../db/repositories/onboarding-evidence-repo';
@@ -107,8 +109,17 @@ export async function curateItemWithPipeline(
   // Load the authoritative runtime config (ACTIVE v2 bundle when present,
   // transitional v1 otherwise). The modular pipeline works even without
   // full product types/attributes — name_consolidation always runs.
-  const activationContext = createRuntimeActivationContext(workspacePath);
+  const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
   const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+  // Run-start readiness gate (issue #17 L): the ACTIVE v2 config must be
+  // ready before any snapshot/run/model side effect. Not-ready throws
+  // ClassificationNotReadyError, which the onboarding worker records as a
+  // curation-stage failure with the stable reason (no transient retry).
+  assertClassificationReady(authority, {
+    catalogFields: activationContext.catalogFields,
+    verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
+    verifiedPageIds: activationContext.verifiedPageIds,
+  });
   let configSnapshotRef: {
     id: string;
     hash: string;
@@ -148,6 +159,8 @@ export async function curateItemWithPipeline(
 
   // Build + freeze + persist ONE immutable runtime snapshot before run
   // creation so every stage reads the same frozen config, options, and facts.
+  // The verified Page catalog is captured ONCE from the active import.
+  const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
   const runtimeSnapshot = buildRuntimeSnapshot({
     workspaceId,
     workspacePath,
@@ -159,7 +172,9 @@ export async function curateItemWithPipeline(
     sourceProductHash: '',
     searchKeywords: ext.searchKeywords ? String(ext.searchKeywords) : null,
     productPageNames: [],
-    pages: { state: 'no_verified_page_catalog', nameOnlyRecords: [] },
+    pages: toPageSnapshotState(pageSnapshot),
+    pageImportId: pageSnapshot.pageImportId,
+    pageImportHash: pageSnapshot.pageImportHash,
   });
   const { id: runtimeSnapId, hash: runtimeSnapHash } = persistRuntimeSnapshot(runtimeSnapshot);
 

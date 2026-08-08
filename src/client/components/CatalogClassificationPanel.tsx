@@ -6,6 +6,12 @@ import {
   applyCatalogClassification,
   type CatalogClassificationDetail,
 } from '../api';
+import { getClassificationReadiness } from '../onboarding-api';
+import {
+  readinessViewFromReport,
+  shouldBlockRun,
+  type ReadinessView,
+} from '../classification-readiness-view';
 
 const buttonBase: React.CSSProperties = {
   padding: '8px 16px',
@@ -64,8 +70,23 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
   // Use string map where '' means unset. We filter at submit time.
   const [decisionMap, setDecisionMap] = useState<Record<string, string>>({});
   const [changeSetId, setChangeSetId] = useState<string | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessView | null>(null);
   // Outstanding action tokens keyed by proposalId; reused until a definitive success.
   const actionTokensRef = React.useRef<Record<string, string>>({});
+
+  const loadReadiness = useCallback(async () => {
+    try {
+      const result = await getClassificationReadiness();
+      setReadiness(readinessViewFromReport(result.readiness));
+    } catch {
+      // Conservative: an unreadable report must never read as ready.
+      setReadiness(readinessViewFromReport(null));
+    }
+  }, []);
+
+  useEffect(() => {
+    loadReadiness();
+  }, [loadReadiness]);
 
   const loadClassification = useCallback(async () => {
     setLoading(true);
@@ -206,6 +227,17 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
       </p>
 
       {/* Run status */}
+      {readiness && !readiness.isReady && (
+        <div style={{ marginBottom: 16, padding: 12, background: '#fff7ed', border: '1px solid #fdba74', borderRadius: 8, fontSize: 13 }}>
+          <div style={{ color: '#9a3412', fontWeight: 600 }}>⚠ Classification is not ready to run</div>
+          <div style={{ color: '#7c2d12', marginTop: 4 }}>{readiness.summary.join(' ')}</div>
+          {readiness.capabilities.page.reason && (
+            <div style={{ color: '#7c2d12', marginTop: 2 }}>Category Pages: {readiness.capabilities.page.reason}</div>
+          )}
+        </div>
+      )}
+
+      {/* Run status */}
       {run && (
         <div style={{ marginBottom: 16, padding: 12, background: '#f8fafc', borderRadius: 8, fontSize: 13 }}>
           <div><strong>Status:</strong> {run.status}</div>
@@ -225,7 +257,7 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
         <button
           style={primaryButton}
           onClick={handleRun}
-          disabled={running}
+          disabled={running || (readiness ? shouldBlockRun(readiness) : false)}
         >
           {running ? 'Running...' : hasActiveRun ? 'Rerun' : 'Run Classification'}
         </button>

@@ -8,6 +8,8 @@
  * name_consolidation).
  */
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from './config-loader';
+import { captureVerifiedPageSnapshot, toPageSnapshotState } from './page-snapshot';
+import { assertClassificationReady } from './readiness';
 import { syncConfigToCache, createConfigSnapshot, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
 import {
   createRun,
@@ -46,8 +48,16 @@ export async function classifyCatalogProduct(
 
   // 1. Load the authoritative runtime config (ACTIVE v2 bundle when present,
   //    transitional v1 otherwise) and resolve the snapshot reference binding.
-  const activationContext = createRuntimeActivationContext(workspacePath);
+  const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
   const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+  // Run-start readiness gate (issue #17 L): the ACTIVE v2 config must be
+  // ready (enabled targets with legal options, verified Page catalog when
+  // the Page target is enabled) before any snapshot/run/model side effect.
+  assertClassificationReady(authority, {
+    catalogFields: activationContext.catalogFields,
+    verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
+    verifiedPageIds: activationContext.verifiedPageIds,
+  });
   let configSnapshotRef: StageContext['configSnapshotRef'];
   let focusedFileHashes: Record<string, string>;
   let catalogEvidenceHash: string | null;
@@ -88,8 +98,10 @@ export async function classifyCatalogProduct(
   }
 
   // 4. Build + freeze + persist ONE immutable runtime snapshot before run
-  //    creation. Page context is the product's own name-only observations
-  //    (never every store Page); the page catalog is unverified.
+  //    creation. The verified Page catalog is captured ONCE from the active
+  //    import and frozen into the snapshot; page context is the product's own
+  //    name-only observations (never every store Page).
+  const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
   const ownPageNames = parseProductOnPages(product.shopsite?.preserved);
   const runtimeSnapshot = buildRuntimeSnapshot({
     workspaceId,
@@ -102,10 +114,12 @@ export async function classifyCatalogProduct(
     sourceProductHash: productHash,
     searchKeywords: product.core.seo?.searchKeywords ?? null,
     productPageNames: ownPageNames,
-    pages: {
-      state: 'no_verified_page_catalog',
-      nameOnlyRecords: ownPageNames.map(pageName => ({ pageId: pageName, pageName, verified: false })),
-    },
+    pages: toPageSnapshotState(
+      pageSnapshot,
+      ownPageNames.map(pageName => ({ pageId: pageName, pageName, verified: false })),
+    ),
+    pageImportId: pageSnapshot.pageImportId,
+    pageImportHash: pageSnapshot.pageImportHash,
   });
   const { id: runtimeSnapId, hash: runtimeSnapHash } = persistRuntimeSnapshot(runtimeSnapshot);
 

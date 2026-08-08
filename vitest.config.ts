@@ -86,6 +86,8 @@ export default defineConfig({
       'src/tests/unit/benchmark-evaluator.test.ts',
       'src/tests/unit/product-retrieval.test.ts',
       'src/tests/unit/classification-config-store.test.ts',
+      'src/tests/unit/classification-config-loader.test.ts',
+      'src/tests/unit/name-consolidation-stage.test.ts',
       'src/tests/unit/classification-runtime-snapshot.test.ts',
       'src/tests/unit/reviewed-facts.test.ts',
       'src/tests/unit/page-import-service.test.ts',
@@ -98,6 +100,8 @@ export default defineConfig({
       'src/tests/unit/benchmark-qualification.test.ts',
       'src/tests/unit/embedding-maintenance.test.ts',
       'src/tests/unit/embedding-routes.test.ts',
+      'src/tests/unit/classification-page-snapshot.test.ts',
+      'src/tests/unit/classification-readiness-routes.test.ts',
     ],
   },
 });

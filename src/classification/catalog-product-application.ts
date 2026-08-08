@@ -71,7 +71,7 @@ export async function applyCatalogClassification(
   // formats fail closed.
   if (run.config_snapshot_hash) {
     const storedHash = String(run.config_snapshot_hash);
-    const authority = loadRuntimeConfigAuthority(workspacePath, createRuntimeActivationContext(workspacePath));
+    const authority = loadRuntimeConfigAuthority(workspacePath, createRuntimeActivationContext(workspacePath, workspaceId));
     const matches =
       authorityConfigHashMatches(authority, storedHash) ||
       runtimeSnapshotHashMatchesConfig(

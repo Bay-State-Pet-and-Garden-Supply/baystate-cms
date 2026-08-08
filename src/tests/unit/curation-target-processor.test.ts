@@ -181,7 +181,8 @@ describe('processPageTarget (LLM-first)', () => {
 
     expect(result.proposals.length).toBeGreaterThan(0);
     expect(result.proposals[0].proposalType).toBe('category_page');
-    expect(result.proposals[0].targetId).toBe('Dog Food Dry');
+    // Stable Page ID is the identity; the display name lives in the value.
+    expect(result.proposals[0].targetId).toBe('dog-food-dry');
     expect(result.proposals[0].proposedValue).toHaveProperty('pageId');
     expect(result.proposals[0].proposedValue).toHaveProperty('pageName');
   });
@@ -273,7 +274,7 @@ describe('processPageTarget (LLM-first)', () => {
     expect(result.proposals).toHaveLength(1);
     const proposal = result.proposals[0];
     expect(proposal.proposalType).toBe('category_page');
-    expect(proposal.targetId).toBe('Dog Food Dry');
+    expect(proposal.targetId).toBe('dog-food-dry');
     expect(proposal.proposedValue).toHaveProperty('pageId', 'dog-food-dry');
     expect(proposal.proposedValue).toHaveProperty('pageName', 'Dog Food Dry');
     expect(proposal.confidence).toBeGreaterThanOrEqual(0);

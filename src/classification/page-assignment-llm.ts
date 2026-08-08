@@ -10,7 +10,7 @@
 
 import { type ClassificationEvidence, type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
 import { callLlmForTask } from '../onboarding/llm-client';
-import { listPages, listVerifiedPageOptions } from '../db/repositories/page-repo';
+import type { PageSnapshotRecord } from './runtime-snapshot';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -51,24 +51,24 @@ export interface PageAssignmentResult {
 // ─── Page Hierarchy Builder ──────────────────────────────────────────────────
 
 /**
- * Build a page hierarchy array from flattened options.
+ * Build a page hierarchy array from flattened options PURELY over frozen
+ * verified Page snapshot records (issue #17 D1). No DB or workspace reads:
+ * the records are the immutable snapshot captured before run creation.
  *
- * Resolves parentId → parentName from VERIFIED page identities only (the
- * active import). When no workspaceId is provided the caller opts into the
- * legacy all-rows read (test/back-compat paths); production callers always
- * pass the workspace so name-only rows never enter hierarchy resolution.
+ * Duplicate display names remain distinct because identity is the local page
+ * row ID; parent metadata comes from the frozen records and is never looked
+ * up from mutable store state during a stage.
  */
 export function buildPageHierarchy(
   options: Array<{ value: string; label: string }>,
-  workspaceId?: string,
+  records: ReadonlyArray<PageSnapshotRecord> = [],
 ): Array<{ id: string; name: string; parentName: string | null }> {
-  const storePages = workspaceId ? listVerifiedPageOptions(workspaceId) : listPages();
-  const pageMap = new Map(storePages.map(p => [p.id, p]));
+  const pageMap = new Map(records.map(p => [p.pageId, p]));
 
   return options.map(opt => {
     const page = pageMap.get(opt.value);
-    const parentName = page?.parentId
-      ? (pageMap.get(page.parentId)?.name ?? null)
+    const parentName = page?.parentPageId
+      ? (pageMap.get(page.parentPageId)?.pageName ?? null)
       : null;
     return {
       id: opt.value,

@@ -32,9 +32,13 @@ export type ModelPolicySnapshot =
 export function captureModelPolicySnapshot(
   workspacePath: string,
   snapshotHash?: string,
+  workspaceId?: string,
 ): ModelPolicySnapshot {
   try {
-    const authority = loadRuntimeConfigAuthority(workspacePath, createRuntimeActivationContext(workspacePath));
+    const authority = loadRuntimeConfigAuthority(
+      workspacePath,
+      createRuntimeActivationContext(workspacePath, workspaceId ?? ''),
+    );
     if (authority.kind === 'v2') {
       const policy = authority.bundle.modelPolicy as unknown as ModelPolicyConfigV2;
       if (!policy || typeof policy !== 'object' || !policy.defaultProvider) {

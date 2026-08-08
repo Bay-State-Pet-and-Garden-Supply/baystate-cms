@@ -93,7 +93,7 @@ route.get('/catalog/schema-summary', (c) => {
   let staleMappingCount = 0;
   let fieldsMissingFromLatestPull: string[] = [];
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     unmappedAttributeCount = config.attributes.filter(a =>
       !config.attributeMappings.some(m => m.attributeId === a.id)
     ).length;
@@ -136,7 +136,7 @@ route.get('/catalog/fields', (c) => {
   // Load mapping info from classification config
   let mappings: Array<{ attributeId: string; catalogField: string; isStale: boolean }> = [];
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     mappings = config.attributeMappings.map(m => ({
       attributeId: m.attributeId,
       catalogField: m.catalogField,
@@ -167,7 +167,7 @@ route.get('/catalog/fields', (c) => {
 
   // Check curation targets
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     const curationFields = new Set(
       (config.curationTargets ?? [])
         .filter(t => t.kind === 'product_field' && t.catalogField)
@@ -212,7 +212,7 @@ route.get('/catalog/fields/:xmlField', (c) => {
   let isCurationTarget = false;
   let isStale = false;
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     const mapping = config.attributeMappings.find(m => m.catalogField === xmlField);
     mappedAttributeId = mapping?.attributeId ?? null;
     isStale = mapping?.isStale ?? false;
@@ -363,7 +363,7 @@ route.get('/catalog/mappings', (c) => {
   if (!ws) return c.json({ error: 'No workspace loaded.' }, 400);
 
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     const attrNames = new Map(config.attributes.map(a => [a.id, a.name]));
 
     // Build productType membership for each attribute
@@ -432,7 +432,7 @@ route.get('/catalog/schema-health', (c) => {
 
   // Stale attribute mappings
   try {
-    const config = loadRuntimeConfig(ws.workspacePath);
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     for (const m of config.attributeMappings) {
       if (m.isStale) {
         findings.push({

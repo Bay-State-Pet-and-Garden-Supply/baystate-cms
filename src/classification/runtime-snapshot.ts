@@ -39,6 +39,14 @@ export interface PageSnapshotRecord {
   pageName: string;
   /** False until a real ShopSite Pages export verifies the identity. */
   verified: boolean;
+  /** Verified records only: parent Page ID/name from the frozen import. */
+  parentPageId?: string | null;
+  parentPageName?: string | null;
+  /** Verified records only: exported identity kind/key from the active import. */
+  identityKind?: string;
+  identityKey?: string;
+  /** Verified records only: source hash of the page_index row/import. */
+  sourceHash?: string | null;
 }
 
 export type PageSnapshotState =

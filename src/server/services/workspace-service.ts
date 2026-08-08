@@ -17,7 +17,7 @@ import type { Workspace } from '../../shared/types';
  */
 function attachClassificationConfig(ws: Workspace, workspacePath: string): void {
   try {
-    const activationContext = createRuntimeActivationContext(workspacePath);
+    const activationContext = createRuntimeActivationContext(workspacePath, ws.id);
     const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
     if (authority.kind === 'v2') {
       // The derived cache was written transactionally at activation; never

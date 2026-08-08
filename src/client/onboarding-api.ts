@@ -542,6 +542,14 @@ export async function getClassificationConfig(): Promise<ClassificationConfigRes
   return classificationRequest<ClassificationConfigResponse>('/config');
 }
 
+export async function getClassificationReadiness(): Promise<{
+  readiness: import('../shared/schemas/classification').ClassificationReadinessReportDto;
+}> {
+  return classificationRequest<{
+    readiness: import('../shared/schemas/classification').ClassificationReadinessReportDto;
+  }>('/readiness');
+}
+
 // fallow-ignore-next-line unused-export — used by tests
 export async function saveClassificationConfig(config: any): Promise<{ success: boolean; config: any }> {
   return classificationRequest<{ success: boolean; config: any }>('/config', {

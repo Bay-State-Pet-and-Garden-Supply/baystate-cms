@@ -117,7 +117,7 @@ describe('classification config generator', () => {
     expect(candidate.bundle.attributeMappings.some(mapping => productTypeIds.has(mapping.attributeId))).toBe(false);
   });
 
-  it('keeps exactly one enabled Product Type target, disables Pages, and leaves claims/composition inactive', () => {
+  it('keeps exactly one enabled Product Type target, enables the verified Page target, and leaves claims/composition inactive', () => {
     const candidate = generateCandidate(BayStatePetGardenSeed, evidenceWithFields(REVIEWED_FIELDS));
     const effective = candidate.bundle.curationTargets.filter(target => target.enabled || target.mandatory);
 
@@ -127,9 +127,11 @@ describe('classification config generator', () => {
     expect(typeTargets[0].optionSource).toBe('configured');
 
     const pageTarget = candidate.bundle.curationTargets.find(target => target.kind === 'page')!;
-    expect(pageTarget.enabled).toBe(false);
+    expect(pageTarget.enabled).toBe(true);
     expect(pageTarget.mandatory).toBe(false);
     expect(pageTarget.required).toBe(false);
+    expect(pageTarget.selectionMode).toBe('multiple');
+    expect(pageTarget.optionSource).toBe('live_store');
 
     // Claim/composition attributes exist but no target is enabled for them.
     const claimAttributes = new Set(

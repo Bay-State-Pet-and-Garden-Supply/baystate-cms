@@ -10,6 +10,7 @@ import { authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from '..
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { validateCatalogReviewCompletionGate } from '../../classification/review-completion-gate';
 import { applyCatalogClassification } from '../../classification/catalog-product-application';
+import { ClassificationNotReadyError } from '../../classification/readiness';
 import { SubmitCatalogDecisionsRequestSchema } from '../../shared/schemas/classification';
 
 const route = new Hono();
@@ -50,7 +51,7 @@ route.get('/products/:sku/classification', (c) => {
   }
 
   if (run.configSnapshotHash) {
-    const authority = loadRuntimeConfigAuthority(workspace.workspacePath, createRuntimeActivationContext(workspace.workspacePath));
+    const authority = loadRuntimeConfigAuthority(workspace.workspacePath, createRuntimeActivationContext(workspace.workspacePath, workspace.id));
     const matches =
       authorityConfigHashMatches(authority, run.configSnapshotHash) ||
       runtimeSnapshotHashMatchesConfig(
@@ -111,9 +112,16 @@ route.post('/products/:sku/classification/runs', async (c) => {
       return c.json({ error: result.error || 'Classification failed.' }, 409);
     }
     return c.json(result);
-  } catch (err: any) {
+  } catch (err) {
+    if (err instanceof ClassificationNotReadyError) {
+      return c.json({
+        error: err.message,
+        code: err.code,
+        readiness: err.readiness,
+      }, 409);
+    }
     console.error(`[CatalogClassificationRoutes] Classification failed for ${sku}:`, err);
-    return c.json({ error: err.message || 'Classification failed.' }, 500);
+    return c.json({ error: err instanceof Error ? err.message : 'Classification failed.' }, 500);
   }
 });
 

@@ -127,7 +127,8 @@ export function buildCategoryPageProposal(params: CategoryPageProposalParams): C
     runId: params.runId,
     productSku: params.sku,
     proposalType: 'category_page',
-    targetId: params.pageName,
+    // Stable Page ID is the identity; display name is data in the value.
+    targetId: params.pageId ?? params.pageName,
     proposedValue: {
       pageId: params.pageId ?? null,
       pageName: params.pageName,

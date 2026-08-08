@@ -363,7 +363,7 @@ export async function promoteItems(
               skippedPageRefs.push({ proposalId: proposal.id, pageName });
               continue;
             }
-            classificationPageNames.push(targetId);
+            classificationPageNames.push(pageName);
             classificationPageProposals.push({ pageId, pageName });
           } else if (proposal.proposalType === 'primary_product_type') {
             acceptedProductType = getEffectivePrimaryProductTypeId(proposal);

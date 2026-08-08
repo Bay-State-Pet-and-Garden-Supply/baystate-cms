@@ -66,7 +66,7 @@ describe('grouped page target processing', () => {
     expect(mocks.perItem).not.toHaveBeenCalled();
     expect(result.proposals).toHaveLength(1);
     expect(result.proposals[0].productSku).toBe('SKU1');
-    expect(result.proposals[0].targetId).toBe('Cat Food Wet');
+    expect(result.proposals[0].targetId).toBe('cat-wet');
   });
 
   it('returns zero proposals on cohort abstention without per-item fallback', async () => {

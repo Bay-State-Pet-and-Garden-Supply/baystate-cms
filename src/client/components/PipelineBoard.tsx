@@ -12,6 +12,7 @@ import {
   completeReviewStage,
   OnboardingApiError,
   getCurationTargets,
+  getClassificationReadiness,
   type CurationTargetsResponse,
   type ConsistencyWarning,
 } from '../onboarding-api';
@@ -53,6 +54,7 @@ import { ProductImageGallery } from './pipeline-drawer/ProductImageGallery';
 import { DiscoveryStagePanel } from './pipeline-drawer/DiscoveryStagePanel';
 import { ExtractionStagePanel } from './pipeline-drawer/ExtractionStagePanel';
 import { CurationStagePanel } from './pipeline-drawer/CurationStagePanel';
+import { readinessViewFromReport } from '../classification-readiness-view';
 
 const STAGES: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
@@ -286,6 +288,22 @@ export function PipelineBoard({
       setCurationTargetState(res);
     } catch { /* classification target settings are optional for legacy workspaces */ }
   }, []);
+
+  // Classification readiness banner (issue #17 L): automatic curation is
+  // blocked server-side when not ready; the banner surfaces why.
+  const [readinessView, setReadinessView] = useState<ReturnType<typeof readinessViewFromReport> | null>(null);
+  const loadReadiness = useCallback(async () => {
+    try {
+      const res = await getClassificationReadiness();
+      setReadinessView(readinessViewFromReport(res.readiness));
+    } catch {
+      setReadinessView(readinessViewFromReport(null));
+    }
+  }, []);
+
+  useEffect(() => {
+    loadReadiness();
+  }, [loadReadiness]);
 
   useEffect(() => {
     fetchStaged();
@@ -1407,6 +1425,13 @@ export function PipelineBoard({
           100% { transform: rotate(360deg); }
         }
       `}</style>
+      {/* Header */}
+      {readinessView && !readinessView.isReady && (
+        <div style={{ padding: '8px 24px', flexShrink: 0, background: '#fff7ed', borderBottom: '1px solid #fdba74', fontSize: 13 }}>
+          <span style={{ color: '#9a3412', fontWeight: 600 }}>⚠ Automatic curation is blocked — classification is not ready.</span>{' '}
+          <span style={{ color: '#7c2d12' }}>{readinessView.capabilities.page.reason || readinessView.summary.join(' ')}</span>
+        </div>
+      )}
       {/* Header */}
       <div style={{ padding: '12px 24px', flexShrink: 0, borderBottom: '1px solid #e5e7eb', background: '#fff', marginBottom: 12 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

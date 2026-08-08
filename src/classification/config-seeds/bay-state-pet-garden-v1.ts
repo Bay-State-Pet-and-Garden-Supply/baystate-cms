@@ -393,7 +393,10 @@ export const BayStatePetGardenSeed: BayStateSeed = {
       id: 'store-pages',
       kind: 'page',
       label: 'Category Pages',
-      enabled: false,
+      // Enabled for the reviewed D2 activation: the verified Page import
+      // (211 exported_guid pages) is frozen into every run snapshot and
+      // Page identity is never a display name.
+      enabled: true,
       mandatory: false,
       selectionMode: 'multiple',
       attributeId: null,

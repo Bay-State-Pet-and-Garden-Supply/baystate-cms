@@ -1199,3 +1199,35 @@ export const BuildPredictionBundleRequestSchema = z.object({
   splitGroup: z.enum(['test', 'holdout']).default('holdout'),
 });
 export type BuildPredictionBundleRequest = z.infer<typeof BuildPredictionBundleRequestSchema>;
+
+// ─── Classification readiness (issue #17 work item L) ────────────────────────
+
+export const ClassificationReadinessCapabilitySchema = z.object({
+  kind: z.enum(['product_type', 'product_field', 'page']),
+  enabled: z.boolean(),
+  targetCount: z.number().int().nonnegative(),
+  runnable: z.boolean(),
+  reason: z.string().nullable(),
+}).strict();
+export type ClassificationReadinessCapability = z.infer<typeof ClassificationReadinessCapabilitySchema>;
+
+export const ClassificationReadinessFindingSchema = z.object({
+  severity: z.enum(['error', 'warning', 'info']),
+  code: z.string(),
+  path: z.string(),
+  message: z.string(),
+}).strict();
+export type ClassificationReadinessFinding = z.infer<typeof ClassificationReadinessFindingSchema>;
+
+export const ClassificationReadinessReportSchema = z.object({
+  isReady: z.boolean(),
+  hasWarnings: z.boolean(),
+  capabilities: z.object({
+    productType: ClassificationReadinessCapabilitySchema,
+    productFields: ClassificationReadinessCapabilitySchema,
+    categoryPages: ClassificationReadinessCapabilitySchema,
+  }),
+  findings: z.array(ClassificationReadinessFindingSchema),
+  summary: z.array(z.string()),
+}).strict();
+export type ClassificationReadinessReportDto = z.infer<typeof ClassificationReadinessReportSchema>;

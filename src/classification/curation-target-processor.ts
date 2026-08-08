@@ -246,8 +246,12 @@ export async function processPageTarget(
   const selectionMode = (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
   const maxPages = selectionMode === 'multiple' ? 5 : 1;
 
-  // ── Build page hierarchy from verified store pages ───────────────────
-  const pageHierarchy = buildPageHierarchy(options, context.workspaceId);
+  // ── Build page hierarchy from FROZEN verified snapshot records ────────
+  // Pure over the immutable Page snapshot; no DB reads during the stage.
+  const pageHierarchy = buildPageHierarchy(
+    options,
+    context.snapshot?.pages.state === 'verified' ? context.snapshot.pages.records : [],
+  );
 
   // ── Extract product context from evidence and proposals ────────────────
   const productContext = extractProductContext(input.evidence, input.allProposals);

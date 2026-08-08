@@ -77,6 +77,9 @@ describe('classification config-store', () => {
 
   const activationContext = (): VerifiedActivationContext => ({
     catalogFields: REVIEWED_FIELDS,
+    // The reviewed seed enables the verified Page target, so the active
+    // activation context must attest the verified Page identities.
+    verifiedPageIds: ['page-1', 'page-2'],
     // Binds the evidence hash to the current pre-activation catalog HEAD.
     verifyCatalogEvidence: (input) => ({
       verified: input.catalogEvidenceHash === EVIDENCE_HASH && input.sourceCatalogCommit === runGit(root, ['rev-parse', 'HEAD']),

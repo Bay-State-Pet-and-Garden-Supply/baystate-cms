@@ -102,13 +102,12 @@ describe('buildPageHierarchy', () => {
     vi.clearAllMocks();
   });
 
-  it('resolves parent names from page_index', () => {
-    const mockPages = [
-      { id: 'parent-1', name: 'Dog Food Shop All', fileName: null, parentId: null, pageHash: 'a', lastSyncedAt: null, createdAt: '', updatedAt: '' },
-      { id: 'child-1', name: 'Dog Food Dry', fileName: null, parentId: 'parent-1', pageHash: 'b', lastSyncedAt: null, createdAt: '', updatedAt: '' },
-      { id: 'child-2', name: 'Dog Food Wet', fileName: null, parentId: 'parent-1', pageHash: 'c', lastSyncedAt: null, createdAt: '', updatedAt: '' },
+  it('resolves parent names from frozen verified Page records (pure, no DB)', () => {
+    const records = [
+      { pageId: 'parent-1', pageName: 'Dog Food Shop All', verified: true, parentPageId: null, parentPageName: null },
+      { pageId: 'child-1', pageName: 'Dog Food Dry', verified: true, parentPageId: 'parent-1', parentPageName: 'Dog Food Shop All' },
+      { pageId: 'child-2', pageName: 'Dog Food Wet', verified: true, parentPageId: 'parent-1', parentPageName: 'Dog Food Shop All' },
     ];
-    asMock(listPages).mockReturnValue(mockPages);
 
     const options = [
       { value: 'parent-1', label: 'Dog Food Shop All' },
@@ -116,7 +115,7 @@ describe('buildPageHierarchy', () => {
       { value: 'child-2', label: 'Dog Food Wet' },
     ];
 
-    const result = buildPageHierarchy(options);
+    const result = buildPageHierarchy(options, records);
 
     expect(result).toHaveLength(3);
     expect(result[0]).toEqual({ id: 'parent-1', name: 'Dog Food Shop All', parentName: null });
@@ -124,18 +123,19 @@ describe('buildPageHierarchy', () => {
     expect(result[2]).toEqual({ id: 'child-2', name: 'Dog Food Wet', parentName: 'Dog Food Shop All' });
   });
 
-  it('returns null parentName for top-level pages', () => {
-    asMock(listPages).mockReturnValue([
-      { id: 'p1', name: 'Dog Toys', fileName: null, parentId: null, pageHash: 'a', lastSyncedAt: null, createdAt: '', updatedAt: '' },
-      { id: 'p2', name: 'Dog Beds', fileName: null, parentId: null, pageHash: 'b', lastSyncedAt: null, createdAt: '', updatedAt: '' },
-    ]);
+  it('returns null parentName for top-level pages and is duplicate-name safe', () => {
+    const records = [
+      { pageId: 'p1', pageName: 'Same Name', verified: true, parentPageId: null, parentPageName: null },
+      { pageId: 'p2', pageName: 'Same Name', verified: true, parentPageId: null, parentPageName: null },
+    ];
 
     const result = buildPageHierarchy([
-      { value: 'p1', label: 'Dog Toys' },
-      { value: 'p2', label: 'Dog Beds' },
-    ]);
+      { value: 'p1', label: 'Same Name' },
+      { value: 'p2', label: 'Same Name' },
+    ], records);
 
     expect(result.every(p => p.parentName === null)).toBe(true);
+    expect(new Set(result.map(p => p.id)).size).toBe(2);
   });
 });
 
