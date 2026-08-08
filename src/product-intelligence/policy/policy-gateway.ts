@@ -160,8 +160,11 @@ export class PolicyGateway {
     // The DB import is lazy so the gateway stays importable in environments
     // without bun:sqlite (vitest); audit failures never break the run.
     void (async () => {
-      const { getDb } = await import('../../db/connection');
+      // The import itself can reject in environments without bun:sqlite
+      // (vitest) — the try must wrap it so audit failures never become
+      // unhandled rejections and never break the run.
       try {
+      const { getDb } = await import('../../db/connection');
       getDb().run(
         `INSERT OR IGNORE INTO product_intelligence_policy_decisions
          (id, run_id, sequence, decision, policy_version, target_type, target,

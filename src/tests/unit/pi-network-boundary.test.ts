@@ -446,7 +446,7 @@ describe('P0-1 round-3 transport injection', () => {
         { status: 200, headers: { 'content-type': 'application/json' } },
       );
     };
-    const { candidates } = await discoverSources('745801105447', 'Feline Wormeze Liquid', null, {
+    const { candidates } = await discoverSources('745801105447', 'Feline Wormeze Liquid', 'farnam.com', {
       // Skip the LLM name-consolidation call for a deterministic test.
       existingExpectedName: 'Feline Wormeze Liquid',
       networkFetch: spy,
