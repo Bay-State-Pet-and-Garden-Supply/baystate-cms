@@ -456,7 +456,7 @@ function resolveEvidenceFacts(runId: string, evidenceIds: string[]): ResolvedEvi
       value = null;
     }
     let contentHash: string | null;
-    let entityId: string | null = null;
+    let entityId: string | null;
     try {
       const metadata = row.metadataJson
         ? (JSON.parse(row.metadataJson) as { contentHash?: unknown; entityId?: unknown; nodeId?: unknown; entityRef?: unknown })

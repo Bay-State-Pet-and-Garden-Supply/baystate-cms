@@ -81,7 +81,7 @@ function buildCacheKey(
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
     modelPolicy,
-    protectedOperation: 'cohort_title_consolidation',
+    ...(modelPolicy !== undefined ? { protectedOperation: 'cohort_title_consolidation' } : {}),
   });
   const modelIdentity = llmConfig
     ? {
@@ -356,7 +356,7 @@ async function coordinateGroup(
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
     modelPolicy,
-    protectedOperation: 'cohort_title_consolidation',
+    ...(modelPolicy !== undefined ? { protectedOperation: 'cohort_title_consolidation' } : {}),
   });
   if (!llmConfig) {
     throw new Error('No LLM configured for product_curation');
@@ -388,7 +388,11 @@ async function coordinateGroup(
     'product_curation',
     prompt,
     'You are a clean product taxonomy assistant.',
-    { allowFallback: true, modelPolicy, protectedOperation: 'cohort_title_consolidation' },
+    {
+      allowFallback: true,
+      modelPolicy,
+      ...(modelPolicy !== undefined ? { protectedOperation: 'cohort_title_consolidation' } : {}),
+    },
   );
 
   if (!response || response.length < 2) {

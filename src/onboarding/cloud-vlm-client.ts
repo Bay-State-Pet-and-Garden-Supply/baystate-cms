@@ -20,6 +20,8 @@ export interface CloudVlmParams {
   imageUrl: string;
   /** Provider/model override (defaults to llm_task_configs or fallback) */
   task?: string;
+  /** Frozen classification model-policy view (issue #17 item A). */
+  modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null;
 }
 
 // ─── Image Fetching ───────────────────────────────────────────────────────────
@@ -97,14 +99,17 @@ export async function extractPackagingOcrFromCloud(
     return null;
   }
 
-  // 2. Resolve LLM config for the vision task
+  // 2. Resolve LLM config for the vision task (protected: routed through the
+  //    frozen classification model policy — never the generic fallback).
   let config: LlmConfig | null = null;
   try {
-    config = getLlmConfigForTask((task ?? 'classification_evidence_extraction') as LlmTask, { allowFallback: true });
+    config = getLlmConfigForTask((task ?? 'classification_evidence_extraction') as LlmTask, {
+      allowFallback: true,
+      modelPolicy: params.modelPolicy,
+      protectedOperation: 'evidence_extraction',
+    });
   } catch {
-    // Fallback to generic config
-    const { getLlmConfig } = await import('./llm-client');
-    config = getLlmConfig();
+    config = null;
   }
 
   if (!config) {

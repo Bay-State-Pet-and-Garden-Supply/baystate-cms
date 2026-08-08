@@ -11,7 +11,7 @@
  * Uses `category_classification` task routing for all target kinds
  * to avoid widening task-routing scope in this refactor.
  */
-import { getLlmConfigForTask, callLlmForTask, defaultProtectedOperationForTask } from '../onboarding/llm-client';
+import { getLlmConfigForTask, callLlmForTask, defaultProtectedOperationForTask, type LlmConfig } from '../onboarding/llm-client';
 import type { LlmTask } from '../db/repositories/llm-task-config-repo';
 import { ModelPolicyDeniedError, type ModelPolicyView, type ProtectedOperation } from './model-policy-gateway';
 
@@ -61,17 +61,28 @@ export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmR
 
   if (options.length === 0 || evidenceText.trim().length < 8) return null;
 
-  const operation =
-    params.protectedOperation ??
-    defaultProtectedOperationForTask(taskName as LlmTask);
-  if (!operation && params.modelPolicy !== undefined) {
-    throw new ModelPolicyDeniedError('policy_absent', 'product_type_ranking');
+  let operation: ProtectedOperation | null = null;
+  let llmConfig: import('../onboarding/llm-client').LlmConfig | null = null;
+  try {
+    operation =
+      params.protectedOperation ??
+      defaultProtectedOperationForTask(taskName as LlmTask);
+
+    if (!operation && params.modelPolicy !== undefined) {
+      throw new ModelPolicyDeniedError('policy_absent', 'product_type_ranking');
+    }
+
+    llmConfig = getLlmConfigForTask(taskName as any, {
+      allowFallback: true,
+      modelPolicy: params.modelPolicy,
+      ...(operation ? { protectedOperation: operation } : {}),
+    });
+  } catch (err) {
+    if (err instanceof ModelPolicyDeniedError && params.modelPolicy === undefined) {
+      return null;
+    }
+    throw err;
   }
-  const llmConfig = getLlmConfigForTask(taskName as any, {
-    allowFallback: true,
-    modelPolicy: params.modelPolicy,
-    ...(operation ? { protectedOperation: operation } : {}),
-  });
   if (!llmConfig) return null;
 
   const maxVals = maxValues ?? (selectionMode === 'multiple' ? Math.min(5, options.length) : 1);
@@ -93,7 +104,11 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
       taskName as any,
       prompt,
       'You are a strict catalog classifier. You only return exact values from the allowed options.',
-      { allowFallback: true, modelPolicy: params.modelPolicy, protectedOperation: operation ?? undefined },
+      {
+        allowFallback: true,
+        modelPolicy: params.modelPolicy,
+        ...(operation ? { protectedOperation: operation } : {}),
+      },
     );
 
     if (!response) return null;
@@ -109,7 +124,11 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
           taskName as any,
           `The previous response was not valid JSON. Fix the JSON format:\n\n${response.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
           'You are a precise JSON fixer. Return only valid JSON matching the requested shape.',
-          { allowFallback: true, modelPolicy: params.modelPolicy, protectedOperation: operation ?? undefined },
+          {
+            allowFallback: true,
+            modelPolicy: params.modelPolicy,
+            ...(operation ? { protectedOperation: operation } : {}),
+          },
         );
         if (retryResponse) {
           parsed = parseRankerResponse(retryResponse);

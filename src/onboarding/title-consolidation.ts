@@ -84,7 +84,7 @@ export async function consolidateProductTitle(
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
     modelPolicy,
-    protectedOperation: 'title_consolidation',
+    ...(modelPolicy !== undefined ? { protectedOperation: 'title_consolidation' } : {}),
   });
 
   // If LLM is not configured, prefer spreadsheet name (has variant tokens like LG, SM, YELLOW)
@@ -116,7 +116,7 @@ export async function consolidateProductTitle(
     const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', {
       allowFallback: true,
       modelPolicy,
-      protectedOperation: 'title_consolidation',
+      ...(modelPolicy !== undefined ? { protectedOperation: 'title_consolidation' } : {}),
     });
     if (cleanTitle && cleanTitle.length > 2) {
       console.log(`[TitleConsolidation] LLM consolidated title: "${cleanTitle}"`);

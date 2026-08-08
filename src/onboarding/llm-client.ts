@@ -262,18 +262,13 @@ export function defaultProtectedOperationForTask(task: LlmTask): ProtectedOperat
       return 'attribute_ranking';
     case 'category_page_assignment':
       return 'page_assignment';
-    case 'product_curation':
-      return 'title_consolidation';
-    case 'product_name_consolidation':
-      return 'discovery_name_consolidation';
-    case 'brand_inference':
-      return 'brand_inference';
     default:
       return null;
   }
 }
 
 function credentialForProvider(provider: string): {
+  provider: string;
   apiKey: string;
   baseUrl: string | null;
   model: string | null;
@@ -283,7 +278,8 @@ function credentialForProvider(provider: string): {
     // locality_undeclared unless the caller resolves them explicitly.
     return null;
   }
-  return resolveProviderCredential(provider);
+  const cred = resolveProviderCredential(provider);
+  return cred ? { provider, ...cred } : null;
 }
 
 /**
@@ -337,6 +333,7 @@ export function getLlmConfigForTask(
     if (options.modelPolicy) {
       return resolveProtectedConfig(task, operation, options.modelPolicy);
     }
+    throw new ModelPolicyDeniedError('policy_absent', operation);
   }
 
   // Non-protected tasks or calls without explicit modelPolicy: legacy resolution order.
@@ -682,7 +679,7 @@ export async function consolidateProductName(
       config = getLlmConfigForTask('product_name_consolidation', {
         allowFallback: true,
         modelPolicy,
-        protectedOperation: 'discovery_name_consolidation',
+        ...(modelPolicy !== undefined ? { protectedOperation: 'discovery_name_consolidation' } : {}),
       });
     } catch (err) {
       if (err instanceof ModelPolicyDeniedError) {
@@ -748,7 +745,7 @@ Register-Aligned Expected Name:`;
       ? await callLlmForTask('product_name_consolidation', prompt, systemPrompt, {
           allowFallback: true,
           modelPolicy,
-          protectedOperation: 'discovery_name_consolidation',
+          ...(modelPolicy !== undefined ? { protectedOperation: 'discovery_name_consolidation' } : {}),
         })
       : await callLlm(prompt, systemPrompt);
     if (name == null) {

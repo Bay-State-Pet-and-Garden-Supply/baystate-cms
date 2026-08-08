@@ -12,6 +12,8 @@
  */
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { consolidateProductTitle } from '../../onboarding/title-consolidation';
+import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
+import type { ModelPolicyConfigV2 } from '../../shared/schemas/classification';
 
 /**
  * Extract the best title signal from evidence of a given sourceField.
@@ -251,19 +253,27 @@ export const nameConsolidationStage: StageDefinition = {
       : undefined;
 
     try {
-      const result = await consolidateProductTitle({
-        name: spreadsheetName ?? fallbackName,
-        rawRegisterName: rawRegisterName ?? undefined,
-        brandHint: brandHint ?? undefined,
-        webTitle: webTitle ?? undefined,
-        ocrTitle: ocrTitle ?? undefined,
-        ocrWeight: ocrWeight ?? undefined,
-        ocrSize: ocrSize ?? undefined,
-        ocrCount: ocrCount ?? undefined,
-        siblingContext,
-        distributorTitles: distributorSignals.titles.length > 0 ? distributorSignals.titles : undefined,
-        distributorBrands: distributorSignals.brands.length > 0 ? distributorSignals.brands : undefined,
-      });
+      const result = await consolidateProductTitle(
+        {
+          name: spreadsheetName ?? fallbackName,
+          rawRegisterName: rawRegisterName ?? undefined,
+          brandHint: brandHint ?? undefined,
+          webTitle: webTitle ?? undefined,
+          ocrTitle: ocrTitle ?? undefined,
+          ocrWeight: ocrWeight ?? undefined,
+          ocrSize: ocrSize ?? undefined,
+          ocrCount: ocrCount ?? undefined,
+          siblingContext,
+          distributorTitles: distributorSignals.titles.length > 0 ? distributorSignals.titles : undefined,
+          distributorBrands: distributorSignals.brands.length > 0 ? distributorSignals.brands : undefined,
+        },
+        context.snapshot
+          ? modelPolicyViewFromConfig(
+              context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+              context.snapshot.snapshotHash,
+            )
+          : null,
+      );
 
       return {
         status: 'succeeded',

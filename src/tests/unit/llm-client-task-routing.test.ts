@@ -287,3 +287,175 @@ describe('LLM Client — task-specific routing', () => {
     expect(calls[1].body.model).toBe('llama3:8b');
   });
 });
+
+describe('Protected classification operations — model-policy gateway (issue #17 item A)', () => {
+  const testDbPath = 'src/tests/unit/llm-client-policy-test.db';
+
+  function stubFetch(responseBody: unknown = {
+    choices: [{ message: { content: 'mock response' } }],
+  }): { calls: Array<{ url: string; body: { model: string; temperature?: number } }> } {
+    const calls: Array<{ url: string; body: { model: string; temperature?: number } }> = [];
+    const mock = (async (url: string, init?: RequestInit) => {
+      const body = JSON.parse((init?.body as string) ?? '{}');
+      calls.push({ url, body });
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    globalThis.fetch = mock;
+    return { calls };
+  }
+
+  function localOnlyOllamaView() {
+    const { buildModelPolicyView } = require('../../classification/model-policy-gateway') as typeof import('../../classification/model-policy-gateway');
+    return buildModelPolicyView(
+      {
+        defaultProvider: 'ollama',
+        defaultModel: 'qwen2.5vl:latest',
+        providerLocalities: { ollama: 'local' },
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'local_only',
+        mlFeatures: {
+          productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        },
+      } as any,
+      { snapshotHash: 'snap-1' },
+    );
+  }
+
+  let originalFetch: typeof fetch;
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+    upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'qwen2.5vl:latest');
+    upsertApiKey('deepseek', 'sk-deepseek-test', null, 'deepseek-default');
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
+
+  beforeEach(() => { originalFetch = globalThis.fetch; });
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  test('a live DeepSeek task config is ignored for a protected op under a local-only/Ollama policy', async () => {
+    upsertLlmTaskConfig({ task: 'classification_evidence_extraction', provider: 'deepseek', model: 'deepseek-v4-flash' });
+    const { calls } = stubFetch();
+    const view = localOnlyOllamaView();
+
+    const config = getLlmConfigForTask('classification_evidence_extraction', {
+      allowFallback: true,
+      modelPolicy: view,
+      protectedOperation: 'evidence_extraction',
+    });
+    expect(config?.provider).toBe('ollama');
+    expect(config?.model).toBe('qwen2.5vl:latest');
+
+    await callLlmForTask('classification_evidence_extraction', 'hello', 'system', {
+      allowFallback: true,
+      modelPolicy: view,
+      protectedOperation: 'evidence_extraction',
+    });
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toContain('http://localhost:11434/v1/chat/completions');
+    expect(calls[0].url).not.toContain('api.deepseek.com');
+    deleteLlmTaskConfig('classification_evidence_extraction');
+  });
+
+  test('mutating llm_task_configs or the API-key model after snapshot creation cannot change the route', async () => {
+    upsertLlmTaskConfig({ task: 'category_page_assignment', provider: 'openai', model: 'gpt-4o-mini' });
+    const view = localOnlyOllamaView();
+
+    const before = getLlmConfigForTask('category_page_assignment', {
+      modelPolicy: view,
+      protectedOperation: 'page_assignment',
+    });
+    upsertLlmTaskConfig({ task: 'category_page_assignment', provider: 'deepseek', model: 'deepseek-v4-pro' });
+    upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'mutated-model');
+    const after = getLlmConfigForTask('category_page_assignment', {
+      modelPolicy: view,
+      protectedOperation: 'page_assignment',
+    });
+    expect(before?.provider).toBe('ollama');
+    expect(after?.provider).toBe('ollama');
+    expect(after?.model).toBe('qwen2.5vl:latest');
+    deleteLlmTaskConfig('category_page_assignment');
+  });
+
+  test('explicit null policy (disabled) resolves to no config for protected ops — no transport', async () => {
+    const { calls } = stubFetch();
+    const config = getLlmConfigForTask('classification_evidence_extraction', {
+      allowFallback: true,
+      modelPolicy: null,
+      protectedOperation: 'evidence_extraction',
+    });
+    expect(config).toBeNull();
+    const result = await callLlmForTask('classification_evidence_extraction', 'hello', 'system', {
+      allowFallback: true,
+      modelPolicy: null,
+      protectedOperation: 'evidence_extraction',
+    });
+    expect(result).toBeNull();
+    expect(calls.length).toBe(0);
+  });
+
+  test('missing policy on a protected op throws policy_absent (no silent fallback model)', () => {
+    expect(() =>
+      getLlmConfigForTask('classification_evidence_extraction', {
+        allowFallback: true,
+      }),
+    ).toThrow(/policy_absent/);
+  });
+
+  test('a declared-local provider with a remote base URL is denied at config resolution', () => {
+    const { buildModelPolicyView } = require('../../classification/model-policy-gateway') as typeof import('../../classification/model-policy-gateway');
+    const view = buildModelPolicyView(
+      {
+        defaultProvider: 'ollama',
+        defaultModel: 'qwen2.5vl:latest',
+        providerLocalities: { ollama: 'local' },
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'local_only',
+        mlFeatures: {
+          productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        },
+      } as any,
+      { snapshotHash: 'snap-2' },
+    );
+    upsertApiKey('ollama', 'ollama-default', 'https://api.example.com/v1', 'qwen2.5vl:latest');
+    expect(() =>
+      getLlmConfigForTask('classification_evidence_extraction', {
+        modelPolicy: view,
+        protectedOperation: 'evidence_extraction',
+      }),
+    ).toThrow(/endpoint_non_loopback/);
+    upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'llama3');
+  });
+
+  test('non-protected profile task routing is unchanged when a policy view is present', async () => {
+    upsertLlmTaskConfig({ task: 'profile_generation', provider: 'deepseek', model: 'deepseek-v4-pro' });
+    const { calls } = stubFetch();
+    const view = localOnlyOllamaView();
+    const config = getLlmConfigForTask('profile_generation', {
+      allowFallback: false,
+      modelPolicy: view,
+    });
+    expect(config?.provider).toBe('deepseek');
+    await callLlmForTask('profile_generation', 'hello', 'system', { allowFallback: false, modelPolicy: view });
+    expect(calls.length).toBe(1);
+    expect(calls[0].url).toContain('https://api.deepseek.com/chat/completions');
+    deleteLlmTaskConfig('profile_generation');
+  });
+});

@@ -416,7 +416,7 @@ async function selectWithLlm(
     config = getLlmConfigForTask('product_name_consolidation', {
       allowFallback: true,
       modelPolicy,
-      protectedOperation: 'sitemap_selection',
+      ...(modelPolicy !== undefined ? { protectedOperation: 'sitemap_selection' } : {}),
     });
   } catch (err) {
     console.warn(
@@ -492,7 +492,7 @@ async function selectWithLlm(
       allowFallback: true,
       temperature: 0,
       modelPolicy,
-      protectedOperation: 'sitemap_selection',
+      ...(modelPolicy !== undefined ? { protectedOperation: 'sitemap_selection' } : {}),
     });
   } catch (err) {
     console.warn(

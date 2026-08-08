@@ -1,0 +1,245 @@
+/**
+ * Unit tests for `src/classification/model-policy-gateway.ts` (issue #17
+ * work item A). Pure tests: provider credentials are injected through the
+ * gateway deps, so this suite runs under Vitest without a database.
+ */
+import { describe, expect, it } from 'vitest';
+import {
+  ModelPolicyDeniedError,
+  assertModelPolicyIntact,
+  buildModelPolicyView,
+  isLoopbackBaseUrl,
+  resolveFallbackRoute,
+  resolveModelRoute,
+  type ModelPolicyGatewayDeps,
+  type ModelPolicyView,
+} from '../../classification/model-policy-gateway';
+import type { ModelPolicyConfigV2 } from '../../shared/schemas/classification';
+
+const OLLAMA_LOCAL_POLICY: ModelPolicyConfigV2 = {
+  defaultProvider: 'ollama',
+  defaultModel: 'qwen2.5vl:latest',
+  providerLocalities: { ollama: 'local' },
+  stageOverrides: {},
+  imageDataSharing: 'local_only',
+  textDataSharing: 'local_only',
+  mlFeatures: {
+    productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+    pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+    confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+    productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+  },
+};
+
+const DEFAULT_BASE_URLS: Record<string, string> = {
+  ollama: 'http://localhost:11434/v1',
+  deepseek: 'https://api.deepseek.com',
+  openai: 'https://api.openai.com/v1',
+};
+
+function deps(keys: Record<string, { apiKey: string; baseUrl: string | null; model?: string | null }>): ModelPolicyGatewayDeps {
+  return {
+    getCredential: provider => {
+      const cred = keys[provider];
+      return cred
+        ? { provider, apiKey: cred.apiKey, baseUrl: cred.baseUrl, model: cred.model ?? null }
+        : null;
+    },
+    defaultBaseUrls: DEFAULT_BASE_URLS,
+  };
+}
+
+const LOCAL_KEYS = deps({ ollama: { apiKey: 'ollama-default', baseUrl: 'http://localhost:11434/v1' } });
+
+describe('isLoopbackBaseUrl', () => {
+  it('accepts localhost, 127.0.0.1, ::1 and *.localhost over http/https', () => {
+    expect(isLoopbackBaseUrl('http://localhost:11434/v1')).toBe(true);
+    expect(isLoopbackBaseUrl('https://localhost:443')).toBe(true);
+    expect(isLoopbackBaseUrl('http://127.0.0.1:8000')).toBe(true);
+    expect(isLoopbackBaseUrl('http://127.0.0.2:8000')).toBe(true);
+    expect(isLoopbackBaseUrl('http://[::1]:11434/v1')).toBe(true);
+    expect(isLoopbackBaseUrl('http://api.localhost/v1')).toBe(true);
+  });
+
+  it('rejects remote hosts, bare domains, non-http schemes and malformed URLs', () => {
+    expect(isLoopbackBaseUrl('https://api.deepseek.com')).toBe(false);
+    expect(isLoopbackBaseUrl('https://api.example.com')).toBe(false);
+    expect(isLoopbackBaseUrl('api.deepseek.com')).toBe(false);
+    expect(isLoopbackBaseUrl('file:///tmp/x')).toBe(false);
+    expect(isLoopbackBaseUrl('ftp://localhost/x')).toBe(false);
+    expect(isLoopbackBaseUrl('not a url')).toBe(false);
+    expect(isLoopbackBaseUrl('http://256.1.1.1')).toBe(false);
+  });
+});
+
+describe('buildModelPolicyView / assertModelPolicyIntact', () => {
+  it('produces a stable digest and detects tampering', () => {
+    const view = buildModelPolicyView(OLLAMA_LOCAL_POLICY, { snapshotHash: 'abc' });
+    expect(view.policyDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => assertModelPolicyIntact(view)).not.toThrow();
+
+    // Tampered view (mutated locality) must fail the transport-boundary check.
+    const tampered = {
+      ...view,
+      providerLocalities: { ...view.providerLocalities, ollama: 'cloud' },
+    } as unknown as ModelPolicyView;
+    expect(() => assertModelPolicyIntact(tampered)).toThrow(ModelPolicyDeniedError);
+    try {
+      assertModelPolicyIntact(tampered);
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('policy_tampered');
+    }
+  });
+});
+
+describe('resolveModelRoute — locality and endpoint enforcement', () => {
+  it('resolves a declared-local provider with a loopback endpoint under local_only', () => {
+    const view = buildModelPolicyView(OLLAMA_LOCAL_POLICY, { snapshotHash: 's1' });
+    const route = resolveModelRoute(view, 'evidence_extraction', LOCAL_KEYS);
+    expect(route.provider).toBe('ollama');
+    expect(route.model).toBe('qwen2.5vl:latest');
+    expect(route.locality).toBe('local');
+    expect(route.baseUrl).toBe('http://localhost:11434/v1');
+    expect(route.fromOverride).toBe(false);
+  });
+
+  it('denies a cloud provider under text local_only with zero fallback', () => {
+    const view = buildModelPolicyView(
+      {
+        ...OLLAMA_LOCAL_POLICY,
+        defaultProvider: 'deepseek',
+        defaultModel: 'deepseek-v4-flash',
+        providerLocalities: { deepseek: 'cloud' },
+      },
+      { snapshotHash: 's2' },
+    );
+    try {
+      resolveModelRoute(view, 'evidence_extraction', deps({ deepseek: { apiKey: 'sk', baseUrl: 'https://api.deepseek.com' } }));
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ModelPolicyDeniedError);
+      expect((err as ModelPolicyDeniedError).code).toBe('text_local_only_non_local_provider');
+    }
+  });
+
+  it('denies an undeclared provider locality', () => {
+    const view = buildModelPolicyView(
+      { ...OLLAMA_LOCAL_POLICY, providerLocalities: {} },
+      { snapshotHash: 's3' },
+    );
+    try {
+      resolveModelRoute(view, 'evidence_extraction', LOCAL_KEYS);
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('locality_undeclared');
+    }
+  });
+
+  it('denies a declared-local provider whose resolved endpoint is remote', () => {
+    const view = buildModelPolicyView(OLLAMA_LOCAL_POLICY, { snapshotHash: 's4' });
+    try {
+      resolveModelRoute(
+        view,
+        'evidence_extraction',
+        deps({ ollama: { apiKey: 'ollama-default', baseUrl: 'https://api.example.com/v1' } }),
+      );
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('endpoint_non_loopback');
+    }
+  });
+
+  it('denies when the provider credential is missing', () => {
+    const view = buildModelPolicyView(OLLAMA_LOCAL_POLICY, { snapshotHash: 's5' });
+    try {
+      resolveModelRoute(view, 'evidence_extraction', deps({}));
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('credential_missing');
+    }
+  });
+
+  it('denies an unknown/empty route', () => {
+    const view = buildModelPolicyView(
+      { ...OLLAMA_LOCAL_POLICY, defaultProvider: '', defaultModel: '' },
+      { snapshotHash: 's6' },
+    );
+    try {
+      resolveModelRoute(view, 'evidence_extraction', LOCAL_KEYS);
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('route_unknown');
+    }
+  });
+
+  it('prefers the stage override provider/model when present', () => {
+    const view = buildModelPolicyView(
+      {
+        ...OLLAMA_LOCAL_POLICY,
+        stageOverrides: {
+          evidence_extraction: {
+            provider: 'ollama',
+            model: 'llama3',
+            fallbackProvider: null,
+            fallbackModel: null,
+          },
+        },
+      },
+      { snapshotHash: 's7' },
+    );
+    const route = resolveModelRoute(view, 'evidence_extraction', LOCAL_KEYS);
+    expect(route.model).toBe('llama3');
+    expect(route.fromOverride).toBe(true);
+  });
+});
+
+describe('resolveFallbackRoute — explicit fallback only', () => {
+  it('returns null when no fallback pair is declared (implicit fallback impossible)', () => {
+    const view = buildModelPolicyView(OLLAMA_LOCAL_POLICY, { snapshotHash: 's8' });
+    expect(resolveFallbackRoute(view, 'evidence_extraction', LOCAL_KEYS)).toBeNull();
+  });
+
+  it('validates an explicit local fallback pair', () => {
+    const view = buildModelPolicyView(
+      {
+        ...OLLAMA_LOCAL_POLICY,
+        stageOverrides: {
+          evidence_extraction: {
+            provider: 'ollama',
+            model: 'qwen2.5vl:latest',
+            fallbackProvider: 'ollama',
+            fallbackModel: 'llama3',
+          },
+        },
+      },
+      { snapshotHash: 's9' },
+    );
+    const fallback = resolveFallbackRoute(view, 'evidence_extraction', LOCAL_KEYS);
+    expect(fallback).not.toBeNull();
+    expect(fallback!.model).toBe('llama3');
+    expect(fallback!.baseUrl).toBe('http://localhost:11434/v1');
+  });
+
+  it('denies a fallback without an explicit model (implicit fallback forbidden)', () => {
+    const view = buildModelPolicyView(
+      {
+        ...OLLAMA_LOCAL_POLICY,
+        stageOverrides: {
+          evidence_extraction: {
+            provider: 'ollama',
+            model: 'qwen2.5vl:latest',
+            fallbackProvider: 'ollama',
+            fallbackModel: null,
+          },
+        },
+      },
+      { snapshotHash: 's10' },
+    );
+    try {
+      resolveFallbackRoute(view, 'evidence_extraction', LOCAL_KEYS);
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect((err as ModelPolicyDeniedError).code).toBe('implicit_fallback_forbidden');
+    }
+  });
+});
