@@ -12,6 +12,7 @@
  */
 import type { InteractionAction } from '../../shared/schemas/extraction-worker';
 import { gtinFromAny } from './platforms';
+import { variantTokenOverlap } from '../tools/contract';
 import type { ExtractedFieldEvidence, ExtractedImageCandidate } from '../tools/contract';
 
 export interface CapturedNetworkResponse {
@@ -212,13 +213,28 @@ export async function runBrowserInteraction(
     variant: { name?: string; id?: string; sku?: string } | null;
     variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
   },
+  // P0-5 round 2: the EXPECTED variant (name/GTIN from the run input). A
+  // successful interaction only proves an option was selected — variant_match
+  // additionally requires the selected option to correspond to the expected
+  // size/flavor.
+  expectedVariant?: { name?: string; gtin?: string },
 ): Promise<{ finalUrl: string; selectedOptions: string[]; methodsUsed: string[]; warnings: string[] }> {
   const snapshotResult = await snapshot({ url, captureNetwork: true, interaction });
   const methodsUsed = evidenceFromBrowserSnapshot(snapshotResult, out);
   if (interaction.type === 'select_option' && snapshotResult.interaction?.performed) {
     for (const option of snapshotResult.interaction.selectedOptions) {
-      out.variantSignals.push({ kind: 'variant_match' });
       addFieldOnce(out.fields, 'variant_selection', option, 'browser', 'interaction selected option');
+      // P0-5 round 2: tie the selected option to the EXPECTED variant.
+      // Without expected terms no comparison is possible — emit NO signal
+      // (absence of a signal must never imply a match).
+      const expectedName = expectedVariant?.name;
+      if (expectedName) {
+        if (variantTokenOverlap(expectedName, option) >= 0.5) {
+          out.variantSignals.push({ kind: 'variant_match' });
+        } else {
+          out.variantSignals.push({ kind: 'variant_mismatch' });
+        }
+      }
     }
   }
   return {

@@ -32,7 +32,7 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     const runPromise = executor.startResearch(TEST_INPUT, testContext({ runId: 'run-pi-1' }), events);
     await Promise.resolve();
     const session = factory.created[0];
-    submitViaTool(factory, validSubmission());
+    submitViaTool(factory, validSubmission() as unknown as Parameters<typeof submitViaTool>[1]);
     session.finish();
     const result = await runPromise;
 
@@ -55,7 +55,7 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     const executor = makeExecutor(factory);
     const runPromise = executor.startResearch(TEST_INPUT, testContext({ runId: 'run-pi-2' }), createExecutionEventSink('run-pi-2'));
     await Promise.resolve();
-    submitViaTool(factory, ABSTENTION_SUBMISSION);
+    submitViaTool(factory, ABSTENTION_SUBMISSION as unknown as Parameters<typeof submitViaTool>[1]);
     factory.created[0].finish();
     const result = await runPromise;
 
@@ -73,7 +73,7 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     session.emitToolStart('read');
     session.emitToolEnd('read', false);
     session.emitToolStart(WORKFLOW_SUBMISSION_TOOL_NAME);
-    submitViaTool(factory, validSubmission());
+    submitViaTool(factory, validSubmission() as unknown as Parameters<typeof submitViaTool>[1]);
     session.emitToolEnd(WORKFLOW_SUBMISSION_TOOL_NAME, false);
     session.finish();
     await runPromise;
@@ -110,7 +110,7 @@ describe('PiProductIntelligenceExecutor — success paths', () => {
     session.emitToolEnd('extract_products_page', true);
     // Then completes normally.
     session.emitToolStart(WORKFLOW_SUBMISSION_TOOL_NAME);
-    submitViaTool(factory, validSubmission());
+    submitViaTool(factory, validSubmission() as unknown as Parameters<typeof submitViaTool>[1]);
     session.emitToolEnd(WORKFLOW_SUBMISSION_TOOL_NAME, false);
     session.finish();
     const result = await runPromise;
@@ -353,7 +353,7 @@ describe('PiProductIntelligenceExecutor — allowlisting and prompt construction
     const executor = makeExecutor(factory);
     const runPromise = executor.startResearch(TEST_INPUT, testContext({ runId: 'run-pi-16' }), createExecutionEventSink('run-pi-16'));
     await Promise.resolve();
-    submitViaTool(factory, validSubmission());
+    submitViaTool(factory, validSubmission() as unknown as Parameters<typeof submitViaTool>[1]);
     factory.created[0].finish();
     const result = await runPromise;
     expect(result.configId).toBe('config-test-0001');
@@ -367,7 +367,7 @@ describe('PiProductIntelligenceExecutor — allowlisting and prompt construction
     const session = factory.created[0];
     const disposeSpy = session.dispose.bind(session);
     // The factory dispose wrapper already guards double-dispose; verify the session flag.
-    submitViaTool(factory, validSubmission());
+    submitViaTool(factory, validSubmission() as unknown as Parameters<typeof submitViaTool>[1]);
     session.finish();
     await runPromise;
     expect(session.disposed).toBe(true);

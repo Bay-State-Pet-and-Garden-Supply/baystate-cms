@@ -111,6 +111,13 @@ export async function runExtractionLadder(
   // absence of variant UI or signals is never treated as proof.
   let singleVariantProof = false;
   const selectedVariantLinkage = (): boolean => variantSignals.some((s) => s.kind === 'variant_match');
+  // P0-5 round 2: an affirmative contradiction — platform/browser revealing
+  // multiple variants (parent_page) or a variant mismatch — invalidates any
+  // structured-only single-variant proof. Absence-based claims never survive
+  // a layer that actually sees the variant set.
+  const contradictoryVariant = (): boolean =>
+    variantSignals.some((s) => s.kind === 'parent_page' || s.kind === 'variant_mismatch');
+  const effectiveSingleVariantProof = (): boolean => singleVariantProof && !contradictoryVariant();
 
   const addField = (field: string, value: string | null | undefined, method: string, sourcePath?: string): void => {
     if (value === null || value === undefined) return;
@@ -191,17 +198,6 @@ export async function runExtractionLadder(
     }
   }
   productName ??= signals.ogTitle ?? signals.metaTitle;
-
-  // Early exit: exact GTIN plus a healthy field count AND positive
-  // single-variant proof — the page is the product; do not spend platform
-  // fetches on it. Without proof the ladder falls through so variant
-  // resolution layers can settle identity (review P0-5).
-  if (exactGtinMatch(expected.gtin, gtins) && fields.length >= 3 && (singleVariantProof || selectedVariantLinkage())) {
-    return {
-      result: assembleResult(),
-      layersUsed: [...new Set(layersUsed)],
-    };
-  }
 
   // Layer 3: platform-specific public product representations.
   layersUsed.push('platform_api');
@@ -429,6 +425,19 @@ export async function runExtractionLadder(
   brand ??= fields.find((f) => f.field === 'brand')?.value ?? null;
   size ??= fields.find((f) => f.field === 'size')?.value ?? null;
 
+  // Early exit (P0-5 round 2): settle only AFTER the platform layer had a
+  // chance to reveal multiple variants. Structured-only proof no longer exits
+  // before platform/browser layers run, so a multi-variant storefront that
+  // renders leaf JSON-LD for the displayed child cannot be settled too early;
+  // an affirmative contradiction (parent_page/variant_mismatch) invalidates
+  // the proof via effectiveSingleVariantProof().
+  if (exactGtinMatch(expected.gtin, gtins) && fields.length >= 3 && (effectiveSingleVariantProof() || selectedVariantLinkage())) {
+    return {
+      result: assembleResult(false),
+      layersUsed: [...new Set(layersUsed)],
+    };
+  }
+
   // ---------------------------------------------------------------------
   // Layers 5-8: escalate only when deterministic layers did not settle the
   // identity. Exact GTIN + healthy field count means the page is the product.
@@ -436,7 +445,7 @@ export async function runExtractionLadder(
   let llmContributed = false;
   let browserSignals: string[] = [];
   const settled = (): boolean =>
-    exactGtinMatch(expected.gtin, gtins) && fields.length >= 3 && (singleVariantProof || selectedVariantLinkage());
+    exactGtinMatch(expected.gtin, gtins) && fields.length >= 3 && (effectiveSingleVariantProof() || selectedVariantLinkage());
 
   // Layer 5: rendered browser with network capture (XHR/fetch/GraphQL).
   if (!settled() && options.browser) {
@@ -477,6 +486,7 @@ export async function runExtractionLadder(
         finalUrl,
         options.interaction,
         interactionOut,
+        { name: expected.name, gtin: expected.gtin },
       );
       fetchModes.push('browser');
       finalUrl = result.finalUrl || finalUrl;
@@ -598,7 +608,7 @@ export async function runExtractionLadder(
       expectedName: expected.name,
       variantSignals,
       hasAnyField,
-      singleVariantProof,
+      singleVariantProof: effectiveSingleVariantProof(),
       selectedVariantLinkage: selectedVariantLinkage(),
     });
     return {

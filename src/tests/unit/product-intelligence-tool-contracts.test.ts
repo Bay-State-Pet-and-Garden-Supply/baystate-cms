@@ -262,17 +262,31 @@ describe('variant proof helpers (P0-5)', () => {
     });
   });
 
-  it('structuredSingleVariantProof requires an affirmative leaf Product with no group/variant markers', () => {
-    const leaf = '<script type="application/ld+json">{"@type":"Product","name":"A","gtin":"1"}</script>';
+  it('structuredSingleVariantProof requires an affirmative leaf Product with a single offer and no variant affordances', () => {
+    // A parsed leaf Product with a single offers object IS affirmative proof.
+    const leaf =
+      '<script type="application/ld+json">{"@type":"Product","name":"A","gtin":"1","offers":{"price":"1"}}</script>';
     expect(structuredSingleVariantProof(leaf)).toBe(true);
+    // A leaf Product WITHOUT an offer declaration is NOT proof (absence).
+    const leafNoOffer =
+      '<script type="application/ld+json">{"@type":"Product","name":"A","gtin":"1"}</script>';
+    expect(structuredSingleVariantProof(leafNoOffer)).toBe(false);
+    // An offers ARRAY (multi-offer) is not a single-offer declaration.
+    const leafOfferArray =
+      '<script type="application/ld+json">{"@type":"Product","name":"A","gtin":"1","offers":[{"price":"1"},{"price":"2"}]}</script>';
+    expect(structuredSingleVariantProof(leafOfferArray)).toBe(false);
     // ProductGroup pages are never single-variant proof.
     const group =
       '<script type="application/ld+json">{"@type":"ProductGroup","hasVariant":[{"@type":"Product"}]}</script>';
     expect(structuredSingleVariantProof(group)).toBe(false);
     // hasVariant markers anywhere invalidate the proof even with a leaf node.
     const group2 =
-      '<script type="application/ld+json">{"@type":"Product","name":"A","hasVariant":[{}]}</script>';
+      '<script type="application/ld+json">{"@type":"Product","name":"A","hasVariant":[{},{}]}</script>';
     expect(structuredSingleVariantProof(group2)).toBe(false);
+    // isVariantOf marks a child of a group — not single-variant proof.
+    const child =
+      '<script type="application/ld+json">{"@type":"Product","name":"A","gtin":"1","offers":{"price":"1"},"isVariantOf":{"@type":"ProductGroup"}}</script>';
+    expect(structuredSingleVariantProof(child)).toBe(false);
     // variants markers invalidate the proof (parent page carrying default data).
     const variants =
       '<script id="__NEXT_DATA__" type="application/json">{"product":{"variants":[]}}</script>';
@@ -281,12 +295,15 @@ describe('variant proof helpers (P0-5)', () => {
     expect(structuredSingleVariantProof('<html><body>nothing</body></html>')).toBe(false);
   });
 
-  it('jsonLdLeafProductProof only accepts @type Product without variant keys', () => {
-    expect(jsonLdLeafProductProof({ '@type': 'Product', name: 'A' })).toBe(true);
+  it('jsonLdLeafProductProof only accepts @type Product with a single offer and without variant keys', () => {
+    expect(jsonLdLeafProductProof({ '@type': 'Product', name: 'A', offers: { price: '1' } })).toBe(true);
+    expect(jsonLdLeafProductProof({ '@type': 'Product', name: 'A' })).toBe(false);
+    expect(jsonLdLeafProductProof({ '@type': 'Product', name: 'A', offers: [] })).toBe(false);
     expect(jsonLdLeafProductProof({ '@type': 'Product', hasVariant: [] })).toBe(false);
     expect(jsonLdLeafProductProof({ '@type': 'Product', variants: [{}] })).toBe(false);
+    expect(jsonLdLeafProductProof({ '@type': 'Product', offers: { price: '1' }, isVariantOf: { '@type': 'ProductGroup' } })).toBe(false);
     expect(jsonLdLeafProductProof({ '@type': 'ProductGroup', hasVariant: [] })).toBe(false);
-    expect(jsonLdLeafProductProof({ '@type': ['Product', 'ItemPage'] })).toBe(true);
+    expect(jsonLdLeafProductProof({ '@type': ['Product', 'ItemPage'], offers: { price: '1' } })).toBe(true);
     expect(jsonLdLeafProductProof(null)).toBe(false);
   });
 });

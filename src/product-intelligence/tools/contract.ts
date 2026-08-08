@@ -299,34 +299,99 @@ export function variantProofFromSignals(
 }
 
 /**
- * Positive single-variant proof from an HTML page's structured data (P0-5):
- * the page must declare at least one JSON-LD Product node while carrying NO
- * ProductGroup / hasVariant / variants markers anywhere. Per schema.org a
- * plain Product node without hasVariant is a leaf product. ProductGroup,
- * hasVariant, or variants markers anywhere in the page invalidate the proof
- * (a parent page may still embed a leaf-shaped default-variant node).
+ * Positive single-variant proof from an HTML page's structured data (P0-5,
+ * round 2): proof requires an AFFIRMATIVE single-sellable-variant declaration
+ * parsed from embedded JSON-LD — a leaf Product node carrying a single offers
+ * object and no variant affordance keys (hasVariant / isVariantOf / variants /
+ * ProductGroup). Raw-HTML absence heuristics are never proof: a multi-variant
+ * storefront can render leaf JSON-LD for the displayed child only, so callers
+ * must additionally let platform/browser layers run before settling on this
+ * proof (see the ladder's early-exit gating).
  */
 export function structuredSingleVariantProof(html: string): boolean {
-  if (/"hasVariant"/.test(html)) return false;
-  if (/"@type"\s*:\s*"ProductGroup"/.test(html)) return false;
-  if (/"variants"\s*:/.test(html)) return false;
-  // Closing quote anchors the match so "ProductGroup" cannot satisfy it.
-  return /"@type"\s*:\s*"Product"/.test(html);
+  return jsonLdEntriesFromHtml(html).some(jsonLdLeafProductProof);
 }
 
 /**
- * Positive single-variant proof from a parsed JSON-LD entry: @type Product
- * with no hasVariant/variants keys (leaf product claim). Object-level check
- * for browser-snapshot JSON-LD, which is no longer embedded in page HTML.
+ * Extract raw JSON-LD nodes (@type-bearing) from embedded
+ * `<script type="application/ld+json">` blocks, recursing into @graph,
+ * mainEntity and itemListElement containers. Malformed blocks are ignored.
+ */
+function jsonLdEntriesFromHtml(html: string): unknown[] {
+  const entries: unknown[] = [];
+  const scriptRe = /<script[^>]*type=["']application\/ld\+json[^"']*["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = scriptRe.exec(html))) {
+    const raw = match[1].trim();
+    if (!raw) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue; // malformed JSON-LD block is never proof
+    }
+    const collect = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        for (const item of node) collect(item);
+        return;
+      }
+      if (node === null || typeof node !== 'object') return;
+      const obj = node as Record<string, unknown>;
+      if (obj['@graph'] !== undefined) collect(obj['@graph']);
+      if (obj['@type'] !== undefined) entries.push(obj);
+      for (const key of ['mainEntity', 'itemListElement']) {
+        if (obj[key] !== undefined) collect(obj[key]);
+      }
+    };
+    collect(parsed);
+  }
+  return entries;
+}
+
+/**
+ * Positive single-variant proof from a parsed JSON-LD entry (P0-5 round 2):
+ * @type Product (not ProductGroup) with NO variant affordance keys
+ * (hasVariant / isVariantOf / variants) AND an AFFIRMATIVE single-offer
+ * declaration (offers present as a single object, not an array). Absence of
+ * variant markers without an offer declaration is never proof.
  */
 export function jsonLdLeafProductProof(entry: unknown): boolean {
   if (!entry || typeof entry !== 'object') return false;
   const obj = entry as Record<string, unknown>;
   if (obj['hasVariant'] !== undefined) return false;
+  if (obj['isVariantOf'] !== undefined) return false;
   if (obj['variants'] !== undefined) return false;
   const type = obj['@type'];
   const types = Array.isArray(type) ? type : [type];
-  return types.includes('Product');
+  if (types.includes('ProductGroup')) return false;
+  if (!types.includes('Product')) return false;
+  const offers = obj['offers'];
+  if (offers === undefined || Array.isArray(offers)) return false;
+  if (typeof offers !== 'object' || offers === null) return false;
+  return true;
+}
+
+/**
+ * P0-5 round 2: variant_match must be tied to the EXPECTED variant, not to a
+ * successful interaction. Token overlap between the expected product name and
+ * the selected option / declared variant, with digit+unit merging so "16 oz"
+ * aligns with "16oz". Generic selector tokens (size/option/select/variant/
+ * flavor/color) are ignored. Returns the fraction of candidate tokens present
+ * in the expected name (0..1); 0 when either side is empty.
+ */
+export function variantTokenOverlap(expectedName: string | undefined, candidate: string): number {
+  if (!expectedName || !candidate) return 0;
+  const tokens = (text: string): string[] =>
+    text
+      .toLowerCase()
+      .replace(/(\d+)\s*(oz|ml|lb|lbs|g|kg|ct|count|pack|fl|floz|count)/g, '$1$2')
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 2 && !/^(size|option|select|variant|flavou?r|color|colour|default)$/.test(t));
+  const expectedTokens = new Set(tokens(expectedName));
+  const candidateTokens = tokens(candidate);
+  if (candidateTokens.length === 0) return 0;
+  const hits = candidateTokens.filter((t) => expectedTokens.has(t)).length;
+  return hits / candidateTokens.length;
 }
 
 /**

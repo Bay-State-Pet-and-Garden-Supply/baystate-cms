@@ -14,8 +14,9 @@ import { getDb } from '../../db/connection';
 import { getEvidenceAttemptsForItem } from '../../db/repositories/onboarding-evidence-repo';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
 import { fetchOpenIcecatByGtin } from '../../crawler/importers/icecat';
+import { defaultPolicyGateway } from '../policy';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
-import { errorResult, evidenceId, noResult, okResult, upcCheckDigit } from './contract';
+import { errorResult, evidenceId, noResult, okResult, policyDenied, upcCheckDigit } from './contract';
 import { boundedString } from './registry';
 
 function normalizeGtin(raw: string): string | null {
@@ -167,10 +168,25 @@ const lookupStructuredProductDatabase: PiToolAdapter = {
   description:
     'Look up a GTIN in an open structured product database (Open Icecat). Returns title, brand, category, features, and images or no_result when unavailable.',
   parameters: Type.Object({ gtin: boundedString(64, 'GTIN/UPC') }),
-  async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
+  async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const gtin = String(params.gtin ?? '');
+    const gateway = ctx.gateway ?? defaultPolicyGateway;
+    const netCtx = { runId: ctx.runId, policy: ctx.policy };
+    // P0-1 (round 2): the Open Icecat SDK and REST fallback both perform
+    // their own networking — pre-check the endpoint through the policy
+    // gateway so restrictive policies deny the lookup before any bytes move,
+    // and bind the REST fallback to the gateway-bound fetch below.
+    const endpoint = `https://live.icecat.biz/api/?shop_name=OpenIcecatUser&gtin=${encodeURIComponent(gtin)}`;
+    const decision = await gateway.checkNetworkRequest(netCtx, endpoint, 'fetched_content');
+    if (!decision.allowed) {
+      return policyDenied(`icecat lookup denied: ${decision.reasonCode}${decision.detail ? ` (${decision.detail})` : ''}`);
+    }
     try {
-      const product = await fetchOpenIcecatByGtin(gtin);
+      const product = await fetchOpenIcecatByGtin(
+        gtin,
+        undefined,
+        gateway.buildPiNetworkFetch(netCtx, { dataClassification: 'fetched_content' }),
+      );
       if (!product) return noResult(`No structured database record for ${gtin}`);
       return okResult(
         {

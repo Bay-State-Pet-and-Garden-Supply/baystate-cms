@@ -22,7 +22,7 @@ import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation } 
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { boundedString } from './registry';
-import type { EvidenceResolver, ResolvedEvidenceFact } from '../assets/verification';
+import type { EvidenceResolver, ResolvedEvidenceFact, ReuseGrantRecord } from '../assets/verification';
 
 export const verifyImageCandidateTool: PiToolAdapter = {
   name: 'verify_image_candidate',
@@ -220,21 +220,34 @@ let _evidenceRepo:
   | {
       listPiEvidence: (runId: string) => LazyEvidenceRow[];
       listPiSources: (runId: string) => LazySourceRow[];
+      listPiEvidenceByToolEvidenceId: (runId: string, toolEvidenceIds: string[]) => LazyEvidenceRow[];
     }
   | undefined;
 
-function loadEvidenceRepo(): { listPiEvidence: (runId: string) => LazyEvidenceRow[]; listPiSources: (runId: string) => LazySourceRow[] } {
+function loadEvidenceRepo(): {
+  listPiEvidence: (runId: string) => LazyEvidenceRow[];
+  listPiSources: (runId: string) => LazySourceRow[];
+  listPiEvidenceByToolEvidenceId: (runId: string, toolEvidenceIds: string[]) => LazyEvidenceRow[];
+} {
   if (!_evidenceRepo) {
     try {
       const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
       if (!conn.isDbInitialized?.()) {
         // No DB (e.g. vitest): return an empty resolver — no evidence rows
         // can resolve, so identity comparison cannot approve. Fail closed.
-        _evidenceRepo = { listPiEvidence: () => [], listPiSources: () => [] };
+        _evidenceRepo = {
+          listPiEvidence: () => [],
+          listPiSources: () => [],
+          listPiEvidenceByToolEvidenceId: () => [],
+        };
         return _evidenceRepo;
       }
     } catch {
-      _evidenceRepo = { listPiEvidence: () => [], listPiSources: () => [] };
+      _evidenceRepo = {
+        listPiEvidence: () => [],
+        listPiSources: () => [],
+        listPiEvidenceByToolEvidenceId: () => [],
+      };
       return _evidenceRepo;
     }
     _evidenceRepo = lazyRequire('../../db/repositories/product-intelligence-repo') as NonNullable<typeof _evidenceRepo>;
@@ -242,13 +255,30 @@ function loadEvidenceRepo(): { listPiEvidence: (runId: string) => LazyEvidenceRo
   return _evidenceRepo;
 }
 
+/**
+ * Resolve durable evidence rows for the agent-visible evidence ids. The
+ * registry relays deterministic tool evidence ids (evidenceId() /
+ * fieldEvidenceId() — e.g. 'extract_product_page:abc123:gtin:def456') to the
+ * model; when persisted, the DB row gets its own UUID with the deterministic
+ * id stored in metadata.toolEvidenceId. Resolve BOTH namespaces so the real
+ * agent path works end to end: first the row UUID, then the canonical
+ * agent-facing metadata.toolEvidenceId namespace.
+ */
 function resolveEvidenceFacts(runId: string, evidenceIds: string[]): ResolvedEvidenceFact[] {
   if (!evidenceIds.length) return [];
   const repo = loadEvidenceRepo();
-  const rows = repo.listPiEvidence(runId).filter((row) => evidenceIds.includes(row.id));
+  const byRowId = repo.listPiEvidence(runId).filter((row) => evidenceIds.includes(row.id));
+  const seen = new Set(byRowId.map((row) => row.id));
+  const byToolEvidenceId = repo
+    .listPiEvidenceByToolEvidenceId(runId, evidenceIds)
+    .filter((row) => !seen.has(row.id));
+  const rows = [
+    ...byRowId.map((row) => ({ row, matchedNamespace: 'row_id' as const })),
+    ...byToolEvidenceId.map((row) => ({ row, matchedNamespace: 'tool_evidence_id' as const })),
+  ];
   if (rows.length === 0) return [];
   const sources = new Map(repo.listPiSources(runId).map((source) => [source.id, source]));
-  return rows.map((row) => {
+  return rows.map(({ row, matchedNamespace }) => {
     let value: unknown;
     try {
       value = JSON.parse(row.valueJson);
@@ -272,6 +302,7 @@ function resolveEvidenceFacts(runId: string, evidenceIds: string[]): ResolvedEvi
       sourceUrl: source?.url ?? null,
       sourceDomain: source?.domain ?? null,
       contentHash,
+      matchedNamespace,
     };
   });
 }
@@ -280,22 +311,22 @@ function resolveEvidenceFacts(runId: string, evidenceIds: string[]): ResolvedEvi
  * P0-6: durable server-authoritative reuse grants. Lazy-load the workspace
  * grant resolver; with no DB (vitest) or no grants, reuse is denied.
  */
-function loadReuseGrantResolver(workspaceId: string): (sourceTier: string, domain: string) => boolean {
+function loadReuseGrantResolver(workspaceId: string): (sourceTier: string, domain: string) => ReuseGrantRecord | null {
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
     if (!conn.isDbInitialized?.()) {
-      return () => false;
+      return () => null;
     }
   } catch {
-    return () => false;
+    return () => null;
   }
   try {
     const repo = lazyRequire('../../db/repositories/pi-reuse-policy-repo') as {
-      buildReuseGrantResolver: (workspaceId: string) => (sourceTier: string, domain: string) => boolean;
+      buildReuseGrantResolver: (workspaceId: string) => (sourceTier: string, domain: string) => ReuseGrantRecord | null;
     };
     return repo.buildReuseGrantResolver(workspaceId);
   } catch {
-    return () => false;
+    return () => null;
   }
 }
 

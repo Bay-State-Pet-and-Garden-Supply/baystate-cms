@@ -42,9 +42,12 @@ const DATA_SHARING_RESTRICTIVENESS: Record<DataSharingPolicy, number> = {
  * applied to an approved (server-authoritative) base policy.
  *
  * Allowed: tool/domain allowlists may only shrink; numeric limits may only
- * decrease; dataSharingPolicy may only become more restrictive.
- * Forbidden: any networkPolicy change, any modelRoute override, and any
- * change to configId (the server computes it). Throws Error with a precise
+ * decrease; dataSharingPolicy may only become more restrictive. Converting an
+ * unlimited maxCostUsd (null) to a finite amount is MORE restrictive and is
+ * allowed.
+ * Forbidden: any networkPolicy change, any modelRoute override, any change
+ * to configId (the server computes it), and any maxCostUsd raise — including
+ * raising a finite budget to null (unlimited). Throws Error with a precise
  * message on the first violation; returns the merged policy otherwise.
  */
 export function assertReducingOverride(
@@ -87,13 +90,22 @@ export function assertReducingOverride(
 
   if ('maxCostUsd' in overrides) {
     const over = overrides.maxCostUsd;
-    if (over !== undefined && over !== null) {
-      const approved = base.maxCostUsd;
-      if (approved === null || approved === undefined || over > approved) {
+    if (over === undefined) {
+      // No-op override; the merged policy keeps the approved value.
+    } else if (over === null) {
+      // null means unlimited — raising a finite budget to unlimited is
+      // forbidden under the limits-may-only-decrease rule.
+      if (base.maxCostUsd !== null && base.maxCostUsd !== undefined) {
         throw new Error(
-          `maxCostUsd override rejected: ${over} exceeds the approved budget ${approved ?? 'unlimited'}`,
+          `maxCostUsd override rejected: null (unlimited) exceeds the approved budget ${base.maxCostUsd} (limits may only decrease)`,
         );
       }
+    } else if (base.maxCostUsd !== null && base.maxCostUsd !== undefined && over > base.maxCostUsd) {
+      // Finite-to-larger-finite raise. An unlimited (null/undefined) base
+      // converted to a finite amount is always more restrictive and allowed.
+      throw new Error(
+        `maxCostUsd override rejected: ${over} exceeds the approved budget ${base.maxCostUsd} (limits may only decrease)`,
+      );
     }
   }
 

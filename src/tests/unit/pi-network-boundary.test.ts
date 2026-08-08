@@ -27,7 +27,7 @@ import { runMigrations } from '../../db/migrations';
 import { createPiRun } from '../../db/repositories/product-intelligence-repo';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
 import { defaultPolicyGateway } from '../../product-intelligence/policy';
-import { defaultToolRegistry, buildDefaultToolRegistry } from '../../product-intelligence/tools';
+import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { discoveryTools } from '../../product-intelligence/tools/discovery-tools';
 import { fetchPageHtml, HTTP_EXTRACTION_HEADERS } from '../../product-intelligence/extraction/platforms';
 import { ManagedFallbackRegistry } from '../../product-intelligence/extraction/managed-fallback';
@@ -120,45 +120,82 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('P0-1 transitive network boundary', () => {
-  const TOOL_SOURCE_FILES = [
-    'src/product-intelligence/tools/discovery-tools.ts',
-    'src/product-intelligence/tools/extraction-tools.ts',
-    'src/product-intelligence/tools/identity-tools.ts',
-    'src/product-intelligence/tools/verification-tools.ts',
-    'src/product-intelligence/tools/taxonomy-tools.ts',
-    'src/product-intelligence/tools/image-tools.ts',
+  // Genuinely transitive: every network-capable adapter's transport function
+  // must (a) accept an injected fetch, and (b) be called by the adapter with
+  // a gateway-bound fetch. A preflight checkNetworkRequest alone is NOT
+  // sufficient — the actual HTTP owner must be the injected gateway fetch.
+
+  const TRANSPORT_SEAMS: Array<{ file: string; needle: string; note: string }> = [
+    { file: 'src/onboarding/page-extractor.ts', needle: 'fetchFn: NetworkFetch = fetch', note: 'extractViaHttpDetailed' },
+    { file: 'src/onboarding/sitemap-fetcher.ts', needle: 'fetchFn: NetworkFetch = fetch', note: 'fetchAndParseSitemap' },
+    { file: 'src/onboarding/variant-url-resolver.ts', needle: 'fetchFn?: NetworkFetch', note: 'resolveVariantsForCandidates' },
+    { file: 'src/crawler/importers/icecat.ts', needle: 'fetchFn: NetworkFetch = fetch', note: 'fetchOpenIcecatByGtin' },
+    { file: 'src/onboarding/packaging-ocr.ts', needle: 'fetchFn?: NetworkFetch', note: 'extractPackagingOcr params' },
   ] as const;
 
-  const GATEWAY_SEAM = /checkNetworkRequest|gatewayFetch|buildPiNetworkFetch|policyDenied/;
-  // Network markers that indicate the adapter performs (or reaches) an
-  // external fetch. 'gatewayFetch(' contains 'fetch(' so require a preceding
-  // boundary that excludes the gateway seam itself.
-  const NETWORK_MARKER = /(?<![a-z_])fetch\(|discoverSources|fetchAndParseSitemap|resolveVariantsForCandidates|extractPackagingOcr|searchSerper/;
-
-  it('every network-capable tool adapter references the gateway seam in its source', () => {
-    const registry = buildDefaultToolRegistry();
-    const names = registry.names();
-    expect(names.length).toBeGreaterThan(10);
-
-    const inspected = new Set<string>();
-    for (const name of names) {
-      const file = TOOL_SOURCE_FILES.find((candidate) => {
-        const source = fs.readFileSync(candidate, 'utf8');
-        return source.includes(`name: '${name}'`);
-      });
-      if (!file) continue;
-      inspected.add(file);
-      const source = fs.readFileSync(file, 'utf8');
-      const networkCapable = NETWORK_MARKER.test(source);
-      const gatesThroughGateway = GATEWAY_SEAM.test(source);
-      // Tools that reach the network MUST gate through the gateway in the
-      // same source file (the adapter is the only path into the capability).
-      if (networkCapable) {
-        expect(gatesThroughGateway, `${name} (${file}) reaches the network without a gateway seam`).toBe(true);
-      }
+  it('every network-owning transport accepts an injected fetch', () => {
+    for (const seam of TRANSPORT_SEAMS) {
+      const source = fs.readFileSync(seam.file, 'utf8');
+      expect(source, `${seam.note} (${seam.file}) must accept an injected fetchFn`).toContain(seam.needle);
     }
-    // Sanity: we actually inspected every tool source file.
-    expect(inspected.size).toBe(TOOL_SOURCE_FILES.length);
+  });
+
+  it('every tool adapter binds its legacy transport to a gateway-built fetch', () => {
+    const extraction = fs.readFileSync('src/product-intelligence/tools/extraction-tools.ts', 'utf8');
+    expect(extraction).toContain('buildPiNetworkFetch');
+    expect(extraction).toContain('extractViaHttpDetailed');
+    expect(extraction).toContain('extractPackagingOcr');
+    const identity = fs.readFileSync('src/product-intelligence/tools/identity-tools.ts', 'utf8');
+    expect(identity).toContain('buildPiNetworkFetch');
+    expect(identity).toContain('fetchOpenIcecatByGtin');
+    const discovery = fs.readFileSync('src/product-intelligence/tools/discovery-tools.ts', 'utf8');
+    expect(discovery).toContain('buildPiNetworkFetch');
+    expect(discovery).toContain('fetchAndParseSitemap');
+    expect(discovery).toContain('resolveVariantsForCandidates');
+    // The worker payload schema carries the run's allowed source domains.
+    const workerSchema = fs.readFileSync('src/shared/schemas/extraction-worker.ts', 'utf8');
+    expect(workerSchema).toContain('sourcesAllowlist');
+  });
+
+  it('extract_structured_page_data drives the real fetch through the injected gateway fetch (spy)', async () => {
+    const calls: string[] = [];
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+      // Contextually typed against the gateway's fetchFn so it satisfies
+      // Bun's `typeof fetch` (the same pattern as the redirect test above).
+      fetchFn: async (input, init) => {
+        void init;
+        calls.push(String(input));
+        return new Response(
+          '<html><body><script type="application/ld+json">{"@type":"Product","name":"Wormeze"}</script></body></html>',
+          { status: 200, headers: { 'content-type': 'text/html' } },
+        );
+      },
+    });
+    const tool = defaultToolRegistry.get('extract_structured_page_data');
+    expect(tool).toBeDefined();
+    const result = await tool!.execute(
+      { url: 'https://shop.example.com/p' },
+      makeCtx({
+        gateway,
+        policy: makePolicy({ dataSharingPolicy: 'cloud_models_and_sources', networkPolicy: 'allowlisted_remote' }),
+      }),
+    );
+    // The spy — NOT a raw legacy fetch — performed the HTTP.
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]).toBe('https://shop.example.com/p');
+    expect(['no_result', 'ok']).toContain(result.status);
+  });
+
+  it('lookup_structured_product_database is policy-gated (local_only denies before any network)', async () => {
+    const tool = defaultToolRegistry.get('lookup_structured_product_database');
+    expect(tool).toBeDefined();
+    const result = await tool!.execute(
+      { gtin: '745801105447' },
+      makeCtx({ policy: makePolicy({ networkPolicy: 'local_only' }) }),
+    );
+    expect(result.status).toBe('policy_denied');
+    expect((result as { reason: string }).reason).toMatch(/icecat lookup denied/);
   });
 
   it('every discovery adapter individually is gateway-gated', () => {
@@ -171,7 +208,7 @@ describe('P0-1 transitive network boundary', () => {
       // Adapter blocks end at the next "name: '" or the file end.
       const next = source.indexOf(`name: '`, start + 8);
       const block = next === -1 ? source.slice(start) : source.slice(start, next);
-      const networkCapable = NETWORK_MARKER.test(block);
+      const networkCapable = /(?<![a-z_])fetch\(|discoverSources|fetchAndParseSitemap|resolveVariantsForCandidates|extractPackagingOcr|searchSerper/.test(block);
       if (networkCapable) {
         expect(
           /checkNetworkRequest|gatewayFetch|buildPiNetworkFetch|policyDenied/.test(block),

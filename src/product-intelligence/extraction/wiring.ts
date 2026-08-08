@@ -13,6 +13,19 @@ import type { BrowserSnapshot, BrowserSnapshotFn } from './browser';
 
 const lazyRequire = createRequire(import.meta.url);
 
+/**
+ * P0-1 (round 2): the run's allowed-source-domains forwarded to the browser
+ * worker so rendered navigation, redirect hops, and captured subresources
+ * enforce the same source allowlist as the server-side policy gateway. Set
+ * per ladder construction by the caller that holds the run policy; a fresh
+ * value replaces the previous run's (single-worker server model).
+ */
+let snapshotSourcesAllowlist: string[] | undefined;
+
+export function setSnapshotSourcesAllowlist(allowlist: string[] | undefined): void {
+  snapshotSourcesAllowlist = allowlist;
+}
+
 /** Worker snapshot client, lazily loaded (null when unavailable). */
 function lazySnapshotFn(): BrowserSnapshotFn | null {
   try {
@@ -22,6 +35,7 @@ function lazySnapshotFn(): BrowserSnapshotFn | null {
         runtime: 'rendered';
         captureScreenshot: boolean;
         captureNetwork?: boolean;
+        sourcesAllowlist?: string[];
         interaction?: { type: string; selector?: string; optionLabel?: string; settleMs?: number } | null;
       }) => Promise<{ ok: true; data: unknown } | { ok: false; error: string }>;
     };
@@ -33,6 +47,7 @@ function lazySnapshotFn(): BrowserSnapshotFn | null {
         runtime: 'rendered',
         captureScreenshot: false,
         captureNetwork: request.captureNetwork,
+        sourcesAllowlist: snapshotSourcesAllowlist,
         interaction: request.interaction ?? null,
       });
       if (!result.ok) throw new Error(result.error);

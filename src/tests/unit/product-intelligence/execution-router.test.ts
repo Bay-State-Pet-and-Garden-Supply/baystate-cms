@@ -28,7 +28,7 @@ function fakePiExecutor(name = 'pi'): ProductIntelligenceExecutor {
         extensionVersions: [],
         configId: 'config-test-0001',
         durationMs: 5,
-        submission: validSubmission(),
+        submission: validSubmission() as unknown as never,
         failure: null,
         events: [],
       };

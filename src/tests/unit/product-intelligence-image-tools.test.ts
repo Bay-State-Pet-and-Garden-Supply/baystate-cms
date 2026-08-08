@@ -14,6 +14,7 @@ import sharp from 'sharp';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
+import { upsertReusePolicy } from '../../db/repositories/pi-reuse-policy-repo';
 import { createPiRun, insertPiEvidence, insertPiSource, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
@@ -224,6 +225,171 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       // Deterministic rights: no durable reuse grant -> restricted, never approved.
       expect(record.rightsStatus).toBe('restricted');
       expect(record.commerceApproved).toBe(false);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('resolves the agent-facing toolEvidenceId namespace (dual-namespace evidence resolution)', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun();
+    const source = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    // The row UUID differs from the agent-visible deterministic id stored in
+    // metadata.toolEvidenceId — exactly what a real Pi session receives.
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456', contentHash: 'ocr-content-hash' },
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'product_name',
+      value: 'Stella Chicken Broth 16 oz',
+      extractionMethod: 'image_ocr',
+      metadata: { toolEvidenceId: 'extract_product_page:abc123:name:abc789' },
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.example.com/i.png',
+        gtin: '036000291452',
+        expectedName: 'Stella Chicken Broth 16 oz',
+        netContentValue: 16,
+        netContentUnit: 'oz',
+        declaredSourceType: 'supplier',
+        // Agent-visible toolEvidenceIds — NOT the DB row UUIDs.
+        evidenceIds: ['extract_product_page:abc123:gtin:def456', 'extract_product_page:abc123:name:abc789'],
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const record = result.data as {
+        commerceApproved: boolean;
+        rightsStatus: string;
+        qualityStatus: string;
+        exactProductMatch: boolean;
+        observationProvenance: string;
+        observedGtin: string | null;
+      };
+      // Both namespaces resolve to the same durable rows; the toolEvidenceId
+      // path is canonical for the agent-facing flow.
+      expect(record.observationProvenance).toBe('evidence');
+      expect(record.observedGtin).toBe('036000291452');
+      expect(record.exactProductMatch).toBe(true);
+      expect(record.qualityStatus).toBe('usable');
+      expect(record.rightsStatus).toBe('restricted'); // no reuse grant seeded
+      expect(record.commerceApproved).toBe(false);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('derives rights from the durable grant record and ignores caller-asserted rights strings', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun();
+    const source = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456' },
+    });
+    const grant = upsertReusePolicy({
+      workspaceId: wsId,
+      sourceTier: 'manufacturer',
+      domainPattern: 'cdn.example.com',
+      allowed: true,
+      terms: 'vendor license',
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.example.com/i.png',
+        gtin: '036000291452',
+        declaredSourceType: 'manufacturer',
+        evidenceIds: ['extract_product_page:abc123:gtin:def456'],
+        // Caller-asserted rights strings must NOT become the durable basis.
+        rightsBasis: 'supplier_authorized_asset',
+        rightsEvidenceRef: 'caller-invented-ref',
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const record = result.data as {
+        commerceApproved: boolean;
+        rightsStatus: string;
+        rightsBasis: string | null;
+        rightsEvidenceRef: string | null;
+        exactProductMatch: boolean;
+        observationProvenance: string;
+      };
+      expect(record.rightsStatus).toBe('approved');
+      // Derived from the grant record, not the caller's strings.
+      expect(record.rightsBasis).toBe('grant:manufacturer@cdn.example.com');
+      expect(record.rightsEvidenceRef).toBe(grant.id);
+      expect(record.observationProvenance).toBe('evidence');
+      expect(record.exactProductMatch).toBe(true);
+      expect(record.commerceApproved).toBe(true);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('ignores caller-asserted rights strings when no grant exists (stays restricted)', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun();
+    // The shared DB may carry a manufacturer@cdn.example.com grant from an
+    // earlier test — use a tier/domain no grant covers so this stays
+    // deterministic regardless of execution order.
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://other.example.com/i.png',
+        declaredSourceType: 'retailer',
+        rightsBasis: 'supplier_authorized_asset',
+        rightsEvidenceRef: 'caller-invented-ref',
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const record = result.data as { rightsStatus: string; rightsBasis: string | null; rightsEvidenceRef: string | null };
+      expect(record.rightsStatus).toBe('restricted');
+      expect(record.rightsBasis).toBeNull();
+      expect(record.rightsEvidenceRef).toBeNull();
     }
     transitionPiRunStatus(run.id, 'completed', {});
   });

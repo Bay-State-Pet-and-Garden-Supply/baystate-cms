@@ -4,9 +4,55 @@
  */
 import type { ProductResearchContext, ProductResearchInput, StructuredSubmission } from '../../../../src/product-intelligence/contracts';
 import type { TerminalResultSubmission } from '../../../../src/product-intelligence/contracts';
+import type { ProductResearchBundle, InsufficientEvidenceSubmission } from '../../../../src/product-intelligence/workflow/bundle';
 import type { PiSessionFactory, PiSessionHandle, PiSessionLike } from '../../../../src/product-intelligence/pi/pi-session-factory';
 
 export const VALID_GTIN = '085000079585';
+
+/**
+ * A PI-4 workflow research bundle that passes validateTerminalSubmission:
+ * exact identity, evidence ids cited, no classification/image/conflict
+ * entries that would trigger CMS-controlled checks.
+ */
+export function validBundle(overrides: Partial<ProductResearchBundle> = {}): ProductResearchBundle {
+  return {
+    schemaVersion: 1,
+    gtin: VALID_GTIN,
+    inputName: 'STELLA CHKN BROTH 16OZ',
+    identity: {
+      status: 'exact_match',
+      brand: null,
+      canonicalName: null,
+      variant: null,
+      manufacturer: null,
+      netContent: null,
+      packCount: null,
+      evidenceIds: ['ev-bundle-1'],
+    },
+    commerceFacts: [],
+    classificationProposals: [],
+    imageCandidates: [],
+    conflicts: [],
+    disposition: 'research_complete',
+    ...overrides,
+  };
+}
+
+/** A PI-4 workflow abstention (insufficient evidence) that passes validation. */
+export function insufficientEvidenceSubmission(
+  overrides: Partial<InsufficientEvidenceSubmission> = {},
+): InsufficientEvidenceSubmission {
+  return {
+    schemaVersion: 1,
+    gtin: VALID_GTIN,
+    inputName: 'STELLA CHKN BROTH 16OZ',
+    reason: 'No extractable product fields on the page',
+    actionableNextStep: 'Try the browser snapshot layer',
+    evidenceIds: ['ev-bundle-1'],
+    attemptedSteps: ['extract_product_page'],
+    ...overrides,
+  };
+}
 
 export const TEST_INPUT: ProductResearchInput = {
   gtin: VALID_GTIN,

@@ -68,7 +68,7 @@ function isRemoteUrl(value: string): boolean {
  * `fetchFn` defaults to the global fetch (onboarding pipeline unchanged);
  * PI callers may pass a policy-gateway-bound fetch (P0-1).
  */
-async function fetchRemoteImageAsBase64(url: string, fetchFn: typeof fetch = fetch): Promise<string | null> {
+async function fetchRemoteImageAsBase64(url: string, fetchFn: NetworkFetch = fetch): Promise<string | null> {
   try {
     const response = await fetchFn(url, {
       headers: {
@@ -118,6 +118,7 @@ export async function loadProductImageAsBase64(
   imageUrl: string,
   workspacePath?: string,
   imageLocalPath?: string | null,
+  fetchFn: NetworkFetch = fetch,
 ): Promise<string | null> {
   // Try local path first (for items where images were downloaded)
   if (imageLocalPath && workspacePath) {
@@ -154,7 +155,7 @@ export async function loadProductImageAsBase64(
 
   // Remote URL — fetch in-memory
   if (isRemoteUrl(imageUrl)) {
-    return fetchRemoteImageAsBase64(imageUrl);
+    return fetchRemoteImageAsBase64(imageUrl, fetchFn);
   }
 
   return null;
@@ -291,6 +292,10 @@ export function coercePackagingOcrData(
 
 // ─── Main entry point ──────────────────────────────────────────────────────────
 
+
+/** Minimal structural fetch signature — lets callers inject the PI
+ *  policy-gateway bound fetch (P0-1). */
+type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export interface ExtractPackagingOcrParams {
   /** The primary image URL or relative path from extraction data. */
   imageUrl: string;
@@ -302,6 +307,12 @@ export interface ExtractPackagingOcrParams {
   imageSourceUrl?: string | null;
   /** SKU / UPC for logging. */
   sku?: string | null;
+  /**
+   * P0-1 (round 2): injected fetch for the remote image loader. Product
+   * Intelligence binds this to the policy gateway's gatewayFetch; the
+   * onboarding pipeline keeps the default global fetch.
+   */
+  fetchFn?: NetworkFetch;
 }
 
 /**
@@ -321,7 +332,7 @@ export interface ExtractPackagingOcrParams {
 export async function extractPackagingOcr(
   params: ExtractPackagingOcrParams,
 ): Promise<PackagingOcrData | null> {
-  const { imageUrl, workspacePath, imageLocalPath, imageSourceUrl, sku } = params;
+  const { imageUrl, workspacePath, imageLocalPath, imageSourceUrl, sku, fetchFn } = params;
 
   const vlmConfig = getVlmConfig();
   if (!vlmConfig?.enabled) {
@@ -330,7 +341,7 @@ export async function extractPackagingOcr(
   }
 
   // Load the image
-  const base64Image = await loadProductImageAsBase64(imageUrl, workspacePath, imageLocalPath);
+  const base64Image = await loadProductImageAsBase64(imageUrl, workspacePath, imageLocalPath, fetchFn);
   if (!base64Image) {
     console.warn(`[PackagingOcr] Could not load image for OCR: ${imageUrl}`);
     return null;

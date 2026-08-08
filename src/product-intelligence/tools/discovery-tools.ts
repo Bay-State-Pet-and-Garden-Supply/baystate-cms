@@ -177,7 +177,17 @@ const searchBrandSitemap: PiToolAdapter = {
     const gate = await gateSitemapFetch(ctx, domain);
     if (!gate.allowed) return policyDenied(gate.reason);
     try {
-      const sitemap = await fetchAndParseSitemap(domain, params.productUrlPattern ? String(params.productUrlPattern) : null);
+      // P0-1 (round 2): the sitemap fetcher owns the real HTTP — inject the
+      // gateway-bound fetch so the actual fetches are enforced, not only the
+      // destination pre-check above.
+      const sitemap = await fetchAndParseSitemap(
+        domain,
+        params.productUrlPattern ? String(params.productUrlPattern) : null,
+        (ctx.gateway ?? defaultPolicyGateway).buildPiNetworkFetch(
+          { runId: ctx.runId, policy: ctx.policy },
+          { dataClassification: 'fetched_content' },
+        ),
+      );
       if (sitemap.urls.length === 0) return noResult(`No sitemap URLs found for ${domain}`);
       const matches = await matchSitemapUrls(sitemap.urls, name || gtin, null, gtin, domain);
       if (matches.length === 0) return noResult(`Sitemap for ${domain} has no matches for ${gtin}`);
@@ -276,6 +286,13 @@ const resolveProductVariants: PiToolAdapter = {
         expectedName: params.expectedName ? String(params.expectedName) : String(params.rawName),
         brandHint: params.brandHint ? String(params.brandHint) : null,
         brandDomains: [],
+        // P0-1 (round 2): the variant resolver performs the page fetches —
+        // inject the gateway-bound fetch so each candidate page HTTP is
+        // enforced end-to-end, not only pre-checked.
+        fetchFn: gateway.buildPiNetworkFetch(
+          { runId: ctx.runId, policy: ctx.policy },
+          { dataClassification: 'fetched_content' },
+        ),
       });
       return okResult(
         {

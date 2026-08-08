@@ -17,6 +17,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { lookup } from 'node:dns/promises';
 import { chromium } from 'playwright';
 import { SnapshotRequestSchema, SnapshotResponseSchema } from '../../shared/schemas/extraction-worker';
 import type { SnapshotResponse, InteractionAction } from '../../shared/schemas/extraction-worker';
@@ -494,7 +495,10 @@ function redactSensitiveKeys(node: unknown, depth = 0): unknown {
  * XHR/fetch/GraphQL JSON responses. Filtering keeps analytics, media, and
  * oversized payloads out; only parsed JSON bodies are retained.
  */
-async function installNetworkCapture(page: import('playwright').Page): Promise<{
+async function installNetworkCapture(
+  page: import('playwright').Page,
+  sourcesAllowlist?: string[],
+): Promise<{
   responses: CapturedNetworkResponse[];
   stop: () => void;
 }> {
@@ -510,8 +514,10 @@ async function installNetworkCapture(page: import('playwright').Page): Promise<{
     const contentType = headers['content-type'] ?? '';
     if (!contentType.includes('json')) return;
     const reqUrl = response.url();
-    // P0-1: never capture responses from private/link-local destinations.
+    // P0-1: never capture responses from private/link-local destinations or
+    // destinations outside the run's allowed source domains.
     if (isPrivateOrLinkLocalUrl(reqUrl)) return;
+    if (!isDestinationAllowed(reqUrl, sourcesAllowlist)) return;
     // Requirement: filter to relevant product data — never analytics,
     // cart/account/checkout/session, or personalization endpoints, and
     // never record query strings (session tokens live there).
@@ -710,28 +716,89 @@ function isPrivateOrLinkLocalUrl(rawUrl: string): boolean {
   return false;
 }
 
+/**
+ * P0-1 (round 2): the run's allowed-source-domains apply to navigation
+ * (initial + redirect hops) and captured sub-resources. An absent or empty
+ * allowlist means the caller did not restrict sources (static floors still
+ * apply); a non-empty allowlist requires an exact or subdomain-suffix match
+ * (case-insensitive, `www.` normalized).
+ */
+function isDestinationAllowed(rawUrl: string, sourcesAllowlist: string[] | undefined): boolean {
+  if (!sourcesAllowlist || sourcesAllowlist.length === 0) return true;
+  let hostname: string;
+  try {
+    hostname = new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const normalize = (d: string): string => d.toLowerCase().replace(/^www\./, '');
+  return sourcesAllowlist.some((entry) => {
+    const normalized = normalize(entry);
+    if (normalized.length === 0) return false;
+    return hostname === normalized || hostname.endsWith('.' + normalized);
+  });
+}
+
+/**
+ * P0-1 (round 2): DNS-based private-address resolution for navigation. The
+ * literal-URL floor cannot see hostnames that resolve to private ranges, so
+ * the navigation destination is resolved via the system resolver and denied
+ * when ANY address is private/link-local/loopback. Resolution failure does
+ * not by itself deny (the literal floor already ran); the authoritative
+ * DNS SSRF check remains at the tool-boundary gateway.
+ */
+async function isDnsDestinationPrivate(hostname: string): Promise<boolean> {
+  try {
+    const records = await lookup(hostname, { all: true });
+    return records.some((record) => isPrivateOrLinkLocalUrl(`http://${record.address}/`));
+  } catch {
+    return false;
+  }
+}
+
+async function isNavigationBlocked(rawUrl: string, sourcesAllowlist: string[] | undefined): Promise<string | null> {
+  if (isPrivateOrLinkLocalUrl(rawUrl)) {
+    return `Blocked private/link-local destination: ${rawUrl}`;
+  }
+  if (!isDestinationAllowed(rawUrl, sourcesAllowlist)) {
+    return `Blocked destination outside allowed source domains: ${rawUrl}`;
+  }
+  try {
+    const hostname = new URL(rawUrl).hostname;
+    if (await isDnsDestinationPrivate(hostname)) {
+      return `Blocked destination resolving to a private address: ${rawUrl}`;
+    }
+  } catch {
+    // Unparseable URL — the literal floor already rejected it.
+  }
+  return null;
+}
+
 async function doStaticSnapshot(
   url: string,
   captureScreenshot: boolean,
   captureNetwork: boolean,
   domain: string,
   jobId: string,
+  sourcesAllowlist?: string[],
 ): Promise<SnapshotResponse> {
   const warnings: string[] = [];
   const artifactDir = resolveArtifactDir(domain, jobId);
 
 
-  // Fetch — P0-1: private/link-local destinations are denied up front and
-  // redirects are followed manually with every hop re-checked, so a public
-  // start URL cannot tunnel navigation to a private destination.
+  // Fetch — P0-1: private/link-local destinations and destinations outside
+  // the run's allowed source domains are denied up front, redirects are
+  // followed manually with every hop re-checked (allowlist + DNS), so a
+  // public start URL cannot tunnel navigation to a private destination.
   let response: Response | undefined;
   let html: string;
   try {
     let currentUrl = url;
     let redirects = 0;
     for (;;) {
-      if (isPrivateOrLinkLocalUrl(currentUrl)) {
-        warnings.push(`Blocked private/link-local destination: ${currentUrl}`);
+      const blocked = await isNavigationBlocked(currentUrl, sourcesAllowlist);
+      if (blocked) {
+        warnings.push(blocked);
         return buildSnapshotResponse({
           url,
           finalUrl: url,
@@ -867,6 +934,7 @@ async function doRenderedSnapshot(
   interaction: InteractionAction | null,
   domain: string,
   jobId: string,
+  sourcesAllowlist?: string[],
 ): Promise<SnapshotResponse> {
   const warnings: string[] = [];
   const artifactDir = resolveArtifactDir(domain, jobId);
@@ -929,9 +997,14 @@ async function doRenderedSnapshot(
         /analytics|google-analytics|doubleclick|facebook|hotjar|klaviyo|pixel/i.test(reqUrl);
 
       // P0-1: abort navigation/sub-resources to private or link-local
-      // destinations (defense in depth on top of the tool-boundary gateway
-      // check; redirect hops and sub-requests are covered here too).
+      // destinations and to hosts outside the run's allowed source domains
+      // (defense in depth on top of the tool-boundary gateway check; redirect
+      // hops and sub-requests are covered here too).
       if (isPrivateOrLinkLocalUrl(reqUrl)) {
+        await route.abort();
+        return;
+      }
+      if (!isDestinationAllowed(reqUrl, sourcesAllowlist)) {
         await route.abort();
         return;
       }
@@ -945,13 +1018,16 @@ async function doRenderedSnapshot(
 
     // PI-11: capture product-relevant network responses during navigation.
     if (captureNetwork) {
-      networkCapture = await installNetworkCapture(page);
+      networkCapture = await installNetworkCapture(page, sourcesAllowlist);
     }
 
-    // Navigate — P0-1: deny obvious private/link-local destinations before
-    // the browser touches them (the route handler above also aborts them).
-    if (isPrivateOrLinkLocalUrl(url)) {
-      warnings.push(`Blocked private/link-local navigation destination: ${url}`);
+    // Navigate — P0-1: deny private/link-local destinations, destinations
+    // outside the allowed source domains, and hostnames that resolve to
+    // private addresses before the browser touches them (the route handler
+    // above also aborts them).
+    const blocked = await isNavigationBlocked(url, sourcesAllowlist);
+    if (blocked) {
+      warnings.push(blocked);
     } else {
       try {
         await page.goto(url, {
@@ -1184,6 +1260,7 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
           request.captureNetwork ?? false,
           domain,
           jobId,
+          request.sourcesAllowlist,
         );
       } else {
         result = await doRenderedSnapshot(
@@ -1193,6 +1270,7 @@ export function handleSnapshot(req: IncomingMessage, res: ServerResponse): void 
           request.interaction ?? null,
           domain,
           jobId,
+          request.sourcesAllowlist,
         );
       }
 

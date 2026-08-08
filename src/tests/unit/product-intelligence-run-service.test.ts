@@ -32,7 +32,7 @@ import {
 } from '../../product-intelligence/run-service';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
 import type { ProductResearchContext, ProductResearchInput, ProductResearchResult, TerminalResultSubmission } from '../../product-intelligence/contracts';
-import { TEST_INPUT, validSubmission } from './product-intelligence/test-helpers';
+import { TEST_INPUT, validBundle, validSubmission, insufficientEvidenceSubmission } from './product-intelligence/test-helpers';
 import type { ProductResearchBundle } from '../../product-intelligence/workflow/bundle';
 
 const wsId = 'pi-service-test-workspace';
@@ -85,7 +85,7 @@ class FakePiExecutor implements ProductIntelligenceExecutor {
   readonly name = 'pi';
   readonly version = '1.0.0';
   outcome: ProductResearchResult['outcome'] = 'submitted';
-  submission: TerminalResultSubmission = validSubmission();
+  submission: TerminalResultSubmission = validBundle();
   failure: ProductResearchResult['failure'] = null;
   emitToolCalls = true;
   /** When true, research waits until the caller signal aborts. */
@@ -240,6 +240,12 @@ describe('Product Intelligence run service', () => {
 
   it('runs a submitted research end-to-end with durable artifacts', async () => {
     const executor = new FakePiExecutor();
+    // A bundle with a blocking conflict + cited identity evidence exercises
+    // the workflow persistence path (conflicts + gap reporting).
+    executor.submission = validBundle({
+      identity: { ...validBundle().identity, status: 'exact_match' },
+      conflicts: [{ field: 'netContent', values: ['16 oz', '4 oz'], severity: 'medium', evidenceIds: ['ev-bundle-1'] }],
+    });
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT, mode: 'shadow' }, runOpts);
     await started.completed;
 
@@ -257,13 +263,15 @@ describe('Product Intelligence run service', () => {
     expect(result?.schemaVersion).toBe(1);
     expect(result?.resultHash).toBeTruthy();
 
-    // Normalized sources and evidence persisted from the submission.
+    // Workflow persistence: no sources/evidence rows from a minimal bundle
+    // (per-tool persistence creates those), but the blocking conflict is
+    // durable and the uncited identity evidence is reported as a gap.
     const sources = listPiSources(started.run.id);
-    expect(sources.length).toBe(1);
-    expect(sources[0].domain).toBe('supplier.example.com');
+    expect(sources.length).toBe(0);
     const evidence = listPiEvidence(started.run.id);
-    expect(evidence.length).toBe(1);
-    expect(evidence[0].targetField).toBe('gtin');
+    expect(evidence.length).toBe(0);
+    const conflicts = getPiRunProjection(started.run.id)?.conflicts as Array<{ field: string; severity: string }>;
+    expect(conflicts.map((c) => c.field)).toContain('netContent');
 
     // Events persisted in order; tool call derived.
     const events = listPiEvents(started.run.id);
@@ -272,8 +280,9 @@ describe('Product Intelligence run service', () => {
     // The SSE-facing stream maps normalized types to domain events.
     const mapped = replayPiEvents(started.run.id).map((e) => e.type);
     expect(mapped).toContain('run.completed');
-    expect(mapped).toContain('source.added');
-    expect(mapped).toContain('evidence.added');
+    expect(mapped).toContain('conflict.detected');
+    // Cited-but-not-durable evidence surfaces as an honest gap (never fabricated).
+    expect(mapped).toContain('evidence.gap');
     // No duplicate run.started/run.completed (service emits only additive events).
     expect(mapped.filter((t) => t === 'run.completed')).toHaveLength(1);
     const toolCalls = getPiRunProjection(started.run.id)?.toolCalls as Array<{ toolName: string }>;
@@ -290,7 +299,7 @@ describe('Product Intelligence run service', () => {
 
   it('persists an abstained run and emits no needs_review for exact identity', async () => {
     const executor = new FakePiExecutor();
-    executor.submission = { ...validSubmission(), abstention: { scope: 'full', reason: 'r', actionableNextStep: 'n', targets: [] }, productProposal: { fields: [] } };
+    executor.submission = insufficientEvidenceSubmission();
     executor.outcome = 'abstained';
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT, mode: 'shadow' }, runOpts);
     await started.completed;
@@ -301,17 +310,42 @@ describe('Product Intelligence run service', () => {
 
   it('flags needs_review when identity is not exact or images are unknown', async () => {
     const executor = new FakePiExecutor();
-    executor.submission = {
-      ...validSubmission(),
-      identity: { ...validSubmission().identity, gtinMatch: 'unknown', gtinEvidenceIds: [] },
-      images: [{ url: 'https://example.com/i.jpg', sourceId: 'src-1', rightsStatus: 'unknown', identityMatch: 'unknown', evidenceIds: [] }],
-    };
+    executor.submission = validBundle({
+      identity: { ...validBundle().identity, status: 'probable_match' },
+      imageCandidates: [
+        {
+          sourceId: 'src-1',
+          sourceArtifactId: 'art-1',
+          url: 'https://example.com/i.jpg',
+          role: 'comparison',
+          exactProductMatch: false,
+          exactVariantMatch: null,
+          rightsStatus: 'unknown',
+          evidenceIds: [],
+        } as unknown as ProductResearchBundle['imageCandidates'][number],
+      ],
+    });
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT }, runOpts);
     await started.completed;
     const types = listPiEvents(started.run.id).map((e) => e.type);
     expect(types).toContain('run.needs_review');
     const payload = JSON.parse(listPiEvents(started.run.id).find((e) => e.type === 'run.needs_review')!.payloadJson);
     expect(payload.reasons.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('denies a legacy PI-1 envelope at the terminal gate (review finding 6)', async () => {
+    const executor = new FakePiExecutor();
+    // A fake executor CAN cast a legacy envelope through the type boundary —
+    // the deterministic CMS-side gate must deny it at runtime, never pass it.
+    executor.submission = validSubmission() as unknown as TerminalResultSubmission;
+    const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT }, runOpts);
+    await started.completed;
+    const run = getPiRun(started.run.id);
+    expect(run?.status).toBe('failed');
+    expect(run?.errorCode).toBe('validation_error');
+    expect(run?.errorMessage).toContain('unsupported submission shape');
+    const types = replayPiEvents(started.run.id).map((e) => e.type);
+    expect(types).toContain('run.failed');
   });
 
   it('marks unavailable runs completed with disposition unavailable (legacy path)', async () => {
@@ -388,6 +422,12 @@ describe('Product Intelligence run service', () => {
 
   it('creates comparisons with metrics against a baseline', async () => {
     const executor = new FakePiExecutor();
+    // A bundle with one commerce fact drives fieldCount from the workflow shape
+    // (bundles have no productProposal/evidenceSources — per-tool persistence
+    // owns source rows).
+    executor.submission = validBundle({
+      commerceFacts: [{ field: 'netContent', value: '16 oz', evidenceIds: ['ev-bundle-1'], extractionMethods: ['json_ld'], confidenceSignal: null }],
+    });
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT }, runOpts);
     await started.completed;
     const comparison = createPiComparison({ runId: started.run.id, baselineType: 'legacy', baselineRef: 'legacy-run-xyz' });
@@ -395,7 +435,7 @@ describe('Product Intelligence run service', () => {
     expect(metrics.executor).toBe('pi');
     expect(metrics.outcome).toBe('submitted');
     expect(metrics.fieldCount).toBe(1);
-    expect(metrics.sourceCount).toBe(1);
+    expect(metrics.sourceCount).toBe(0);
   });
 
   it('persists bundle image candidates as durable assets with rights provenance (PI-6)', async () => {

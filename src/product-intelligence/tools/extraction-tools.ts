@@ -26,13 +26,14 @@ import {
   policyDenied,
   structuredSingleVariantProof,
   variantProofFromSignals,
+  variantTokenOverlap,
   type ExtractedFieldEvidence,
   type FieldEvidenceEntry,
   type PageExtractionContract,
   type PageExtractionResult,
 } from './contract';
 import { createLadderExtractionContract } from '../extraction/ladder';
-import { defaultLadderOptions } from '../extraction/wiring';
+import { defaultLadderOptions, setSnapshotSourcesAllowlist } from '../extraction/wiring';
 import { HTTP_EXTRACTION_HEADERS, type FetchedPage, type ShopifyProductJson } from '../extraction/platforms';
 import type { LadderOptions } from '../extraction/ladder';
 import type { PolicyGateway } from '../policy/policy-gateway';
@@ -59,12 +60,20 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
     expected?: { gtin?: string; name?: string; brandHint?: string | null };
     signal: AbortSignal;
     timeoutMs: number;
+    fetchFn?: typeof fetch;
   }): Promise<PageExtractionResult> {
     const expected = request.expected ?? {};
-    const raw = await extractViaHttpDetailed(request.url, null, {
-      name: expected.name,
-      brandHint: expected.brandHint ?? null,
-    });
+    const raw = await extractViaHttpDetailed(
+      request.url,
+      null,
+      {
+        name: expected.name,
+        brandHint: expected.brandHint ?? null,
+      },
+      // P0-1 (round 2): bind the legacy transport to the injected
+      // (gateway-bound) fetch when the caller provides one.
+      (request as { fetchFn?: typeof fetch }).fetchFn,
+    );
 
     // Final URL: extraction follows redirects internally; when it does not
     // report one, the requested URL stands.
@@ -120,10 +129,19 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
 
     const variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }> = [];
     const variantText = normalizeFieldValue((heuristics?.variant as string) ?? null);
-    if (variantText && expected.gtin && !gtins.some((g) => g.value === expected.gtin)) {
-      variantSignals.push({ kind: 'variant_mismatch' });
-    } else if (variantText) {
-      variantSignals.push({ kind: 'variant_match' });
+    if (variantText) {
+      // P0-5 round 2: a declared variant only yields variant_match when it is
+      // tied to the EXPECTED variant (token overlap with the expected name);
+      // a bare variant declaration or a successful interaction is never a
+      // match by itself.
+      if (expected.gtin && !gtins.some((g) => g.value === expected.gtin)) {
+        variantSignals.push({ kind: 'variant_mismatch' });
+      } else if (expected.name && variantTokenOverlap(expected.name, variantText) >= 0.5) {
+        variantSignals.push({ kind: 'variant_match' });
+      } else if (expected.name) {
+        variantSignals.push({ kind: 'variant_mismatch' });
+      }
+      // No expected name -> no comparison possible -> no signal.
     }
 
     const proof = variantProofFromSignals(variantSignals);
@@ -180,6 +198,14 @@ function gatewayBoundLadderOptions(ctx: PiToolContext): LadderOptions {
   const gateway: PolicyGateway = ctx.gateway ?? defaultPolicyGateway;
   const netCtx = { runId: ctx.runId, policy: ctx.policy };
   const options = defaultLadderOptions();
+  // P0-1 (round 2): hand the run's allowed-source-domains to the browser
+  // worker so its rendered navigation, redirects, and captured subresources
+  // enforce the same source allowlist as the server-side gateway.
+  setSnapshotSourcesAllowlist(
+    ctx.policy.allowedSourceDomains && ctx.policy.allowedSourceDomains.length > 0
+      ? ctx.policy.allowedSourceDomains
+      : undefined,
+  );
   options.fetchPage = async (url: string, signal: AbortSignal, timeoutMs: number): Promise<FetchedPage> => {
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -340,12 +366,21 @@ const extractStructuredPageData: PiToolAdapter = {
   async execute(params, ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
     const gateway = ctx.gateway ?? defaultPolicyGateway;
+    const netCtx = { runId: ctx.runId, policy: ctx.policy };
     const policyDecision = await gateway.checkNetworkRequest(ctx, url, 'fetched_content');
     if (!policyDecision.allowed) {
       return policyDenied(policyDecision.detail ?? policyDecision.reasonCode);
     }
     try {
-      const raw = await extractViaHttpDetailed(url, null, { name: params.expectedName ? String(params.expectedName) : undefined });
+      // P0-1 (round 2): the legacy transport owns the real fetch — inject the
+      // gateway-bound fetch so the actual HTTP is enforced (SSRF, redirects,
+      // size/type limits, audit), not only pre-checked.
+      const raw = await extractViaHttpDetailed(
+        url,
+        null,
+        { name: params.expectedName ? String(params.expectedName) : undefined },
+        gateway.buildPiNetworkFetch(netCtx, { dataClassification: 'fetched_content' }),
+      );
       const projection = {
         finalUrl: (raw as { finalUrl?: string }).finalUrl ?? url,
         jsonLd: (raw as { jsonLd?: unknown }).jsonLd ?? null,
@@ -390,10 +425,17 @@ const extractPackagingEvidence: PiToolAdapter = {
     const netCheck = await (ctx.gateway ?? defaultPolicyGateway).checkNetworkRequest({ runId: ctx.runId, policy: ctx.policy }, imageUrl);
     if (!netCheck.allowed) return policyDenied(`image fetch denied: ${netCheck.reasonCode}${netCheck.detail ? ` (${netCheck.detail})` : ''}`);
     try {
+      // P0-1 (round 2): the OCR image loader performs the real fetch — inject
+      // the gateway-bound fetch so the actual download is enforced end-to-end
+      // (the pre-check above denies obvious violations before any bytes move).
       const ocr = await extractPackagingOcr({
         imageUrl,
         sku: params.gtin ? String(params.gtin) : null,
         imageSourceUrl: params.imageSourceUrl ? String(params.imageSourceUrl) : null,
+        fetchFn: (ctx.gateway ?? defaultPolicyGateway).buildPiNetworkFetch(
+          { runId: ctx.runId, policy: ctx.policy },
+          { dataClassification: 'fetched_content' },
+        ),
       });
       if (!ocr) {
         return noResult('Packaging OCR produced no result (VLM may be unconfigured or the image could not be loaded)');

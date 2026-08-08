@@ -59,15 +59,67 @@ export function listApprovedPolicies(workspaceId: string): ApprovedPolicyRow[] {
 }
 
 /**
- * The single active (newest) approved policy record for the workspace, or
- * undefined when none has been seeded yet.
+ * The single active (newest) DEFAULT approved policy record for the
+ * workspace, or undefined when none has been seeded yet. Explicitly filters
+ * name = 'default' (review finding 9) — a differently-named policy record
+ * must never be mistaken for the workspace default.
  */
-export function getActiveApprovedPolicy(workspaceId: string): ApprovedPolicyRow | undefined {
+export function getActiveDefaultApprovedPolicy(workspaceId: string): ApprovedPolicyRow | undefined {
   const db = getDb();
   const row = db
-    .query(`${ROW_SELECT} WHERE workspace_id = ? AND active = 1 ORDER BY version DESC LIMIT 1`)
-    .get(workspaceId) as Record<string, unknown> | undefined;
+    .query(`${ROW_SELECT} WHERE workspace_id = ? AND name = ? AND active = 1 ORDER BY version DESC LIMIT 1`)
+    .get(workspaceId, DEFAULT_POLICY_NAME) as Record<string, unknown> | undefined;
   return row ? mapRow(row) : undefined;
+}
+
+/**
+ * @deprecated Use getActiveDefaultApprovedPolicy — the active policy is
+ * always the workspace default record.
+ */
+export function getActiveApprovedPolicy(workspaceId: string): ApprovedPolicyRow | undefined {
+  return getActiveDefaultApprovedPolicy(workspaceId);
+}
+
+/**
+ * Look up a specific immutable approved-policy record row by id + version
+ * within a workspace. Used by rerun reauthorization (review finding 7): the
+ * BASE record is reauthorized, then stored overrides are re-applied against
+ * its immutable policy_json.
+ */
+export function getApprovedPolicyRecord(
+  workspaceId: string,
+  policyId: string,
+  version?: number,
+): ApprovedPolicyRow | undefined {
+  const db = getDb();
+  const row =
+    version === undefined
+      ? (db
+          .query(`${ROW_SELECT} WHERE workspace_id = ? AND id = ?`)
+          .get(workspaceId, policyId) as Record<string, unknown> | undefined)
+      : (db
+          .query(`${ROW_SELECT} WHERE workspace_id = ? AND id = ? AND version = ?`)
+          .get(workspaceId, policyId, version) as Record<string, unknown> | undefined);
+  return row ? mapRow(row) : undefined;
+}
+
+/**
+ * True when the specific approved-policy record (id + version) is currently
+ * the active record for the workspace. Rerun reauthorization (review finding
+ * 7): a base record that was superseded or revoked must never be
+ * resurrected by a rerun.
+ */
+export function isApprovedPolicyRecordActive(workspaceId: string, policyId: string, version?: number): boolean {
+  const db = getDb();
+  const row =
+    version === undefined
+      ? (db
+          .query('SELECT COUNT(*) AS c FROM pi_approved_policies WHERE workspace_id = ? AND id = ? AND active = 1')
+          .get(workspaceId, policyId) as { c: number })
+      : (db
+          .query('SELECT COUNT(*) AS c FROM pi_approved_policies WHERE workspace_id = ? AND id = ? AND version = ? AND active = 1')
+          .get(workspaceId, policyId, version) as { c: number });
+  return row.c > 0;
 }
 
 /**
@@ -107,7 +159,7 @@ export function createApprovedPolicyVersion(
       [randomUUID(), workspaceId, name, version, policyJson, configId, now()],
     );
   })();
-  const active = getActiveApprovedPolicy(workspaceId);
+  const active = getActiveDefaultApprovedPolicy(workspaceId);
   if (!active) throw new Error(`Failed to create approved policy version for workspace ${workspaceId}`);
   return active;
 }
@@ -127,7 +179,7 @@ export function seedDefaultApprovedPolicy(
     .query('SELECT id FROM pi_approved_policies WHERE workspace_id = ? AND name = ?')
     .get(workspaceId, DEFAULT_POLICY_NAME) as { id: string } | undefined;
   if (existing) {
-    const active = getActiveApprovedPolicy(workspaceId);
+    const active = getActiveDefaultApprovedPolicy(workspaceId);
     if (!active) throw new Error(`Approved policy record exists but none is active for workspace ${workspaceId}`);
     return active;
   }

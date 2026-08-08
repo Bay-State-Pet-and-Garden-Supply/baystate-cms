@@ -265,6 +265,10 @@ export function resolveVariantsFromHtml(
 /**
  * Main entry point: run variant resolution on candidates.
  */
+
+/** Minimal structural fetch signature — lets callers inject the PI
+ *  policy-gateway bound fetch (P0-1). */
+type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export async function resolveVariantsForCandidates(options: {
   candidates: InsertSourceData[];
   upc: string;
@@ -273,8 +277,14 @@ export async function resolveVariantsForCandidates(options: {
   brandHint: string | null;
   brandDomains: string[];
   price?: number | null;
+  /**
+   * P0-1 (round 2): injected fetch so Product Intelligence can bind the
+   * variant-page fetches to the policy gateway's gatewayFetch. The
+   * onboarding pipeline keeps the default global fetch.
+   */
+  fetchFn?: NetworkFetch;
 }): Promise<InsertSourceData[]> {
-  const { candidates, upc, rawName, expectedName, brandHint, brandDomains, price } = options;
+  const { candidates, upc, rawName, expectedName, brandHint, brandDomains, price, fetchFn } = options;
 
   // Identify the bounded set: Top 3 candidates, sitemap candidates, and official domain candidates.
   const boundedSet = new Set<InsertSourceData>();
@@ -299,7 +309,7 @@ export async function resolveVariantsForCandidates(options: {
   await Promise.all(
     boundedList.map(async (cand) => {
       try {
-        const response = await fetch(cand.url, {
+        const response = await (fetchFn ?? fetch)(cand.url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',

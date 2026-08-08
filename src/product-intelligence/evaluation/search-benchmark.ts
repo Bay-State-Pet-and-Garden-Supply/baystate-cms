@@ -184,6 +184,8 @@ export interface SearchBenchmarkReport {
 const RECOMMEND_THRESHOLDS = {
   pageFoundRate: 0.8,
   precisionAt5: 0.5,
+  /** A strategy that ranks noise above the truth is never recommended. */
+  misleadingRejectionRate: 0.5,
   /** No recommendation below this many measured products (degenerate runs). */
   minProducts: 3,
 } as const;
@@ -322,6 +324,10 @@ export async function runSearchBenchmark(opts: SearchBenchmarkOptions): Promise<
     .filter((row) => row.products >= RECOMMEND_THRESHOLDS.minProducts)
     .filter((row) => row.pageFoundRate !== null && row.pageFoundRate >= RECOMMEND_THRESHOLDS.pageFoundRate)
     .filter((row) => row.precisionAt5 !== null && row.precisionAt5 >= RECOMMEND_THRESHOLDS.precisionAt5)
+    // Non-vacuous misleading-source rejection: a strategy whose results rank
+    // noise above the truth (rate < 0.5 over products that HAVE misleading
+    // sources) must never be recommended, regardless of raw find-rate.
+    .filter((row) => row.misleadingRejectionRate === null || row.misleadingRejectionRate >= RECOMMEND_THRESHOLDS.misleadingRejectionRate)
     .map((row) => row.strategy);
 
   return {
@@ -330,7 +336,7 @@ export async function runSearchBenchmark(opts: SearchBenchmarkOptions): Promise<
       recommended.length > 0
         ? {
             recommended,
-            rationale: `pageFoundRate >= ${RECOMMEND_THRESHOLDS.pageFoundRate}, precision@5 >= ${RECOMMEND_THRESHOLDS.precisionAt5}, and n >= ${RECOMMEND_THRESHOLDS.minProducts} measured products (never model confidence)`,
+            rationale: `pageFoundRate >= ${RECOMMEND_THRESHOLDS.pageFoundRate}, precision@5 >= ${RECOMMEND_THRESHOLDS.precisionAt5}, misleading-source rejection >= ${RECOMMEND_THRESHOLDS.misleadingRejectionRate}, and n >= ${RECOMMEND_THRESHOLDS.minProducts} measured products (never model confidence)`,
           }
         : null,
   };

@@ -127,9 +127,14 @@ const GZIP_MAGIC = [0x1f, 0x8b];
  *          array. `sourceUrl` is the URL of the first sitemap document
  *          that produced a result; empty when nothing was found.
  */
+
+/** Minimal structural fetch signature — lets callers inject the PI
+ *  policy-gateway bound fetch (P0-1). */
+type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 export async function fetchAndParseSitemap(
   domain: string,
   productUrlPattern?: string | null,
+  fetchFn: NetworkFetch = fetch,
 ): Promise<SitemapFetchResult> {
   const origin = normalizeOrigin(domain);
   if (!origin) {
@@ -146,7 +151,7 @@ export async function fetchAndParseSitemap(
   // ── Step 1: try standard sitemap paths ────────────────────────────────
   for (const path of STANDARD_SITEMAP_PATHS) {
     const url = origin + path;
-    const result = await tryFetchSitemap(url, 0);
+    const result = await tryFetchSitemap(url, 0, fetchFn);
     if (result) {
       const filtered = applyPattern(result.urls, pattern);
       console.log(
@@ -162,9 +167,9 @@ export async function fetchAndParseSitemap(
   );
 
   // ── Step 2: try robots.txt Sitemap: directives ────────────────────────
-  const robotsUrls = await parseRobotsSitemaps(origin + '/robots.txt');
+  const robotsUrls = await parseRobotsSitemaps(origin + '/robots.txt', fetchFn);
   for (const robotsUrl of robotsUrls) {
-    const result = await tryFetchSitemap(robotsUrl, 0);
+    const result = await tryFetchSitemap(robotsUrl, 0, fetchFn);
     if (result) {
       const filtered = applyPattern(result.urls, pattern);
       console.log(
@@ -178,7 +183,7 @@ export async function fetchAndParseSitemap(
   // ── Step 3: try Shopify-specific paths ────────────────────────────────
   for (const path of SHOPIFY_SITEMAP_PATHS) {
     const url = origin + path;
-    const result = await tryFetchSitemap(url, 0);
+    const result = await tryFetchSitemap(url, 0, fetchFn);
     if (result) {
       const filtered = applyPattern(result.urls, pattern);
       console.log(
@@ -212,8 +217,9 @@ export async function fetchAndParseSitemap(
 async function tryFetchSitemap(
   url: string,
   depth: number,
+  fetchFn: NetworkFetch = fetch,
 ): Promise<SitemapFetchResult | null> {
-  const body = await fetchSitemapBody(url);
+  const body = await fetchSitemapBody(url, fetchFn);
   if (body === null) return null;
 
   const detected = detectSitemapKind(body);
@@ -235,7 +241,7 @@ async function tryFetchSitemap(
     );
     const collected: string[] = [];
     for (const child of childUrls) {
-      const childResult = await tryFetchSitemap(child, depth + 1);
+      const childResult = await tryFetchSitemap(child, depth + 1, fetchFn);
       if (childResult) {
         for (const u of childResult.urls) collected.push(u);
       }
@@ -258,10 +264,10 @@ async function tryFetchSitemap(
  * Honors `Content-Encoding: gzip` and the gzip magic bytes for
  * pre-compressed bodies served without the header.
  */
-async function fetchSitemapBody(url: string): Promise<string | null> {
+async function fetchSitemapBody(url: string, fetchFn: NetworkFetch = fetch): Promise<string | null> {
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetchFn(url, {
       headers: {
         'User-Agent': HTTP_USER_AGENT,
         'Accept': ACCEPT_HEADER,
@@ -342,10 +348,10 @@ function gunzip(bytes: Uint8Array): Uint8Array {
  * directives. Returns an empty array when the file is missing, empty,
  * or unparseable; never throws.
  */
-async function parseRobotsSitemaps(robotsUrl: string): Promise<string[]> {
+async function parseRobotsSitemaps(robotsUrl: string, fetchFn: NetworkFetch = fetch): Promise<string[]> {
   let body: string | null = null;
   try {
-    const response = await fetch(robotsUrl, {
+    const response = await fetchFn(robotsUrl, {
       headers: {
         'User-Agent': HTTP_USER_AGENT,
         'Accept': 'text/plain, text/*, */*;q=0.1',

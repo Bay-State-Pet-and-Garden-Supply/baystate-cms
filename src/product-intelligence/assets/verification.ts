@@ -304,9 +304,10 @@ export interface VerifyImageDeps {
    */
   evidenceResolver?: EvidenceResolver;
   /**
-   * Server-authoritative reuse grant: (sourceTier, domain) -> reuse allowed.
-   * A manufacturer/supplier domain proves ORIGIN, not authorization.
-   * Defaults to NO grants — every asset is restricted until a grant exists.
+   * Server-authoritative reuse grant: (sourceTier, domain) -> the grant
+   * record that authorized reuse, or null. A manufacturer/supplier domain
+   * proves ORIGIN, not authorization. Defaults to NO grants — every asset
+   * is restricted until a grant exists.
    */
   reuseGrantResolver?: ReuseGrantResolver;
 }
@@ -344,10 +345,32 @@ export interface ResolvedEvidenceFact {
   sourceUrl: string | null;
   sourceDomain: string | null;
   contentHash: string | null;
+  /** Which identifier namespace resolved this row: the row UUID or the
+   *  agent-facing deterministic metadata.toolEvidenceId. */
+  matchedNamespace?: 'row_id' | 'tool_evidence_id';
 }
 
 export type EvidenceResolver = (evidenceIds: string[]) => ResolvedEvidenceFact[];
-export type ReuseGrantResolver = (sourceTier: string, domain: string) => boolean;
+
+/**
+ * The durable reuse grant that authorized an asset (server-authoritative).
+ * Records WHICH grant allowed reuse so the asset stores grantId instead of
+ * caller-asserted rights strings.
+ */
+export interface ReuseGrantRecord {
+  allowed: true;
+  grantId: string;
+  sourceTier: string;
+  domainPattern: string;
+  terms: string | null;
+}
+
+/**
+ * (sourceTier, domain) -> the matching grant record, or null (no reuse).
+ * A non-null record is the authorization itself — callers derive
+ * rightsBasis/rightsEvidenceRef from it server-side.
+ */
+export type ReuseGrantResolver = (sourceTier: string, domain: string) => ReuseGrantRecord | null;
 
 /**
  * Verify an image candidate end-to-end. Never throws for expected conditions:
@@ -410,11 +433,14 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
 
   // Rights resolve ONLY from a durable reuse grant. Declared source tier +
   // basis strings prove where the asset came from, never authorization.
-  const grantResolver = deps.reuseGrantResolver ?? (() => false);
-  const reuseGranted = grantResolver(declaredSourceType, domainOf(input.url));
-  const rightsStatus = reuseGranted ? 'approved' : 'restricted';
-  const rightsBasis = reuseGranted ? (input.declaredRightsBasis ?? 'reuse_grant') : null;
-  const rightsEvidenceRef = reuseGranted ? (input.declaredRightsEvidenceRef ?? null) : null;
+  // When a grant exists, rightsBasis/rightsEvidenceRef are derived from the
+  // grant RECORD itself (grantId + tier@domainPattern) — caller-declared
+  // rights strings are never authoritative.
+  const grantResolver = deps.reuseGrantResolver ?? (() => null);
+  const grant = grantResolver(declaredSourceType, domainOf(input.url));
+  const rightsStatus = grant ? 'approved' : 'restricted';
+  const rightsBasis = grant ? `grant:${grant.sourceTier}@${grant.domainPattern}` : null;
+  const rightsEvidenceRef = grant ? grant.grantId : null;
 
   if (!decoded.verified) {
     return {

@@ -16,11 +16,12 @@ import os from 'node:os';
 import { initDb, getDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { createPiRun, getPiResult, getPiRun, insertPiResult, listPiComparisons, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
-import { seedDefaultApprovedPolicy } from '../../db/repositories/pi-approved-policy-repo';
+import { seedDefaultApprovedPolicy, getActiveDefaultApprovedPolicy } from '../../db/repositories/pi-approved-policy-repo';
 import { replayPiRun } from '../../product-intelligence/run-service';
-import { validSubmission } from './product-intelligence/test-helpers';
+import { assertReducingOverride, computePolicyConfigId } from '../../product-intelligence/policy';
+import { validSubmission, validBundle } from './product-intelligence/test-helpers';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
-import type { ProductIntelligencePolicy } from '../../product-intelligence/contracts';
+import { ProductIntelligencePolicySchema, type ProductIntelligencePolicy } from '../../product-intelligence/contracts';
 
 const workspaceId = 'ws-pi-replay-test';
 
@@ -79,6 +80,54 @@ function makeTerminalRun(executorName: 'pi' | 'legacy' = 'pi'): string {
   return run.id;
 }
 
+/**
+ * Create a completed origin run exactly as the route would (review finding
+ * 7): base approved policy + strictly-reducing override -> resolved policy
+ * whose configId has NO approved-policy row, with the lineage persisted on
+ * the run. Returns the origin id + the resolved policy configId.
+ */
+function makeOverrideTerminalRun(): { id: string; policyConfigId: string } {
+  const baseRow = getActiveDefaultApprovedPolicy(workspaceId)!;
+  const base = ProductIntelligencePolicySchema.parse(JSON.parse(baseRow.policyJson));
+  const overrides: Partial<ProductIntelligencePolicy> = { maxToolCalls: 20 };
+  const resolved = computePolicyConfigId(ProductIntelligencePolicySchema.parse(assertReducingOverride(base, overrides)));
+  const run = createPiRun({
+    workspaceId,
+    mode: 'shadow',
+    executor: 'pi',
+    inputJson: JSON.stringify({ gtin: '085000079585', registerName: 'STELLA CHKN BROTH 16OZ' }),
+    policyJson: JSON.stringify(resolved),
+    configSnapshotId: resolved.configId,
+    configSnapshotHash: resolved.configId,
+    promptHash: 'prompt-hash-1',
+    piVersion: '0.83.0',
+  });
+  insertPiResult({
+    runId: run.id,
+    schemaVersion: 1,
+    disposition: 'submitted',
+    result: {
+      runId: run.id,
+      outcome: 'submitted',
+      executor: 'pi',
+      executorVersion: '1.0.0',
+      piVersion: '0.83.0',
+      extensionVersions: [],
+      configId: resolved.configId,
+      durationMs: 10,
+      submission: null,
+      failure: null,
+      events: [],
+    },
+  });
+  getDb().run(
+    'UPDATE product_intelligence_runs SET base_policy_id = ?, base_policy_version = ?, policy_overrides_json = ? WHERE id = ?',
+    [baseRow.id, baseRow.version, JSON.stringify(overrides), run.id],
+  );
+  transitionPiRunStatus(run.id, 'completed', {});
+  return { id: run.id, policyConfigId: resolved.configId };
+}
+
 class FakeLegacyExecutor implements ProductIntelligenceExecutor {
   readonly name = 'legacy';
   readonly version = '1.0.0';
@@ -129,9 +178,7 @@ class FakeExecutor implements ProductIntelligenceExecutor {
       extensionVersions: [],
       configId: context.policy.configId,
       durationMs: 1,
-      submission: validSubmission({
-        productProposal: { fields: [{ field: 'title', value: 'Rerun Title', evidenceIds: [] }] },
-      }),
+      submission: validBundle(),
       failure: null,
       events: events.snapshot(),
     };
@@ -205,7 +252,9 @@ describe('PI-10 replay modes', () => {
     expect(run.policyJson).toBe(getPiRun(origin)!.policyJson);
     const result = getPiResult(run.id);
     expect(result).toBeDefined();
-    expect(JSON.parse(result!.resultJson)).toMatchObject({ submission: { productProposal: { fields: [{ field: 'title', value: 'Rerun Title' }] } } });
+    expect(JSON.parse(result!.resultJson)).toMatchObject({
+      submission: { gtin: '085000079585', disposition: 'research_complete' },
+    });
   });
 
   it('refuses to replay a running run', async () => {
@@ -273,6 +322,31 @@ describe('PI-10 replay modes', () => {
     expect(mode).toBe('rerun');
     expect(executor.calls).toBe(1);
     expect(run.originRunId).toBe(origin);
+  });
+
+  it('reauthorizes an override run by its BASE approved record (review finding 7)', async () => {
+    seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
+    const origin = makeOverrideTerminalRun();
+    const executor = new FakeExecutor();
+    const { run, mode } = await replayPiRun(origin.id, { mode: 'rerun', executor });
+    expect(mode).toBe('rerun');
+    expect(executor.calls).toBe(1);
+    // The replay run inherits the origin's base lineage (rerun-of-rerun
+    // reauthorizes the same base record).
+    const lineage = getDb().query('SELECT base_policy_id AS basePolicyId FROM product_intelligence_runs WHERE id = ?').get(run.id) as
+      | { basePolicyId: string | null }
+      | undefined;
+    expect(lineage?.basePolicyId).toBeTruthy();
+  });
+
+  it('refuses an override run whose BASE policy record is revoked (review finding 7)', async () => {
+    seedDefaultApprovedPolicy(workspaceId, JSON.stringify(TEST_POLICY), TEST_POLICY.configId);
+    const origin = makeOverrideTerminalRun();
+    // Revoke the base record (operator superseded/revoked it).
+    getDb().run('UPDATE pi_approved_policies SET active = 0 WHERE workspace_id = ?', [workspaceId]);
+    const executor = new FakeExecutor();
+    await expect(replayPiRun(origin.id, { mode: 'rerun', executor })).rejects.toThrow(/origin policy is no longer approved/);
+    expect(executor.calls).toBe(0);
   });
 
   it('deterministic replay stays available with no active approved policy (P0-4)', async () => {

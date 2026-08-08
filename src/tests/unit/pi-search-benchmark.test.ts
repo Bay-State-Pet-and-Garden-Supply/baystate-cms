@@ -134,7 +134,9 @@ describe('PI-9 search-stage benchmark', () => {
     const pages = new Map(CASES.map((c) => [c.gtin, c.pageUrl]));
     const misleading = new Map<string, string>();
     for (const c of CASES) {
-      if (c.misleadingDomains?.length) misleading.set(c.gtin, `https://${c.misleadingDomains[0]}/misleading`);
+      // Cover EVERY product with noise ranked above the truth — the strategy
+      // under test is 'noise above truth', not 'noise for one product'.
+      misleading.set(c.gtin, `https://${c.misleadingDomains?.[0] ?? 'noise.example.com'}/misleading`);
     }
     const report = await runSearchBenchmark({
       datasetId: dsId,

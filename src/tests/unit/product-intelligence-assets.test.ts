@@ -411,7 +411,10 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
               if (id === 'ev-name-1') return { id, targetField: 'product_name', value: 'Stella Chicken Broth 16 oz', extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
               return { id, targetField: 'net_content', value: { value: 16, unit: 'oz' }, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
             }),
-          reuseGrantResolver: (tier) => tier === 'supplier',
+          reuseGrantResolver: (tier) =>
+            tier === 'supplier'
+              ? { allowed: true as const, grantId: 'grant-supplier-1', sourceTier: 'supplier', domainPattern: '*', terms: null }
+              : null,
         },
       );
       expect(record.qualityStatus).toBe('usable');
@@ -440,7 +443,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
         {
           ...deps(gatewayReturning(solidPng)),
           evidenceResolver: () => [], // no durable evidence rows resolve
-          reuseGrantResolver: () => false,
+          reuseGrantResolver: () => null,
         },
       );
       expect(record.exactProductMatch).toBe(false);
@@ -485,7 +488,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           ...deps(gatewayReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: 'persisted-content-hash' })),
-          reuseGrantResolver: () => true,
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-hash-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
         },
       );
       expect(record.qualityStatus).toBe('usable');
@@ -513,7 +516,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
               if (id === 'ev-name-wrong') return { id, targetField: 'product_name', value: 'Stella Chicken Broth 8 oz', extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
               return { id, targetField: 'net_content', value: { value: 8, unit: 'oz' }, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
             }),
-          reuseGrantResolver: () => true,
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-wrong-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
         },
       );
       expect(record.exactProductMatch).toBe(false);
@@ -534,7 +537,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           ...deps(gatewayReturning(solidPng)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
-          reuseGrantResolver: () => false,
+          reuseGrantResolver: () => null,
         },
       );
       expect(record.rightsStatus).toBe('restricted');
@@ -559,7 +562,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           ...deps(gatewayReturning(tiny)),
           evidenceResolver: (ids) =>
             ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null })),
-          reuseGrantResolver: () => true,
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-tiny-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
         },
       );
       expect(record.qualityStatus).toBe('low_quality');

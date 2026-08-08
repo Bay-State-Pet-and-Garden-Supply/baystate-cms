@@ -21,8 +21,9 @@ import {
   PI_EXECUTOR_NAME,
   ProductIntelligencePolicySchema,
   ProductResearchInputSchema,
+  isLegacyTerminalSubmission,
+  type HistoricalTerminalSubmission,
   type StructuredSubmission,
-  type TerminalResultSubmission,
   type ProductIntelligenceExecutionEvent,
   type ProductIntelligencePolicy,
   type ProductResearchContext,
@@ -74,7 +75,7 @@ import {
   type PiToolCallRow,
 } from '../db/repositories/product-intelligence-repo';
 import { sha256Hex } from '../shared/stable-id';
-import { verifyPolicySnapshot } from './policy';
+import { verifyPolicySnapshot, assertReducingOverride, computePolicyConfigId } from './policy';
 import { buildResearchPrompt } from './pi/pi-prompt-builder';
 import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
@@ -428,6 +429,13 @@ export interface StartPiRunInput {
   onboardingItemId?: string | null;
   /** PI-10 replay lineage: set when this run is a same-configuration rerun. */
   originRunId?: string | null;
+  /** Review finding 7: the approved-policy record this run's policy was
+   *  derived from, and the reducing overrides applied. Persisted so a real
+   *  rerun reauthorizes the BASE record (never the resolved configId, which
+   *  has no approved-policy row when overrides were applied). */
+  basePolicyId?: string | null;
+  basePolicyVersion?: number | null;
+  policyOverridesJson?: string | null;
 }
 
 export interface StartPiRunResult {
@@ -528,6 +536,10 @@ export async function startProductIntelligenceRun(
     originRunId: input.originRunId ?? null,
     replayDepth: input.originRunId ? (getPiRun(input.originRunId)?.replayDepth ?? 0) + 1 : 0,
   });
+  // Review finding 7: persist the approved-policy lineage (base record +
+  // reducing overrides) so reruns reauthorize the base record rather than a
+  // resolved configId that has no approved-policy row.
+  setRunPolicyLineage(run.id, input.basePolicyId ?? null, input.basePolicyVersion ?? null, input.policyOverridesJson ?? null);
   activeControllers.set(run.id, controller);
 
   const context: ProductResearchContext = {
@@ -564,9 +576,17 @@ export async function startProductIntelligenceRun(
         // Deterministic CMS-side gate: the bundle must satisfy the workflow
         // rules (evidence on facts, blocked identities, taxonomy ids, image
         // rights, conflict dispositions). Invalid bundles fail the run.
-        const validation = isWorkflowSubmission(result.submission)
-          ? validateTerminalSubmission(result.submission, parsedInput.gtin, workspace.id)
-          : { valid: true, issues: [] as string[] };
+        // Review finding 6: the legacy PI-1 envelope is excluded from the
+        // live result type; a submission that is not a workflow submission
+        // is DENIED here (never { valid: true }) so no executor — fake or
+        // otherwise — can skip PI-4 validation. Abstentions (null
+        // submission) remain valid.
+        const validation =
+          result.submission === null
+            ? { valid: true, issues: [] as string[] }
+            : isWorkflowSubmission(result.submission)
+              ? validateTerminalSubmission(result.submission, parsedInput.gtin, workspace.id)
+              : { valid: false, issues: ['unsupported submission shape'] as string[] };
         if (!validation.valid) {
           const message = `Terminal submission failed validation: ${validation.issues.join('; ')}`;
           transitionPiRunStatus(run.id, 'failed', { errorCode: 'validation_error', errorMessage: message });
@@ -704,8 +724,10 @@ function persistSubmissionArtifacts(
   const submission = result.submission;
   if (!submission) return;
 
-  // PI-1 envelope: sources + evidence + conflicts rows.
-  if ('evidenceSources' in submission) {
+  // Historical PI-1 envelope: sources + evidence + conflicts rows (kept for
+  // type correctness; the terminal gate denies legacy shapes before they
+  // reach persistence, so this branch is unreachable for live runs).
+  if (isLegacyTerminalSubmission(submission)) {
     persistPi1Artifacts(runId, submission, sink);
     return;
   }
@@ -973,7 +995,7 @@ function rightsStatusOf(candidate: { rightsStatus: BundleImageCandidate['rightsS
   }
 }
 
-function submissionDisposition(submission: TerminalResultSubmission): 'submitted' | 'abstained' {
+function submissionDisposition(submission: HistoricalTerminalSubmission): 'submitted' | 'abstained' {
   if ('evidenceSources' in submission) return submission.abstention ? 'abstained' : 'submitted';
   if ('disposition' in submission) return 'submitted';
   return 'abstained';
@@ -982,7 +1004,9 @@ function submissionDisposition(submission: TerminalResultSubmission): 'submitted
 function submissionNeedsReview(result: ProductResearchResult): boolean {
   const submission = result.submission;
   if (!submission) return false;
-  if ('evidenceSources' in submission) {
+  // Historical PI-1 envelopes (only reachable through parsed old rows;
+  // live results are workflow-only since the terminal gate denies legacy).
+  if (isLegacyTerminalSubmission(submission)) {
     if (submission.identity.gtinMatch !== 'exact') return true;
     if (submission.conflicts.some((conflict) => conflict.severity === 'high')) return true;
     return submission.images.some((image) => image.identityMatch === 'unknown' || image.rightsStatus === 'unknown');
@@ -1000,7 +1024,9 @@ function reviewReasons(result: ProductResearchResult): string[] {
   const reasons: string[] = [];
   const submission = result.submission;
   if (!submission) return reasons;
-  if ('evidenceSources' in submission) {
+  // Historical PI-1 envelopes (unreachable for live results — the terminal
+  // gate denies legacy shapes before persistence).
+  if (isLegacyTerminalSubmission(submission)) {
     if (submission.identity.gtinMatch !== 'exact') reasons.push(`identity.gtinMatch is '${submission.identity.gtinMatch}'`);
     if (submission.conflicts.some((conflict) => conflict.severity === 'high')) reasons.push('high-severity conflicts present');
     if (submission.images.some((image) => image.identityMatch === 'unknown' || image.rightsStatus === 'unknown')) {
@@ -1125,7 +1151,7 @@ function countFields(result: { resultJson: string }): number {
     const parsed = JSON.parse(result.resultJson) as ProductResearchResult;
     const submission = parsed.submission;
     if (!submission) return 0;
-    if ('evidenceSources' in submission) return submission.productProposal.fields.length;
+    if (isLegacyTerminalSubmission(submission)) return submission.productProposal.fields.length;
     if ('disposition' in submission) return submission.commerceFacts.length;
     return 0;
   } catch {
@@ -1204,6 +1230,36 @@ export const MAX_PI_REPLAY_DEPTH = 16;
  * @throws if the original run is still running (replays need a settled origin)
  * or not found.
  */
+
+/** Persist the approved-policy lineage for a run (review finding 7). */
+function setRunPolicyLineage(
+  runId: string,
+  basePolicyId: string | null,
+  basePolicyVersion: number | null,
+  policyOverridesJson: string | null,
+): void {
+  getDb().run(
+    'UPDATE product_intelligence_runs SET base_policy_id = ?, base_policy_version = ?, policy_overrides_json = ? WHERE id = ?',
+    [basePolicyId, basePolicyVersion, policyOverridesJson, runId],
+  );
+}
+
+/** Read the approved-policy lineage for a run (review finding 7). */
+function getRunPolicyLineage(
+  runId: string,
+): { basePolicyId: string | null; basePolicyVersion: number | null; policyOverridesJson: string | null } {
+  const row = getDb()
+    .query(
+      `SELECT base_policy_id AS basePolicyId, base_policy_version AS basePolicyVersion,
+              policy_overrides_json AS policyOverridesJson
+       FROM product_intelligence_runs WHERE id = ?`,
+    )
+    .get(runId) as
+    | { basePolicyId: string | null; basePolicyVersion: number | null; policyOverridesJson: string | null }
+    | undefined;
+  return row ?? { basePolicyId: null, basePolicyVersion: null, policyOverridesJson: null };
+}
+
 export async function replayPiRun(
   runId: string,
   options: {
@@ -1257,6 +1313,10 @@ export async function replayPiRun(
     // the replayed run's inspector matches the original (new ids, preserved
     // metadata incl. metadata.toolEvidenceId).
     clonePiEvidenceRows(origin.id, replay.id);
+    // Review finding 7: the replay copies the origin's approved-policy
+    // lineage so a rerun-of-replay reauthorizes the same base record.
+    const originLineage = getRunPolicyLineage(origin.id);
+    setRunPolicyLineage(replay.id, originLineage.basePolicyId, originLineage.basePolicyVersion, originLineage.policyOverridesJson);
     appendPiEvent(replay.id, 0, 'replay', {
       mode: 'deterministic',
       originRunId: origin.id,
@@ -1283,25 +1343,59 @@ export async function replayPiRun(
   if (origin.executor !== PI_EXECUTOR_NAME && options.executor.name === PI_EXECUTOR_NAME) {
     throw new Error('A rerun must use the same executor family as the origin run');
   }
-  // P0-4 + P0-2: a rerun must not resurrect a security policy that is no
-  // longer approved/active. The repo is loaded lazily (createRequire) so
-  // run-service stays importable in non-bun environments.
+  // P0-4 + P0-2 + review finding 7: a rerun must not resurrect a security
+  // policy that is no longer approved/active. When the origin was created
+  // from an approved-policy record with reducing overrides, reauthorize the
+  // BASE record (id + version) and re-apply the stored overrides against its
+  // immutable policy_json, verifying the re-derived configId still matches
+  // the origin snapshot (a reducing override produces a resolved hash with
+  // no approved-policy row — refusing on that hash would break valid runs).
+  // Pre-lineage runs fall back to the content configId check.
   const originPolicy = ProductIntelligencePolicySchema.parse(JSON.parse(origin.policyJson));
   const lazyRequire = createRequire(import.meta.url);
-  const { isApprovedPolicyActive } = lazyRequire('../db/repositories/pi-approved-policy-repo') as {
+  const policyRepo = lazyRequire('../db/repositories/pi-approved-policy-repo') as {
     isApprovedPolicyActive: (workspaceId: string, configId: string) => boolean;
+    isApprovedPolicyRecordActive: (workspaceId: string, policyId: string, version?: number) => boolean;
+    getApprovedPolicyRecord: (workspaceId: string, policyId: string, version?: number) => { policyJson: string } | undefined;
   };
-  if (!isApprovedPolicyActive(origin.workspaceId, originPolicy.configId)) {
-    throw new Error('origin policy is no longer approved; rerun refused');
+  const lineage = getRunPolicyLineage(origin.id);
+  let rerunPolicy: ProductIntelligencePolicy;
+  if (lineage.basePolicyId) {
+    if (!policyRepo.isApprovedPolicyRecordActive(origin.workspaceId, lineage.basePolicyId, lineage.basePolicyVersion ?? undefined)) {
+      throw new Error('origin policy is no longer approved; rerun refused');
+    }
+    const baseRecord = policyRepo.getApprovedPolicyRecord(origin.workspaceId, lineage.basePolicyId, lineage.basePolicyVersion ?? undefined);
+    if (!baseRecord) {
+      throw new Error('origin policy record is missing; rerun refused');
+    }
+    const basePolicy = ProductIntelligencePolicySchema.parse(JSON.parse(baseRecord.policyJson));
+    const rawOverrides = lineage.policyOverridesJson ? (JSON.parse(lineage.policyOverridesJson) as Partial<ProductIntelligencePolicy>) : undefined;
+    const resolved = rawOverrides
+      ? computePolicyConfigId(ProductIntelligencePolicySchema.parse(assertReducingOverride(basePolicy, rawOverrides)))
+      : basePolicy;
+    // Immutable records make this a tamper check; still, never rerun on a
+    // policy that no longer derives from the approved base.
+    if (resolved.configId !== originPolicy.configId) {
+      throw new Error('origin policy snapshot is inconsistent with the approved base record; rerun refused');
+    }
+    rerunPolicy = resolved;
+  } else {
+    if (!policyRepo.isApprovedPolicyActive(origin.workspaceId, originPolicy.configId)) {
+      throw new Error('origin policy is no longer approved; rerun refused');
+    }
+    rerunPolicy = originPolicy;
   }
   const started = await startProductIntelligenceRun(
     options.executor,
     {
       input: ProductResearchInputSchema.parse(JSON.parse(origin.inputJson)),
       mode: origin.mode,
-      policy: originPolicy,
+      policy: rerunPolicy,
       onboardingItemId: origin.onboardingItemId,
       originRunId: origin.id,
+      basePolicyId: lineage.basePolicyId,
+      basePolicyVersion: lineage.basePolicyVersion,
+      policyOverridesJson: lineage.policyOverridesJson,
     },
     // PI-10-MINOR-7: honor the ORIGIN's workspace, not the current one — the
     // service API only treats workspaceId as authoritative when the path is

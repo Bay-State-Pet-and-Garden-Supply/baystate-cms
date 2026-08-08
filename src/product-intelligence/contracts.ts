@@ -14,7 +14,7 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
  */
 import { z } from 'zod';
-import { TerminalSubmissionSchema } from './workflow/bundle';
+import { TerminalSubmissionSchema, type TerminalSubmission } from './workflow/bundle';
 
 // ---------------------------------------------------------------------------
 // Product input
@@ -360,7 +360,18 @@ export type ProductIntelligenceExecutionEvent = z.infer<
 
 /** Any terminal submission the run service persists: the legacy PI-1 evidence envelope or a PI-4 workflow submission. */
 export const TerminalResultSubmissionSchema = z.union([StructuredSubmissionSchema, TerminalSubmissionSchema]);
-export type TerminalResultSubmission = z.infer<typeof TerminalResultSubmissionSchema>;
+/** Historical union type for parsing persisted rows (legacy + workflow). */
+export type HistoricalTerminalSubmission = z.infer<typeof TerminalResultSubmissionSchema>;
+
+/**
+ * The LIVE terminal submission type: PI-4 workflow submissions only (review
+ * finding 6). The legacy PI-1 envelope is deliberately excluded — a fake or
+ * future executor cannot type a legacy envelope through the live result
+ * path, and the run-service terminal gate denies non-workflow submissions at
+ * runtime. Historical rows keep the full union via HistoricalTerminalSubmission
+ * + parseLegacySubmission().
+ */
+export type TerminalResultSubmission = TerminalSubmission;
 
 /**
  * The legacy PI-1 terminal envelope (schemaVersion 1 structured evidence
@@ -372,6 +383,15 @@ export type LegacyTerminalSubmission = StructuredSubmission;
 /** Type narrowing for the legacy PI-1 envelope (historical parsing only). */
 export function isLegacyTerminalSubmission(value: unknown): value is LegacyTerminalSubmission {
   return StructuredSubmissionSchema.safeParse(value).success;
+}
+
+/**
+ * Parser for historical PI-1 envelopes (read-only rendering of old runs).
+ * Returns null when the value is not a legacy envelope — live results never
+ * contain one.
+ */
+export function parseLegacySubmission(value: unknown): LegacyTerminalSubmission | null {
+  return isLegacyTerminalSubmission(value) ? value : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -436,8 +456,9 @@ export const ProductResearchResultSchema = z.object({
   /** Provider-reported model cost in USD (PI-10; null when unknown). Serves as
    *  both the estimate and the final figure until real billing is available. */
   modelCostUsd: z.number().nonnegative().nullish(),
-  /** Terminal submission: PI-1 evidence bundle or a PI-4 workflow submission. */
-  submission: TerminalResultSubmissionSchema.nullable().default(null),
+  /** Terminal submission: PI-4 workflow submission (legacy envelopes are
+   *  excluded from the live type — see TerminalResultSubmission). */
+  submission: TerminalSubmissionSchema.nullable().default(null),
   /** Terminal failure details when outcome is 'failed'. */
   failure: ResearchFailureSchema.nullable().default(null),
   /** Normalized execution events (PI-2 persists these durably). */

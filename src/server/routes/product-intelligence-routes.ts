@@ -197,6 +197,11 @@ router.post('/product-intelligence/runs', async (c) => {
           (body as { onboardingItemId?: string | null }).onboardingItemId ??
           inputResult.data.existingOnboardingItemId ??
           null,
+        // Review finding 7: persist the approved-policy lineage so reruns
+        // reauthorize the BASE record (never the resolved configId).
+        basePolicyId: approved.id,
+        basePolicyVersion: approved.version,
+        policyOverridesJson: rawOverrides !== undefined ? JSON.stringify(rawOverrides) : null,
       },
       { workspaceId: ws.id, workspacePath: ws.workspacePath },
     );
@@ -460,13 +465,21 @@ router.post('/product-intelligence/runs/:id/review', async (c) => {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
   const decision = (body as { decision?: unknown }).decision;
-  const reviewer = (body as { reviewer?: unknown }).reviewer;
+  const displayLabel = (body as { reviewer?: unknown }).reviewer;
   if (decision !== 'approve' && decision !== 'reject') {
     return c.json({ error: "decision must be 'approve' or 'reject'" }, 400);
   }
-  if (typeof reviewer !== 'string' || reviewer.trim() === '') {
-    return c.json({ error: 'reviewer is required' }, 400);
-  }
+  // Review finding 8: reviewer identity is NEVER client-asserted. The only
+  // auth boundary is the optional shared API token on mutating routes — a
+  // caller-typed string is a display label, not an authenticated identity.
+  const authHeader = c.req.header('Authorization');
+  const authentication = authHeader !== undefined && authHeader.startsWith('Bearer ') ? 'shared_api_token' : 'local_ui';
+  const reviewerJson = JSON.stringify({
+    actorType: 'local_operator',
+    actorId: null,
+    authentication,
+    displayLabel: typeof displayLabel === 'string' && displayLabel.trim() !== '' ? displayLabel.trim() : null,
+  });
   const note = (body as { note?: unknown }).note;
   if (note !== undefined && typeof note !== 'string') {
     return c.json({ error: 'note must be a string' }, 400);
@@ -480,7 +493,7 @@ router.post('/product-intelligence/runs/:id/review', async (c) => {
     runId,
     decision,
     resultHash: stored.resultHash,
-    reviewer: reviewer.trim(),
+    reviewer: reviewerJson,
     note: note !== undefined ? String(note) : null,
   });
   return c.json({ decision: row }, 201);

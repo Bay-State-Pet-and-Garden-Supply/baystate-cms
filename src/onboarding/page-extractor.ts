@@ -45,6 +45,8 @@ export const HTTP_EXTRACTION_HEADERS: Record<string, string> = {
 };
 
 /** Timeout (ms) for HTTP fetches. */
+type NetworkFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 const HTTP_FETCH_TIMEOUT_MS = 15000;
 
 /** Detailed result returned by the HTTP extraction path. */
@@ -91,8 +93,13 @@ export async function extractViaHttpDetailed(
   url: string,
   profile?: ExtractorProfile | null,
   expected?: { name?: string; brandHint?: string | null; price?: string | null },
+  fetchFn: NetworkFetch = fetch,
 ): Promise<HttpExtractionDetailed> {
-  const response = await fetch(url, {
+  // P0-1 (round 2): the transport accepts an injected fetch so the Product
+  // Intelligence layer can bind this function to the policy gateway's
+  // gatewayFetch (SSRF floor, redirect re-validation, size/type limits,
+  // audit). Non-PI callers keep the default global fetch.
+  const response = await fetchFn(url, {
     headers: HTTP_EXTRACTION_HEADERS,
     signal: AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS),
   });

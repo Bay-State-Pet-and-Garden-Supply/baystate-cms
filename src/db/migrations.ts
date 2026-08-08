@@ -1925,6 +1925,44 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Policy lineage (review finding 7): real reruns reauthorize the BASE
+  // approved-policy record, then re-apply the stored reducing overrides.
+  // Without this, a run created with a reducing override has a resolved
+  // configId with no matching pi_approved_policies row, so the rerun gate
+  // would refuse a perfectly valid run. base_policy_id/version reference the
+  // immutable approved record; policy_overrides_json holds the exact
+  // override snapshot the run was created with (re-validated as still
+  // reducing on every rerun).
+  try {
+    const policyLineageVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('product_intelligence_policy_lineage_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!policyLineageVersion) {
+      console.log('[Migrations] Running product intelligence policy lineage migration...');
+      db.transaction(() => {
+        const baseIdCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_runs') WHERE name = 'base_policy_id'").get() as { c: number };
+        if (baseIdCols.c === 0) {
+          db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN base_policy_id TEXT;');
+        }
+        const baseVersionCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_runs') WHERE name = 'base_policy_version'").get() as { c: number };
+        if (baseVersionCols.c === 0) {
+          db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN base_policy_version INTEGER;');
+        }
+        const overridesCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_runs') WHERE name = 'policy_overrides_json'").get() as { c: number };
+        if (overridesCols.c === 0) {
+          db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN policy_overrides_json TEXT;');
+        }
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('product_intelligence_policy_lineage_schema_version', '1');");
+      console.log('[Migrations] Product intelligence policy lineage migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Product intelligence policy lineage migration failed:', e);
+    throw e;
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

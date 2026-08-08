@@ -9,6 +9,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../connection';
+import type { ReuseGrantRecord } from '../../product-intelligence/assets/verification';
 
 const now = () => new Date().toISOString();
 
@@ -85,16 +86,26 @@ export function domainMatches(pattern: string, domain: string): boolean {
 }
 
 /**
- * Build a workspace-scoped reuse grant resolver. Returns false (fail
- * closed) for any tier/domain without an explicit allowed grant.
+ * Build a workspace-scoped reuse grant resolver. Returns null (fail
+ * closed) for any tier/domain without an explicit allowed grant — a
+ * non-null record is the authorization itself, carrying the grant id and
+ * terms so the durable asset can record WHICH grant authorized reuse.
  */
 export function buildReuseGrantResolver(
   workspaceId: string,
-): (sourceTier: string, domain: string) => boolean {
-  return (sourceTier: string, domain: string): boolean => {
+): (sourceTier: string, domain: string) => ReuseGrantRecord | null {
+  return (sourceTier: string, domain: string): ReuseGrantRecord | null => {
     const rows = listReusePolicies(workspaceId);
-    return rows.some(
+    const match = rows.find(
       (r) => r.allowed === 1 && r.sourceTier === sourceTier && domainMatches(r.domainPattern, domain),
     );
+    if (!match) return null;
+    return {
+      allowed: true,
+      grantId: match.id,
+      sourceTier: match.sourceTier,
+      domainPattern: match.domainPattern,
+      terms: match.terms,
+    };
   };
 }

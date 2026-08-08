@@ -48,30 +48,43 @@ describe('P0-6 reuse grants', () => {
 
   it('fails closed with no grants (default resolver denies everything)', () => {
     const resolver = buildReuseGrantResolver(workspaceId);
-    expect(resolver('manufacturer', 'durvet.com')).toBe(false);
-    expect(resolver('supplier', 'anywhere.example')).toBe(false);
+    expect(resolver('manufacturer', 'durvet.com')).toBeNull();
+    expect(resolver('supplier', 'anywhere.example')).toBeNull();
     expect(listReusePolicies(workspaceId)).toHaveLength(0);
   });
 
-  it('grants allow only the matching source tier and domain', () => {
-    upsertReusePolicy({ workspaceId, sourceTier: 'manufacturer', domainPattern: 'durvet.com', allowed: true });
+  it('grants allow only the matching source tier and domain and return the grant record', () => {
+    upsertReusePolicy({ workspaceId, sourceTier: 'manufacturer', domainPattern: 'durvet.com', allowed: true, terms: 'vendor license' });
     const resolver = buildReuseGrantResolver(workspaceId);
-    expect(resolver('manufacturer', 'durvet.com')).toBe(true);
+    const record = resolver('manufacturer', 'durvet.com');
+    expect(record).not.toBeNull();
+    expect(record).toMatchObject({
+      allowed: true,
+      sourceTier: 'manufacturer',
+      domainPattern: 'durvet.com',
+      terms: 'vendor license',
+    });
+    expect(typeof record!.grantId).toBe('string');
+    expect(record!.grantId.length).toBeGreaterThan(0);
+    // The grantId is the durable row id.
+    expect(record!.grantId).toBe(listReusePolicies(workspaceId)[0].id);
     // Tier mismatch: a supplier asset is not covered by a manufacturer grant.
-    expect(resolver('supplier', 'durvet.com')).toBe(false);
+    expect(resolver('supplier', 'durvet.com')).toBeNull();
     // Domain mismatch.
-    expect(resolver('manufacturer', 'other-site.com')).toBe(false);
+    expect(resolver('manufacturer', 'other-site.com')).toBeNull();
   });
 
   it('supports wildcard and subdomain-suffix patterns case-insensitively', () => {
     upsertReusePolicy({ workspaceId, sourceTier: 'retailer', domainPattern: '*', allowed: true });
-    expect(buildReuseGrantResolver(workspaceId)('retailer', 'anything.example')).toBe(true);
-    expect(buildReuseGrantResolver(workspaceId)('manufacturer', 'anything.example')).toBe(false);
+    expect(buildReuseGrantResolver(workspaceId)('retailer', 'anything.example')).not.toBeNull();
+    expect(buildReuseGrantResolver(workspaceId)('manufacturer', 'anything.example')).toBeNull();
 
     upsertReusePolicy({ workspaceId, sourceTier: 'supplier', domainPattern: 'AcmeCdn.com', allowed: true });
-    expect(buildReuseGrantResolver(workspaceId)('supplier', 'cdn.acmecdn.com')).toBe(true);
-    expect(buildReuseGrantResolver(workspaceId)('supplier', 'images.acmecdn.com')).toBe(true);
-    expect(buildReuseGrantResolver(workspaceId)('supplier', 'evilacmecdn.com')).toBe(false);
+    const cdnGrant = buildReuseGrantResolver(workspaceId)('supplier', 'cdn.acmecdn.com');
+    expect(cdnGrant).not.toBeNull();
+    expect(cdnGrant!.domainPattern).toBe('AcmeCdn.com');
+    expect(buildReuseGrantResolver(workspaceId)('supplier', 'images.acmecdn.com')).not.toBeNull();
+    expect(buildReuseGrantResolver(workspaceId)('supplier', 'evilacmecdn.com')).toBeNull();
   });
 
   it('upsert is idempotent and revocation (allowed=false) denies', () => {
@@ -79,7 +92,7 @@ describe('P0-6 reuse grants', () => {
     upsertReusePolicy({ workspaceId, sourceTier: 'manufacturer', domainPattern: 'durvet.com', allowed: true });
     expect(listReusePolicies(workspaceId)).toHaveLength(1);
     upsertReusePolicy({ workspaceId, sourceTier: 'manufacturer', domainPattern: 'durvet.com', allowed: false, terms: 'revoked' });
-    expect(buildReuseGrantResolver(workspaceId)('manufacturer', 'durvet.com')).toBe(false);
+    expect(buildReuseGrantResolver(workspaceId)('manufacturer', 'durvet.com')).toBeNull();
   });
 
   it('domainMatches covers exact, wildcard, and subdomain-suffix semantics', () => {

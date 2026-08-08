@@ -115,28 +115,115 @@ function isFieldLevelEvidence(row: PiEvidenceRow): boolean {
   return normalizeFieldKey(row.targetField) !== 'tool_evidence';
 }
 
-/** Resolve a selected fact to its durable field-level evidence row:
- *  1. the run's per-field row for this field (targetField match, preferring
- *     a row whose tool evidence id the proposal cited);
- *  2. a row matching a cited tool evidence id or legacy submission evidence
- *     id (field-level only).
- *  Returns undefined when nothing durable resolves — the caller fails closed. */
+/** Normalized comparable form of a durable evidence row's stored value.
+ *  Field-level rows persist the extracted value; coarse rows persist
+ *  {evidenceId, snippet} whose snippet is the evidence text. */
+function evidenceValueOf(row: PiEvidenceRow): string | null {
+  if (row.valueJson === null || row.valueJson === undefined || row.valueJson === '') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.valueJson) as unknown;
+  } catch {
+    return null;
+  }
+  if (typeof parsed === 'string') return parsed;
+  if (typeof parsed === 'number' || typeof parsed === 'boolean') return String(parsed);
+  if (Array.isArray(parsed)) return JSON.stringify(parsed);
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    if (typeof obj.snippet === 'string' && obj.snippet) return obj.snippet;
+    try {
+      return JSON.stringify(obj);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function normalizeValue(value: string): string {
+  return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+}
+
+/** Clean full-string number parse; null when the string is not purely numeric. */
+function parseCleanNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Evidence is ground truth (security review finding 4): the proposed value
+ *  must equal the evidence value after normalization (strings) or numerically
+ *  (clean numbers), or be a substantial fragment of the evidence value. */
+function valuesEquivalent(proposed: unknown, evidenceRow: PiEvidenceRow): boolean {
+  const evidenceText = evidenceValueOf(evidenceRow);
+  if (evidenceText === null || evidenceText === '') return false;
+  const proposedText = String(proposed ?? '');
+  if (proposedText.trim() === '') return false;
+  const p = normalizeValue(proposedText);
+  const e = normalizeValue(evidenceText);
+  if (p === e) return true;
+  const pNum = parseCleanNumber(p);
+  const eNum = parseCleanNumber(e);
+  if (pNum !== null && eNum !== null) return pNum === eNum;
+  // Substantial fragment of the evidence value (evidence is the ground truth).
+  if (p.length >= 4 && e.includes(p)) return true;
+  return false;
+}
+
+/** Resolve a selected fact to the DURABLE field-level evidence row that
+ *  explicitly supports it (security review finding 4 — value binding):
+ *   (a) CITATION FIRST — only rows the proposal explicitly cited for this
+ *       field (by tool evidence id, submission evidence id, or row id) are
+ *       eligible; a targetField match alone never resolves.
+ *   (b) FIELD MATCH — the cited row's targetField must normalize to the
+ *       proposed field name.
+ *   (c) VALUE EQUIVALENCE — the proposed value must equal (or be a
+ *       substantial fragment of) the evidence row's stored value.
+ *  Returns { row } on success or { reason } describing the failing rule.
+ *  The caller fails closed on any { reason }. */
 function resolveFieldEvidence(
   field: string,
   citedIds: string[],
-  byField: Map<string, PiEvidenceRow>,
+  proposalValue: unknown,
   byToolEvidenceId: Map<string, PiEvidenceRow>,
   bySubmissionEvidenceId: Map<string, PiEvidenceRow>,
-): PiEvidenceRow | undefined {
-  const direct = byField.get(normalizeFieldKey(field));
-  if (direct) return direct;
+  byRowId: Map<string, PiEvidenceRow>,
+): { row: PiEvidenceRow } | { reason: string } {
+  if (citedIds.length === 0) {
+    return { reason: 'no citation for field' };
+  }
+  let cited: PiEvidenceRow | undefined;
   for (const id of citedIds) {
     const viaToolId = byToolEvidenceId.get(id);
-    if (viaToolId && isFieldLevelEvidence(viaToolId)) return viaToolId;
+    if (viaToolId && isFieldLevelEvidence(viaToolId)) {
+      cited = viaToolId;
+      break;
+    }
     const viaSubmission = bySubmissionEvidenceId.get(id);
-    if (viaSubmission && isFieldLevelEvidence(viaSubmission)) return viaSubmission;
+    if (viaSubmission && isFieldLevelEvidence(viaSubmission)) {
+      cited = viaSubmission;
+      break;
+    }
+    const viaRowId = byRowId.get(id);
+    if (viaRowId && isFieldLevelEvidence(viaRowId)) {
+      cited = viaRowId;
+      break;
+    }
   }
-  return undefined;
+  if (!cited) {
+    return { reason: 'no durable field-level evidence row cited for this field' };
+  }
+  if (normalizeFieldKey(cited.targetField) !== normalizeFieldKey(field)) {
+    return { reason: `field mismatch: cited row targets '${cited.targetField}'` };
+  }
+  if (!valuesEquivalent(proposalValue, cited)) {
+    const proposed = String(proposalValue ?? '').slice(0, 60);
+    const evidenceText = (evidenceValueOf(cited) ?? '').slice(0, 60);
+    return { reason: `value mismatch: proposed '${proposed}' vs evidence '${evidenceText}'` };
+  }
+  return { row: cited };
 }
 
 function digitsOf(value: string | null | undefined): string {
@@ -193,9 +280,12 @@ function proposalFieldsOf(envelope: Record<string, unknown>): ProposalField[] {
       if (key) fields.push({ field: key, value: f.value, evidenceIds: (f.evidenceIds as string[] | undefined) ?? [] });
     }
   }
-  // PI-4 bundle: identity (canonicalName -> title) + commerceFacts
+  // PI-4 bundle: identity (canonicalName -> title) + commerceFacts. Identity
+  // facts inherit the bundle identity's own evidence citations (finding 4:
+  // every imported value must be bound to evidence it explicitly cites).
   const identity = envelope.identity as Record<string, unknown> | undefined;
   if (identity) {
+    const citedIdentityIds = (identity.evidenceIds as string[] | undefined) ?? [];
     const identityFields: Array<[string, string]> = [
       ['canonicalName', 'title'],
       ['brand', 'brand'],
@@ -203,7 +293,9 @@ function proposalFieldsOf(envelope: Record<string, unknown>): ProposalField[] {
       ['variant', 'variant'],
     ];
     for (const [srcKey, destKey] of identityFields) {
-      if (identity[srcKey] != null) fields.push({ field: destKey, value: identity[srcKey], evidenceIds: [] });
+      if (identity[srcKey] != null) {
+        fields.push({ field: destKey, value: identity[srcKey], evidenceIds: citedIdentityIds });
+      }
     }
   }
   const commerceFacts = envelope.commerceFacts;
@@ -379,24 +471,23 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
       if (mergeField(field, proposal.value, item, state)) selected.push({ field, proposal });
     }
 
-    // P1-1 (security review): every selected fact must resolve to a DURABLE
-    // field-level evidence row (per-tool rows keyed by metadata.toolEvidenceId;
-    // legacy submission rows keyed by metadata.submissionEvidenceId) plus its
-    // durable source row. Fabricated ids (`${runId}:${field}`), proposal
-    // evidence ids-as-source-ids, and the runId-as-source fallback are gone;
-    // an unresolvable fact aborts the import before anything is written.
+    // P1-1 + finding 4 (security review): every selected fact must resolve to
+    // the DURABLE field-level evidence row it explicitly cites (per-tool rows
+    // keyed by metadata.toolEvidenceId; legacy submission rows keyed by
+    // metadata.submissionEvidenceId; row id as a secondary namespace) AND the
+    // evidence value must support the proposed value (see
+    // resolveFieldEvidence rules a-c). Fabricated ids, proposal evidence
+    // ids-as-source-ids, and the runId-as-source fallback are gone; an
+    // unresolved or mismatched fact aborts the import before anything is
+    // written.
     const citedIds = [...new Set(selected.flatMap((s) => s.proposal.evidenceIds))];
     const allEvidence = listPiEvidence(runId);
     const allSources = listPiSources(runId);
     const sourcesById = new Map(allSources.map((s) => [s.id, s]));
-    const byField = new Map<string, PiEvidenceRow>();
     const bySubmissionEvidenceId = new Map<string, PiEvidenceRow>();
+    const byRowId = new Map<string, PiEvidenceRow>();
     for (const row of allEvidence) {
-      const key = normalizeFieldKey(row.targetField);
-      const toolId = toolEvidenceIdOf(row);
-      if (key && (!byField.has(key) || (toolId != null && citedIds.includes(toolId)))) {
-        byField.set(key, row);
-      }
+      byRowId.set(row.id, row);
       const md = evidenceMetadataOf(row);
       if (md && typeof md.submissionEvidenceId === 'string') {
         bySubmissionEvidenceId.set(md.submissionEvidenceId, row);
@@ -412,11 +503,12 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
     }> = [];
     const evidenceIds: string[] = [];
     for (const { field, proposal } of selected) {
-      const row = resolveFieldEvidence(field, proposal.evidenceIds, byField, byToolEvidenceId, bySubmissionEvidenceId);
-      if (!row) {
-        unresolved.push({ field, reason: 'no durable field-level evidence row for this run' });
+      const resolved = resolveFieldEvidence(field, proposal.evidenceIds, proposal.value, byToolEvidenceId, bySubmissionEvidenceId, byRowId);
+      if ('reason' in resolved) {
+        unresolved.push({ field, reason: resolved.reason });
         continue;
       }
+      const row = resolved.row;
       const source = row.sourceId ? sourcesById.get(row.sourceId) : undefined;
       if (!source) {
         unresolved.push({ field, reason: 'evidence row has no durable source row' });

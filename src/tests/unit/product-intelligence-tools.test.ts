@@ -16,12 +16,13 @@ import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createPiRun, transitionPiRunStatus, getPiRun } from '../../db/repositories/product-intelligence-repo';
 import { startProductIntelligenceRun, getPiRunProjection } from '../../product-intelligence/run-service';
+import type { ProductResearchBundle } from '../../product-intelligence/workflow/bundle';
 import { PiToolRegistry } from '../../product-intelligence/tools/registry';
 import { buildDefaultToolRegistry, defaultToolRegistry } from '../../product-intelligence/tools';
 import { taxonomyTools } from '../../product-intelligence/tools/taxonomy-tools';
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from '../../product-intelligence/executor';
 import type { ProductResearchContext, ProductResearchInput, ProductResearchResult } from '../../product-intelligence/contracts';
-import { asPi1Submission, testPolicy, validSubmission } from './product-intelligence/test-helpers';
+import { testPolicy, validBundle } from './product-intelligence/test-helpers';
 
 const wsId = 'pi-tools-test-workspace';
 
@@ -292,10 +293,14 @@ class FixtureAgentExecutor implements ProductIntelligenceExecutor {
         ? (taxonomyResult.data as { productTypes: Array<{ id: string }> }).productTypes[0].id
         : null;
 
-    // 3. submit with tool-derived evidence ids.
-    const submission = validSubmission({
-      identity: { ...validSubmission().identity, gtinEvidenceIds: [gtinEvidenceId] },
-      classificationProposal: { productTypeId, categoryPageId: null, attributes: [] },
+    // 3. submit with tool-derived evidence ids (PI-4 workflow bundle).
+    const submission = validBundle({
+      gtin: '036000291452',
+      inputName: 'TEST PRODUCT 16OZ',
+      identity: { ...validBundle().identity, evidenceIds: [gtinEvidenceId] },
+      classificationProposals: productTypeId
+        ? [{ targetId: productTypeId, selectedOptionId: productTypeId, evidenceIds: [gtinEvidenceId], disposition: 'proposed' }]
+        : [],
     });
     events.emit('submission_received', { data: { schemaVersion: submission.schemaVersion } });
     events.emit('run_completed', { data: { outcome: 'submitted' } });
@@ -365,9 +370,9 @@ describe('Fixture agent run using only research tools', () => {
     // The submission cites the tool-derived evidence id and the taxonomy id.
     const result = projection?.result as { resultJson: string };
     const parsed = JSON.parse(result.resultJson) as ProductResearchResult;
-    const pi1 = asPi1Submission(parsed.submission);
-    expect(pi1?.identity.gtinEvidenceIds[0]).toMatch(/^validate_gtin:/);
-    expect(pi1?.classificationProposal.productTypeId).toBe('pt-dog-food');
+    const bundle = parsed.submission as ProductResearchBundle | null;
+    expect(bundle?.identity.evidenceIds[0]).toMatch(/^validate_gtin:/);
+    expect(bundle?.classificationProposals[0]?.targetId).toBe('pt-dog-food');
   });
 });
 

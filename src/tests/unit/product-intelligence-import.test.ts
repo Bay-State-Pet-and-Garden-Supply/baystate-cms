@@ -33,6 +33,7 @@ import {
 } from '../../product-intelligence/flags';
 import {
   importRunToOnboarding,
+  UnresolvedEvidenceError,
   verifyImportedResultGate,
 } from '../../product-intelligence/onboarding-import';
 import { validSubmission } from './product-intelligence/test-helpers';
@@ -552,5 +553,95 @@ describe('PI-8 onboarding import', () => {
       body: JSON.stringify({ mode: 'create' }),
     });
     expect(cross.status).toBe(404);
+  });
+
+  it('value binding (finding 4): proposal value must equal its cited evidence value', () => {
+    const runId = makeCompletedRun('085000079585', 'REGISTER', {
+      productProposal: {
+        fields: [{ field: 'description', value: 'Stella Chicken Treats', evidenceIds: ['ev-desc-1'] }],
+      },
+    });
+    seedFieldEvidence(runId, 'description', 'Stella & Chewy Chicken Bone Broth', 'ev-desc-1');
+
+    let caught: unknown;
+    try {
+      importRunToOnboarding(runId, { mode: 'create' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UnresolvedEvidenceError);
+    const entry = (caught as UnresolvedEvidenceError).unresolvedFields.find((f) => f.field === 'description');
+    expect(entry).toBeTruthy();
+    expect(entry?.reason).toMatch(/value mismatch/);
+    expect(entry?.reason).toContain('Stella Chicken Treats');
+    expect(entry?.reason).toContain('Stella & Chewy Chicken Bone Broth');
+  });
+
+  it('value binding (finding 4): a field with no citation is unresolved', () => {
+    const runId = makeCompletedRun('085000079585', 'REGISTER', {
+      productProposal: { fields: [{ field: 'description', value: 'Chicken Broth', evidenceIds: [] }] },
+    });
+
+    let caught: unknown;
+    try {
+      importRunToOnboarding(runId, { mode: 'create' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UnresolvedEvidenceError);
+    const entry = (caught as UnresolvedEvidenceError).unresolvedFields.find((f) => f.field === 'description');
+    expect(entry).toBeTruthy();
+    expect(entry?.reason).toMatch(/no citation/);
+  });
+
+  it('value binding (finding 4): a cited row targeting a different field is unresolved', () => {
+    const runId = makeCompletedRun('085000079585', 'REGISTER', {
+      productProposal: { fields: [{ field: 'size', value: '16 oz', evidenceIds: ['ev-size-1'] }] },
+    });
+    // Evidence row exists for the cited id but its targetField is description.
+    seedFieldEvidence(runId, 'description', '16 oz', 'ev-size-1');
+
+    let caught: unknown;
+    try {
+      importRunToOnboarding(runId, { mode: 'create' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UnresolvedEvidenceError);
+    const entry = (caught as UnresolvedEvidenceError).unresolvedFields.find((f) => f.field === 'size');
+    expect(entry).toBeTruthy();
+    expect(entry?.reason).toMatch(/field mismatch/);
+  });
+
+  it('value binding (finding 4): normalized equality passes (whitespace/case folded)', () => {
+    const runId = makeCompletedRun('085000079585', 'REGISTER', {
+      productProposal: {
+        fields: [{ field: 'description', value: 'Stella & Chewy', evidenceIds: ['ev-desc-1'] }],
+      },
+    });
+    seedFieldEvidence(runId, 'description', '  Stella & Chewy  ', 'ev-desc-1');
+
+    const result = importRunToOnboarding(runId, { mode: 'create' });
+    expect(result.created).toBe(true);
+    const item = findItemById(result.item.id);
+    const evidence = item?.extractionData?.productIntelligenceEvidence;
+    expect(evidence?.[0]?.evidence.map((e) => e.field)).toContain('description');
+  });
+
+  it('value binding (finding 4): matching cited evidence imports the field (happy path)', () => {
+    const runId = makeCompletedRun('085000079585', 'REGISTER', {
+      productProposal: {
+        fields: [{ field: 'description', value: 'Chicken Bone Broth', evidenceIds: ['ev-desc-1'] }],
+      },
+    });
+    seedFieldEvidence(runId, 'description', 'Chicken Bone Broth', 'ev-desc-1');
+
+    const result = importRunToOnboarding(runId, { mode: 'create' });
+    expect(result.created).toBe(true);
+    const item = findItemById(result.item.id);
+    const evidence = item?.extractionData?.productIntelligenceEvidence;
+    expect(evidence?.[0]?.evidence).toContainEqual(
+      expect.objectContaining({ field: 'description', value: 'Chicken Bone Broth', evidenceId: 'ev-desc-1' }),
+    );
   });
 });

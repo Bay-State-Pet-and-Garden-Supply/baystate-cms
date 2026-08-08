@@ -10,7 +10,7 @@ import {
   ProductResearchResultSchema,
   ProductIntelligenceExecutionEventSchema,
 } from '../../../product-intelligence/contracts';
-import { testContext, testPolicy, validSubmission } from './test-helpers';
+import { testContext, testPolicy, validSubmission, validBundle } from './test-helpers';
 
 describe('ProductResearchInputSchema', () => {
   it('accepts a valid input', () => {
@@ -192,7 +192,7 @@ describe('ProductResearchResultSchema + events', () => {
       extensionVersions: [],
       configId: 'cfg',
       durationMs: 12,
-      submission: validSubmission(),
+      submission: validBundle(),
       failure: null,
       events: [],
     });

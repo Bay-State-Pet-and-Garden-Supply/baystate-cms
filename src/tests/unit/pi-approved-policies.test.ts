@@ -17,8 +17,10 @@ import { runMigrations } from '../../db/migrations';
 import {
   createApprovedPolicyVersion,
   getActiveApprovedPolicy,
+  getActiveDefaultApprovedPolicy,
   getApprovedPolicyById,
   isApprovedPolicyActive,
+  isApprovedPolicyRecordActive,
   listApprovedPolicies,
   seedDefaultApprovedPolicy,
 } from '../../db/repositories/pi-approved-policy-repo';
@@ -27,6 +29,7 @@ import {
   computePolicyConfigId,
   verifyPolicySnapshot,
 } from '../../product-intelligence/policy';
+import { seedDefaultApprovedPolicyForWorkspace } from '../../server/services/migration-service';
 import { buildDefaultPiPolicy } from '../../product-intelligence/run-service';
 import { ProductIntelligencePolicySchema } from '../../product-intelligence/contracts';
 
@@ -108,6 +111,43 @@ describe('P0-2 approved policies', () => {
     expect(getApprovedPolicyById(workspaceId, 'no-such-id')).toBeUndefined();
   });
 
+  it('resolves the active DEFAULT record explicitly (review finding 9)', () => {
+    const policy = buildDefaultPiPolicy();
+    const seeded = seedDefaultApprovedPolicy(workspaceId, JSON.stringify(policy), policy.configId);
+    // A differently-named record must never shadow the default.
+    createApprovedPolicyVersion(workspaceId, 'alt-policy', JSON.stringify(policy), `${policy.configId}-alt`);
+    const active = getActiveDefaultApprovedPolicy(workspaceId);
+    expect(active?.name).toBe('default');
+    expect(active?.id).toBe(seeded.id);
+    expect(getActiveApprovedPolicy(workspaceId)?.name).toBe('default');
+  });
+
+  it('isApprovedPolicyRecordActive checks the specific record+version (review finding 7)', () => {
+    const policy = buildDefaultPiPolicy();
+    const seeded = seedDefaultApprovedPolicy(workspaceId, JSON.stringify(policy), policy.configId);
+    expect(isApprovedPolicyRecordActive(workspaceId, seeded.id, seeded.version)).toBe(true);
+    expect(isApprovedPolicyRecordActive(workspaceId, 'no-such-id', 1)).toBe(false);
+    // A superseded version is no longer active.
+    const next = createApprovedPolicyVersion(workspaceId, 'default', JSON.stringify(policy), `${policy.configId}-v2`);
+    expect(isApprovedPolicyRecordActive(workspaceId, seeded.id, seeded.version)).toBe(false);
+    expect(isApprovedPolicyRecordActive(workspaceId, next.id, next.version)).toBe(true);
+  });
+
+  it('seeds the default approved policy for a new workspace at the server layer', () => {
+    const wsId = 'ws-server-seed-test';
+    seedWorkspace(wsId, wsPath);
+    seedDefaultApprovedPolicyForWorkspace(wsId);
+    const active = getActiveApprovedPolicy(wsId);
+    expect(active?.name).toBe('default');
+    expect(active?.active).toBe(1);
+    // Idempotent: a second seed must not create a second record.
+    seedDefaultApprovedPolicyForWorkspace(wsId);
+    const rows = getDb()
+      .query('SELECT COUNT(*) AS c FROM pi_approved_policies WHERE workspace_id = ?')
+      .get(wsId) as { c: number };
+    expect(rows.c).toBe(1);
+  });
+
   it('accepts strictly-reducing overrides', () => {
     const base = buildDefaultPiPolicy();
     const merged = assertReducingOverride(base, { allowedTools: [], maxToolCalls: 50, deadlineMs: 10_000 });
@@ -132,6 +172,19 @@ describe('P0-2 approved policies', () => {
     const base = buildDefaultPiPolicy(); // deadlineMs: 300_000
     expect(() => assertReducingOverride(base, { deadlineMs: 400_000 })).toThrow(/deadlineMs override rejected/);
     expect(() => assertReducingOverride(base, { maxToolCalls: 200 })).toThrow(/maxToolCalls override rejected/);
+  });
+
+  it('allows converting an unlimited maxCostUsd to a finite budget', () => {
+    const base = buildDefaultPiPolicy(); // maxCostUsd: null (unlimited)
+    const merged = assertReducingOverride(base, { maxCostUsd: 50 });
+    expect(merged.maxCostUsd).toBe(50);
+  });
+
+  it('rejects raising a finite maxCostUsd (larger amount or null/unlimited)', () => {
+    const base = computePolicyConfigId({ ...buildDefaultPiPolicy(), maxCostUsd: 50 });
+    expect(() => assertReducingOverride(base, { maxCostUsd: 100 })).toThrow(/maxCostUsd override rejected/);
+    expect(() => assertReducingOverride(base, { maxCostUsd: null })).toThrow(/maxCostUsd override rejected/);
+    expect(() => assertReducingOverride(base, { maxCostUsd: 30 })).not.toThrow();
   });
 
   it('rejects network policy changes', () => {

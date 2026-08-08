@@ -132,7 +132,7 @@ describe('platform payload parsers', () => {
 });
 
 describe('extraction ladder', () => {
-  it('extracts a JSON-LD page with exact GTIN identity (early exit, no platform fetch)', async () => {
+  it('extracts a JSON-LD page with exact GTIN identity (affirmative single-offer proof, settled after the platform layer)', async () => {
     const fetchPage = vi.fn(async () => fetched(JSON_LD_HTML, 'https://example.com/p/stella-broth-16oz'));
     const fetchShopify = vi.fn(async () => {
       throw new Error('should not be called');
@@ -149,7 +149,10 @@ describe('extraction ladder', () => {
     expect(result.productName).toContain('Chicken Broth');
     expect(result.sku).toBe('SC-BROTH-16');
     expect(result.brand).toBe("Stella & Chewy's");
-    expect(result.fetchModes).toEqual(['http', 'structured_data']);
+    // P0-5 round 2: the platform layer always runs before settling, so the
+    // fetch-modes now include the platform probe even for non-platform pages.
+    expect(result.fetchModes).toEqual(expect.arrayContaining(['http', 'structured_data']));
+    expect(layersUsed).toContain('platform_none');
     expect(result.deterministicOnly).toBe(true);
     expect(layersUsed).toContain('http');
     expect(fetchShopify).not.toHaveBeenCalled();
@@ -262,8 +265,8 @@ describe('extraction ladder', () => {
   it('surfaces conflicting GTIN evidence durably', async () => {
     const conflictingHtml = `
 <html><head><title>T</title>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"A","gtin":"111111111111"}</script>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"B","gtin":"222222222222"}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"A","gtin":"111111111111","offers":{"price":"1"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"B","gtin":"222222222222","offers":{"price":"2"}}</script>
 </head><body></body></html>`;
     const { result } = await runExtractionLadder(
       'https://conflict.example.com/p/x',
@@ -459,7 +462,7 @@ describe('ladder contract adapter + helpers', () => {
   });
   it('recurses into WebPage.mainEntity JSON-LD wrappers', async () => {
     const html = `<html><head>
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","mainEntity":{"@type":"Product","name":"Wrapped Product 4oz","sku":"WP-4","gtin":"123456789012"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","mainEntity":{"@type":"Product","name":"Wrapped Product 4oz","sku":"WP-4","gtin":"123456789012","offers":{"price":"1"}}}</script>
 </head><body></body></html>`;
     const { result } = await runExtractionLadder(
       'https://wrapped.example.com/p/x',
@@ -474,7 +477,7 @@ describe('ladder contract adapter + helpers', () => {
 
   it('accepts ld+json script types with charset suffixes', async () => {
     const html = `<html><head>
-<script type="application/ld+json; charset=utf-8">{"@type":"Product","name":"Charset Product","sku":"CS-1","gtin":"222222222222"}</script>
+<script type="application/ld+json; charset=utf-8">{"@type":"Product","name":"Charset Product","sku":"CS-1","gtin":"222222222222","offers":{"price":"1"}}</script>
 </head><body></body></html>`;
     const { result } = await runExtractionLadder(
       'https://charset.example.com/p/x',
@@ -518,8 +521,10 @@ describe('ladder contract adapter + helpers', () => {
       { fetchPage: async () => fetched(thinHtml, 'https://thin.example.com/p/x') },
     );
     // GTIN matched but only one field -> no early exit; platform layer ran.
+    // P0-5 round 2: a bare Product JSON-LD with no offer declaration is not
+    // affirmative single-variant proof, so the identity cannot be exact.
     expect(layersUsed).toContain('platform_api');
-    expect(result.identityStatus).toBe('exact_match');
+    expect(result.identityStatus).not.toBe('exact_match');
   });
 
   it('parses Nuxt 3 __NUXT_DATA__ devalue payloads', async () => {
@@ -547,7 +552,7 @@ describe('ladder contract adapter + helpers', () => {
     const snapshot: BrowserSnapshotFn = async () => ({
       url: 'https://browser.example.com/p/x',
       finalUrl: 'https://browser.example.com/p/x',
-      jsonLd: [{ '@type': 'Product', name: 'Browser Product 12oz', sku: 'BP-12', brand: 'Browser Co', gtin: '666666666666' }],
+      jsonLd: [{ '@type': 'Product', name: 'Browser Product 12oz', sku: 'BP-12', brand: 'Browser Co', gtin: '666666666666', offers: { price: '1' } }],
       embeddedProductData: [],
       imageCandidates: ['https://img.example.com/browser.jpg'],
       networkResponses: [
@@ -609,7 +614,7 @@ describe('ladder contract adapter + helpers', () => {
       selector: '#size',
       optionLabel: '12 oz',
       settleMs: 500,
-    }, out);
+    }, out, { name: 'Selectable Product 12oz' });
     expect(result.selectedOptions).toEqual(['12 oz']);
     expect(out.variantSignals.some((s) => s.kind === 'variant_match')).toBe(true);
     expect(out.fields.some((f) => f.field === 'variant_selection')).toBe(true);
@@ -618,7 +623,7 @@ describe('ladder contract adapter + helpers', () => {
 
   it('escalates to the managed browser fallback with a domain-scoped provider', async () => {
     const pages = new Map<string, string>([
-      ['https://managed.example.com/p/x', `<html><head><script type="application/ld+json">{"@type":"Product","name":"Managed Product 4oz","sku":"MP-4","gtin":"888888888888"}</script></head><body></body></html>`],
+      ['https://managed.example.com/p/x', `<html><head><script type="application/ld+json">{"@type":"Product","name":"Managed Product 4oz","sku":"MP-4","gtin":"888888888888","offers":{"price":"1"}}</script></head><body></body></html>`],
     ]);
     const registry = new ManagedFallbackRegistry(
       { providers: [{ name: 'stub_managed', pinnedVersion: '0.1.0', allowedDomains: ['managed.example.com'] }] },
@@ -834,5 +839,107 @@ describe('ladder contract adapter + helpers', () => {
     });
     expect(response.values).toHaveLength(1);
     expect(response.values[0].field).toBe('size');
+  });
+
+  it('does not exact-match a multi-variant storefront that renders leaf JSON-LD only (P0-5 round 2 adversarial)', async () => {
+    // The storefront emits a single-offer leaf Product JSON-LD for the
+    // RENDERED child, but serves multiple variants via its platform API.
+    const leafOnlyHtml = `<html><head><title>Wormeze Feline 4oz</title>
+<script src="/cdn/shop/t/1/main.js"></script>
+<script type="application/ld+json">{"@type":"Product","name":"Wormeze Feline 4oz","gtin":"745801105447","offers":{"price":"8.99"}}</script>
+</head><body></body></html>`;
+    const fetchPage = vi.fn(async () => fetched(leafOnlyHtml, 'https://shop.example.com/products/wormeze-4oz'));
+    const fetchShopify = vi.fn(async () => ({
+      title: 'Wormeze Feline',
+      vendor: 'Farnam',
+      variants: [
+        { id: 1, title: '2 oz', sku: 'WF-2' },
+        { id: 2, title: '4 oz', sku: 'WF-4' },
+      ],
+    }) as never);
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://shop.example.com/products/wormeze-4oz',
+      { gtin: '745801105447', name: 'Wormeze Feline 4oz' },
+      new AbortController().signal,
+      5000,
+      { fetchPage, fetchShopify },
+    );
+    // The platform layer ran and revealed >1 variants: the leaf JSON-LD
+    // proof must NOT survive the contradiction.
+    expect(layersUsed).toContain('shopify');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('parent_product_only');
+  });
+
+  it('emits variant_mismatch when the selected option is not the expected variant (P0-5 round 2)', async () => {
+    const snapshot: BrowserSnapshotFn = async (request) => ({
+      url: 'https://browser.example.com/p/size-pick',
+      finalUrl: 'https://browser.example.com/p/size-pick',
+      jsonLd: [],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: request.interaction
+        ? { performed: true, finalUrl: 'https://browser.example.com/p/size-pick?size=8oz', selectedOptions: ['8 oz'] }
+        : null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const out: {
+      fields: Array<{ field: string; value: string; method: string; sourcePath?: string }>;
+      images: Array<{ url: string; sourcePath?: string }>;
+      gtins: Array<{ value: string; method: string }>;
+      sku: string | null;
+      brand: string | null;
+      productName: string | null;
+      size: string | null;
+      variant: { name?: string; id?: string; sku?: string } | null;
+      variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
+    } = { fields: [], images: [], gtins: [], sku: null, brand: null, productName: null, size: null, variant: null, variantSignals: [] };
+    const result = await runBrowserInteraction(snapshot, 'https://browser.example.com/p/size-pick', {
+      type: 'select_option',
+      selector: '#size',
+      optionLabel: '8 oz',
+      settleMs: 500,
+    }, out, { name: 'Size Pick 16oz' });
+    expect(result.selectedOptions).toEqual(['8 oz']);
+    expect(out.variantSignals.some((s) => s.kind === 'variant_match')).toBe(false);
+    expect(out.variantSignals.some((s) => s.kind === 'variant_mismatch')).toBe(true);
+  });
+
+  it('emits NO variant signal when no expected-variant comparison is possible (P0-5 round 2)', async () => {
+    const snapshot: BrowserSnapshotFn = async (request) => ({
+      url: 'https://browser.example.com/p/unknown',
+      finalUrl: 'https://browser.example.com/p/unknown',
+      jsonLd: [],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: request.interaction
+        ? { performed: true, finalUrl: 'https://browser.example.com/p/unknown', selectedOptions: ['4 oz'] }
+        : null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const out: {
+      fields: Array<{ field: string; value: string; method: string; sourcePath?: string }>;
+      images: Array<{ url: string; sourcePath?: string }>;
+      gtins: Array<{ value: string; method: string }>;
+      sku: string | null;
+      brand: string | null;
+      productName: string | null;
+      size: string | null;
+      variant: { name?: string; id?: string; sku?: string } | null;
+      variantSignals: Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>;
+    } = { fields: [], images: [], gtins: [], sku: null, brand: null, productName: null, size: null, variant: null, variantSignals: [] };
+    // No expected variant terms -> no comparison possible -> no signal at all.
+    await runBrowserInteraction(snapshot, 'https://browser.example.com/p/unknown', {
+      type: 'select_option',
+      selector: '#size',
+      optionLabel: '4 oz',
+      settleMs: 500,
+    }, out);
+    expect(out.variantSignals).toHaveLength(0);
+    expect(out.fields.some((f) => f.field === 'variant_selection')).toBe(true);
   });
 });
