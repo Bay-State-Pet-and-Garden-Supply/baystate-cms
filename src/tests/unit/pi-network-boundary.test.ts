@@ -25,7 +25,7 @@ import os from 'node:os';
 import { initDb, getDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { createPiRun } from '../../db/repositories/product-intelligence-repo';
-import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
+import { PolicyGateway, PolicyDeniedError, MAX_MODEL_RESPONSE_BYTES } from '../../product-intelligence/policy/policy-gateway';
 import { defaultPolicyGateway } from '../../product-intelligence/policy';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
 import { discoveryTools } from '../../product-intelligence/tools/discovery-tools';
@@ -764,5 +764,143 @@ describe('P0-1 round-4 DNS-rebinding pinning', () => {
 
   it('resolvePublicAddress denies unresolvable hostnames (fail closed)', async () => {
     expect(await resolvePublicAddress('no-such-host-round4.invalid')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-5: model transports compose TWO authorities — model/data-sharing AND
+// destination/SSRF — on every hop, with a stream-bounded response cap.
+// ---------------------------------------------------------------------------
+
+describe('P0-1 round-5 model-transport destination authority', () => {
+  /** A gateway whose DNS never touches the real network. */
+  function literalGateway(fetchFn: (input: string, init?: RequestInit) => Promise<Response>): PolicyGateway {
+    return new PolicyGateway({
+      fetchFn: fetchFn as (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+      resolveHostname: async (hostname) => {
+        if (/^[\d.]+$/.test(hostname) || hostname.includes(':')) return [hostname];
+        return ['93.184.216.34'];
+      },
+    });
+  }
+
+  const modelCall = { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', endpointUrl: 'https://vlm.example.com' };
+
+  it('a remote model endpoint at a private address is denied even with a matching model route', async () => {
+    const gateway = literalGateway(async () => new Response('{}', { status: 200 }));
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, modelCall);
+    // 10.0.0.5 is private; the model route matches but the SSRF floor denies.
+    await expect(fetch('http://10.0.0.5/v1/chat')).rejects.toThrow(PolicyDeniedError);
+  });
+
+  it('a remote model endpoint on a non-80/443 port is denied', async () => {
+    const gateway = literalGateway(async () => new Response('{}', { status: 200 }));
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, modelCall);
+    await expect(fetch('https://vlm.example.com:9999/v1/chat')).rejects.toThrow(/port 9999 not allowed/);
+  });
+
+  it('a remote model endpoint redirecting to a loopback/private destination is denied', async () => {
+    const gateway = literalGateway(async (input) => {
+      const url = String(input);
+      if (url.startsWith('https://vlm.example.com')) {
+        return new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:8000/v1/chat' } });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, modelCall);
+    // The redirect hop is re-checked with BOTH authorities; the loopback
+    // target falls under the loopback-model policy, whose port allowlist
+    // (80/443/11434/11435) rejects :8000.
+    await expect(fetch('https://vlm.example.com/v1/chat')).rejects.toThrow(PolicyDeniedError);
+  });
+
+  it('a local model endpoint under local_only is allowed through the composed transport', async () => {
+    const calls: string[] = [];
+    const gateway = literalGateway(async (input) => {
+      calls.push(String(input));
+      return new Response('{"done":true}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const ctx = makeCtx({ policy: makePolicy({ dataSharingPolicy: 'local_only' }) });
+    const fetch = gateway.buildModelFetch(ctx, {
+      provider: 'ollama_vlm',
+      model: 'qwen2.5vl:latest',
+      endpointUrl: 'http://127.0.0.1:11434',
+    });
+    const response = await fetch('http://127.0.0.1:11434/api/chat');
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('{"done":true}');
+    expect(calls).toEqual(['http://127.0.0.1:11434/api/chat']);
+  });
+
+  it('a local model endpoint redirecting off-loopback is denied (local redirects must stay loopback)', async () => {
+    const gateway = literalGateway(async (input) => {
+      const url = String(input);
+      if (url.startsWith('http://127.0.0.1:11434')) {
+        return new Response(null, { status: 302, headers: { location: 'http://10.0.0.5:11434/api/chat' } });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    // Permissive policy so ONLY the destination authority can deny the hop.
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_and_sources',
+        networkPolicy: 'allowlisted_remote',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, {
+      provider: 'ollama_vlm',
+      model: 'qwen2.5vl:latest',
+      endpointUrl: 'http://127.0.0.1:11434',
+    });
+    // 10.0.0.5 is not loopback -> the redirect hop is treated as remote and
+    // the private-address floor denies it.
+    await expect(fetch('http://127.0.0.1:11434/api/chat')).rejects.toThrow(/private|invalid_port|local model endpoint/);
+  });
+
+  it('a chunked model response without Content-Length exceeding 20MB is rejected by the bounded stream', async () => {
+    const chunk = 'x'.repeat(1024 * 1024);
+    const gateway = literalGateway(async () => {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            const encoder = new TextEncoder();
+            for (let i = 0; i < 21; i++) {
+              controller.enqueue(encoder.encode(chunk));
+            }
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }, // NO content-length
+      );
+    });
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, modelCall);
+    const response = await fetch('https://vlm.example.com/v1/chat');
+    await expect(response.text()).rejects.toThrow(/exceeds|response_too_large/);
+    expect(MAX_MODEL_RESPONSE_BYTES).toBe(20 * 1024 * 1024);
   });
 });

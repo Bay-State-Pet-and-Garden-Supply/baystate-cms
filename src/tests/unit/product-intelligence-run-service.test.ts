@@ -59,7 +59,7 @@ function bundleWithImage(): ProductResearchBundle {
         sourceArtifactId: 'a1',
         url: 'https://cdn.example.com/primary.jpg',
         role: 'primary',
-        verifiedAssetIds: [],
+        verifiedAssetId: '',
         exactProductMatch: true,
         exactVariantMatch: true,
         variantReference: null,
@@ -316,29 +316,18 @@ describe('Product Intelligence run service', () => {
     expect(types).not.toContain('run.needs_review');
   });
 
-  it('flags needs_review when identity is not exact or images are unknown', async () => {
+  it('flags needs_review when identity is not exact (round-5: uncited images now fail the gate instead)', async () => {
     const executor = new FakePiExecutor();
     executor.submission = validBundle({
       identity: { ...validBundle().identity, status: 'probable_match' },
-      imageCandidates: [
-        {
-          sourceId: 'src-1',
-          sourceArtifactId: 'art-1',
-          url: 'https://example.com/i.jpg',
-          role: 'comparison',
-          exactProductMatch: false,
-          exactVariantMatch: null,
-          rightsStatus: 'unknown',
-          evidenceIds: [],
-        } as unknown as ProductResearchBundle['imageCandidates'][number],
-      ],
+      imageCandidates: [],
     });
     const started = await startProductIntelligenceRun(executor, { input: TEST_INPUT }, runOpts);
     await started.completed;
     const types = listPiEvents(started.run.id).map((e) => e.type);
     expect(types).toContain('run.needs_review');
     const payload = JSON.parse(listPiEvents(started.run.id).find((e) => e.type === 'run.needs_review')!.payloadJson);
-    expect(payload.reasons.length).toBeGreaterThanOrEqual(2);
+    expect(payload.reasons.length).toBeGreaterThanOrEqual(1);
   });
 
   it('denies a legacy PI-1 envelope at the terminal gate (review finding 6)', async () => {
@@ -503,7 +492,7 @@ describe('Product Intelligence run service', () => {
     }).id;
 
     const bundle = bundleWithImage();
-    bundle.imageCandidates[0].verifiedAssetIds = [assetId];
+    bundle.imageCandidates[0].verifiedAssetId = assetId;
 
     // The terminal gate accepts the run-bound, identity-bound citation.
     const validation = validateTerminalSubmission(bundle, TEST_INPUT.gtin, wsId, runId);

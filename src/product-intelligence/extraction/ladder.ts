@@ -474,14 +474,16 @@ export async function runExtractionLadder(
     try {
       const snapshot = await options.browser.snapshot({ url: finalUrl, captureNetwork: true, signal });
       fetchModes.push('browser');
-      const browserOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals, variantSetEvidence: { single: false, multiple: false } };
-      const browserEvidence = evidenceFromBrowserSnapshot(snapshot, browserOut);
-      // Round-4 P1-2: browser single-variant proof requires AFFIRMATIVE
-      // browser-derived variant-set evidence (a payload declaring exactly one
-      // variant, or a DOM selector with a single option). Rendered JSON-LD is
-      // only corroboration (structured) — the same leaf claim re-observed
-      // after rendering never upgrades to browser proof, because a JS-rendered
-      // size selector can hide multiple variants from the passive extractor.
+      const browserOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals, variantSetEvidence: { single: false, multiple: false }, variantSetContributions: [] };
+      const browserEvidence = evidenceFromBrowserSnapshot(snapshot, browserOut, { gtin: expected.gtin });
+      // Round-4 P1-2 + round-5 P0-3: browser single-variant proof requires
+      // AFFIRMATIVE browser-derived variant-set evidence (a payload declaring
+      // exactly one variant, or a DOM selector with a single option) that is
+      // ENTITY-SCOPED — only payloads LINKED to the expected GTIN may prove or
+      // contradict; an unrelated product/recommended payload's variant set
+      // proves nothing about this product. Rendered JSON-LD is only
+      // corroboration (structured) — the same leaf claim re-observed after
+      // rendering never upgrades to browser proof.
       if (browserEvidence.variantSetEvidence === 'single') {
         noteProof('browser');
       } else if (snapshot.jsonLd.some(jsonLdLeafProductProof)) {
@@ -509,7 +511,7 @@ export async function runExtractionLadder(
   if (!settled() && options.browser && options.interaction) {
     layersUsed.push('interaction');
     try {
-      const interactionOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals, variantSetEvidence: { single: false, multiple: false } };
+      const interactionOut = { fields, images, gtins, sku, brand, productName, size, variant, variantSignals, variantSetEvidence: { single: false, multiple: false }, variantSetContributions: [] };
       const result = await runBrowserInteraction(
         options.browser.snapshot,
         finalUrl,

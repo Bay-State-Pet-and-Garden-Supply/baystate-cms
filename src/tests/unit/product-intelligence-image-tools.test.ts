@@ -430,6 +430,130 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     transitionPiRunStatus(run.id, 'completed', {});
   });
 
+  it('resolves source kind through the discovering PAGE row — manufacturer image approval works without a CDN source row (round-5)', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
+    // Real path: NO source row for the CDN image URL. The tier comes from the
+    // durable provenance chain — the manufacturer product page that
+    // DISCOVERED the image (sourcePageUrl) and the field-level OCR evidence
+    // rows bound to that page's source row.
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/stella-broth-16oz',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    const gtinRow = insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { contentHash: createHash('sha256').update(png).digest('hex') },
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource.id,
+      targetField: 'product_name',
+      value: 'Stella Chicken Broth 16 oz',
+      extractionMethod: 'image_ocr',
+    });
+    upsertReusePolicy({
+      workspaceId: wsId,
+      sourceTier: 'manufacturer',
+      domainPattern: 'cdn.example.com',
+      allowed: true,
+      terms: 'vendor license',
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.example.com/i.png',
+        sourcePageUrl: 'https://brand.example.com/p/stella-broth-16oz',
+        gtin: '036000291452',
+        evidenceIds: [gtinRow.id],
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const record = result.data as {
+        commerceApproved: boolean;
+        rightsStatus: string;
+        rightsBasis: string | null;
+        rightsEvidenceRef: string | null;
+        exactProductMatch: boolean;
+        observationProvenance: string;
+      };
+      // Tier resolved through the page row (no CDN source row needed).
+      expect(record.rightsStatus).toBe('approved');
+      expect(record.rightsBasis).toBe('grant:manufacturer@cdn.example.com');
+      expect(record.observationProvenance).toBe('evidence');
+      expect(record.exactProductMatch).toBe(true);
+      expect(record.commerceApproved).toBe(true);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('stays restricted when the page row resolves the tier but no reuse grant matches (round-5)', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: 'https://retailer.example.com/p/stella-broth-16oz',
+      domain: 'retailer.example.com',
+      sourceType: 'retailer',
+    });
+    const gtinRow = insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { contentHash: createHash('sha256').update(png).digest('hex') },
+    });
+    // Grants exist for OTHER tiers (manufacturer/supplier on the CDN domain) —
+    // the resolved 'retailer' tier must not be granted, so rights stay
+    // restricted (fail closed). The shared test DB already holds a
+    // manufacturer grant from earlier tests; the tier must not match it.
+    upsertReusePolicy({
+      workspaceId: wsId,
+      sourceTier: 'supplier',
+      domainPattern: 'cdn.example.com',
+      allowed: true,
+      terms: 'supplier license',
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.example.com/i.png',
+        sourcePageUrl: 'https://retailer.example.com/p/stella-broth-16oz',
+        gtin: '036000291452',
+        evidenceIds: [gtinRow.id],
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const record = result.data as { commerceApproved: boolean; rightsStatus: string };
+      expect(record.rightsStatus).toBe('restricted');
+      expect(record.commerceApproved).toBe(false);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
   it('ignores caller-asserted rights strings when no grant exists (stays restricted)', async () => {
     const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
       .png()

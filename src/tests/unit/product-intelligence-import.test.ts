@@ -184,7 +184,7 @@ describe('PI-8 onboarding import', () => {
           sourceArtifactId: 'a1',
           url: 'https://cdn.example.com/i.jpg',
           role: 'primary',
-          verifiedAssetIds: [approved.id],
+          verifiedAssetId: approved.id,
         },
       ],
     });
@@ -222,14 +222,21 @@ describe('PI-8 onboarding import', () => {
           sourceArtifactId: 'a1',
           url: 'https://cdn.example.com/i1.jpg',
           role: 'primary',
-          verifiedAssetIds: [a1.id],
+          verifiedAssetId: a1.id,
         },
         {
           sourceId: 'src-2',
           sourceArtifactId: 'a2',
           url: 'https://cdn.example.com/i2.jpg',
-          role: 'secondary',
-          verifiedAssetIds: [a2.id, a3.id],
+          role: 'alternate',
+          verifiedAssetId: a2.id,
+        },
+        {
+          sourceId: 'src-3',
+          sourceArtifactId: 'a3',
+          url: 'https://cdn.example.com/i3.jpg',
+          role: 'nutrition',
+          verifiedAssetId: a3.id,
         },
       ],
     });
@@ -254,7 +261,7 @@ describe('PI-8 onboarding import', () => {
           sourceArtifactId: 'a1',
           url: 'https://cdn.example.com/i.jpg',
           role: 'primary',
-          verifiedAssetIds: ['placeholder'],
+          verifiedAssetId: 'placeholder',
         },
       ],
     });
@@ -268,10 +275,28 @@ describe('PI-8 onboarding import', () => {
         .query('SELECT result_json AS j FROM product_intelligence_results WHERE run_id = ?')
         .get(runId) as { j: string }).j,
     );
-    citing.imageCandidates[0].verifiedAssetIds = [notApproved.id];
+    citing.imageCandidates[0].verifiedAssetId = notApproved.id;
     insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: citing });
     approveRun(runId);
     expect(() => importRunToOnboarding(runId, { mode: 'create' })).toThrow(/not commerce-approved/);
+  });
+
+  it('fails closed when a selected image candidate cites no verified asset (round-5 P1-1)', () => {
+    const runId = makeCompletedRun('085000079585', 'STELLA CHKN BROTH 16OZ', envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz'));
+    const envelope = envelopeWithTitle('Stella & Chewys Chicken Broth 16 oz', {
+      imageCandidates: [
+        {
+          sourceId: 'src-1',
+          sourceArtifactId: 'a1',
+          url: 'https://cdn.example.com/i.jpg',
+          role: 'alternate',
+          verifiedAssetId: '',
+        },
+      ],
+    });
+    insertPiResult({ runId, schemaVersion: 1, disposition: 'submitted', result: envelope });
+    approveRun(runId);
+    expect(() => importRunToOnboarding(runId, { mode: 'create' })).toThrow(/cites no verified asset/);
   });
 
   it('fails closed when the bundle cites a nonexistent asset id', () => {
@@ -283,7 +308,7 @@ describe('PI-8 onboarding import', () => {
           sourceArtifactId: 'a1',
           url: 'https://cdn.example.com/i.jpg',
           role: 'primary',
-          verifiedAssetIds: ['no-such-asset-id'],
+          verifiedAssetId: 'no-such-asset-id',
         },
       ],
     });

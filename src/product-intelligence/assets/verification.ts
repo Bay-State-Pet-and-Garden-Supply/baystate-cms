@@ -59,6 +59,25 @@ const UNIT_ALIASES: Record<string, string> = {
 
 const NET_CONTENT_RE = /^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z\s]+?)\s*$/;
 
+/**
+ * Round-5: extract a net-content reading from free text such as a register
+ * name ("STELLA CHKN BROTH 16OZ" -> { value: 16, unit: 'oz' }). Unanchored
+ * scan so a trailing size token inside a longer name is found; false
+ * positives are acceptable because a mismatch only blocks exact identity
+ * (the GTIN rule below is the primary gate).
+ */
+const NET_CONTENT_SCAN_RE = /(\d+(?:\.\d+)?)\s*(fl\s?oz|oz|ounce|ounces|lb|lbs|pound|pounds|kg|kilogram|kilograms|g|gram|grams|ml|milliliter|milliliters|l|liter|liters|ct|pk|pack)\b/i;
+export function extractNetContentFromText(raw: string): NetContent | null {
+  const match = NET_CONTENT_SCAN_RE.exec(raw.trim());
+  if (!match) return null;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unitKey = match[2].trim().toLowerCase();
+  const unit = UNIT_ALIASES[unitKey] ?? unitKey;
+  if (!unit) return null;
+  return { value, unit };
+}
+
 /** Parse a "12 oz"-style string into a normalized net content, or null. */
 export function parseNetContent(raw: string): NetContent | null {
   const match = NET_CONTENT_RE.exec(raw.trim());
@@ -192,11 +211,34 @@ export function classifyAssetIdentity(observed: IdentityObservation, expected: A
   let exactProductMatch: boolean;
   if (expected.expectedGtin && observed.gtin) {
     exactProductMatch = gtinAgrees && productConflicts.length === 0;
+  } else if (expected.expectedGtin) {
+    // Round-5: a run whose identity carries a GTIN demands an OBSERVED exact
+    // GTIN (or a server-authoritative asset-to-GTIN linkage) for exact
+    // identity — fuzzy name alignment alone can only support probable_match,
+    // never exact. This closes "expected 16 oz" vs a 32 oz package whose OCR
+    // captured no barcode (and whose size evidence becomes a conflict).
+    const nameAgrees = expected.expectedName && observed.productName ? nameAlignment(expected.expectedName, observed.productName) : false;
+    if (nameAgrees) reasons.push('observed product name aligns with the expected name');
+    reasons.push('name alignment only — exact identity requires an observed GTIN');
+    exactProductMatch = false;
   } else {
     const nameAgrees = expected.expectedName && observed.productName ? nameAlignment(expected.expectedName, observed.productName) : false;
     const contentAgrees = expected.expectedNetContent && observed.netContent ? sameNetContent(expected.expectedNetContent, observed.netContent) : false;
     exactProductMatch = Boolean(nameAgrees && (contentAgrees || expected.expectedNetContent === null)) && productConflicts.length === 0;
     if (nameAgrees) reasons.push('observed product name aligns with the expected name');
+  }
+
+  // Round-5: size/weight net-content (and flavor/formula) conflicts are
+  // VARIANT discriminators — a 32 oz package is not the 16 oz variant even
+  // when the variant field itself was never observed. Detected conflicts
+  // must also block commerce approval regardless of a null exactVariantMatch.
+  if (
+    exactVariantMatch === null &&
+    conflicts.some(
+      (c) => c.startsWith('net_content_mismatch') || c.startsWith('flavor_mismatch') || c.startsWith('formula_mismatch'),
+    )
+  ) {
+    exactVariantMatch = false;
   }
 
   return { exactProductMatch, exactVariantMatch, conflicts, reasons };
@@ -304,11 +346,13 @@ export interface VerifyImageDeps {
    */
   evidenceResolver?: EvidenceResolver;
   /** Server-derived source-kind: resolves the durable source row for the
-   *  asset URL and returns its source_type. Authority never comes from the
-   *  agent's declaredSourceType string. When no durable source resolves,
+   *  asset URL AND its durable provenance (the discovering page + the
+   *  field-level evidence rows) and returns the source_type of the first
+   *  resolvable record. Authority never comes from the agent's
+   *  declaredSourceType string. When no durable source resolves,
    *  verification proceeds with sourceType 'unknown' (rights stay
    *  restricted unless a reuse grant matches). */
-  sourceTypeResolver?: (url: string) => string | null;
+  sourceTypeResolver?: (url: string, provenance: SourceTypeProvenance) => string | null;
   /**
    * Server-authoritative reuse grant: (sourceTier, domain) -> the grant
    * record that authorized reuse, or null. A manufacturer/supplier domain
@@ -339,6 +383,13 @@ export interface VerifiedAgainstSnapshot {
  *  (at tool time) and the terminal validator (at submission time) compute
  *  this from run-derived data, so hash equality proves the asset was verified
  *  against the same immutable product identity. */
+/** Durable provenance a source-kind resolver can chain through: the
+ *  discovering page URL and the evidence rows the candidate cites. */
+export type SourceTypeProvenance = {
+  sourcePageUrl?: string | null;
+  evidenceIds?: string[];
+};
+
 export function canonicalVerifiedAgainstHash(snapshot: VerifiedAgainstSnapshot): string {
   return sha256Hex(canonicalJsonStringify(snapshot));
 }
@@ -423,7 +474,10 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   // Round-4: source kind derives from the durable source row (provenance),
   // never from the agent's declared string. Unresolvable -> 'unknown' (fail
   // closed: no grant tier, rights stay restricted unless one matches).
-  const declaredSourceType = deps.sourceTypeResolver?.(input.url) ?? 'unknown';
+  const declaredSourceType = deps.sourceTypeResolver?.(input.url, {
+    sourcePageUrl: input.sourcePageUrl ?? null,
+    evidenceIds: input.evidenceIds ?? [],
+  }) ?? 'unknown';
   // Round-4: the comparison target is the server-derived run identity. When
   // the run input lacks a dimension, that dimension is NOT compared — it is
   // never taken from the agent.
@@ -518,7 +572,11 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     expectedBrand: null,
     expectedName: runIdentity?.name ?? null,
     expectedVariant: runIdentity?.variant ?? null,
-    expectedNetContent: runIdentity?.netContent ?? null,
+    // Round-5: the run schema carries no net content field, so the register
+    // name's trailing size token ("STELLA CHKN BROTH 16OZ" -> 16 oz) is the
+    // server-derived expectation — a 32 oz package OCR then conflicts instead
+    // of silently passing on name alignment.
+    expectedNetContent: runIdentity?.netContent ?? (runIdentity?.name ? extractNetContentFromText(runIdentity.name) : null),
     expectedPackCount: runIdentity?.packCount ?? null,
     expectedFlavor: runIdentity?.flavor ?? null,
     expectedFormula: runIdentity?.formula ?? null,
@@ -561,6 +619,16 @@ const OBSERVED_FIELD_KEYS: Record<string, keyof IdentityObservation> = {
   name: 'productName',
   title: 'productName',
   variant: 'variant',
+  // Round-5: packaging-OCR size/weight fields become net-content readings
+  // ("32 oz" is a variant discriminator, not a name token); count maps to
+  // pack count; flavor maps to the variant field so flavor evidence can
+  // surface in the observed text and variant comparison.
+  size: 'netContent',
+  weight: 'netContent',
+  count: 'packCount',
+  flavor: 'variant',
+  flavor_variety: 'variant',
+  flavorvariety: 'variant',
   net_content: 'netContent',
   netcontent: 'netContent',
   pack_count: 'packCount',

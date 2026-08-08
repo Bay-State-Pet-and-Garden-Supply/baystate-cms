@@ -873,14 +873,15 @@ export function persistBundleAssets(
   const existingSources = listPiSources(runId);
   for (const candidate of submission.imageCandidates) {
     // Round-3 (review finding 5): authority comes ONLY from durable
-    // server-verified asset rows. A candidate whose verifiedAssetIds resolve
-    // to nothing is dropped — agent-supplied identity/rights/commerce claims
-    // are never written into durable asset rows.
-    const verified = getPiAssetsByIds(candidate.verifiedAssetIds ?? []);
+    // server-verified asset rows. Round-5 (review P1-1): the citation is
+    // SINGULAR — a candidate whose verifiedAssetId resolves to nothing is
+    // dropped — agent-supplied identity/rights/commerce claims are never
+    // written into durable asset rows.
+    const verified = getPiAssetsByIds(candidate.verifiedAssetId ? [candidate.verifiedAssetId] : []);
     if (verified.length === 0) {
       sink.emitDomain('asset.rejected', {
         url: candidate.url,
-        reason: 'no durable server-verified asset resolves from the cited ids',
+        reason: 'no durable server-verified asset resolves from the cited verifiedAssetId',
       });
       continue;
     }

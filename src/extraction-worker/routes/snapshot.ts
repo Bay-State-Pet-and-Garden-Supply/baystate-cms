@@ -883,14 +883,18 @@ async function isNavigationBlocked(rawUrl: string, sourcesAllowlist: string[] | 
  * Throws when an http hostname cannot be proven public (fail closed — the
  * caller treats it as a blocked destination).
  */
-async function fetchPinned(logicalUrl: string, timeoutMs: number): Promise<{ response: Response; pinned: boolean }> {
+async function fetchPinned(
+  logicalUrl: string,
+  timeoutMs: number,
+  init: { method?: string; headers?: Record<string, string>; body?: BodyInit | null } = {},
+): Promise<{ response: Response; pinned: boolean }> {
   let parsed: URL;
   try {
     parsed = new URL(logicalUrl);
   } catch {
     return { response: await fetch(logicalUrl, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) }), pinned: false };
   }
-  const headers: Record<string, string> = { ...HTTP_EXTRACTION_HEADERS };
+  const headers: Record<string, string> = { ...HTTP_EXTRACTION_HEADERS, ...(init.headers ?? {}) };
   let fetchUrl = logicalUrl;
   let pinned = false;
   if (parsed.protocol === 'http:' && !isIpLiteralHostname(parsed.hostname)) {
@@ -906,11 +910,88 @@ async function fetchPinned(logicalUrl: string, timeoutMs: number): Promise<{ res
     }
   }
   const response = await fetch(fetchUrl, {
+    method: init.method ?? 'GET',
     headers,
+    body: init.body ?? undefined,
     signal: AbortSignal.timeout(timeoutMs),
     redirect: 'manual',
   });
   return { response, pinned };
+}
+
+/**
+ * Round-5 P1-3: close the DNS-rebinding TOCTOU for HTTP BROWSER SUBREQUESTS.
+ * Top-level navigation is already pinned (round-4); subrequests (XHR/fetch/
+ * scripts/subresources) previously did a DNS preflight and then
+ * route.continue(), letting Chromium open its own connection/resolution. This
+ * helper fetches an http subrequest through the PINNED transport (validated
+ * IP literal + Host header) so no browser-side connection is ever made to the
+ * destination. Returns null when the request is NOT pinnable (https — TLS SNI
+ * requires the real hostname — or an IP-literal host); the caller keeps
+ * route.continue() for those, with the existing preflight checks. Throws when
+ * the destination cannot be proven public or the fetch fails (fail closed —
+ * the caller aborts the route).
+ */
+export async function fulfillPinnedSubrequest(
+  requestInfo: {
+    url: string;
+    method?: string | null;
+    headers?: Record<string, string> | null;
+    body?: Buffer | string | null;
+  },
+  deps: {
+    resolveFn?: (hostname: string) => Promise<string | null>;
+    fetchFn?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+    timeoutMs?: number;
+  } = {},
+): Promise<{ status: number; headers: Record<string, string>; body: Buffer } | null> {
+  const timeoutMs = deps.timeoutMs ?? HTTP_FETCH_TIMEOUT_MS;
+  const resolveFn = deps.resolveFn ?? resolvePublicAddress;
+  const fetchFn = deps.fetchFn ?? ((input: string | URL | Request, init?: RequestInit) => fetch(input, init));
+  let parsed: URL;
+  try {
+    parsed = new URL(requestInfo.url);
+  } catch {
+    throw new Error(`Cannot pin invalid subrequest URL: ${requestInfo.url}`);
+  }
+  if (parsed.protocol !== 'http:' || isIpLiteralHostname(parsed.hostname)) {
+    // https cannot be pinned (TLS SNI needs the real hostname) — the caller
+    // keeps the preflight + route.continue() path (documented residual).
+    // IP-literal hosts are already address-bound; nothing to pin.
+    return null;
+  }
+  const address = await resolveFn(parsed.hostname);
+  if (address === null) {
+    throw new Error(`Subrequest destination ${parsed.hostname} cannot be proven public (fail closed)`);
+  }
+  const pinnedUrl = pinHttpDestination(requestInfo.url, address);
+  if (pinnedUrl === null) {
+    throw new Error(`Subrequest ${requestInfo.url} could not be pinned to ${address}`);
+  }
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(requestInfo.headers ?? {})) {
+    const lower = key.toLowerCase();
+    if (lower === 'host' || lower === 'content-length' || lower === 'connection' || lower === 'accept-encoding') continue;
+    headers[key] = value;
+  }
+  headers.Host = parsed.hostname;
+  const body = requestInfo.body ? (Buffer.isBuffer(requestInfo.body) ? requestInfo.body : Buffer.from(String(requestInfo.body))) : undefined;
+  const response = await fetchFn(pinnedUrl, {
+    method: requestInfo.method ?? 'GET',
+    headers,
+    // Uint8Array is a clean BodyInit (TS libs don't accept Buffer<TArrayBuffer>).
+    body: body && body.length > 0 ? new Uint8Array(body) : undefined,
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: 'manual',
+  });
+  const responseBody = Buffer.from(await response.arrayBuffer());
+  const responseHeaders: Record<string, string> = {};
+  response.headers.forEach((value, key) => {
+    const lower = key.toLowerCase();
+    if (lower === 'content-length' || lower === 'transfer-encoding' || lower === 'connection' || lower === 'keep-alive') return;
+    responseHeaders[key] = value;
+  });
+  return { status: response.status, headers: responseHeaders, body: responseBody };
 }
 
 async function doStaticSnapshot(
@@ -1163,8 +1244,32 @@ async function doRenderedSnapshot(
 
       if (type === 'image' || type === 'font' || type === 'media' || type === 'stylesheet' || isTracker) {
         await route.abort();
-      } else {
-        await route.continue();
+        return;
+      }
+      // Round-5 P1-3: http SUBREQUESTS ride the PINNED transport (validated
+      // IP literal + Host header) instead of route.continue() — Chromium never
+      // opens its own connection to the destination, so the DNS-rebinding
+      // TOCTOU is closed for intercepted http requests. https keeps
+      // route.continue() with the preflight checks above (TLS SNI makes
+      // pinning impossible — documented residual at resolveDestinationAndCheck).
+      try {
+        const fulfill = await fulfillPinnedSubrequest({
+          url: reqUrl,
+          method: req.method(),
+          headers: req.headers(),
+          body: req.postDataBuffer(),
+        });
+        if (fulfill === null) {
+          await route.continue();
+        } else {
+          // The fulfilled response passes through the capture onResponse path
+          // (Playwright dispatches a response event) with the original logical
+          // URL, so product evidence filtering keeps working.
+          await route.fulfill(fulfill);
+        }
+      } catch (error) {
+        warnings.push(`blocked subrequest ${reqUrl}: ${error instanceof Error ? error.message : String(error)}`);
+        await route.abort();
       }
     });
 

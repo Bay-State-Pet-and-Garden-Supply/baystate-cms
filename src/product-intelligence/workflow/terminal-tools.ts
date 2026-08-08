@@ -77,6 +77,7 @@ export const BundleTypeBoxSchema = Type.Object({
         sourceArtifactId: Type.String({ minLength: 1 }),
         url: Type.String({ format: 'uri' }),
         role: Type.Union([Type.Literal('primary'), Type.Literal('alternate'), Type.Literal('nutrition'), Type.Literal('ingredients'), Type.Literal('comparison')]),
+        verifiedAssetId: Type.Optional(Type.String({ minLength: 1 })),
         verifiedAssetIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
         // Deprecated round-3 fields (historical parsing only; server-derived
         // from verifiedAssetIds — never authoritative).

@@ -53,6 +53,9 @@ export const PackagingOcrDataSchema = z.object({
   productName: z.string().nullable().default(null),
   brand: z.string().nullable().default(null),
   species: z.array(z.string()).default(() => []),
+  /** Round-5: UPC/GTIN barcode digits printed on the package (8-14 digits).
+   *  Optional — null when no barcode is visible/legible. */
+  upc: z.string().nullable().default(null),
 
   // Physical / sensory attributes
   flavorVariety: z.string().nullable().default(null),

@@ -142,6 +142,18 @@ export function isExplicitLoopbackEndpoint(url: string): boolean {
   }
 }
 
+/**
+ * Conservative port allowlist for LOCAL model endpoints (round-5). Loopback
+ * models get an explicit loopback-model destination policy — loopback
+ * literals only, http(s), and this port set (Ollama defaults 11434/11435
+ * plus 80/443 for local proxies). Redirects from a local endpoint must
+ * remain loopback AND within this port set.
+ */
+export const LOCAL_MODEL_PORTS = new Set([80, 443, 11434, 11435]);
+
+/** Model-call response cap (VLM/OCR), enforced on the body stream. */
+export const MAX_MODEL_RESPONSE_BYTES = 20 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Gateway
 // ---------------------------------------------------------------------------
@@ -397,31 +409,10 @@ export class PolicyGateway {
       }
 
       if (options.maxResponseBytes !== undefined && options.maxResponseBytes !== null) {
-        // Enforce the size limit at the body level by wrapping the stream.
-        const limit = options.maxResponseBytes;
-        const reader = response.body?.getReader();
-        if (reader) {
-          let received = 0;
-          const limited = new ReadableStream<Uint8Array>({
-            async pull(controller) {
-              const { value, done } = await reader.read();
-              if (done) {
-                controller.close();
-                return;
-              }
-              received += value.byteLength;
-              if (received > limit) {
-                controller.error(new PolicyDeniedError({ allowed: false, reasonCode: 'response_too_large', policyVersion: ctx.policy.configId, detail: `${received} bytes exceeds ${limit}` }));
-                return;
-              }
-              controller.enqueue(value);
-            },
-            cancel() {
-              void reader.cancel().catch(() => undefined);
-            },
-          });
-          return new Response(limited, { status: response.status, headers: response.headers });
-        }
+        // Enforce the size limit at the body level by wrapping the stream
+        // (shared with the model transport — chunked/missing-length bodies
+        // are capped too, never trusted via Content-Length).
+        return this.limitResponseStream(response, options.maxResponseBytes, ctx, 'response');
       }
 
       return response;
@@ -506,11 +497,105 @@ export class PolicyGateway {
   }
 
   /**
-   * Model-call transport (VLM/OCR): gates EVERY hop through
-   * checkModelEndpoint (local loopback endpoints are allowed under any
-   * data-sharing policy; remote endpoints must match the policy modelRoute)
-   * and enforces a response-size cap. Redirects are followed manually and
-   * re-gated hop by hop — a redirected model call cannot escape the gate.
+   * Round-5: destination/SSRF authority for model transports. Every model
+   * hop composes TWO independent authorities: checkModelEndpoint (model +
+   * data-sharing authorization) AND this destination check. LOCAL endpoints
+   * get an explicit loopback-model policy — loopback literals only, http(s),
+   * and the LOCAL_MODEL_PORTS allowlist (Ollama defaults + 80/443); remote
+   * endpoints reuse the public-destination validator (protocol, port,
+   * allowlist, DNS, private/link-local deny) WITHOUT the page-fetch-specific
+   * cloud_models_only network denial — model authorization belongs to
+   * checkModelEndpoint alone.
+   */
+  async checkModelDestination(
+    ctx: PolicyCheckContext,
+    url: string,
+    isLocalModel: boolean,
+  ): Promise<{ allowed: boolean; reasonCode: PolicyReasonCode; detail: string }> {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return { allowed: false, reasonCode: 'invalid_protocol', detail: `unparseable model endpoint: ${url.slice(0, 120)}` };
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { allowed: false, reasonCode: 'invalid_protocol', detail: `model endpoint protocol ${parsed.protocol} not allowed` };
+    }
+    if (isLocalModel) {
+      if (!isExplicitLoopbackEndpoint(url)) {
+        return {
+          allowed: false,
+          reasonCode: 'private_network_destination',
+          detail: `local model endpoint must be an explicit loopback literal: ${url.slice(0, 120)}`,
+        };
+      }
+      const port = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+      if (!LOCAL_MODEL_PORTS.has(port)) {
+        return {
+          allowed: false,
+          reasonCode: 'invalid_port',
+          detail: `local model port ${port} not allowed (allowlist: ${[...LOCAL_MODEL_PORTS].sort((a, b) => a - b).join(', ')})`,
+        };
+      }
+      return { allowed: true, reasonCode: 'unknown', detail: '' };
+    }
+    // Remote model: reuse the public-destination validator. This applies the
+    // protocol/port/domain-allowlist/DNS/private-IP floor to the model hop
+    // without the cloud_models_only page-fetch denial (that is a page-fetch
+    // rule; model authorization stays with checkModelEndpoint).
+    const destination = await this.validateDestination(url, ctx.policy, 'model_input');
+    if (!destination.allowed) {
+      return { allowed: false, reasonCode: destination.reasonCode, detail: `model endpoint ${destination.detail}` };
+    }
+    return { allowed: true, reasonCode: 'unknown', detail: '' };
+  }
+
+  /**
+   * Stream-bounded response body: enforces the size cap on the body stream
+   * (never trusting Content-Length — chunked or missing-length bodies are
+   * capped too) and errors the stream with PolicyDeniedError past the limit.
+   * Shared by gatewayFetch and the model transport.
+   */
+  private limitResponseStream(response: Response, limit: number, ctx: PolicyCheckContext, what: string): Response {
+    const reader = response.body?.getReader();
+    if (!reader) return response;
+    let received = 0;
+    const limited = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const { value, done } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        received += value.byteLength;
+        if (received > limit) {
+          controller.error(
+            new PolicyDeniedError({
+              allowed: false,
+              reasonCode: 'response_too_large',
+              policyVersion: ctx.policy.configId,
+              detail: `${what} exceeds ${limit} bytes (${received} received)`,
+            }),
+          );
+          return;
+        }
+        controller.enqueue(value);
+      },
+      cancel() {
+        void reader.cancel().catch(() => undefined);
+      },
+    });
+    return new Response(limited, { status: response.status, headers: response.headers });
+  }
+
+  /**
+   * Model-call transport (VLM/OCR): gates EVERY hop through TWO independent
+   * authorities — checkModelEndpoint (model + data-sharing: loopback allowed
+   * under any policy, remote must match the modelRoute) AND
+   * checkModelDestination (SSRF/destination floor: loopback-model policy for
+   * local endpoints, public-destination validation for remote). Redirects are
+   * followed manually and BOTH authorities re-fire on every hop. The response
+   * size cap is enforced on the body stream (never via Content-Length).
    */
   buildModelFetch(
     ctx: PolicyCheckContext,
@@ -521,13 +606,25 @@ export class PolicyGateway {
       let currentUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
       let redirects = 0;
       for (;;) {
-        const decision = await this.checkModelEndpoint(ctx, {
+        const modelDecision = await this.checkModelEndpoint(ctx, {
           provider: call.provider,
           model: call.model,
           endpointUrl: currentUrl,
           dataClassification: classification,
         });
-        if (!decision.allowed) throw new PolicyDeniedError(decision);
+        if (!modelDecision.allowed) throw new PolicyDeniedError(modelDecision);
+
+        const isLocalModel = isExplicitLoopbackEndpoint(currentUrl);
+        const destination = await this.checkModelDestination(ctx, currentUrl, isLocalModel);
+        if (!destination.allowed) {
+          throw new PolicyDeniedError({
+            allowed: false,
+            reasonCode: destination.reasonCode,
+            policyVersion: ctx.policy.configId,
+            detail: destination.detail,
+          });
+        }
+
         const response = await this.fetchFn(currentUrl, { ...init, redirect: 'manual', signal: init.signal });
         if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
           redirects += 1;
@@ -542,17 +639,9 @@ export class PolicyGateway {
           currentUrl = new URL(response.headers.get('location')!, currentUrl).toString();
           continue;
         }
-        const MAX_MODEL_RESPONSE_BYTES = 20 * 1024 * 1024;
-        const contentLength = Number(response.headers.get('content-length') ?? '0');
-        if (contentLength > MAX_MODEL_RESPONSE_BYTES) {
-          throw new PolicyDeniedError({
-            allowed: false,
-            reasonCode: 'response_too_large',
-            policyVersion: ctx.policy.configId,
-            detail: `model response exceeds ${MAX_MODEL_RESPONSE_BYTES} bytes`,
-          });
-        }
-        return response;
+        // Round-5: the 20MB cap is enforced on the body stream — a
+        // chunked/missing-length body cannot exceed the limit.
+        return this.limitResponseStream(response, MAX_MODEL_RESPONSE_BYTES, ctx, 'model response');
       }
     };
   }

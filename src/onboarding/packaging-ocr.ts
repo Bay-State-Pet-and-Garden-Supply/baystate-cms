@@ -27,11 +27,13 @@ export const PACKAGING_OCR_PROMPT = `Analyze this product packaging image for a 
 Return ONLY valid JSON. Do not wrap in markdown. Do not guess. Use null or [] when not visible.
 If a field does not apply to this product type (e.g. flavor for a shovel, species for a hose), return null or [].
 Separate printed text from visual inference.
+"upc": transcribe the exact UPC/GTIN barcode digits printed on the package (EAN-13/UPC-A, 8-14 digits, digits only after stripping check-spacing). Use null when no barcode is visible or legible.
 
 {
   "productName": string | null,
   "brand": string | null,
   "species": string[],
+  "upc": string | null,
   "flavorVariety": string | null,
   "color": string | null,
   "material": string | null,
@@ -244,6 +246,16 @@ export function coercePackagingOcrData(
     return null;
   };
 
+  // Round-5: barcode digits only; a valid UPC/GTIN is 8-14 digits after
+  // stripping spaces/hyphens (EAN-13/UPC-A check-spacing). Anything else
+  // is not a trustworthy barcode transcription and stays null.
+  const normalizeBarcode = (val: unknown): string | null => {
+    const raw = normalizeString(val);
+    if (raw === null) return null;
+    const digits = raw.replace(/\D/g, '');
+    return digits.length >= 8 && digits.length <= 14 ? digits : null;
+  };
+
   // Clamp confidence values
   const normalizeConfidence = (val: unknown): number | null => {
     const n = typeof val === 'number' ? val : Number(val);
@@ -263,6 +275,7 @@ export function coercePackagingOcrData(
     productName: normalizeString(raw.productName),
     brand: normalizeString(raw.brand),
     species: normalizeArray(raw.species),
+    upc: normalizeBarcode(raw.upc),
     flavorVariety: normalizeString(raw.flavorVariety),
     color: normalizeString(raw.color),
     material: normalizeString(raw.material),

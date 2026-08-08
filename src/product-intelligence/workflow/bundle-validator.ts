@@ -185,46 +185,44 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
     }
   }
 
-  // Images (PI-6, round-3): primary-image authority resolves from DURABLE
-  // server-verified asset rows cited by `verifiedAssetIds` — agent-supplied
+  // Images (PI-6, round-3/5): image authority resolves from DURABLE
+  // server-verified asset rows — agent-supplied
   // exactProductMatch/rightsStatus/rightsBasis/rightsEvidenceRef/
   // originalContentHash/qualityStatus/commerceApproved are IGNORED. The
   // deterministic commerce-approval rules then re-run over the resolved
-  // server-side fields.
+  // server-side fields. Round-5 (review P1-1): EVERY selected candidate —
+  // every role — is bound to exactly ONE durable verified asset (singular
+  // verifiedAssetId) with run/URL/identity-hash checks; role-specific
+  // approval rules follow the binding.
   const primaries = bundle.imageCandidates.filter((image) => image.role === 'primary');
   if (primaries.length > 1) {
     issues.push(`at most one primary image may be proposed (got ${primaries.length})`);
   }
   const assetRepo = loadAssetRepo();
   for (const image of bundle.imageCandidates) {
-    if (image.role !== 'primary') continue;
-    const verifiedAssetIds = image.verifiedAssetIds ?? [];
-    if (verifiedAssetIds.length === 0) {
-      issues.push(`primary image ${image.url} cites no verified asset id (authority must resolve from a durable server-verified asset)`);
+    const role = image.role;
+    // ── Round-5: the SINGULAR binding applies to every role ──────────────
+    const verifiedAssetId = image.verifiedAssetId ?? '';
+    if (!verifiedAssetId) {
+      issues.push(`${role} image ${image.url} cites no verified asset id (authority must resolve from a durable server-verified asset)`);
       continue;
     }
-    // Round-4 (review P0): exactly ONE verified asset per terminal candidate
-    // — the binding must be unambiguous.
-    if (verifiedAssetIds.length > 1) {
-      issues.push(`primary image ${image.url} cites ${verifiedAssetIds.length} verified asset ids; exactly one is required`);
-      continue;
-    }
-    const assets = assetRepo.getPiAssetsByIds(verifiedAssetIds);
+    const assets = assetRepo.getPiAssetsByIds([verifiedAssetId]);
     if (assets.length === 0) {
-      issues.push(`primary image ${image.url} cites no resolvable durable verified asset (ids: ${verifiedAssetIds.join(', ')})`);
+      issues.push(`${role} image ${image.url} cites no resolvable durable verified asset (id: ${verifiedAssetId})`);
       continue;
     }
     const verified = assets[0];
     // Round-4 (review P0): the verified asset must belong to the CURRENT run
     // (no cross-run borrowing — asset.run_id is part of the binding).
     if (runId && verified.runId !== runId) {
-      issues.push(`primary image ${image.url} cites verified asset from another run (${verified.runId}); asset must belong to the current run ${runId}`);
+      issues.push(`${role} image ${image.url} cites verified asset from another run (${verified.runId}); asset must belong to the current run ${runId}`);
       continue;
     }
     // Round-4 (review P0): the terminal candidate URL must equal the durable
     // source URL of the verified asset (no URL A asset cited for URL B).
     if (verified.sourceUrl !== image.url) {
-      issues.push(`primary image ${image.url} url does not match the verified asset's source url (${verified.sourceUrl})`);
+      issues.push(`${role} image ${image.url} url does not match the verified asset's source url (${verified.sourceUrl})`);
       continue;
     }
     // Round-4 (review P0): the asset must be verified against the CURRENT
@@ -232,58 +230,79 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
     // the run input and compare. Cross-identity borrowing (verify image Y
     // against GTIN Y, submit GTIN X) is refused.
     if (!runId) {
-      issues.push(`primary image ${image.url} verified asset cannot be bound to a run (no run id for validation)`);
+      issues.push(`${role} image ${image.url} verified asset cannot be bound to a run (no run id for validation)`);
       continue;
     }
     if (!verified.verifiedAgainstHash) {
-      issues.push(`primary image ${image.url} verified asset has no verified-against identity snapshot (cross-run borrowing is refused)`);
+      issues.push(`${role} image ${image.url} verified asset has no verified-against identity snapshot (cross-run borrowing is refused)`);
       continue;
     }
     const runInput = runInputSnapshot(assetRepo, runId);
     if (!runInput) {
-      issues.push(`primary image ${image.url} current run has no input identity to bind the verified asset against`);
+      issues.push(`${role} image ${image.url} current run has no input identity to bind the verified asset against`);
       continue;
     }
     if (verified.verifiedAgainstHash !== canonicalVerifiedAgainstHash(runInput)) {
-      issues.push(`primary image ${image.url} verified asset was verified against a different product identity (hash mismatch — cross-run/cross-identity borrowing refused)`);
+      issues.push(`${role} image ${image.url} verified asset was verified against a different product identity (hash mismatch — cross-run/cross-identity borrowing refused)`);
       continue;
     }
-    const rightsStatus = verified.rightsStatus;
-    if (rightsStatus === 'unknown') {
-      issues.push(`primary image ${image.url} verified asset has unknown rights status`);
-    } else if (rightsStatus !== 'approved') {
-      issues.push(`primary image ${image.url} verified asset rights are '${rightsStatus}', not approved (durable reuse grant required)`);
+
+    // ── Round-5: role-specific approval rules ─────────────────────────────
+    if (role === 'primary') {
+      const rightsStatus = verified.rightsStatus;
+      if (rightsStatus === 'unknown') {
+        issues.push(`primary image ${image.url} verified asset has unknown rights status`);
+      } else if (rightsStatus !== 'approved') {
+        issues.push(`primary image ${image.url} verified asset rights are '${rightsStatus}', not approved (durable reuse grant required)`);
+      }
+      if (!verified.exactProductMatch) {
+        issues.push(`primary image ${image.url} verified asset is not an exact product match`);
+      }
+      if (verified.exactVariantMatch === 0) {
+        issues.push(`primary image ${image.url} verified asset is not an exact variant match (parent-product-only images cannot be primary)`);
+      }
+      if (!verified.originalContentHash) {
+        issues.push(`primary image ${image.url} verified asset has no content hash (extraction provenance is required)`);
+      } else if (!/^[0-9a-f]{64}$/.test(verified.originalContentHash)) {
+        issues.push(`primary image ${image.url} verified asset content hash is not a SHA-256 hex digest (${verified.originalContentHash.slice(0, 24)}...)`);
+      }
+      if (verified.qualityStatus !== 'usable') {
+        issues.push(`primary image ${image.url} verified asset quality is '${verified.qualityStatus}', not 'usable'`);
+      }
+      const conflicts = parseConflicts(verified.conflictsJson);
+      if (conflicts.length > 0) {
+        issues.push(`primary image ${image.url} verified asset has conflicting visible-package evidence: ${conflicts.join('; ')}`);
+      }
+      const recomputed = computeCommerceApproved({
+        rightsStatus: rightsStatus === 'unknown' ? 'unknown' : rightsStatus === 'approved' ? 'approved' : 'restricted',
+        exactProductMatch: !!verified.exactProductMatch,
+        exactVariantMatch: verified.exactVariantMatch === 1 ? true : verified.exactVariantMatch === 0 ? false : null,
+        qualityStatus: (verified.qualityStatus ?? 'usable') as 'usable' | 'low_quality' | 'invalid',
+        conflicts,
+      });
+      if (!recomputed) {
+        issues.push(`primary image ${image.url} verified asset does not satisfy the deterministic commerce-approval rules`);
+      } else if (verified.commerceApproved !== (recomputed ? 1 : 0)) {
+        issues.push(`primary image ${image.url} stored commerce approval (${verified.commerceApproved}) does not match the recomputed verified status (${recomputed})`);
+      }
+    } else if (role === 'alternate' || role === 'nutrition' || role === 'ingredients') {
+      // Supporting commerce images: the asset must be real (verified) and its
+      // reuse must be authorized — but exact-product/variant equality is not
+      // required the way it is for primary (an alternate may be a crop, angle,
+      // or ingredient shot of the same verified product).
+      const rightsStatus = verified.rightsStatus;
+      if (rightsStatus !== 'approved') {
+        issues.push(`${role} image ${image.url} verified asset rights are '${rightsStatus ?? 'unknown'}', not approved (durable reuse grant required)`);
+      }
+      if (!verified.exactProductMatch && verified.qualityStatus !== 'usable') {
+        issues.push(`${role} image ${image.url} verified asset is neither an exact product match nor 'usable' quality`);
+      }
+      if (verified.qualityStatus === 'invalid') {
+        issues.push(`${role} image ${image.url} verified asset quality is 'invalid'`);
+      }
     }
-    if (!verified.exactProductMatch) {
-      issues.push(`primary image ${image.url} verified asset is not an exact product match`);
-    }
-    if (verified.exactVariantMatch === 0) {
-      issues.push(`primary image ${image.url} verified asset is not an exact variant match (parent-product-only images cannot be primary)`);
-    }
-    if (!verified.originalContentHash) {
-      issues.push(`primary image ${image.url} verified asset has no content hash (extraction provenance is required)`);
-    } else if (!/^[0-9a-f]{64}$/.test(verified.originalContentHash)) {
-      issues.push(`primary image ${image.url} verified asset content hash is not a SHA-256 hex digest (${verified.originalContentHash.slice(0, 24)}...)`);
-    }
-    if (verified.qualityStatus !== 'usable') {
-      issues.push(`primary image ${image.url} verified asset quality is '${verified.qualityStatus}', not 'usable'`);
-    }
-    const conflicts = parseConflicts(verified.conflictsJson);
-    if (conflicts.length > 0) {
-      issues.push(`primary image ${image.url} verified asset has conflicting visible-package evidence: ${conflicts.join('; ')}`);
-    }
-    const recomputed = computeCommerceApproved({
-      rightsStatus: rightsStatus === 'unknown' ? 'unknown' : rightsStatus === 'approved' ? 'approved' : 'restricted',
-      exactProductMatch: !!verified.exactProductMatch,
-      exactVariantMatch: verified.exactVariantMatch === 1 ? true : verified.exactVariantMatch === 0 ? false : null,
-      qualityStatus: (verified.qualityStatus ?? 'usable') as 'usable' | 'low_quality' | 'invalid',
-      conflicts,
-    });
-    if (!recomputed) {
-      issues.push(`primary image ${image.url} verified asset does not satisfy the deterministic commerce-approval rules`);
-    } else if (verified.commerceApproved !== (recomputed ? 1 : 0)) {
-      issues.push(`primary image ${image.url} stored commerce approval (${verified.commerceApproved}) does not match the recomputed verified status (${recomputed})`);
-    }
+    // comparison role: binding-only — identity checks may use it, but it
+    // never becomes a commerce asset, so no approval rules are applied here.
   }
 
   // Conflicts drive disposition.

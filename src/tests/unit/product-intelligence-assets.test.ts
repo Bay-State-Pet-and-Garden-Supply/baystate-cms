@@ -354,12 +354,42 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(result.conflicts).toEqual([]);
     });
 
-    it('matches on strong name + net-content agreement when GTIN is absent', () => {
+    it('round-5: 16 oz expected vs a 32 oz package WITHOUT a barcode is never exact — size becomes a variant conflict', () => {
+      const result = classifyAssetIdentity(
+        { brand: 'Stella', productName: 'Stella Chicken Broth 32 oz', variant: null, netContent: { value: 32, unit: 'oz' }, packCount: 1, gtin: null },
+        expected,
+      );
+      expect(result.exactProductMatch).toBe(false);
+      expect(result.exactVariantMatch).toBe(false); // size discriminator, even though variant was null
+      expect(result.conflicts.some((c) => c.startsWith('net_content_mismatch'))).toBe(true);
+      // A detected conflict blocks commerce approval regardless of the null-variant escape.
+      expect(
+        computeCommerceApproved({
+          rightsStatus: 'approved',
+          exactProductMatch: result.exactProductMatch,
+          exactVariantMatch: result.exactVariantMatch,
+          qualityStatus: 'usable',
+          conflicts: result.conflicts,
+        }),
+      ).toBe(false);
+    });
+
+    it('round-5: a matching observed GTIN keeps exact identity despite a fuzzy-name-only OCR line', () => {
+      const result = classifyAssetIdentity(
+        { brand: 'Stella', productName: 'Stella Chewys Chicken Broth 16 oz', variant: null, netContent: { value: 16, unit: 'oz' }, packCount: 1, gtin: GTIN },
+        expected,
+      );
+      expect(result.exactProductMatch).toBe(true);
+      expect(result.conflicts).toEqual([]);
+    });
+
+    it('name + net-content agreement WITHOUT an observed GTIN is not exact when the run identity carries a GTIN (round-5)', () => {
       const result = classifyAssetIdentity(
         { brand: 'Stella', productName: 'Stella & Chewys Chicken Broth 16 oz', variant: null, netContent: { value: 16, unit: 'oz' }, packCount: 1, gtin: null },
         expected,
       );
-      expect(result.exactProductMatch).toBe(true);
+      expect(result.exactProductMatch).toBe(false);
+      expect(result.reasons.some((r) => r.includes('exact identity requires an observed GTIN'))).toBe(true);
     });
   });
 

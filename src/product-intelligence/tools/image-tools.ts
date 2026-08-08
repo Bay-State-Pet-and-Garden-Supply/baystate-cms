@@ -22,7 +22,7 @@ import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation, P
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { boundedString } from './registry';
-import type { EvidenceResolver, ResolvedEvidenceFact, ReuseGrantRecord, VerifiedAgainstSnapshot } from '../assets/verification';
+import type { EvidenceResolver, ResolvedEvidenceFact, ReuseGrantRecord, SourceTypeProvenance, VerifiedAgainstSnapshot } from '../assets/verification';
 
 export const verifyImageCandidateTool: PiToolAdapter = {
   name: 'verify_image_candidate',
@@ -410,12 +410,21 @@ function loadRunIdentity(runId: string): VerifiedAgainstSnapshot | null {
   }
 }
 
-/** Round-4 (review P0): resolve the durable source-kind for an asset URL from
- *  the run's source rows. Agent-declared source types never select a reuse
- *  grant — this resolver is the only source of sourceType. */
-function loadSourceTypeResolver(runId: string): (url: string) => string | null {
-  let sources: Array<{ url: string; sourceType: string | null }> | null = null;
-  return (url: string) => {
+/** Round-4/5 (review P0/P1): resolve the durable source-kind for an asset
+ *  URL through its full durable provenance chain, in order:
+ *   (a) the source row for the image/CDN URL itself (exact match);
+ *   (b) the source row for the DISCOVERING PAGE (candidate sourcePageUrl) —
+ *       a manufacturer/supplier product page proves the tier the image
+ *       arrived through, without requiring a typed row for the CDN URL;
+ *   (c) the source rows of the cited field-level evidence (dual namespace:
+ *       row UUID or agent-visible toolEvidenceId) — OCR/structured evidence
+ *       persists with its own source row;
+ *   (d) null ('unknown' — fail closed, rights stay restricted).
+ * Agent-declared source types never select a reuse grant — this resolver is
+ * the only source of sourceType. */
+function loadSourceTypeResolver(runId: string): (url: string, provenance: SourceTypeProvenance) => string | null {
+  let sources: Array<{ id: string; url: string; sourceType: string | null }> | null = null;
+  return (url: string, provenance: SourceTypeProvenance) => {
     if (sources === null) {
       try {
         const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
@@ -423,13 +432,45 @@ function loadSourceTypeResolver(runId: string): (url: string) => string | null {
           sources = [];
         } else {
           const store = loadAssetStore();
-          sources = (store?.listPiSources(runId) ?? []).map((s) => ({ url: s.url, sourceType: s.sourceType ?? null }));
+          sources = (store?.listPiSources(runId) ?? []).map((s) => ({
+            id: s.id,
+            url: s.url,
+            sourceType: s.sourceType ?? null,
+          }));
         }
       } catch {
         sources = [];
       }
     }
-    return sources.find((s) => s.url === url)?.sourceType ?? null;
+    const sourceList = sources;
+    if (sourceList.length === 0) return null;
+    const tierOf = (candidateUrl: string | null | undefined): string | null =>
+      candidateUrl ? (sourceList.find((s) => s.url === candidateUrl)?.sourceType ?? null) : null;
+    // (a) exact image/CDN URL.
+    const exact = tierOf(url);
+    if (exact) return exact;
+    // (b) discovering page.
+    const page = tierOf(provenance.sourcePageUrl);
+    if (page) return page;
+    // (c) cited evidence rows (row UUID or toolEvidenceId namespace) — the
+    // evidence row's source row carries the tier it was captured through.
+    const evidenceIds = provenance.evidenceIds ?? [];
+    if (evidenceIds.length > 0) {
+      try {
+        const repo = loadEvidenceRepo();
+        const rows = repo.listPiEvidence(runId).filter((row) => evidenceIds.includes(row.id));
+        const seen = new Set(rows.map((row) => row.id));
+        rows.push(...repo.listPiEvidenceByToolEvidenceId(runId, evidenceIds).filter((row) => !seen.has(row.id)));
+        const byId = new Map(sourceList.map((s) => [s.id, s]));
+        for (const row of rows) {
+          const matched = byId.get(row.sourceId);
+          if (matched?.sourceType) return matched.sourceType;
+        }
+      } catch {
+        // evidence lookup failure — fall through to null (fail closed)
+      }
+    }
+    return null;
   };
 }
 

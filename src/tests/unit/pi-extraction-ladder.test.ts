@@ -19,7 +19,7 @@ import {
   fetchPageHtml,
 } from '../../product-intelligence/extraction/platforms';
 import { runExtractionLadder, exactGtinMatch, createLadderExtractionContract } from '../../product-intelligence/extraction/ladder';
-import { runBrowserInteraction, type BrowserSnapshotFn } from '../../product-intelligence/extraction/browser';
+import { runBrowserInteraction, evidenceFromBrowserSnapshot, type BrowserSnapshotFn } from '../../product-intelligence/extraction/browser';
 import { ManagedFallbackRegistry, StubManagedProvider } from '../../product-intelligence/extraction/managed-fallback';
 import { LlmExtractionAdapter, isLlmAvailable, narrowLlmPrompt, NARROW_LLM_SYSTEM_PROMPT } from '../../product-intelligence/extraction/llm';
 import type { FetchedPage } from '../../product-intelligence/extraction/platforms';
@@ -756,6 +756,192 @@ describe('ladder contract adapter + helpers', () => {
     expect(out.variantSignals.some((s) => s.kind === 'variant_match')).toBe(true);
     expect(out.fields.some((f) => f.field === 'variant_selection')).toBe(true);
     expect(result.finalUrl).toContain('size=12oz');
+  });
+
+  it('round-5 P0-3: an unrelated recommended payload declaring one variant cannot prove this GTIN single-variant (contamination)', async () => {
+    // Payload A (the main product) carries the exact GTIN and NO variants
+    // field. Payload B (an unrelated recommended product) declares exactly
+    // one variant. The shared-flag accumulator would have let B's single
+    // bit settle exact_match — entity scoping must reject it.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://contam.example.com/p/main',
+      finalUrl: 'https://contam.example.com/p/main',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Main Product 16oz',
+          sku: 'MP-16',
+          gtin: '123123123123',
+          size: '16 oz',
+          offers: { price: '9.99' },
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://contam.example.com/api/recommended',
+          status: 200,
+          responseContentType: 'application/json',
+          // Related product — different entity, no GTIN, declares ONE variant.
+          jsonBody: { product: { title: 'Recommended Snack', sku: 'RC-1', variants: [{ id: 1, title: '1 pack' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://contam.example.com/p/main',
+      { gtin: '123123123123', name: 'Main Product 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://contam.example.com/p/main'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.gtins.map((g) => g.value)).toContain('123123123123');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match');
+    expect(result.identityReasons.join(' ')).toMatch(/unproven|not exact|single-variant/i);
+  });
+
+  it('round-5 P0-3: an unrelated multi-variant payload does not contradict by itself (no parent_page from unlinked payloads)', async () => {
+    // Payload A carries the exact GTIN without a variants field; payload B
+    // (unrelated) declares THREE variants. Before round 5, B pushed a
+    // parent_page contradiction signal. Now unlinked payloads neither prove
+    // nor contradict — the identity stays 'unproven', not 'parent page'.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://multi.example.com/p/main',
+      finalUrl: 'https://multi.example.com/p/main',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Main Product 16oz',
+          sku: 'MP-16',
+          gtin: '321321321321',
+          size: '16 oz',
+          offers: { price: '9.99' },
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://multi.example.com/api/related',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { product: { title: 'Related Item', sku: 'RL-3', variants: [{ id: 1 }, { id: 2 }, { id: 3 }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://multi.example.com/p/main',
+      { gtin: '321321321321', name: 'Main Product 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://multi.example.com/p/main'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match');
+    const reasons = result.identityReasons.join(' ');
+    expect(reasons).toMatch(/unproven|not exact|single-variant/i);
+    expect(reasons).not.toMatch(/parent/i);
+    expect(reasons).not.toMatch(/multiple variants/i);
+  });
+
+  it('round-5 P0-3: entity-scoped variant-set signal — linked proves, unlinked never (unit)', () => {
+    const makeOut = () => ({
+      fields: [] as Array<{ field: string; value: string; method: string; sourcePath?: string }>,
+      images: [] as Array<{ url: string; sourcePath?: string }>,
+      gtins: [] as Array<{ value: string; method: string }>,
+      sku: null as string | null,
+      brand: null as string | null,
+      productName: null as string | null,
+      size: null as string | null,
+      variant: null as { name?: string; id?: string; sku?: string } | null,
+      variantSignals: [] as Array<{ kind: 'parent_page' | 'variant_mismatch' | 'variant_match' }>,
+      variantSetEvidence: { single: false, multiple: false },
+      variantSetContributions: [],
+    });
+    const snapshotOf = (jsonLd: Array<Record<string, unknown>>, network: Array<{ url: string; jsonBody: unknown }>) => ({
+      url: 'https://u.example.com/p/x',
+      finalUrl: 'https://u.example.com/p/x',
+      jsonLd,
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: network.map((n) => ({ url: n.url, status: 200, responseContentType: 'application/json', jsonBody: n.jsonBody })),
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+
+    // (a) expected GTIN + linked single-variant payload -> 'single'.
+    const outA = makeOut();
+    const evA = evidenceFromBrowserSnapshot(
+      snapshotOf([], [{ url: 'https://u.example.com/api/1', jsonBody: { product: { title: 'T', gtin: '999999999999', variants: [{ id: 1 }] } } }]),
+      outA,
+      { gtin: '999999999999' },
+    );
+    expect(evA.variantSetEvidence).toBe('single');
+
+    // (b) expected GTIN + UNLINKED single-variant payload -> 'none'.
+    const outB = makeOut();
+    const evB = evidenceFromBrowserSnapshot(
+      snapshotOf([], [{ url: 'https://u.example.com/api/2', jsonBody: { product: { title: 'Other', gtin: '888888888888', variants: [{ id: 1 }] } } }]),
+      outB,
+      { gtin: '999999999999' },
+    );
+    expect(evB.variantSetEvidence).toBe('none');
+    expect(outB.variantSignals.some((s) => s.kind === 'parent_page')).toBe(false);
+
+    // (c) expected GTIN + unlinked MULTI-variant payload -> 'none', and it
+    //     contributes NO parent_page contradiction either.
+    const outC = makeOut();
+    const evC = evidenceFromBrowserSnapshot(
+      snapshotOf([], [{ url: 'https://u.example.com/api/3', jsonBody: { product: { title: 'Other', variants: [{ id: 1 }, { id: 2 }] } } }]),
+      outC,
+      { gtin: '999999999999' },
+    );
+    expect(evC.variantSetEvidence).toBe('none');
+    expect(outC.variantSignals.some((s) => s.kind === 'parent_page')).toBe(false);
+
+    // (d) no expected GTIN + single payload -> page-primary fallback: 'single'.
+    const outD = makeOut();
+    const evD = evidenceFromBrowserSnapshot(
+      snapshotOf([{ '@type': 'Product', name: 'Solo', sku: 'SO-1', variants: [{ id: 1, title: '8 oz' }] }], []),
+      outD,
+      {},
+    );
+    expect(evD.variantSetEvidence).toBe('single');
+
+    // (e) no expected GTIN + two unidentifiable payloads -> conservative 'none'.
+    const outE = makeOut();
+    const evE = evidenceFromBrowserSnapshot(
+      snapshotOf([{ '@type': 'Product', name: 'One', sku: 'O-1', variants: [{ id: 1 }] }], [{ url: 'https://u.example.com/api/4', jsonBody: { product: { title: 'Two', sku: 'T-2', variants: [{ id: 1 }] } } }]),
+      outE,
+      {},
+    );
+    expect(evE.variantSetEvidence).toBe('none');
+
+    // (f) linked multi-variant payload IS a contradiction (parent_page).
+    const outF = makeOut();
+    const evF = evidenceFromBrowserSnapshot(
+      snapshotOf([], [{ url: 'https://u.example.com/api/5', jsonBody: { product: { title: 'T', gtin: '999999999999', variants: [{ id: 1 }, { id: 2 }] } } }]),
+      outF,
+      { gtin: '999999999999' },
+    );
+    expect(evF.variantSetEvidence).toBe('multiple');
+    expect(outF.variantSignals.some((s) => s.kind === 'parent_page')).toBe(true);
   });
 
   it('escalates to the managed browser fallback with a domain-scoped provider', async () => {

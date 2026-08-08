@@ -74,10 +74,12 @@ export const ImageQualityStatusSchema = z.enum(['usable', 'low_quality', 'invali
  * (see bundle-validator).
  *
  * Round-3 (review finding 5): AUTHORITY is never agent-supplied. The
- * candidate's `verifiedAssetIds` cite durable server-verified asset rows
- * (persisted by verify_image_candidate); the validator and the persistence
- * layer re-derive identity, rights, quality, content hash, and
- * commerce-approval from those rows. The legacy authoritative fields below
+ * candidate cites a durable server-verified asset row (persisted by
+ * verify_image_candidate); the validator and the persistence layer
+ * re-derive identity, rights, quality, content hash, and
+ * commerce-approval from that row. Round-5 (review P1-1): the citation is
+ * SINGULAR — every selected candidate (any role) binds to exactly one
+ * verified asset. The legacy authoritative fields below
  * (exactProductMatch … commerceApproved) remain only as OPTIONAL fields for
  * parsing historical bundles; they are never trusted by validation or
  * persistence.
@@ -87,8 +89,15 @@ export const BundleImageCandidateSchema = z.object({
   sourceArtifactId: z.string().min(1),
   url: z.string().url(),
   role: ImageRoleSchema,
-  /** Durable server-verified asset row ids (verify_image_candidate output). */
-  verifiedAssetIds: z.array(z.string().min(1)).default([]),
+  /**
+   * Durable server-verified asset row id (verify_image_candidate output).
+   * Round-5: exactly one per candidate, any role; the validator binds it
+   * (run, URL, identity hash) and derives all authority from the row. Empty
+   * (missing) means uncited and fails validation.
+   */
+  verifiedAssetId: z.string().min(1).default(''),
+  /** @deprecated round-3/4 array form — historical parsing only; never authoritative. */
+  verifiedAssetIds: z.array(z.string().min(1)).optional(),
   // ── Deprecated (round-3): present only for historical bundle parsing ──────
   // Every field below was previously agent-supplied and authoritative. It is
   // now IGNORED by validation and persistence; the server resolves the real
