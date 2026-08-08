@@ -59,6 +59,9 @@ export interface PiRunRow {
   basePolicyId: string | null;
   basePolicyVersion: number | null;
   policyOverridesJson: string | null;
+  /** Round-8 (review P1): effective research/terminal tool versions + schema
+   *  hashes, captured at session creation (see setRunToolsJson). */
+  toolsJson: string | null;
 }
 
 export interface CreatePiRunInput {
@@ -85,6 +88,8 @@ export interface CreatePiRunInput {
   basePolicyId?: string | null;
   basePolicyVersion?: number | null;
   policyOverridesJson?: string | null;
+  /** Round-8 (review P1): effective tool versions/schema hashes (JSON array). */
+  toolsJson?: string | null;
 }
 
 export function createPiRun(input: CreatePiRunInput): PiRunRow {
@@ -97,8 +102,9 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
      (id, workspace_id, onboarding_item_id, mode, status, executor, input_json,
       policy_json, config_snapshot_id, config_snapshot_hash, code_commit,
       prompt_hash, pi_version, extension_versions_json, started_at, completed_at,
-      origin_run_id, replay_depth, base_policy_id, base_policy_version, policy_overrides_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      origin_run_id, replay_depth, base_policy_id, base_policy_version, policy_overrides_json,
+      tools_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.workspaceId,
@@ -121,6 +127,7 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
       input.basePolicyId ?? null,
       input.basePolicyVersion ?? null,
       input.policyOverridesJson ?? null,
+      input.toolsJson ?? null,
     ],
   );
   return getPiRun(id) as PiRunRow;
@@ -138,7 +145,8 @@ const RUN_SELECT = `
          token_usage_json AS tokenUsageJson,
          origin_run_id AS originRunId, replay_depth AS replayDepth,
          base_policy_id AS basePolicyId, base_policy_version AS basePolicyVersion,
-         policy_overrides_json AS policyOverridesJson
+         policy_overrides_json AS policyOverridesJson,
+         tools_json AS toolsJson
   FROM product_intelligence_runs
 `;
 
@@ -180,6 +188,18 @@ export function countPiRuns(workspaceId: string): number {
     .query('SELECT COUNT(*) AS count FROM product_intelligence_runs WHERE workspace_id = ?')
     .get(workspaceId) as { count: number };
   return Number(row.count);
+}
+
+/** Round-8 (review P1): capture the session's effective research/terminal
+ *  tools ({ name, version, schemaHash }[]) on the run. Called by the Pi
+ *  executor once the session exists (the tools are not knowable at
+ *  createPiRun time). Best-effort capture — a failure never breaks the run. */
+export function setRunToolsJson(runId: string, tools: unknown): void {
+  const db = getDb();
+  db.run('UPDATE product_intelligence_runs SET tools_json = ? WHERE id = ?', [
+    JSON.stringify(tools ?? []),
+    runId,
+  ]);
 }
 
 /**

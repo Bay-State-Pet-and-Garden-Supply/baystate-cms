@@ -245,6 +245,8 @@ export class FakeSessionFactory implements PiSessionFactory {
   lastSubmissionHandler: ((submission: TerminalResultSubmission) => void) | null = null;
   effectiveTools: string[] = ['read', 'grep', 'find', 'ls', 'submit_product_research_bundle'];
   piVersion: string | null = '0.83.0';
+  /** Round-8 (review P1): captured tool versions the fake session reports. */
+  toolVersions: Array<{ name: string; version: string | null; schemaHash: string }> = [];
 
   async createSession(
     _input: ProductResearchInput,
@@ -260,6 +262,7 @@ export class FakeSessionFactory implements PiSessionFactory {
       piVersion: this.piVersion,
       extensionVersions: [],
       effectiveTools: this.effectiveTools,
+      toolVersions: this.toolVersions ?? [],
       dispose: () => session.dispose(),
     };
   }

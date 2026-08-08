@@ -78,6 +78,10 @@ export const ProductAssetEvidenceSchema = z.object({
   /** Stable artifact id of the source/network response the asset came from. */
   sourceArtifactId: z.string().min(1).max(256),
   extractionMethod: ExtractionMethodSchema,
+  /** Round-8 (review P1): the verification pipeline that produced this
+   *  record ('image_verification_pipeline'), kept distinct from
+   *  extractionMethod (the candidate's DISCOVERY method). */
+  verificationMethod: z.string().nullish(),
   /** Retrieval timestamp (ISO-8601). */
   retrievedAt: z.string(),
   /** SHA-256 of the original fetched bytes (never mutated by transforms). */

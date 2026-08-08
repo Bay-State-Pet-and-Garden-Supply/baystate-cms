@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { initDb, getDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { createPiRun, getPiResult, getPiRun, insertPiResult, listPiComparisons, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, getPiResult, getPiRun, insertPiResult, listPiComparisons, setRunToolsJson, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
 import { seedDefaultApprovedPolicy, getActiveDefaultApprovedPolicy } from '../../db/repositories/pi-approved-policy-repo';
 import { replayPiRun } from '../../product-intelligence/run-service';
 import { assertReducingOverride, computePolicyConfigId } from '../../product-intelligence/policy';
@@ -405,5 +405,16 @@ describe('PI-10 replay modes', () => {
       status: 'completed',
     });
     await expect(replayPiRun(deep.id, { mode: 'deterministic' })).rejects.toThrow(/too deep/);
+  });
+
+  it('persists the session\'s effective tool versions/schema hashes on the run (round-8 P1)', () => {
+    const run = makeTerminalRun();
+    expect(getPiRun(run)!.toolsJson).toBeNull();
+    const tools = [
+      { name: 'verify_image_candidate', version: '2.0.0', schemaHash: 'a'.repeat(64) },
+      { name: 'search_upc', version: '1.2.0', schemaHash: 'b'.repeat(64) },
+    ];
+    setRunToolsJson(run, tools);
+    expect(JSON.parse(getPiRun(run)!.toolsJson!)).toEqual(tools);
   });
 });

@@ -124,6 +124,24 @@ function checkWorkspaceToolCategoryBudget(workspaceId: string, toolName: string)
   }
 }
 
+/** Round-8 (review P1): persist the session's effective tool versions/schema
+ *  hashes on the run row. The tools are only known once the session exists,
+ *  so this is a post-create UPDATE (not atomic with createPiRun); it is
+ *  best-effort and never breaks the run. Non-bun environments (vitest) no-op. */
+function persistRunTools(runId: string, toolVersions: Array<{ name: string; version: string | null; schemaHash: string }>): void {
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) return;
+    const repo = lazyRequire('../../db/repositories/product-intelligence-repo') as {
+      setRunToolsJson?: (runId: string, tools: unknown) => void;
+    };
+    repo.setRunToolsJson?.(runId, toolVersions);
+  } catch {
+    // Best-effort capture — never fail the run because telemetry could not
+    // be written.
+  }
+}
+
 export interface PiExecutorOptions {
   /**
    * Session factory. Defaults to the real Pi SDK factory; tests inject a fake
@@ -293,8 +311,14 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
           piVersion: handle.piVersion,
           extensionVersions: handle.extensionVersions,
           tools: handle.effectiveTools,
+          toolVersions: handle.toolVersions ?? [],
         },
       });
+
+      // Round-8 (review P1): capture the effective tool versions/schema
+      // hashes on the run row now that the session exists (the tools are not
+      // knowable at createPiRun time).
+      persistRunTools(runId, handle.toolVersions ?? []);
 
       // --- Session event mapping (tool calls, agent lifecycle) --------------
       // Known-tool set for unknown-tool marking (smoke finding D): the SDK

@@ -36,6 +36,8 @@ export interface SessionToolContext {
 
 export interface ResearchToolDefinition {
   name: string;
+  /** Adapter implementation version (bumped on behavior change). */
+  version: string;
   label: string;
   description: string;
   promptGuidelines: string[];
@@ -106,6 +108,7 @@ export class PiToolRegistry {
   private toToolDefinition(adapter: PiToolAdapter, ctx: SessionToolContext): ResearchToolDefinition {
     return {
       name: adapter.name,
+      version: adapter.version,
       label: adapter.name.replace(/_/g, ' '),
       description: adapter.description,
       promptGuidelines: adapter.promptGuidelines ?? [],

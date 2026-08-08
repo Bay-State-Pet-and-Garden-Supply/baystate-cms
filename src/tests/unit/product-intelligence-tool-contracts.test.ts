@@ -105,14 +105,19 @@ describe('compare_identity_signals', () => {
 });
 
 describe('check_source_priority', () => {
-  it('ranks official > supplier > retailer > unknown', async () => {
-    const official = await checkSourcePriority.execute({ url: 'https://www.stellachewys.com/p/1', officialDomains: ['stellachewys.com'] }, ctx);
-    expect(official.status).toBe('ok');
-    expect(okData(official, { tier: '' }).tier).toBe('official');
+  it('is non-authoritative: agent assertions never mint official/supplier tiers (round-8)', async () => {
+    // With no DB (pure vitest) the trusted brand-site registry is unavailable,
+    // and agent-supplied sourceKind/officialDomains are advisory only — they
+    // can never mint official/manufacturer authority.
+    const officialClaim = await checkSourcePriority.execute({ url: 'https://www.stellachewys.com/p/1', officialDomains: ['stellachewys.com'] }, ctx);
+    expect(officialClaim.status).toBe('ok');
+    expect(okData(officialClaim, { tier: '' }).tier).not.toBe('official');
+    expect(okData(officialClaim, { tier: '' }).tier).toBe('unknown');
+    expect((officialClaim as { evidence?: Array<{ kind: string }> }).evidence?.[0]?.kind).not.toBe('official_evidence');
 
-    const supplier = await checkSourcePriority.execute({ url: 'https://distributor.example.com/p/1', sourceKind: 'supplier' }, ctx);
-    expect(supplier.status).toBe('ok');
-    expect(okData(supplier, { tier: '' }).tier).toBe('supplier');
+    const supplierClaim = await checkSourcePriority.execute({ url: 'https://distributor.example.com/p/1', sourceKind: 'supplier' }, ctx);
+    expect(supplierClaim.status).toBe('ok');
+    expect(okData(supplierClaim, { tier: '' }).tier).not.toBe('supplier');
 
     const retailer = await checkSourcePriority.execute({ url: 'https://www.chewy.com/p/1' }, ctx);
     expect(retailer.status).toBe('ok');

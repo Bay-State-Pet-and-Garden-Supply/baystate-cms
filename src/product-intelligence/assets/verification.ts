@@ -426,12 +426,16 @@ export interface VerifyImageInput {
   declaredRightsEvidenceRef?: string | null;
   /** Durable evidence-row ids the server resolves into observations. */
   evidenceIds?: string[];
-  /** Round-6: server-authoritative asset-to-GTIN linkage. ONLY a caller that
+  /** Round-6/8: server-authoritative asset-to-GTIN linkage. ONLY a caller that
    *  resolved a durable asset record for THIS image (same run/URL) may supply
    *  this — it is the alternative to hash-bound OCR/decoder evidence for
    *  establishing the image's observed GTIN. The agent cannot supply it; the
-   *  tool adapter builds it server-side from durable asset rows. */
-  assetGtinLinkages?: Array<{ gtin: string; assetId?: string }>;
+   *  tool adapter builds it server-side from durable asset rows. Round-8: the
+   *  linkage is CONTENT-ADDRESSED — it authorizes only the exact bytes
+   *  (originalContentHash === currentImageHash) that the prior asset was
+   *  verified against; a mutable URL whose bytes changed can never re-qualify
+   *  the old GTIN. */
+  assetGtinLinkages?: Array<{ gtin: string; assetId?: string; originalContentHash: string | null }>;
   /** Agent-asserted packaging observations — recorded, never authoritative. */
   observed?: Partial<IdentityObservation>;
 }
@@ -552,7 +556,20 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
   // the exact bytes being inspected and (b) values covered by a
   // server-authoritative asset-to-GTIN linkage. Differing qualified values are
   // a GTIN conflict (never silently picks one).
-  const linkageGtinValues = new Set((input.assetGtinLinkages ?? []).map((linkage) => normalizeGtinDigits(linkage.gtin)));
+  // Round-8 (review P0): linkages are CONTENT-ADDRESSED — a linkage covers a
+  // value ONLY when its recorded originalContentHash equals the exact bytes
+  // being inspected. A prior exact asset authorizes the same BYTES, never
+  // whatever happens to live at the same URL later. One fact's hash can never
+  // authorize another fact's value.
+  const linkageCovers = (digits: string): boolean =>
+    (input.assetGtinLinkages ?? []).some(
+      (linkage) =>
+        normalizeGtinDigits(linkage.gtin) === digits &&
+        linkage.originalContentHash !== null &&
+        linkage.originalContentHash !== undefined &&
+        linkage.originalContentHash !== '' &&
+        linkage.originalContentHash === currentImageHash,
+    );
   const qualifiedGtinValues = new Set<string>();
   for (const fact of usableFacts.filter(isGtinObservationFact)) {
     const raw = fact.value && typeof fact.value === 'object' ? (fact.value as Record<string, unknown>).value : fact.value;
@@ -562,7 +579,7 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     const isImageDerived = method === 'image_ocr' || method === 'decoder';
     const byteBound =
       isImageDerived && !!fact.contentHash && currentImageHash !== '' && fact.contentHash === currentImageHash;
-    if (byteBound || linkageGtinValues.has(digits)) {
+    if (byteBound || linkageCovers(digits)) {
       qualifiedGtinValues.add(digits);
     }
   }
@@ -774,6 +791,7 @@ function baseRecord(
     sourcePath: input.sourcePath ?? null,
     sourceArtifactId: input.sourceArtifactId ?? `verify_image_candidate:${sha256Hex(input.url).slice(0, 24)}`,
     extractionMethod: input.extractionMethod ?? 'manual',
+    verificationMethod: 'image_verification_pipeline',
     retrievedAt,
     originalContentHash: decoded?.image?.contentHash ?? '',
     perceptualHash: decoded?.image?.perceptualHash ?? null,
@@ -800,6 +818,7 @@ function failRecord(input: VerifyImageInput, declaredSourceType: string, retriev
     sourcePath: input.sourcePath ?? null,
     sourceArtifactId: input.sourceArtifactId ?? `verify_image_candidate:${sha256Hex(input.url).slice(0, 24)}`,
     extractionMethod: input.extractionMethod ?? 'manual',
+    verificationMethod: 'image_verification_pipeline',
     retrievedAt,
     originalContentHash: '',
     perceptualHash: null,

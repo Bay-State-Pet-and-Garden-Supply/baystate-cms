@@ -558,7 +558,9 @@ describe('ladder contract adapter + helpers', () => {
     const snapshot: BrowserSnapshotFn = async () => ({
       url: 'https://browser.example.com/p/x',
       finalUrl: 'https://browser.example.com/p/x',
-      jsonLd: [{ '@type': 'Product', name: 'Browser Product 12oz', sku: 'BP-12', brand: 'Browser Co', gtin: '666666666666', offers: { price: '1' } }],
+      // Round-8: the leaf carries a canonical @id matching the page URL — the
+      // independent anchor the API payload propagates from (shared SKU BP-12).
+      jsonLd: [{ '@type': 'Product', '@id': 'https://browser.example.com/p/x', name: 'Browser Product 12oz', sku: 'BP-12', brand: 'Browser Co', gtin: '666666666666', offers: { price: '1' } }],
       embeddedProductData: [],
       imageCandidates: ['https://img.example.com/browser.jpg'],
       networkResponses: [
@@ -1064,17 +1066,19 @@ describe('ladder contract adapter + helpers', () => {
   });
 
   it('round-6 P0-3: the current-product API response sharing the primary identity DOES prove single-variant', async () => {
-    // Positive page-primary case: the leaf JSON-LD product (mainEntity) and
-    // the network current-product API response share the SAME identity
-    // (sku + gtin) — the API payload is the page's product, its declared
-    // single variant is affirmative browser proof, and the requested GTIN is
-    // on the page. Co-occurrence of identity marks the current product.
+    // Positive page-primary case: the leaf JSON-LD product carries a
+    // canonical @id matching the page URL (the independent round-8 anchor);
+    // the network current-product API response shares the SAME non-GTIN
+    // identity (sku CP-16) and PROPAGATES from the anchor — the API payload
+    // is the page's product, its declared single variant is affirmative
+    // browser proof, and the requested GTIN is on the page.
     const snapshot: BrowserSnapshotFn = async () => ({
       url: 'https://api-pos.example.com/p/x',
       finalUrl: 'https://api-pos.example.com/p/x',
       jsonLd: [
         {
           '@type': 'Product',
+          '@id': 'https://api-pos.example.com/p/x',
           name: 'Current Product 16oz',
           sku: 'CP-16',
           gtin: '666666666666',
@@ -1245,17 +1249,19 @@ describe('ladder contract adapter + helpers', () => {
     expect(result.identityStatus).toBe('exact_match');
   });
 
-  it('round-7 P0-3: repeated NON-GTIN sku co-occurrence marks the primary (GTIN excluded from the key)', async () => {
-    // Positive round-7 case (iv): the leaf JSON-LD product and the current-
-    // product API response share a non-GTIN sku (co-occurrence, GTIN removed
-    // from the key) — the API payload is primary, its single variant proves
-    // the requested GTIN's page is single-variant.
+  it('round-8 P0-3: repeated non-GTIN sku PROPAGATES an anchor (never creates one) — anchored leaf + API response proves single-variant', async () => {
+    // Round-7 positive case, updated for round-8: the leaf JSON-LD product
+    // and the current-product API response share a non-GTIN sku. Under
+    // round-8 the shared SKU alone must NOT create page-primary status — the
+    // leaf carries a canonical @id matching the page URL (the independent
+    // anchor), and the API payload PROPAGATES from it via the shared SKU.
     const snapshot: BrowserSnapshotFn = async () => ({
       url: 'https://sku-pos.example.com/p/z',
       finalUrl: 'https://sku-pos.example.com/p/z',
       jsonLd: [
         {
           '@type': 'Product',
+          '@id': 'https://sku-pos.example.com/p/z',
           name: 'Sku Product 12oz',
           sku: 'SK-12',
           gtin: '777777777777',
@@ -1289,6 +1295,179 @@ describe('ladder contract adapter + helpers', () => {
     );
     expect(layersUsed).toContain('browser');
     expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('round-8 P0-3: a recommendation repeated with the SAME sku cannot create page-primary status (no anchor, expected GTIN)', async () => {
+    // The reviewer's round-8 escape: the page's real product renders only as
+    // DOM/meta. Cross-sell Y appears TWICE with the SAME sku (REC-123) —
+    // embedded state + /api/recommendations — carrying the requested GTIN and
+    // one variant. Round-7's co-occurrence key (non-GTIN) would count REC-123
+    // twice and make Y primary. Round-8: co-occurrence only PROPAGATES an
+    // anchor; with no anchor and an expected GTIN, Y stays corroboration.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://same-sku.example.com/p/x',
+      finalUrl: 'https://same-sku.example.com/p/x',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Requested UPC Item',
+          sku: 'REC-123',
+          gtin: '888888888888',
+          variants: [{ id: 1, title: '1 ct' }],
+        },
+      ],
+      embeddedProductData: [
+        {
+          title: 'Requested UPC Item',
+          sku: 'REC-123',
+          gtin: '888888888888',
+          variants: [{ id: 1, title: '1 ct' }],
+        },
+      ],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result } = await runExtractionLadder(
+      'https://same-sku.example.com/p/x',
+      { gtin: '888888888888', name: 'Requested UPC Item' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body><h1>Requested UPC Item</h1></body></html>', 'https://same-sku.example.com/p/x'),
+        browser: { snapshot },
+      },
+    );
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityReasons.join(' ')).toMatch(/unproven|not exact|single-variant/i);
+  });
+
+  it('round-8 P0-3: a mainEntity anchor plus SKU propagation proves single-variant for the requested GTIN', async () => {
+    // Positive: the WebPage mainEntity anchors the leaf product; the current-
+    // product API payload shares its non-GTIN sku and PROPAGATES from the
+    // anchor. The requested GTIN + one variant then proves single-variant.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://anchor-prop.example.com/p/a',
+      finalUrl: 'https://anchor-prop.example.com/p/a',
+      jsonLd: [
+        {
+          '@type': 'ProductPage',
+          mainEntity: {
+            '@type': 'Product',
+            name: 'Anchor Product 8oz',
+            sku: 'AN-8',
+            gtin: '666666666666',
+            size: '8 oz',
+            offers: { price: '5.99' },
+          },
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://anchor-prop.example.com/api/products/current',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { product: { title: 'Anchor Product 8oz', sku: 'AN-8', gtin: '666666666666', variants: [{ id: 1, title: '8 oz' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://anchor-prop.example.com/p/a',
+      { gtin: '666666666666', name: 'Anchor Product 8oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://anchor-prop.example.com/p/a'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
+  it('round-8 P0-3: a same-GTIN recommendation with TWO variants does not force parent_product_only without an anchor', async () => {
+    // Contradiction re-scoping: an unrelated recommendation carrying the
+    // requested GTIN and declaring TWO variants must not force parent_page
+    // before page-primary linkage is computed. With no anchor the payload is
+    // not primary, so there is NO contradiction — the identity stays below
+    // exact (probable/unproven), never parent_product_only.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://no-ctr.example.com/p/x',
+      finalUrl: 'https://no-ctr.example.com/p/x',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Requested UPC Item',
+          sku: 'CT-2',
+          gtin: '888888888888',
+          variants: [{ id: 1, title: '8 oz' }, { id: 2, title: '32 oz' }],
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result } = await runExtractionLadder(
+      'https://no-ctr.example.com/p/x',
+      { gtin: '888888888888', name: 'Requested UPC Item' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://no-ctr.example.com/p/x'),
+        browser: { snapshot },
+      },
+    );
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).not.toBe('parent_product_only');
+    expect(result.identityReasons.join(' ')).toMatch(/unproven|not exact|single-variant/i);
+  });
+
+  it('round-8 P0-3: an ANCHORED primary with TWO variants still contradicts (parent_product_only)', async () => {
+    // Contradiction re-scoping positive: the canonical-URL-linked primary
+    // payload declares TWO variants — it is page-primary-qualified, so the
+    // parent_page contradiction fires as before.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://anchor-ctr.example.com/p/y',
+      finalUrl: 'https://anchor-ctr.example.com/p/y',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          '@id': 'https://anchor-ctr.example.com/p/y',
+          name: 'Anchored Product',
+          sku: 'AC-1',
+          gtin: '999999999999',
+          variants: [{ id: 1, title: '8 oz' }, { id: 2, title: '32 oz' }],
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://anchor-ctr.example.com/p/y',
+      { gtin: '999999999999', name: 'Anchored Product' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://anchor-ctr.example.com/p/y'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).toBe('parent_product_only');
   });
 
   it('escalates to the managed browser fallback with a domain-scoped provider', async () => {
@@ -1445,7 +1624,9 @@ describe('ladder contract adapter + helpers', () => {
       const snapshot: BrowserSnapshotFn = async () => ({
         url: 'https://settled.example.com/p/x',
         finalUrl: 'https://settled.example.com/p/x',
-        jsonLd: [{ '@type': 'Product', name: "Stella & Chewy's Chicken Broth 16oz", sku: 'SC-BROTH-16', gtin: '085000079585', offers: { price: '6.99' } }],
+        // Round-8: the leaf carries a canonical @id anchor; the embedded
+        // payload propagates via shared SKU SC-BROTH-16.
+        jsonLd: [{ '@type': 'Product', '@id': 'https://settled.example.com/p/x', name: "Stella & Chewy's Chicken Broth 16oz", sku: 'SC-BROTH-16', gtin: '085000079585', offers: { price: '6.99' } }],
         // Round-4 P1-2: rendered leaf JSON-LD is corroboration only — the
         // AFFIRMATIVE single-variant evidence is this embedded payload's
         // explicit variants array with exactly one entry.
@@ -1646,6 +1827,10 @@ describe('ladder contract adapter + helpers', () => {
       jsonLd: [
         {
           '@type': 'Product',
+          // Round-8: the browser-revealed product IS the page's current
+          // product (canonical @id anchor) — its >1 variants are a
+          // page-primary-qualified contradiction.
+          '@id': 'https://unknown.example.com/p/wormeze-4oz',
           name: 'Wormeze Feline Anthelmintic',
           gtin: '745801105447',
           variants: [

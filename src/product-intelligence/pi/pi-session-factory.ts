@@ -25,6 +25,43 @@ import { buildWorkflowTerminalTools } from '../workflow/terminal-tools';
 import { KNOWN_BUILTIN_TOOLS, TERMINAL_TOOLS } from '../contracts';
 import { buildApprovedResourceLoader } from './pi-resource-loader';
 import type { PiToolRegistry } from '../tools/registry';
+import { sha256Hex, canonicalJsonStringify } from '../../shared/stable-id';
+
+/** Round-8 (review P1): a captured research/terminal tool identity — name,
+ *  adapter version, and a stable hash of its TypeBox parameter schema. */
+export interface CapturedToolVersion {
+  name: string;
+  version: string | null;
+  schemaHash: string;
+}
+
+/**
+ * Round-8 (review P1): capture { name, version, schemaHash } for the
+ * session's effective custom tools (workflow terminals + granted research
+ * tools). schemaHash is the SHA-256 of the canonical (stable-key) JSON of the
+ * TypeBox parameters schema — a contract change shows up as a hash change for
+ * replay/provenance purposes. Pure helper (no SDK/DB), unit-testable.
+ */
+export function captureToolVersions(
+  tools: Array<{ name: string; version?: string | null; parameters: unknown }>,
+): CapturedToolVersion[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    version: tool.version ?? null,
+    schemaHash: schemaHashOf(tool.parameters),
+  }));
+}
+
+function schemaHashOf(parameters: unknown): string {
+  try {
+    return sha256Hex(canonicalJsonStringify(parameters ?? {}));
+  } catch {
+    // TypeBox schemas are plain JSON-able objects; if canonical stringify
+    // ever fails, fall back to stable-key JSON.stringify (never throw).
+    const stable = JSON.stringify(parameters ?? {}, Object.keys((parameters ?? {}) as object).sort());
+    return sha256Hex(stable);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Minimal session surface (SDK session cast to this in the real factory;
@@ -55,6 +92,9 @@ export interface PiSessionHandle {
   extensionVersions: Array<{ name: string; version?: string | null }>;
   /** Effective tool names exposed by the session (allowlist + terminal tools). */
   effectiveTools: string[];
+  /** Round-8 (review P1): captured { name, version, schemaHash } for every
+   *  effective custom (terminal + research) tool in the session. */
+  toolVersions: CapturedToolVersion[];
   /** Dispose the session. Safe to call multiple times. */
   dispose(): void;
 }
@@ -181,6 +221,10 @@ export class PiSdkSessionFactory implements PiSessionFactory {
     });
 
     let disposed = false;
+    const toolVersions = captureToolVersions([
+      ...workflowTerminalTools,
+      ...(researchTools && researchTools.length > 0 ? researchTools : []),
+    ]);
     const handle: PiSessionHandle = {
       session: session as unknown as PiSessionLike,
       piVersion: sdk.VERSION ?? null,
@@ -189,6 +233,7 @@ export class PiSdkSessionFactory implements PiSessionFactory {
         version: null,
       })),
       effectiveTools: [...allowedTools, ...customToolNames],
+      toolVersions,
       dispose() {
         if (disposed) return;
         disposed = true;

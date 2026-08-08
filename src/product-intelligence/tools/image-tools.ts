@@ -21,12 +21,13 @@ import { discoverCandidates } from '../assets/discovery';
 import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation, ProductAssetEvidence } from '../assets/schema';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
+import { sha256Hex } from '../../shared/stable-id';
 import { boundedString } from './registry';
 import type { EvidenceResolver, ResolvedEvidenceFact, ReuseGrantRecord, SourceTypeProvenance, VerifiedAgainstSnapshot } from '../assets/verification';
 
 export const verifyImageCandidateTool: PiToolAdapter = {
   name: 'verify_image_candidate',
-  version: '1.0.0',
+  version: '2.0.0',
   description:
     'Verify a candidate product image against the expected product: quarantine-fetch through the policy gateway, decode and reject corrupt content, record content + perceptual hashes, compare observed packaging evidence (GTIN, name, net content, pack count, flavor, formula, variant), resolve rights from the declared source and basis, and compute the deterministic commerce-approved flag. Never returns image binaries. Pass observed fields from extract_packaging_evidence when available.',
   parameters: Type.Object({
@@ -125,15 +126,22 @@ export const verifyImageCandidateTool: PiToolAdapter = {
     }
 
     try {
+      // Round-8 (review P1): discovery provenance (sourcePath/sourceArtifactId/
+      // extractionMethod) comes from the SERVER-CREATED candidate row — never
+      // from agent parameters. The agent's sourcePath/sourceArtifactId/
+      // extractionMethod params are non-authoritative hints that are dropped;
+      // the verification pipeline method is recorded separately on the record
+      // (verificationMethod = 'image_verification_pipeline') while the asset's
+      // extractionMethod stays the candidate's discovery method.
       const record = await verifyImageCandidate(
         {
           url,
           // Round-7: provenance is server-derived from the candidate record —
           // the discovering source's URL, never the agent's sourcePageUrl.
           sourcePageUrl: discoveringSource.url ?? null,
-          sourcePath: params.sourcePath ? String(params.sourcePath) : null,
-          sourceArtifactId: params.sourceArtifactId ? String(params.sourceArtifactId) : undefined,
-          extractionMethod: params.extractionMethod as ExtractionMethod | undefined,
+          sourcePath: candidate.sourcePath ?? null,
+          sourceArtifactId: candidate.sourceArtifactId ?? undefined,
+          extractionMethod: (candidate.extractionMethod as ExtractionMethod | undefined) ?? undefined,
           candidateId,
           runIdentity,
           evidenceIds: Array.isArray(params.evidenceIds) ? (params.evidenceIds as unknown[]).map((id) => String(id)) : undefined,
@@ -191,7 +199,7 @@ export const verifyImageCandidateTool: PiToolAdapter = {
 
 export const discoverImageCandidatesTool: PiToolAdapter = {
   name: 'discover_image_candidates',
-  version: '1.0.0',
+  version: '2.0.0',
   description:
     'Discover product image candidates from a structured artifact: JSON-LD image values, Shopify or WooCommerce embedded variant-image mappings, or a #29-style network-capture JSON array. Returns normalized candidates with source page, exact source path, artifact id, extraction method, and variant mapping. Network-free.',
   parameters: Type.Object({
@@ -210,6 +218,17 @@ export const discoverImageCandidatesTool: PiToolAdapter = {
     const content = String(params.content ?? '');
     const sourceType = String(params.sourceType ?? '') as 'json_ld' | 'shopify' | 'woocommerce' | 'network_capture';
     const retrievedAt = params.retrievedAt ? String(params.retrievedAt) : undefined;
+    // Round-8 (review P0): the candidate -> discovering-page relationship must
+    // be ATTESTED to a server-retained artifact. The model-supplied content is
+    // accepted ONLY when its SHA-256 equals a durable evidence row's
+    // contentHash for this page URL — fabricated content supplied against a
+    // real page URL can never mint a durable candidate record (and thus never
+    // selects a rights tier).
+    if (!attestContentToPage(ctx.runId, pageUrl, sha256Hex(content))) {
+      return policyDenied(
+        `content is not attested to a server-retained artifact for page ${pageUrl} (sha256 mismatch — run extract_product_page first)`,
+      );
+    }
     try {
       const candidates: DiscoveredImageCandidate[] = discoverCandidates(sourceType, content, pageUrl, retrievedAt);
       if (candidates.length === 0) {
@@ -449,6 +468,7 @@ let _assetStore:
         sourceUrl: string;
         exactProductMatch: number | boolean;
         verifiedAgainstJson: string | null;
+        originalContentHash: string | null;
       }>;
       // Round-7: server-created image-candidate records.
       insertPiImageCandidate: (input: Record<string, unknown>) => LazyCandidateRow;
@@ -497,12 +517,56 @@ function domainOfUrl(url: string): string {
  *  is the alternative to hash-bound OCR/decoder evidence for establishing
  *  the image's observed GTIN. The agent cannot supply this; it is derived
  *  from durable server state only. */
-function loadAssetGtinLinkages(runId: string, url: string): Array<{ gtin: string; assetId?: string }> {
+/** Round-8 (review P0): the model-supplied discovery artifact is only
+ *  authoritative when it is ATTESTED to a server-retained page fetch. The
+ *  server retains page-bytes hashes in durable evidence metadata (extraction
+ *  field entries carry metadata.contentHash = sha256 of the fetched page);
+ *  fabricated content can never match a hash the server actually recorded.
+ *  No DB / no matching row -> fail closed (never persist a candidate). */
+function attestContentToPage(runId: string, pageUrl: string, contentHash: string): boolean {
+  const repo = loadEvidenceRepo();
+  if (!repo) return false;
+  try {
+    const sources = repo.listPiSources(runId);
+    const sourceUrlById = new Map<string, string>();
+    for (const source of sources) {
+      sourceUrlById.set(source.id, normalizeUrlForAttestation(source.url));
+    }
+    const expectedUrl = normalizeUrlForAttestation(pageUrl);
+    const rows = repo.listPiEvidence(runId);
+    for (const row of rows) {
+      if (!row.metadataJson) continue;
+      let metadata: { contentHash?: unknown };
+      try {
+        metadata = JSON.parse(row.metadataJson) as { contentHash?: unknown };
+      } catch {
+        continue;
+      }
+      if (typeof metadata.contentHash !== 'string' || metadata.contentHash !== contentHash) continue;
+      const sourceUrl = sourceUrlById.get(row.sourceId);
+      if (sourceUrl !== undefined && sourceUrl === expectedUrl) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeUrlForAttestation(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname.replace(/^www\./, '').toLowerCase()}${parsed.pathname.replace(/\/$/, '')}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
+function loadAssetGtinLinkages(runId: string, url: string): Array<{ gtin: string; assetId?: string; originalContentHash: string | null }> {
   const store = loadAssetStore();
   if (!store) return [];
   try {
     const rows = store.listPiAssetsByRun(runId);
-    const out: Array<{ gtin: string; assetId?: string }> = [];
+    const out: Array<{ gtin: string; assetId?: string; originalContentHash: string | null }> = [];
     for (const row of rows) {
       if (row.sourceUrl !== url) continue;
       if (!row.exactProductMatch) continue;
@@ -510,7 +574,7 @@ function loadAssetGtinLinkages(runId: string, url: string): Array<{ gtin: string
       try {
         const snapshot = JSON.parse(row.verifiedAgainstJson) as { gtin?: unknown };
         const gtin = snapshot.gtin !== undefined && snapshot.gtin !== null ? String(snapshot.gtin).replace(/\D/g, '') : null;
-        if (gtin && gtin.length >= 8) out.push({ gtin, assetId: row.id });
+        if (gtin && gtin.length >= 8) out.push({ gtin, assetId: row.id, originalContentHash: row.originalContentHash ?? null });
       } catch {
         // malformed snapshot rows never contribute a linkage
       }
@@ -541,38 +605,36 @@ function loadRunIdentity(runId: string): VerifiedAgainstSnapshot | null {
 }
 
 /** Round-4/5 (review P0/P1): resolve the durable source-kind for an asset
- *  URL through its full durable provenance chain, in order:
- *   (a) the source row for the image/CDN URL itself (exact match);
- *   (b) the source row for the DISCOVERING PAGE (candidate sourcePageUrl) —
- *       a manufacturer/supplier product page proves the tier the image
- *       arrived through, without requiring a typed row for the CDN URL;
- *   (c) the source rows of the cited field-level evidence (dual namespace:
- *       row UUID or agent-visible toolEvidenceId) — OCR/structured evidence
- *       persists with its own source row;
- *   (d) null ('unknown' — fail closed, rights stay restricted).
+ *  URL through its durable provenance chain. Authority order (round-8):
+ *   (a) the SERVER-CREATED candidate record's discovering source — when a
+ *       candidateId is present it is authoritative and NEVER outranked by an
+ *       image-URL source row (no sticky-tier override); an existing candidate
+ *       whose discovering source is untiered fails closed ('unknown');
+ *   (b) only when NO candidate provenance exists: the exact image/CDN URL
+ *       source row.
  * Agent-declared source types never select a reuse grant — this resolver is
  * the only source of sourceType. */
 function loadSourceTypeResolver(runId: string): (url: string, provenance: SourceTypeProvenance) => string | null {
   return (url: string, provenance: SourceTypeProvenance) => {
     const sourceList = loadSourceRows(runId);
     if (sourceList.length === 0) return null;
-    // (a) exact image/CDN URL source row.
-    const exact = sourceList.find((source) => source.url === url)?.sourceType ?? null;
-    if (exact) return exact;
-    // (b) Round-7: the SERVER-CREATED candidate record's discovering source.
-    // The sourcePageUrl and evidence rows the caller supplies are display/
-    // observation inputs only — they NEVER select the tier. Only the durable
-    // candidate -> discovering-source relationship (created by
-    // discover_image_candidates) is authoritative.
+    // (a) Round-7/8: the SERVER-CREATED candidate record's discovering source
+    // is the authority when a candidateId exists. The sourcePageUrl and
+    // evidence rows the caller supplies are display/observation inputs only.
     if (provenance.candidateId) {
       const store = loadAssetStore();
       const candidate = store?.getPiImageCandidate?.(provenance.candidateId);
-      if (candidate?.discoveringSourceId) {
-        const tier = sourceList.find((source) => source.id === candidate.discoveringSourceId)?.sourceType ?? null;
-        if (tier) return tier;
+      if (!candidate?.discoveringSourceId) {
+        // Candidate exists but its provenance is unresolved — fail closed.
+        return null;
       }
+      return (
+        sourceList.find((source) => source.id === candidate.discoveringSourceId)?.sourceType ??
+        null
+      );
     }
-    return null;
+    // (b) No candidate provenance: exact image/CDN URL source row.
+    return sourceList.find((source) => source.url === url)?.sourceType ?? null;
   };
 }
 
@@ -607,7 +669,12 @@ function loadSourceRows(runId: string): Array<{ id: string; url: string; sourceT
 /** Persist the server-verified record as a durable asset row; returns the
  *  row id (the id the terminal bundle cites in verifiedAssetIds) or null
  *  when no DB is available. Only usable records are persisted (invalid
- *  images are never primary material and carry no id to cite). */
+ *  images are never primary material and carry no id to cite).
+ *  Round-8 (review P1): the image-URL source row below is AUDIT ONLY — the
+ *  resolved sourceType/rights relationship comes from the candidate's
+ *  discovering source (record.sourceType is candidate-derived after the
+ *  resolver reorder), never from whatever tier this audit row happens to
+ *  carry; the tier-resolver ignores it whenever a candidate exists. */
 function persistVerifiedAsset(runId: string, record: ProductAssetEvidence): string | null {
   const store = loadAssetStore();
   if (!store) return null;

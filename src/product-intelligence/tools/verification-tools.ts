@@ -9,11 +9,14 @@
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/20
  */
 import { Type } from 'typebox';
+import { createRequire } from 'node:module';
 import { verifyCandidate, type VerificationContext } from '../../onboarding/page-verifier';
 import { defaultPolicyGateway } from '../policy';
 import type { PiToolAdapter, PiToolContext, PiToolResult } from './contract';
 import { errorResult, evidenceId, noResult, okResult, policyDenied } from './contract';
 import { boundedString } from './registry';
+
+const lazyRequire = createRequire(import.meta.url);
 
 export const verifyCandidatePage: PiToolAdapter = {
   name: 'verify_candidate_page',
@@ -161,11 +164,40 @@ export const compareIdentitySignals: PiToolAdapter = {
 
 const KNOWN_RETAILER_DOMAINS = ['chewy.com', 'amazon.com', 'walmart.com', 'target.com', 'tractorsupply.com', 'acehardware.com', 'petco.com', 'petsmart.com', 'agway.com', 'tscstores.com'];
 
+/** Round-8 (review P0): official/manufacturer/supplier authority comes ONLY
+ *  from the CMS-managed brand-site registry — never from agent-supplied
+ *  sourceKind or officialDomains. The lookup is lazy (createRequire) so this
+ *  module stays importable without bun:sqlite (vitest); with no DB the result
+ *  fails closed to 'unknown' (the trusted registry is the standing wiring
+ *  dependency for manufacturer-tier authority). */
+function trustedOfficialDomain(domain: string): { official: boolean; reason: string } {
+  try {
+    const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };
+    if (!conn.isDbInitialized?.()) {
+      return { official: false, reason: 'trusted registry unavailable (no database)' };
+    }
+    const repo = lazyRequire('../../db/repositories/brand-site-repo') as {
+      listAllBrandSites: () => Array<{ domain: string }>;
+    };
+    const sites = repo.listAllBrandSites();
+    const official = sites.some((site) => {
+      const siteDomain = String(site.domain ?? '').replace(/^www\./, '').toLowerCase();
+      return siteDomain !== '' && (domain === siteDomain || domain.endsWith(`.${siteDomain}`));
+    });
+    return {
+      official,
+      reason: official ? 'domain is in the CMS-managed brand-site registry' : 'domain is not in the trusted brand-site registry',
+    };
+  } catch {
+    return { official: false, reason: 'trusted registry unavailable (lookup failed)' };
+  }
+}
+
 export const checkSourcePriority: PiToolAdapter = {
   name: 'check_source_priority',
   version: '1.0.0',
   description:
-    'Rank a source by authority: official manufacturer domains and supplier/distributor sources outrank retailer corroboration; unknown domains are lowest. Returns the priority tier and reasoning.',
+    'Rank a source by authority: only domains in the CMS-managed brand-site registry are official; known retailer domains are retailer corroboration; everything else is unknown. Agent-supplied sourceKind/officialDomains are NEVER authoritative (round-8: they cannot mint manufacturer/supplier authority). Advisory only — the result cannot mint durable source tiers.',
   parameters: Type.Object({
     url: boundedString(512, 'Source URL'),
     officialDomains: Type.Optional(Type.Array(boundedString(256, 'Official domain'), { maxItems: 10 })),
@@ -173,38 +205,32 @@ export const checkSourcePriority: PiToolAdapter = {
   }),
   async execute(params, _ctx: PiToolContext): Promise<PiToolResult> {
     const url = String(params.url ?? '');
-    let domain = '';
+    let domain: string;
     try {
       domain = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
     } catch {
       return noResult(`Invalid URL: ${url.slice(0, 80)}`);
     }
-    const official = (params.officialDomains as string[] | undefined) ?? [];
-    const officialNorm = official.map((d) => d.replace(/^www\./, '').toLowerCase());
-    const isOfficial = officialNorm.some((d) => domain === d || domain.endsWith(`.${d}`));
-    const kind = params.sourceKind ? String(params.sourceKind) : 'other';
-    const isRetailer = KNOWN_RETAILER_DOMAINS.includes(domain) || kind === 'retailer';
+    // Round-8: agent-asserted source kind and official domains are recorded as
+    // advisory hints only — they never determine the tier or the evidence kind.
+    const agentKind = params.sourceKind ? String(params.sourceKind) : 'other';
+    const isRetailer = KNOWN_RETAILER_DOMAINS.includes(domain);
+    const registry = trustedOfficialDomain(domain);
 
     let tier: string;
     let reason: string;
-    if (isOfficial || kind === 'manufacturer') {
+    if (registry.official) {
       tier = 'official';
-      reason = 'official manufacturer domain or source kind';
-    } else if (kind === 'supplier' || kind === 'distributor') {
-      tier = 'supplier';
-      reason = 'supplier/distributor source kind';
-    } else if (kind === 'registry' || kind === 'catalog') {
-      tier = 'registry';
-      reason = 'structured registry/catalog source kind';
+      reason = registry.reason;
     } else if (isRetailer) {
       tier = 'retailer';
       reason = 'known retailer corroboration';
     } else {
       tier = 'unknown';
-      reason = 'domain is not official and source kind is unknown';
+      reason = `${registry.reason}; agent-declared kind '${agentKind}' is not authoritative`;
     }
     return okResult(
-      { url, domain, tier, reason, isOfficial, isRetailer },
+      { url, domain, tier, reason, isOfficial: registry.official, isRetailer, agentKind },
       [{ id: evidenceId('check_source_priority', url), kind: tier === 'official' ? 'official_evidence' : 'search_lead', url, domain, method: 'source_priority_rank' }],
     );
   },

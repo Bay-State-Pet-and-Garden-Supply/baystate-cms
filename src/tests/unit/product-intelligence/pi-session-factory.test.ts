@@ -13,11 +13,36 @@ import {
   PiSdkSessionFactory,
   PiSessionError,
   captureSdkVersion,
+  captureToolVersions,
   effectiveToolNames,
   validateToolAllowlist,
 } from '../../../product-intelligence/pi/pi-session-factory';
 import { TERMINAL_TOOLS, WORKFLOW_SUBMISSION_TOOL_NAME } from '../../../product-intelligence/contracts';
 import { TEST_INPUT, testContext, testPolicy } from './test-helpers';
+
+describe('tool version capture (round-8 P1)', () => {
+  it('captures { name, version, schemaHash } per effective tool with stable hashes', () => {
+    const tools = [
+      { name: 'search_upc', version: '1.2.0', parameters: { type: 'object', properties: { gtin: { type: 'string' } } } },
+      { name: 'verify_image_candidate', version: '2.0.0', parameters: { type: 'object', properties: { url: { type: 'string' } } } },
+    ];
+    const captured = captureToolVersions(tools);
+    expect(captured).toHaveLength(2);
+    expect(captured[0]).toMatchObject({ name: 'search_upc', version: '1.2.0' });
+    expect(captured[0].schemaHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(captured[1].schemaHash).not.toBe(captured[0].schemaHash);
+    // Stable: identical parameters produce the same hash regardless of key order.
+    const again = captureToolVersions([{ name: 'search_upc', version: '1.2.0', parameters: { properties: { gtin: { type: 'string' } }, type: 'object' } }]);
+    expect(again[0].schemaHash).toBe(captured[0].schemaHash);
+  });
+
+  it('treats missing versions as null and different schemas as different hashes', () => {
+    const a = captureToolVersions([{ name: 'submit_product_research_bundle', parameters: { type: 'object' } }]);
+    expect(a[0].version).toBeNull();
+    const b = captureToolVersions([{ name: 'submit_product_research_bundle', parameters: { type: 'object', properties: { x: { type: 'string' } } } }]);
+    expect(b[0].schemaHash).not.toBe(a[0].schemaHash);
+  });
+});
 
 describe('tool allowlisting (pure functions)', () => {
   it('accepts known read-only tools', () => {

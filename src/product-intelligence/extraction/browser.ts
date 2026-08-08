@@ -181,12 +181,13 @@ export function evidenceFromProductPayload(
   // to it may contradict — an unrelated recommended/product payload with
   // multiple variants neither proves nor contradicts. Page-level signals
   // (DOM variant selectors) remain the preferred contradiction source.
-  const linkedToExpected = (): boolean => {
-    if (!opts?.expectedGtin) return true; // no entity context: legacy behavior
-    const expectedDigits = String(opts.expectedGtin).replace(/\D/g, '');
-    return gtin !== null && gtin.replace(/\D/g, '') === expectedDigits;
-  };
-  if (Array.isArray(product.variants) && product.variants.length > 1 && linkedToExpected()) {
+  // Round-8 P0-3: with an expected entity known, the contradiction is DEFERRED
+  // to the final page-primary-qualified contribution pass in
+  // evidenceFromBrowserSnapshot — a payload that merely carries the requested
+  // GTIN (e.g. a recommendation) must not force parent_page before the
+  // page-primary linkage is computed. Without an entity reference, keep the
+  // legacy unscoped emission for direct callers (managed fallback).
+  if (!opts?.expectedGtin && Array.isArray(product.variants) && product.variants.length > 1) {
     if (!out.variantSignals.some((signal) => signal.kind === 'parent_page')) {
       out.variantSignals.push({ kind: 'parent_page' });
     }
@@ -254,19 +255,27 @@ function isProductType(payload: Record<string, unknown>): boolean {
 }
 
 /**
- * Round-6 P0-3: server-established identity ids of the page's PRIMARY/CURRENT
+ * Round-6/7 P0-3: server-established identity ids of the page's PRIMARY/CURRENT
  * product entity, derived ONLY from page-level markers:
  *   - the canonical mainEntity of a WebPage/ItemPage/ProductPage node;
  *   - a product payload whose url/@id equals the canonical page URL;
- *   - identity CO-OCCURRENCE: a sku/id declared by two or more product-like
- *     payloads (e.g. the leaf JSON-LD product AND its current-product API
- *     response) is the page's current product. A one-off recommendation or
- *     cross-sell payload appears once and never becomes primary.
+ *   - identity co-occurrence: a non-GTIN stable id (sku/productId/handle)
+ *     declared by two or more product-like payloads.
+ *
+ * Round-8 P0-3 (ANCHOR-PROPAGATION ONLY): co-occurrence may only PROPAGATE an
+ * independent anchor, never create one. With no strong anchor (mainEntity /
+ * canonical-URL match) AND an expected GTIN present, repeated non-GTIN
+ * identifiers NEVER create page-primary status — a recommendation repeated
+ * across payloads (same sku) stays corroboration, because the algorithm cannot
+ * distinguish a current-product API repeating the SKU from a recommendations
+ * API repeating it. Without an expected entity, the legacy co-occurrence
+ * fallback remains for callers that have no identity reference.
+ *
  * GTIN equality is intentionally NOT a primary marker: a recommendation
  * payload carrying the requested UPC must never become "the page's product"
  * merely because it shares the GTIN.
  */
-function pagePrimaryEntityIds(snapshot: BrowserSnapshot, canonicalUrl: string): string[] {
+function pagePrimaryEntityIds(snapshot: BrowserSnapshot, canonicalUrl: string, expectedGtin: string | null): string[] {
   const strongIds: string[] = [];
   const addIds = (payload: Record<string, unknown>): void => {
     strongIds.push(...identityIdsOf(payload));
@@ -306,12 +315,37 @@ function pagePrimaryEntityIds(snapshot: BrowserSnapshot, canonicalUrl: string): 
     const product = findProductLikeStrict(net.jsonBody);
     if (product) collectProduct(product);
   }
-  if (strongIds.length > 0) return strongIds;
-  // Identity co-occurrence fallback: a NON-GTIN stable id (sku/productId/
-  // handle/canonical @id) declared by >= 2 payloads is the page's current
-  // product (its leaf JSON-LD plus its API response). GTINs are excluded
-  // from the key entirely (round-7 P0-3): a recommendation carrying the
-  // requested UPC must never become primary by repetition.
+  if (strongIds.length > 0) {
+    // Round-8: the anchor's NON-GTIN identity ids expand to other product-like
+    // payloads sharing them (leaf JSON-LD product + its current-product API
+    // response). GTINs never propagate page-primary status — identity evidence
+    // is not page-context evidence. When the anchor carries no non-GTIN ids,
+    // nothing propagates (the anchor ids themselves remain primary).
+    const anchorNonGtin = new Set<string>();
+    for (const id of strongIds) {
+      if (!/^\d{8,14}$/.test(id)) anchorNonGtin.add(id.toLowerCase());
+    }
+    if (anchorNonGtin.size > 0) {
+      const propagated: string[] = [...strongIds];
+      for (const payload of productLike) {
+        if (payloadSharesAnchor(payload, anchorNonGtin)) {
+          for (const id of identityIdsOf(payload)) {
+            if (!propagated.includes(id)) propagated.push(id);
+          }
+        }
+      }
+      return propagated;
+    }
+    return strongIds;
+  }
+  if (expectedGtin) {
+    // Round-8 P0-3: repeated non-GTIN identifiers must never CREATE
+    // page-primary status when an expected GTIN is being sought — a
+    // recommendation repeated across payloads stays corroboration.
+    return [];
+  }
+  // Legacy (no expected entity): repeated non-GTIN identity still marks the
+  // page's current product for callers without an entity reference.
   const occurrences = new Map<string, number>();
   for (const payload of productLike) {
     for (const id of nonGtinIdentityIdsOf(payload)) {
@@ -324,6 +358,14 @@ function pagePrimaryEntityIds(snapshot: BrowserSnapshot, canonicalUrl: string): 
     if (count >= 2) repeated.push(key);
   }
   return repeated;
+}
+
+/** True when a product-like payload shares any of the anchor's non-GTIN ids. */
+function payloadSharesAnchor(payload: Record<string, unknown>, anchorNonGtin: ReadonlySet<string>): boolean {
+  for (const id of nonGtinIdentityIdsOf(payload)) {
+    if (anchorNonGtin.has(id.toLowerCase())) return true;
+  }
+  return false;
 }
 
 /** True when a contribution's identity (gtin/sku/id) matches the page-primary id set. */
@@ -382,7 +424,7 @@ export function evidenceFromBrowserSnapshot(
   // evidence, not page-context evidence — a recommendation payload carrying
   // the requested GTIN must not prove the primary product is single-variant.
   out.stats ??= { productLikeCount: 0 };
-  out.pagePrimaryIds ??= pagePrimaryEntityIds(snapshot, normalizeCanonicalUrl(snapshot.finalUrl || snapshot.url));
+  out.pagePrimaryIds ??= pagePrimaryEntityIds(snapshot, normalizeCanonicalUrl(snapshot.finalUrl || snapshot.url), expected?.gtin ?? null);
   for (const jsonLd of snapshot.jsonLd) {
     evidenceFromProductPayload(jsonLd, 'json_ld', 'browser JSON-LD', out, { expectedGtin: expected?.gtin ?? null });
     methodsUsed.push('json_ld');
@@ -436,6 +478,12 @@ export function evidenceFromBrowserSnapshot(
   // a cross-sell. Primary/current-page identity requires an independent
   // page-context marker (mainEntity, canonical @id/url, platform current-
   // product id, selected-child state, or repeated NON-GTIN stable identity).
+  // Round-8 P0-3: the repeated non-GTIN identity path only PROPAGATES an
+  // independent anchor (see pagePrimaryEntityIds); with an expected GTIN and
+  // no anchor, no payload is primary and repeated recommendations stay
+  // corroboration. Both the positive (single-variant proof) and the
+  // CONTRADICTION (parent_page) signals are computed from this same final
+  // page-primary-qualified contribution set.
   const primaryIds = out.pagePrimaryIds ?? [];
   const totalProductLike = out.stats?.productLikeCount ?? contributions.length;
   const linked = (contribution: VariantSetContribution): boolean => {
@@ -457,7 +505,13 @@ export function evidenceFromBrowserSnapshot(
   for (const contribution of contributions) {
     if (!linked(contribution)) continue;
     if (contribution.variantCount === 1) payloadSingle = true;
-    else if (contribution.variantCount > 1) payloadMultiple = true;
+    else if (contribution.variantCount > 1) {
+      payloadMultiple = true;
+      // Round-8 P0-3: only a page-primary-qualified payload may contradict.
+      if (!out.variantSignals.some((signal) => signal.kind === 'parent_page')) {
+        out.variantSignals.push({ kind: 'parent_page' });
+      }
+    }
   }
   const single = payloadSingle || domSingle;
   const multiple = payloadMultiple || domMultiple;

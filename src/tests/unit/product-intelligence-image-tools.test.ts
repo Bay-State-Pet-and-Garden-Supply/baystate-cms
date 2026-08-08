@@ -16,8 +16,10 @@ import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { upsertReusePolicy } from '../../db/repositories/pi-reuse-policy-repo';
-import { createPiRun, insertPiEvidence, insertPiImageCandidate, insertPiSource, listPiImageCandidatesByRun, listPiSources, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { createPiRun, insertPiAsset, insertPiEvidence, insertPiImageCandidate, insertPiSource, listPiAssetsByRun, listPiImageCandidatesByRun, listPiSources, transitionPiRunStatus } from '../../db/repositories/product-intelligence-repo';
+import { upsertBrandSite } from '../../db/repositories/brand-site-repo';
 import { defaultToolRegistry } from '../../product-intelligence/tools';
+import { verifyImageCandidateTool, discoverImageCandidatesTool } from '../../product-intelligence/tools/image-tools';
 import { PolicyGateway } from '../../product-intelligence/policy/policy-gateway';
 import { testPolicy } from './product-intelligence/test-helpers';
 
@@ -86,6 +88,22 @@ describe('PI-6 image tools', () => {
     const html = `<script>var Shopify = Shopify || {};
 Shopify.ProductVariants = [{"id":123,"title":"16 oz","option1":"16 oz","image_id":456}];
 Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</script>`;
+    // Round-8 (review P0): the artifact must be ATTESTED to a server-retained
+    // page fetch — seed the durable evidence row carrying the page-bytes hash.
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: 'https://shop.example.com/products/stella',
+      domain: 'shop.example.com',
+      sourceType: 'other',
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource.id,
+      targetField: 'title',
+      value: 'Stella Chicken Broth 16 oz',
+      extractionMethod: 'json_ld',
+      metadata: { contentHash: createHash('sha256').update(html).digest('hex') },
+    });
     const result = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('discover_image_candidates')!,
       { pageUrl: 'https://shop.example.com/products/stella', content: html, sourceType: 'shopify' },
@@ -497,10 +515,26 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       terms: 'vendor license',
     });
     // Discover through the real tool: the server creates the candidate record
-    // and binds it to the page source (by page URL).
+    // and binds it to the page source (by page URL). Round-8: the artifact
+    // must be ATTESTED to a server-retained page fetch (the durable evidence
+    // row carries the page-bytes hash the tool now verifies against).
     const html = `<script>var Shopify = Shopify || {};
 Shopify.ProductVariants = [{"id":123,"title":"16 oz","option1":"16 oz","image_id":456}];
 Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</script>`;
+    const attestationSource = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/stella-broth-16oz',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: attestationSource.id,
+      targetField: 'title',
+      value: 'Stella Chicken Broth 16 oz',
+      extractionMethod: 'json_ld',
+      metadata: { contentHash: createHash('sha256').update(html).digest('hex') },
+    });
     const discovered = await defaultToolRegistry.dispatch(
       defaultToolRegistry.get('discover_image_candidates')!,
       { pageUrl: 'https://brand.example.com/p/stella-broth-16oz', content: html, sourceType: 'shopify' },
@@ -686,6 +720,272 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
     );
     expect(result.status).toBe('error');
     expect((result as { message: string }).message).toContain('schema');
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('refuses fabricated content against a real page (round-8 attestation gate)', async () => {
+    const run = runningRun();
+    const pageUrl = 'https://brand.example.com/p/stella-broth-16oz';
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: pageUrl,
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    // The server retains the REAL page-bytes hash in durable evidence.
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource.id,
+      targetField: 'title',
+      value: 'Stella Chicken Broth 16 oz',
+      extractionMethod: 'json_ld',
+      metadata: { contentHash: 'a'.repeat(64) },
+    });
+    const candidatesBefore = listPiImageCandidatesByRun(run.id).length;
+    const sourcesBefore = listPiSources(run.id).length;
+    // Fabricated content (its sha256 does not match the retained hash) cannot
+    // mint a durable candidate bound to the manufacturer page.
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('discover_image_candidates')!,
+      { pageUrl, content: '<script>fabricated image B</script>', sourceType: 'shopify' },
+      toolCtx(run.id),
+    );
+    expect(result.status).toBe('policy_denied');
+    expect((result as { reason?: string }).reason).toContain('attested');
+    expect(listPiImageCandidatesByRun(run.id)).toHaveLength(candidatesBefore);
+    expect(listPiSources(run.id)).toHaveLength(sourcesBefore);
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('refuses a stale URL-bound asset linkage when the image bytes changed (round-8 content-addressed linkage)', async () => {
+    const pngH1 = await sharp({ create: { width: 64, height: 48, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const pngH2 = await sharp({ create: { width: 64, height: 48, channels: 3, background: { r: 200, g: 60, b: 30 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(pngH2), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
+    const imageUrl = 'https://cdn.example.com/u.png';
+    const source = insertPiSource({
+      runId: run.id,
+      url: imageUrl,
+      domain: 'cdn.example.com',
+      sourceType: 'manufacturer',
+    });
+    // time 1: U served H1 and was verified exact against GTIN X.
+    insertPiAsset({
+      runId: run.id,
+      sourceId: source.id,
+      sourceUrl: imageUrl,
+      sourceType: 'manufacturer',
+      sourceArtifactId: 'a1',
+      extractionMethod: 'image_ocr',
+      retrievedAt: new Date().toISOString(),
+      originalContentHash: createHash('sha256').update(pngH1).digest('hex'),
+      perceptualHash: 'phash-h1',
+      rightsStatus: 'approved',
+      rightsBasis: 'grant:manufacturer@cdn.example.com',
+      rightsEvidenceRef: 'grant:manufacturer@cdn.example.com',
+      exactProductMatch: true,
+      exactVariantMatch: true,
+      qualityStatus: 'usable',
+      commerceApproved: true,
+      conflicts: [],
+      verifiedAgainstJson: JSON.stringify({ runId: run.id, gtin: '036000291452', name: 'Stella Chicken Broth 16 oz' }),
+      verifiedAgainstHash: 'h1',
+      declaredSourceType: 'manufacturer',
+    });
+    // time 2: a generic (null-hash) GTIN fact exists for X.
+    const gtinRow = insertPiEvidence({
+      runId: run.id,
+      sourceId: source.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: imageUrl,
+        candidateId: candidateOf(run.id, imageUrl, source.id),
+        gtin: '036000291452',
+        evidenceIds: [gtinRow.id],
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      // The old linkage (H1) does NOT authorize the new bytes (H2) — the
+      // generic fact stays unqualified, so exact identity cannot be claimed.
+      expect((result.data as { exactProductMatch: boolean }).exactProductMatch).toBe(false);
+    }
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('check_source_priority is non-authoritative: trusted registry only (round-8)', async () => {
+    const run = runningRun();
+    const tool = defaultToolRegistry.get('check_source_priority');
+    // A CMS-managed brand-site registry entry makes the domain official.
+    upsertBrandSite('Stella Chewys', 'stellachewys.com', null);
+    const official = await defaultToolRegistry.dispatch(
+      tool!,
+      { url: 'https://www.stellachewys.com/p/1' },
+      toolCtx(run.id),
+    );
+    expect(official.status).toBe('ok');
+    expect(((official as { data?: unknown }).data as { tier: string; isOfficial: boolean }).tier).toBe('official');
+    expect(((official as { data?: unknown }).data as { tier: string; isOfficial: boolean }).isOfficial).toBe(true);
+    expect((official as { evidence?: Array<{ kind: string }> }).evidence?.[0]?.kind).toBe('official_evidence');
+    // Agent assertions never mint authority: sourceKind 'manufacturer' and
+    // officialDomains are advisory only.
+    const manufactured = await defaultToolRegistry.dispatch(
+      tool!,
+      { url: 'https://fakebrand.example.com/p/1', sourceKind: 'manufacturer', officialDomains: ['fakebrand.example.com'] },
+      toolCtx(run.id),
+    );
+    expect(manufactured.status).toBe('ok');
+    expect(((manufactured as { data?: unknown }).data as { tier: string }).tier).not.toBe('official');
+    expect(((manufactured as { data?: unknown }).data as { tier: string }).tier).toBe('unknown');
+    expect((manufactured as { evidence?: Array<{ kind: string }> }).evidence?.[0]?.kind).not.toBe('official_evidence');
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('image tool contracts are version 2.0.0 (round-8 breaking changes)', () => {
+    expect(verifyImageCandidateTool.version).toBe('2.0.0');
+    expect(discoverImageCandidatesTool.version).toBe('2.0.0');
+  });
+
+  it('candidate provenance fields win over agent params; verification method recorded separately (round-8 P1)', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
+    const pageSource = insertPiSource({
+      runId: run.id,
+      url: 'https://brand.example.com/p/1',
+      domain: 'brand.example.com',
+      sourceType: 'manufacturer',
+    });
+    insertPiSource({
+      runId: run.id,
+      url: 'https://cdn.example.com/i.png',
+      domain: 'cdn.example.com',
+      sourceType: 'retailer', // an exact image-URL row with a DIFFERENT tier
+    });
+    // The server-created candidate carries the authoritative discovery
+    // provenance (a json_ld artifact) — the agent's sourcePath/sourceArtifactId/
+    // extractionMethod params below must be ignored in favor of these.
+    const candidateId = insertPiImageCandidate({
+      runId: run.id,
+      imageUrl: 'https://cdn.example.com/i.png',
+      discoveringSourceId: pageSource.id,
+      sourceArtifactId: 'cand-artifact-9',
+      sourcePath: 'json_ld.image.0',
+      extractionMethod: 'json_ld',
+      variantReference: null,
+    }).id;
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: pageSource.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456', contentHash: createHash('sha256').update(png).digest('hex') },
+    });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      {
+        url: 'https://cdn.example.com/i.png',
+        candidateId,
+        evidenceIds: ['extract_product_page:abc123:gtin:def456'],
+        // Agent-provided provenance hints that must NOT win:
+        sourcePath: 'agent-invented-path',
+        sourceArtifactId: 'agent-invented-artifact',
+        extractionMethod: 'media_api',
+      },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    const record = (result as { data?: unknown }).data as {
+      sourcePath: string | null;
+      sourceArtifactId: string | null;
+      extractionMethod: string | null;
+      verificationMethod: string | null;
+    };
+    expect(record.sourcePath).toBe('json_ld.image.0');
+    expect(record.sourceArtifactId).toBe('cand-artifact-9');
+    expect(record.extractionMethod).toBe('json_ld');
+    expect(record.verificationMethod).toBe('image_verification_pipeline');
+    // The persisted asset row carries the candidate's provenance too.
+    const assets = listPiAssetsByRun(run.id);
+    const persisted = assets[assets.length - 1];
+    expect(persisted.sourcePath).toBe('json_ld.image.0');
+    expect(persisted.sourceArtifactId).toBe('cand-artifact-9');
+    expect(persisted.extractionMethod).toBe('json_ld');
+    transitionPiRunStatus(run.id, 'completed', {});
+  });
+
+  it('candidate discovering source outranks a sticky exact-image-URL tier (round-8 P1)', async () => {
+    const png = await sharp({ create: { width: 640, height: 480, channels: 3, background: { r: 100, g: 140, b: 180 } } })
+      .png()
+      .toBuffer();
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.endsWith('example.com') ? ['93.184.216.34'] : []),
+      fetchFn: async () => new Response(new Uint8Array(png), { status: 200, headers: { 'content-type': 'image/png' } }),
+    });
+    const run = runningRun(JSON.stringify({ gtin: '036000291452', registerName: 'Stella Chicken Broth 16 oz' }));
+    // A 'sticky' image-URL source row from an earlier verification says
+    // 'retailer' — if it outranked the candidate, rights would be restricted
+    // (no retailer grant).
+    insertPiSource({
+      runId: run.id,
+      url: 'https://cdn.example.com/i.png',
+      domain: 'cdn.example.com',
+      sourceType: 'retailer',
+    });
+    const supplierSource = insertPiSource({
+      runId: run.id,
+      url: 'https://supplier.example.com/p/1',
+      domain: 'supplier.example.com',
+      sourceType: 'supplier',
+    });
+    const candidateId = insertPiImageCandidate({
+      runId: run.id,
+      imageUrl: 'https://cdn.example.com/i.png',
+      discoveringSourceId: supplierSource.id,
+      sourceArtifactId: 'a1',
+      sourcePath: 'json_ld.image.0',
+      extractionMethod: 'json_ld',
+      variantReference: null,
+    }).id;
+    insertPiEvidence({
+      runId: run.id,
+      sourceId: supplierSource.id,
+      targetField: 'gtin',
+      value: '036000291452',
+      extractionMethod: 'image_ocr',
+      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456', contentHash: createHash('sha256').update(png).digest('hex') },
+    });
+    upsertReusePolicy({ workspaceId: wsId, sourceTier: 'supplier', domainPattern: 'cdn.example.com', allowed: true, terms: 'supplier license' });
+    const result = await defaultToolRegistry.dispatch(
+      defaultToolRegistry.get('verify_image_candidate')!,
+      { url: 'https://cdn.example.com/i.png', candidateId, evidenceIds: ['extract_product_page:abc123:gtin:def456'] },
+      toolCtx(run.id, { gateway }),
+    );
+    expect(result.status).toBe('ok');
+    const record = (result as { data?: unknown }).data as { rightsStatus: string; sourceType: string };
+    // The candidate's discovering source (supplier) won over the sticky
+    // retailer image-URL row — the supplier grant approved the reuse.
+    expect(record.sourceType).toBe('supplier');
+    expect(record.rightsStatus).toBe('approved');
     transitionPiRunStatus(run.id, 'completed', {});
   });
 });

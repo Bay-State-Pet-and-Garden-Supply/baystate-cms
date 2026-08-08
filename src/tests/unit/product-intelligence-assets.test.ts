@@ -494,6 +494,7 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
     });
 
     it('denies approval for a manufacturer-hosted image without a reuse grant even when identity resolves', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
       const record = await verifyImageCandidate(
         {
           url: 'https://cdn.example.com/mfr.png',
@@ -502,9 +503,11 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           expectedGtin: GTIN,
           declaredSourceType: 'manufacturer',
           evidenceIds: ['ev-gtin-1'],
-          // Round-6: identity resolves through a server-authoritative
-          // asset-to-GTIN linkage (the alternative to hash-bound evidence).
-          assetGtinLinkages: [{ gtin: GTIN, assetId: 'asset-mfr-1' }],
+          // Round-6/8: identity resolves through a server-authoritative
+          // asset-to-GTIN linkage — which is CONTENT-ADDRESSED: it only
+          // authorizes the exact bytes (originalContentHash) the prior
+          // asset was verified against.
+          assetGtinLinkages: [{ gtin: GTIN, assetId: 'asset-mfr-1', originalContentHash: pngHash }],
         },
         {
           ...deps(gatewayReturning(solidPng)),

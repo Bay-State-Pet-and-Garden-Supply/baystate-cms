@@ -1963,6 +1963,35 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Round-8 (review P1): capture effective research-tool versions + schema
+  // hashes on runs for replay/provenance. Tool NAMES are already persisted
+  // via tool_calls rows; versions and schema hashes need the run-level field.
+  // tools_json = JSON array of { name, version, schemaHash } for every
+  // effective research/terminal tool in the session, captured at session
+  // creation (the executor writes it once the session exists — the tools are
+  // not knowable at createPiRun time).
+  try {
+    const toolsVersion = db
+      .query('SELECT value FROM app_meta WHERE key = ?')
+      .get('pi_tools_capture_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!toolsVersion) {
+      console.log('[Migrations] Running pi tools capture migration...');
+      db.transaction(() => {
+        const toolsCols = db.query("SELECT COUNT(*) AS c FROM pragma_table_info('product_intelligence_runs') WHERE name = 'tools_json'").get() as { c: number };
+        if (toolsCols.c === 0) {
+          db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN tools_json TEXT;');
+        }
+      })();
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('pi_tools_capture_schema_version', '1');");
+      console.log('[Migrations] Pi tools capture migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Pi tools capture migration failed:', e);
+    throw e;
+  }
+
   // Round-4 (review P0): a 'server-verified' image asset must be bound to the
   // run's immutable product identity. verified_against_hash is the SHA-256 of
   // the canonical identity snapshot (runId + gtin + name, server-derived from
