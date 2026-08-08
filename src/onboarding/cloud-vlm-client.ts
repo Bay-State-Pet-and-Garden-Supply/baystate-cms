@@ -21,6 +21,7 @@ import {
   COST_BASIS,
   type ModelCallContext,
 } from '../classification/model-operation-registry';
+import { assertModelPlanCompatible } from '../classification/runtime-snapshot';
 import {
   insertModelCallStart,
   completeModelCall,
@@ -115,6 +116,14 @@ export async function extractPackagingOcrFromCloud(
     return null;
   }
 
+  // 0a. Fail closed on snapshot-plan compatibility BEFORE any config
+  //     resolution or transport: a run-bound cloud VLM call without a
+  //     compatible frozen plan (or with a forged call context) never
+  //     proceeds. Matches the audited LLM wrapper's boundary.
+  if (params.modelCall) {
+    assertModelPlanCompatible(params.snapshot, 'evidence_extraction', params.modelCall);
+  }
+
   // 0. Resolve the vision route through the frozen policy BEFORE any
   //    transport. `requiresImage` enforces imageDataSharing at the route
   //    layer (issue #17 pass 1c): under `imageDataSharing: 'local_only'`
@@ -192,49 +201,56 @@ export async function extractPackagingOcrFromCloud(
   let callId: string | null = null;
   if (modelCall) {
     const hashes = computePromptHashes(PACKAGING_OCR_PROMPT, '');
-    try {
-      callId = insertModelCallStart({
-        runId: modelCall.runId,
-        stageName: modelCall.stage,
-        operation: modelCall.operation,
-        attempt: modelCall.attempt,
-        provider: config.provider,
-        model: config.model,
-        locality: params.modelPolicy?.providerLocalities[config.provider] ?? null,
-        snapshotHash: modelCall.snapshotHash,
-        modelPolicyDigest: params.modelPolicy?.policyDigest ?? '',
-        promptTemplateVersion: modelCall.promptTemplateVersion,
-        ruleVersion: modelCall.ruleVersion,
-        systemPromptHash: hashes.systemPromptHash,
-        userPromptHash: hashes.userPromptHash,
-      });
-    } catch (err) {
-      console.error(
-        '[CloudVlm] Failed to persist model-call start row; aborting transport:',
-        redactTransportText(err instanceof Error ? err.message : String(err)),
-      );
-      return null;
-    }
+    // A failed start insert MUST abort (parity with the audited LLM wrapper):
+    // without a durable start row there is no provenance, and the image must
+    // never be fetched for an unaudited call.
+    callId = insertModelCallStart({
+      runId: modelCall.runId,
+      stageName: modelCall.stage,
+      operation: modelCall.operation,
+      attempt: modelCall.attempt,
+      provider: config.provider,
+      model: config.model,
+      locality: params.modelPolicy?.providerLocalities[config.provider] ?? null,
+      snapshotHash: modelCall.snapshotHash,
+      modelPolicyDigest: params.modelPolicy?.policyDigest ?? '',
+      promptTemplateVersion: modelCall.promptTemplateVersion,
+      ruleVersion: modelCall.ruleVersion,
+      systemPromptHash: hashes.systemPromptHash,
+      userPromptHash: hashes.userPromptHash,
+    });
   }
 
   const startedAt = Date.now();
-  const completeTerminal = (status: typeof MODEL_CALL_STATUS[keyof typeof MODEL_CALL_STATUS], errorMessage?: string, durationMs?: number) => {
+  const completeTerminal = (status: typeof MODEL_CALL_STATUS[keyof typeof MODEL_CALL_STATUS], errorMessage?: string, durationMs?: number, promptTokens?: number | null, completionTokens?: number | null): boolean => {
     if (callId) {
-      completeModelCall(callId, {
+      return completeModelCall(callId, {
         status,
         durationMs: durationMs ?? Date.now() - startedAt,
         errorMessage,
+        promptTokens: promptTokens ?? null,
+        completionTokens: completionTokens ?? null,
         estimatedCostUsd: (params.modelPolicy?.providerLocalities[config.provider] ?? null) === 'local' ? 0 : null,
         costBasis: (params.modelPolicy?.providerLocalities[config.provider] ?? null) === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
       });
     }
+    return true;
   };
+
+  // Terminalization guard: any error after the start row MUST leave a durable
+  // terminal row (never a stranded `started`).
+  let terminalWritten = false;
+  const markTerminal = (status: typeof MODEL_CALL_STATUS[keyof typeof MODEL_CALL_STATUS], errorMessage?: string, durationMs?: number, promptTokens?: number | null, completionTokens?: number | null): boolean => {
+    terminalWritten = true;
+    return completeTerminal(status, errorMessage, durationMs, promptTokens, completionTokens);
+  };
+
 
   // 1. Get the image as base64 (image transport was already authorized by
   //    the policy route resolution above).
   const imageData = await fetchImageAsBase64(imageUrl);
   if (!imageData) {
-    completeTerminal(MODEL_CALL_STATUS.failed, `Could not load image: ${redactImageUrl(imageUrl)}`);
+    markTerminal(MODEL_CALL_STATUS.failed, `Could not load image: ${redactImageUrl(imageUrl)}`);
     console.warn(`[CloudVlm] Could not load image: ${redactImageUrl(imageUrl)}`);
     return null;
   }
@@ -286,31 +302,45 @@ export async function extractPackagingOcrFromCloud(
       }
     }
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err: any) {
+      const isAbort =
+        (err?.name === 'AbortError' || err?.name === 'TimeoutError') ||
+        String(err?.message ?? '').toLowerCase().includes('abort');
+      markTerminal(
+        isAbort ? MODEL_CALL_STATUS.cancelled : MODEL_CALL_STATUS.failed,
+        redactTransportText(err?.message ?? String(err)),
+      );
+      console.warn(`[CloudVlm] ${isAbort ? 'Cancelled' : 'Failed'} cloud VLM transport: ${redactTransportText(err?.message ?? String(err))}`);
+      return null;
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
       const reason = `[CloudVlm] API request failed (${config.provider}): ${response.status} - ${redactTransportText(errorText)}`;
-      completeTerminal(MODEL_CALL_STATUS.failed, reason);
+      markTerminal(MODEL_CALL_STATUS.failed, reason);
       console.warn(reason);
       return null;
     }
 
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
     };
 
     const rawContent = data?.choices?.[0]?.message?.content;
     if (!rawContent) {
-      completeTerminal(MODEL_CALL_STATUS.failed, 'Cloud VLM API returned empty response.');
+      markTerminal(MODEL_CALL_STATUS.failed, 'Cloud VLM API returned empty response.');
       console.warn('[CloudVlm] API returned empty response.');
       return null;
     }
@@ -320,7 +350,7 @@ export async function extractPackagingOcrFromCloud(
     // 5. Parse the response using the same utilities as local OCR
     const parsed = parseJsonFromVlmResponse(rawContent);
     if (!parsed) {
-      completeTerminal(MODEL_CALL_STATUS.failed, 'Could not parse JSON from cloud VLM response.');
+      markTerminal(MODEL_CALL_STATUS.failed, 'Could not parse JSON from cloud VLM response.');
       console.warn('[CloudVlm] Could not parse JSON from response.');
       return null;
     }
@@ -338,13 +368,22 @@ export async function extractPackagingOcrFromCloud(
 
     const result = coercePackagingOcrData(parsed, metadata);
     if (!result) {
-      completeTerminal(MODEL_CALL_STATUS.failed, 'Schema coercion failed for cloud OCR response.');
+      markTerminal(MODEL_CALL_STATUS.failed, 'Schema coercion failed for cloud OCR response.');
       console.warn('[CloudVlm] Schema coercion failed for cloud OCR response.');
       return null;
     }
 
-    // Success: terminal row must be durable before the result is returned.
-    completeTerminal(MODEL_CALL_STATUS.success);
+    // Success: terminal row (with usage tokens when present) must be durable
+    // before the result is returned. A failed terminal update discards the
+    // output — the model result must never be returned without durable
+    // provenance.
+    const promptTokens = data.usage?.prompt_tokens ?? null;
+    const completionTokens = data.usage?.completion_tokens ?? null;
+    const terminalDurable = markTerminal(MODEL_CALL_STATUS.success, undefined, undefined, promptTokens, completionTokens);
+    if (!terminalDurable) {
+      console.error(`[CloudVlm] Model call ${callId ?? '?'} terminal update failed; discarding OCR output.`);
+      return null;
+    }
 
     const fieldCount = Object.entries(result).filter(
       ([k, v]) => k !== 'metadata' && k !== 'confidenceByField' && v !== null && !(Array.isArray(v) && v.length === 0),
@@ -357,8 +396,16 @@ export async function extractPackagingOcrFromCloud(
 
     return result;
   } catch (err: any) {
-    completeTerminal(MODEL_CALL_STATUS.failed, redactTransportText(err.message));
-    console.warn(`[CloudVlm] Cloud VLM call failed: ${redactTransportText(err.message)}`);
+    // Outer terminalization: any error that did not already write a terminal
+    // row leaves a durable `failed` row; never a stranded `started`.
+    if (!terminalWritten) {
+      try {
+        markTerminal(MODEL_CALL_STATUS.failed, redactTransportText(err?.message ?? String(err)));
+      } catch (terminalErr: any) {
+        console.error('[CloudVlm] Failed to terminalize call row after error:', redactTransportText(terminalErr?.message ?? String(terminalErr)));
+      }
+    }
+    console.warn(`[CloudVlm] Cloud VLM call failed: ${redactTransportText(err?.message ?? String(err))}`);
     return null;
   }
 }

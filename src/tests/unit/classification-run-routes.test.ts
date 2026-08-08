@@ -159,6 +159,76 @@ describe('GET /api/classification/runs/:id (issue #17 E)', () => {
     const body = await res.json();
     expect(body.snapshotSummary).toEqual({ unavailable: 'snapshot_unavailable', configSnapshotHash: 'f'.repeat(64) });
   });
+
+  it('returns snapshot_unavailable (not 500) for malformed historical snapshot JSON (pass 4b)', async () => {
+    const run = createRun(wsA.id, 'SKU-3', null, 'zz'.repeat(32), { sourceKind: 'catalog_product', sourceProductHash: 'p3' });
+    // Insert a row whose config_json is not valid JSON under the run's hash.
+    getDb().run(
+      "INSERT INTO classification_config_snapshots (id, workspace_id, snapshot_hash, config_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      [randomUUID(), wsA.id, 'zz'.repeat(32), 'not-json{{{', new Date().toISOString()],
+    );
+    const res = await makeApp().request(`/api/classification/runs/${run.id}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.snapshotSummary).toEqual({ unavailable: 'snapshot_unavailable', configSnapshotHash: 'zz'.repeat(32) });
+  });
+
+  it('sanitizes credential-shaped evidence content out of the response body (pass 4b)', async () => {
+    const run = createRun(wsA.id, 'SKU-4', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'p4' });
+    // Seed evidence whose metadata + snippet carry credential shapes.
+    getDb().run(
+      `INSERT INTO classification_evidence
+       (id, run_id, product_sku, stage_name, source, reliability, attribute_id, source_url, source_field, snippet, value_json, metadata_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        run.id,
+        'SKU-4',
+        'evidence_extraction',
+        'official_product_page',
+        'medium',
+        'flavor',
+        'https://example.com/',
+        'llm_flavor',
+        'Authorization: Bearer sk-live-abcdef SecretKeyHere',
+        JSON.stringify('Chicken'),
+        JSON.stringify({ api_key: 'supersecret', token: 'tok_123', provenance: 'llm' }),
+        new Date().toISOString(),
+      ],
+    );
+    const res = await makeApp().request(`/api/classification/runs/${run.id}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('api_key');
+    expect(serialized).not.toContain('Authorization');
+    expect(serialized).not.toContain('sk-live');
+    expect(serialized).not.toContain('supersecret');
+    expect(serialized).toContain('[REDACTED]');
+  });
+
+  it('computes real config/source drift flags instead of hard-coded false (pass 4b)', async () => {
+    // Config drift: a configSnapshotHash that cannot match the current config
+    // authority resolves to drift (unknown snapshot hash fails closed).
+    const run = createRun(wsA.id, 'SKU-5', null, 'ff'.repeat(32), { sourceKind: 'catalog_product', sourceProductHash: 'p5' });
+    // Complete the run so the source-drift branch evaluates (it only runs for
+    // completed runs).
+    const { completeRun } = await import('../../db/repositories/classification-run-repo');
+    completeRun(run.id, 'completed');
+    // Source drift: write a product file whose hash differs from the run's
+    // recorded sourceProductHash.
+    fs.mkdirSync(path.join(wsA.path, 'products'), { recursive: true });
+    fs.writeFileSync(
+      path.join(wsA.path, 'products', 'SKU-5.json'),
+      JSON.stringify({ sku: 'SKU-5', name: 'Changed Product', shopsite: {}, fields: {} }),
+      'utf-8',
+    );
+    const res = await makeApp().request(`/api/classification/runs/${run.id}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.drift.configDrift).toBe(true);
+    expect(body.drift.sourceDrift).toBe(true);
+  });
 });
 
 // Helper: update the run row's config_snapshot_hash so the route resolves the

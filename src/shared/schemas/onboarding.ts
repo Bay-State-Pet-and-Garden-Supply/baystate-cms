@@ -91,6 +91,8 @@ export const PackagingOcrDataSchema = z.object({
     extractedAt: z.string().nullable().default(null),
     parser: z.string().nullable().default(null),
     rawResponseExcerpt: z.string().nullable().default(null),
+    /** Durable model-call IDs that produced this OCR (issue #17 E). */
+    modelCallIds: z.array(z.string()).optional(),
   }).nullable().default(null),
 });
 

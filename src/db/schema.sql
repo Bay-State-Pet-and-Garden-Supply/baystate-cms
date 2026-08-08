@@ -341,6 +341,41 @@ CREATE INDEX IF NOT EXISTS idx_benchmark_eval_runs_dataset ON benchmark_eval_run
 CREATE INDEX IF NOT EXISTS idx_benchmark_qualification_receipts_dataset ON benchmark_qualification_receipts(dataset_id);
 CREATE INDEX IF NOT EXISTS idx_benchmark_qualification_receipts_digest ON benchmark_qualification_receipts(digest);
 
+-- ─── Classification model-call provenance (issue #17 E) ────────────────────
+-- Durable per-call observability for protected model calls bound to a
+-- classification run. classification_runs / classification_proposals are
+-- created by classification-migration.sql (loaded in runMigrations); the
+-- proposal column model_call_ids_json is added by the guarded
+-- model_calls_schema_version migration so old-shape upgrade DBs stay valid.
+CREATE TABLE IF NOT EXISTS classification_model_calls (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+  stage_name TEXT,
+  operation TEXT NOT NULL,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  provider TEXT,
+  model TEXT,
+  locality TEXT,
+  snapshot_hash TEXT,
+  model_policy_digest TEXT,
+  prompt_template_version TEXT,
+  rule_version TEXT,
+  system_prompt_hash TEXT,
+  user_prompt_hash TEXT,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  duration_ms INTEGER,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed', 'policy_denied', 'unavailable', 'cancelled')),
+  error_message TEXT,
+  estimated_cost_usd REAL,
+  cost_basis TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_classification_model_calls_run ON classification_model_calls(run_id);
+CREATE INDEX IF NOT EXISTS idx_classification_model_calls_snapshot ON classification_model_calls(snapshot_hash);
+
 INSERT OR IGNORE INTO app_meta (key, value) VALUES ('schema_version', '1');
 INSERT OR IGNORE INTO app_meta (key, value) VALUES ('app_version', '0.1.0');
 

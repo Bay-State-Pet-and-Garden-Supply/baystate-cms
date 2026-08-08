@@ -209,6 +209,39 @@ export function insertTerminalModelCall(
   return id;
 }
 
+/**
+ * Record a terminal `policy_denied` / `unavailable` row for a protected
+ * preflight that decided not to invoke the model (no frozen policy, no LLM
+ * config, route denial). Every model-eligible attempt must be observable even
+ * when no transport happens. No-op when no audit context is present.
+ */
+export function recordTerminalPreflight(
+  ctx: import('../../classification/model-operation-registry').ModelCallContext | null | undefined,
+  modelPolicyDigest: string,
+  status: 'policy_denied' | 'unavailable',
+  errorMessage: string,
+): void {
+  if (!ctx) return;
+  insertTerminalModelCall({
+    runId: ctx.runId,
+    stageName: ctx.stage,
+    operation: ctx.operation,
+    attempt: ctx.attempt,
+    provider: null,
+    model: null,
+    locality: null,
+    snapshotHash: ctx.snapshotHash,
+    modelPolicyDigest,
+    promptTemplateVersion: ctx.promptTemplateVersion,
+    ruleVersion: ctx.ruleVersion,
+    systemPromptHash: '',
+    userPromptHash: '',
+    status,
+    errorMessage,
+    costBasis: COST_BASIS.unknown,
+  });
+}
+
 /** All model-call rows for a run (ascending by start time). */
 export function getModelCallsByRun(runId: string): ModelCallRow[] {
   return getDb()

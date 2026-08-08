@@ -46,6 +46,7 @@ import {
   computePromptHashes,
   MODEL_CALL_STATUS,
   COST_BASIS,
+  OPERATION_PARAMETERS,
   type ModelCallContext,
 } from '../classification/model-operation-registry';
 import { assertModelPlanCompatible, type RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
@@ -492,8 +493,10 @@ async function callLlmForTaskAudited(
   }
 
   // Fail closed when the run snapshot has no compatible frozen plan for this
-  // operation (legacy schema-v1 snapshot, missing entry, or version drift).
-  assertModelPlanCompatible(options.snapshot, ctx.operation);
+  // operation (legacy schema-v1 snapshot, missing entry, version drift, or a
+  // forged call context). The supplied context versions are validated against
+  // the frozen plan entry.
+  assertModelPlanCompatible(options.snapshot, ctx.operation, ctx);
 
   const { systemPromptHash, userPromptHash } = computePromptHashes(systemPrompt, prompt);
   // Locality is provider-scoped; unknown before config resolution (denials
@@ -564,35 +567,34 @@ async function callLlmForTaskAudited(
     assertModelPolicyIntact(options.modelPolicy);
   }
 
-  const temperature = resolveTemperature(task, options);
-  const reasoningEffort = resolveReasoningEffort(task);
-
-  // Insert the `started` audit row BEFORE transport. If the row cannot be
-  // persisted, transport is never invoked (fail-closed invariant).
-  let callId: string;
-  try {
-    callId = insertModelCallStart({
-      runId: ctx.runId,
-      stageName: ctx.stage,
-      operation: ctx.operation,
-      attempt: ctx.attempt,
-      provider: config.provider,
-      model: config.model,
-      locality: resolvedLocality,
-      snapshotHash: ctx.snapshotHash,
-      modelPolicyDigest: options.modelPolicy?.policyDigest ?? '',
-      promptTemplateVersion: ctx.promptTemplateVersion,
-      ruleVersion: ctx.ruleVersion,
-      systemPromptHash,
-      userPromptHash,
-    });
-  } catch (err) {
-    console.error('[LLMClient] Failed to persist model-call start row; aborting transport:', redactTransportText(err instanceof Error ? err.message : String(err)));
-    return null;
-  }
+  // Insert the `started` audit row BEFORE transport. A failed start insert
+  // MUST abort the call with a thrown error (never a silent null): without a
+  // durable start row there is no provenance, and transport must not happen.
+  const callId = insertModelCallStart({
+    runId: ctx.runId,
+    stageName: ctx.stage,
+    operation: ctx.operation,
+    attempt: ctx.attempt,
+    provider: config.provider,
+    model: config.model,
+    locality: resolvedLocality,
+    snapshotHash: ctx.snapshotHash,
+    modelPolicyDigest: options.modelPolicy?.policyDigest ?? '',
+    promptTemplateVersion: ctx.promptTemplateVersion,
+    ruleVersion: ctx.ruleVersion,
+    systemPromptHash,
+    userPromptHash,
+  });
 
   const startedAt = Date.now();
   const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
+  // Deterministic frozen operation parameters (issue #17 E): protected calls
+  // NEVER read mutable llm_task_configs for temperature/reasoning-effort. The
+  // registry's OPERATION_PARAMETERS (or an explicit caller override) is the
+  // only source, so mutating task config cannot change a run's transport.
+  const operationParams = OPERATION_PARAMETERS[ctx.operation];
+  const temperature = options.temperature ?? operationParams?.temperature ?? 0.1;
+  const reasoningEffort: string | null = null;
   const requestBody: Record<string, unknown> = {
     model: config.model,
     messages: [
@@ -604,6 +606,16 @@ async function callLlmForTaskAudited(
   if (reasoningEffort) {
     requestBody.reasoning_effort = reasoningEffort;
   }
+
+  // Terminalization guard: any error after the start row MUST leave a durable
+  // terminal row (never a stranded `started`). A dedicated flag prevents
+  // double-terminalization when a path already wrote its terminal row before
+  // throwing (fetch errors, non-OK responses, empty content).
+  let terminalWritten = false;
+  const markTerminal = (update: Parameters<typeof completeModelCall>[1]): boolean => {
+    terminalWritten = true;
+    return completeModelCall(callId, update);
+  };
 
   await acquireLlmSlot(config.provider);
   try {
@@ -633,7 +645,7 @@ async function callLlmForTaskAudited(
         (err as { name?: string })?.name === 'AbortError' ||
         (err as { message?: string })?.message?.includes('abort') === true;
       const terminal = isAbort ? MODEL_CALL_STATUS.cancelled : MODEL_CALL_STATUS.failed;
-      completeModelCall(callId, {
+      markTerminal({
         status: terminal,
         durationMs: Date.now() - startedAt,
         errorMessage: redactTransportText(err instanceof Error ? err.message : String(err)),
@@ -646,7 +658,7 @@ async function callLlmForTaskAudited(
     if (!response.ok) {
       const text = await response.text();
       const reason = `LLM API request failed (${config.provider}): ${response.status} - ${redactTransportText(text)}`;
-      completeModelCall(callId, {
+      markTerminal({
         status: MODEL_CALL_STATUS.failed,
         durationMs: Date.now() - startedAt,
         errorMessage: reason,
@@ -663,7 +675,7 @@ async function callLlmForTaskAudited(
     };
     const content = data.choices?.[0]?.message?.content;
     if (!content) {
-      completeModelCall(callId, {
+      markTerminal({
         status: MODEL_CALL_STATUS.failed,
         durationMs: Date.now() - startedAt,
         errorMessage: 'LLM returned an empty response.',
@@ -680,7 +692,7 @@ async function callLlmForTaskAudited(
     const completionTokens = data.usage?.completion_tokens ?? null;
     const cost = computeModelCallCost(resolvedLocality, promptTokens, completionTokens);
 
-    const terminalDurable = completeModelCall(callId, {
+    const terminalDurable = markTerminal({
       status: MODEL_CALL_STATUS.success,
       durationMs: Date.now() - startedAt,
       promptTokens,
@@ -707,6 +719,27 @@ async function callLlmForTaskAudited(
         totalTokens: data.usage?.total_tokens ?? null,
       },
     };
+  } catch (err) {
+    // Outer terminalization: any exception after the start row that did not
+    // already write a terminal row (route re-assertion, JSON decode, etc.)
+    // leaves a durable `failed` row. A stranded `started` row is impossible.
+    if (!terminalWritten) {
+      try {
+        markTerminal({
+          status: MODEL_CALL_STATUS.failed,
+          durationMs: Date.now() - startedAt,
+          errorMessage: redactTransportText(err instanceof Error ? err.message : String(err)),
+          estimatedCostUsd: resolvedLocality === 'local' ? 0 : null,
+          costBasis: resolvedLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
+        });
+      } catch (terminalErr) {
+        console.error(
+          `[LLMClient] Failed to terminalize model call ${callId} after error: `,
+          redactTransportText(terminalErr instanceof Error ? terminalErr.message : String(terminalErr)),
+        );
+      }
+    }
+    throw err;
   } finally {
     releaseLlmSlot(config.provider);
   }

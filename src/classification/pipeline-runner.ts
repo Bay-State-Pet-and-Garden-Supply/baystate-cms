@@ -4,6 +4,7 @@ import type { ClassificationStageName, StageDefinition, StageContext, StageInput
 import type { ClassificationEvidence, ClassificationProposal } from '../shared/types';
 import { snapshotHash } from './runtime-snapshot';
 import { redactTransportText } from './model-policy-gateway';
+import { MODEL_CALL_STATUS } from './model-operation-registry';
 import { validateProposalSafety } from './proposal-safety';
 
 const now = () => new Date().toISOString();
@@ -92,12 +93,21 @@ function assertModelCallLinkage(options: {
     if (callIds.length === 0) continue;
     for (const callId of callIds) {
       const row = db
-        .query('SELECT run_id, snapshot_hash FROM classification_model_calls WHERE id = ?')
-        .get(callId) as { run_id: string; snapshot_hash: string | null } | undefined;
+        .query('SELECT run_id, snapshot_hash, status FROM classification_model_calls WHERE id = ?')
+        .get(callId) as { run_id: string; snapshot_hash: string | null; status: string } | undefined;
+      // The call must belong to this run/snapshot AND be terminal-success:
+      // a `started` (non-terminal) call can never be linked to a persisted
+      // proposal — no durable success means no model output reached it.
       if (!row || row.run_id !== options.runId || row.snapshot_hash !== options.snapshotHash) {
         throw new Error(
           `Model call linkage failed: proposal "${proposal.id}" references model call "${callId}" ` +
             `that does not belong to run "${options.runId}" / snapshot "${options.snapshotHash}".`,
+        );
+      }
+      if (row.status !== MODEL_CALL_STATUS.success) {
+        throw new Error(
+          `Model call linkage failed: proposal "${proposal.id}" references model call "${callId}" ` +
+            `with non-terminal/non-success status "${row.status}"; only durable success calls can be linked.`,
         );
       }
     }

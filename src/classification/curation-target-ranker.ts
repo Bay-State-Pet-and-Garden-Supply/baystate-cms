@@ -20,6 +20,8 @@ import {
   type ProtectedOperation,
 } from './model-policy-gateway';
 import type { ModelCallContext } from './model-operation-registry';
+import { MODEL_CALL_STATUS } from './model-operation-registry';
+import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 
 export interface LlmRankOptionsParams {
@@ -82,8 +84,15 @@ export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmR
       defaultProtectedOperationForTask(taskName as LlmTask);
 
     // Protected ranking operation with no frozen policy context: deterministic
-    // abstain. The LLM is never called without a policy (issue #17 pass 1c).
+    // abstain, but still observable — a durable `unavailable` terminal row so
+    // the attempted call never silently disappears from provenance.
     if (operation && params.modelPolicy === undefined) {
+      recordTerminalPreflight(
+        params.modelCall,
+        '',
+        MODEL_CALL_STATUS.unavailable,
+        'No frozen model policy for protected ranking operation.',
+      );
       return null;
     }
 
@@ -93,12 +102,26 @@ export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmR
       ...(operation ? { protectedOperation: operation } : {}),
     });
   } catch (err) {
-    if (err instanceof ModelPolicyDeniedError && params.modelPolicy === undefined) {
-      return null;
+    if (err instanceof ModelPolicyDeniedError) {
+      recordTerminalPreflight(
+        params.modelCall,
+        params.modelPolicy?.policyDigest ?? '',
+        MODEL_CALL_STATUS.policyDenied,
+        `Model policy denied protected ranking operation (${err.code}).`,
+      );
+      if (params.modelPolicy === undefined) return null;
     }
     throw err;
   }
-  if (!llmConfig) return null;
+  if (!llmConfig) {
+    recordTerminalPreflight(
+      params.modelCall,
+      params.modelPolicy?.policyDigest ?? '',
+      MODEL_CALL_STATUS.unavailable,
+      'No LLM config available for the protected ranking operation.',
+    );
+    return null;
+  }
 
   const maxVals = maxValues ?? (selectionMode === 'multiple' ? Math.min(5, options.length) : 1);
   const optionList = options.slice(0, 150).map(o => o.label);
@@ -134,13 +157,20 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
 
     // Parse JSON response with repair for common formatting issues
     let parsed = parseRankerResponse(response.content);
-    // The call that produced the final accepted parse (primary or retry).
-    let acceptedCallId = response.callId;
 
     // Retry only when parsing failed. A valid empty values array is an
     // intentional abstention and must not be turned into an invented match.
+    const influencingCallIds: string[] = [];
+    if (response?.callId) influencingCallIds.push(response.callId);
     if (!parsed) {
       try {
+        // The retry is a distinct attempt (the first response is embedded in
+        // the retry prompt, so BOTH calls influenced the final proposal) and
+        // must carry its own attempt number.
+        const retryAttempt = (params.modelCall?.attempt ?? 0) + 1;
+        const retryModelCall = params.modelCall
+          ? { ...params.modelCall, attempt: retryAttempt }
+          : undefined;
         const retryResponse = await callLlmForTaskWithProvenance(
           taskName as any,
           `The previous response was not valid JSON. Fix the JSON format:\n\n${response.content.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
@@ -149,12 +179,14 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
             allowFallback: true,
             modelPolicy: params.modelPolicy,
             ...(operation ? { protectedOperation: operation } : {}),
-            ...auditedCall,
+            ...(retryModelCall && params.snapshot
+              ? { modelCall: retryModelCall, snapshot: params.snapshot }
+              : {}),
           },
         );
         if (retryResponse) {
           parsed = parseRankerResponse(retryResponse.content);
-          acceptedCallId = retryResponse.callId;
+          if (retryResponse.callId) influencingCallIds.push(retryResponse.callId);
         }
       } catch {
         // Retry also failed - fall through to null return below
@@ -173,7 +205,9 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     if (values.length === 0) return null;
 
     const confidence = Math.max(0.35, Math.min(0.85, parsed.confidence ?? 0.55));
-    return { values, confidence, modelCallIds: [acceptedCallId] };
+    // Link EVERY call that influenced the accepted parse (the primary call and
+    // any retry whose response was embedded in the accepted output).
+    return { values, confidence, modelCallIds: influencingCallIds };
   } catch (err: any) {
     console.warn(`[CurationTargetRanker] LLM ranking failed for "${targetLabel}": ${redactTransportText(err.message)}`);
     return null;

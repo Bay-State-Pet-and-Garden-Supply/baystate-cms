@@ -13,6 +13,17 @@
 
 import { getVlmConfig, callVlm } from './vlm-client';
 import { redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
+import {
+  computePromptHashes,
+  MODEL_CALL_STATUS,
+  COST_BASIS,
+  type ModelCallContext,
+} from '../classification/model-operation-registry';
+import { assertModelPlanCompatible } from '../classification/runtime-snapshot';
+import {
+  insertModelCallStart,
+  completeModelCall,
+} from '../db/repositories/classification-model-call-repo';
 import { PackagingOcrDataSchema } from '../shared/schemas/onboarding';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
 import { sha256Hex } from '../shared/stable-id';
@@ -337,6 +348,13 @@ export interface ExtractPackagingOcrParams {
    * pipeline, which historically passed one transport for both.
    */
   modelFetchFn?: NetworkFetch;
+  /** Durable model-call audit context (issue #17 E): when present, the local
+   *  VLM transport is audited with a classification_model_calls row
+   *  (started → terminal on every path) so run-bound local VLM output is
+   *  fully observable and its callId flows into the OCR evidence metadata. */
+  modelCall?: ModelCallContext | null;
+  /** Runtime snapshot the call is bound to (plan compatibility). */
+  snapshot?: import('../classification/runtime-snapshot').RuntimeClassificationSnapshot | null;
 }
 
 /**
@@ -376,17 +394,68 @@ export async function extractPackagingOcr(
   // identity while image B is being inspected.
   const contentHash = sha256Hex(Buffer.from(base64Image, 'base64'));
 
+  // Durable audit for run-bound local VLM calls (issue #17 E): fail closed on
+  // plan compatibility, insert the `started` row BEFORE transport, and write a
+  // terminal row on every path so the local VLM output is observable. Without
+  // a durable start row the model is never invoked.
+  const auditCtx = params.modelCall ?? null;
+  let callId: string | null = null;
+  if (auditCtx) {
+    assertModelPlanCompatible(params.snapshot, 'evidence_extraction', auditCtx);
+    const hashes = computePromptHashes(PACKAGING_OCR_PROMPT, '');
+    callId = insertModelCallStart({
+      runId: auditCtx.runId,
+      stageName: auditCtx.stage,
+      operation: auditCtx.operation,
+      attempt: auditCtx.attempt,
+      provider: 'ollama',
+      model: vlmConfig.model,
+      locality: 'local',
+      snapshotHash: auditCtx.snapshotHash,
+      modelPolicyDigest: '',
+      promptTemplateVersion: auditCtx.promptTemplateVersion,
+      ruleVersion: auditCtx.ruleVersion,
+      systemPromptHash: hashes.systemPromptHash,
+      userPromptHash: hashes.userPromptHash,
+    });
+  }
+
+  const startedAt = Date.now();
+  let terminalWritten = false;
+  const markTerminal = (
+    status: typeof MODEL_CALL_STATUS[keyof typeof MODEL_CALL_STATUS],
+    errorMessage?: string,
+  ): boolean => {
+    if (!callId) return true;
+    terminalWritten = true;
+    return completeModelCall(callId, {
+      status,
+      durationMs: Date.now() - startedAt,
+      errorMessage,
+      estimatedCostUsd: 0,
+      costBasis: COST_BASIS.localZero,
+    });
+  };
+
   // Call VLM
   console.log(`[PackagingOcr] Running OCR on ${sku ?? imageUrl} using ${vlmConfig.model}`);
   let rawResponse: string;
   try {
     rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn);
   } catch (err: any) {
+    if (!terminalWritten && callId) {
+      try {
+        markTerminal(MODEL_CALL_STATUS.failed, redactTransportText(err.message));
+      } catch {
+        // best-effort; the primary warning still uses the redacted reason
+      }
+    }
     console.warn(`[PackagingOcr] VLM call failed for ${sku ?? redactImageUrl(imageUrl ?? '')}: ${redactTransportText(err.message)}`);
     return null;
   }
 
   if (!rawResponse || rawResponse.length < 3) {
+    if (callId) markTerminal(MODEL_CALL_STATUS.failed, 'Empty or too-short response from local VLM.');
     console.warn(`[PackagingOcr] Empty or too-short response from VLM for ${sku ?? imageUrl}`);
     return null;
   }
@@ -395,6 +464,7 @@ export async function extractPackagingOcr(
   const responseExcerpt = rawResponse.slice(0, 200);
   const parsed = parseJsonFromVlmResponse(rawResponse);
   if (!parsed) {
+    if (callId) markTerminal(MODEL_CALL_STATUS.failed, 'Could not parse JSON from local VLM response.');
     console.warn(`[PackagingOcr] Could not parse JSON from VLM response for ${sku ?? imageUrl}`);
     return null;
   }
@@ -407,12 +477,23 @@ export async function extractPackagingOcr(
     extractedAt: new Date().toISOString(),
     parser: 'packaging-ocr.ts',
     rawResponseExcerpt: responseExcerpt,
+    ...(callId ? { modelCallIds: [callId] } : {}),
   };
 
   const result = coercePackagingOcrData(parsed, metadata);
   if (!result) {
+    if (callId) markTerminal(MODEL_CALL_STATUS.failed, 'Schema coercion failed for local VLM response.');
     console.warn(`[PackagingOcr] Schema coercion failed for ${sku ?? imageUrl}`);
     return null;
+  }
+
+  // Success: the terminal row must be durable before the result is returned.
+  if (callId) {
+    const terminalDurable = markTerminal(MODEL_CALL_STATUS.success);
+    if (!terminalDurable) {
+      console.error(`[PackagingOcr] Local VLM call ${callId} terminal update failed; discarding OCR output.`);
+      return null;
+    }
   }
 
   const fieldCount = Object.entries(result).filter(

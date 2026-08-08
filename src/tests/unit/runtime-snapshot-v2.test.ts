@@ -213,4 +213,37 @@ describe('runtime snapshot with ACTIVE v2 config authority (Milestone 7)', () =>
     const rv2 = buildRuntimeRuleVersions();
     expect(rv2.digest).toBe(rv.digest);
   });
+
+  it('assertModelPlanCompatible rejects a forged call context version (pass 4b)', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    const forged = {
+      runId: 'run',
+      snapshotHash: v2.snapshotHash,
+      stage: 'product_attribute_proposals' as const,
+      operation: 'attribute_ranking' as const,
+      attempt: 1,
+      promptTemplateVersion: 'forged-prompt-v999',
+      ruleVersion: 'forged-rule-v999',
+    };
+    expect(() => assertModelPlanCompatible(v2, 'attribute_ranking', forged)).toThrow(/context prompt-template version/);
+    const forgedRuleOnly = { ...forged, promptTemplateVersion: 'attribute-ranking-prompt-v1' };
+    expect(() => assertModelPlanCompatible(v2, 'attribute_ranking', forgedRuleOnly)).toThrow(/context rule version/);
+  });
+
+  it('assertModelPlanCompatible rejects a missing runtimeRuleVersions and a tampered plan digest (pass 4b)', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    // Missing runtimeRuleVersions on a schema-v2 snapshot → fail closed.
+    const missingRules = JSON.parse(JSON.stringify(v2));
+    delete missingRules.runtimeRuleVersions;
+    expect(() => assertModelPlanCompatible(missingRules, 'attribute_ranking')).toThrow(/no frozen runtimeRuleVersions/);
+    // Tampered plan entry without a recomputed digest → fail closed.
+    const tamperedPlan = JSON.parse(JSON.stringify(v2));
+    const entry = tamperedPlan.modelExecutionPlan.entries.find((e: any) => e.operation === 'attribute_ranking');
+    entry.ruleVersion = 'tampered-rules-v2';
+    expect(() => assertModelPlanCompatible(tamperedPlan, 'attribute_ranking')).toThrow(/plan digest does not match/);
+    // Tampered rule-versions fields without a recomputed digest → fail closed.
+    const tamperedRules = JSON.parse(JSON.stringify(v2));
+    tamperedRules.runtimeRuleVersions.outputPolicyVersion = 'tampered-v2';
+    expect(() => assertModelPlanCompatible(tamperedRules, 'attribute_ranking')).toThrow(/runtimeRuleVersions digest does not match/);
+  });
 });

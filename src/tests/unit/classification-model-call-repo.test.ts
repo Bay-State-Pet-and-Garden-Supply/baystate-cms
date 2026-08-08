@@ -15,6 +15,7 @@ import {
   getModelCallById,
   verifyModelCallsBelongToRun,
   computeModelCallCost,
+  recordTerminalPreflight,
 } from '../../db/repositories/classification-model-call-repo';
 import { MODEL_CALL_STATUS, COST_BASIS } from '../../classification/model-operation-registry';
 
@@ -164,5 +165,28 @@ describe('classification model-call repo (issue #17 E)', () => {
     insertModelCallStart(makeStart(run.id, { operation: 'attribute_ranking' }));
     const calls = getModelCallsByRun(run.id);
     expect(calls.map(c => c.operation)).toEqual(['evidence_extraction', 'attribute_ranking']);
+  });
+
+  it('recordTerminalPreflight writes an observable unavailable/policy_denied row (pass 4b)', () => {
+    const run = createRun(workspaceId, 'SKU-8', null, HASH, { sourceKind: 'catalog_product', sourceProductHash: 'p8' });
+    const ctx = {
+      runId: run.id,
+      snapshotHash: HASH,
+      stage: 'product_attribute_proposals' as const,
+      operation: 'attribute_ranking' as const,
+      attempt: 1,
+      promptTemplateVersion: 'attribute-ranking-prompt-v1',
+      ruleVersion: 'attribute-ranking-rules-v1',
+    };
+    recordTerminalPreflight(ctx, 'd'.repeat(64), 'unavailable', 'No LLM config available.');
+    recordTerminalPreflight(ctx, 'd'.repeat(64), 'policy_denied', 'Model policy denied.');
+    const rows = getModelCallsByRun(run.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.map(r => r.status).sort()).toEqual(['policy_denied', 'unavailable']);
+    expect(rows[0].snapshot_hash).toBe(HASH);
+    expect(rows[0].operation).toBe('attribute_ranking');
+    // No-op without a context.
+    recordTerminalPreflight(null, '', 'unavailable', 'nope');
+    expect(getModelCallsByRun(run.id)).toHaveLength(2);
   });
 });

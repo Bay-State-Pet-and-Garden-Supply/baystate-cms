@@ -11,6 +11,9 @@
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { unlinkSync } from 'node:fs';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
@@ -28,6 +31,7 @@ import {
   type LlmConfig,
 } from '../../onboarding/llm-client';
 import { ModelPolicyDeniedError, buildModelPolicyView } from '../../classification/model-policy-gateway';
+import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../../classification/model-operation-registry';
 
 describe('LLM Client — task-specific routing', () => {
   const testDbPath = 'src/tests/unit/llm-client-routing-test.db';
@@ -967,6 +971,12 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
 
   // A minimal schema-v2 runtime snapshot carrying a compatible frozen plan.
   function compatibleSnapshot(snapshotHash: string): any {
+    // Build a REAL compatible frozen plan + rule versions so content digests
+    // match the registry's deterministic digest computation (the strengthened
+    // plan-compat check recomputes and compares digests).
+    const view = localView(snapshotHash);
+    const plan = buildModelExecutionPlan(view);
+    const rules = buildRuntimeRuleVersions();
     return {
       schemaVersion: 2,
       snapshotHash,
@@ -976,31 +986,8 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
       createdAt: '2026-08-01T12:00:00.000Z',
       config: {},
       configSnapshotRef: { id: 'x', hash: 'y', sourceCommit: null, createdAt: '2026-08-01T12:00:00.000Z' },
-      modelExecutionPlan: {
-        version: 1,
-        registryVersion: 1,
-        entries: [
-          {
-            operation: 'attribute_ranking',
-            stage: 'product_attribute_proposals',
-            provider: 'ollama',
-            model: 'qwen2.5vl:latest',
-            locality: 'local',
-            fromOverride: false,
-            promptTemplateVersion: 'attribute-ranking-prompt-v1',
-            ruleVersion: 'attribute-ranking-rules-v1',
-          },
-        ],
-        digest: 'e'.repeat(64),
-      },
-      runtimeRuleVersions: {
-        version: 1,
-        registryVersion: 1,
-        promptTemplateVersions: {},
-        ruleVersions: {},
-        outputPolicyVersion: 'v1',
-        digest: 'f'.repeat(64),
-      },
+      modelExecutionPlan: plan,
+      runtimeRuleVersions: rules,
     };
   }
 
@@ -1194,5 +1181,274 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
       },
     )).rejects.toThrow(/no frozen model-execution plan/);
     expect(fetchCalls).toBe(0);
+  });
+
+  test('a failed start insert throws and never transports (pass 4b)', async () => {
+    const { callLlmForTaskWithProvenance } = await import('../../onboarding/llm-client');
+    const snapshotHash = 'g'.repeat(64);
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => { fetchCalls++; return new Response('{}', { status: 200 }); }) as unknown as typeof fetch;
+    // A bad FK (run does not exist) makes insertModelCallStart throw; the
+    // audited wrapper must propagate the error (never swallow → null).
+    await expect(callLlmForTaskWithProvenance(
+      'attribute_value_classification',
+      'pick',
+      'system',
+      {
+        modelPolicy: localView(snapshotHash),
+        protectedOperation: 'attribute_ranking',
+        modelCall: {
+          runId: 'no-such-run',
+          snapshotHash,
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: compatibleSnapshot(snapshotHash),
+      },
+    )).rejects.toThrow();
+    expect(fetchCalls).toBe(0);
+  });
+
+  test('a post-start decode error leaves a durable failed terminal row (never stranded started)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { callLlmForTaskWithProvenance } = await import('../../onboarding/llm-client');
+    const run = createRun('ws', 'SKU-DECODE', null, null);
+    const snapshotHash = 'h'.repeat(64);
+    // Transport succeeds but the body is invalid JSON: the JSON decode throws
+    // AFTER the started row, so the outer terminalization catch must write a
+    // durable `failed` row.
+    globalThis.fetch = (async () => new Response('not-json{{{', { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+
+    await expect(callLlmForTaskWithProvenance(
+      'attribute_value_classification',
+      'pick',
+      'system',
+      {
+        modelPolicy: localView(snapshotHash),
+        protectedOperation: 'attribute_ranking',
+        modelCall: {
+          runId: run.id,
+          snapshotHash,
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: compatibleSnapshot(snapshotHash),
+      },
+    )).rejects.toThrow();
+    const rows = getModelCallsByRun(run.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('failed');
+  });
+
+  test('mutating llm_task_configs cannot change a protected call temperature (frozen parameters)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { callLlmForTaskWithProvenance } = await import('../../onboarding/llm-client');
+    const { upsertLlmTaskConfig } = await import('../../db/repositories/llm-task-config-repo');
+    const run = createRun('ws', 'SKU-TEMP', null, null);
+    const snapshotHash = 'i'.repeat(64);
+    let requestBody: any = null;
+    globalThis.fetch = (async (url: string, init: any) => {
+      requestBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'Beef' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    // Mutate the mutable task config to temperature 0.77 + high reasoning
+    // effort: protected audited calls must still transport the frozen
+    // registry parameters (attribute_ranking temperature 0, no reasoning).
+    upsertLlmTaskConfig({
+      task: 'attribute_value_classification',
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      temperature: 0.77,
+      reasoningEffort: 'high',
+    } as any);
+
+    const result = await callLlmForTaskWithProvenance(
+      'attribute_value_classification',
+      'pick',
+      'system',
+      {
+        modelPolicy: localView(snapshotHash),
+        protectedOperation: 'attribute_ranking',
+        modelCall: {
+          runId: run.id,
+          snapshotHash,
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: compatibleSnapshot(snapshotHash),
+      },
+    );
+    expect(result).not.toBeNull();
+    expect(requestBody.temperature).toBe(0);
+    expect(requestBody.reasoning_effort).toBeUndefined();
+  });
+
+  test('cloud VLM persists usage tokens and a durable success row (pass 4b)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { extractPackagingOcrFromCloud } = await import('../../onboarding/cloud-vlm-client');
+    const run = createRun('ws', 'SKU-CVLM', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'c1' });
+    const snapshotHash = 'j'.repeat(64);
+    // Image fetch returns a >1KiB raster; model fetch returns OCR JSON + usage.
+    const imageBytes = Buffer.alloc(2048, 0x61);
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith('.jpg')) {
+        return new Response(imageBytes, { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({ productName: 'Cloud Treats', species: [] }) } }],
+        usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+
+    const result = await extractPackagingOcrFromCloud({
+      imageUrl: 'https://example.com/img.jpg',
+      modelPolicy: localView(snapshotHash),
+      modelCall: {
+        runId: run.id,
+        snapshotHash,
+        stage: 'evidence_extraction',
+        operation: 'evidence_extraction',
+        attempt: 1,
+        promptTemplateVersion: 'evidence-extraction-prompt-v1',
+        ruleVersion: 'evidence-extraction-rules-v1',
+      },
+      snapshot: compatibleSnapshot(snapshotHash),
+    });
+    expect(result).not.toBeNull();
+    const callIds = (result!.metadata as any)?.modelCallIds as string[] | undefined;
+    expect(callIds).toBeDefined();
+    const rows = getModelCallsByRun(run.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('success');
+    expect(rows[0].prompt_tokens).toBe(12);
+    expect(rows[0].completion_tokens).toBe(7);
+  });
+
+  test('cloud VLM maps a transport abort to cancelled (pass 4b)', async () => {
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { extractPackagingOcrFromCloud } = await import('../../onboarding/cloud-vlm-client');
+    const run = createRun('ws', 'SKU-CVLM-ABORT', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'c2' });
+    const snapshotHash = 'k'.repeat(64);
+    const imageBytes = Buffer.alloc(2048, 0x62);
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith('.jpg')) {
+        return new Response(imageBytes, { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      }
+      throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    }) as unknown as typeof fetch;
+
+    const result = await extractPackagingOcrFromCloud({
+      imageUrl: 'https://example.com/img.jpg',
+      modelPolicy: localView(snapshotHash),
+      modelCall: {
+        runId: run.id,
+        snapshotHash,
+        stage: 'evidence_extraction',
+        operation: 'evidence_extraction',
+        attempt: 1,
+        promptTemplateVersion: 'evidence-extraction-prompt-v1',
+        ruleVersion: 'evidence-extraction-rules-v1',
+      },
+      snapshot: compatibleSnapshot(snapshotHash),
+    });
+    expect(result).toBeNull();
+    const rows = getModelCallsByRun(run.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('cancelled');
+  });
+
+  test('cloud VLM discards output when the run is deleted during transport (terminal not durable) (pass 4b)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { extractPackagingOcrFromCloud } = await import('../../onboarding/cloud-vlm-client');
+    const run = createRun('ws', 'SKU-CVLM-DEL', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'c3' });
+    const snapshotHash = 'l'.repeat(64);
+    const imageBytes = Buffer.alloc(2048, 0x63);
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith('.jpg')) {
+        return new Response(imageBytes, { status: 200, headers: { 'content-type': 'image/jpeg' } });
+      }
+      // Delete the run during the model transport: the started call row is
+      // cascade-deleted, so the success terminal update cannot be durable and
+      // the OCR output must be discarded.
+      getDb().run('DELETE FROM classification_runs WHERE id = ?', [run.id]);
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ productName: 'Must be discarded', species: [] }) } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+
+    const result = await extractPackagingOcrFromCloud({
+      imageUrl: 'https://example.com/img.jpg',
+      modelPolicy: localView(snapshotHash),
+      modelCall: {
+        runId: run.id,
+        snapshotHash,
+        stage: 'evidence_extraction',
+        operation: 'evidence_extraction',
+        attempt: 1,
+        promptTemplateVersion: 'evidence-extraction-prompt-v1',
+        ruleVersion: 'evidence-extraction-rules-v1',
+      },
+      snapshot: compatibleSnapshot(snapshotHash),
+    });
+    expect(result).toBeNull();
+    expect(getModelCallsByRun(run.id)).toHaveLength(0);
+  });
+
+  test('run-bound local VLM OCR is audited with a durable success row (pass 4b)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { extractPackagingOcr } = await import('../../onboarding/packaging-ocr');
+    const { upsertApiKey: upsertVlm } = await import('../../db/repositories/api-key-repo');
+    const run = createRun('ws', 'SKU-LVLM', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'c4' });
+    const snapshotHash = 'm'.repeat(64);
+    // Local VLM transport mock returns valid OCR JSON; the image is loaded from
+    // a real local file (>1KiB) so no image fetch is needed.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lvlm-'));
+    const imgPath = path.join(tmpDir, 'img.bin');
+    fs.writeFileSync(imgPath, Buffer.alloc(2048, 0x64));
+    upsertVlm('ollama_vlm', 'enabled', 'http://localhost:11434', 'qwen2.5vl:latest');
+    const modelFetch = (async () => new Response(JSON.stringify({ message: { content: JSON.stringify({ productName: 'Local Treats', species: [] }) } }), { status: 200 })) as unknown as typeof fetch;
+
+    const result = await extractPackagingOcr({
+      imageUrl: 'https://example.com/img.jpg',
+      imageLocalPath: 'img.bin',
+      workspacePath: tmpDir,
+      sku: 'SKU-LVLM',
+      modelFetchFn: modelFetch,
+      modelCall: {
+        runId: run.id,
+        snapshotHash,
+        stage: 'evidence_extraction',
+        operation: 'evidence_extraction',
+        attempt: 1,
+        promptTemplateVersion: 'evidence-extraction-prompt-v1',
+        ruleVersion: 'evidence-extraction-rules-v1',
+      },
+      snapshot: compatibleSnapshot(snapshotHash),
+    });
+    expect(result).not.toBeNull();
+    const callIds = (result!.metadata as any)?.modelCallIds as string[] | undefined;
+    expect(callIds).toBeDefined();
+    const rows = getModelCallsByRun(run.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('success');
+    expect(rows[0].provider).toBe('ollama');
+    expect(rows[0].locality).toBe('local');
   });
 });

@@ -20,6 +20,11 @@ vi.mock('../../onboarding/llm-client', () => ({
   }),
 }));
 vi.mock('../../db/repositories/page-repo', () => ({ listPages: vi.fn(() => []) }));
+// The coordinator records terminal preflight rows; mock the repo so the
+// bun:sqlite-backed module never loads in the Vitest graph.
+vi.mock('../../db/repositories/classification-model-call-repo', () => ({
+  recordTerminalPreflight: vi.fn(),
+}));
 
 import {
   clearCohortPageCoordinationCache,

@@ -17,6 +17,11 @@ vi.mock('../../onboarding/llm-client', () => ({
   getLlmConfigForTask: mocks.getLlmConfigForTask,
   defaultProtectedOperationForTask: () => 'product_type_ranking',
 }));
+// The ranker now records terminal preflight rows; mock the repo so the
+// bun:sqlite-backed module never loads in the Vitest graph.
+vi.mock('../../db/repositories/classification-model-call-repo', () => ({
+  recordTerminalPreflight: vi.fn(),
+}));
 
 import { llmRankOptions } from '../../classification/curation-target-ranker';
 
@@ -46,6 +51,38 @@ describe('curation target ranker response handling', () => {
     expect(mocks.getLlmConfigForTask).not.toHaveBeenCalled();
   });
 
+  it('records an observable unavailable terminal row on the no-policy preflight (pass 4b)', async () => {
+    const mocks2 = await import('../../db/repositories/classification-model-call-repo');
+    const { targetLabel, options, selectionMode, evidenceText } = baseParams;
+    const { llmRankOptions } = await import('../../classification/curation-target-ranker');
+    // With an audit context but no frozen policy, the preflight must both
+    // abstain AND record a durable unavailable terminal row.
+    await expect(
+      llmRankOptions({
+        targetLabel,
+        options,
+        selectionMode,
+        evidenceText,
+        modelCall: {
+          runId: 'run-1',
+          snapshotHash: 'a'.repeat(64),
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: {} as any,
+      }),
+    ).resolves.toBeNull();
+    expect((mocks2 as any).recordTerminalPreflight).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'attribute_ranking' }),
+      '',
+      'unavailable',
+      expect.any(String),
+    );
+  });
+
   it('does not retry a valid empty abstention', async () => {
     mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce({ content: '{"values":[],"confidence":0}', callId: 'c1', provider: 'openai', model: 'test-model', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
 
@@ -62,7 +99,10 @@ describe('curation target ranker response handling', () => {
     await expect(llmRankOptions(baseParams)).resolves.toEqual({
       values: ['Chicken'],
       confidence: 0.8,
-      modelCallIds: ['c2'],
+      // BOTH influencing calls are linked: the primary parse failed, so the
+      // retry prompt embedded the first response and both influenced the
+      // accepted output.
+      modelCallIds: ['c1', 'c2'],
     });
     expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(2);
   });

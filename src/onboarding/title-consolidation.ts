@@ -7,8 +7,10 @@
  * Exported as a standalone helper so it can be reused by the modular
  * name-consolidation classification stage without duplicating LLM prompts.
  */
-import { getLlmConfigForTask, callLlmForTask } from './llm-client';
+import { getLlmConfigForTask, callLlmForTaskWithProvenance } from './llm-client';
 import { redactTransportText } from '../classification/model-policy-gateway';
+import { MODEL_CALL_STATUS } from '../classification/model-operation-registry';
+import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
 import { buildPerItemPrompt } from './title-prompt-template';
 export interface TitleSignals {
   /** Original name from the spreadsheet import (always available) */
@@ -62,6 +64,8 @@ export interface TitleSignals {
 export interface TitleResult {
   title: string;
   source: 'web' | 'ocr' | 'llm';
+  /** Durable model-call IDs that produced this title (issue #17 E). */
+  modelCallIds?: string[];
 }
 
 /**
@@ -93,7 +97,14 @@ export async function consolidateProductTitle(
 
   // If LLM is not configured, prefer spreadsheet name (has variant tokens like LG, SM, YELLOW)
   // over web title which may strip them. OCR title still wins when available.
+  // The attempted-but-unavailable call is still observable (durable row).
   if (!llmConfig) {
+    recordTerminalPreflight(
+      audit?.modelCall,
+      modelPolicy?.policyDigest ?? '',
+      MODEL_CALL_STATUS.unavailable,
+      'No LLM config available for title consolidation.',
+    );
     if (signals.ocrTitle) {
       return { title: signals.ocrTitle, source: 'ocr' };
     }
@@ -117,15 +128,20 @@ export async function consolidateProductTitle(
       distributorBrands: signals.distributorBrands,
     });
 
-    const cleanTitle = await callLlmForTask('product_curation', prompt, 'You are a clean product taxonomy assistant.', {
+    const auditedTitle = await callLlmForTaskWithProvenance('product_curation', prompt, 'You are a clean product taxonomy assistant.', {
       allowFallback: true,
       modelPolicy,
       protectedOperation: 'title_consolidation',
       ...(audit?.modelCall ? { modelCall: audit.modelCall, snapshot: audit.snapshot } : {}),
     });
-    if (cleanTitle && cleanTitle.length > 2) {
+    if (auditedTitle && auditedTitle.content.length > 2) {
+      const cleanTitle = auditedTitle.content.trim();
       console.log(`[TitleConsolidation] LLM consolidated title: "${cleanTitle}"`);
-      return { title: cleanTitle, source: 'llm' };
+      return {
+        title: cleanTitle,
+        source: 'llm',
+        ...(auditedTitle.callId ? { modelCallIds: [auditedTitle.callId] } : {}),
+      };
     }
   } catch (err: any) {
     console.warn(`[TitleConsolidation] LLM title consolidation failed: ${redactTransportText(err.message)}`);

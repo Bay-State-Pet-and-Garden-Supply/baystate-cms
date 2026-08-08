@@ -38,6 +38,8 @@ import {
   OPERATION_TO_STAGE,
   PROMPT_TEMPLATE_VERSIONS,
   RULE_VERSIONS,
+  verifyModelExecutionPlanIntegrity,
+  verifyRuntimeRuleVersionsIntegrity,
   type ModelCallContext,
   type ModelExecutionPlan,
   type ModelExecutionPlanEntry,
@@ -444,7 +446,14 @@ export function getRuntimeSnapshotByHash(workspaceId: string, hash: string): Run
     .query('SELECT config_json FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?')
     .get(workspaceId, hash) as { config_json: string } | undefined;
   if (!row) return null;
-  const parsed = JSON.parse(row.config_json) as Partial<RuntimeClassificationSnapshot>;
+  let parsed: Partial<RuntimeClassificationSnapshot>;
+  try {
+    parsed = JSON.parse(row.config_json) as Partial<RuntimeClassificationSnapshot>;
+  } catch {
+    // Malformed historical JSON is visible as snapshot_unavailable, never a
+    // 500 — a corrupt snapshot cannot authorize a call or fake provenance.
+    return null;
+  }
   // Accept legacy schema-v1 and additive schema-v2 runtime snapshots; reject
   // plain config snapshots (no snapshotHash) and unknown schema versions.
   if (
@@ -460,13 +469,17 @@ export function getRuntimeSnapshotByHash(workspaceId: string, hash: string): Run
 /**
  * Fail closed when a protected model call would run against a snapshot
  * without a compatible frozen model-execution plan entry: legacy schema-v1
- * snapshots (no plan) or a plan that does not cover the operation with the
- * current registry's prompt-template/rule versions. A snapshot without a
- * compatible plan can never route a new model call.
+ * snapshots (no plan), a plan whose content digest does not match its stored
+ * digest, missing runtimeRuleVersions or a digest mismatch, a plan that does
+ * not cover the operation with the current registry's prompt-template/rule
+ * versions, or a supplied ModelCallContext whose prompt/rule versions differ
+ * from the frozen plan entry. A snapshot without a compatible plan can never
+ * route a new model call.
  */
 export function assertModelPlanCompatible(
   snapshot: RuntimeClassificationSnapshot | null | undefined,
   operation: ProtectedOperation,
+  ctx?: ModelCallContext | null,
 ): void {
   if (!snapshot) {
     throw new Error(
@@ -477,6 +490,23 @@ export function assertModelPlanCompatible(
     throw new Error(
       `Model plan incompatible: snapshot schema ${snapshot.schemaVersion} has no frozen model-execution plan ` +
         `for operation "${operation}".`,
+    );
+  }
+  // The frozen rule versions must be present AND digest-consistent: a missing
+  // or tampered rule set cannot authorize a call.
+  if (!snapshot.runtimeRuleVersions) {
+    throw new Error(
+      `Model plan incompatible: snapshot schema 2 has no frozen runtimeRuleVersions for operation "${operation}".`,
+    );
+  }
+  if (!verifyModelExecutionPlanIntegrity(snapshot.modelExecutionPlan)) {
+    throw new Error(
+      `Model plan incompatible: snapshot model-execution plan digest does not match its entries (operation "${operation}").`,
+    );
+  }
+  if (!verifyRuntimeRuleVersionsIntegrity(snapshot.runtimeRuleVersions)) {
+    throw new Error(
+      `Model plan incompatible: snapshot runtimeRuleVersions digest does not match its fields (operation "${operation}").`,
     );
   }
   const stage = OPERATION_TO_STAGE[operation];
@@ -502,6 +532,22 @@ export function assertModelPlanCompatible(
       `Model plan incompatible: operation "${operation}" rule version ${entry.ruleVersion} ` +
         `differs from the current registry version ${RULE_VERSIONS[operation]}.`,
     );
+  }
+  // The supplied call context must be stamped with the frozen plan versions:
+  // a forged/mismatched context can never be persisted as provenance.
+  if (ctx) {
+    if (ctx.promptTemplateVersion !== entry.promptTemplateVersion) {
+      throw new Error(
+        `Model plan incompatible: call context prompt-template version ${ctx.promptTemplateVersion} ` +
+          `differs from the frozen plan entry ${entry.promptTemplateVersion} for operation "${operation}".`,
+      );
+    }
+    if (ctx.ruleVersion !== entry.ruleVersion) {
+      throw new Error(
+        `Model plan incompatible: call context rule version ${ctx.ruleVersion} ` +
+          `differs from the frozen plan entry ${entry.ruleVersion} for operation "${operation}".`,
+      );
+    }
   }
 }
 

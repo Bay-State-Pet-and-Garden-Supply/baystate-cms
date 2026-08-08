@@ -1,6 +1,8 @@
 import { callLlmForTaskWithProvenance, getLlmConfigForTask } from '../onboarding/llm-client';
 import { redactTransportText, type ModelPolicyView } from './model-policy-gateway';
 import type { ModelCallContext } from './model-operation-registry';
+import { MODEL_CALL_STATUS } from './model-operation-registry';
+import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 import type { ProductLineItemSnapshot } from './types';
 import {
@@ -145,11 +147,29 @@ async function coordinate(params: CohortPageCoordinationParams): Promise<Map<str
   if (new Set(params.products.map(product => product.sku)).size !== params.products.length) {
     return abstainAll(params.products, 'Cohort input contains duplicate SKUs.');
   }
-  if (!getLlmConfigForTask('category_page_assignment', {
-    allowFallback: true,
-    modelPolicy: params.modelPolicy,
-    protectedOperation: 'cohort_page_assignment',
-  })) {
+  let llmConfigured: boolean;
+  try {
+    llmConfigured = Boolean(getLlmConfigForTask('category_page_assignment', {
+      allowFallback: true,
+      modelPolicy: params.modelPolicy,
+      protectedOperation: 'cohort_page_assignment',
+    }));
+  } catch (err) {
+    recordTerminalPreflight(
+      params.modelCall,
+      params.modelPolicy?.policyDigest ?? '',
+      MODEL_CALL_STATUS.policyDenied,
+      `Model policy denied cohort page assignment (${err instanceof Error ? err.message : String(err)}).`,
+    );
+    return abstainAll(params.products, 'Cohort page LLM policy denied.');
+  }
+  if (!llmConfigured) {
+    recordTerminalPreflight(
+      params.modelCall,
+      params.modelPolicy?.policyDigest ?? '',
+      MODEL_CALL_STATUS.unavailable,
+      'No category_page_assignment LLM is configured.',
+    );
     return abstainAll(params.products, 'No category_page_assignment LLM is configured.');
   }
 

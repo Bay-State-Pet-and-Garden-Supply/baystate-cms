@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { getCurrentWorkspace } from '../services/workspace-service';
-import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext } from '../../classification/config-loader';
+import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext, loadRuntimeConfigAuthority } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
 import { processRefreshQueue } from '../../classification/refresh-queue-processor';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
@@ -10,12 +10,47 @@ import {
 } from '../../classification/curation-targets';
 import { getRun, getStageResults, getEvidenceByRun, getLiveDecisionsByRun, getProposalsByRun } from '../../db/repositories/classification-run-repo';
 import { getModelCallsByRun } from '../../db/repositories/classification-model-call-repo';
-import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
+import { getRuntimeSnapshotByHash, authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from '../../classification/runtime-snapshot';
+import { readProductFile } from '../../git/workspace-files';
+import { computeProductHash } from '../../classification/catalog-product-source';
 
 import { evaluateClassificationReadiness } from '../../classification/config-validation';
 import { normalizeClassificationReadinessReport } from '../../classification/readiness';
 
 const router = new Hono();
+
+/**
+ * Deep-walk sanitization for run-detail responses: any string that carries
+ * credential-shaped content (API keys, authorization headers, bearer/sk-
+ * tokens) is replaced with a redaction marker, and object keys that look
+ * secret are redacted outright. Evidence values, snippets, proposals,
+ * decisions, and stage results are returned through this projection so the
+ * endpoint has an enforceable no-sensitive-content guarantee.
+ */
+const CREDENTIAL_CONTENT_PATTERN =
+  /(api[_-]?key|authorization|bearer\s|sk-[a-z0-9]{4,}|refresh_token|access_token|\{\s*"api_key|\{\s*"token)/i;
+const SECRET_KEY_PATTERN = /(api[_-]?key|authorization|token|secret|password)/i;
+
+function sanitizeForRunDetail(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return CREDENTIAL_CONTENT_PATTERN.test(value) ? '[REDACTED]' : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(sanitizeForRunDetail);
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      // Secret-looking KEYS are dropped entirely (never emitted, even with a
+      // redacted value) so the endpoint has an enforceable guarantee that
+      // no api_key/Authorization/token field name appears in the body.
+      if (SECRET_KEY_PATTERN.test(key)) continue;
+      out[key] = sanitizeForRunDetail(val);
+    }
+    return out;
+  }
+  return value;
+}
 
 /**
  * GET /api/classification/readiness
@@ -192,6 +227,40 @@ router.get('/classification/runs/:id', (c) => {
   const decisions = getLiveDecisionsByRun(runId);
   const modelCalls = getModelCallsByRun(runId);
 
+  // Real config/source drift from the actual authority + snapshot comparison
+  // (never hard-coded false). An unresolvable config authority or unknown
+  // snapshot hash is treated as drift (fail closed).
+  let configDrift = false;
+  let sourceDrift = false;
+  if (run.configSnapshotHash) {
+    try {
+      const authority = loadRuntimeConfigAuthority(ws.workspacePath, createRuntimeActivationContext(ws.workspacePath, ws.id));
+      const matches =
+        authorityConfigHashMatches(authority, run.configSnapshotHash) ||
+        runtimeSnapshotHashMatchesConfig(
+          ws.id,
+          run.configSnapshotHash,
+          authority.kind === 'v2' ? authority.bundle : authority.config,
+        );
+      if (!matches) configDrift = true;
+    } catch {
+      configDrift = true;
+    }
+  }
+  if (
+    run.sourceProductHash &&
+    (run.status === 'completed' || run.status === 'completed_with_abstentions')
+  ) {
+    try {
+      const product = readProductFile(ws.workspacePath, run.productSku);
+      if (product && computeProductHash(product) !== run.sourceProductHash) {
+        sourceDrift = true;
+      }
+    } catch {
+      sourceDrift = true;
+    }
+  }
+
   // Runtime snapshot summary: version + digests only. Never the full config
   // (which embeds allowed values etc.) and never prompt/response bodies.
   let snapshotSummary = null;
@@ -254,15 +323,17 @@ router.get('/classification/runs/:id', (c) => {
       sourceProductHash: run.sourceProductHash,
       configSnapshotHash: run.configSnapshotHash,
     },
-    evidence,
-    proposals,
-    decisions,
-    stageResults,
+    // Child records pass through the credential-sanitizing projection so the
+    // endpoint never returns api_key/Authorization/sk- content.
+    evidence: sanitizeForRunDetail(evidence),
+    proposals: sanitizeForRunDetail(proposals),
+    decisions: sanitizeForRunDetail(decisions),
+    stageResults: sanitizeForRunDetail(stageResults),
     modelCalls: modelCallsView,
     snapshotSummary,
     drift: {
-      configDrift: false,
-      sourceDrift: false,
+      configDrift,
+      sourceDrift,
     },
   });
 });

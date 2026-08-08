@@ -1245,8 +1245,10 @@ describe('Classification Pipeline Integration', () => {
     const config = loadClassificationConfig(workspacePath);
     const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
     const run = createRun(workspaceId, 'SKU-MC-OK', snapId, snapHash);
-    // A real model-call row bound to this run + snapshot hash.
-    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    // A real model-call row bound to this run + snapshot hash, completed to
+    // `success`: only a durable success call can be linked to a persisted
+    // proposal (a `started` row is non-terminal and must be rejected).
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
     const callId = insertModelCallStart({
       runId: run.id,
       stageName: 'product_attribute_proposals',
@@ -1262,6 +1264,15 @@ describe('Classification Pipeline Integration', () => {
       systemPromptHash: 's'.repeat(64),
       userPromptHash: 'u'.repeat(64),
     });
+    const terminalDurable = completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    });
+    expect(terminalDurable).toBe(true);
 
     const stage = {
       name: 'product_attribute_proposals' as const,
@@ -1373,5 +1384,71 @@ describe('Classification Pipeline Integration', () => {
     expect(persisted.c).toBe(0);
     const stageRows = getStageResults(run.id).filter(s => s.status === 'succeeded');
     expect(stageRows).toHaveLength(0);
+  });
+
+  it('rejects a proposal linked to a non-terminal (started) model call and rolls back', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'SKU-MC-STARTED', snapId, snapHash);
+    // A model-call row for THIS run/snapshot that is still `started` (never
+    // completed): only a durable `success` call can be linked to a persisted
+    // proposal.
+    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    const startedCall = insertModelCallStart({
+      runId: run.id,
+      stageName: 'product_attribute_proposals',
+      operation: 'attribute_ranking',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'llama3',
+      locality: 'local',
+      snapshotHash: snapHash,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'attribute-ranking-prompt-v1',
+      ruleVersion: 'attribute-ranking-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: run.id,
+            productSku: 'SKU-MC-STARTED',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [startedCall],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-MC-STARTED', evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/non-terminal\/non-success|started/);
+    const persisted = getDb().query(
+      'SELECT COUNT(*) AS c FROM classification_proposals WHERE run_id = ?',
+    ).get(run.id) as { c: number };
+    expect(persisted.c).toBe(0);
   });
 });

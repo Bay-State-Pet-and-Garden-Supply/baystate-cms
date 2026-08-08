@@ -664,6 +664,9 @@ function mapProposal(row: Record<string, any>): ClassificationProposal {
     proposedValue: row.proposed_value_json ? JSON.parse(String(row.proposed_value_json)) : null,
     confidence: Number(row.confidence),
     evidenceIds: row.evidence_ids_json ? JSON.parse(String(row.evidence_ids_json)) : [],
+    ...(row.model_call_ids_json
+      ? { modelCallIds: JSON.parse(String(row.model_call_ids_json)) as string[] }
+      : {}),
     status: String(row.status) as ClassificationProposal['status'],
     isBulkAcceptable: Number(row.is_bulk_acceptable) === 1,
     isStale: Number(row.is_stale) === 1,

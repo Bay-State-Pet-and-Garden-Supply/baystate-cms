@@ -294,6 +294,9 @@ export const nameConsolidationStage: StageDefinition = {
           metadata: {
             curatedTitle: result.title,
             titleSource: result.source,
+            // Durable model-call IDs that produced this title (issue #17 E):
+            // carried in stage metadata so the run's provenance is complete.
+            modelCallIds: result.modelCallIds ?? [],
             packagingOcrTitle: ocrTitle ?? null,
             signalsUsed: {
               spreadsheetName: spreadsheetName ?? null,

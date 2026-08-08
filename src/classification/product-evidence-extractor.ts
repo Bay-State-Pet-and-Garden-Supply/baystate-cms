@@ -11,6 +11,8 @@ import { getVlmConfig } from '../onboarding/vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from '../onboarding/packaging-ocr';
 import { getLlmConfigForTask, callLlmForTaskWithProvenance } from '../onboarding/llm-client';
 import { redactTransportText } from './model-policy-gateway';
+import { MODEL_CALL_STATUS } from './model-operation-registry';
+import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
 import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
 import { buildModelCallContext } from './runtime-snapshot';
 import { getCachedBrands, getCachedDataSharingPolicy } from '../db/repositories/classification-config-repo';
@@ -717,11 +719,20 @@ export async function extractProductEvidence(
     for (let i = 0; i < imageUrls.length; i++) {
       const imgUrl = imageUrls[i];
       try {
+        // Run-bound local VLM calls are audited (issue #17 E): the call
+        // context binds the transport to the run snapshot plan and the
+        // resulting callId flows into the OCR evidence metadata.
+        const localModelCall = context.snapshot
+          ? buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1)
+          : null;
         const ocrResult = await extractPackagingOcr({
           imageUrl: imgUrl,
           workspacePath: input.workspacePath,
           imageSourceUrl: imgUrl,
           sku,
+          ...(localModelCall && context.snapshot
+            ? { modelCall: localModelCall, snapshot: context.snapshot }
+            : {}),
         });
 
         if (ocrResult && hasOcrContent(ocrResult)) {
@@ -746,6 +757,9 @@ export async function extractProductEvidence(
           runId: context.runId,
           sku,
           model: mergedOcr.metadata?.model ?? 'unknown',
+          ...(Array.isArray((mergedOcr.metadata as { modelCallIds?: string[] } | undefined)?.modelCallIds)
+            ? { modelCallIds: (mergedOcr.metadata as unknown as { modelCallIds: string[] }).modelCallIds }
+            : {}),
         });
         evidence.push(...visualEvidence);
         console.log(`[EvidenceExtraction] Added ${visualEvidence.length} evidence entries from local packaging OCR`);
@@ -807,11 +821,25 @@ export async function extractProductEvidence(
           context.snapshot.snapshotHash,
         )
       : null;
-    const llmConfig = getLlmConfigForTask('classification_evidence_extraction', {
-      allowFallback: true,
-      modelPolicy: evidencePolicyView,
-      protectedOperation: 'evidence_extraction',
-    });
+    const preflightModelCall = context.snapshot
+      ? buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1)
+      : null;
+    let llmConfig: import('../onboarding/llm-client').LlmConfig | null;
+    try {
+      llmConfig = getLlmConfigForTask('classification_evidence_extraction', {
+        allowFallback: true,
+        modelPolicy: evidencePolicyView,
+        protectedOperation: 'evidence_extraction',
+      });
+    } catch (err) {
+      recordTerminalPreflight(
+        preflightModelCall,
+        evidencePolicyView?.policyDigest ?? '',
+        MODEL_CALL_STATUS.policyDenied,
+        `Model policy denied text evidence extraction (${err instanceof Error ? err.message : String(err)}).`,
+      );
+      llmConfig = null;
+    }
     if (llmConfig) {
       const titleStr = typeof titleInfo.value === 'string' ? titleInfo.value : '';
       const descStr = typeof descInfo.value === 'string' ? descInfo.value : '';
@@ -873,6 +901,16 @@ export async function extractProductEvidence(
       } else {
         llmStatus = 'no_text';
       }
+    } else {
+      // Preflight decided not to call the model (no config): the attempted
+      // call is still observable via a durable `unavailable` terminal row.
+      llmStatus = 'failed';
+      recordTerminalPreflight(
+        preflightModelCall,
+        evidencePolicyView?.policyDigest ?? '',
+        MODEL_CALL_STATUS.unavailable,
+        'No LLM config available for text evidence extraction.',
+      );
     }
   }
 

@@ -174,6 +174,45 @@ export function buildRuntimeRuleVersions(): RuntimeRuleVersions {
 }
 
 /**
+ * Recompute a model-execution plan's content digest from its own fields and
+ * compare it to the stored digest. A plan whose digest does not match its
+ * entries has been tampered with (or was built incorrectly) and must never
+ * authorize a model call.
+ */
+export function verifyModelExecutionPlanIntegrity(plan: ModelExecutionPlan): boolean {
+  try {
+    const recomputed = hashCanonicalJson({
+      version: plan.version,
+      registryVersion: plan.registryVersion,
+      entries: plan.entries,
+    });
+    return recomputed === plan.digest;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Recompute a runtime rule-versions digest from its own fields and compare it
+ * to the stored digest. A tampered/missing digest can never be treated as the
+ * frozen rule set.
+ */
+export function verifyRuntimeRuleVersionsIntegrity(rules: RuntimeRuleVersions): boolean {
+  try {
+    const recomputed = hashCanonicalJson({
+      version: rules.version,
+      registryVersion: rules.registryVersion,
+      promptTemplateVersions: rules.promptTemplateVersions,
+      ruleVersions: rules.ruleVersions,
+      outputPolicyVersion: rules.outputPolicyVersion,
+    });
+    return recomputed === rules.digest;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Build the frozen model-execution plan for a run snapshot from the frozen
  * model-policy view. Only run-bound operations are included; provider/model
  * come from the policy (stage override or default) and the declared locality
