@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   callLlmForTask: vi.fn(),
+  callLlmForTaskWithProvenance: vi.fn(),
   getLlmConfigForTask: vi.fn(() => ({
     provider: 'openai',
     model: 'test-model',
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../../onboarding/llm-client', () => ({
   callLlmForTask: mocks.callLlmForTask,
+  callLlmForTaskWithProvenance: mocks.callLlmForTaskWithProvenance,
   getLlmConfigForTask: mocks.getLlmConfigForTask,
   defaultProtectedOperationForTask: () => 'product_type_ranking',
 }));
@@ -45,33 +47,37 @@ describe('curation target ranker response handling', () => {
   });
 
   it('does not retry a valid empty abstention', async () => {
-    mocks.callLlmForTask.mockResolvedValueOnce('{"values":[],"confidence":0}');
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce({ content: '{"values":[],"confidence":0}', callId: 'c1', provider: 'openai', model: 'test-model', usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } });
 
     await expect(llmRankOptions(baseParams)).resolves.toBeNull();
-    expect(mocks.callLlmForTask).toHaveBeenCalledTimes(1);
+    expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+    expect(mocks.callLlmForTask).not.toHaveBeenCalled();
   });
 
   it('retries once after invalid JSON and accepts repaired JSON', async () => {
-    mocks.callLlmForTask
-      .mockResolvedValueOnce('not valid json')
-      .mockResolvedValueOnce('{"values":["Chicken"],"confidence":0.8}');
+    mocks.callLlmForTaskWithProvenance
+      .mockResolvedValueOnce({ content: 'not valid json', callId: 'c1', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } })
+      .mockResolvedValueOnce({ content: '{"values":["Chicken"],"confidence":0.8}', callId: 'c2', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } });
 
     await expect(llmRankOptions(baseParams)).resolves.toEqual({
       values: ['Chicken'],
       confidence: 0.8,
+      modelCallIds: ['c2'],
     });
-    expect(mocks.callLlmForTask).toHaveBeenCalledTimes(2);
+    expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(2);
   });
 
   it('does not retry a valid non-empty response', async () => {
-    mocks.callLlmForTask.mockResolvedValueOnce(
-      '{"values":["Salmon"],"confidence":0.7}',
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Salmon"],"confidence":0.7}', callId: 'c3', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
     );
 
     await expect(llmRankOptions(baseParams)).resolves.toEqual({
       values: ['Salmon'],
       confidence: 0.7,
+      modelCallIds: ['c3'],
     });
-    expect(mocks.callLlmForTask).toHaveBeenCalledTimes(1);
+    expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+    expect(mocks.callLlmForTask).not.toHaveBeenCalled();
   });
 });

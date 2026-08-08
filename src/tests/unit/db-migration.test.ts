@@ -206,6 +206,7 @@ describe('SQLite Migration', () => {
       'classification_history_events',
       'classification_refresh_queue',
       'classification_refresh_deferrals',
+      'classification_model_calls',
     ];
 
     for (const table of tables) {
@@ -214,6 +215,19 @@ describe('SQLite Migration', () => {
       ).get(table);
       expect(row).toBeTruthy();
     }
+  });
+
+  it('should create the classification_model_calls provenance columns and proposal model_call_ids_json', () => {
+    const db = getDb();
+    const callCols = (db.query('PRAGMA table_info(classification_model_calls)').all() as Array<{ name: string }>).map(c => c.name);
+    for (const col of ['id', 'run_id', 'operation', 'attempt', 'provider', 'model', 'locality', 'snapshot_hash', 'model_policy_digest', 'prompt_template_version', 'rule_version', 'system_prompt_hash', 'user_prompt_hash', 'started_at', 'ended_at', 'duration_ms', 'prompt_tokens', 'completion_tokens', 'status', 'error_message', 'estimated_cost_usd', 'cost_basis', 'created_at']) {
+      expect(callCols).toContain(col);
+    }
+    const proposalCols = (db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string }>).map(c => c.name);
+    expect(proposalCols).toContain('model_call_ids_json');
+    // Idempotent re-run leaves the marker set.
+    const marker = db.query('SELECT value FROM app_meta WHERE key = ?').get('model_calls_schema_version') as { value: string } | undefined;
+    expect(marker?.value).toBe('1');
   });
 
   it('should support minimal classification audit inserts', () => {

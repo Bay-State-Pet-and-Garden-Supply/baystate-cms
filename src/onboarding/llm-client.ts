@@ -42,6 +42,19 @@ import {
   type ModelPolicyView,
   type ProtectedOperation,
 } from '../classification/model-policy-gateway';
+import {
+  computePromptHashes,
+  MODEL_CALL_STATUS,
+  COST_BASIS,
+  type ModelCallContext,
+} from '../classification/model-operation-registry';
+import { assertModelPlanCompatible, type RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
+import {
+  insertModelCallStart,
+  completeModelCall,
+  insertTerminalModelCall,
+  computeModelCallCost,
+} from '../db/repositories/classification-model-call-repo';
 
 // ── LLM Concurrency Gate ──────────────────────────────────────────────────────
 // Local Ollama models buckle under parallel requests. Serialize so only one
@@ -420,6 +433,297 @@ export interface CallLlmForTaskOptions {
   modelPolicy?: ModelPolicyView | null;
   /** Protected operation for policy routing; defaults from the task name. */
   protectedOperation?: ProtectedOperation;
+  /**
+   * Durable model-call audit context (issue #17 work item E). When present,
+   * the wrapper inserts a `started` row before transport and updates a
+   * terminal row on every path; the model output is returned only after the
+   * terminal row is durable. `snapshot` is required for the plan-compatibility
+   * check (a new call from a snapshot without a compatible plan fails closed).
+   */
+  modelCall?: ModelCallContext;
+  /** Immutable runtime snapshot the call is bound to (plan compatibility). */
+  snapshot?: RuntimeClassificationSnapshot | null;
+}
+
+/** Result of an audited model call (issue #17 work item E). */
+export interface ModelCallResult {
+  content: string;
+  callId: string;
+  provider: string;
+  model: string;
+  usage: {
+    promptTokens: number | null;
+    completionTokens: number | null;
+    totalTokens: number | null;
+  };
+}
+
+/**
+ * Resolve the task's temperature override (if any). Caller-provided
+ * options.temperature wins over the task config's stored value.
+ */
+function resolveTemperature(task: LlmTask, options: CallLlmForTaskOptions): number {
+  const taskConfig = getLlmTaskConfig(task);
+  return options.temperature !== undefined
+    ? options.temperature
+    : taskConfig?.temperature !== null && taskConfig?.temperature !== undefined
+      ? taskConfig.temperature
+      : 0.1;
+}
+
+function resolveReasoningEffort(task: LlmTask): string | null {
+  return getLlmTaskConfig(task)?.reasoningEffort ?? null;
+}
+
+/**
+ * Perform the audited transport for one protected call. The audit context is
+ * REQUIRED: without `modelCall`, this throws (callers must use the plain
+ * `callLlmForTask` path for non-audited calls).
+ */
+async function callLlmForTaskAudited(
+  task: LlmTask,
+  prompt: string,
+  systemPrompt: string,
+  options: CallLlmForTaskOptions,
+): Promise<ModelCallResult | null> {
+  const ctx = options.modelCall;
+  if (!ctx) {
+    throw new Error('callLlmForTaskAudited requires a modelCall audit context.');
+  }
+
+  // Fail closed when the run snapshot has no compatible frozen plan for this
+  // operation (legacy schema-v1 snapshot, missing entry, or version drift).
+  assertModelPlanCompatible(options.snapshot, ctx.operation);
+
+  const { systemPromptHash, userPromptHash } = computePromptHashes(systemPrompt, prompt);
+  // Locality is provider-scoped; unknown before config resolution (denials
+  // and unavailable states record null locality + unknown cost basis).
+  const locality: string | null = null;
+
+  let config: LlmConfig | null;
+  try {
+    config = getLlmConfigForTask(task, {
+      allowFallback: options.allowFallback,
+      modelPolicy: options.modelPolicy,
+      protectedOperation: options.protectedOperation,
+      requiresImage: options.requiresImage,
+    });
+  } catch (err) {
+    if (err instanceof ModelPolicyDeniedError) {
+      // Record the denial as a durable terminal row (no transport happened).
+      insertTerminalModelCall({
+        runId: ctx.runId,
+        stageName: ctx.stage,
+        operation: ctx.operation,
+        attempt: ctx.attempt,
+        provider: null,
+        model: null,
+        locality,
+        snapshotHash: ctx.snapshotHash,
+        modelPolicyDigest: options.modelPolicy?.policyDigest ?? '',
+        promptTemplateVersion: ctx.promptTemplateVersion,
+        ruleVersion: ctx.ruleVersion,
+        systemPromptHash,
+        userPromptHash,
+        status: MODEL_CALL_STATUS.policyDenied,
+        errorMessage: `Model policy denied (${err.code})`,
+        costBasis: COST_BASIS.unknown,
+      });
+    }
+    throw err;
+  }
+  if (!config) {
+    // No model available (disabled policy or no credential): durable
+    // `unavailable` row so the attempted call is observable.
+    insertTerminalModelCall({
+      runId: ctx.runId,
+      stageName: ctx.stage,
+      operation: ctx.operation,
+      attempt: ctx.attempt,
+      provider: null,
+      model: null,
+      locality,
+      snapshotHash: ctx.snapshotHash,
+      modelPolicyDigest: options.modelPolicy?.policyDigest ?? '',
+      promptTemplateVersion: ctx.promptTemplateVersion,
+      ruleVersion: ctx.ruleVersion,
+      systemPromptHash,
+      userPromptHash,
+      status: MODEL_CALL_STATUS.unavailable,
+      errorMessage: 'No LLM config available for the protected operation.',
+      costBasis: COST_BASIS.unknown,
+    });
+    return null;
+  }
+
+  const resolvedLocality = options.modelPolicy?.providerLocalities[config.provider] ?? locality;
+
+  // Re-assert the frozen policy immediately before transport (issue #17 item
+  // A): validation at activation alone is insufficient.
+  if (options.modelPolicy) {
+    assertModelPolicyIntact(options.modelPolicy);
+  }
+
+  const temperature = resolveTemperature(task, options);
+  const reasoningEffort = resolveReasoningEffort(task);
+
+  // Insert the `started` audit row BEFORE transport. If the row cannot be
+  // persisted, transport is never invoked (fail-closed invariant).
+  let callId: string;
+  try {
+    callId = insertModelCallStart({
+      runId: ctx.runId,
+      stageName: ctx.stage,
+      operation: ctx.operation,
+      attempt: ctx.attempt,
+      provider: config.provider,
+      model: config.model,
+      locality: resolvedLocality,
+      snapshotHash: ctx.snapshotHash,
+      modelPolicyDigest: options.modelPolicy?.policyDigest ?? '',
+      promptTemplateVersion: ctx.promptTemplateVersion,
+      ruleVersion: ctx.ruleVersion,
+      systemPromptHash,
+      userPromptHash,
+    });
+  } catch (err) {
+    console.error('[LLMClient] Failed to persist model-call start row; aborting transport:', redactTransportText(err instanceof Error ? err.message : String(err)));
+    return null;
+  }
+
+  const startedAt = Date.now();
+  const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
+  const requestBody: Record<string, unknown> = {
+    model: config.model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prompt },
+    ],
+    temperature,
+  };
+  if (reasoningEffort) {
+    requestBody.reasoning_effort = reasoningEffort;
+  }
+
+  await acquireLlmSlot(config.provider);
+  try {
+    // Re-assert the frozen policy immediately at the transport boundary
+    // (after the queue wait): tampering or route drift denies the call.
+    if (options.modelPolicy) {
+      reassertProtectedRouteBeforeTransport(task, config, {
+        modelPolicy: options.modelPolicy,
+        protectedOperation: options.protectedOperation,
+        requiresImage: options.requiresImage,
+      });
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err) {
+      const isAbort =
+        (err as { name?: string })?.name === 'AbortError' ||
+        (err as { message?: string })?.message?.includes('abort') === true;
+      const terminal = isAbort ? MODEL_CALL_STATUS.cancelled : MODEL_CALL_STATUS.failed;
+      completeModelCall(callId, {
+        status: terminal,
+        durationMs: Date.now() - startedAt,
+        errorMessage: redactTransportText(err instanceof Error ? err.message : String(err)),
+        estimatedCostUsd: resolvedLocality === 'local' ? 0 : null,
+        costBasis: resolvedLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
+      });
+      throw err;
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      const reason = `LLM API request failed (${config.provider}): ${response.status} - ${redactTransportText(text)}`;
+      completeModelCall(callId, {
+        status: MODEL_CALL_STATUS.failed,
+        durationMs: Date.now() - startedAt,
+        errorMessage: reason,
+        estimatedCostUsd: resolvedLocality === 'local' ? 0 : null,
+        costBasis: resolvedLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
+      });
+      // Never embed the raw provider error body in the thrown error.
+      throw new Error(reason);
+    }
+
+    const data = (await response.json()) as {
+      choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) {
+      completeModelCall(callId, {
+        status: MODEL_CALL_STATUS.failed,
+        durationMs: Date.now() - startedAt,
+        errorMessage: 'LLM returned an empty response.',
+        estimatedCostUsd: resolvedLocality === 'local' ? 0 : null,
+        costBasis: resolvedLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
+      });
+      throw new Error('LLM returned an empty response.');
+    }
+
+    // Token counts come from the OpenAI-compatible usage object when present;
+    // absence remains null. Cost: 0 only for explicitly local routes;
+    // unknown cloud rates are null + 'unknown' (never a guessed zero).
+    const promptTokens = data.usage?.prompt_tokens ?? null;
+    const completionTokens = data.usage?.completion_tokens ?? null;
+    const cost = computeModelCallCost(resolvedLocality, promptTokens, completionTokens);
+
+    const terminalDurable = completeModelCall(callId, {
+      status: MODEL_CALL_STATUS.success,
+      durationMs: Date.now() - startedAt,
+      promptTokens,
+      completionTokens,
+      estimatedCostUsd: cost.estimatedCostUsd,
+      costBasis: cost.costBasis,
+    });
+
+    // No durable terminal row means the output is discarded: the model output
+    // must never reach a proposal unless its terminal row is durable.
+    if (!terminalDurable) {
+      console.error(`[LLMClient] Model call ${callId} terminal update failed; discarding output.`);
+      return null;
+    }
+
+    return {
+      content: content.trim(),
+      callId,
+      provider: config.provider,
+      model: config.model,
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens: data.usage?.total_tokens ?? null,
+      },
+    };
+  } finally {
+    releaseLlmSlot(config.provider);
+  }
+}
+
+/**
+ * Call the LLM configured for a specific AI task and return the full audited
+ * result (call ID, provider, model, usage) ONLY after the terminal model-call
+ * row is durable. Requires `options.modelCall` + `options.snapshot`.
+ */
+export async function callLlmForTaskWithProvenance(
+  task: LlmTask,
+  prompt: string,
+  systemPrompt = 'You are a helpful product cataloging assistant.',
+  options: CallLlmForTaskOptions = {},
+): Promise<ModelCallResult | null> {
+  return callLlmForTaskAudited(task, prompt, systemPrompt, options);
 }
 
 /**
@@ -427,6 +731,10 @@ export interface CallLlmForTaskOptions {
  * `getLlmConfigForTask()`. Throws `MissingLlmTaskConfigError` for
  * profile tasks with no config; returns `null` for other tasks when
  * no config and no fallback is available.
+ *
+ * When `options.modelCall` is provided, the call is audited through
+ * `classification_model_calls` (started → terminal on every path) and the
+ * content is returned only after the terminal row is durable.
  */
 export async function callLlmForTask(
   task: LlmTask,
@@ -434,6 +742,11 @@ export async function callLlmForTask(
   systemPrompt = 'You are a helpful product cataloging assistant.',
   options: CallLlmForTaskOptions = {},
 ): Promise<string | null> {
+  if (options.modelCall) {
+    const result = await callLlmForTaskAudited(task, prompt, systemPrompt, options);
+    return result?.content ?? null;
+  }
+
   let config: LlmConfig | null;
   try {
     config = getLlmConfigForTask(task, {
@@ -456,16 +769,8 @@ export async function callLlmForTask(
     assertModelPolicyIntact(options.modelPolicy);
   }
 
-  // Resolve the task's temperature override (if any). Caller-provided
-  // options.temperature wins over the task config's stored value.
-  const taskConfig = getLlmTaskConfig(task);
-  const temperature =
-    options.temperature !== undefined
-      ? options.temperature
-      : taskConfig?.temperature !== null && taskConfig?.temperature !== undefined
-        ? taskConfig.temperature
-        : 0.1;
-  const reasoningEffort = taskConfig?.reasoningEffort ?? null;
+  const temperature = resolveTemperature(task, options);
+  const reasoningEffort = resolveReasoningEffort(task);
 
   await acquireLlmSlot(config.provider);
   try {

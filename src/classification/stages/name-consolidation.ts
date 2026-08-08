@@ -13,6 +13,7 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { consolidateProductTitle } from '../../onboarding/title-consolidation';
 import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
+import { buildModelCallContext } from '../runtime-snapshot';
 import type { ModelPolicyConfigV2 } from '../../shared/schemas/classification';
 
 /**
@@ -273,6 +274,12 @@ export const nameConsolidationStage: StageDefinition = {
               context.snapshot.snapshotHash,
             )
           : null,
+        context.snapshot
+          ? {
+              modelCall: buildModelCallContext(context.snapshot, context.runId, 'title_consolidation', 1),
+              snapshot: context.snapshot,
+            }
+          : undefined,
       );
 
       return {

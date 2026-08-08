@@ -24,6 +24,8 @@ export default defineConfig({
       'src/tests/unit/extractor-profiles.test.ts',
       'src/tests/unit/extraction-remedies.test.ts',
       'src/tests/unit/classification-pipeline.test.ts',
+      'src/tests/unit/classification-model-call-repo.test.ts',
+      'src/tests/unit/classification-run-routes.test.ts',
       'src/tests/unit/source-discovery.test.ts',
       'src/tests/unit/profile-generation-repo.test.ts',
       'src/tests/unit/profile-promoter.test.ts',

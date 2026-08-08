@@ -20,6 +20,7 @@ import {
 } from './curation-target-matcher';
 import { enrichProductDetails } from './detail-enrichment';
 import { llmRankOptions } from './curation-target-ranker';
+import { buildModelCallContext } from './runtime-snapshot';
 import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
 import {
@@ -31,6 +32,7 @@ import {
   buildPageHierarchy,
   extractProductContext,
   llmAssignCategoryPages,
+  type PageAssignmentResult,
 } from './page-assignment-llm';
 import { coordinateCohortPagesOnce } from './cohort-page-coordinator';
 
@@ -60,7 +62,7 @@ export function processProductTypeTarget(
 ): Promise<TargetProcessResult> {
   return processTargetInternal(target, input, context, {
     kind: 'product_type',
-    buildProposal: (value, confidence, evIds) =>
+    buildProposal: (value, confidence, evIds, modelCallIds) =>
       buildProductTypeProposal({
         runId: context.runId,
         sku: input.sku,
@@ -68,6 +70,7 @@ export function processProductTypeTarget(
         confidence,
         evidenceIds: evIds,
         snapshotHash: context.snapshot?.snapshotHash ?? null,
+        ...(modelCallIds?.length ? { modelCallIds } : {}),
       }),
     task: 'product_type_classification',
   });
@@ -149,6 +152,7 @@ export async function processProductFieldTarget(
 
   let values: string[] = [];
   let confidence = 0;
+  let llmModelCallIds: string[] | undefined;
 
   if (aliasMatches.length > 0) {
     values = aliasMatches.map(m => m.value);
@@ -192,11 +196,18 @@ export async function processProductFieldTarget(
           )
         : null,
       protectedOperation: 'attribute_ranking',
+      ...(context.snapshot
+        ? {
+            modelCall: buildModelCallContext(context.snapshot, context.runId, 'attribute_ranking', 1),
+            snapshot: context.snapshot,
+          }
+        : {}),
     });
 
     if (llmResult && llmResult.values.length > 0) {
       values = llmResult.values;
       confidence = llmResult.confidence;
+      llmModelCallIds = llmResult.modelCallIds;
     }
   }
 
@@ -213,6 +224,7 @@ export async function processProductFieldTarget(
     evidenceIds,
     isMultiple: selectionMode === 'multiple',
     snapshotHash,
+    ...(llmModelCallIds?.length ? { modelCallIds: llmModelCallIds } : {}),
   });
 
   return { proposals: [proposal], message: `"${targetConfig.label}": ${values.join(', ')} (${(confidence * 100).toFixed(0)}%)` };
@@ -258,7 +270,7 @@ export async function processPageTarget(
 
   const groupedSkus = context.productLineContext?.siblingSkus ?? [];
   const isMultiItemGroup = groupedSkus.length >= 2;
-  let llmResult: { pages: Array<{ pageId: string; pageName: string; confidence: number }> } | null;
+  let llmResult: PageAssignmentResult | null;
   let assignmentSource = 'LLM';
 
   if (isMultiItemGroup) {
@@ -282,6 +294,12 @@ export async function processPageTarget(
             context.snapshot.snapshotHash,
           )
         : null,
+      ...(context.snapshot
+        ? {
+            modelCall: buildModelCallContext(context.snapshot, context.runId, 'cohort_page_assignment', 1),
+            snapshot: context.snapshot,
+          }
+        : {}),
     });
     const member = coordinated.get(input.sku);
     if (!member || member.status === 'abstained') {
@@ -290,7 +308,7 @@ export async function processPageTarget(
         message: `Cohort page coordination abstained: ${member?.reason ?? `missing result for SKU ${input.sku}`}`,
       };
     }
-    llmResult = { pages: member.pages };
+    llmResult = { pages: member.pages, modelCallIds: member.modelCallIds };
     assignmentSource = 'cohort LLM';
   } else {
     llmResult = await llmAssignCategoryPages({
@@ -307,6 +325,12 @@ export async function processPageTarget(
             context.snapshot.snapshotHash,
           )
         : null,
+      ...(context.snapshot
+        ? {
+            modelCall: buildModelCallContext(context.snapshot, context.runId, 'page_assignment', 1),
+            snapshot: context.snapshot,
+          }
+        : {}),
     });
   }
 
@@ -338,6 +362,7 @@ export async function processPageTarget(
       verifiedPageIdentity: verifiedPageIdSet.has(p.pageId),
       isBulkAcceptable: (p.isBrandShortcut || p.pageName.startsWith('Brand -')) ? false : undefined,
       snapshotHash,
+      ...(llmResult.modelCallIds?.length ? { modelCallIds: llmResult.modelCallIds } : {}),
     }),
   );
 
@@ -352,7 +377,12 @@ export async function processPageTarget(
 
 interface TargetProposalBuilder {
   kind: string;
-  buildProposal: (value: string, confidence: number, evidenceIds: string[]) => ClassificationProposal;
+  buildProposal: (
+    value: string,
+    confidence: number,
+    evidenceIds: string[],
+    modelCallIds?: string[],
+  ) => ClassificationProposal;
   /** LLM task name for routing, or undefined to use 'category_classification' fallback */
   task?: string;
 }
@@ -412,6 +442,17 @@ async function processTargetInternal(
         )
       : null,
     protectedOperation: builder.task === 'category_page_assignment' ? 'page_assignment' : 'product_type_ranking',
+    ...(context.snapshot
+      ? {
+          modelCall: buildModelCallContext(
+            context.snapshot,
+            context.runId,
+            builder.task === 'category_page_assignment' ? 'page_assignment' : 'product_type_ranking',
+            1,
+          ),
+          snapshot: context.snapshot,
+        }
+      : {}),
   });
 
   if (!llmResult || llmResult.values.length === 0) {
@@ -419,7 +460,7 @@ async function processTargetInternal(
   }
 
   const proposals = llmResult.values.map(v =>
-    builder.buildProposal(v, llmResult.confidence, evidenceIds),
+    builder.buildProposal(v, llmResult.confidence, evidenceIds, llmResult.modelCallIds),
   );
 
   return {

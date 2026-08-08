@@ -18,6 +18,7 @@ vi.mock('../../classification/page-assignment-llm', () => ({
   llmAssignCategoryPages: vi.fn(),
 }));
 
+vi.mock('../../classification/runtime-snapshot', () => ({ buildModelCallContext: vi.fn(() => null) }));
 vi.mock('../../classification/config-loader', () => ({
   loadClassificationConfig: vi.fn(() => ({
     curationTargets: [

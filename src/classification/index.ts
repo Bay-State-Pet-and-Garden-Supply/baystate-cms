@@ -63,6 +63,30 @@ export type {
   PageSnapshotRecord,
 } from './runtime-snapshot';
 
+// ─── Model Operation Registry (issue #17 E) ───────────────────────────────────
+export {
+  MODEL_OPERATION_REGISTRY_VERSION,
+  OUTPUT_POLICY_VERSION,
+  PROMPT_TEMPLATE_VERSIONS,
+  RULE_VERSIONS,
+  OPERATION_PARAMETERS,
+  OPERATION_TO_STAGE,
+  RUN_BOUND_OPERATIONS,
+  MODEL_CALL_STATUS,
+  COST_BASIS,
+  buildRuntimeRuleVersions,
+  buildModelExecutionPlan,
+  computePromptHashes,
+} from './model-operation-registry';
+export type {
+  ModelCallContext,
+  ModelCallStatus,
+  CostBasis,
+  ModelExecutionPlan,
+  ModelExecutionPlanEntry,
+  RuntimeRuleVersions,
+} from './model-operation-registry';
+
 // ─── Reviewed Facts ────────────────────────────────────────────────────────────
 export { collectReviewedFacts, isFactCompatible, filterCompatibleFacts } from './reviewed-facts';
 export type { ReviewedFact, CollectReviewedFactsInput } from './reviewed-facts';

@@ -11,7 +11,7 @@
  * Uses `category_classification` task routing for all target kinds
  * to avoid widening task-routing scope in this refactor.
  */
-import { getLlmConfigForTask, callLlmForTask, defaultProtectedOperationForTask } from '../onboarding/llm-client';
+import { getLlmConfigForTask, callLlmForTaskWithProvenance, defaultProtectedOperationForTask } from '../onboarding/llm-client';
 import type { LlmTask } from '../db/repositories/llm-task-config-repo';
 import {
   ModelPolicyDeniedError,
@@ -19,6 +19,8 @@ import {
   type ModelPolicyView,
   type ProtectedOperation,
 } from './model-policy-gateway';
+import type { ModelCallContext } from './model-operation-registry';
+import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 
 export interface LlmRankOptionsParams {
   /** Human-readable label for the target kind (e.g. "product type", "flavor", "category page") */
@@ -44,11 +46,17 @@ export interface LlmRankOptionsParams {
   modelPolicy?: ModelPolicyView | null;
   /** Protected operation; defaults from the task name. */
   protectedOperation?: ProtectedOperation;
+  /** Durable model-call audit context (issue #17 work item E). */
+  modelCall?: ModelCallContext | null;
+  /** Runtime snapshot the call is bound to (plan compatibility). */
+  snapshot?: RuntimeClassificationSnapshot | null;
 }
 
 export interface LlmRankResult {
   values: string[];
   confidence: number;
+  /** Durable model-call IDs that produced this ranking (issue #17 E). */
+  modelCallIds?: string[];
 }
 
 /**
@@ -107,7 +115,10 @@ ${evidenceText.slice(0, 3000)}
 Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`;
 
   try {
-    const response = await callLlmForTask(
+    const auditedCall = params.modelCall
+      ? { modelCall: params.modelCall, snapshot: params.snapshot }
+      : {};
+    const response = await callLlmForTaskWithProvenance(
       taskName as any,
       prompt,
       'You are a strict catalog classifier. You only return exact values from the allowed options.',
@@ -115,30 +126,35 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
         allowFallback: true,
         modelPolicy: params.modelPolicy,
         ...(operation ? { protectedOperation: operation } : {}),
+        ...auditedCall,
       },
     );
 
     if (!response) return null;
 
     // Parse JSON response with repair for common formatting issues
-    let parsed = parseRankerResponse(response);
+    let parsed = parseRankerResponse(response.content);
+    // The call that produced the final accepted parse (primary or retry).
+    let acceptedCallId = response.callId;
 
     // Retry only when parsing failed. A valid empty values array is an
     // intentional abstention and must not be turned into an invented match.
     if (!parsed) {
       try {
-        const retryResponse = await callLlmForTask(
+        const retryResponse = await callLlmForTaskWithProvenance(
           taskName as any,
-          `The previous response was not valid JSON. Fix the JSON format:\n\n${response.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
+          `The previous response was not valid JSON. Fix the JSON format:\n\n${response.content.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
           'You are a precise JSON fixer. Return only valid JSON matching the requested shape.',
           {
             allowFallback: true,
             modelPolicy: params.modelPolicy,
             ...(operation ? { protectedOperation: operation } : {}),
+            ...auditedCall,
           },
         );
         if (retryResponse) {
-          parsed = parseRankerResponse(retryResponse);
+          parsed = parseRankerResponse(retryResponse.content);
+          acceptedCallId = retryResponse.callId;
         }
       } catch {
         // Retry also failed - fall through to null return below
@@ -157,7 +173,7 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     if (values.length === 0) return null;
 
     const confidence = Math.max(0.35, Math.min(0.85, parsed.confidence ?? 0.55));
-    return { values, confidence };
+    return { values, confidence, modelCallIds: [acceptedCallId] };
   } catch (err: any) {
     console.warn(`[CurationTargetRanker] LLM ranking failed for "${targetLabel}": ${redactTransportText(err.message)}`);
     return null;

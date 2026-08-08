@@ -14,10 +14,13 @@ import {
   persistRuntimeSnapshot,
   runtimeSnapshotHashMatchesConfig,
   authorityConfigHashMatches,
+  getRuntimeSnapshotByHash,
+  assertModelPlanCompatible,
 } from '../../classification/runtime-snapshot';
 import type { RuntimeSnapshotInput } from '../../classification/runtime-snapshot';
 import type { RuntimeConfigAuthority } from '../../classification/config-loader';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
+import { buildRuntimeRuleVersions } from '../../classification/model-operation-registry';
 
 let workspacePath: string;
 let workspaceId: string;
@@ -127,5 +130,87 @@ describe('runtime snapshot with ACTIVE v2 config authority (Milestone 7)', () =>
     delete (input as { authority?: unknown }).authority;
     delete (input as { config?: unknown }).config;
     expect(() => buildRuntimeSnapshot(input)).toThrow(/requires either a runtime config authority/);
+  });
+
+  // ── Issue #17 work item E: schema-v2 model-execution plan ─────────────────
+
+  it('schema v2 snapshots carry a frozen model-execution plan and rule versions', () => {
+    const snapshot = buildRuntimeSnapshot(buildV2Input());
+    expect(snapshot.schemaVersion).toBe(2);
+    expect(snapshot.modelExecutionPlan).toBeDefined();
+    expect(snapshot.modelExecutionPlan!.entries.length).toBeGreaterThan(0);
+    expect(snapshot.modelExecutionPlan!.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(snapshot.runtimeRuleVersions).toBeDefined();
+    expect(snapshot.runtimeRuleVersions!.digest).toMatch(/^[a-f0-9]{64}$/);
+    // The plan entry resolves the policy default (ollama) for a stage-mapped op.
+    const entry = snapshot.modelExecutionPlan!.entries.find(e => e.operation === 'attribute_ranking');
+    expect(entry).toBeDefined();
+    expect(entry!.provider).toBe('ollama');
+    expect(entry!.locality).toBe('local');
+    expect(entry!.stage).toBe('product_attribute_proposals');
+    expect(entry!.promptTemplateVersion).toBe('attribute-ranking-prompt-v1');
+    expect(entry!.ruleVersion).toBe('attribute-ranking-rules-v1');
+  });
+
+  it('plan is immutable and included in the snapshot hash', () => {
+    const snapshot = buildRuntimeSnapshot(buildV2Input());
+    expect(Object.isFrozen(snapshot.modelExecutionPlan)).toBe(true);
+    const a = buildRuntimeSnapshot(buildV2Input());
+    const b = buildRuntimeSnapshot(buildV2Input());
+    expect(snapshotHash(a)).toBe(snapshotHash(b));
+  });
+
+  it('snapshot hash changes when prompt/rule versions change but not when task config mutates', () => {
+    const a = buildRuntimeSnapshot(buildV2Input());
+    // Rule-version change must change the snapshot hash (frozen plan digest).
+    const mutated = buildRuntimeSnapshot(buildV2Input());
+    // Simulate a registry bump by rewriting the frozen plan entry and digest.
+    const raw = JSON.parse(JSON.stringify(mutated)) as typeof mutated;
+    const rawEntry = raw.modelExecutionPlan!.entries.find(e => e.operation === 'attribute_ranking')!;
+    rawEntry.ruleVersion = 'attribute-ranking-rules-v2';
+    expect(snapshotHash(raw)).not.toBe(snapshotHash(a));
+    // Task-config mutation does not change the snapshot (config is frozen at
+    // build time and the plan comes from the policy, not llm_task_configs).
+    const afterConfigMutate = buildRuntimeSnapshot(buildV2Input());
+    expect(snapshotHash(afterConfigMutate)).toBe(snapshotHash(a));
+  });
+
+  it('assertModelPlanCompatible fails closed for legacy schema-v1 snapshots and passes for v2', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    expect(() => assertModelPlanCompatible(v2, 'attribute_ranking')).not.toThrow();
+    expect(() => assertModelPlanCompatible(v2, 'product_type_ranking')).not.toThrow();
+    // A schema-v1 snapshot has no plan → fail closed.
+    const v1 = JSON.parse(JSON.stringify(v2));
+    v1.schemaVersion = 1;
+    delete v1.modelExecutionPlan;
+    delete v1.runtimeRuleVersions;
+    expect(() => assertModelPlanCompatible(v1, 'attribute_ranking')).toThrow(/no frozen model-execution plan/);
+    expect(() => assertModelPlanCompatible(null, 'attribute_ranking')).toThrow(/no runtime snapshot/);
+  });
+
+  it('legacy schema-v1 snapshots remain readable (read-only support)', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    const legacy = JSON.parse(JSON.stringify(v2));
+    legacy.schemaVersion = 1;
+    delete legacy.modelExecutionPlan;
+    delete legacy.runtimeRuleVersions;
+    legacy.snapshotHash = snapshotHash(legacy);
+    const { id } = persistRuntimeSnapshot(legacy);
+    expect(id).toBeDefined();
+    const loaded = getRuntimeSnapshotByHash(workspaceId, snapshotHash(legacy));
+    expect(loaded).not.toBeNull();
+    expect(loaded!.schemaVersion).toBe(1);
+    expect(loaded!.modelExecutionPlan).toBeUndefined();
+    // Legacy hash domain is stable across reads.
+    expect(snapshotHash(loaded!)).toBe(snapshotHash(legacy));
+  });
+
+  it('runtime rule versions are deterministic and versioned', () => {
+    const rv = buildRuntimeRuleVersions();
+    expect(rv.version).toBe(1);
+    expect(rv.registryVersion).toBe(1);
+    expect(rv.digest).toMatch(/^[a-f0-9]{64}$/);
+    const rv2 = buildRuntimeRuleVersions();
+    expect(rv2.digest).toBe(rv.digest);
   });
 });

@@ -14,9 +14,21 @@ function asMock(fn: any): Mock {
 
 // ── Mocks (hoisted) ──────────────────────────────────────────────────────────
 
-vi.mock('../../onboarding/llm-client', () => ({
-  callLlmForTask: vi.fn(),
-}));
+vi.mock('../../onboarding/llm-client', () => {
+  const callLlmForTask = vi.fn();
+  return {
+    callLlmForTask,
+    // The audited wrapper is used by production call sites; forward it to the
+    // same transport mock so existing assertions on callLlmForTask keep
+    // working while the provenance wrapper returns the enriched result shape.
+    callLlmForTaskWithProvenance: vi.fn(async (task: string, prompt: string, system: string) => {
+      const content = await callLlmForTask(task, prompt, system);
+      return content == null
+        ? null
+        : { content, callId: 'call-1', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } };
+    }),
+  };
+});
 
 vi.mock('../../db/repositories/page-repo', () => ({
   listPages: vi.fn(),

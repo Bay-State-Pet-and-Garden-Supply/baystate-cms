@@ -9,7 +9,7 @@
  */
 
 import { type ClassificationEvidence, type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
-import { callLlmForTask } from '../onboarding/llm-client';
+import { callLlmForTaskWithProvenance } from '../onboarding/llm-client';
 import { redactTransportText } from './model-policy-gateway';
 import type { PageSnapshotRecord } from './runtime-snapshot';
 
@@ -43,10 +43,16 @@ export interface PageAssignmentParams {
   siblingProducts?: Array<{ sku: string; name: string }>;
   /** Frozen classification model-policy view (issue #17 item A). */
   modelPolicy?: import('./model-policy-gateway').ModelPolicyView | null;
+  /** Durable model-call audit context (issue #17 work item E). */
+  modelCall?: import('./model-operation-registry').ModelCallContext | null;
+  /** Runtime snapshot the call is bound to (plan compatibility). */
+  snapshot?: import('./runtime-snapshot').RuntimeClassificationSnapshot | null;
 }
 
 export interface PageAssignmentResult {
   pages: Array<{ pageId: string; pageName: string; confidence: number; isBrandShortcut?: boolean }>;
+  /** Durable model-call IDs that produced this assignment (issue #17 E). */
+  modelCallIds?: string[];
 }
 
 // ─── Page Hierarchy Builder ──────────────────────────────────────────────────
@@ -655,17 +661,25 @@ Return ONLY valid JSON with this exact shape:
 Use the page's ID for the "pageId" field and its exact name for "pageName".`;
 
   try {
-    const response = await callLlmForTask(
+    const auditedCall = params.modelCall
+      ? { modelCall: params.modelCall, snapshot: params.snapshot }
+      : {};
+    const response = await callLlmForTaskWithProvenance(
       'category_page_assignment',
       prompt,
       systemPrompt,
-      { allowFallback: true, modelPolicy: params.modelPolicy, protectedOperation: 'page_assignment' },
+      {
+        allowFallback: true,
+        modelPolicy: params.modelPolicy,
+        protectedOperation: 'page_assignment',
+        ...auditedCall,
+      },
     );
 
     if (!response) return null;
 
     // Parse the response
-    const parsed = parsePageAssignmentResponse(response);
+    const parsed = parsePageAssignmentResponse(response.content);
     if (!parsed || !parsed.pages || parsed.pages.length === 0) return null;
 
     // Validate entries against known pages
@@ -685,7 +699,7 @@ Use the page's ID for the "pageId" field and its exact name for "pageName".`;
 
     if (normalized.length === 0) return null;
 
-    return { pages: normalized };
+    return { pages: normalized, modelCallIds: [response.callId] };
   } catch (err: any) {
     console.warn(`[PageAssignmentLLM] LLM call failed: ${redactTransportText(err.message)}`);
     return null;

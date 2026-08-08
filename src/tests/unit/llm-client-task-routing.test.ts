@@ -946,3 +946,253 @@ describe('Protected classification operations — model-policy gateway (issue #1
     }
   });
 });
+
+describe('Model-call provenance wrapper (issue #17 E)', () => {
+  const testDbPath = 'src/tests/unit/llm-client-provenance-test.db';
+
+  function localView(snapshotHash: string) {
+    return buildModelPolicyView(
+      {
+        defaultProvider: 'ollama',
+        defaultModel: 'qwen2.5vl:latest',
+        providerLocalities: { ollama: 'local' },
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'local_only',
+        mlFeatures: {},
+      } as any,
+      { snapshotHash },
+    );
+  }
+
+  // A minimal schema-v2 runtime snapshot carrying a compatible frozen plan.
+  function compatibleSnapshot(snapshotHash: string): any {
+    return {
+      schemaVersion: 2,
+      snapshotHash,
+      workspaceId: 'ws',
+      workspacePath: '/tmp/ws',
+      productSku: 'SKU',
+      createdAt: '2026-08-01T12:00:00.000Z',
+      config: {},
+      configSnapshotRef: { id: 'x', hash: 'y', sourceCommit: null, createdAt: '2026-08-01T12:00:00.000Z' },
+      modelExecutionPlan: {
+        version: 1,
+        registryVersion: 1,
+        entries: [
+          {
+            operation: 'attribute_ranking',
+            stage: 'product_attribute_proposals',
+            provider: 'ollama',
+            model: 'qwen2.5vl:latest',
+            locality: 'local',
+            fromOverride: false,
+            promptTemplateVersion: 'attribute-ranking-prompt-v1',
+            ruleVersion: 'attribute-ranking-rules-v1',
+          },
+        ],
+        digest: 'e'.repeat(64),
+      },
+      runtimeRuleVersions: {
+        version: 1,
+        registryVersion: 1,
+        promptTemplateVersions: {},
+        ruleVersions: {},
+        outputPolicyVersion: 'v1',
+        digest: 'f'.repeat(64),
+      },
+    };
+  }
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+    upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'qwen2.5vl:latest');
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
+
+  test('audited success returns the full result and persists a durable success row with tokens and honest local cost', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallById } = await import('../../db/repositories/classification-model-call-repo');
+    const { callLlmForTaskWithProvenance } = await import('../../onboarding/llm-client');
+    const run = createRun('ws', 'SKU-P', null, null);
+    const snapshotHash = 'a'.repeat(64);
+    const calls: Array<{ url: string }> = [];
+    globalThis.fetch = (async (url: string) => {
+      calls.push({ url });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '  Chicken  ' } }],
+        usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+
+    const result = await callLlmForTaskWithProvenance(
+      'attribute_value_classification',
+      'pick a value',
+      'system',
+      {
+        modelPolicy: localView(snapshotHash),
+        protectedOperation: 'attribute_ranking',
+        modelCall: {
+          runId: run.id,
+          snapshotHash,
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: compatibleSnapshot(snapshotHash),
+      },
+    );
+
+    expect(calls.length).toBe(1);
+    expect(result).not.toBeNull();
+    expect(result!.content).toBe('Chicken');
+    expect(result!.provider).toBe('ollama');
+    expect(result!.model).toBe('qwen2.5vl:latest');
+    expect(result!.usage.promptTokens).toBe(12);
+    expect(result!.usage.completionTokens).toBe(7);
+    expect(result!.usage.totalTokens).toBe(19);
+    const row = getModelCallById(result!.callId)!;
+    expect(row.status).toBe('success');
+    expect(row.prompt_tokens).toBe(12);
+    expect(row.completion_tokens).toBe(7);
+    expect(row.estimated_cost_usd).toBe(0);
+    expect(row.cost_basis).toBe('local_zero');
+    expect(row.system_prompt_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(row.user_prompt_hash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test('token absence persists null tokens and unknown cloud cost is never a guessed zero', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallById } = await import('../../db/repositories/classification-model-call-repo');
+    const { callLlmForTaskWithProvenance } = await import('../../onboarding/llm-client');
+    const run = createRun('ws', 'SKU-TOKENS', null, null);
+    const snapshotHash = 'b'.repeat(64);
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'Beef' } }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+
+    const result = await callLlmForTaskWithProvenance(
+      'attribute_value_classification',
+      'pick',
+      'system',
+      {
+        modelPolicy: localView(snapshotHash),
+        protectedOperation: 'attribute_ranking',
+        modelCall: {
+          runId: run.id,
+          snapshotHash,
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: compatibleSnapshot(snapshotHash),
+      },
+    );
+    expect(result).not.toBeNull();
+    expect(result!.usage.promptTokens).toBeNull();
+    expect(result!.usage.completionTokens).toBeNull();
+    const row = getModelCallById(result!.callId)!;
+    expect(row.prompt_tokens).toBeNull();
+    expect(row.completion_tokens).toBeNull();
+    // Local route: still an honest zero (costBasis local_zero).
+    expect(row.estimated_cost_usd).toBe(0);
+    expect(row.cost_basis).toBe('local_zero');
+  });
+
+  test('policy denial records a policy_denied row and never transports', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { callLlmForTaskWithProvenance } = await import('../../onboarding/llm-client');
+    const run = createRun('ws', 'SKU-DENY', null, null);
+    const snapshotHash = 'c'.repeat(64);
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => { fetchCalls++; return new Response('{}', { status: 200 }); }) as unknown as typeof fetch;
+
+    // A cloud provider under local_only is denied before transport.
+    const cloudView = buildModelPolicyView(
+      {
+        defaultProvider: 'deepseek',
+        defaultModel: 'deepseek-v4-flash',
+        providerLocalities: { deepseek: 'cloud' },
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'local_only',
+        mlFeatures: {},
+      } as any,
+      { snapshotHash },
+    );
+    upsertApiKey('deepseek', 'sk-deepseek-probe', null, 'deepseek-v4-flash');
+
+    await expect(callLlmForTaskWithProvenance(
+      'attribute_value_classification',
+      'pick',
+      'system',
+      {
+        modelPolicy: cloudView,
+        protectedOperation: 'attribute_ranking',
+        modelCall: {
+          runId: run.id,
+          snapshotHash,
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: compatibleSnapshot(snapshotHash),
+      },
+    )).rejects.toThrow(/Model policy denied/);
+    expect(fetchCalls).toBe(0);
+    const rows = getModelCallsByRun(run.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('policy_denied');
+  });
+
+  test('a snapshot without a compatible plan fails closed before any audit or transport', async () => {
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { callLlmForTaskWithProvenance } = await import('../../onboarding/llm-client');
+    const run = createRun('ws', 'SKU-NOPLAN', null, null);
+    const snapshotHash = 'd'.repeat(64);
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => { fetchCalls++; return new Response('{}', { status: 200 }); }) as unknown as typeof fetch;
+    // Legacy schema-v1 snapshot: no plan.
+    const legacy = compatibleSnapshot(snapshotHash);
+    legacy.schemaVersion = 1;
+    delete legacy.modelExecutionPlan;
+    delete legacy.runtimeRuleVersions;
+
+    await expect(callLlmForTaskWithProvenance(
+      'attribute_value_classification',
+      'pick',
+      'system',
+      {
+        modelPolicy: localView(snapshotHash),
+        protectedOperation: 'attribute_ranking',
+        modelCall: {
+          runId: run.id,
+          snapshotHash,
+          stage: 'product_attribute_proposals',
+          operation: 'attribute_ranking',
+          attempt: 1,
+          promptTemplateVersion: 'attribute-ranking-prompt-v1',
+          ruleVersion: 'attribute-ranking-rules-v1',
+        },
+        snapshot: legacy,
+      },
+    )).rejects.toThrow(/no frozen model-execution plan/);
+    expect(fetchCalls).toBe(0);
+  });
+});

@@ -15,6 +15,17 @@ import {
   redactTransportText,
   type ModelPolicyView,
 } from '../classification/model-policy-gateway';
+import {
+  computePromptHashes,
+  MODEL_CALL_STATUS,
+  COST_BASIS,
+  type ModelCallContext,
+} from '../classification/model-operation-registry';
+import {
+  insertModelCallStart,
+  completeModelCall,
+  insertTerminalModelCall,
+} from '../db/repositories/classification-model-call-repo';
 import { PACKAGING_OCR_PROMPT, parseJsonFromVlmResponse, coercePackagingOcrData } from './packaging-ocr';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
 import type { LlmTask } from '../db/repositories/llm-task-config-repo';
@@ -28,6 +39,10 @@ export interface CloudVlmParams {
   task?: string;
   /** Frozen classification model-policy view (issue #17 item A). */
   modelPolicy?: ModelPolicyView | null;
+  /** Durable model-call audit context (issue #17 work item E). */
+  modelCall?: ModelCallContext | null;
+  /** Runtime snapshot the call is bound to (plan compatibility). */
+  snapshot?: import('../classification/runtime-snapshot').RuntimeClassificationSnapshot | null;
 }
 
 // ─── Image Fetching ───────────────────────────────────────────────────────────
@@ -115,6 +130,26 @@ export async function extractPackagingOcrFromCloud(
       requiresImage: true,
     });
   } catch (err: any) {
+    if (params.modelCall) {
+      insertTerminalModelCall({
+        runId: params.modelCall.runId,
+        stageName: params.modelCall.stage,
+        operation: params.modelCall.operation,
+        attempt: params.modelCall.attempt,
+        provider: null,
+        model: null,
+        locality: null,
+        snapshotHash: params.modelCall.snapshotHash,
+        modelPolicyDigest: params.modelPolicy?.policyDigest ?? '',
+        promptTemplateVersion: params.modelCall.promptTemplateVersion,
+        ruleVersion: params.modelCall.ruleVersion,
+        systemPromptHash: '',
+        userPromptHash: '',
+        status: MODEL_CALL_STATUS.policyDenied,
+        errorMessage: `Model policy denied cloud VLM (${err?.code ?? 'error'})`,
+        costBasis: COST_BASIS.unknown,
+      });
+    }
     if (err?.code === 'policy_absent') {
       console.warn('[CloudVlm] No model policy context for cloud VLM; no image fetched.');
     } else {
@@ -127,13 +162,79 @@ export async function extractPackagingOcrFromCloud(
 
   if (!config) {
     console.warn('[CloudVlm] No LLM config available for cloud VLM call; no image fetched.');
+    if (params.modelCall) {
+      insertTerminalModelCall({
+        runId: params.modelCall.runId,
+        stageName: params.modelCall.stage,
+        operation: params.modelCall.operation,
+        attempt: params.modelCall.attempt,
+        provider: null,
+        model: null,
+        locality: null,
+        snapshotHash: params.modelCall.snapshotHash,
+        modelPolicyDigest: params.modelPolicy?.policyDigest ?? '',
+        promptTemplateVersion: params.modelCall.promptTemplateVersion,
+        ruleVersion: params.modelCall.ruleVersion,
+        systemPromptHash: '',
+        userPromptHash: '',
+        status: MODEL_CALL_STATUS.unavailable,
+        errorMessage: 'No LLM config available for cloud VLM call.',
+        costBasis: COST_BASIS.unknown,
+      });
+    }
     return null;
   }
+
+  // Durable audit: insert the `started` row BEFORE any transport (image fetch
+  // + vision call). If the row cannot be persisted, no transport happens
+  // (fail-closed invariant, issue #17 E).
+  const modelCall = params.modelCall ?? null;
+  let callId: string | null = null;
+  if (modelCall) {
+    const hashes = computePromptHashes(PACKAGING_OCR_PROMPT, '');
+    try {
+      callId = insertModelCallStart({
+        runId: modelCall.runId,
+        stageName: modelCall.stage,
+        operation: modelCall.operation,
+        attempt: modelCall.attempt,
+        provider: config.provider,
+        model: config.model,
+        locality: params.modelPolicy?.providerLocalities[config.provider] ?? null,
+        snapshotHash: modelCall.snapshotHash,
+        modelPolicyDigest: params.modelPolicy?.policyDigest ?? '',
+        promptTemplateVersion: modelCall.promptTemplateVersion,
+        ruleVersion: modelCall.ruleVersion,
+        systemPromptHash: hashes.systemPromptHash,
+        userPromptHash: hashes.userPromptHash,
+      });
+    } catch (err) {
+      console.error(
+        '[CloudVlm] Failed to persist model-call start row; aborting transport:',
+        redactTransportText(err instanceof Error ? err.message : String(err)),
+      );
+      return null;
+    }
+  }
+
+  const startedAt = Date.now();
+  const completeTerminal = (status: typeof MODEL_CALL_STATUS[keyof typeof MODEL_CALL_STATUS], errorMessage?: string, durationMs?: number) => {
+    if (callId) {
+      completeModelCall(callId, {
+        status,
+        durationMs: durationMs ?? Date.now() - startedAt,
+        errorMessage,
+        estimatedCostUsd: (params.modelPolicy?.providerLocalities[config.provider] ?? null) === 'local' ? 0 : null,
+        costBasis: (params.modelPolicy?.providerLocalities[config.provider] ?? null) === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
+      });
+    }
+  };
 
   // 1. Get the image as base64 (image transport was already authorized by
   //    the policy route resolution above).
   const imageData = await fetchImageAsBase64(imageUrl);
   if (!imageData) {
+    completeTerminal(MODEL_CALL_STATUS.failed, `Could not load image: ${redactImageUrl(imageUrl)}`);
     console.warn(`[CloudVlm] Could not load image: ${redactImageUrl(imageUrl)}`);
     return null;
   }
@@ -197,7 +298,9 @@ export async function extractPackagingOcrFromCloud(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.warn(`[CloudVlm] API request failed (${config.provider}): ${response.status} - ${redactTransportText(errorText)}`);
+      const reason = `[CloudVlm] API request failed (${config.provider}): ${response.status} - ${redactTransportText(errorText)}`;
+      completeTerminal(MODEL_CALL_STATUS.failed, reason);
+      console.warn(reason);
       return null;
     }
 
@@ -207,6 +310,7 @@ export async function extractPackagingOcrFromCloud(
 
     const rawContent = data?.choices?.[0]?.message?.content;
     if (!rawContent) {
+      completeTerminal(MODEL_CALL_STATUS.failed, 'Cloud VLM API returned empty response.');
       console.warn('[CloudVlm] API returned empty response.');
       return null;
     }
@@ -216,6 +320,7 @@ export async function extractPackagingOcrFromCloud(
     // 5. Parse the response using the same utilities as local OCR
     const parsed = parseJsonFromVlmResponse(rawContent);
     if (!parsed) {
+      completeTerminal(MODEL_CALL_STATUS.failed, 'Could not parse JSON from cloud VLM response.');
       console.warn('[CloudVlm] Could not parse JSON from response.');
       return null;
     }
@@ -228,13 +333,18 @@ export async function extractPackagingOcrFromCloud(
       extractedAt: new Date().toISOString(),
       parser: 'cloud-vlm-client.ts',
       rawResponseExcerpt: responseExcerpt,
+      ...(callId ? { modelCallIds: [callId] } : {}),
     };
 
     const result = coercePackagingOcrData(parsed, metadata);
     if (!result) {
+      completeTerminal(MODEL_CALL_STATUS.failed, 'Schema coercion failed for cloud OCR response.');
       console.warn('[CloudVlm] Schema coercion failed for cloud OCR response.');
       return null;
     }
+
+    // Success: terminal row must be durable before the result is returned.
+    completeTerminal(MODEL_CALL_STATUS.success);
 
     const fieldCount = Object.entries(result).filter(
       ([k, v]) => k !== 'metadata' && k !== 'confidenceByField' && v !== null && !(Array.isArray(v) && v.length === 0),
@@ -247,6 +357,7 @@ export async function extractPackagingOcrFromCloud(
 
     return result;
   } catch (err: any) {
+    completeTerminal(MODEL_CALL_STATUS.failed, redactTransportText(err.message));
     console.warn(`[CloudVlm] Cloud VLM call failed: ${redactTransportText(err.message)}`);
     return null;
   }

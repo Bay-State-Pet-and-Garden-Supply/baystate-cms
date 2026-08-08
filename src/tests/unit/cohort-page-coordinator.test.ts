@@ -4,11 +4,20 @@ import type { ProductLineItemSnapshot } from '../../classification/types';
 const mocks = vi.hoisted(() => ({
   callLlmForTask: vi.fn(),
   getLlmConfigForTask: vi.fn(),
+  callLlmForTaskWithProvenance: vi.fn(),
 }));
 
 vi.mock('../../onboarding/llm-client', () => ({
   callLlmForTask: mocks.callLlmForTask,
   getLlmConfigForTask: mocks.getLlmConfigForTask,
+  // The audited wrapper forwards to the same transport mock and wraps the
+  // string content in the enriched result shape the coordinator consumes.
+  callLlmForTaskWithProvenance: vi.fn(async (task: string, prompt: string, system: string) => {
+    const content = await mocks.callLlmForTask(task, prompt, system);
+    return content == null
+      ? null
+      : { content, callId: 'cohort-call-1', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } };
+  }),
 }));
 vi.mock('../../db/repositories/page-repo', () => ({ listPages: vi.fn(() => []) }));
 
@@ -95,7 +104,7 @@ describe('cohort page coordinator', () => {
     expect(result.get('SKU1')).toEqual({ status: 'assigned', pages: [
       { pageId: 'cat-wet', pageName: 'Cat Food Wet', confidence: 0.8 },
       { pageId: 'brand-acme', pageName: 'Brand - Acme', confidence: 0.95, isBrandShortcut: true },
-    ] });
+    ], modelCallIds: ['cohort-call-1'] });
   });
 
   it('applies species safety per SKU and retains different valid page sets', async () => {

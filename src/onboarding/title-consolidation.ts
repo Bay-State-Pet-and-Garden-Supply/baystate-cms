@@ -10,7 +10,6 @@
 import { getLlmConfigForTask, callLlmForTask } from './llm-client';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import { buildPerItemPrompt } from './title-prompt-template';
-
 export interface TitleSignals {
   /** Original name from the spreadsheet import (always available) */
   name: string;
@@ -81,6 +80,10 @@ export interface TitleResult {
 export async function consolidateProductTitle(
   signals: TitleSignals,
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  audit?: {
+    modelCall?: import('../classification/model-operation-registry').ModelCallContext | null;
+    snapshot?: import('../classification/runtime-snapshot').RuntimeClassificationSnapshot | null;
+  },
 ): Promise<TitleResult> {
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
@@ -118,6 +121,7 @@ export async function consolidateProductTitle(
       allowFallback: true,
       modelPolicy,
       protectedOperation: 'title_consolidation',
+      ...(audit?.modelCall ? { modelCall: audit.modelCall, snapshot: audit.snapshot } : {}),
     });
     if (cleanTitle && cleanTitle.length > 2) {
       console.log(`[TitleConsolidation] LLM consolidated title: "${cleanTitle}"`);

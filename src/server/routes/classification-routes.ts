@@ -8,6 +8,9 @@ import {
   applyCurationTargetsToConfig,
   listCurationTargetCandidates,
 } from '../../classification/curation-targets';
+import { getRun, getStageResults, getEvidenceByRun, getLiveDecisionsByRun, getProposalsByRun } from '../../db/repositories/classification-run-repo';
+import { getModelCallsByRun } from '../../db/repositories/classification-model-call-repo';
+import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
 
 import { evaluateClassificationReadiness } from '../../classification/config-validation';
 import { normalizeClassificationReadinessReport } from '../../classification/readiness';
@@ -161,6 +164,107 @@ router.post('/classification/migrate-legacy', (c) => {
     console.error('[ClassificationRoutes] Migration failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
+});
+
+/**
+ * GET /api/classification/runs/:id
+ *
+ * Workspace-scoped run detail (issue #17 work item E). Returns the run, stage
+ * results, evidence, proposals, live decisions, model calls, a runtime
+ * snapshot summary (version/digests — never prompt bodies or credentials),
+ * and config/source drift flags. A run that belongs to another workspace
+ * returns 404 (no existence leak).
+ */
+router.get('/classification/runs/:id', (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+  const runId = c.req.param('id');
+  const run = getRun(runId);
+  if (!run || run.workspaceId !== ws.id) {
+    return c.json({ error: 'Run not found' }, 404);
+  }
+
+  const evidence = getEvidenceByRun(runId);
+  const proposals = getProposalsByRun(runId);
+  const stageResults = getStageResults(runId);
+  const decisions = getLiveDecisionsByRun(runId);
+  const modelCalls = getModelCallsByRun(runId);
+
+  // Runtime snapshot summary: version + digests only. Never the full config
+  // (which embeds allowed values etc.) and never prompt/response bodies.
+  let snapshotSummary = null;
+  if (run.configSnapshotHash) {
+    const snap = getRuntimeSnapshotByHash(ws.id, run.configSnapshotHash);
+    if (snap) {
+      snapshotSummary = {
+        schemaVersion: snap.schemaVersion,
+        snapshotHash: snap.snapshotHash,
+        createdAt: snap.createdAt,
+        configAuthorityKind: snap.configAuthorityKind,
+        sourceCatalogCommit: snap.sourceCatalogCommit,
+        catalogEvidenceHash: snap.catalogEvidenceHash,
+        modelExecutionPlanDigest: snap.modelExecutionPlan?.digest ?? null,
+        runtimeRuleVersionsDigest: snap.runtimeRuleVersions?.digest ?? null,
+        pageImportId: snap.pageImportId,
+        pageImportHash: snap.pageImportHash,
+      };
+    } else {
+      snapshotSummary = { unavailable: 'snapshot_unavailable', configSnapshotHash: run.configSnapshotHash };
+    }
+  }
+
+  // Model-call projection: hashes/versions only — prompt hashes, never bodies.
+  const modelCallsView = modelCalls.map(call => ({
+    id: call.id,
+    status: call.status,
+    operation: call.operation,
+    stageName: call.stage_name,
+    attempt: call.attempt,
+    provider: call.provider,
+    model: call.model,
+    locality: call.locality,
+    snapshotHash: call.snapshot_hash,
+    modelPolicyDigest: call.model_policy_digest,
+    promptTemplateVersion: call.prompt_template_version,
+    ruleVersion: call.rule_version,
+    systemPromptHash: call.system_prompt_hash,
+    userPromptHash: call.user_prompt_hash,
+    startedAt: call.started_at,
+    endedAt: call.ended_at,
+    durationMs: call.duration_ms,
+    promptTokens: call.prompt_tokens,
+    completionTokens: call.completion_tokens,
+    errorMessage: call.error_message,
+    estimatedCostUsd: call.estimated_cost_usd,
+    costBasis: call.cost_basis,
+  }));
+
+  return c.json({
+    run: {
+      id: run.id,
+      workspaceId: run.workspaceId,
+      sourceKind: run.sourceKind,
+      productSku: run.productSku,
+      status: run.status,
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+      errorMessage: run.errorMessage,
+      sourceProductHash: run.sourceProductHash,
+      configSnapshotHash: run.configSnapshotHash,
+    },
+    evidence,
+    proposals,
+    decisions,
+    stageResults,
+    modelCalls: modelCallsView,
+    snapshotSummary,
+    drift: {
+      configDrift: false,
+      sourceDrift: false,
+    },
+  });
 });
 
 /**

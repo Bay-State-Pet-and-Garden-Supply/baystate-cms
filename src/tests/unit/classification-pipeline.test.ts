@@ -26,6 +26,7 @@ import {
 } from '../../db/repositories/classification-config-repo';
 import { createRun, completeRun, getProposalsByRun, getStageResults, getEvidenceByRun, recordDecision, getAcceptedProposals } from '../../db/repositories/classification-run-repo';
 import { runPipeline } from '../../classification/pipeline-runner';
+import type { ClassificationStageName } from '../../classification/types';
 import { evidenceExtractionStage, nameConsolidationStage, categoryPageProposalsStage, productAttributeProposalsStage, attributeApplicabilityStage, primaryProductTypeStage } from '../../classification';
 import { upsertPage } from '../../db/repositories/page-repo';
 import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
@@ -1236,5 +1237,141 @@ describe('Classification Pipeline Integration', () => {
     expect(res.count).toBe(0);
     expect(res.failures.length).toBe(1);
     expect(res.failures[0].error).toBe('Missing extraction data');
+  });
+
+  // ── Issue #17 work item E: model-call linkage on persisted proposals ────
+
+  it('persists a proposal whose modelCallIds belong to the run/snapshot', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'SKU-MC-OK', snapId, snapHash);
+    // A real model-call row bound to this run + snapshot hash.
+    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: run.id,
+      stageName: 'product_attribute_proposals',
+      operation: 'attribute_ranking',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'llama3',
+      locality: 'local',
+      snapshotHash: snapHash,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'attribute-ranking-prompt-v1',
+      ruleVersion: 'attribute-ranking-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: run.id,
+            productSku: 'SKU-MC-OK',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [callId],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    const result = await runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-MC-OK', evidence: [], acceptedProposals: [], allProposals: [] });
+    expect(result.proposals).toHaveLength(1);
+    const persisted = getDb().query(
+      'SELECT model_call_ids_json FROM classification_proposals WHERE run_id = ?',
+    ).all(run.id) as Array<{ model_call_ids_json: string | null }>;
+    expect(persisted).toHaveLength(1);
+    expect(JSON.parse(persisted[0].model_call_ids_json ?? '[]')).toEqual([callId]);
+  });
+
+  it('rolls back stage persistence when a proposal references a model call from another run/snapshot', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'SKU-MC-BAD', snapId, snapHash);
+    // A model call belonging to a DIFFERENT run.
+    const otherRun = createRun(workspaceId, 'SKU-OTHER', snapId, snapHash);
+    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    const foreignCall = insertModelCallStart({
+      runId: otherRun.id,
+      stageName: 'product_attribute_proposals',
+      operation: 'attribute_ranking',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'llama3',
+      locality: 'local',
+      snapshotHash: snapHash,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'attribute-ranking-prompt-v1',
+      ruleVersion: 'attribute-ranking-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: run.id,
+            productSku: 'SKU-MC-BAD',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [foreignCall],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-MC-BAD', evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+    // No proposal row was persisted (transaction rolled back).
+    const persisted = getDb().query(
+      'SELECT COUNT(*) AS c FROM classification_proposals WHERE run_id = ?',
+    ).get(run.id) as { c: number };
+    expect(persisted.c).toBe(0);
+    const stageRows = getStageResults(run.id).filter(s => s.status === 'succeeded');
+    expect(stageRows).toHaveLength(0);
   });
 });

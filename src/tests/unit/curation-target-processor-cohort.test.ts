@@ -25,6 +25,7 @@ vi.mock('../../classification/page-assignment-llm', () => ({
   llmAssignCategoryPages: mocks.perItem,
 }));
 
+vi.mock('../../classification/runtime-snapshot', () => ({ buildModelCallContext: vi.fn(() => null) }));
 import { processPageTarget } from '../../classification/curation-target-processor';
 
 const products = [

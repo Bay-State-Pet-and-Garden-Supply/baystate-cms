@@ -770,6 +770,12 @@ export const ClassificationProposalSchema = z.object({
    * it so the pipeline can fail closed on cross-snapshot proposal smuggling.
    */
   snapshotHash: z.string().nullable().optional(),
+  /**
+   * Durable model-call IDs (classification_model_calls) that produced this
+   * proposal. The pipeline verifies every ID belongs to the same run/snapshot
+   * before persistence (issue #17 work item E).
+   */
+  modelCallIds: z.array(z.string()).optional(),
   createdAt: IsoDateTimeStringSchema,
 });
 

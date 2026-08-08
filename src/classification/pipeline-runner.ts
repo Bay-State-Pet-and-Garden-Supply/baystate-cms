@@ -24,8 +24,8 @@ function persistEvidence(runId: string, sku: string, evidence: ClassificationEvi
 function persistProposals(runId: string, sku: string, proposals: ClassificationProposal[], configSnapshotHash?: string): void {
   if (proposals.length === 0) return;
   const db = getDb();
-  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, JSON.stringify(p.evidenceIds ?? []), now());
+  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, model_call_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, JSON.stringify(p.evidenceIds ?? []), JSON.stringify(p.modelCallIds ?? []), now());
 }
 
 function linkProposalEvidence(proposalId: string, evidenceIds: string[]): void {
@@ -76,9 +76,38 @@ function assertRunBoundary(options: {
 }
 
 /**
+ * Verify every model-call ID stamped on the proposals belongs to the current
+ * run AND snapshot hash. A foreign call row (another run or snapshot) must
+ * never be linked to a proposal — fail closed before persistence.
+ */
+function assertModelCallLinkage(options: {
+  runId: string;
+  snapshotHash?: string | null;
+  proposals: ClassificationProposal[];
+}): void {
+  if (options.snapshotHash === undefined || options.snapshotHash === null) return;
+  const db = getDb();
+  for (const proposal of options.proposals) {
+    const callIds = proposal.modelCallIds ?? [];
+    if (callIds.length === 0) continue;
+    for (const callId of callIds) {
+      const row = db
+        .query('SELECT run_id, snapshot_hash FROM classification_model_calls WHERE id = ?')
+        .get(callId) as { run_id: string; snapshot_hash: string | null } | undefined;
+      if (!row || row.run_id !== options.runId || row.snapshot_hash !== options.snapshotHash) {
+        throw new Error(
+          `Model call linkage failed: proposal "${proposal.id}" references model call "${callId}" ` +
+            `that does not belong to run "${options.runId}" / snapshot "${options.snapshotHash}".`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Persist a successful or abstained stage atomically. A stage result must
- * never claim success unless all evidence, proposals, and evidence links are
- * durable in the same transaction.
+ * never claim success unless all evidence, proposals, evidence links, and
+ * model-call linkages are durable in the same transaction.
  */
 function persistStageCompletion(options: {
   runId: string;
@@ -94,6 +123,11 @@ function persistStageCompletion(options: {
 }): void {
   const db = getDb();
   db.transaction(() => {
+    assertModelCallLinkage({
+      runId: options.runId,
+      snapshotHash: options.configSnapshotHash,
+      proposals: options.proposals,
+    });
     persistEvidence(options.runId, options.sku, options.evidence, options.onboardingItemId);
     persistProposals(options.runId, options.sku, options.proposals, options.configSnapshotHash);
     for (const proposal of options.proposals) {

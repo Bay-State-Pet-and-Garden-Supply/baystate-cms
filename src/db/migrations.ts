@@ -1400,6 +1400,62 @@ export function runMigrations(): void {
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_page_index_identity_unique ON page_index(workspace_id, import_id, identity_kind, identity_key);',
   );
 
+  // ── Classification model-call provenance (issue #17 work item E) ──────────
+  //
+  // Durable per-call observability for protected model calls bound to
+  // classification runs: `classification_model_calls` (started → terminal on
+  // every path) and the `model_call_ids_json` column on proposals so a
+  // proposal can be traced to the exact calls that produced it. Legacy
+  // `curation_model_calls` is deprecated and untouched. Idempotent; guarded by
+  // `model_calls_schema_version`.
+  try {
+    const modelCallsVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('model_calls_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!modelCallsVersion) {
+      console.log('[Migrations] Running classification model-call provenance migration...');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS classification_model_calls (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+          stage_name TEXT,
+          operation TEXT NOT NULL,
+          attempt INTEGER NOT NULL DEFAULT 1,
+          provider TEXT,
+          model TEXT,
+          locality TEXT,
+          snapshot_hash TEXT,
+          model_policy_digest TEXT,
+          prompt_template_version TEXT,
+          rule_version TEXT,
+          system_prompt_hash TEXT,
+          user_prompt_hash TEXT,
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          duration_ms INTEGER,
+          prompt_tokens INTEGER,
+          completion_tokens INTEGER,
+          status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed', 'policy_denied', 'unavailable', 'cancelled')),
+          error_message TEXT,
+          estimated_cost_usd REAL,
+          cost_basis TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_classification_model_calls_run ON classification_model_calls(run_id);
+        CREATE INDEX IF NOT EXISTS idx_classification_model_calls_snapshot ON classification_model_calls(snapshot_hash);
+      `);
+      const proposalColumns = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string }>;
+      if (!proposalColumns.some(col => col.name === 'model_call_ids_json')) {
+        db.exec('ALTER TABLE classification_proposals ADD COLUMN model_call_ids_json TEXT;');
+      }
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('model_calls_schema_version', '1');");
+      console.log('[Migrations] Classification model-call provenance migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Classification model-call provenance migration failed:', e);
+    throw e;
+  }
+
   // ── Product Intelligence Migration (PI-2) ──────────────────────────────────
   //
   // Durable data model for Product Intelligence runs (epic #28, issue #19):

@@ -26,6 +26,8 @@ export interface ProductTypeProposalParams {
   isBulkAcceptable?: boolean;
   /** Immutable runtime snapshot hash this proposal was built under. */
   snapshotHash?: string | null;
+  /** Durable model-call IDs that produced this proposal (issue #17 E). */
+  modelCallIds?: string[];
 }
 
 /**
@@ -50,6 +52,7 @@ export function buildProductTypeProposal(params: ProductTypeProposalParams): Cla
     isStale: false,
     stalenessReason: null,
     snapshotHash: params.snapshotHash ?? null,
+    modelCallIds: params.modelCallIds,
     createdAt: now(),
   };
 }
@@ -67,6 +70,8 @@ export interface FieldAssignmentProposalParams {
   isBulkAcceptable?: boolean;
   /** Immutable runtime snapshot hash this proposal was built under. */
   snapshotHash?: string | null;
+  /** Durable model-call IDs that produced this proposal (issue #17 E). */
+  modelCallIds?: string[];
 }
 
 /**
@@ -94,6 +99,7 @@ export function buildFieldAssignmentProposal(params: FieldAssignmentProposalPara
     isStale: false,
     stalenessReason: null,
     snapshotHash: params.snapshotHash ?? null,
+    modelCallIds: params.modelCallIds,
     createdAt: now(),
   };
 }
@@ -112,6 +118,8 @@ export interface CategoryPageProposalParams {
   isBulkAcceptable?: boolean;
   /** Immutable runtime snapshot hash this proposal was built under. */
   snapshotHash?: string | null;
+  /** Durable model-call IDs that produced this proposal (issue #17 E). */
+  modelCallIds?: string[];
 }
 
 /**
@@ -141,6 +149,7 @@ export function buildCategoryPageProposal(params: CategoryPageProposalParams): C
     isStale: false,
     stalenessReason: null,
     snapshotHash: params.snapshotHash ?? null,
+    modelCallIds: params.modelCallIds,
     createdAt: now(),
   };
 }

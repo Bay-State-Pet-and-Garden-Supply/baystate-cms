@@ -9,9 +9,10 @@
 import { randomUUID } from 'node:crypto';
 import { getVlmConfig } from '../onboarding/vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from '../onboarding/packaging-ocr';
-import { getLlmConfigForTask, callLlmForTask } from '../onboarding/llm-client';
+import { getLlmConfigForTask, callLlmForTaskWithProvenance } from '../onboarding/llm-client';
 import { redactTransportText } from './model-policy-gateway';
 import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
+import { buildModelCallContext } from './runtime-snapshot';
 import { getCachedBrands, getCachedDataSharingPolicy } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from './brand-resolution';
 import type { StageInput, StageContext } from './types';
@@ -87,6 +88,8 @@ interface OcrToEvidenceParams {
   runId: string;
   sku: string;
   model: string;
+  /** Durable model-call IDs that produced the OCR evidence (issue #17 E). */
+  modelCallIds?: string[];
 }
 
 /**
@@ -100,7 +103,6 @@ export function packagingOcrDataToEvidence(
 ): ClassificationEvidence[] {
   const evidence: ClassificationEvidence[] = [];
   const { runId, sku, model } = params;
-
   /** Resolve reliability — use per-field confidence when available. */
   const reliability = (field: string, fallback: string): string => {
     const confidence = ocrData.confidenceByField?.[field];
@@ -386,6 +388,14 @@ export function packagingOcrDataToEvidence(
         value: val,
         metadata: { provenance: 'packaging_ocr', model, confidence: ocrData.confidenceByField?.claims ?? null },
       });
+    }
+  }
+
+  // Propagate the durable model-call IDs that produced this OCR evidence so
+  // proposals/stage metadata can trace back to the exact calls (issue #17 E).
+  if (params.modelCallIds?.length) {
+    for (const e of evidence) {
+      e.metadata = { ...(e.metadata ?? {}), modelCallIds: params.modelCallIds };
     }
   }
 
@@ -760,15 +770,23 @@ export async function extractProductEvidence(
       const cloudOcrResult = await extractPackagingOcrFromCloud({
         imageUrl: String(input.primaryImage),
         modelPolicy: evidencePolicyView,
+        ...(context.snapshot
+          ? {
+              modelCall: buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1),
+              snapshot: context.snapshot,
+            }
+          : {}),
       });
 
       if (cloudOcrResult && hasOcrContent(cloudOcrResult)) {
         packagingOcrData = cloudOcrResult;
         cloudStatus = 'succeeded';
+        const cloudModelCallIds = (cloudOcrResult as { metadata?: { modelCallIds?: string[] } }).metadata?.modelCallIds;
         const cloudEvidence = packagingOcrDataToEvidence(cloudOcrResult, {
           runId: context.runId,
           sku,
           model: (cloudOcrResult as any).metadata?.model ?? 'cloud-vision',
+          ...(cloudModelCallIds?.length ? { modelCallIds: cloudModelCallIds } : {}),
         });
         evidence.push(...cloudEvidence);
         console.log(`[EvidenceExtraction] Added ${cloudEvidence.length} evidence entries from cloud packaging OCR`);
@@ -805,18 +823,25 @@ export async function extractProductEvidence(
       ].filter(Boolean).join('\n');
 
       if (allText.length > 10) {
+        // Durable model-call audit context (issue #17 E): bound to the run
+        // snapshot plan; null when the snapshot has no compatible plan (then
+        // the wrapper fails closed before transport).
+        const modelCall = context.snapshot
+          ? buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1)
+          : null;
         try {
           const prompt = `Extract the following attributes from this product text. Return ONLY valid JSON with these keys (omit any you cannot determine): {"flavor": "..." | null, "color": "..." | null, "material": "..." | null, "size": "..." | null, "lifeStage": "..." | null, "breedSize": "..." | null, "productForm": "..." | null, "healthConcern": "..." | null, "ingredientKeywords": ["..."]}. Do not guess. Only include values that are explicitly mentioned.\n\nProduct text:\n${allText.slice(0, 3000)}`;
 
-          const response = await callLlmForTask('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', {
+          const response = await callLlmForTaskWithProvenance('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', {
             allowFallback: true,
             modelPolicy: evidencePolicyView,
             protectedOperation: 'evidence_extraction',
+            ...(modelCall ? { modelCall, snapshot: context.snapshot } : {}),
           });
           if (response == null) {
             throw new Error('LLM call returned null');
           }
-          const parsed = JSON.parse(response.trim());
+          const parsed = JSON.parse(response.content.trim());
           let addedLlmEvidence = false;
           for (const [key, val] of Object.entries(parsed)) {
             if (val === null || val === undefined) continue;
@@ -836,7 +861,7 @@ export async function extractProductEvidence(
               sourceField: `llm_${key}`,
               snippet: typeof val === 'string' ? val.slice(0, 300) : JSON.stringify(val).slice(0, 300),
               value: val,
-              metadata: { provenance: defaultTextSource, model: llmConfig.model },
+              metadata: { provenance: defaultTextSource, model: llmConfig.model, modelCallIds: [response.callId] },
               capturedAt: now(),
             });
           }

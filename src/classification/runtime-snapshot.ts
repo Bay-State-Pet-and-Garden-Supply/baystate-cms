@@ -31,6 +31,19 @@ import {
   normalizeAbsentHash,
   type ReviewedFact,
 } from './reviewed-facts';
+import { buildModelPolicyView } from './model-policy-gateway';
+import {
+  buildModelExecutionPlan,
+  buildRuntimeRuleVersions,
+  OPERATION_TO_STAGE,
+  PROMPT_TEMPLATE_VERSIONS,
+  RULE_VERSIONS,
+  type ModelCallContext,
+  type ModelExecutionPlan,
+  type ModelExecutionPlanEntry,
+  type ProtectedOperation,
+  type RuntimeRuleVersions,
+} from './model-operation-registry';
 
 const now = () => new Date().toISOString();
 
@@ -90,7 +103,8 @@ export interface RuntimeSnapshotInput {
 }
 
 export interface RuntimeClassificationSnapshot {
-  schemaVersion: 1;
+  /** 1 = legacy (no frozen model-execution plan); 2 = additive plan/rule versions. */
+  schemaVersion: 1 | 2;
   snapshotHash: string;
   createdAt: string;
   workspaceId: string;
@@ -131,6 +145,15 @@ export interface RuntimeClassificationSnapshot {
    * export exists. It never supports claims or composition.
    */
   pageContextReliability: 'low';
+  /**
+   * Schema-v2 only: frozen model-execution plan (operation → stage →
+   * provider/model/locality + prompt-template/rule versions + digest). Absent
+   * on legacy schema-v1 snapshots; a new model call from a snapshot without a
+   * compatible plan fails closed.
+   */
+  modelExecutionPlan?: ModelExecutionPlan;
+  /** Schema-v2 only: versioned prompt/rule/output-policy versions + digest. */
+  runtimeRuleVersions?: RuntimeRuleVersions;
 }
 
 /** Effective curation targets: enabled targets plus mandatory targets. */
@@ -222,8 +245,9 @@ export function buildRuntimeSnapshot(input: RuntimeSnapshotInput): RuntimeClassi
     ?? { kind: 'v1', config: input.config as ClassificationConfig };
   const fields = resolveAuthorityFields(authority);
   const config = fields.config;
+  const isV2 = authority.kind === 'v2';
   const snapshot: RuntimeClassificationSnapshot = {
-    schemaVersion: 1,
+    schemaVersion: isV2 ? 2 : 1,
     snapshotHash: '',
     createdAt: input.createdAt ?? now(),
     workspaceId: input.workspaceId,
@@ -260,6 +284,17 @@ export function buildRuntimeSnapshot(input: RuntimeSnapshotInput): RuntimeClassi
     pageImportId: input.pageImportId ?? null,
     pageImportHash: input.pageImportHash ?? null,
     pageContextReliability: 'low',
+    // Schema-v2 only: freeze the model-execution plan + rule versions from the
+    // v2 model policy. Legacy v1 snapshots carry no plan — a new model call
+    // from them fails closed (no compatible plan).
+    ...(isV2
+      ? {
+          modelExecutionPlan: buildModelExecutionPlan(
+            buildModelPolicyView(fields.modelPolicy as Parameters<typeof buildModelPolicyView>[0]),
+          ),
+          runtimeRuleVersions: buildRuntimeRuleVersions(),
+        }
+      : {}),
   };
   snapshot.snapshotHash = snapshotHash(snapshot);
   return deepFreeze(snapshot);
@@ -410,8 +445,100 @@ export function getRuntimeSnapshotByHash(workspaceId: string, hash: string): Run
     .get(workspaceId, hash) as { config_json: string } | undefined;
   if (!row) return null;
   const parsed = JSON.parse(row.config_json) as Partial<RuntimeClassificationSnapshot>;
-  if (parsed.schemaVersion !== 1 || typeof parsed.snapshotHash !== 'string' || !parsed.config) return null;
+  // Accept legacy schema-v1 and additive schema-v2 runtime snapshots; reject
+  // plain config snapshots (no snapshotHash) and unknown schema versions.
+  if (
+    (parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) ||
+    typeof parsed.snapshotHash !== 'string' ||
+    !parsed.config
+  ) {
+    return null;
+  }
   return parsed as RuntimeClassificationSnapshot;
+}
+
+/**
+ * Fail closed when a protected model call would run against a snapshot
+ * without a compatible frozen model-execution plan entry: legacy schema-v1
+ * snapshots (no plan) or a plan that does not cover the operation with the
+ * current registry's prompt-template/rule versions. A snapshot without a
+ * compatible plan can never route a new model call.
+ */
+export function assertModelPlanCompatible(
+  snapshot: RuntimeClassificationSnapshot | null | undefined,
+  operation: ProtectedOperation,
+): void {
+  if (!snapshot) {
+    throw new Error(
+      `Model plan incompatible: no runtime snapshot for model call operation "${operation}".`,
+    );
+  }
+  if (snapshot.schemaVersion !== 2 || !snapshot.modelExecutionPlan) {
+    throw new Error(
+      `Model plan incompatible: snapshot schema ${snapshot.schemaVersion} has no frozen model-execution plan ` +
+        `for operation "${operation}".`,
+    );
+  }
+  const stage = OPERATION_TO_STAGE[operation];
+  if (stage === null) {
+    // Onboarding-only operations (brand inference, sitemap selection) are not
+    // run-bound; they use the pre-run policy snapshot, not the run plan.
+    return;
+  }
+  const entry = snapshot.modelExecutionPlan.entries.find(e => e.operation === operation);
+  if (!entry) {
+    throw new Error(
+      `Model plan incompatible: snapshot plan has no entry for operation "${operation}".`,
+    );
+  }
+  if (entry.promptTemplateVersion !== PROMPT_TEMPLATE_VERSIONS[operation]) {
+    throw new Error(
+      `Model plan incompatible: operation "${operation}" prompt-template version ${entry.promptTemplateVersion} ` +
+        `differs from the current registry version ${PROMPT_TEMPLATE_VERSIONS[operation]}.`,
+    );
+  }
+  if (entry.ruleVersion !== RULE_VERSIONS[operation]) {
+    throw new Error(
+      `Model plan incompatible: operation "${operation}" rule version ${entry.ruleVersion} ` +
+        `differs from the current registry version ${RULE_VERSIONS[operation]}.`,
+    );
+  }
+}
+
+/** Plan entry lookup for run-detail reporting (never prompt bodies). */
+export function getModelExecutionPlanEntry(
+  snapshot: RuntimeClassificationSnapshot | null | undefined,
+  operation: ProtectedOperation,
+): ModelExecutionPlanEntry | null {
+  if (!snapshot || snapshot.schemaVersion !== 2 || !snapshot.modelExecutionPlan) return null;
+  return snapshot.modelExecutionPlan.entries.find(e => e.operation === operation) ?? null;
+}
+
+/**
+ * Build the durable model-call audit context for a run-bound protected call
+ * from the frozen snapshot plan. Fails closed when the snapshot has no
+ * compatible plan entry for the operation (callers wrap this at the transport
+ * wrapper anyway; this helper produces the context only for schema-v2
+ * snapshots and returns null otherwise).
+ */
+export function buildModelCallContext(
+  snapshot: RuntimeClassificationSnapshot | null | undefined,
+  runId: string,
+  operation: ProtectedOperation,
+  attempt: number,
+): ModelCallContext | null {
+  if (!snapshot || snapshot.schemaVersion !== 2 || !snapshot.modelExecutionPlan) return null;
+  const entry = snapshot.modelExecutionPlan.entries.find(e => e.operation === operation);
+  if (!entry) return null;
+  return {
+    runId,
+    snapshotHash: snapshot.snapshotHash,
+    stage: OPERATION_TO_STAGE[operation] ?? null,
+    operation,
+    attempt,
+    promptTemplateVersion: entry.promptTemplateVersion,
+    ruleVersion: entry.ruleVersion,
+  };
 }
 
 /**
