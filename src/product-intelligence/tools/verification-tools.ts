@@ -50,6 +50,7 @@ export const verifyCandidatePage: PiToolAdapter = {
         { url, title: null, confidence: 0, sourceMethod: 'agent_candidate' },
         context,
         networkFetch,
+        { signal: ctx.signal, timeoutMs: ctx.remainingMs },
       );
       if (!result) return noResult(`Could not fetch or parse ${url.slice(0, 80)}`);
       const gtinEvidence = result.signals.upcInPage ? 'gtin_evidence' : 'search_lead';
@@ -524,9 +525,33 @@ export function refreshResolvedAuthoritiesForRun(runId: string): void {
 
     // ---- DECISION PHASE (aggregate before decide) ------------------------
     const candidatePageUrls = new Set([...evidenceBrandsByPageUrl.keys(), ...assetBrandsByPageUrl.keys()]);
+
+    // Round 14 (review P0-1): RUN-WIDE BRAND AMBIGUITY.
+    // Compute the run-wide set of qualified candidate brands across all pages
+    // (both evidence and asset phases). If the run contains multiple distinct
+    // qualified product brands (e.g. branda.example has Brand A while brandb.example
+    // has Brand B for GTIN X), the product brand is globally unresolved. No
+    // manufacturer authority may be granted to ANY page in the run (fail closed).
+    const runWideBrands = new Set<string>();
+    for (const entries of evidenceBrandsByPageUrl.values()) {
+      for (const entry of entries) {
+        runWideBrands.add(entry.brand.toLowerCase());
+      }
+    }
+    for (const resolvedList of assetBrandsByPageUrl.values()) {
+      for (const resolved of resolvedList) {
+        runWideBrands.add(resolved.brand.toLowerCase());
+      }
+    }
+    if (runWideBrands.size > 1) {
+      for (const pageUrl of candidatePageUrls) {
+        ambiguousPageUrls.add(pageUrl);
+      }
+    }
+
     for (const pageUrl of candidatePageUrls) {
       if (ambiguousPageUrls.has(pageUrl)) {
-        continue; // ambiguity within a phase -> fail closed
+        continue; // ambiguity within a phase or run-wide -> fail closed
       }
       const assetList = assetBrandsByPageUrl.get(pageUrl);
       const evList = evidenceBrandsByPageUrl.get(pageUrl);

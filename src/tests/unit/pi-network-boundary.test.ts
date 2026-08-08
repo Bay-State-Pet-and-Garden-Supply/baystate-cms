@@ -233,6 +233,32 @@ describe('P0-1 transitive network boundary', () => {
     expect(result.status).toBe('ok');
   });
 
+  it('verify_candidate_page respects caller cancellation/deadline signal (Round 14 review P1-4)', async () => {
+    const controller = new AbortController();
+    controller.abort(); // pre-aborted caller signal
+    const gateway = new PolicyGateway({
+      resolveHostname: async (hostname) => (hostname.includes(':') || /^[\d.]+$/.test(hostname) ? [hostname] : ['93.184.216.34']),
+      fetchFn: async (_url, init) => {
+        if (init?.signal?.aborted) {
+          throw new DOMException('The operation was aborted', 'AbortError');
+        }
+        return new Response('<html></html>', { status: 200 });
+      },
+    });
+
+    const tool = defaultToolRegistry.get('verify_candidate_page');
+    expect(tool).toBeDefined();
+    const result = await tool!.execute(
+      { url: 'https://shop.example.com/verify-product', gtin: '01234567890123', expectedName: 'Acme Widget' },
+      makeCtx({
+        gateway,
+        signal: controller.signal,
+        policy: makePolicy({ dataSharingPolicy: 'cloud_models_and_sources', networkPolicy: 'allowlisted_remote' }),
+      }),
+    );
+    expect(result.status).toBe('no_result');
+  });
+
   it('lookup_structured_product_database is policy-gated (local_only denies before any network)', async () => {
     const tool = defaultToolRegistry.get('lookup_structured_product_database');
     expect(tool).toBeDefined();

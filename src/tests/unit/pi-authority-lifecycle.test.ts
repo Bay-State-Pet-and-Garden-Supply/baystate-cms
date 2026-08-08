@@ -487,6 +487,52 @@ describe('PI authority lifecycle (round-11 integration)', () => {
     const authorities = listSourceAuthoritiesByRun(runId);
     expect(authorities.length).toBe(0);
   });
+
+  it('Round 14 (review P0-1): two official sites with same GTIN but different brands resolve to run-wide brand ambiguity (no authority granted)', async () => {
+    const testGtin = '00012345678909';
+    const runId = createPiRun({
+      workspaceId: wsId,
+      mode: 'shadow',
+      executor: 'pi',
+      inputJson: JSON.stringify({ gtin: testGtin, registerName: 'Contradictory Product' }),
+      policyJson: '{}',
+      configSnapshotId: 'c',
+      configSnapshotHash: 'c',
+    }).id;
+    const PAGE_A = 'https://branda.example.com/product-a';
+    const PAGE_B = 'https://brandb.example.com/product-b';
+    const IMAGE_A = 'https://cdn.example.com/image-a.png';
+    const IMAGE_B = 'https://cdn.example.com/image-b.png';
+
+    upsertBrandSite('Brand A', 'branda.example.com', null);
+    upsertBrandSite('Brand B', 'brandb.example.com', null);
+
+    const sink = new PersistingExecutionEventSink(runId);
+    const sourceA = insertPiSource({ runId, url: PAGE_A, domain: 'branda.example.com', sourceType: 'other' });
+    const sourceB = insertPiSource({ runId, url: PAGE_B, domain: 'brandb.example.com', sourceType: 'other' });
+    insertPiSource({ runId, url: IMAGE_A, domain: 'cdn.example.com', sourceType: 'other' });
+    insertPiSource({ runId, url: IMAGE_B, domain: 'cdn.example.com', sourceType: 'other' });
+    insertPiImageCandidate({ runId, imageUrl: IMAGE_A, discoveringSourceId: sourceA.id, entityId: 'e-a' });
+    insertPiImageCandidate({ runId, imageUrl: IMAGE_B, discoveringSourceId: sourceB.id, entityId: 'e-b' });
+
+    const hashA = createHash('sha256').update('image-a-bytes').digest('hex');
+    const hashB = createHash('sha256').update('image-b-bytes').digest('hex');
+
+    sink.emit('tool_call_finished', {
+      toolName: 'extract_packaging_evidence',
+      evidence: [
+        { id: 'ev-upc-a', field: 'upc', value: testGtin, url: IMAGE_A, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashA },
+        { id: 'ev-brand-a', field: 'brand', value: 'Brand A', url: IMAGE_A, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashA },
+        { id: 'ev-upc-b', field: 'upc', value: testGtin, url: IMAGE_B, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashB },
+        { id: 'ev-brand-b', field: 'brand', value: 'Brand B', url: IMAGE_B, domain: 'cdn.example.com', method: 'image_ocr', contentHash: hashB },
+      ] as never,
+    });
+
+    refreshResolvedAuthoritiesForRun(runId);
+
+    const authorities = listSourceAuthoritiesByRun(runId);
+    expect(authorities.length).toBe(0);
+  });
 });
 
 function imageCandidateOf(

@@ -91,8 +91,19 @@ export async function verifyCandidate(
   candidate: InsertSourceData,
   context: VerificationContext,
   fetchFn: NetworkFetch = fetch,
+  options?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<VerificationResult | null> {
   let html: string;
+  const localCapMs = 12_000;
+  const effectiveTimeout =
+    typeof options?.timeoutMs === 'number' && options.timeoutMs > 0
+      ? Math.min(options.timeoutMs, localCapMs)
+      : localCapMs;
+  const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
+  const composedSignal = options?.signal
+    ? AbortSignal.any([options.signal, timeoutSignal])
+    : timeoutSignal;
+
   try {
     const response = await fetchFn(candidate.url, {
       headers: {
@@ -101,7 +112,7 @@ export async function verifyCandidate(
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
       },
-      signal: AbortSignal.timeout(12_000),
+      signal: composedSignal,
       redirect: 'follow',
     });
     if (!response.ok) return null;
@@ -136,12 +147,13 @@ export async function verifyTopCandidates(
   context: VerificationContext,
   maxCandidates = 3,
   fetchFn: NetworkFetch = fetch,
+  options?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<VerificationResult[]> {
   const toVerify = candidates.slice(0, maxCandidates);
   if (toVerify.length === 0) return [];
 
   const settled = await Promise.allSettled(
-    toVerify.map(c => verifyCandidate(c, context, fetchFn)),
+    toVerify.map(c => verifyCandidate(c, context, fetchFn, options)),
   );
 
   const results: VerificationResult[] = [];
