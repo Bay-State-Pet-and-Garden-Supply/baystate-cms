@@ -48,7 +48,6 @@ import {
   type PreparedDecisionAction,
   type ProposalDecisionSnapshot,
 } from '../pipeline-decision-state';
-import { SearchableBrandSelector } from './SearchableBrandSelector';
 import { ReviewDrawerShell } from './pipeline-drawer/ReviewDrawerShell';
 import { ProductImageGallery } from './pipeline-drawer/ProductImageGallery';
 import { DiscoveryStagePanel } from './pipeline-drawer/DiscoveryStagePanel';
@@ -1430,6 +1429,11 @@ export function PipelineBoard({
         <div style={{ padding: '8px 24px', flexShrink: 0, background: '#fff7ed', borderBottom: '1px solid #fdba74', fontSize: 13 }}>
           <span style={{ color: '#9a3412', fontWeight: 600 }}>⚠ Automatic curation is blocked — classification is not ready.</span>{' '}
           <span style={{ color: '#7c2d12' }}>{readinessView.capabilities.page.reason || readinessView.summary.join(' ')}</span>
+          {readinessView.findingCodes.length > 0 && (
+            <span style={{ color: '#7c2d12' }}> (Findings: {readinessView.findingCodes.join(', ')})</span>
+          )}
+          {' '}
+          <a href="/?view=settings" style={{ color: '#9a3412', fontWeight: 600 }}>Open Curation Targets settings →</a>
         </div>
       )}
       {/* Header */}

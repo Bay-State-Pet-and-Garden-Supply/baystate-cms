@@ -60,6 +60,13 @@ export function captureModelPolicySnapshot(
 export function modelPolicyViewFromConfig(
   policy: ModelPolicyConfigV2,
   snapshotHash?: string,
-): ModelPolicyView {
+): ModelPolicyView | null {
+  if (!policy || typeof policy !== 'object') return null;
+  const localities = (policy as Partial<ModelPolicyConfigV2>).providerLocalities;
+  if (!localities || typeof localities !== 'object' || Object.keys(localities).length === 0) {
+    // No attested provider locality (legacy v1 shape or empty v2): fail closed
+    // — protected calls abstain rather than infer locality from a provider name.
+    return null;
+  }
   return buildModelPolicyView(policy, snapshotHash ? { snapshotHash } : {});
 }

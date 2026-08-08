@@ -6,6 +6,8 @@ import { runMigrations } from '../../db/migrations';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
 import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
+import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
 import { listChangeSets, listChangeSetItems } from '../../db/repositories/change-set-repo';
 import { assignProductToPageId } from '../../db/repositories/page-repo';
 import { type ExtractionData, ExtractionDataSchema } from '../../shared/schemas/onboarding';
@@ -1303,5 +1305,156 @@ describe('Draft Promoter Service', () => {
     expect(draft.customFields['ProductField18']).toBeUndefined();
     expect(draft.customFields['ProductField22']).toBeUndefined();
     expect(draft.customFields['ProductField21']).toBeUndefined();
+  });
+
+  it('promotes an accepted category page proposal whose identity is verified in the ACTIVE import', async () => {
+    // Create an ACTIVE verified import so verifiedPageIds is non-empty.
+    activatePageImportFromRecords({
+      workspaceId: wsId,
+      sourceHash: 'a'.repeat(64),
+      parserFormatVersion: 'pages-xml-1',
+      records: [
+        { identity: { kind: 'exported_guid', key: 'vf', status: 'verified' }, name: 'Verified Food', parentRef: null, availability: 'available' },
+      ],
+      activatedBy: 'test',
+    });
+    const verifiedRows = listVerifiedPageOptions(wsId);
+    const verifiedFood = verifiedRows.find(r => r.name === 'Verified Food');
+    expect(verifiedFood).toBeDefined();
+
+    const batch = createBatch({ workspaceId: wsId, name: 'Verified Pages', fileName: 'vp.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [{ upc: '999000000001', name: 'Verified Product', price: '$5.00', rowNumber: 1, brandHint: 'Test Brand' }]);
+    const item = items[0];
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'Verified Product',
+      brand: 'Test Brand',
+      description: 'Promotion verified-page test.',
+      bulletPoints: [],
+      primaryImage: 'products/999000000001/images/primary.jpg',
+      additionalImages: [],
+      price: '$5.00',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: `https://example.test/999000000001`,
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const db = getDb();
+    db.query("UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(
+      JSON.stringify(extractionData),
+      JSON.stringify({ curatedTitle: 'Verified Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, curatedAt: new Date().toISOString(), curationMethod: 'auto' }),
+      item.id,
+    );
+
+    // Seed a run + accepted category_page proposal referencing the REAL
+    // verified page_index row id and the display name.
+    const runId = 'run-verified-page';
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO classification_runs
+       (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, 'completed', ?)`,
+      [runId, wsId, item.id, item.upc, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ curatedTitle: 'Verified Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, classificationRunId: runId, curatedAt: now, curationMethod: 'auto' }), item.id],
+    );
+    const proposalId = 'prop-verified-page';
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, ?, 'category_page', ?, ?, 1.0, 'accepted', ?)`,
+      [proposalId, runId, item.upc, verifiedFood!.id, JSON.stringify({ pageId: verifiedFood!.id, pageName: 'Verified Food' }), now],
+    );
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      [`decision-${proposalId}`, proposalId, `decision-token-${proposalId}`, now],
+    );
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const changeSetItem = db.query(
+      'SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1',
+    ).get(item.upc) as { draft_json: string };
+    const draft = JSON.parse(changeSetItem.draft_json);
+    // The verified page must be serialized into ProductOnPages.
+    expect(draft.shopsite.preserved.unknownElements.ProductOnPages).toContain('Verified Food');
+  });
+
+  it('skips (non-blocking) an accepted page proposal whose identity is NOT in the active import', async () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Unverified Pages', fileName: 'up.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [{ upc: '999000000002', name: 'Unverified Product', price: '$6.00', rowNumber: 1, brandHint: 'Test Brand' }]);
+    const item = items[0];
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'Unverified Product',
+      brand: 'Test Brand',
+      description: 'Promotion unverified-page test.',
+      bulletPoints: [],
+      primaryImage: 'products/999000000002/images/primary.jpg',
+      additionalImages: [],
+      price: '$6.00',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: `https://example.test/999000000002`,
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const db = getDb();
+    db.query("UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(
+      JSON.stringify(extractionData),
+      JSON.stringify({ curatedTitle: 'Unverified Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, curatedAt: new Date().toISOString(), curationMethod: 'auto' }),
+      item.id,
+    );
+
+    const runId = 'run-unverified-page';
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT OR IGNORE INTO classification_runs
+       (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES (?, ?, ?, ?, 'completed', ?)`,
+      [runId, wsId, item.id, item.upc, now],
+    );
+    db.run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ curatedTitle: 'Unverified Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, classificationRunId: runId, curatedAt: now, curationMethod: 'auto' }), item.id],
+    );
+    const proposalId = 'prop-unverified-page';
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, ?, 'category_page', ?, ?, 1.0, 'accepted', ?)`,
+      // pageId 'bogus-not-in-import' is not among the active import's verified rows.
+      [proposalId, runId, item.upc, 'bogus-not-in-import', JSON.stringify({ pageId: 'bogus-not-in-import', pageName: 'Bogus Page' }), now],
+    );
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      [`decision-${proposalId}`, proposalId, `decision-token-${proposalId}`, now],
+    );
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    // Unverified page identity is a visible, non-blocking skip.
+    expect(result.failures).toHaveLength(0);
+    expect(result.count).toBe(1);
+    const changeSetItem = db.query(
+      'SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1',
+    ).get(item.upc) as { draft_json: string };
+    const draft = JSON.parse(changeSetItem.draft_json);
+    const pagesXml = draft.shopsite?.preserved?.unknownElements?.ProductOnPages;
+    // Bogus page must never be serialized into ProductOnPages.
+    expect(pagesXml ?? '').not.toContain('Bogus Page');
   });
 });

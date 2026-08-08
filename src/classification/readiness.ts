@@ -13,6 +13,8 @@
 import { evaluateClassificationReadiness } from './config-validation';
 import type { ClassificationConfigValidationOptions, ClassificationReadinessReport } from './config-validation';
 import type { RuntimeConfigAuthority } from './config-loader';
+import { ClassificationReadinessReportSchema } from '../shared/schemas/classification';
+import type { ClassificationReadinessReportDto } from '../shared/schemas/classification';
 
 export class ClassificationNotReadyError extends Error {
   readonly code = 'classification_not_ready';
@@ -25,6 +27,29 @@ export class ClassificationNotReadyError extends Error {
     this.name = 'ClassificationNotReadyError';
     this.readiness = readiness;
   }
+}
+
+/**
+ * Normalize a readiness report to the shared schema contract
+ * (`reason: string | null` on every capability — the evaluator emits
+ * `undefined` for runnable capabilities). Both the GET readiness route and the
+ * catalog POST 409 must return the schema-validated shape.
+ */
+export function normalizeClassificationReadinessReport(
+  report: ClassificationReadinessReport,
+): ClassificationReadinessReportDto {
+  const parsed = ClassificationReadinessReportSchema.safeParse({
+    ...report,
+    capabilities: {
+      productType: { ...report.capabilities.productType, reason: report.capabilities.productType.reason ?? null },
+      productFields: { ...report.capabilities.productFields, reason: report.capabilities.productFields.reason ?? null },
+      categoryPages: { ...report.capabilities.categoryPages, reason: report.capabilities.categoryPages.reason ?? null },
+    },
+  });
+  if (!parsed.success) {
+    throw new Error('Readiness report failed schema validation: ' + JSON.stringify(parsed.error.issues));
+  }
+  return parsed.data;
 }
 
 /**

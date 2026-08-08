@@ -19,6 +19,7 @@ import {
 } from '../db/repositories/classification-run-repo';
 import { getCachedAttributeMappings, getCachedBrands } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from '../classification/brand-resolution';
+import { getPageIdentityId, pageNameFromPageValue } from '../shared/proposal-display';
 import {
   getEffectivePrimaryProductTypeId,
   getEffectiveProposalTargetId,
@@ -356,9 +357,9 @@ export async function promoteItems(
               }
             }
           } else if (proposal.proposalType === 'category_page' && targetId) {
-            const pv = getEffectiveProposalValue(proposal) as Record<string, unknown> | undefined;
-            const pageId = pv?.pageId ? String(pv.pageId) : null;
-            const pageName = pv?.pageName ? String(pv.pageName) : String(targetId);
+            const pv = getEffectiveProposalValue(proposal);
+            const pageId = getPageIdentityId(proposal);
+            const pageName = pageNameFromPageValue(pv, targetId) ?? '';
             if (!pageId || !verifiedPageIds.has(pageId)) {
               skippedPageRefs.push({ proposalId: proposal.id, pageName });
               continue;

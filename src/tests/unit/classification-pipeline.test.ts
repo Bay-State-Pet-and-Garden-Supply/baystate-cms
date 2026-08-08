@@ -31,6 +31,8 @@ import { upsertPage } from '../../db/repositories/page-repo';
 import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
 import { buildRuntimeSnapshot, persistRuntimeSnapshot } from '../../classification/runtime-snapshot';
+import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../../classification/page-snapshot';
+import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
 import { listCurationTargetCandidates } from '../../classification/curation-targets';
 import { getDb } from '../../db/connection';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
@@ -1073,6 +1075,84 @@ describe('Classification Pipeline Integration', () => {
         { sku: 'RUNID-SKU', evidence: [], acceptedProposals: [], allProposals: [] },
       ),
     ).rejects.toThrow(/runId mismatch/i);
+  });
+
+  it('category-page stage output is byte-identical when page_index mutates after the snapshot is built', async () => {
+    // This test controls its own config: ensure the page target is enabled
+    // regardless of any earlier test's on-disk mutations.
+    const nowTs = new Date().toISOString();
+    const baseConfig = loadClassificationConfig(workspacePath);
+    saveClassificationConfig(workspacePath, {
+      ...baseConfig,
+      manifest: { ...baseConfig.manifest, updatedAt: nowTs },
+      curationTargets: BASELINE_CURATION_TARGETS,
+    });
+    syncConfigToCache(workspaceId, loadClassificationConfig(workspacePath));
+
+    // Activate a verified Page import so the page stage has verified options.
+    activatePageImportFromRecords({
+      workspaceId,
+      sourceHash: 'e'.repeat(64),
+      parserFormatVersion: 'pages-xml-1',
+      records: [
+        { identity: { kind: 'exported_guid', key: '1', status: 'verified' }, name: 'Dog Food', parentRef: null, availability: 'available' },
+        { identity: { kind: 'exported_guid', key: '2', status: 'verified' }, name: 'Dog Toys', parentRef: null, availability: 'available' },
+      ],
+      activatedBy: 'test',
+    });
+    const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
+    expect(pageSnapshot.pageImportId).not.toBeNull();
+
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const runtime = buildRuntimeSnapshot({
+      workspaceId,
+      workspacePath,
+      productSku: 'PAGE-SKU',
+      config,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+      sourceProductHash: 'src-hash-page',
+      pages: toPageSnapshotState(pageSnapshot),
+      pageImportId: pageSnapshot.pageImportId,
+      pageImportHash: pageSnapshot.pageImportHash,
+    });
+    persistRuntimeSnapshot(runtime);
+
+    const makeEvidence = (runId: string) => [
+      { id: randomUUID(), runId, stageName: 'evidence_extraction' as const, productSku: 'PAGE-SKU', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Dry Dog Food Beef Recipe for dogs', value: 'Dry Dog Food Beef Recipe for dogs', metadata: {}, capturedAt: new Date().toISOString() },
+    ];
+    const makeAcceptedType = (runId: string) => ({ id: randomUUID(), runId, productSku: 'PAGE-SKU', proposalType: 'primary_product_type' as const, targetId: 'dry-dog-food', proposedValue: {}, confidence: 1, evidenceIds: [], status: 'accepted' as const, isBulkAcceptable: false, isStale: false, stalenessReason: null, createdAt: new Date().toISOString() });
+
+    const runA = createRun(workspaceId, 'PAGE-SKU', null, runtime.snapshotHash, { sourceKind: 'catalog_product', sourceProductHash: 'src-hash-page' });
+    const contextA = { workspacePath, workspaceId, runId: runA.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() }, snapshot: runtime };
+    const resultA = await runPipeline(
+      [categoryPageProposalsStage],
+      contextA,
+      { sku: 'PAGE-SKU', evidence: makeEvidence(runA.id), acceptedProposals: [makeAcceptedType(runA.id)], allProposals: [] },
+    );
+    completeRun(runA.id, 'completed');
+
+    // Mutate page_index AFTER the snapshot was frozen: the page stage must
+    // read only the frozen verified records.
+    getDb().run('UPDATE page_index SET name = ? WHERE identity_key = ?', ['Renamed Food', '1']);
+    getDb().run("UPDATE page_index SET availability = 'unavailable' WHERE identity_key = ?", ['2']);
+
+    const runB = createRun(workspaceId, 'PAGE-SKU', null, runtime.snapshotHash, { sourceKind: 'catalog_product', sourceProductHash: 'src-hash-page' });
+    const contextB = { workspacePath, workspaceId, runId: runB.id, configSnapshotRef: contextA.configSnapshotRef, snapshot: runtime };
+    const resultB = await runPipeline(
+      [categoryPageProposalsStage],
+      contextB,
+      { sku: 'PAGE-SKU', evidence: makeEvidence(runB.id), acceptedProposals: [makeAcceptedType(runB.id)], allProposals: [] },
+    );
+
+    const normalize = (p: any) => ({ proposalType: p.proposalType, targetId: p.targetId, proposedValue: p.proposedValue, status: p.status });
+    const sortable = (p: any) => `${p.proposalType}:${String(p.targetId)}`;
+    const a = resultA.proposals.map(normalize).sort((x: any, y: any) => sortable(x).localeCompare(sortable(y)));
+    const b = resultB.proposals.map(normalize).sort((x: any, y: any) => sortable(x).localeCompare(sortable(y)));
+
+    expect(a).toEqual(b);
+    // At least one page proposal was produced by the frozen verified catalog.
+    expect(a.length).toBeGreaterThan(0);
   });
 
   it('stage output is unchanged when config/cache/Page rows mutate after the snapshot is built', async () => {

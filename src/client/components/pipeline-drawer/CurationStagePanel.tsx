@@ -1,6 +1,7 @@
 import React from 'react';
 import type { ClassificationProposal, CurationTargetConfig } from '../../../shared/schemas/classification';
 import type { BrandSite } from '../../../shared/schemas/onboarding';
+import { pageNameFromPageValue } from '../../../shared/proposal-display';
 import { SearchableBrandSelector } from '../SearchableBrandSelector';
 
 interface CurationStagePanelProps {
@@ -186,7 +187,7 @@ export function CurationStagePanel({
                   ? fieldMeta.label
                   : p.proposalType === 'primary_product_type'
                   ? 'Product Type'
-                  : getEffectiveProposalTargetId(p);
+                  : pageNameFromPageValue(effectiveValue, getEffectiveProposalTargetId(p)) ?? '';
 
               return (
                 <div key={p.id} style={{ padding: '10px 0', borderBottom: '1px solid #ede9fe', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>

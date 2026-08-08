@@ -235,6 +235,33 @@ describe('classification readiness (issue #17 L)', () => {
       const body = await res.json() as { code: string; readiness: { isReady: boolean } };
       expect(body.code).toBe('classification_not_ready');
       expect(body.readiness.isReady).toBe(false);
+      // The 409 readiness payload must conform to the shared report schema
+      // (every capability carries reason: string | null).
+      const parsed = ClassificationReadinessReportSchema.safeParse(body.readiness);
+      expect(parsed.success).toBe(true);
+      expect(parsed.data!.capabilities.categoryPages.reason).not.toBeUndefined();
+      const after = (getDb().query('SELECT COUNT(*) c FROM classification_runs').get() as { c: number }).c;
+      expect(after).toBe(before);
+    });
+
+    it('fails closed with NO run when the Page catalog is incoherent during capture', async () => {
+      // Activate a verified import, then empty its records_json while the
+      // verified page_index rows remain — capture must throw before any run.
+      activatePageImportFromRecords({
+        workspaceId,
+        sourceHash: 'd'.repeat(64),
+        parserFormatVersion: 'pages-xml-1',
+        records: [verifiedRecord('1', 'Dog Food'), verifiedRecord('2', 'Dog Toys')],
+        activatedBy: 'test',
+      });
+      getDb().run("UPDATE page_imports SET records_json = '[]' WHERE workspace_id = ?", [workspaceId]);
+      const app = makeApp();
+      writeSkuProduct('READY-3');
+      const before = (getDb().query('SELECT COUNT(*) c FROM classification_runs').get() as { c: number }).c;
+      const res = await app.request('/api/products/READY-3/classification/runs', { method: 'POST' });
+      // Capture drift is a hard failure (not readiness): the request fails and
+      // no run row is created.
+      expect(res.status).not.toBe(200);
       const after = (getDb().query('SELECT COUNT(*) c FROM classification_runs').get() as { c: number }).c;
       expect(after).toBe(before);
     });

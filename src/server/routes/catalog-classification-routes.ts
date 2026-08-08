@@ -10,7 +10,7 @@ import { authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from '..
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { validateCatalogReviewCompletionGate } from '../../classification/review-completion-gate';
 import { applyCatalogClassification } from '../../classification/catalog-product-application';
-import { ClassificationNotReadyError } from '../../classification/readiness';
+import { ClassificationNotReadyError, normalizeClassificationReadinessReport } from '../../classification/readiness';
 import { SubmitCatalogDecisionsRequestSchema } from '../../shared/schemas/classification';
 
 const route = new Hono();
@@ -117,7 +117,7 @@ route.post('/products/:sku/classification/runs', async (c) => {
       return c.json({
         error: err.message,
         code: err.code,
-        readiness: err.readiness,
+        readiness: normalizeClassificationReadinessReport(err.readiness),
       }, 409);
     }
     console.error(`[CatalogClassificationRoutes] Classification failed for ${sku}:`, err);

@@ -14,6 +14,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { sha256Hex } from '../shared/stable-id';
+import { pageNameFromPageValue } from '../shared/proposal-display';
 import * as benchmarkRepo from '../db/repositories/benchmark-repo';
 import * as classRunRepo from '../db/repositories/classification-run-repo';
 import type { BenchmarkPredictionEntry, BenchmarkPredictionBundle } from '../shared/schemas/classification';
@@ -72,7 +73,12 @@ export function extractPredictionsForSku(
       productType = val;
       confidence = proposal.confidence;
     } else if (proposal.proposalType === 'category_page') {
-      const pageName = effectiveTarget ?? val;
+      // Page labels use the display name from the effective value — never the
+      // stable Page ID (issue #17 D1).
+      const pageName = pageNameFromPageValue(
+        decision.hasRevisedValue ? decision.revisedValue : proposal.proposedValue,
+        effectiveTarget,
+      );
       if (pageName) pageAssignments.push(pageName);
     } else if (proposal.proposalType === 'field_assignment' && effectiveTarget) {
       fieldAssignments.push({ targetId: effectiveTarget, value: val });

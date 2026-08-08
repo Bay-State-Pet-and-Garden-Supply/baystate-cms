@@ -27,10 +27,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Resolve the ACTIVE canonical configuration (read-only).
+  // Resolve the ACTIVE canonical configuration (read-only). This offline
+  // script has no Page-identity needs: the empty-string workspace sentinel
+  // omits verifiedPageIds (fail closed) rather than guessing a workspace ID.
   let authority;
   try {
-    authority = loadRuntimeConfigAuthority(catalogPath, createRuntimeActivationContext(catalogPath));
+    authority = loadRuntimeConfigAuthority(catalogPath, createRuntimeActivationContext(catalogPath, ''));
   } catch (error) {
     console.error('❌ Failed to load the active classification configuration:', error instanceof Error ? error.message : error);
     process.exit(1);

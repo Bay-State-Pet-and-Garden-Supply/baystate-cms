@@ -319,6 +319,13 @@ export async function processPageTarget(
   }
 
   // ── Build proposals from LLM results ───────────────────────────────────
+  // Verified identity is stamped only for pageIds present in the frozen
+  // verified snapshot (never inferred from a name or a mutable DB read).
+  const verifiedPageIdSet = new Set(
+    context.snapshot?.pages.state === 'verified'
+      ? context.snapshot.pages.records.map(r => r.pageId)
+      : [],
+  );
   const { evidenceIds } = buildEvidenceText(input.evidence);
   const proposals = llmResult.pages.map((p: any) =>
     buildCategoryPageProposal({
@@ -328,6 +335,7 @@ export async function processPageTarget(
       pageName: p.pageName,
       confidence: p.confidence,
       evidenceIds,
+      verifiedPageIdentity: verifiedPageIdSet.has(p.pageId),
       isBulkAcceptable: (p.isBrandShortcut || p.pageName.startsWith('Brand -')) ? false : undefined,
       snapshotHash,
     }),

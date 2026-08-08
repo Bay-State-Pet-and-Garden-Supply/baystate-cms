@@ -1,4 +1,4 @@
-import { listPages } from '../db/repositories/page-repo';
+import { getPageDisplayName, getPageIdentityId } from '../shared/proposal-display';
 import { convertToLbs } from '../shared/weight-converter';
 import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../classification/page-snapshot';
 import { assertClassificationReady } from '../classification/readiness';
@@ -111,6 +111,11 @@ export async function curateItemWithPipeline(
   // full product types/attributes — name_consolidation always runs.
   const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
   const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+  // Capture the verified Page catalog ONCE, coherently (validates import/row
+  // correspondence and throws on drift) BEFORE the readiness gate so the gate
+  // is bound to the exact snapshot the run will freeze — an enabled Page
+  // target can never start with pages.state='no_verified_page_catalog'.
+  const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
   // Run-start readiness gate (issue #17 L): the ACTIVE v2 config must be
   // ready before any snapshot/run/model side effect. Not-ready throws
   // ClassificationNotReadyError, which the onboarding worker records as a
@@ -118,7 +123,7 @@ export async function curateItemWithPipeline(
   assertClassificationReady(authority, {
     catalogFields: activationContext.catalogFields,
     verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
-    verifiedPageIds: activationContext.verifiedPageIds,
+    verifiedPageIds: pageSnapshot.pageImportId ? pageSnapshot.verifiedPageIds : [],
   });
   let configSnapshotRef: {
     id: string;
@@ -159,8 +164,7 @@ export async function curateItemWithPipeline(
 
   // Build + freeze + persist ONE immutable runtime snapshot before run
   // creation so every stage reads the same frozen config, options, and facts.
-  // The verified Page catalog is captured ONCE from the active import.
-  const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
+  // The verified Page catalog (captured above, before readiness) is frozen in.
   const runtimeSnapshot = buildRuntimeSnapshot({
     workspaceId,
     workspacePath,
@@ -398,35 +402,34 @@ export async function curateItemWithPipeline(
 
     // ── Collect and deduplicate page proposals ────────────────────────────
     const pageProposals = allProposals
-      .filter(p => p.proposalType === 'category_page' && p.targetId)
+      .filter(p => p.proposalType === 'category_page')
       .sort((a, b) => {
         // Accepted first, then by confidence descending
         if (a.status === 'accepted' && b.status !== 'accepted') return -1;
         if (a.status !== 'accepted' && b.status === 'accepted') return 1;
         return b.confidence - a.confidence;
       });
-    const seenPages = new Set<string>();
+    // Only identities verified in the FROZEN snapshot are suggestions. The
+    // mutable page_index is never re-read after capture (issue #17 D1);
+    // name-only/out-of-import proposals are review context and never surface.
+    const verifiedPageIdSet = new Set(pageSnapshot.pageImportId ? pageSnapshot.verifiedPageIds : []);
+    const seenPageIds = new Set<string>();
     const rawSuggestedPages: string[] = [];
     for (const p of pageProposals) {
-      if (p.targetId && !seenPages.has(p.targetId)) {
-        seenPages.add(p.targetId);
-        rawSuggestedPages.push(p.targetId);
-      }
+      const pageId = getPageIdentityId(p);
+      const pageName = getPageDisplayName(p);
+      if (!pageId || !verifiedPageIdSet.has(pageId)) continue;
+      if (!pageName || seenPageIds.has(pageId)) continue;
+      seenPageIds.add(pageId);
+      rawSuggestedPages.push(pageName);
     }
 
     // ── Validate page assignments against species from VLM OCR evidence ───
     const validatedPages = validatePageAssignmentsBySpecies(rawSuggestedPages, allEvidence);
 
-    // ── Validate that pages actually exist in the page_index (ADR 0005) ────
-    const existingPageNames = new Set(listPages().map(p => p.name));
-    const suggestedPages: string[] = [];
-    for (const pageName of validatedPages) {
-      if (existingPageNames.has(pageName)) {
-        suggestedPages.push(pageName);
-      } else {
-        console.warn(`[ProductCurator] Dropping non-existent page: "${pageName}"`);
-      }
-    }
+    // Suggested page names are already validated against the frozen verified
+    // Page snapshot above — no post-run DB read is needed (ADR 0005).
+    const suggestedPages = validatedPages;
     // Limit to top 5 to keep suggestions reasonable
     suggestedPages.splice(5);
 

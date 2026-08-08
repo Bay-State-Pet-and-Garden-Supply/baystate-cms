@@ -17,6 +17,7 @@
 
 import { getDb } from '../db/connection';
 import { normalizeBrand, extractNameStem } from '../onboarding/product-line-grouper';
+import { pageNameFromPageValue } from '../shared/proposal-display';
 import * as benchmarkRepo from '../db/repositories/benchmark-repo';
 import * as classRunRepo from '../db/repositories/classification-run-repo';
 import type { BenchmarkGoldLabels } from '../shared/schemas/classification';
@@ -191,7 +192,12 @@ export function exportBenchmark(
       } else if (proposal.proposalType === 'category_page') {
         // Page labels are excluded until a verified Page identity exists.
         if (verifiedPages) {
-          const pageName = effectiveTarget ?? val ?? '';
+          // Display name comes from the effective value — never the stable
+          // Page ID (issue #17 D1).
+          const pageName = pageNameFromPageValue(
+            decision.hasRevisedValue ? decision.revisedValue : proposal.proposedValue,
+            effectiveTarget,
+          );
           if (pageName) pageAssignments.push({ pageName, pageId: null });
         }
       } else if (proposal.proposalType === 'field_assignment' && effectiveTarget) {

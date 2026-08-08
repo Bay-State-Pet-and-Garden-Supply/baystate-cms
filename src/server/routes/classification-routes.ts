@@ -10,7 +10,7 @@ import {
 } from '../../classification/curation-targets';
 
 import { evaluateClassificationReadiness } from '../../classification/config-validation';
-import { ClassificationReadinessReportSchema } from '../../shared/schemas/classification';
+import { normalizeClassificationReadinessReport } from '../../classification/readiness';
 
 const router = new Hono();
 
@@ -33,18 +33,7 @@ router.get('/classification/readiness', (c) => {
       verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
       verifiedPageIds: activationContext.verifiedPageIds,
     });
-    const parsed = ClassificationReadinessReportSchema.safeParse({
-      ...readiness,
-      capabilities: {
-        productType: { ...readiness.capabilities.productType, reason: readiness.capabilities.productType.reason ?? null },
-        productFields: { ...readiness.capabilities.productFields, reason: readiness.capabilities.productFields.reason ?? null },
-        categoryPages: { ...readiness.capabilities.categoryPages, reason: readiness.capabilities.categoryPages.reason ?? null },
-      },
-    });
-    if (!parsed.success) {
-      return c.json({ error: 'Readiness report failed schema validation.', issues: parsed.error.issues }, 500);
-    }
-    return c.json({ readiness: parsed.data });
+    return c.json({ readiness: normalizeClassificationReadinessReport(readiness) });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }

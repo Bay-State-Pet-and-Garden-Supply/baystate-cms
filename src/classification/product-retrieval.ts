@@ -21,6 +21,7 @@ import {
 } from './retrieval-index';
 import { evaluateFeaturePolicy, type FeaturePolicyOptions } from './feature-policy';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
+import { pageNameFromPageValue } from '../shared/proposal-display';
 import { sha256Hex, canonicalJsonStringify } from '../shared/stable-id';
 
 export interface SimilarProduct {
@@ -184,7 +185,13 @@ export async function findSimilarApprovedProducts(
           if (proposal.proposalType === 'primary_product_type') {
             productType = val;
           } else if (proposal.proposalType === 'category_page') {
-            if (target || val) acceptedPages.push(target || val);
+            // Display name from the effective value — never the Page ID
+            // (issue #17 D1).
+            const pageName = pageNameFromPageValue(
+              decision.hasRevisedValue ? decision.revisedValue : proposal.proposedValue,
+              target || null,
+            );
+            if (pageName) acceptedPages.push(pageName);
           } else if (proposal.proposalType === 'field_assignment' && target) {
             acceptedFields[target] = val;
           }

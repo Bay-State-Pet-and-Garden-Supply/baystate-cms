@@ -1,6 +1,7 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { getCachedAttributeMappings } from '../../db/repositories/classification-config-repo';
 import { getEffectiveProposalValue, serializeAttributeValue } from '../assignment-projection';
+import { getPageDisplayName } from '../../shared/proposal-display';
 
 /**
  * Product Draft Projection Stage
@@ -78,20 +79,23 @@ export const productDraftProjectionStage: StageDefinition = {
       }
     }
 
-    // Collect accepted category page assignments, then supplement with pending
+    // Collect accepted category page assignments, then supplement with pending.
+    // Page display names come from proposedValue.pageName (never the target
+    // Page ID — issue #17 D1).
     const pageAssignments: string[] = [];
     for (const proposal of accepted) {
-      if (proposal.proposalType === 'category_page' && proposal.targetId) {
-        pageAssignments.push(proposal.targetId);
-      }
+      if (proposal.proposalType !== 'category_page') continue;
+      const pageName = getPageDisplayName(proposal);
+      if (pageName) pageAssignments.push(pageName);
     }
 
     const pendingPageAssignments: string[] = [];
     if (pageAssignments.length === 0) {
       for (const proposal of allProposals) {
-        if (proposal.proposalType !== 'category_page' || !proposal.targetId) continue;
+        if (proposal.proposalType !== 'category_page') continue;
         if (proposal.status !== 'pending' || proposal.isStale) continue;
-        pendingPageAssignments.push(proposal.targetId);
+        const pageName = getPageDisplayName(proposal);
+        if (pageName) pendingPageAssignments.push(pageName);
       }
     }
 

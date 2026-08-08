@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   getCatalogClassification,
   runCatalogClassification,
-  submitCatalogDecisions,
   applyCatalogClassification,
   type CatalogClassificationDetail,
 } from '../api';
@@ -31,12 +30,6 @@ const primaryButton: React.CSSProperties = {
   color: '#ffffff',
 };
 
-const secondaryButton: React.CSSProperties = {
-  ...buttonBase,
-  background: '#e2e8f0',
-  color: '#1e293b',
-};
-
 const sectionStyle: React.CSSProperties = {
   marginTop: 32,
   padding: 24,
@@ -56,10 +49,6 @@ interface Props {
   onDraftCreated: () => void;
 }
 
-function createActionToken(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
 export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
   const [detail, setDetail] = useState<CatalogClassificationDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -67,12 +56,8 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  // Use string map where '' means unset. We filter at submit time.
-  const [decisionMap, setDecisionMap] = useState<Record<string, string>>({});
   const [changeSetId, setChangeSetId] = useState<string | null>(null);
   const [readiness, setReadiness] = useState<ReadinessView | null>(null);
-  // Outstanding action tokens keyed by proposalId; reused until a definitive success.
-  const actionTokensRef = React.useRef<Record<string, string>>({});
 
   const loadReadiness = useCallback(async () => {
     try {
@@ -94,22 +79,6 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
     try {
       const result = await getCatalogClassification(sku);
       setDetail(result);
-      // Restore decision selections
-      if (result.proposals && result.decisions) {
-        const seen = new Set<string>();
-        const map: Record<string, 'accepted' | 'rejected' | 'deferred'> = {};
-        for (const d of result.decisions) {
-          // Only keep the most recent decision per proposal (newest-first order)
-          if (seen.has(d.proposalId)) continue;
-          seen.add(d.proposalId);
-          if (d.decision === 'accepted' || d.decision === 'rejected' || d.decision === 'deferred') {
-            map[d.proposalId] = d.decision;
-          }
-        }
-        setDecisionMap(map);
-      }
-      // Canonical live decisions replace any unresolved transport tokens.
-      actionTokensRef.current = {};
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -133,61 +102,6 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
       setError(err.message);
     } finally {
       setRunning(false);
-    }
-  };
-
-  const handleDecision = (proposalId: string, decision: string) => {
-    setDecisionMap(prev => {
-      const nextValue = prev[proposalId] === decision ? '' : decision;
-      // A genuine UI toggle is a new logical action; mint a fresh token.
-      // Clearing the selection drops any outstanding token for that proposal.
-      if (nextValue) {
-        actionTokensRef.current[proposalId] = createActionToken();
-      } else {
-        delete actionTokensRef.current[proposalId];
-      }
-      return {
-        ...prev,
-        [proposalId]: nextValue,
-      };
-    });
-  };
-
-  const handleSubmitDecisions = async () => {
-    if (!detail?.run) return;
-    setError('');
-    setMessage('');
-
-    const currentByProposal = new Map((detail.decisions ?? []).map(decision => [decision.proposalId, decision]));
-    const decisions = Object.entries(decisionMap)
-      .filter(([_, decision]) => decision === 'accepted' || decision === 'rejected' || decision === 'deferred')
-      .map(([proposalId, decision]) => {
-        const actionToken = actionTokensRef.current[proposalId] ?? createActionToken();
-        actionTokensRef.current[proposalId] = actionToken;
-        return {
-          proposalId,
-          decision: decision as 'accepted' | 'rejected' | 'deferred',
-          actionToken,
-          expectedRevisionId: currentByProposal.get(proposalId)?.id ?? null,
-        };
-      });
-
-    if (decisions.length === 0) {
-      setError('No decisions to submit.');
-      return;
-    }
-
-    try {
-      await submitCatalogDecisions(sku, detail.run.id, decisions);
-      // Clear only after a definitive success; loadClassification also resets.
-      for (const d of decisions) {
-        delete actionTokensRef.current[d.proposalId];
-      }
-      setMessage(`Submitted ${decisions.length} decision(s).`);
-      await loadClassification();
-    } catch (err: any) {
-      // Keep outstanding tokens so a retry of the same action is idempotent.
-      setError(err.message);
     }
   };
 
@@ -226,14 +140,28 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
         Run AI-powered product classification to propose attributes, category pages, and product types.
       </p>
 
-      {/* Run status */}
+      {/* Run status — conservative while readiness is unknown: buttons stay
+          disabled and a loading note is shown until a real report arrives. */}
+      {!readiness && (
+        <div style={{ marginBottom: 16, padding: 12, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, color: '#64748b' }}>
+          Checking classification readiness…
+        </div>
+      )}
       {readiness && !readiness.isReady && (
         <div style={{ marginBottom: 16, padding: 12, background: '#fff7ed', border: '1px solid #fdba74', borderRadius: 8, fontSize: 13 }}>
           <div style={{ color: '#9a3412', fontWeight: 600 }}>⚠ Classification is not ready to run</div>
           <div style={{ color: '#7c2d12', marginTop: 4 }}>{readiness.summary.join(' ')}</div>
+          {readiness.findingCodes.length > 0 && (
+            <div style={{ color: '#7c2d12', marginTop: 4 }}>
+              Findings: {readiness.findingCodes.join(', ')}
+            </div>
+          )}
           {readiness.capabilities.page.reason && (
             <div style={{ color: '#7c2d12', marginTop: 2 }}>Category Pages: {readiness.capabilities.page.reason}</div>
           )}
+          <a href="/?view=settings" style={{ color: '#9a3412', fontWeight: 600, marginTop: 6, display: 'inline-block' }}>
+            Open Curation Targets settings →
+          </a>
         </div>
       )}
 
@@ -257,7 +185,8 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
         <button
           style={primaryButton}
           onClick={handleRun}
-          disabled={running || (readiness ? shouldBlockRun(readiness) : false)}
+          disabled={running || readiness === null || shouldBlockRun(readiness)}
+          title={readiness === null ? 'Checking classification readiness…' : (shouldBlockRun(readiness) ? 'Classification is not ready to run' : undefined)}
         >
           {running ? 'Running...' : hasActiveRun ? 'Rerun' : 'Run Classification'}
         </button>

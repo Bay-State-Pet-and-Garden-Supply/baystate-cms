@@ -32,15 +32,6 @@ function verifiedRecord(
   };
 }
 
-function nameOnlyRecord(name: string): PageRecord {
-  return {
-    identity: { kind: 'unverified_name_only', key: name, status: 'unverified' },
-    name,
-    parentRef: null,
-    availability: 'unavailable',
-  };
-}
-
 function freshDb(): string {
   const wsPath = path.join(os.tmpdir(), `page-snapshot-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   fs.mkdirSync(path.join(wsPath, '.baystate-cms'), { recursive: true });
@@ -168,6 +159,33 @@ describe('captureVerifiedPageSnapshot (issue #17 D1)', () => {
     expect(uniqueIds.size).toBe(2);
     const names = snap.records.map(r => r.pageName);
     expect(new Set(names).size).toBe(1);
+  });
+
+  it('throws when a child row parent_id is tampered (row/import drift)', () => {
+    activate([
+      verifiedRecord('1', 'Dog Food'),
+      verifiedRecord('2', 'Dog Toys', '1'),
+    ]);
+    const db = getDb();
+    // Give the parentless record '1' a parent row it must not have: the FK
+    // accepts an existing row id, but capture must reject the drift.
+    const row2 = db.query('SELECT id FROM page_index WHERE identity_key = ?').get('2') as { id: string };
+    db.run('UPDATE page_index SET parent_id = ? WHERE identity_key = ?', [row2.id, '1']);
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/unexpected parent/i);
+  });
+
+  it('throws when records_json is emptied while verified rows remain (import/row drift)', () => {
+    activate([verifiedRecord('1', 'Dog Food')]);
+    const db = getDb();
+    db.run('UPDATE page_imports SET records_json = ? WHERE workspace_id = ?', ['[]', workspaceId]);
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/changed during capture/);
+  });
+
+  it('throws on name mismatch between import records and page_index rows', () => {
+    activate([verifiedRecord('1', 'Dog Food')]);
+    const db = getDb();
+    db.run('UPDATE page_index SET name = ? WHERE identity_key = ?', ['Renamed Food', '1']);
+    expect(() => captureVerifiedPageSnapshot(workspaceId)).toThrow(/name mismatch/i);
   });
 
   it('exposes the same records for both run boundaries via the shared builder', () => {

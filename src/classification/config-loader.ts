@@ -641,13 +641,13 @@ export function loadRuntimeConfigAuthority(
  * the field-registry xmlFields as the attested Catalog Field set, the
  * catalog-evidence verifier bound to the committed artifact, and the verified
  * Page IDs from the active import (stable identities only — name-only rows
- * never enter). Production run/route callers MUST pass the workspace ID so
- * Page identity is never inferred from a path; when omitted, verifiedPageIds
- * is absent and an enabled Page target fails active validation (fail closed).
+ * never enter). `workspaceId` is REQUIRED so Page identity is never inferred
+ * from a path; a caller without a workspace ID must pass the empty-string
+ * sentinel to omit verifiedPageIds (fail closed for any enabled Page target).
  * Cheap enough for every runtime load; the full tree re-scan gate is added by
  * the activation caller through `verifyCatalogEvidenceTree`.
  */
-export function createRuntimeActivationContext(workspacePath: string, workspaceId?: string): VerifiedActivationContext {
+export function createRuntimeActivationContext(workspacePath: string, workspaceId: string): VerifiedActivationContext {
   return {
     catalogFields: readLiveCatalogFields(workspacePath),
     verifyCatalogEvidence: createCatalogEvidenceVerifier(workspacePath),

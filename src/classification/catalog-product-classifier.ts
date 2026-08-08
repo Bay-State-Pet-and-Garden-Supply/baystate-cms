@@ -51,13 +51,18 @@ export async function classifyCatalogProduct(
   //    transitional v1 otherwise) and resolve the snapshot reference binding.
   const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
   const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+  // Capture the verified Page catalog ONCE, coherently (validates import/row
+  // correspondence and throws on drift) BEFORE the readiness gate so the gate
+  // is bound to the exact snapshot the run will freeze — an enabled Page
+  // target can never start with pages.state='no_verified_page_catalog'.
+  const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
   // Run-start readiness gate (issue #17 L): the ACTIVE v2 config must be
   // ready (enabled targets with legal options, verified Page catalog when
   // the Page target is enabled) before any snapshot/run/model side effect.
   assertClassificationReady(authority, {
     catalogFields: activationContext.catalogFields,
     verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
-    verifiedPageIds: activationContext.verifiedPageIds,
+    verifiedPageIds: pageSnapshot.pageImportId ? pageSnapshot.verifiedPageIds : [],
   });
   let configSnapshotRef: StageContext['configSnapshotRef'];
   let focusedFileHashes: Record<string, string>;
@@ -99,10 +104,9 @@ export async function classifyCatalogProduct(
   }
 
   // 4. Build + freeze + persist ONE immutable runtime snapshot before run
-  //    creation. The verified Page catalog is captured ONCE from the active
-  //    import and frozen into the snapshot; page context is the product's own
+  //    creation. The verified Page catalog (captured above, before readiness)
+  //    is frozen into the snapshot; page context is the product's own
   //    name-only observations (never every store Page).
-  const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
   const ownPageNames = parseProductOnPages(product.shopsite?.preserved);
   const runtimeSnapshot = buildRuntimeSnapshot({
     workspaceId,
