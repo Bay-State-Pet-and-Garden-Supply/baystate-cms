@@ -131,4 +131,66 @@ describe('fulfillPinnedSubrequest', () => {
     expect(calls[0].url).toBe('http://198.51.100.4/products.json?t=123');
     expect(result?.body.toString('utf8')).toBe('[]');
   });
+
+  it('round-6 P1-4: caps the response stream — an oversized body rejects regardless of Content-Length', async () => {
+    const spyFetch = async (): Promise<Response> => fakeResponse({ body: 'x'.repeat(5000) });
+    await expect(
+      fulfillPinnedSubrequest(
+        { url: 'http://api.example.com/big.json' },
+        {
+          resolveFn: async () => '203.0.113.7',
+          fetchFn: spyFetch,
+          maxResponseBytes: 1000,
+        },
+      ),
+    ).rejects.toThrow(/exceeds 1000 bytes/);
+  });
+
+  it('round-6 P1-4: a declared Content-Length over the cap rejects before streaming', async () => {
+    const spyFetch = async (): Promise<Response> =>
+      fakeResponse({ headers: { 'content-length': '99999' }, body: 'small' });
+    await expect(
+      fulfillPinnedSubrequest(
+        { url: 'http://api.example.com/declared.json' },
+        {
+          resolveFn: async () => '203.0.113.7',
+          fetchFn: spyFetch,
+          maxResponseBytes: 1000,
+        },
+      ),
+    ).rejects.toThrow(/declares 99999 bytes/);
+  });
+
+  it('round-6 P1-4: the per-snapshot aggregate budget aborts once cumulative bytes exceed the cap', async () => {
+    const budget = { bytes: 0 };
+    const spyFetch = async (): Promise<Response> => fakeResponse({ body: 'A'.repeat(1500) });
+    const opts = {
+      resolveFn: async () => '203.0.113.7',
+      fetchFn: spyFetch,
+      maxAggregateBytes: 2000,
+    };
+    const first = await fulfillPinnedSubrequest({ url: 'http://api.example.com/1.json' }, { ...opts, budget });
+    expect(first).not.toBeNull();
+    expect(budget.bytes).toBe(1500);
+    // Second response would push the aggregate to 3000 > 2000 → rejected.
+    await expect(fulfillPinnedSubrequest({ url: 'http://api.example.com/2.json' }, { ...opts, budget })).rejects.toThrow(
+      /aggregate subrequest budget exceeded/,
+    );
+    expect(budget.bytes).toBe(1500); // unchanged after the rejection
+  });
+
+  it('round-6 P1-4: an oversized request body is denied before any fetch (spy never fires)', async () => {
+    let fetched = false;
+    await expect(
+      fulfillPinnedSubrequest(
+        { url: 'http://api.example.com/post', method: 'POST', body: Buffer.from('y'.repeat(2000)) },
+        {
+          resolveFn: async () => '203.0.113.7',
+          fetchFn: async () => { fetched = true; return fakeResponse({}); },
+          maxBodyBytes: 500,
+        },
+      ),
+    ).rejects.toThrow(/subrequest body exceeds 500 bytes/);
+    expect(fetched).toBe(false);
+  });
 });

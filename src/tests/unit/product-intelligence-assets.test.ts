@@ -421,6 +421,10 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
     });
 
     it('approves a verified supplier asset with evidence-resolved facts and a reuse grant', async () => {
+      // Round-6: the evidence facts are byte-bound (content hash == the exact
+      // bytes being inspected) — that is what makes them authoritative for
+      // the image's identity.
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
       const record = await verifyImageCandidate(
         {
           url: 'https://cdn.example.com/i.png',
@@ -440,9 +444,9 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           // Server-resolved durable evidence rows (the only authority).
           evidenceResolver: (ids) =>
             ids.map((id) => {
-              if (id === 'ev-gtin-1') return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
-              if (id === 'ev-name-1') return { id, targetField: 'product_name', value: 'Stella Chicken Broth 16 oz', extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
-              return { id, targetField: 'net_content', value: { value: 16, unit: 'oz' }, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+              if (id === 'ev-gtin-1') return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash };
+              if (id === 'ev-name-1') return { id, targetField: 'product_name', value: 'Stella Chicken Broth 16 oz', extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash };
+              return { id, targetField: 'net_content', value: { value: 16, unit: 'oz' }, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash };
             }),
           reuseGrantResolver: (tier) =>
             tier === 'supplier'
@@ -498,6 +502,9 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
           expectedGtin: GTIN,
           declaredSourceType: 'manufacturer',
           evidenceIds: ['ev-gtin-1'],
+          // Round-6: identity resolves through a server-authoritative
+          // asset-to-GTIN linkage (the alternative to hash-bound evidence).
+          assetGtinLinkages: [{ gtin: GTIN, assetId: 'asset-mfr-1' }],
         },
         {
           ...deps(gatewayReturning(solidPng)),
@@ -534,6 +541,63 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"},{"id
       expect(record.extractionMethod).toBe('image_ocr');
       expect(record.originalContentHash).toMatch(/^[0-9a-f]{64}$/);
       expect(record.observationProvenance).toBe('evidence');
+    });
+
+    it('refuses a null-hash generic GTIN fact as image identity evidence (round-6 adversarial)', async () => {
+      // 'This run has durable evidence that GTIN X exists' is NOT 'this image
+      // is durably linked to GTIN X'. A generic field-evidence GTIN (no
+      // content hash) can never establish the image's identity — only
+      // hash-bound OCR/decoder evidence or a server-authoritative linkage.
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/nohash.png',
+          sourcePageUrl: PAGE,
+          extractionMethod: 'image_ocr',
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN, name: 'Stella Chicken Broth 16 oz' },
+          expectedGtin: GTIN,
+          expectedName: 'Stella Chicken Broth 16 oz',
+          evidenceIds: ['ev-gtin-nohash', 'ev-name-nohash'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          // Hash-bound name fact (informative), NULL-hash GTIN fact (NOT
+          // authoritative for this image).
+          evidenceResolver: (ids) =>
+            ids.map((id) => {
+              if (id === 'ev-gtin-nohash') return { id, targetField: 'gtin', value: GTIN, extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: null };
+              return { id, targetField: 'product_name', value: 'Stella Chicken Broth 16 oz', extractionMethod: 'image_ocr', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash };
+            }),
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-nohash-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
+          sourceTypeResolver: (url) => (url === 'https://cdn.example.com/nohash.png' ? 'supplier' : null),
+        },
+      );
+      // Name alignment alone can only support probable_match when the run
+      // has a GTIN — exact requires a byte-bound or linkage-bound GTIN.
+      expect(record.exactProductMatch).toBe(false);
+      expect(record.observationProvenance).toBe('evidence');
+      expect(record.commerceApproved).toBe(false);
+    });
+
+    it('accepts hash-bound decoder GTIN evidence as exact identity (round-6)', async () => {
+      const pngHash = createHash('sha256').update(solidPng).digest('hex');
+      const record = await verifyImageCandidate(
+        {
+          url: 'https://cdn.example.com/decoder.png',
+          sourcePageUrl: PAGE,
+          extractionMethod: 'decoder',
+          runIdentity: { runId: 'run-assets-1', gtin: GTIN },
+          expectedGtin: GTIN,
+          evidenceIds: ['ev-gtin-dec'],
+        },
+        {
+          ...deps(gatewayReturning(solidPng)),
+          evidenceResolver: (ids) =>
+            ids.map((id) => ({ id, targetField: 'gtin', value: GTIN, extractionMethod: 'decoder', snippet: null, sourceUrl: PAGE, sourceDomain: 'brand.example.com', contentHash: pngHash })),
+          reuseGrantResolver: () => ({ allowed: true as const, grantId: 'grant-dec-1', sourceTier: 'supplier', domainPattern: '*', terms: null }),
+        },
+      );
+      expect(record.exactProductMatch).toBe(true);
     });
 
     it('drops OCR evidence whose content hash does not match the bytes being inspected (round-3 adversarial)', async () => {

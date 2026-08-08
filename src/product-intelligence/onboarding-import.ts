@@ -584,37 +584,76 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
     // the run's whole research/verification history (five verified candidates
     // with one chosen must import exactly the one chosen). Each cited id must
     // resolve to a durable asset row of THIS run (listPiAssetsByRun is
-    // run-scoped, so cross-run borrowing fails closed) with commerceApproved
-    // === 1; an uncited/empty candidate or anything else aborts the import
-    // before a single write. Candidate order is preserved; duplicates dedupe.
-    // Roles are not representable in the shared approvedImageIds string[]
-    // shape, so ids only (candidate order keeps primary first when the bundle
-    // lists it first).
+    // run-scoped, so cross-run borrowing fails closed). Round-6 (review
+    // P1): roles are preserved and the ROLE POLICY matches the terminal
+    // validator — primary requires full commerce approval; supporting roles
+    // (alternate/nutrition/ingredients) require approved rights AND the same
+    // same-product linkage (exact product/variant match, or the same
+    // discovering page as the primary asset); comparison images are bound
+    // but NEVER part of the commerce image set. A violation aborts the
+    // import before a single write.
     const bundleCandidates = Array.isArray(envelope.imageCandidates)
       ? (envelope.imageCandidates as Array<Record<string, unknown>>)
       : [];
     const assetsById = new Map(listPiAssetsByRun(runId).map((a) => [a.id, a]));
+    const images: Array<{ assetId: string; role: string }> = [];
     const approvedImageIds: string[] = [];
+    // Primary asset (if a primary candidate is cited) anchors the same-page
+    // linkage for supporting roles.
+    const primaryCandidate = bundleCandidates.find((c) => c.role === 'primary');
+    const primaryAsset =
+      primaryCandidate && typeof primaryCandidate.verifiedAssetId === 'string' && primaryCandidate.verifiedAssetId
+        ? assetsById.get(primaryCandidate.verifiedAssetId)
+        : undefined;
     for (const candidate of bundleCandidates) {
       const id = typeof candidate.verifiedAssetId === 'string' ? candidate.verifiedAssetId : '';
+      const role = String(candidate.role ?? 'unknown');
       if (!id) {
         throw new UnresolvedEvidenceError([
-          { field: `image:${String(candidate.role ?? 'unknown')}`, reason: 'selected image candidate cites no verified asset' },
+          { field: `image:${role}`, reason: 'selected image candidate cites no verified asset' },
         ]);
       }
-      if (approvedImageIds.includes(id)) continue;
+      if (images.some((entry) => entry.assetId === id && entry.role === role)) continue;
       const asset = assetsById.get(id);
       if (!asset) {
         throw new UnresolvedEvidenceError([
           { field: `image:${id}`, reason: 'cited verified asset does not belong to this run (or does not exist)' },
         ]);
       }
-      if (asset.commerceApproved !== 1) {
+      if (role === 'primary') {
+        if (asset.commerceApproved !== 1) {
+          throw new UnresolvedEvidenceError([
+            { field: `image:${id}`, reason: 'cited primary verified asset is not commerce-approved' },
+          ]);
+        }
+      } else if (role === 'alternate' || role === 'nutrition' || role === 'ingredients') {
+        if (asset.rightsStatus !== 'approved') {
+          throw new UnresolvedEvidenceError([
+            { field: `image:${id}`, reason: `cited ${role} verified asset rights are '${asset.rightsStatus}', not approved` },
+          ]);
+        }
+        const samePageLinkage =
+          !!primaryAsset &&
+          !!primaryAsset.sourcePageUrl &&
+          !!asset.sourcePageUrl &&
+          primaryAsset.sourcePageUrl === asset.sourcePageUrl;
+        const sameProductLinkage =
+          asset.exactProductMatch === 1 || asset.exactVariantMatch === 1 || samePageLinkage;
+        if (!sameProductLinkage) {
+          throw new UnresolvedEvidenceError([
+            { field: `image:${id}`, reason: `cited ${role} verified asset is not durably linked to this product (no exact match and no shared discovering page with the primary image)` },
+          ]);
+        }
+      } else if (role === 'comparison') {
+        // Binding-only: never a commerce asset — recorded with its role, not
+        // added to the commerce image set.
+      } else {
         throw new UnresolvedEvidenceError([
-          { field: `image:${id}`, reason: 'cited verified asset is not commerce-approved' },
+          { field: `image:${id}`, reason: `unknown image role '${role}'` },
         ]);
       }
-      approvedImageIds.push(id);
+      images.push({ assetId: id, role });
+      if (role !== 'comparison') approvedImageIds.push(id);
     }
 
     // Materialize evidence into the item's extraction data (distinct
@@ -628,6 +667,7 @@ export function importRunToOnboarding(runId: string, opts: ImportRunOptions): Im
       evidence: evidencePayload,
       sources,
       approvedImageIds,
+      images,
     };
     // One payload entry per imported run: a newer run augments the array, it
     // does not silently replace an earlier import's item evidence. A re-import

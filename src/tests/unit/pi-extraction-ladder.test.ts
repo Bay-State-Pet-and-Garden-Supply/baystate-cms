@@ -944,6 +944,163 @@ describe('ladder contract adapter + helpers', () => {
     expect(outF.variantSignals.some((s) => s.kind === 'parent_page')).toBe(true);
   });
 
+  it('round-6 P0-3: a recommendation carrying the REQUESTED GTIN cannot prove the page product single-variant (page-primary linkage)', async () => {
+    // The reviewer's round-6 regression: the page's primary product X has a
+    // DIFFERENT GTIN (no variants declared); the recommendation/cross-sell
+    // payload Y carries the REQUESTED GTIN and declares exactly one variant.
+    // Round-5's GTIN-equality linkage would settle exact — round-6 requires
+    // page-primary/current-entity linkage, and Y is not the page's product.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://rec.example.com/p/main',
+      finalUrl: 'https://rec.example.com/p/main',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Primary Product 16oz',
+          sku: 'PP-16',
+          gtin: '777777777777',
+          size: '16 oz',
+          offers: { price: '12.99' },
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://rec.example.com/api/cross-sell',
+          status: 200,
+          responseContentType: 'application/json',
+          // Cross-sell for the REQUESTED UPC (different sku) — one variant.
+          jsonBody: { product: { title: 'Requested UPC Item', sku: 'CS-9', gtin: '888888888888', variants: [{ id: 1, title: '1 ct' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://rec.example.com/p/main',
+      { gtin: '888888888888', name: 'Requested UPC Item' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://rec.example.com/p/main'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.gtins.map((g) => g.value)).toContain('888888888888');
+    // GTIN equality alone is identity evidence, not page-context evidence.
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityStatus).toBe('probable_match');
+    expect(result.identityReasons.join(' ')).toMatch(/unproven|not exact|single-variant/i);
+  });
+
+  it('round-6 P0-3: canonical mainEntity marks the primary — a GTIN-bearing recommendation still cannot prove single-variant', async () => {
+    // Strong-marker variant of the reviewer regression: the page declares its
+    // canonical product via a WebPage mainEntity. The recommendation payload
+    // carries the REQUESTED GTIN with one variant, but it is NOT the page's
+    // primary entity — identity equality must not override page context.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://me.example.com/p/main',
+      finalUrl: 'https://me.example.com/p/main',
+      jsonLd: [
+        {
+          '@type': 'ProductPage',
+          '@id': 'https://me.example.com/p/main',
+          mainEntity: {
+            '@type': 'Product',
+            name: 'Primary Product 16oz',
+            sku: 'MP-16',
+            gtin: '777777777777',
+            size: '16 oz',
+            offers: { price: '12.99' },
+          },
+        },
+        {
+          '@type': 'Product',
+          name: 'Primary Product 16oz',
+          sku: 'MP-16',
+          gtin: '777777777777',
+          size: '16 oz',
+          offers: { price: '12.99' },
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://me.example.com/api/recommended',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { product: { title: 'Requested UPC Item', sku: 'RC-2', gtin: '888888888888', variants: [{ id: 1, title: '1 ct' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result } = await runExtractionLadder(
+      'https://me.example.com/p/main',
+      { gtin: '888888888888', name: 'Requested UPC Item' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://me.example.com/p/main'),
+        browser: { snapshot },
+      },
+    );
+    expect(result.identityStatus).not.toBe('exact_match');
+    expect(result.identityReasons.join(' ')).toMatch(/unproven|not exact|single-variant/i);
+  });
+
+  it('round-6 P0-3: the current-product API response sharing the primary identity DOES prove single-variant', async () => {
+    // Positive page-primary case: the leaf JSON-LD product (mainEntity) and
+    // the network current-product API response share the SAME identity
+    // (sku + gtin) — the API payload is the page's product, its declared
+    // single variant is affirmative browser proof, and the requested GTIN is
+    // on the page. Co-occurrence of identity marks the current product.
+    const snapshot: BrowserSnapshotFn = async () => ({
+      url: 'https://api-pos.example.com/p/x',
+      finalUrl: 'https://api-pos.example.com/p/x',
+      jsonLd: [
+        {
+          '@type': 'Product',
+          name: 'Current Product 16oz',
+          sku: 'CP-16',
+          gtin: '666666666666',
+          size: '16 oz',
+          offers: { price: '8.99' },
+        },
+      ],
+      embeddedProductData: [],
+      imageCandidates: [],
+      networkResponses: [
+        {
+          url: 'https://api-pos.example.com/api/products/current',
+          status: 200,
+          responseContentType: 'application/json',
+          jsonBody: { product: { title: 'Current Product 16oz', sku: 'CP-16', gtin: '666666666666', variants: [{ id: 1, title: '16 oz' }] } },
+        },
+      ],
+      interaction: null,
+      pageStructureSignals: [],
+      warnings: [],
+    });
+    const { result, layersUsed } = await runExtractionLadder(
+      'https://api-pos.example.com/p/x',
+      { gtin: '666666666666', name: 'Current Product 16oz' },
+      new AbortController().signal,
+      5000,
+      {
+        fetchPage: async () => fetched('<html><body>js-rendered</body></html>', 'https://api-pos.example.com/p/x'),
+        browser: { snapshot },
+      },
+    );
+    expect(layersUsed).toContain('browser');
+    expect(result.identityStatus).toBe('exact_match');
+  });
+
   it('escalates to the managed browser fallback with a domain-scoped provider', async () => {
     const pages = new Map<string, string>([
       ['https://managed.example.com/p/x', `<html><head><script type="application/ld+json">{"@type":"Product","name":"Managed Product 4oz","sku":"MP-4","gtin":"888888888888","offers":{"price":"1"}}</script></head><body></body></html>`],

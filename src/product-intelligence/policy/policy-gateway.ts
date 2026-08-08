@@ -47,6 +47,7 @@ export type PolicyReasonCode =
   | 'budget_exceeded'
   | 'tool_not_allowed'
   | 'data_sharing_denies_search'
+  | 'zone_transition'
   | 'unknown';
 
 export type DataClassification = 'public' | 'product_input' | 'fetched_content' | 'search_query' | 'local_evidence' | 'model_input';
@@ -596,16 +597,41 @@ export class PolicyGateway {
    * local endpoints, public-destination validation for remote). Redirects are
    * followed manually and BOTH authorities re-fire on every hop. The response
    * size cap is enforced on the body stream (never via Content-Length).
+   *
+   * Round-6 zone rule: the transport's TRUST ZONE is classified ONCE from the
+   * configured initial endpoint (call.endpointUrl) and is immutable for the
+   * whole request — a local-model transport must stay explicit-loopback on
+   * every redirect, and a remote-model transport must stay public/remote on
+   * every redirect. Redirects that cross the local/remote boundary are denied
+   * with reasonCode 'zone_transition' (a route-authorized remote VLM cannot
+   * 302 into 127.0.0.1:11434, and a local Ollama cannot hop out to a public
+   * URL).
    */
   buildModelFetch(
     ctx: PolicyCheckContext,
     call: { provider: string; model: string; endpointUrl: string },
   ): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
     const classification: DataClassification = 'model_input';
+    // Round-6: classify the trust zone once from the CONFIGURED endpoint and
+    // never recompute it from a redirect target.
+    const initialZone: 'local' | 'remote' = isExplicitLoopbackEndpoint(call.endpointUrl) ? 'local' : 'remote';
+    const isLocalModel = initialZone === 'local';
     return async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
       let currentUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
       let redirects = 0;
       for (;;) {
+        // Round-6: zone integrity is checked BEFORE model authorization — a
+        // zone-crossed target is never even authorized as a model endpoint.
+        const hopZone: 'local' | 'remote' = isExplicitLoopbackEndpoint(currentUrl) ? 'local' : 'remote';
+        if (hopZone !== initialZone) {
+          throw new PolicyDeniedError({
+            allowed: false,
+            reasonCode: 'zone_transition',
+            policyVersion: ctx.policy.configId,
+            detail: `model transport is ${initialZone}-zone (from configured endpoint ${call.endpointUrl}) but the request landed on ${currentUrl} — ${initialZone} never becomes ${hopZone}`,
+          });
+        }
+
         const modelDecision = await this.checkModelEndpoint(ctx, {
           provider: call.provider,
           model: call.model,
@@ -614,7 +640,6 @@ export class PolicyGateway {
         });
         if (!modelDecision.allowed) throw new PolicyDeniedError(modelDecision);
 
-        const isLocalModel = isExplicitLoopbackEndpoint(currentUrl);
         const destination = await this.checkModelDestination(ctx, currentUrl, isLocalModel);
         if (!destination.allowed) {
           throw new PolicyDeniedError({

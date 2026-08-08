@@ -118,6 +118,16 @@ export const ProductAssetEvidenceSchema = z.object({
   sourceId: z.string().nullish(),
   payload: z.record(z.string(), z.unknown()).nullish(),
   createdAt: z.string().nullish(),
+  /** Round-4: canonical identity snapshot the asset was verified against
+   *  (server-derived from the run input: runId + gtin + name). */
+  verifiedAgainst: z.record(z.string(), z.unknown()).nullish(),
+  /** Round-4: SHA-256 of canonicalVerifiedAgainstHash(snapshot) — the
+   *  terminal validator recomputes it from the current run's input and
+   *  refuses cross-run / cross-identity borrowing. */
+  verifiedAgainstHash: z.string().nullish(),
+  /** Round-4: durable source-kind derived from the source row at
+   *  verification time (never the agent's declared string). */
+  declaredSourceType: z.string().nullish(),
 });
 export type ProductAssetEvidence = z.infer<typeof ProductAssetEvidenceSchema>;
 

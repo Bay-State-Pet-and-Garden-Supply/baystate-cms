@@ -608,7 +608,7 @@ describe('P0-1 round-4 VLM model-policy boundary', () => {
         calls.push(url);
         if (url.includes('/api/chat')) {
           return new Response(
-            JSON.stringify({ message: { content: '{"productName":"Feline Wormeze Liquid","brand":"Farnam","size":"4 oz"}' } }),
+            JSON.stringify({ message: { content: '{"productName":"Feline Wormeze Liquid","brand":"Farnam","size":"4 oz","upc":"745801105447","count":"1"}' } }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }
@@ -623,9 +623,16 @@ describe('P0-1 round-4 VLM model-policy boundary', () => {
     );
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') return;
-    expect(result.evidence.length).toBe(3); // productName, brand, size
+    // Round-6: the OCR adapter now emits upc + count as well.
+    expect(result.evidence.length).toBe(5); // productName, brand, size, upc, count
     const byField = new Map(result.evidence.map((e) => [(e as { field?: string }).field ?? '', e]));
-    for (const [field, value] of [['productName', 'Feline Wormeze Liquid'], ['brand', 'Farnam'], ['size', '4 oz']] as const) {
+    for (const [field, value] of [
+      ['productName', 'Feline Wormeze Liquid'],
+      ['brand', 'Farnam'],
+      ['size', '4 oz'],
+      ['upc', '745801105447'],
+      ['count', '1'],
+    ] as const) {
       const entry = byField.get(field) as { value?: string; contentHash?: string; method?: string; url?: string; id?: string };
       expect(entry).toBeDefined();
       expect(entry.value).toBe(value);
@@ -873,7 +880,119 @@ describe('P0-1 round-5 model-transport destination authority', () => {
     });
     // 10.0.0.5 is not loopback -> the redirect hop is treated as remote and
     // the private-address floor denies it.
-    await expect(fetch('http://127.0.0.1:11434/api/chat')).rejects.toThrow(/private|invalid_port|local model endpoint/);
+    await expect(fetch('http://127.0.0.1:11434/api/chat')).rejects.toThrow(/zone_transition|private|invalid_port|local model endpoint/);
+  });
+
+  // -------------------------------------------------------------------
+  // Round-6: the model transport TRUST ZONE is classified once from the
+  // configured endpoint and never transitions. A route-authorized remote
+  // VLM cannot redirect into 127.0.0.1:11434 (the loopback model policy
+  // would otherwise allow it), and a local Ollama cannot hop out to a
+  // public endpoint.
+  // -------------------------------------------------------------------
+
+  it('a remote model redirecting to an allowlisted loopback port is denied (zone_transition)', async () => {
+    // The reviewer's exact case: vlm.example.com 302s to http://127.0.0.1:11434.
+    // Port 11434 IS in LOCAL_MODEL_PORTS — the old code allowed the hop; the
+    // round-6 zone rule denies it as a local/remote transition.
+    const gateway = literalGateway(async (input) => {
+      const url = String(input);
+      if (url.startsWith('https://vlm.example.com')) {
+        return new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:11434/api/chat' } });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, modelCall);
+    // The zone rule denies the hop with reasonCode zone_transition (the
+    // message carries the reason; bun's toThrow callback form is unusable).
+    await expect(fetch('https://vlm.example.com/v1/chat')).rejects.toThrow(/zone_transition/);
+  });
+
+  it('a remote model redirecting to a private (non-loopback) address is denied', async () => {
+    const gateway = literalGateway(async (input) => {
+      const url = String(input);
+      if (url.startsWith('https://vlm.example.com')) {
+        return new Response(null, { status: 302, headers: { location: 'http://10.0.0.5:11434/api/chat' } });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, modelCall);
+    // 10.x is not loopback, so the hop stays 'remote' zone; the public/
+    // remote destination floor rejects the private address.
+    await expect(fetch('https://vlm.example.com/v1/chat')).rejects.toThrow(/private|Policy denied/);
+  });
+
+  it('a remote model redirecting to another remote endpoint is allowed (remote stays remote)', async () => {
+    const calls: string[] = [];
+    const gateway = literalGateway(async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === 'https://vlm.example.com/v1/chat') {
+        return new Response(null, { status: 302, headers: { location: 'https://cdn.example.com/vlm/chat' } });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const ctx = makeCtx({
+      policy: makePolicy({
+        dataSharingPolicy: 'cloud_models_only',
+        modelRoute: { provider: 'ollama_vlm', model: 'qwen2.5vl:latest', thinkingLevel: 'off' },
+      }),
+    });
+    const fetch = gateway.buildModelFetch(ctx, modelCall);
+    const response = await fetch('https://vlm.example.com/v1/chat');
+    expect(response.status).toBe(200);
+    expect(calls).toEqual(['https://vlm.example.com/v1/chat', 'https://cdn.example.com/vlm/chat']);
+  });
+
+  it('a local model redirecting to a public endpoint is denied (local never becomes remote)', async () => {
+    const gateway = literalGateway(async (input) => {
+      const url = String(input);
+      if (url.startsWith('http://127.0.0.1:11434')) {
+        return new Response(null, { status: 302, headers: { location: 'https://evil.example.com/api/chat' } });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const ctx = makeCtx({ policy: makePolicy({ dataSharingPolicy: 'cloud_models_and_sources' }) });
+    const fetch = gateway.buildModelFetch(ctx, {
+      provider: 'ollama_vlm',
+      model: 'qwen2.5vl:latest',
+      endpointUrl: 'http://127.0.0.1:11434',
+    });
+    await expect(fetch('http://127.0.0.1:11434/api/chat')).rejects.toThrow(/zone_transition/);
+  });
+
+  it('a local model redirecting to another loopback endpoint is allowed (local stays local)', async () => {
+    const calls: string[] = [];
+    const gateway = literalGateway(async (input) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === 'http://127.0.0.1:11434/api/chat') {
+        return new Response(null, { status: 302, headers: { location: 'http://127.0.0.1:11435/api/chat' } });
+      }
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const ctx = makeCtx({ policy: makePolicy({ dataSharingPolicy: 'local_only' }) });
+    const fetch = gateway.buildModelFetch(ctx, {
+      provider: 'ollama_vlm',
+      model: 'qwen2.5vl:latest',
+      endpointUrl: 'http://127.0.0.1:11434',
+    });
+    const response = await fetch('http://127.0.0.1:11434/api/chat');
+    expect(response.status).toBe(200);
+    // 11435 is in LOCAL_MODEL_PORTS and both hops are explicit loopback.
+    expect(calls).toEqual(['http://127.0.0.1:11434/api/chat', 'http://127.0.0.1:11435/api/chat']);
   });
 
   it('a chunked model response without Content-Length exceeding 20MB is rejected by the bounded stream', async () => {

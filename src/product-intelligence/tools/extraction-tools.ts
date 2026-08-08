@@ -481,6 +481,13 @@ const extractPackagingEvidence: PiToolAdapter = {
           ['size', ocr.size],
           ['weight', ocr.weight],
           ['flavorVariety', ocr.flavorVariety],
+          // Round-6: the VLM prompt + schema already read the barcode; the
+          // adapter must not discard it — upc/count become hash-bound
+          // field-level evidence so verify_image_candidate can use the
+          // barcode as byte-bound GTIN identity (exact requires an observed
+          // GTIN or a server-authoritative linkage).
+          ['upc', ocr.upc],
+          ['count', ocr.count],
         ] as Array<[string, unknown]>
       ).filter(
         (entry): entry is [string, string] =>
@@ -509,8 +516,10 @@ const extractPackagingEvidence: PiToolAdapter = {
           size: ocr.size ?? null,
           weight: ocr.weight ?? null,
           flavorVariety: ocr.flavorVariety ?? null,
+          upc: ocr.upc ?? null,
+          count: ocr.count ?? null,
           contentHash: ocr.contentHash ?? null,
-          rawFields: Object.keys(ocr).filter((k) => !['productName', 'brand', 'size', 'weight', 'flavorVariety'].includes(k)),
+          rawFields: Object.keys(ocr).filter((k) => !['productName', 'brand', 'size', 'weight', 'flavorVariety', 'upc', 'count'].includes(k)),
         },
         evidence,
       );

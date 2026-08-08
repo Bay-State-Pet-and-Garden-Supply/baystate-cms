@@ -68,6 +68,10 @@ export interface BrowserExtractionEvidence {
   selectedOptions: string[];
   finalUrl: string;
   methodsUsed: string[];
+  /** Round-6 P0-3: total product-like payloads processed (page context for the single-payload primary fallback). */
+  stats?: { productLikeCount: number };
+  /** Round-6 P0-3: identity ids of the page's PRIMARY/CURRENT product entity, established server-side from page-level markers (mainEntity, canonical-URL match, first Product in document order). */
+  pagePrimaryIds?: string[];
 }
 
 /**
@@ -117,12 +121,17 @@ export function evidenceFromProductPayload(
     variantSetEvidence?: { single: boolean; multiple: boolean };
     /** Round-5 P0-3: per-payload declared variant-set contributions (entity-scoped). */
     variantSetContributions?: VariantSetContribution[];
+    /** Round-6 P0-3: total product-like payloads processed (page context). */
+    stats?: { productLikeCount: number };
+    /** Round-6 P0-3: identity ids of the page's PRIMARY/CURRENT product entity. */
+    pagePrimaryIds?: string[];
   },
   /** Round-5 P0-3: the expected entity identity (when known) scopes both proof
    *  and contradiction signals to linked payloads. When absent, callers
    *  without entity context keep the legacy unscoped behavior. */
   opts?: { expectedGtin?: string | null },
 ): void {
+  if (out.stats) out.stats.productLikeCount += 1;
   const title = typeof product.title === 'string' ? product.title : typeof product.name === 'string' ? product.name : null;
   const sku = typeof product.sku === 'string' ? product.sku : null;
   const brand = typeof product.brand === 'string' ? product.brand : typeof product.vendor === 'string' ? product.vendor : null;
@@ -193,6 +202,129 @@ export function evidenceFromProductPayload(
   }
 }
 
+/** Round-6 P0-3: canonical URL form for page-context comparisons (no hash, no trailing slash, lowercase). */
+function normalizeCanonicalUrl(value: string): string {
+  try {
+    const u = new URL(value);
+    u.hash = '';
+    return u.toString().replace(/\/$/, '').toLowerCase();
+  } catch {
+    return value.replace(/\/$/, '').toLowerCase();
+  }
+}
+
+/** Identity ids a product-like payload carries (@id/id/productId/handle/url/sku/gtin). */
+function identityIdsOf(payload: Record<string, unknown>): string[] {
+  const ids: string[] = [];
+  for (const key of ['@id', 'id', 'productId', 'handle', 'url', 'sku']) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.length > 0 && value.length <= 512) ids.push(value);
+  }
+  const gtin = gtinFromAny(payload);
+  if (gtin) ids.push(gtin.replace(/\D/g, ''));
+  return ids;
+}
+
+/** True for WebPage/ItemPage/ProductPage structured-data nodes. */
+function isPageEntityType(payload: Record<string, unknown>): boolean {
+  const t = payload['@type'] ?? payload.type;
+  return typeof t === 'string' && /(WebPage|ItemPage|ProductPage)/i.test(t);
+}
+
+/** True for a leaf @type Product node (never ProductGroup). */
+function isProductType(payload: Record<string, unknown>): boolean {
+  const t = payload['@type'] ?? payload.type;
+  return typeof t === 'string' && /(^|[^\w])Product([^\w]|$)/i.test(t);
+}
+
+/**
+ * Round-6 P0-3: server-established identity ids of the page's PRIMARY/CURRENT
+ * product entity, derived ONLY from page-level markers:
+ *   - the canonical mainEntity of a WebPage/ItemPage/ProductPage node;
+ *   - a product payload whose url/@id equals the canonical page URL;
+ *   - identity CO-OCCURRENCE: a sku/id declared by two or more product-like
+ *     payloads (e.g. the leaf JSON-LD product AND its current-product API
+ *     response) is the page's current product. A one-off recommendation or
+ *     cross-sell payload appears once and never becomes primary.
+ * GTIN equality is intentionally NOT a primary marker: a recommendation
+ * payload carrying the requested UPC must never become "the page's product"
+ * merely because it shares the GTIN.
+ */
+function pagePrimaryEntityIds(snapshot: BrowserSnapshot, canonicalUrl: string): string[] {
+  const strongIds: string[] = [];
+  const addIds = (payload: Record<string, unknown>): void => {
+    strongIds.push(...identityIdsOf(payload));
+  };
+  const productLike: Array<Record<string, unknown>> = [];
+  const collectProduct = (payload: Record<string, unknown>): void => {
+    productLike.push(payload);
+  };
+  for (const entry of snapshot.jsonLd) {
+    if (isPageEntityType(entry)) {
+      const mainEntity = entry['mainEntity'];
+      if (mainEntity && typeof mainEntity === 'object') {
+        if (Array.isArray(mainEntity)) {
+          for (const node of mainEntity) if (node && typeof node === 'object') addIds(node as Record<string, unknown>);
+        } else {
+          addIds(mainEntity as Record<string, unknown>);
+        }
+      }
+      continue;
+    }
+    if (!isProductType(entry)) continue;
+    const url = typeof entry.url === 'string' ? entry.url : typeof entry['@id'] === 'string' ? entry['@id'] : null;
+    if (url && normalizeCanonicalUrl(url) === canonicalUrl) addIds(entry);
+    collectProduct(entry);
+  }
+  for (const payload of snapshot.embeddedProductData) {
+    const url = typeof payload.url === 'string' ? payload.url : null;
+    if (url && normalizeCanonicalUrl(url) === canonicalUrl) addIds(payload);
+    collectProduct(payload);
+  }
+  for (const net of snapshot.networkResponses) {
+    if (net.jsonBody === null || net.jsonBody === undefined) continue;
+    if (normalizeCanonicalUrl(net.url) === canonicalUrl) {
+      const product = findProductLikeStrict(net.jsonBody);
+      if (product) addIds(product);
+    }
+    const product = findProductLikeStrict(net.jsonBody);
+    if (product) collectProduct(product);
+  }
+  if (strongIds.length > 0) return strongIds;
+  // Identity co-occurrence fallback: a sku/id declared by >= 2 payloads is
+  // the page's current product (its leaf JSON-LD plus its API response).
+  const occurrences = new Map<string, number>();
+  for (const payload of productLike) {
+    for (const id of identityIdsOf(payload)) {
+      const key = id.length >= 8 && /^\d+$/.test(id) ? `g:${id}` : `s:${id.toLowerCase()}`;
+      occurrences.set(key, (occurrences.get(key) ?? 0) + 1);
+    }
+  }
+  const repeated: string[] = [];
+  for (const [key, count] of occurrences) {
+    if (count >= 2) repeated.push(key.startsWith('g:') ? key.slice(2) : key.slice(2));
+  }
+  return repeated;
+}
+
+/** True when a contribution's identity (gtin/sku/id) matches the page-primary id set. */
+function identityMatchesPrimaryIds(
+  identity: { gtin: string | null; sku: string | null; id: string | null },
+  primaryIds: string[],
+): boolean {
+  const set = new Set<string>();
+  for (const raw of primaryIds) {
+    set.add(raw);
+    set.add(raw.toLowerCase());
+    if (/^\d{8,14}$/.test(raw)) set.add(raw.replace(/\D/g, ''));
+  }
+  if (identity.gtin && (set.has(identity.gtin) || set.has(identity.gtin.replace(/\D/g, '')))) return true;
+  for (const candidate of [identity.sku, identity.id]) {
+    if (candidate && (set.has(candidate) || set.has(candidate.toLowerCase()))) return true;
+  }
+  return false;
+}
+
 /** Extract ladder evidence from a rendered snapshot (layers 5-6). */
 export function evidenceFromBrowserSnapshot(
   snapshot: BrowserSnapshot,
@@ -209,6 +341,10 @@ export function evidenceFromBrowserSnapshot(
     variantSetEvidence?: { single: boolean; multiple: boolean };
     /** Round-5 P0-3: per-payload declared variant-set contributions (entity-scoped). */
     variantSetContributions?: VariantSetContribution[];
+    /** Round-6 P0-3: total product-like payloads processed (page context). */
+    stats?: { productLikeCount: number };
+    /** Round-6 P0-3: identity ids of the page's PRIMARY/CURRENT product entity. */
+    pagePrimaryIds?: string[];
   },
   /**
    * Round-5 P0-3: the expected entity identity. Variant-set proof is computed
@@ -221,6 +357,13 @@ export function evidenceFromBrowserSnapshot(
   expected?: { gtin?: string | null },
 ): { methodsUsed: string[]; variantSetEvidence: 'single' | 'multiple' | 'none' } {
   const methodsUsed: string[] = [];
+  // Round-6 P0-3: establish the page's PRIMARY/CURRENT product entity from
+  // page-level markers BEFORE iterating payloads (mainEntity, canonical-URL
+  // match, first Product in document order). GTIN equality alone is identity
+  // evidence, not page-context evidence — a recommendation payload carrying
+  // the requested GTIN must not prove the primary product is single-variant.
+  out.stats ??= { productLikeCount: 0 };
+  out.pagePrimaryIds ??= pagePrimaryEntityIds(snapshot, normalizeCanonicalUrl(snapshot.finalUrl || snapshot.url));
   for (const jsonLd of snapshot.jsonLd) {
     evidenceFromProductPayload(jsonLd, 'json_ld', 'browser JSON-LD', out, { expectedGtin: expected?.gtin ?? null });
     methodsUsed.push('json_ld');
@@ -262,17 +405,27 @@ export function evidenceFromBrowserSnapshot(
   }
   const contributions = out.variantSetContributions ?? [];
   const expectedDigits = expected?.gtin ? String(expected.gtin).replace(/\D/g, '') : null;
+  // Round-6 P0-3: linkage requires the contribution to be the page's
+  // PRIMARY/CURRENT product entity AND (when an expected GTIN exists) to
+  // carry that GTIN. A payload that merely carries the requested GTIN (e.g.
+  // a recommendation/cross-sell for the same UPC) is identity evidence, not
+  // page-context evidence — it must not prove the page's product is
+  // single-variant. A page with exactly ONE product-like payload makes that
+  // payload primary by definition.
+  const primaryIds = out.pagePrimaryIds ?? [];
+  const totalProductLike = out.stats?.productLikeCount ?? contributions.length;
   const linked = (contribution: VariantSetContribution): boolean => {
+    const isPrimary =
+      totalProductLike === 1 || (primaryIds.length > 0 && identityMatchesPrimaryIds(contribution.identity, primaryIds));
+    if (!isPrimary) return false;
     if (expectedDigits) {
       // When the expected GTIN exists, linkage is GTIN equality — a payload
       // without it (or with a different GTIN) is NOT the entity, even if it
       // is the only product-like payload on the page.
       return contribution.identity.gtin !== null && contribution.identity.gtin === expectedDigits;
     }
-    // No expected identity: the page's single product-like payload is its
-    // primary/canonical product. With multiple unidentifiable payloads, none
-    // may prove anything (conservative — absence never proves).
-    return contributions.length === 1;
+    // No expected identity: the page's primary product is the only anchor.
+    return true;
   };
   let payloadSingle = false;
   let payloadMultiple = false;

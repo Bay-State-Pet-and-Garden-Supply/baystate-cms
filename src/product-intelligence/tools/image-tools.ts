@@ -103,6 +103,9 @@ export const verifyImageCandidateTool: PiToolAdapter = {
           extractionMethod: params.extractionMethod as ExtractionMethod | undefined,
           runIdentity,
           evidenceIds: Array.isArray(params.evidenceIds) ? (params.evidenceIds as unknown[]).map((id) => String(id)) : undefined,
+          // Round-6: server-resolved asset-to-GTIN linkage for THIS image
+          // (same run + URL, previously verified exact). Never agent-supplied.
+          assetGtinLinkages: loadAssetGtinLinkages(ctx.runId, url),
           observed,
         },
         {
@@ -354,6 +357,12 @@ let _assetStore:
       insertPiSource: (input: Record<string, unknown>) => LazySourceRow;
       listPiSources: (runId: string) => LazySourceRow[];
       insertPiAsset: (input: Record<string, unknown>) => { id: string };
+      listPiAssetsByRun: (runId: string) => Array<{
+        id: string;
+        sourceUrl: string;
+        exactProductMatch: number | boolean;
+        verifiedAgainstJson: string | null;
+      }>;
     }
   | null
   | undefined;
@@ -391,6 +400,36 @@ function domainOfUrl(url: string): string {
  *  image against, from the run's immutable input (gtin + registerName).
  *  Lazy (bun-only); with no DB it returns null — verification then compares
  *  nothing (dimensions absent are never taken from the agent). */
+/** Round-6: server-authoritative asset-to-GTIN linkage for THIS image.
+ *  Only a durable asset row from the SAME run, for the SAME URL, that was
+ *  previously verified exact and bound to a GTIN snapshot qualifies — this
+ *  is the alternative to hash-bound OCR/decoder evidence for establishing
+ *  the image's observed GTIN. The agent cannot supply this; it is derived
+ *  from durable server state only. */
+function loadAssetGtinLinkages(runId: string, url: string): Array<{ gtin: string; assetId?: string }> {
+  const store = loadAssetStore();
+  if (!store) return [];
+  try {
+    const rows = store.listPiAssetsByRun(runId);
+    const out: Array<{ gtin: string; assetId?: string }> = [];
+    for (const row of rows) {
+      if (row.sourceUrl !== url) continue;
+      if (!row.exactProductMatch) continue;
+      if (!row.verifiedAgainstJson) continue;
+      try {
+        const snapshot = JSON.parse(row.verifiedAgainstJson) as { gtin?: unknown };
+        const gtin = snapshot.gtin !== undefined && snapshot.gtin !== null ? String(snapshot.gtin).replace(/\D/g, '') : null;
+        if (gtin && gtin.length >= 8) out.push({ gtin, assetId: row.id });
+      } catch {
+        // malformed snapshot rows never contribute a linkage
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function loadRunIdentity(runId: string): VerifiedAgainstSnapshot | null {
   try {
     const conn = lazyRequire('../../db/connection') as { isDbInitialized?: () => boolean };

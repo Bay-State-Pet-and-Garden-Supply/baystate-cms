@@ -383,7 +383,10 @@ Shopify.ProductImages = [{"id":456,"src":"//cdn.shopify.com/s/files/a.jpg"}];</s
       targetField: 'gtin',
       value: '036000291452',
       extractionMethod: 'image_ocr',
-      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456' },
+      // Round-6: byte-bound — the evidence carries the SHA-256 of the exact
+      // bytes the verifier is inspecting (the fetched image), so it can
+      // establish THIS image's identity. A null-hash generic fact could not.
+      metadata: { toolEvidenceId: 'extract_product_page:abc123:gtin:def456', contentHash: createHash('sha256').update(png).digest('hex') },
     });
     const grant = upsertReusePolicy({
       workspaceId: wsId,

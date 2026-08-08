@@ -53,6 +53,7 @@ export const BundleClassificationProposalSchema = z.object({
 export type BundleClassificationProposal = z.infer<typeof BundleClassificationProposalSchema>;
 
 export const ImageRoleSchema = z.enum(['primary', 'alternate', 'nutrition', 'ingredients', 'comparison']);
+export type ImageRole = z.infer<typeof ImageRoleSchema>;
 export const ImageRightsStatusSchema = z.enum(['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized', 'unknown']);
 
 export const ImageExtractionMethodSchema = z.enum([

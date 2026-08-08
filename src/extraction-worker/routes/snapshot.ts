@@ -463,6 +463,55 @@ const MAX_CAPTURED_RESPONSES = 40;
 const MAX_CAPTURE_BYTES = 2_000_000;
 const MAX_AGGREGATE_CAPTURE_BYTES = 8_000_000;
 
+/** Round-6 P1-4: per-subrequest response stream cap (fulfillPinnedSubrequest). */
+const MAX_SUBREQUEST_RESPONSE_BYTES = 2_000_000;
+/** Round-6 P1-4: aggregate bytes fulfilled across one snapshot's subrequests. */
+const MAX_AGGREGATE_SUBREQUEST_BYTES = 8_000_000;
+/** Round-6 P1-4: max request body copied into the worker path from the page. */
+const MAX_SUBREQUEST_BODY_BYTES = 1_000_000;
+
+/** Mutable per-snapshot budget shared with fulfillPinnedSubrequest. */
+export interface SubrequestBudgetState {
+  bytes: number;
+}
+
+/**
+ * Read a Response body with a hard stream cap (no Content-Length trust):
+ * chunked / missing-length bodies stop being read once the cap trips and the
+ * error propagates fail-closed (the route is aborted by the caller).
+ */
+async function readBoundedBody(response: Response, cap: number): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length') ?? '0');
+  if (declared > cap) {
+    throw new Error(`subrequest response declares ${declared} bytes (cap ${cap})`);
+  }
+  if (!response.body) {
+    const fallback = Buffer.from(await response.arrayBuffer());
+    if (fallback.length > cap) {
+      throw new Error(`subrequest response exceeds ${cap} bytes (${fallback.length})`);
+    }
+    return fallback;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) {
+        throw new Error(`subrequest response exceeds ${cap} bytes (${total})`);
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  return Buffer.concat(chunks);
+}
+
 /** URLs that are never product evidence (cart/account/checkout/session...). */
 const NON_PRODUCT_URL = /cart|checkout|account|customer|order|session|login|logout|wishlist|billing|payment|address|profile|subscription|api\/auth|sentry|logrocket|segment|amplitude|mixpanel|fullstory|mouseflow|taboola|telemetry|beacon/i;
 
@@ -943,11 +992,22 @@ export async function fulfillPinnedSubrequest(
     resolveFn?: (hostname: string) => Promise<string | null>;
     fetchFn?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
     timeoutMs?: number;
+    /** Per-response stream cap (defaults to MAX_SUBREQUEST_RESPONSE_BYTES). */
+    maxResponseBytes?: number;
+    /** Request-body cap (defaults to MAX_SUBREQUEST_BODY_BYTES). */
+    maxBodyBytes?: number;
+    /** Shared per-snapshot aggregate counter (defaults to no aggregate cap). */
+    budget?: SubrequestBudgetState;
+    /** Aggregate cap across the shared budget (defaults to MAX_AGGREGATE_SUBREQUEST_BYTES). */
+    maxAggregateBytes?: number;
   } = {},
 ): Promise<{ status: number; headers: Record<string, string>; body: Buffer } | null> {
   const timeoutMs = deps.timeoutMs ?? HTTP_FETCH_TIMEOUT_MS;
   const resolveFn = deps.resolveFn ?? resolvePublicAddress;
   const fetchFn = deps.fetchFn ?? ((input: string | URL | Request, init?: RequestInit) => fetch(input, init));
+  const maxResponseBytes = deps.maxResponseBytes ?? MAX_SUBREQUEST_RESPONSE_BYTES;
+  const maxBodyBytes = deps.maxBodyBytes ?? MAX_SUBREQUEST_BODY_BYTES;
+  const maxAggregateBytes = deps.maxAggregateBytes ?? MAX_AGGREGATE_SUBREQUEST_BYTES;
   let parsed: URL;
   try {
     parsed = new URL(requestInfo.url);
@@ -976,6 +1036,12 @@ export async function fulfillPinnedSubrequest(
   }
   headers.Host = parsed.hostname;
   const body = requestInfo.body ? (Buffer.isBuffer(requestInfo.body) ? requestInfo.body : Buffer.from(String(requestInfo.body))) : undefined;
+  // Round-6 P1-4: cap the request body BEFORE any network call — an oversized
+  // page request is denied without the transport (or even the resolver) being
+  // touched.
+  if (body && body.length > maxBodyBytes) {
+    throw new Error(`subrequest body exceeds ${maxBodyBytes} bytes (${body.length})`);
+  }
   const response = await fetchFn(pinnedUrl, {
     method: requestInfo.method ?? 'GET',
     headers,
@@ -984,7 +1050,14 @@ export async function fulfillPinnedSubrequest(
     signal: AbortSignal.timeout(timeoutMs),
     redirect: 'manual',
   });
-  const responseBody = Buffer.from(await response.arrayBuffer());
+  const responseBody = await readBoundedBody(response, maxResponseBytes);
+  // Round-6 P1-4: aggregate per-snapshot budget — the response was already
+  // read (single-response cap bounds that), but the page never receives it
+  // once the aggregate cap trips.
+  if (deps.budget && deps.budget.bytes + responseBody.length > maxAggregateBytes) {
+    throw new Error(`aggregate subrequest budget exceeded (${deps.budget.bytes + responseBody.length} > ${maxAggregateBytes})`);
+  }
+  if (deps.budget) deps.budget.bytes += responseBody.length;
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, key) => {
     const lower = key.toLowerCase();
@@ -1204,6 +1277,10 @@ async function doRenderedSnapshot(
   let pageStructureSignals: string[] = [];
   let interactionResult: SnapshotResponse['interaction'] = null;
   let networkCapture: { responses: CapturedNetworkResponse[]; stop: () => void } | null = null;
+  // Round-6 P1-4: aggregate bytes fulfilled across this snapshot's pinned
+  // http subrequests — shared with fulfillPinnedSubrequest so the budget
+  // spans the whole snapshot (and aborts the route on overflow).
+  const subrequestBudget: SubrequestBudgetState = { bytes: 0 };
 
   try {
     const context = await browser.newContext({
@@ -1258,7 +1335,7 @@ async function doRenderedSnapshot(
           method: req.method(),
           headers: req.headers(),
           body: req.postDataBuffer(),
-        });
+        }, { budget: subrequestBudget });
         if (fulfill === null) {
           await route.continue();
         } else {

@@ -419,6 +419,12 @@ export interface VerifyImageInput {
   declaredRightsEvidenceRef?: string | null;
   /** Durable evidence-row ids the server resolves into observations. */
   evidenceIds?: string[];
+  /** Round-6: server-authoritative asset-to-GTIN linkage. ONLY a caller that
+   *  resolved a durable asset record for THIS image (same run/URL) may supply
+   *  this — it is the alternative to hash-bound OCR/decoder evidence for
+   *  establishing the image's observed GTIN. The agent cannot supply it; the
+   *  tool adapter builds it server-side from durable asset rows. */
+  assetGtinLinkages?: Array<{ gtin: string; assetId?: string }>;
   /** Agent-asserted packaging observations — recorded, never authoritative. */
   observed?: Partial<IdentityObservation>;
 }
@@ -519,14 +525,47 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     ? evidenceFacts.filter((fact) => !fact.contentHash || fact.contentHash === currentImageHash)
     : evidenceFacts;
   const fromEvidence = observationFromFacts(usableFacts);
+  // Round-6 byte-bound GTIN qualification: 'this run has durable evidence
+  // that GTIN X exists' is NOT the same as 'this image is durably linked to
+  // GTIN X'. A generic field-evidence GTIN (any method, null content hash)
+  // can never establish the image's identity. Only (a) image-derived
+  // evidence (image_ocr/decoder) whose content hash equals the EXACT bytes
+  // being inspected, or (b) a server-authoritative asset-to-GTIN linkage
+  // (resolved by the tool from durable asset rows for THIS image) qualify.
+  const normalizeGtinDigits = (value: unknown): string => String(value ?? '').replace(/\D/g, '');
+  const isGtinObservationFact = (fact: ResolvedEvidenceFact): boolean => {
+    const key = OBSERVED_FIELD_KEYS[(fact.targetField ?? '').toLowerCase().replace(/[^a-z0-9]/g, '_')];
+    return key === 'gtin' && fact.value !== null && fact.value !== undefined;
+  };
+  let observedGtinFromEvidence: string | null = fromEvidence.gtin;
+  if (observedGtinFromEvidence) {
+    const gtinFact = usableFacts.find(isGtinObservationFact);
+    const linkageMatch = (input.assetGtinLinkages ?? []).some(
+      (linkage) => normalizeGtinDigits(linkage.gtin) === normalizeGtinDigits(observedGtinFromEvidence),
+    );
+    const method = (gtinFact?.extractionMethod ?? '').toLowerCase();
+    const isImageDerived = method === 'image_ocr' || method === 'decoder';
+    const byteBound =
+      isImageDerived &&
+      !!gtinFact?.contentHash &&
+      currentImageHash !== '' &&
+      gtinFact.contentHash === currentImageHash;
+    if (!linkageMatch && !byteBound) {
+      observedGtinFromEvidence = null;
+    }
+  }
   const observed: IdentityObservation = {
     brand: fromEvidence.brand ?? decoded.observed.brand ?? null,
     productName: fromEvidence.productName ?? decoded.observed.productName ?? null,
     variant: fromEvidence.variant ?? decoded.observed.variant ?? null,
     netContent: fromEvidence.netContent ?? decoded.observed.netContent ?? null,
     packCount: fromEvidence.packCount ?? decoded.observed.packCount ?? null,
-    gtin: fromEvidence.gtin ?? decoded.observed.gtin ?? null,
+    gtin: observedGtinFromEvidence ?? decoded.observed.gtin ?? null,
   };
+  // Reviewer-facing note when evidence contained a GTIN that failed the
+  // byte-bound/linkage qualification (kept out of `observed` but surfaced).
+  const gtinEvidenceRejected =
+    fromEvidence.gtin && !observed.gtin && usableFacts.some(isGtinObservationFact);
   const agentAsserted: IdentityObservation | null = input.observed
     ? {
         brand: input.observed.brand ?? null,
@@ -581,6 +620,12 @@ export async function verifyImageCandidate(input: VerifyImageInput, deps: Verify
     expectedFlavor: runIdentity?.flavor ?? null,
     expectedFormula: runIdentity?.formula ?? null,
   });
+  // Round-6: surface WHY an evidence GTIN was rejected (byte-bound or
+  // linkage qualification) so the reviewer sees the distinction instead of
+  // a bare 'no observed GTIN'.
+  if (gtinEvidenceRejected) {
+    identity.reasons.push('observed GTIN evidence is not byte-bound to this image (evidence GTIN without a matching content hash or server-authoritative linkage)');
+  }
   const commerceApproved = computeCommerceApproved({
     rightsStatus,
     exactProductMatch: identity.exactProductMatch,

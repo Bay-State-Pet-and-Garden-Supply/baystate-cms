@@ -56,6 +56,7 @@ interface LazyAssetRow {
   id: string;
   runId: string;
   sourceUrl: string;
+  sourcePageUrl: string | null;
   rightsStatus: 'approved' | 'restricted' | 'unknown';
   rightsBasis: string | null;
   rightsEvidenceRef: string | null;
@@ -289,13 +290,34 @@ function validateBundle(bundle: ProductResearchBundle, workspaceId: string, issu
       // Supporting commerce images: the asset must be real (verified) and its
       // reuse must be authorized — but exact-product/variant equality is not
       // required the way it is for primary (an alternate may be a crop, angle,
-      // or ingredient shot of the same verified product).
+      // or ingredient shot of the same verified product). Round-6 (review
+      // P1): 'usable quality' is NOT same-product evidence — the supporting
+      // image must be durably linked to the SAME product: either it matches
+      // the product exactly (exactProductMatch), matches the variant, or was
+      // discovered on the same authoritative page/media set as the primary
+      // image (sourcePageUrl equality). Quality alone never suffices.
       const rightsStatus = verified.rightsStatus;
       if (rightsStatus !== 'approved') {
         issues.push(`${role} image ${image.url} verified asset rights are '${rightsStatus ?? 'unknown'}', not approved (durable reuse grant required)`);
       }
-      if (!verified.exactProductMatch && verified.qualityStatus !== 'usable') {
-        issues.push(`${role} image ${image.url} verified asset is neither an exact product match nor 'usable' quality`);
+      // Resolve the primary asset (when one is proposed) for page-linkage.
+      let primaryAsset: LazyAssetRow | null = null;
+      const primaryCandidate = primaries[0];
+      if (primaryCandidate?.verifiedAssetId) {
+        const primaryRows = assetRepo.getPiAssetsByIds([primaryCandidate.verifiedAssetId]);
+        if (primaryRows.length > 0) primaryAsset = primaryRows[0];
+      }
+      const samePageLinkage =
+        !!primaryAsset &&
+        !!primaryAsset.sourcePageUrl &&
+        !!verified.sourcePageUrl &&
+        primaryAsset.sourcePageUrl === verified.sourcePageUrl;
+      const sameProductLinkage =
+        !!verified.exactProductMatch || verified.exactVariantMatch === 1 || samePageLinkage;
+      if (!sameProductLinkage) {
+        issues.push(
+          `${role} image ${image.url} verified asset is not durably linked to this product (no exact product/variant match and no shared discovering page with the primary image; usable quality alone is not same-product evidence)`,
+        );
       }
       if (verified.qualityStatus === 'invalid') {
         issues.push(`${role} image ${image.url} verified asset quality is 'invalid'`);

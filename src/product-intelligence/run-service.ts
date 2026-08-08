@@ -1030,6 +1030,54 @@ function submissionDisposition(submission: HistoricalTerminalSubmission): 'submi
   return 'abstained';
 }
 
+/**
+ * Round-6 (review P1): review telemetry must derive image signals from the
+ * SERVER-RESOLVED durable asset rows the terminal validator already bound
+ * the candidates to — never from the deprecated agent-supplied
+ * image.rightsStatus / image.exactProductMatch fields. Fail-closed: an
+ * unresolvable cited asset means the image state is unknown → review.
+ */
+function bundleImageReviewFlags(submission: { imageCandidates: Array<{ role?: string; verifiedAssetId?: string }> }): {
+  needsReview: boolean;
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+  let needsReview = false;
+  const candidates = submission.imageCandidates ?? [];
+  if (candidates.length === 0) return { needsReview: false, reasons };
+  let assetRepo: { getPiAssetsByIds: (ids: string[]) => Array<{ id: string; rightsStatus?: string; exactProductMatch?: number }> } | undefined;
+  try {
+    const lazyRequire = createRequire(import.meta.url);
+    assetRepo = lazyRequire('../db/repositories/product-intelligence-repo') as typeof assetRepo;
+  } catch {
+    assetRepo = undefined;
+  }
+  const byId = new Map<string, { id: string; rightsStatus?: string; exactProductMatch?: number }>();
+  const citedIds = [...new Set(candidates.map((c) => c.verifiedAssetId ?? '').filter(Boolean))];
+  if (assetRepo) {
+    for (const row of assetRepo.getPiAssetsByIds(citedIds)) byId.set(row.id, row);
+  }
+  for (const image of candidates) {
+    const role = image.role ?? 'unknown';
+    const asset = image.verifiedAssetId ? byId.get(image.verifiedAssetId) : undefined;
+    if (!asset) {
+      needsReview = true;
+      reasons.push(`image (${role}) verified asset does not resolve to a durable row — image identity/rights unknown`);
+      continue;
+    }
+    const rights = asset.rightsStatus ?? 'unknown';
+    if (rights === 'unknown' || rights === 'restricted') {
+      needsReview = true;
+      reasons.push(`image (${role}) durable asset rights are '${rights}', not approved`);
+    }
+    if (role === 'primary' && asset.exactProductMatch !== 1) {
+      needsReview = true;
+      reasons.push(`primary image durable asset is not an exact product match`);
+    }
+  }
+  return { needsReview, reasons };
+}
+
 function submissionNeedsReview(result: ProductResearchResult): boolean {
   const submission = result.submission;
   if (!submission) return false;
@@ -1043,7 +1091,7 @@ function submissionNeedsReview(result: ProductResearchResult): boolean {
   if ('disposition' in submission) {
     if (submission.identity.status !== 'exact_match') return true;
     if (submission.conflicts.some((conflict) => conflict.severity === 'blocking')) return true;
-    return submission.imageCandidates.some((image) => image.rightsStatus === 'unknown' || !image.exactProductMatch);
+    return bundleImageReviewFlags(submission).needsReview;
   }
   if ('recommendedDisposition' in submission) return true; // identity-conflict submission
   return false; // insufficient-evidence abstention
@@ -1066,9 +1114,7 @@ function reviewReasons(result: ProductResearchResult): string[] {
   if ('disposition' in submission) {
     if (submission.identity.status !== 'exact_match') reasons.push(`identity.status is '${submission.identity.status}'`);
     if (submission.conflicts.some((conflict) => conflict.severity === 'blocking')) reasons.push('blocking conflicts present');
-    if (submission.imageCandidates.some((image) => image.rightsStatus === 'unknown' || !image.exactProductMatch)) {
-      reasons.push('image rights or exact-product match unknown');
-    }
+    reasons.push(...bundleImageReviewFlags(submission).reasons);
     return reasons;
   }
   if ('recommendedDisposition' in submission) reasons.push('identity-conflict submission');

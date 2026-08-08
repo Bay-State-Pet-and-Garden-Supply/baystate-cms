@@ -181,6 +181,13 @@ export const ProductIntelligenceImportEvidenceSchema = z.object({
     }),
   ).default(() => []),
   approvedImageIds: z.array(z.string()).default(() => []),
+  /** Round-6: role-preserving image selection from the final reviewed bundle. */
+  images: z.array(
+    z.object({
+      assetId: z.string().min(1),
+      role: z.enum(['primary', 'alternate', 'nutrition', 'ingredients', 'comparison']),
+    }),
+  ).default(() => []),
 });
 
 export type ProductIntelligenceImportEvidence = z.infer<typeof ProductIntelligenceImportEvidenceSchema>;
