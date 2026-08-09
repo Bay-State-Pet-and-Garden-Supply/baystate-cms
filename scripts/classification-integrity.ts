@@ -151,6 +151,11 @@ async function modeBackup(args: Record<string, string | boolean>): Promise<void>
   const backupPath = String(args.backup ?? '');
   if (!backupPath) fail('--backup <path> is required.');
   if (!dbPath) fail('--db <path> is required.');
+  // The backup snapshot and its recorded source identity must describe the
+  // SAME source moment. The source's commit counter is compared across the
+  // snapshot window, but the maintenance gate still requires the source to
+  // be QUIESCENT: STOP ALL API/WORKER PROCESSES before taking the backup.
+  console.error('WARNING: stop all API/worker processes before backup so the source is quiescent.');
   const manifest = createSqliteBackup(dbPath, backupPath);
   // The immediate verification binds the source: the backup must be the
   // snapshot of the CURRENT source at the same moment (blocker 2).

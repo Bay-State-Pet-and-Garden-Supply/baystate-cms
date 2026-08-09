@@ -418,4 +418,190 @@ describe('SQLite backup verifier (Issue #17 C1)', () => {
     expect(fs.existsSync(manifestPath)).toBe(true);
     expect(manifest.sizeBytes).toBe(fs.statSync(backup).size);
   });
+
+  // ── Issue #17 pass 6d regression tests ──────────────────────────────────
+
+  it('rejects a manifest whose sourceIdentityHashAfter violates the recorded invariant (pass 6d)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-inv-6d-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifest = createSqliteBackup(source, backup);
+
+    // Tamper sourceIdentityHashAfter independently: verification must fail
+    // even though the main file, SHA, counts, and current source all match.
+    const tampered: BackupManifest = {
+      ...manifest,
+      sourceIdentityHashAfter: '0'.repeat(64),
+    };
+    const verification = await verifySqliteBackup(backup, tampered, { sourceDbPath: source });
+    expect(verification.ok).toBe(false);
+    expect(verification.errors.some(e => /source identity invariant/i.test(e))).toBe(true);
+  });
+
+  it('detects any intervening commit via the monotonic data_version counter (ABA catcher, pass 6d)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-dv-6d-'));
+    const source = path.join(dir, 's.db');
+    const db = new Database(source);
+    db.exec('PRAGMA journal_mode = WAL;');
+    db.exec('CREATE TABLE t (v TEXT); INSERT INTO t VALUES (\'a\');');
+    const read = () =>
+      (db.query('PRAGMA data_version').get() as { data_version: number }).data_version;
+    const before = read();
+    // A second connection commits — data_version must change even if the
+    // content is later reverted (ABA is still detected).
+    const w = new Database(source);
+    w.exec("UPDATE t SET v = 'b';");
+    const after = read();
+    expect(after).not.toBe(before);
+    w.exec("UPDATE t SET v = 'a';");
+    const afterAba = read();
+    expect(afterAba).not.toBe(before);
+    db.close();
+    w.close();
+  });
+
+  it('row digests are order-independent (XOR combiner, pass 6d)', async () => {
+    // Two databases with identical rows inserted in DIFFERENT orders must
+    // produce identical source identities (the row-combiner is order
+    // independent), while a real content change still differs.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-xor-6d-'));
+    const a = path.join(dir, 'a.db');
+    const b = path.join(dir, 'b.db');
+    const make = (p: string, rows: Array<[string, string]>) => {
+      const db = new Database(p);
+      db.exec('CREATE TABLE t (k TEXT, v TEXT);');
+      for (const [k, v] of rows) {
+        db.exec(`INSERT INTO t (k, v) VALUES ('${k}', '${v}');`);
+      }
+      db.close();
+    };
+    make(a, [['1', 'x'], ['2', 'y'], ['3', 'z']]);
+    make(b, [['3', 'z'], ['1', 'x'], ['2', 'y']]);
+    const ma = createSqliteBackup(a, path.join(dir, 'ba.db'));
+    const mb = createSqliteBackup(b, path.join(dir, 'bb.db'));
+    expect(ma.sourceIdentityHash).toBe(mb.sourceIdentityHash);
+    // Content change still differs.
+    const c = path.join(dir, 'c.db');
+    make(c, [['1', 'x'], ['2', 'DIFFERENT'], ['3', 'z']]);
+    const mc = createSqliteBackup(c, path.join(dir, 'bc.db'));
+    expect(mc.sourceIdentityHash).not.toBe(ma.sourceIdentityHash);
+    // And each backup still verifies against its own source.
+    expect((await verifySqliteBackup(path.join(dir, 'ba.db'), ma, { sourceDbPath: a })).ok).toBe(true);
+    expect((await verifySqliteBackup(path.join(dir, 'bb.db'), mb, { sourceDbPath: b })).ok).toBe(true);
+  });
+
+  it('aborts when the reservation content is modified mid-operation (overwrite variant, pass 6d)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-ow-6d-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifestPath = `${backup}.manifest.json`;
+    // TEST-ONLY hook: after the snapshot, another writer writes INTO the
+    // reservation. Creation must abort with the sentinel untouched (the
+    // reservation content changed, so it is no longer safely ours).
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __afterSnapshot: () => {
+          fs.writeFileSync(manifestPath, 'RACE SENTINEL');
+        },
+      }),
+    ).toThrow(/reservation|aborting/i);
+    expect(fs.existsSync(backup)).toBe(false);
+    expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('RACE SENTINEL');
+    fs.rmSync(manifestPath);
+  });
+
+  it('aborts when the reservation inode is replaced mid-operation (replace variant, pass 6d)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-rp-6d-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifestPath = `${backup}.manifest.json`;
+    // TEST-ONLY hook: after the snapshot, the reservation is unlinked and a
+    // NEW foreign file appears at the path. Creation must abort and cleanup
+    // must never delete the foreign inode.
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __afterSnapshot: () => {
+          fs.rmSync(manifestPath);
+          fs.writeFileSync(manifestPath, 'RACE SENTINEL');
+        },
+      }),
+    ).toThrow(/reservation|aborting/i);
+    expect(fs.existsSync(backup)).toBe(false);
+    expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('RACE SENTINEL');
+    fs.rmSync(manifestPath);
+  });
+
+  it('cleans every artifact on a real mid-VACUUM disk I/O failure and allows a retry (RLIMIT, pass 6d)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-rlimit-6d-'));
+    // A source large enough that VACUUM INTO exceeds the child file-size
+    // limit (macOS ulimit -f units are 512-byte blocks: 1024 => 512 KB).
+    const source = path.join(dir, 'big.db');
+    {
+      const db = new Database(source);
+      db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, payload BLOB);');
+      const blob = Buffer.alloc(4096, 0x41);
+      const ins = db.query('INSERT INTO t (payload) VALUES (?)');
+      for (let i = 0; i < 1200; i++) {
+        ins.run(blob);
+      }
+      db.close();
+    }
+    const backup = path.join(dir, 'backup.db');
+    const report = path.join(dir, 'report.json');
+    const fixture = path.join(dir, 'vacuum-fail-fixture.ts');
+    fs.writeFileSync(
+      fixture,
+      `import { createSqliteBackup } from '${path
+        .resolve(__dirname, '../../db/sqlite-backup-verifier')
+        .replace(/\\/g, '\\\\')}';
+import fs from 'fs';
+const [source, backup, reportPath] = process.argv.slice(2);
+try {
+  createSqliteBackup(source, backup);
+  fs.writeFileSync(reportPath, JSON.stringify({ threw: false }));
+} catch (e) {
+  fs.writeFileSync(reportPath, JSON.stringify({
+    threw: true,
+    backupExists: fs.existsSync(backup),
+    manifestExists: fs.existsSync(backup + '.manifest.json'),
+  }));
+}
+`,
+    );
+    const res = Bun.spawnSync([
+      'bash',
+      '-c',
+      `ulimit -f 1024; bun '${fixture}' '${source}' '${backup}' '${report}'`,
+    ]);
+    expect(res.exitCode).toBe(0);
+    const result = JSON.parse(fs.readFileSync(report, 'utf-8'));
+    expect(result.threw).toBe(true);
+    // Zero artifacts left: the destination was tracked before VACUUM ran and
+    // cleanup removed it; the reservation is our empty file and is removed.
+    expect(result.backupExists).toBe(false);
+    expect(result.manifestExists).toBe(false);
+
+    // Retry from a clean slate succeeds in the unconstrained parent process.
+    const manifest = createSqliteBackup(source, backup);
+    expect(fs.existsSync(backup)).toBe(true);
+    const verification = await verifySqliteBackup(backup, manifest, { sourceDbPath: source });
+    expect(verification.ok).toBe(true);
+  });
+
+  it('backs up a table containing non-finite REAL values (Infinity/-Infinity/NaN, pass 6d)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-nf-6d-'));
+    const source = path.join(dir, 'nf.db');
+    const db = new Database(source);
+    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v REAL);');
+    db.exec("INSERT INTO t (v) VALUES (9e999), (-9e999), (0.0/0.0);");
+    db.close();
+    const backup = path.join(dir, 'backup.db');
+    const manifest = createSqliteBackup(source, backup);
+    const snap = new Database(backup, { readonly: true });
+    expect((snap.query('SELECT COUNT(*) c FROM t').get() as { c: number }).c).toBe(3);
+    snap.close();
+    const verification = await verifySqliteBackup(backup, manifest, { sourceDbPath: source });
+    expect(verification.ok).toBe(true);
+    expect(verification.errors).toEqual([]);
+  });
 });

@@ -134,7 +134,12 @@ function readCriticalCounts(db: Database): Record<string, number> {
  */
 function encodeSqliteValue(value: unknown): unknown {
   if (value === null || value === undefined) return null;
-  if (typeof value === 'number') return { t: 'num', v: value };
+  if (typeof value === 'number') {
+    // SQLite can store non-finite REAL values (Infinity/-Infinity/NaN); the
+    // canonical serializer rejects non-finite numbers, so encode them as
+    // deterministic strings ('Infinity', '-Infinity', 'NaN').
+    return { t: 'num', v: Number.isFinite(value) ? value : String(value) };
+  }
   if (typeof value === 'bigint') return { t: 'big', v: value.toString() };
   if (typeof value === 'string') return { t: 'str', v: value };
   if (typeof value === 'boolean') return { t: 'bool', v: value };
@@ -158,6 +163,11 @@ function encodeSqliteValue(value: unknown): unknown {
  * content change from the replaced-source check; internal `sqlite_%` tables
  * are excluded. Deterministic for a fixed schema. Row `rowid` is excluded
  * from each row's content (a VACUUM reassignment is not a content change).
+ *
+ * Memory is O(1) in row count: each row's SHA-256 digest is XOR-ed into a
+ * fixed 32-byte accumulator (an order-independent combiner — the digest does
+ * not depend on row order), alongside a row count. No per-row array is
+ * retained.
  */
 function tableRowDigests(db: Database): Record<string, string> {
   const digests: Record<string, string> = {};
@@ -169,17 +179,25 @@ function tableRowDigests(db: Database): Record<string, string> {
   for (const { name } of tables) {
     const quoted = `"${name.replace(/"/g, '""')}"`;
     const stmt = db.query(`SELECT * FROM ${quoted}`);
-    const rowHashes: string[] = [];
-    // Stream one row at a time: only the small hash strings accumulate.
-    for (const row of (stmt as unknown as { iterate(): Iterable<Record<string, unknown>> }).iterate()) {
+    const iter = (stmt as unknown as { iterate(): Iterable<Record<string, unknown>> }).iterate();
+    // Order-independent O(1)-memory combiner: XOR every per-row SHA-256
+    // digest into a fixed vector, plus the row count.
+    const acc = Buffer.alloc(32);
+    let rowCount = 0;
+    for (const row of iter) {
       const encoded: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(row)) {
         encoded[k] = encodeSqliteValue(v);
       }
-      rowHashes.push(sha256Hex(canonicalJsonStringify(encoded)));
+      const rowHash = Buffer.from(sha256Hex(canonicalJsonStringify(encoded)), 'hex');
+      for (let i = 0; i < 32; i++) {
+        acc[i] ^= rowHash[i]!;
+      }
+      rowCount += 1;
     }
-    rowHashes.sort();
-    digests[name] = sha256Hex(canonicalJsonStringify(rowHashes));
+    digests[name] = sha256Hex(
+      canonicalJsonStringify({ rowCount, xor: Buffer.from(acc).toString('hex') }),
+    );
   }
   return digests;
 }
@@ -248,25 +266,40 @@ function escapeSingleQuotes(value: string): string {
  *
  * Uses SQLite `VACUUM INTO` so the backup is a consistent standalone
  * snapshot of the source (WAL/SHM content absorbed, no sidecar artifacts),
- * then stream-hashes the complete artifact. The source identity is captured
- * BEFORE and AFTER the snapshot; any drift aborts creation (the artifact and
- * its manifest always describe the SAME source moment).
+ * then stream-hashes the complete artifact. The source identity AND its
+ * `PRAGMA data_version` (a monotonic commit counter) are captured BEFORE and
+ * AFTER the snapshot; any drift aborts creation (the artifact and its
+ * manifest always describe the SAME source moment).
+ *
+ * `VACUUM INTO` cannot run inside a SQLite transaction, so a held write
+ * lock cannot span the snapshot; instead, the monotonic `data_version`
+ * counter bounds the window: ANY commit by ANY connection between the two
+ * reads changes the counter, so ABA drift (an intervening write that
+ * reverts to the original state) is detected exactly — before/after
+ * equality of BOTH the identity and the counter proves no commit occurred
+ * during the snapshot window. The C2 maintenance window still requires
+ * app/API/worker writers to be stopped.
  *
  * Artifact creation is atomic:
- * - The manifest path is reserved exclusively (`wx`) BEFORE the snapshot, so
- *   no other process can create a file there (the manifest is later emitted
- *   by renaming over that reservation — never truncating another file).
- * - `VACUUM INTO` itself requires the destination to not exist, so a main
- *   path raced into existence fails the snapshot atomically.
- * - On ANY failure, ONLY files created by this operation are removed, so a
- *   retry is possible and another process's file is never deleted.
+ * - The manifest path is reserved exclusively (`wx`) BEFORE the snapshot and
+ *   the open descriptor's dev/ino identity is retained. The final emit only
+ *   replaces that owned inode (a sentinel raced in at the path aborts
+ *   creation), and failure cleanup only unlinks the path when it still
+ *   refers to the owned inode (another process's file is never deleted).
+ * - `VACUUM INTO` itself requires the destination to not exist (atomic
+ *   exclusive creation); the destination is added to the created-set BEFORE
+ *   the call so a real mid-VACUUM I/O failure is cleaned up and a retry is
+ *   possible.
+ * - On ANY failure, ONLY files created by this operation are removed.
  *
  * Refuses to overwrite ANY existing artifact (main file, manifest, or
- * sidecar paths). The source DB should be quiescent (writers stopped) during
- * a maintenance window; repair-time verification recomputes the source
- * identity so any later change is detected.
+ * sidecar paths).
  */
-export function createSqliteBackup(sourceDbPath: string, backupPath: string): BackupManifest {
+export function createSqliteBackup(
+  sourceDbPath: string,
+  backupPath: string,
+  testHooks?: { __afterSnapshot?: () => void },
+): BackupManifest {
   const resolvedBackup = path.resolve(backupPath);
   const manifestPath = `${resolvedBackup}.manifest.json`;
   const artifactPaths = [
@@ -292,51 +325,87 @@ export function createSqliteBackup(sourceDbPath: string, backupPath: string): Ba
   /** Files created by THIS operation (removed on any failure). */
   const created: string[] = [];
   let manifestReservationFd: number | null = null;
+  let reservationStat: fs.Stats | null = null;
+
+  /**
+   * True when `p` still refers to the reservation inode we own AND its
+   * content is untouched (size unchanged — we never write to the
+   * reservation, so any content change means another process modified it).
+   */
+  const pathIsReservation = (p: string): boolean => {
+    if (!reservationStat) return false;
+    try {
+      const s = fs.statSync(p);
+      return (
+        s.dev === reservationStat.dev &&
+        s.ino === reservationStat.ino &&
+        s.size === reservationStat.size
+      );
+    } catch {
+      return false;
+    }
+  };
 
   try {
     // Atomic reservation of the manifest path. This file is exclusively
-    // OURS ('wx' fails if anything exists); no other process can create the
-    // manifest path between our entry check and the final rename.
+    // OURS ('wx' fails if anything exists). We retain the open descriptor
+    // and its dev/ino/size so the final emit and failure cleanup act only on
+    // the inode we own with unchanged content — never truncating or deleting
+    // another process's file.
     manifestReservationFd = fs.openSync(manifestPath, 'wx', 0o600);
-    created.push(manifestPath);
+    reservationStat = fs.fstatSync(manifestReservationFd);
 
-    // Pre-snapshot source identity — the moment the snapshot must represent.
+    // Pre-snapshot source identity + commit counter. data_version is
+    // monotonic across EVERY committed write by ANY connection.
     const preSourceDb = new Database(sourceDbPath, { readonly: true });
     let sourceIdentityHash: string;
+    let preDataVersion: number;
     try {
       sourceIdentityHash = computeSourceIdentityHash(preSourceDb);
+      preDataVersion = (preSourceDb.query('PRAGMA data_version').get() as { data_version: number })
+        .data_version;
     } finally {
       preSourceDb.close();
     }
 
-    // Consistent standalone snapshot: `VACUUM INTO` requires the destination
-    // to not already exist (atomic exclusive creation), absorbs WAL/SHM
-    // content, and produces no sidecars.
+    // Consistent standalone snapshot. The destination is tracked BEFORE the
+    // call so a real mid-VACUUM failure (disk full, RLIMIT_FSIZE, I/O error)
+    // is cleaned up and a retry is possible. `VACUUM INTO` requires the
+    // destination to not already exist (atomic exclusive creation).
+    created.push(resolvedBackup);
     const sourceWriter = new Database(sourceDbPath);
     try {
       sourceWriter.exec(`VACUUM INTO '${escapeSingleQuotes(resolvedBackup)}'`);
     } finally {
       sourceWriter.close();
     }
-    created.push(resolvedBackup);
     fs.chmodSync(resolvedBackup, 0o600);
 
-    // Post-snapshot source identity: the source must be the SAME database
-    // moment as the snapshot. Any drift during creation aborts (retry in a
-    // quiescent window) and removes every artifact.
+    // Post-snapshot source identity + commit counter: the source must be the
+    // SAME database moment as the snapshot. Any drift (content OR a commit
+    // counter change — which also catches ABA reverts) aborts creation and
+    // removes every artifact this operation created.
     const postSourceDb = new Database(sourceDbPath, { readonly: true });
     let sourceIdentityHashAfter: string;
+    let postDataVersion: number;
     try {
       sourceIdentityHashAfter = computeSourceIdentityHash(postSourceDb);
+      postDataVersion = (postSourceDb.query('PRAGMA data_version').get() as { data_version: number })
+        .data_version;
     } finally {
       postSourceDb.close();
     }
-    if (sourceIdentityHashAfter !== sourceIdentityHash) {
+    if (sourceIdentityHashAfter !== sourceIdentityHash || postDataVersion !== preDataVersion) {
       throw new Error(
-        'Source database changed during backup creation (source identity drift); ' +
+        'Source database changed during backup creation (source identity or commit-counter drift); ' +
           'aborting. Retry in a quiescent maintenance window.',
       );
     }
+
+    // TEST-ONLY injection point (never supplied by production callers): lets
+    // a regression test deterministically race the manifest reservation (write
+    // into it or replace it) after the snapshot and before the inode check.
+    testHooks?.__afterSnapshot?.();
 
     const sizeBytes = fs.statSync(resolvedBackup).size;
     const sha256 = sha256FileSync(resolvedBackup);
@@ -361,9 +430,9 @@ export function createSqliteBackup(sourceDbPath: string, backupPath: string): Ba
     }
 
     // Emit the manifest by writing a private temp file and ATOMICALLY
-    // renaming it over our own reservation. `renameSync` replaces the
-    // reservation file (which we exclusively own); it can never truncate or
-    // overwrite another process's file.
+    // renaming it over OUR OWN reservation. Before the rename, confirm the
+    // manifest path still refers to the reserved inode: a file raced into
+    // the path aborts creation instead of being overwritten.
     const tmpManifest = `${manifestPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
     const tmpFd = fs.openSync(tmpManifest, 'wx', 0o600);
     created.push(tmpManifest);
@@ -372,16 +441,40 @@ export function createSqliteBackup(sourceDbPath: string, backupPath: string): Ba
     } finally {
       fs.closeSync(tmpFd);
     }
+    if (!pathIsReservation(manifestPath)) {
+      throw new Error(
+        'Manifest reservation was replaced by another process; aborting backup.',
+      );
+    }
     fs.renameSync(tmpManifest, manifestPath);
+    // Close the (now stale, unlinked) reservation descriptor and stop
+    // tracking both emitted paths: they are ours and must survive cleanup.
+    if (manifestReservationFd !== null) {
+      try {
+        fs.closeSync(manifestReservationFd);
+      } catch {
+        // already closed
+      }
+      manifestReservationFd = null;
+      reservationStat = null;
+    }
     created.splice(created.indexOf(tmpManifest), 1);
     fs.chmodSync(manifestPath, 0o600);
-    manifestReservationFd = null;
 
     return manifest;
   } catch (err) {
-    // Remove ONLY files this operation created. Never touch a file we did
-    // not create (the manifest reservation is exclusively ours).
+    // Remove ONLY files this operation created. The manifest reservation is
+    // exclusively ours: unlink its path only when it still refers to the
+    // inode we own (never delete another process's replacement), and always
+    // close the descriptor (no fd leak on the failure path).
     if (manifestReservationFd !== null) {
+      if (pathIsReservation(manifestPath)) {
+        try {
+          fs.rmSync(manifestPath, { force: true });
+        } catch {
+          // best-effort cleanup
+        }
+      }
       try {
         fs.closeSync(manifestReservationFd);
       } catch {
@@ -459,6 +552,17 @@ export async function verifySqliteBackup(
   if (manifest.format !== BACKUP_MANIFEST_FORMAT || manifest.version !== BACKUP_MANIFEST_VERSION) {
     errors.push(
       `Unsupported manifest format/version: ${manifest.format}/${manifest.version}`,
+    );
+  }
+  // Recorded source-identity invariant: the post-snapshot identity must
+  // equal the pre-snapshot identity (both describe the same source moment).
+  // Tampering either field independently is rejected.
+  if (
+    typeof manifest.sourceIdentityHashAfter === 'string' &&
+    manifest.sourceIdentityHashAfter !== manifest.sourceIdentityHash
+  ) {
+    errors.push(
+      `Manifest source identity invariant violated: sourceIdentityHashAfter differs from sourceIdentityHash.`,
     );
   }
   if (!fs.existsSync(resolvedDb)) {
