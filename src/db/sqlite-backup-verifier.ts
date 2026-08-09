@@ -42,7 +42,10 @@
  * Row digests use a deterministic typed SQLite-value encoding (BLOBs become
  * `{t:'blob', b: base64}`) and stream one row at a time via `iterate()`, so
  * BLOB tables such as `product_embeddings.embedding_blob` are supported
- * without materializing the whole table (blocker 4).
+ * without materializing the whole table (blocker 4). The per-table row
+ * combiner is collision-resistant (XOR + modular sums over two Mersenne
+ * primes, see `tableRowDigests`) so duplicate-pair content can never share
+ * an identity (pass 6g blocker 1).
  *
  * The backup path and manifest are created with mode 0600 and never
  * overwrite any existing artifact (main file, manifest, reservation, or
@@ -187,6 +190,9 @@ function encodeSqliteValue(value: unknown): unknown {
   return { t: 'other', v: String(value) };
 }
 
+const MERSENNE_61 = (1n << 61n) - 1n; // 2^61 - 1 (prime)
+const MERSENNE_31 = (1n << 31n) - 1n; // 2^31 - 1 (prime)
+
 /**
  * Content digest of EVERY table's rows (typed canonical encoding, streamed
  * one row at a time so a large live database is never materialized in
@@ -195,10 +201,25 @@ function encodeSqliteValue(value: unknown): unknown {
  * are excluded. Deterministic for a fixed schema. Row `rowid` is excluded
  * from each row's content (a VACUUM reassignment is not a content change).
  *
- * Memory is O(1) in row count: each row's SHA-256 digest is XOR-ed into a
- * fixed 32-byte accumulator (an order-independent combiner — the digest does
- * not depend on row order), alongside a row count. No per-row array is
- * retained.
+ * Memory is O(1) in row count: each row's SHA-256 digest is combined into a
+ * fixed accumulator set (no per-row array is retained). The combiner is
+ * ORDER-INDEPENDENT and COLLISION-RESISTANT (pass 6g blocker 1):
+ *
+ * - XOR of every per-row SHA-256 digest into a fixed 32-byte vector
+ *   (order-independent, but ALONE cancellable by duplicate pairs:
+ *   h XOR h = 0, so [A,A] and [B,B] would collide);
+ * - modular sums of the digest (interpreted as a 256-bit big-endian
+ *   integer) over the Mersenne primes 2^61-1 and 2^31-1. Modular addition
+ *   is commutative (order-independent) and a duplicate pair doubles the
+ *   residue, so two copies of A and two copies of B differ unless
+ *   A ≡ B mod BOTH primes;
+ * - a per-table salt derived from the table name.
+ *
+ * Collision bound: two different row multisets collide only if their digest
+ * residues agree modulo BOTH primes (the XOR is then a weaker fifth
+ * condition), i.e. probability ~1/((2^61-1)(2^31-1)) ≈ 2^-92 per candidate
+ * pair. Different insertion orders never collide (XOR and modular addition
+ * are commutative).
  */
 function tableRowDigests(db: Database): Record<string, string> {
   const digests: Record<string, string> = {};
@@ -211,9 +232,13 @@ function tableRowDigests(db: Database): Record<string, string> {
     const quoted = `"${name.replace(/"/g, '""')}"`;
     const stmt = db.query(`SELECT * FROM ${quoted}`);
     const iter = (stmt as unknown as { iterate(): Iterable<Record<string, unknown>> }).iterate();
-    // Order-independent O(1)-memory combiner: XOR every per-row SHA-256
-    // digest into a fixed vector, plus the row count.
+    // Order-independent, collision-resistant, O(1)-memory combiner: XOR every
+    // per-row SHA-256 digest into a fixed vector, plus modular sums over two
+    // Mersenne primes, plus the row count and a per-table salt.
+    const salt = sha256Hex(`backup-table-salt:${name}`);
     const acc = Buffer.alloc(32);
+    let sum61 = 0n;
+    let sum31 = 0n;
     let rowCount = 0;
     for (const row of iter) {
       const encoded: Record<string, unknown> = {};
@@ -222,12 +247,21 @@ function tableRowDigests(db: Database): Record<string, string> {
       }
       const rowHash = Buffer.from(sha256Hex(canonicalJsonStringify(encoded)), 'hex');
       for (let i = 0; i < 32; i++) {
-        acc[i] ^= rowHash[i]!;
+        acc[i]! ^= rowHash[i]!;
       }
+      const h = BigInt(`0x${rowHash.toString('hex')}`);
+      sum61 = (sum61 + h) % MERSENNE_61;
+      sum31 = (sum31 + h) % MERSENNE_31;
       rowCount += 1;
     }
     digests[name] = sha256Hex(
-      canonicalJsonStringify({ rowCount, xor: Buffer.from(acc).toString('hex') }),
+      canonicalJsonStringify({
+        salt,
+        rowCount,
+        xor: acc.toString('hex'),
+        sum61: sum61.toString(16),
+        sum31: sum31.toString(16),
+      }),
     );
   }
   return digests;
@@ -304,6 +338,50 @@ function sha256FileSync(dbPath: string): string {
   return hash.digest('hex');
 }
 
+/**
+ * Atomically remove `p` ONLY if it still refers to the owned inode, and
+ * NEVER delete a foreign file (issue #17 pass 6g blocker 2).
+ *
+ * Plain stat-then-rm has a TOCTOU: a foreign file replaced between the stat
+ * and the unlink is deleted. Instead, atomically RENAME the path to a unique
+ * private quarantine name (rename moves whatever currently occupies the
+ * path in one atomic syscall), then fstat the quarantined file: if its inode
+ * matches the owned inode, unlink the quarantine (we removed OUR file); if
+ * it does NOT (the rename moved a foreign file), rename it BACK to the
+ * original path (best-effort restore) and leave it. A foreign inode is never
+ * deleted.
+ */
+function quarantineRemove(p: string, ownedDev: number, ownedIno: number): void {
+  const quarantine = `${p}.quarantine-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    fs.renameSync(p, quarantine);
+  } catch {
+    // Already gone or not movable — leave it.
+    return;
+  }
+  let qStat: fs.Stats | null;
+  try {
+    qStat = fs.statSync(quarantine);
+  } catch {
+    // Gone between rename and stat — nothing to remove.
+    return;
+  }
+  if (qStat.dev === ownedDev && qStat.ino === ownedIno) {
+    try {
+      fs.rmSync(quarantine, { force: true });
+    } catch {
+      // best-effort
+    }
+    return;
+  }
+  // We moved a foreign file: restore it (best-effort) and never delete it.
+  try {
+    fs.renameSync(quarantine, p);
+  } catch {
+    // Cannot restore — leave it at the quarantine name (still not deleted).
+  }
+}
+
 function escapeSingleQuotes(value: string): string {
   return value.replace(/'/g, "''");
 }
@@ -355,6 +433,8 @@ export function createSqliteBackup(
     __beforeManifestLinkVerify?: () => void;
     /** Fires just before the final published-artifact ownership re-check on success. */
     __beforeReturn?: () => void;
+    /** Fires after the final inode re-check but BEFORE the content-attested verification. */
+    __beforeContentCheck?: () => void;
   },
 ): BackupManifest {
   const resolvedBackup = path.resolve(backupPath);
@@ -388,11 +468,11 @@ export function createSqliteBackup(
   let reservationFd: number | null = null;
   let reservationStat: fs.Stats | null = null;
 
-  /** True when `p` still refers to the inode recorded in `stat`. */
-  const isOwnedInode = (p: string, stat: fs.Stats): boolean => {
+  /** True when `p` still refers to the recorded inode. */
+  const isOwnedInode = (p: string, dev: number, ino: number): boolean => {
     try {
       const s = fs.statSync(p);
-      return s.dev === stat.dev && s.ino === stat.ino;
+      return s.dev === dev && s.ino === ino;
     } catch {
       return false;
     }
@@ -460,32 +540,29 @@ export function createSqliteBackup(
     // created by construction) BEFORE the hard link, and the destination is
     // verified to still resolve to that exact inode AFTER the link: a foreign
     // file replaced into the path in the link->verify window is detected and
-    // never recorded as owned (cleanup therefore never deletes it).
+    // never recorded as owned (cleanup therefore never deletes it). The temp
+    // descriptor is closed on EVERY exit path (including a linkSync EEXIST
+    // failure — pass 6f blocker 4 fd leak).
     const vacTmpFd = fs.openSync(vacuumTmp, 'r');
-    let vacTmpStat: fs.Stats;
+    let vacTmpStat: fs.Stats | null = null;
     try {
       vacTmpStat = fs.fstatSync(vacTmpFd);
-    } catch (err) {
-      fs.closeSync(vacTmpFd);
-      throw err;
-    }
-    try {
-      fs.linkSync(vacuumTmp, resolvedBackup);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new Error(
-          'Backup destination was created by another process; aborting backup.',
-          { cause: err },
-        );
+      try {
+        fs.linkSync(vacuumTmp, resolvedBackup);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new Error(
+            'Backup destination was created by another process; aborting backup.',
+            { cause: err },
+          );
+        }
+        throw err;
       }
-      throw err;
-    }
-    try {
       // TEST-ONLY injection: a foreign file replaced at the destination after
       // the link but before the ownership capture.
       testHooks?.__beforeBackupLinkVerify?.();
       const destStat = fs.statSync(resolvedBackup);
-      if (destStat.dev !== vacTmpStat.dev || destStat.ino !== vacTmpStat.ino) {
+      if (!vacTmpStat || destStat.dev !== vacTmpStat.dev || destStat.ino !== vacTmpStat.ino) {
         throw new Error(
           'Backup destination was replaced by another process after publication; aborting.',
         );
@@ -542,38 +619,31 @@ export function createSqliteBackup(
     // it with the same atomic no-clobber link. A file raced in at the
     // manifest path (write into a stale file or a brand-new sentinel inode)
     // makes the link fail with EEXIST and aborts creation — the sentinel is
-    // never overwritten.
+    // never overwritten. The exact bytes are captured once (they are also the
+    // expected content for the pass-6g content-attested final check).
+    const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8');
     const tmpManifest = `${manifestPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
     tempPaths.push(tmpManifest);
     const tmpFd = fs.openSync(tmpManifest, 'wx', 0o600);
     let tmpStat: fs.Stats | null = null;
     try {
-      fs.writeFileSync(tmpFd, JSON.stringify(manifest, null, 2));
+      fs.writeFileSync(tmpFd, manifestBytes);
       fs.fsyncSync(tmpFd);
       // Ownership captured from the fd we hold BEFORE publication: the temp
       // is this operation's file by construction, so the hard-linked
       // destination must resolve to this exact inode afterwards.
       tmpStat = fs.fstatSync(tmpFd);
-    } catch (err) {
       try {
-        fs.closeSync(tmpFd);
-      } catch {
-        // already closed
+        fs.linkSync(tmpManifest, manifestPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new Error(
+            'Manifest destination was created by another process; aborting backup.',
+            { cause: err },
+          );
+        }
+        throw err;
       }
-      throw err;
-    }
-    try {
-      fs.linkSync(tmpManifest, manifestPath);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new Error(
-          'Manifest destination was created by another process; aborting backup.',
-          { cause: err },
-        );
-      }
-      throw err;
-    }
-    try {
       // TEST-ONLY injection: a foreign file replaced at the manifest path
       // after the link but before the ownership capture.
       testHooks?.__beforeManifestLinkVerify?.();
@@ -591,14 +661,66 @@ export function createSqliteBackup(
     tempPaths.splice(tempPaths.indexOf(tmpManifest), 1);
     fs.chmodSync(manifestPath, 0o600);
 
-    // Success: remove our reservation marker (inode-checked — never another
-    // process's file) and close the descriptor.
-    if (reservationStat && isOwnedInode(reservationPath, reservationStat)) {
-      try {
-        fs.rmSync(reservationPath, { force: true });
-      } catch {
-        // best-effort cleanup
+    // TEST-ONLY injection: a foreign replacement at either published path
+    // before the final ownership/content re-check.
+    testHooks?.__beforeReturn?.();
+    // Final ownership re-check on the success path: both published artifacts
+    // must STILL resolve to the inodes this operation created. A foreign file
+    // replaced in at the path means the operation did not succeed — fail
+    // closed and never return a foreign manifest as our result (the catch
+    // cleanup leaves foreign files untouched).
+    for (const artifact of published) {
+      if (!isOwnedInode(artifact.path, artifact.dev, artifact.ino)) {
+        throw new Error(
+          `Published artifact ${artifact.path} was replaced by another process; aborting.`,
+        );
       }
+    }
+    // Content-attested final verification (pass 6g blocker 3): the inode
+    // checks above prove PATH ownership, but a foreign process could overwrite
+    // content THROUGH our inode (same-inode write), or replace the path after
+    // the final stat. Immediately before returning, re-read BOTH published
+    // artifacts and require their CONTENT to match what this operation wrote:
+    // - the on-disk manifest bytes must equal the exact bytes we published;
+    // - the backup artifact's content identity (immutable open) must equal the
+    //   recorded snapshot content identity.
+    // Any mismatch fails creation (cleanup below removes only OUR artifacts
+    // via quarantine — foreign content/inodes are never deleted).
+    testHooks?.__beforeContentCheck?.();
+    const onDiskManifest = fs.readFileSync(manifestPath);
+    if (
+      onDiskManifest.length !== manifestBytes.length ||
+      !onDiskManifest.equals(manifestBytes)
+    ) {
+      throw new Error('Manifest content changed after publication; aborting.');
+    }
+    {
+      let finalDb: Database | null = null;
+      try {
+        finalDb = new Database(toImmutableUri(resolvedBackup), { readonly: true });
+        const finalContent = computeContentIdentityHash(finalDb);
+        if (finalContent !== manifest.snapshotContentIdentity) {
+          throw new Error('Backup content changed after publication; aborting.');
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Backup content changed')) {
+          throw err;
+        }
+        // A foreign replacement may not even be a SQLite database; fail closed
+        // with a descriptive error either way.
+        throw new Error(
+          'Backup content changed after publication (published artifact could not be verified); aborting.',
+          { cause: err },
+        );
+      } finally {
+        finalDb?.close();
+      }
+    }
+
+    // Success: remove our reservation marker via quarantine (never another
+    // process's file) and close the descriptor.
+    if (reservationStat) {
+      quarantineRemove(reservationPath, reservationStat.dev, reservationStat.ino);
     }
     if (reservationFd !== null) {
       try {
@@ -610,37 +732,19 @@ export function createSqliteBackup(
     reservationFd = null;
     reservationStat = null;
 
-    // TEST-ONLY injection: a foreign replacement at either published path
-    // before the final ownership re-check.
-    testHooks?.__beforeReturn?.();
-    // Final ownership re-check on the success path: both published artifacts
-    // must STILL resolve to the inodes this operation created. A foreign file
-    // replaced in at the path means the operation did not succeed — fail
-    // closed and never return a foreign manifest as our result (the catch
-    // cleanup leaves foreign files untouched).
-    for (const artifact of published) {
-      if (!isOwnedInode(artifact.path, artifact as unknown as fs.Stats)) {
-        throw new Error(
-          `Published artifact ${artifact.path} was replaced by another process; aborting.`,
-        );
-      }
-    }
-
     return manifest;
   } catch (err) {
-    // Remove ONLY files this operation created:
-    // - the reservation marker, when its path still refers to the inode we
-    //   created (a foreign replacement is never deleted);
-    // - published files whose current path inode matches the inode this
-    //   operation created (another process's replacement is never deleted);
-    // - unique temp names, which are ours by construction.
+    // Remove ONLY files this operation created (pass 6g blocker 2: never
+    // delete a foreign inode — every pathname removal goes through the
+    // atomic quarantine rename + inode check + conditional unlink, so a
+    // foreign replacement raced into the path is restored, not deleted):
+    // - the reservation marker, when it refers to the inode we created;
+    // - published files whose (quarantined) inode is the one this operation
+    //   created;
+    // - unique temp names, which are ours by construction (unlink by name).
     if (reservationFd !== null) {
-      if (reservationStat && isOwnedInode(reservationPath, reservationStat)) {
-        try {
-          fs.rmSync(reservationPath, { force: true });
-        } catch {
-          // best-effort cleanup
-        }
+      if (reservationStat) {
+        quarantineRemove(reservationPath, reservationStat.dev, reservationStat.ino);
       }
       try {
         fs.closeSync(reservationFd);
@@ -649,14 +753,7 @@ export function createSqliteBackup(
       }
     }
     for (const artifact of published) {
-      try {
-        const s = fs.statSync(artifact.path);
-        if (s.dev === artifact.dev && s.ino === artifact.ino) {
-          fs.rmSync(artifact.path, { force: true });
-        }
-      } catch {
-        // already gone or foreign — leave it
-      }
+      quarantineRemove(artifact.path, artifact.dev, artifact.ino);
     }
     for (const temp of tempPaths) {
       try {

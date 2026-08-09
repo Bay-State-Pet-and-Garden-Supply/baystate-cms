@@ -5,6 +5,7 @@ import path from 'path';
 import crypto from 'node:crypto';
 import { Database } from '../../db/driver';
 import {
+  computeContentIdentityHash,
   createSqliteBackup,
   readBackupManifest,
   verifySqliteBackup,
@@ -801,6 +802,125 @@ try {
     ).toThrow(/replaced by another process/i);
     expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('RACE BEFORE RETURN');
     // Our artifacts are removed (the foreign replacement is left untouched).
+    expect(fs.existsSync(backup)).toBe(false);
+    fs.rmSync(manifestPath);
+  });
+
+  // ── Issue #17 pass 6g regression tests ──────────────────────────────────
+
+  it('distinguishes duplicate-pair row content (collision-resistant combiner, pass 6g)', async () => {
+    // Blocker 1 (critical): the OLD XOR-only row combiner cancelled duplicate
+    // pairs ([A,A] and [B,B] both XOR to 0), so different same-schema/
+    // same-count foreign content could share the source identity and be
+    // accepted + verified. The new combiner adds modular sums over two
+    // Mersenne primes, so two copies of A and two copies of B produce
+    // DIFFERENT content identities and the swap aborts.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-dup-6g-'));
+    const source = path.join(dir, 'source.db');
+    const foreign = path.join(dir, 'foreign.db');
+    const makeDup = (p: string, v: string) => {
+      const db = new Database(p);
+      db.exec('CREATE TABLE t (v TEXT);');
+      db.exec(`INSERT INTO t (v) VALUES ('${v}'), ('${v}');`);
+      db.close();
+    };
+    makeDup(source, 'AAAA');
+    makeDup(foreign, 'BBBB');
+
+    // Same schema, same row count (2), duplicate pairs — the identities MUST
+    // differ (XOR alone would have equated them).
+    const srcDb = new Database(source, { readonly: true });
+    const forDb = new Database(foreign, { readonly: true });
+    const srcIdentity = computeContentIdentityHash(srcDb);
+    const forIdentity = computeContentIdentityHash(forDb);
+    srcDb.close();
+    forDb.close();
+    expect(forIdentity).not.toBe(srcIdentity);
+
+    // A swap of the published backup for the foreign artifact after
+    // publication must abort; the foreign bytes are preserved.
+    const backup = path.join(dir, 'backup.db');
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __afterSnapshot: () => {
+          fs.rmSync(backup);
+          fs.copyFileSync(foreign, backup);
+        },
+      }),
+    ).toThrow(/snapshot content does not match/i);
+    expect(fs.readFileSync(backup)).toEqual(fs.readFileSync(foreign));
+    expect(fs.existsSync(`${backup}.manifest.json`)).toBe(false);
+    expect(fs.existsSync(`${backup}.manifest.json.reservation`)).toBe(false);
+    fs.rmSync(backup);
+  });
+
+  it('restores a foreign file at the backup path during cleanup (quarantine, pass 6g)', async () => {
+    // Blocker 2 (high): cleanup must never delete a foreign inode. The backup
+    // path is atomically renamed to a private quarantine name, the
+    // quarantined inode is checked, and a foreign replacement is renamed BACK
+    // byte-identical — never deleted.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-cleanup-6g-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    // __beforeContentCheck fires after the inode ownership re-check but
+    // before the content attestation: a new-inode foreign file armed at the
+    // BACKUP path makes the backup content-identity check fail, and cleanup
+    // must restore the foreign file (our manifest is removed).
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __beforeContentCheck: () => {
+          fs.rmSync(backup);
+          fs.writeFileSync(backup, 'FOREIGN AT BACKUP PATH');
+        },
+      }),
+    ).toThrow(/content changed after publication|snapshot content does not match/i);
+    // The foreign file survives byte-for-byte; our manifest is removed.
+    expect(fs.readFileSync(backup, 'utf-8')).toBe('FOREIGN AT BACKUP PATH');
+    expect(fs.existsSync(`${backup}.manifest.json`)).toBe(false);
+    fs.rmSync(backup);
+  });
+
+  it('detects a same-inode overwrite of the published manifest (content attestation, pass 6g)', async () => {
+    // Blocker 3 (high): the final check must attest CONTENT, not just inode.
+    // A foreign process writing THROUGH our inode retains dev+ino, so the
+    // inode ownership check passes — the content-attested re-read of the
+    // manifest bytes must fail and never return a foreign manifest as success.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-sameinode-6g-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifestPath = `${backup}.manifest.json`;
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __beforeReturn: () => {
+          fs.writeFileSync(manifestPath, 'FOREIGN SAME INODE');
+        },
+      }),
+    ).toThrow(/Manifest content changed/i);
+    // Our artifacts are removed (the manifest inode is ours even though
+    // foreign bytes were written through it; the backup is ours).
+    expect(fs.existsSync(backup)).toBe(false);
+    expect(fs.existsSync(manifestPath)).toBe(false);
+  });
+
+  it('detects a replacement of the manifest after the final inode stat (pass 6g)', async () => {
+    // Blocker 3 (high): a new-inode replacement performed after the final
+    // inode stat (but before that result is consumed) must be caught by the
+    // content-attested re-read of the manifest bytes.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-poststat-6g-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifestPath = `${backup}.manifest.json`;
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __beforeContentCheck: () => {
+          fs.rmSync(manifestPath);
+          fs.writeFileSync(manifestPath, 'FOREIGN POST-STAT');
+        },
+      }),
+    ).toThrow(/Manifest content changed/i);
+    // The foreign manifest survives (cleanup restores it via quarantine); our
+    // backup is removed.
+    expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('FOREIGN POST-STAT');
     expect(fs.existsSync(backup)).toBe(false);
     fs.rmSync(manifestPath);
   });
