@@ -85,6 +85,7 @@ export default defineConfig({
       'src/tests/unit/classification-integrity-audit.test.ts',
       'src/tests/unit/sqlite-backup-verifier.test.ts',
       'src/tests/unit/classification-integrity-cli.test.ts',
+      'src/tests/unit/classification-quality-routes.test.ts',
       'src/tests/unit/weekly-report.test.ts',
       'src/tests/unit/benchmark-export.test.ts',
       'src/tests/unit/benchmark-evaluator.test.ts',

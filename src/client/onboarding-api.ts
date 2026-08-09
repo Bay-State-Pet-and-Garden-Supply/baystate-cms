@@ -943,6 +943,23 @@ export interface WeeklyReportResponse {
   items: WeeklyReportProductItem[];
   totalCount: number;
   promotedCount: number;
+  /** Issue #17 F: versioned classification quality summary (null when no workspace). */
+  qualitySummary?: import('./classification-metrics-view').QualityDisplay | null;
+}
+
+export interface QualityReportResponse {
+  report: import('../shared/schemas/classification-metrics').QualityReport;
+}
+
+/** GET /api/classification/quality-report — workspace-scoped, bounded, read-only. */
+export async function getClassificationQualityReport(
+  start: string,
+  end: string,
+): Promise<QualityReportResponse> {
+  const params = new URLSearchParams();
+  params.set('start', start);
+  params.set('end', end);
+  return request(`/classification/quality-report?${params.toString()}`);
 }
 
 export async function getWeeklyReport(startDate?: string, endDate?: string): Promise<WeeklyReportResponse> {

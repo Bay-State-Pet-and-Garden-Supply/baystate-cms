@@ -1,11 +1,17 @@
 /**
  * Confidence Calibrator & Review Tiers
  *
- * Calibration is fitted ONLY from example-level development-split predictions
- * and can alter abstention or review-priority tiers — it NEVER grants
- * acceptance. Acceptance remains an explicit human decision; the tiers below
- * only route items into 'abstain' / 'review' / 'auto' buckets where 'auto'
- * still requires the normal review workflow to confirm before any acceptance.
+ * EVALUATION-ONLY (issue #17 F): Calibration is fitted ONLY from
+ * example-level development-split predictions and can alter abstention or
+ * review-priority tiers — it NEVER grants acceptance, reorders the queue, or
+ * changes proposal/field output. Acceptance remains an explicit human
+ * decision; the tiers below only route items into 'abstain' / 'review' /
+ * 'auto' buckets where 'auto' still requires the normal review workflow to
+ * confirm before any acceptance. Production quality telemetry MAY report
+ * hypothetical tier distributions but must never call getReviewTier() /
+ * shouldAbstain() to alter statuses or acceptance. Production `enabled` for
+ * the confidenceCalibration feature remains gated behind the frozen Gold
+ * qualification receipt + activation audit (feature-policy).
  */
 
 import type { BenchmarkPredictionEntry } from '../shared/schemas/classification';

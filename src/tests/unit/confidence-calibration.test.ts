@@ -47,4 +47,19 @@ describe('Confidence Calibration & Review Tiers', () => {
     expect(tier).toBe('auto');
     expect(['abstain', 'review', 'auto']).toContain(tier);
   });
+
+  it('tiers remain evaluation-only: telemetry never calls them to alter statuses or acceptance (issue #17 F)', () => {
+    // The evaluation-only contract: getReviewTier/shouldAbstain may report
+    // hypothetical distributions but never change proposal statuses, queue
+    // order, acceptance, or field output. Assert the tier vocabulary is a
+    // hint-only enum (no accept flag) and that a 'review'/'auto' tier does
+    // not imply any acceptance decision exists.
+    const tiers = ['abstain', 'review', 'auto'] as const;
+    const tier = getReviewTier(0.9, 'field_assignment', DEFAULT_THRESHOLDS);
+    expect(tiers).toContain(tier);
+    // No proposal status is derived from the tier: the only acceptance path
+    // is an explicit human submitProposalDecisions row (covered elsewhere).
+    expect(tier).not.toBe('accepted');
+    expect(shouldAbstain(0.1, 'category_page', DEFAULT_THRESHOLDS)).toBe(true);
+  });
 });

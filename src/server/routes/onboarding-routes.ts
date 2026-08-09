@@ -3,6 +3,9 @@ import { streamSSE } from 'hono/streaming';
 import fs from 'node:fs';
 import path from 'node:path';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
+import { buildQualityReport } from '../../db/repositories/classification-metrics-repo';
+import { deriveQualityDisplay } from '../../client/classification-metrics-view';
+import { getCurrentWorkspace } from '../services/workspace-service';
 import {
   createBatch,
   findBatchById,
@@ -352,12 +355,33 @@ route.get('/onboarding/weekly-report', async (c) => {
     i => i.status === 'promoted' || (i.stage === 'promotion' && i.stageStatus === 'completed')
   ).length;
 
+  // Issue #17 F: include the same versioned quality summary in the weekly
+  // report. The report is read-only and workspace-scoped; when no workspace
+  // is active the quality section is null with a warning (never a fabricated
+  // zero). The existing uploaded/promoted item behavior is untouched.
+  let qualitySummary: ReturnType<typeof deriveQualityDisplay> | null = null;
+  const ws = getCurrentWorkspace();
+  if (ws) {
+    try {
+      const report = buildQualityReport(ws.id, startIso, endIso, new Date().toISOString());
+      qualitySummary = deriveQualityDisplay(report);
+    } catch (err) {
+      qualitySummary = {
+        summaryRows: [],
+        warnings: [`Quality summary unavailable: ${err instanceof Error ? err.message : String(err)}`],
+        groupRows: [],
+        hasGroups: false,
+      };
+    }
+  }
+
   return c.json({
     startDate: startIso,
     endDate: endIso,
     items,
     totalCount: items.length,
     promotedCount,
+    qualitySummary,
   });
 });
 

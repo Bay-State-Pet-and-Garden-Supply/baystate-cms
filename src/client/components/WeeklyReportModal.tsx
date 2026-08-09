@@ -63,6 +63,7 @@ export function WeeklyReportModal({ onClose }: WeeklyReportModalProps) {
   const [reportItems, setReportItems] = useState<WeeklyReportProductItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [promotedCount, setPromotedCount] = useState(0);
+  const [qualitySummary, setQualitySummary] = useState<import('../classification-metrics-view').QualityDisplay | null>(null);
   
   const [customText, setCustomText] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -110,6 +111,7 @@ export function WeeklyReportModal({ onClose }: WeeklyReportModalProps) {
       setReportItems(res.items);
       setTotalCount(res.totalCount);
       setPromotedCount(res.promotedCount);
+      setQualitySummary(res.qualitySummary ?? null);
       setCustomText(null); // Reset manual overrides when refetching
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -365,6 +367,20 @@ ${productList}`;
       fontWeight: 600,
       fontSize: 12,
     },
+    qualitySummary: {
+      background: '#f8fafc',
+      border: '1px solid #e2e8f0',
+      borderRadius: 8,
+      padding: 10,
+      margin: '10px 0',
+    },
+    qualityChip: {
+      background: '#f1f5f9',
+      border: '1px solid #e2e8f0',
+      borderRadius: 6,
+      padding: '2px 8px',
+      fontSize: 12,
+    },
     textarea: {
       width: '100%',
       minHeight: 220,
@@ -533,6 +549,39 @@ ${productList}`;
           </div>
 
           {error && <div style={{ color: '#dc2626', fontSize: 13 }}>Failed to load products: {error}</div>}
+
+          {qualitySummary && (
+            <div style={styles.qualitySummary}>
+              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Classification Quality Summary</div>
+              {qualitySummary.summaryRows.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 6 }}>
+                  {qualitySummary.summaryRows.map((row, i) => (
+                    <span key={i} style={styles.qualityChip}>
+                      <strong>{row.label}:</strong> {row.value} <span style={{ opacity: 0.7 }}>({row.denominator})</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {qualitySummary.warnings.length > 0 && (
+                <div style={{ color: '#b45309', fontSize: 12, marginBottom: 4 }}>
+                  {qualitySummary.warnings.slice(0, 5).map((w, i) => (
+                    <div key={i}>⚠ {w}</div>
+                  ))}
+                  {qualitySummary.warnings.length > 5 && <div>… {qualitySummary.warnings.length - 5} more warning(s)</div>}
+                </div>
+              )}
+              {qualitySummary.hasGroups && (
+                <div style={{ fontSize: 12, maxHeight: 140, overflowY: 'auto' }}>
+                  {qualitySummary.groupRows.map((g, i) => (
+                    <div key={i} style={{ marginBottom: 4 }}>
+                      <strong>{g.groupLabel}</strong> · src {g.sourceKind} · precision {g.precision} · coverage{' '}
+                      {g.coverage} · corr {g.correctionRate} · ECE {g.ece} · routes: {g.modelRoutes || 'none'}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, alignItems: 'center' }}>

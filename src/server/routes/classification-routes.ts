@@ -16,6 +16,8 @@ import { computeProductHash } from '../../classification/catalog-product-source'
 
 import { evaluateClassificationReadiness } from '../../classification/config-validation';
 import { normalizeClassificationReadinessReport } from '../../classification/readiness';
+import { QUALITY_REPORT_MAX_RANGE_DAYS } from '../../shared/schemas/classification-metrics';
+import { buildQualityReport } from '../../db/repositories/classification-metrics-repo';
 
 const router = new Hono();
 
@@ -340,6 +342,48 @@ router.get('/classification/runs/:id', (c) => {
       sourceDrift,
     },
   });
+});
+
+/**
+ * GET /api/classification/quality-report?start=&end=
+ *
+ * Workspace-scoped, bounded production quality telemetry (issue #17 F).
+ * Rejects invalid/reversed ranges and caps the window (90 days). The report
+ * is read-only and deterministic for a fixed window/watermark.
+ */
+router.get('/classification/quality-report', (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  const startRaw = c.req.query('start');
+  const endRaw = c.req.query('end');
+  const nowIso = new Date().toISOString();
+  const start = startRaw ?? new Date(new Date(endRaw ?? nowIso).getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const end = endRaw ?? nowIso;
+
+  if (!Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime())) {
+    return c.json({ error: 'Invalid date range: start/end must be valid ISO timestamps' }, 400);
+  }
+  if (new Date(start).getTime() > new Date(end).getTime()) {
+    return c.json({ error: 'Invalid date range: start must not be after end' }, 400);
+  }
+  const rangeMs = new Date(end).getTime() - new Date(start).getTime();
+  const maxMs = QUALITY_REPORT_MAX_RANGE_DAYS * 24 * 60 * 60 * 1000;
+  if (rangeMs > maxMs) {
+    return c.json(
+      { error: `Invalid date range: window exceeds the ${QUALITY_REPORT_MAX_RANGE_DAYS}-day maximum` },
+      400,
+    );
+  }
+
+  try {
+    const report = buildQualityReport(ws.id, start, end, nowIso);
+    return c.json({ report });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
 });
 
 /**
