@@ -31,7 +31,8 @@ export function runVlmExperiment(
   const upcMatchRegressed = candidateScores.upcMatchRate < baselineScores.upcMatchRate;
   const f1Comparable = candidateScores.fieldF1 >= baselineScores.fieldF1 * 0.97;
 
-  const qualified = !upcMatchRegressed && f1Comparable;
+  const hasSuccesses = candidateScores.upcMatchRate > 0 || candidateScores.fieldF1 > 0;
+  const qualified = hasSuccesses && !upcMatchRegressed && f1Comparable;
 
   return {
     baselineModel,

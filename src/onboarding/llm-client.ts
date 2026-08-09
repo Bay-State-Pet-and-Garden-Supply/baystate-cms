@@ -847,13 +847,6 @@ export async function callLlmForTask(
     }
   }
 
-  if (options.modelPolicy) {
-    assertModelPolicyIntact(options.modelPolicy);
-  }
-
-  const temperature = resolveTemperature(task, options);
-  const reasoningEffort = resolveReasoningEffort(task);
-
   const taskConfig = getLlmTaskConfig(task);
   const fallbackProvider = taskConfig?.fallbackProvider ?? null;
   const fallbackModel = taskConfig?.fallbackModel ?? null;

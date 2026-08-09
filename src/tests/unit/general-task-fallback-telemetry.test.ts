@@ -62,21 +62,26 @@ describe('General Task Fallback & Telemetry Integration', () => {
       const calls = getAiModelCallsByWorkspace('default');
       expect(calls.length).toBeGreaterThanOrEqual(2);
 
-      const fallbackCall = calls[0]; // ordered DESC by started_at
-      const primaryCall = calls[1];
+      const primaryCall = calls.find((c) => !c.fallback_from_call_id);
+      const fallbackCall = calls.find((c) => c.fallback_from_call_id);
 
-      expect(primaryCall.task).toBe('product_field_refactor');
-      expect(primaryCall.provider).toBe('ollama');
-      expect(primaryCall.status).toBe('failed');
+      expect(primaryCall).toBeDefined();
+      expect(fallbackCall).toBeDefined();
 
-      expect(fallbackCall.task).toBe('product_field_refactor');
-      expect(fallbackCall.provider).toBe('deepseek');
-      expect(fallbackCall.status).toBe('success');
-      expect(fallbackCall.fallback_from_call_id).toBe(primaryCall.id);
-      expect(fallbackCall.retry_count).toBe(1);
-      expect(fallbackCall.prompt_tokens).toBe(50);
-      expect(fallbackCall.completion_tokens).toBe(15);
-      expect(fallbackCall.cost_basis).toBe('published_rate');
+      if (primaryCall && fallbackCall) {
+        expect(primaryCall.task).toBe('product_field_refactor');
+        expect(primaryCall.provider).toBe('ollama');
+        expect(primaryCall.status).toBe('failed');
+
+        expect(fallbackCall.task).toBe('product_field_refactor');
+        expect(fallbackCall.provider).toBe('deepseek');
+        expect(fallbackCall.status).toBe('success');
+        expect(fallbackCall.fallback_from_call_id).toBe(primaryCall.id);
+        expect(fallbackCall.retry_count).toBe(1);
+        expect(fallbackCall.prompt_tokens).toBe(50);
+        expect(fallbackCall.completion_tokens).toBe(15);
+        expect(fallbackCall.cost_basis).toBe('published_rate');
+      }
     } finally {
       globalThis.fetch = originalFetch;
       deleteLlmTaskConfig('product_field_refactor');
