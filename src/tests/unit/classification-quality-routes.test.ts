@@ -35,13 +35,13 @@ function makeApp(): Hono {
 }
 
 /** Insert a v2 runtime snapshot (digests + enabled targets) under a hash. */
-function seedSnapshot(hash: string, enabled = true): void {
+function seedSnapshot(hash: string, enabled = true, snapshotWsId = wsId): void {
   const now = new Date().toISOString();
   const snapshot = {
     schemaVersion: 2,
     snapshotHash: hash,
     createdAt: now,
-    workspaceId: wsId,
+    workspaceId: snapshotWsId,
     workspacePath: wsPath,
     productSku: 'SKU',
     configAuthorityKind: 'v2' as const,
@@ -278,5 +278,57 @@ describe('GET /api/classification/quality-report (issue #17 F)', () => {
     const parsed = QualityReportSchema.safeParse(report);
     expect(parsed.success).toBe(true);
     expect(report.generatedAt).toBe('2026-08-08T00:00:01.000Z');
+  });
+
+  it('returns 400 (never 500) for an unparseable end with an omitted start (blocker 3)', async () => {
+    const res = await makeApp().request('/api/classification/quality-report?end=not-a-date');
+    expect(res.status).toBe(400);
+  });
+
+  it('normalizes date-only inputs to a schema-valid report (never 500) (blocker 4)', async () => {
+    // Both parse permissively but are schema-invalid as raw ISO datetimes.
+    const res = await makeApp().request('/api/classification/quality-report?start=2026-08-01&end=2026-08-02');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const parsed = QualityReportSchema.safeParse(body.report);
+    expect(parsed.success).toBe(true);
+  });
+
+  it('uses the latest live decision per proposal regardless of insertion order (blocker 5)', async () => {
+    const db = getDb();
+    // Isolated workspace so earlier seeded runs do not pollute the aggregates.
+    const orderWsId = randomUUID();
+    const orderHash = 'c'.repeat(64);
+    insertWorkspace({ id: orderWsId, name: 'ws-order', workspacePath: '/tmp/order', gitPath: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), bootstrapStatus: 'complete', baselineCommit: null });
+    seedSnapshot(orderHash, true, orderWsId);
+    const run = createRun(orderWsId, 'SKU-ORDER', null, orderHash, { sourceKind: 'catalog_product', sourceProductHash: 'po' });
+    completeRun(run.id, 'completed');
+    seedProposal(run.id, 'pp-order', { type: 'primary_product_type', confidence: 0.9 });
+    seedProposal(run.id, 'pp-order-2', { type: 'primary_product_type', confidence: 0.8 });
+
+    const insertDecision = (proposalId: string, decision: string, createdAt: string) => {
+      db.run(
+        `INSERT INTO classification_proposal_decisions
+         (id, proposal_id, decision, revised_value_json, has_revised_target, superseded_at, created_at)
+         VALUES (?, ?, ?, NULL, 0, NULL, ?)`,
+        [randomUUID(), proposalId, decision, createdAt],
+      );
+    };
+    // pp-order: OLDER accepted inserted first, NEWER rejected second → newer wins.
+    const older = new Date(NOW.getTime() - 2 * 60 * 1000).toISOString();
+    const newer = new Date(NOW.getTime() - 1 * 60 * 1000).toISOString();
+    insertDecision('pp-order', 'accepted', older);
+    insertDecision('pp-order', 'rejected', newer);
+    // pp-order-2: NEWER rejected inserted first, OLDER accepted second → newer wins.
+    insertDecision('pp-order-2', 'rejected', newer);
+    insertDecision('pp-order-2', 'accepted', older);
+
+    const report = buildQualityReport(orderWsId, WIN_START, WIN_END, '2026-08-08T00:00:01.000Z');
+    const group = report.groups.find(g => g.configSnapshotHash === orderHash);
+    expect(group).toBeDefined();
+    // Both proposals: the latest live decision (00:00:03) is 'rejected' —
+    // insertion order must not change which decision is counted.
+    expect(group!.reviewAgreement.rejected).toBe(2);
+    expect(group!.reviewAgreement.acceptedUnchanged).toBe(0);
   });
 });

@@ -92,6 +92,7 @@ export function deriveQualityDisplay(report: QualityReport | null): QualityDispl
   let rejected = 0;
   let eligibleRuns = 0;
   let decisionEligibleRuns = 0;
+  let anyGroupCoverageNonNull = false;
   let correctedAccepted = 0;
   let accepted = 0;
   let abstentions = 0;
@@ -102,6 +103,7 @@ export function deriveQualityDisplay(report: QualityReport | null): QualityDispl
     rejected += g.reviewAgreement.rejected;
     eligibleRuns += g.coverage.eligibleRuns;
     decisionEligibleRuns += g.coverage.decisionEligibleRuns;
+    if (g.coverage.value !== null) anyGroupCoverageNonNull = true;
     correctedAccepted += g.corrections.correctedAccepted;
     accepted += g.corrections.accepted;
     abstentions += g.abstention.reviewableAbstentions;
@@ -115,7 +117,13 @@ export function deriveQualityDisplay(report: QualityReport | null): QualityDispl
   });
   summaryRows.push({
     label: 'Coverage',
-    value: eligibleRuns > 0 ? fmtPercent(decisionEligibleRuns / eligibleRuns) : 'n/a',
+    // Never a misleading zero: when eligible runs exist but no group has a
+    // non-null coverage value (no decision-eligible proposals anywhere), the
+    // metric is honestly 'n/a' — mirroring the group-level null semantics.
+    value:
+      eligibleRuns > 0 && (decisionEligibleRuns > 0 || anyGroupCoverageNonNull)
+        ? fmtPercent(decisionEligibleRuns / eligibleRuns)
+        : 'n/a',
     denominator: `decision-eligible ${decisionEligibleRuns} / eligible ${eligibleRuns}`,
   });
   summaryRows.push({

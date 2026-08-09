@@ -360,16 +360,24 @@ router.get('/classification/quality-report', (c) => {
   const startRaw = c.req.query('start');
   const endRaw = c.req.query('end');
   const nowIso = new Date().toISOString();
-  const start = startRaw ?? new Date(new Date(endRaw ?? nowIso).getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const end = endRaw ?? nowIso;
 
-  if (!Number.isFinite(new Date(start).getTime()) || !Number.isFinite(new Date(end).getTime())) {
-    return c.json({ error: 'Invalid date range: start/end must be valid ISO timestamps' }, 400);
+  // Validate the RAW inputs FIRST (blocker 3): an unparseable `end` with an
+  // omitted `start` must yield 400 — the default-start computation below can
+  // never throw a RangeError into a 500.
+  const parsedEnd = endRaw === undefined ? new Date(nowIso) : new Date(endRaw);
+  if (!Number.isFinite(parsedEnd.getTime())) {
+    return c.json({ error: 'Invalid date range: end must be a valid ISO timestamp' }, 400);
   }
-  if (new Date(start).getTime() > new Date(end).getTime()) {
+  const parsedStart = startRaw === undefined
+    ? new Date(parsedEnd.getTime() - 7 * 24 * 60 * 60 * 1000)
+    : new Date(startRaw);
+  if (!Number.isFinite(parsedStart.getTime())) {
+    return c.json({ error: 'Invalid date range: start must be a valid ISO timestamp' }, 400);
+  }
+  if (parsedStart.getTime() > parsedEnd.getTime()) {
     return c.json({ error: 'Invalid date range: start must not be after end' }, 400);
   }
-  const rangeMs = new Date(end).getTime() - new Date(start).getTime();
+  const rangeMs = parsedEnd.getTime() - parsedStart.getTime();
   const maxMs = QUALITY_REPORT_MAX_RANGE_DAYS * 24 * 60 * 60 * 1000;
   if (rangeMs > maxMs) {
     return c.json(
@@ -377,6 +385,11 @@ router.get('/classification/quality-report', (c) => {
       400,
     );
   }
+  // Normalize to strict ISO datetime strings (blocker 4): date-only inputs like
+  // 2026-08-01 parse permissively but would fail the report's strict ISO
+  // datetime schema and 500. toISOString() canonicalizes them.
+  const start = parsedStart.toISOString();
+  const end = parsedEnd.toISOString();
 
   try {
     const report = buildQualityReport(ws.id, start, end, nowIso);

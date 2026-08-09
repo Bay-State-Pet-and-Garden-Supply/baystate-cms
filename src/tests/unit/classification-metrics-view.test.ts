@@ -94,4 +94,35 @@ describe('deriveQualityDisplay (issue #17 F)', () => {
     expect(formatQualityWindow(sampleReport())).toBe('2026-08-01 → 2026-08-08 (UTC)');
     expect(formatQualityWindow(null)).toBe('no window');
   });
+
+  it('shows n/a (never a misleading 0.0%) when coverage is null across all groups (blocker 1)', () => {
+    // One eligible run with an enabled v2 snapshot but NO decision-eligible
+    // proposal: the per-group coverage value is null and the top-line summary
+    // must render 'n/a' — exactly the group-level honesty.
+    const report = computeQualityReport({
+      workspaceId: 'ws1',
+      start: '2026-08-01T00:00:00.000Z',
+      end: '2026-08-08T00:00:00.000Z',
+      sourceWatermark: '2026-08-08T00:00:00.000Z',
+      generatedAt: '2026-08-08T00:00:01.000Z',
+      runs: [
+        {
+          id: 'r1', sourceKind: 'catalog_product', sourceProductHash: 'p', productSku: 'SKU-1',
+          configSnapshotHash: HASH, status: 'completed',
+          startedAt: '2026-08-02T00:00:00.000Z', completedAt: '2026-08-02T00:01:00.000Z',
+        },
+      ],
+      proposals: [],
+      decisions: [],
+      modelCalls: [],
+      snapshots: [{ configSnapshotHash: HASH, schemaVersion: 2, modelPlanDigest: 'plan', ruleVersionsDigest: 'rules', enabledTargets: true }],
+    });
+    const d = deriveQualityDisplay(report);
+    const coverageRow = d.summaryRows.find(r => r.label === 'Coverage');
+    expect(coverageRow?.value).toBe('n/a');
+    expect(coverageRow?.denominator).toContain('0 / eligible 1');
+    // The group row also renders n/a, and a warning explains the null.
+    expect(d.groupRows[0].coverage).toBe('n/a');
+    expect(d.warnings.some(w => /coverage is null|no misleading zero/.test(w))).toBe(true);
+  });
 });

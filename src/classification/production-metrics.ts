@@ -195,17 +195,27 @@ function aggregateCoverage(d: GroupData): QualityCoverage {
     if (snap.schemaVersion !== 2) return false;
     return snap.enabledTargets;
   });
-  // Decision-eligible = the run has at least one proposal with a live decision.
-  const decisionEligibleRuns = eligibleRuns.filter(run => {
-    const proposals = d.proposals.filter(p => p.runId === run.id);
-    return proposals.some(p => d.decisions.has(p.id));
-  });
+  // Decision-eligible = the run has at least one non-abstention proposal
+  // (produced for review; pending included). A run awaiting review is NOT a
+  // silent coverage miss — its proposals are decision-eligible. Only a run
+  // that has produced NO decision-eligible proposal is uncovered, and that is
+  // always surfaced with a warning.
+  const hasEligibleProposal = (run: QualityRunInput) =>
+    d.proposals.some(p => p.runId === run.id && p.proposalType !== REVIEWABLE_ABSTENTION);
+  const decisionEligibleRuns = eligibleRuns.filter(hasEligibleProposal);
+  const runsWithoutEligibleProposals = eligibleRuns.filter(run => !hasEligibleProposal(run));
   const warnings: string[] = [];
   if (eligibleRuns.length === 0) {
     warnings.push('No eligible completed runs with an enabled-target v2 snapshot; coverage is null.');
   } else if (decisionEligibleRuns.length === 0) {
-    // Zero decided runs is "no data", not "0% coverage" — a misleading zero.
-    warnings.push('Eligible runs exist but none has a decision-eligible proposal; coverage is null (no misleading zero).');
+    // Zero decision-eligible proposals is "no data", not "0% coverage" — a
+    // misleading zero.
+    warnings.push('Eligible runs exist but none has produced a decision-eligible proposal; coverage is null (no misleading zero).');
+  } else if (runsWithoutEligibleProposals.length > 0) {
+    // Some eligible runs are uncovered: never a silent miss.
+    warnings.push(
+      `${runsWithoutEligibleProposals.length} eligible run(s) produced no decision-eligible proposal; they count as uncovered (not a silent miss).`,
+    );
   }
   return {
     value:
@@ -341,7 +351,16 @@ function aggregateLatency(d: GroupData): QualityLatency {
 }
 
 function aggregateCost(d: GroupData): QualityCost {
-  const knownCostCalls = d.calls.filter(c => typeof c.estimatedCostUsd === 'number' && c.estimatedCostUsd !== null);
+  // Known cost = a value with an explicit KNOWN basis only (local_zero or a
+  // reviewed rate). A numeric value with costBasis 'unknown' is never counted
+  // as known cost (defense-in-depth on top of the audit writer's invariant).
+  const knownCostCalls = d.calls.filter(
+    c =>
+      typeof c.estimatedCostUsd === 'number' &&
+      c.estimatedCostUsd !== null &&
+      c.costBasis !== null &&
+      c.costBasis !== 'unknown',
+  );
   const tokenCalls = d.calls.filter(
     c => typeof c.promptTokens === 'number' && c.promptTokens !== null && typeof c.completionTokens === 'number' && c.completionTokens !== null,
   );
@@ -405,12 +424,37 @@ function aggregateGrounding(d: GroupData): QualityGrounding {
 
 // ─── Group assembly ───────────────────────────────────────────────────────────
 
-function groupKey(run: QualityRunInput, snapshot: QualitySnapshotDigest | null): string {
+/**
+ * Resolve each run's model route identity from its ACTUAL model calls
+ * (provider/model pairs, sorted + deduped for determinism). A run with no
+ * calls gets the explicit 'no-calls' marker. The route identity is a grouping
+ * dimension: two runs with identical config/plan/rule/source identities but
+ * different executed model routes (e.g. ollama/m1 vs cloud/m2) land in
+ * different version groups — differing model identities are never combined.
+ * (A run with no calls shares the same frozen plan digest as any other
+ * no-call run of that version, so 'no-calls' is the honest route identity.)
+ */
+function routeKeyByRun(modelCalls: QualityModelCallInput[]): Map<string, string> {
+  const routesByRun = new Map<string, Set<string>>();
+  for (const call of modelCalls) {
+    const set = routesByRun.get(call.runId) ?? new Set<string>();
+    set.add(`${call.provider ?? 'unknown'}\u0000${call.model ?? 'unknown'}`);
+    routesByRun.set(call.runId, set);
+  }
+  const out = new Map<string, string>();
+  for (const [runId, set] of routesByRun) {
+    out.set(runId, [...set].sort().join(','));
+  }
+  return out;
+}
+
+function groupKey(run: QualityRunInput, snapshot: QualitySnapshotDigest | null, routeKey: string | null): string {
   return [
     run.configSnapshotHash ?? '',
     snapshot?.modelPlanDigest ?? '',
     snapshot?.ruleVersionsDigest ?? '',
     run.sourceKind ?? '',
+    routeKey ?? 'no-calls',
   ].join('|');
 }
 
@@ -479,9 +523,14 @@ export function computeQualityReport(input: QualityMetricsInput): QualityReport 
 
   const globalWarnings: string[] = [];
 
+  // Route identity per run (blocker 2): resolved once from the actual model
+  // calls so the group key can never combine differing executed routes.
+  const routes = routeKeyByRun(input.modelCalls);
+
   for (const run of input.runs) {
     const snapshot = run.configSnapshotHash ? snapshotsByHash.get(run.configSnapshotHash) ?? null : null;
-    const key = groupKey(run, snapshot);
+    const routeKey = routes.get(run.id) ?? null;
+    const key = groupKey(run, snapshot, routeKey);
     runGroupKey.set(run.id, key);
     if (!groups.has(key)) {
       const identity = {
@@ -594,8 +643,8 @@ export function computeQualityReport(input: QualityMetricsInput): QualityReport 
     generatedAt: input.generatedAt,
     sampleCounts,
     groups: [...groups.values()].sort((a, b) => {
-      const ka = `${a.configSnapshotHash ?? ''}|${a.modelPlanDigest ?? ''}|${a.ruleVersionsDigest ?? ''}|${a.sourceKind ?? ''}`;
-      const kb = `${b.configSnapshotHash ?? ''}|${b.modelPlanDigest ?? ''}|${b.ruleVersionsDigest ?? ''}|${b.sourceKind ?? ''}`;
+      const ka = `${a.configSnapshotHash ?? ''}|${a.modelPlanDigest ?? ''}|${a.ruleVersionsDigest ?? ''}|${a.sourceKind ?? ''}|${a.modelRoutes.map(r => `${r.provider}\u0000${r.model}`).sort().join(',')}`;
+      const kb = `${b.configSnapshotHash ?? ''}|${b.modelPlanDigest ?? ''}|${b.ruleVersionsDigest ?? ''}|${b.sourceKind ?? ''}|${b.modelRoutes.map(r => `${r.provider}\u0000${r.model}`).sort().join(',')}`;
       return ka.localeCompare(kb);
     }),
     warnings: globalWarnings,

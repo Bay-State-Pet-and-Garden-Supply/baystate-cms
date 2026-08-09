@@ -151,15 +151,17 @@ export function getQualityLiveDecisions(
        JOIN classification_runs r ON r.id = p.run_id
        WHERE r.workspace_id = ? AND p.run_id IN (${placeholders})
          AND d.superseded_at IS NULL
-         AND d.created_at >= ? AND d.created_at <= ?`,
+         AND d.created_at >= ? AND d.created_at <= ?
+       ORDER BY d.created_at DESC, d.rowid DESC`,
     )
     .all(workspaceId, ...runIds, startIso, endIso) as unknown as DecisionRow[];
-  // Deterministic per-proposal selection (created_at DESC, rowid DESC) is done
-  // in the aggregation input: the query returns at most one live row per
-  // proposal because superseding marks the prior live row; but defensively
-  // dedupe here with the later row winning.
+  // Per-proposal selection: the query is ordered newest-first (created_at DESC,
+  // rowid DESC — matching the canonical pattern in classification-run-repo), so
+  // the FIRST row encountered for a proposal is the latest live decision. Keep
+  // it and skip any older live row that follows.
   const byProposal = new Map<string, QualityLiveDecisionInput>();
   for (const r of rows) {
+    if (byProposal.has(r.proposal_id)) continue;
     byProposal.set(r.proposal_id, {
       proposalId: r.proposal_id,
       decision: r.decision as 'accepted' | 'rejected' | 'deferred',

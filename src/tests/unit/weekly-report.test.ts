@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mock } from 'bun:test';
 import { getDb, closeDb, initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { getWeeklyReportItems } from '../../db/repositories/onboarding-item-repo';
@@ -6,6 +7,14 @@ import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+
+// The weekly route's no-workspace path must not fall through to the live
+// single-store-catalog bootstrap (migrateLegacyWorkspaceIfNeeded re-points the
+// connection at storage/catalog/.shopsite-cms/app.db). Mock the workspace
+// lookup so the honest null-quality + warning branch is exercised in isolation.
+mock.module('../../server/services/workspace-service', () => ({
+  getCurrentWorkspace: () => null,
+}));
 
 const TEST_DB_PATH = path.join(__dirname, 'weekly-report-test.db');
 
@@ -124,5 +133,23 @@ describe('getWeeklyReportItems', () => {
     // Item behavior unchanged: the item is still returned.
     const items = getWeeklyReportItems(startIso, endIso);
     expect(items.some(i => i.id === itemId)).toBe(true);
+  });
+
+  it('returns an honest null-quality summary WITH a warning when no workspace is active (issue #17 F note B)', async () => {
+    const { Hono } = await import('hono');
+    const { default: onboardingRoutes } = await import('../../server/routes/onboarding-routes');
+    const app = new Hono();
+    app.route('/api', onboardingRoutes);
+
+    // getCurrentWorkspace is mocked to null in this suite, so the route takes
+    // the honest no-workspace branch: a display object whose warnings explain
+    // the unavailable quality section — never a fabricated zero.
+    const res = await app.request('/api/onboarding/weekly-report');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.qualitySummary).not.toBeNull();
+    expect(body.qualitySummary.summaryRows).toEqual([]);
+    expect(body.qualitySummary.hasGroups).toBe(false);
+    expect(body.qualitySummary.warnings.some((w: string) => /No active workspace/.test(w))).toBe(true);
   });
 });

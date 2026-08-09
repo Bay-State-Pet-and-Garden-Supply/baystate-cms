@@ -373,6 +373,15 @@ route.get('/onboarding/weekly-report', async (c) => {
         hasGroups: false,
       };
     }
+  } else {
+    // Honest no-workspace state: null summary WITH the documented warning
+    // (never a fabricated zero).
+    qualitySummary = {
+      summaryRows: [],
+      warnings: ['No active workspace; quality summary is unavailable.'],
+      groupRows: [],
+      hasGroups: false,
+    };
   }
 
   return c.json({

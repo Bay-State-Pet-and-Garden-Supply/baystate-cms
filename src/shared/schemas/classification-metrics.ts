@@ -99,7 +99,14 @@ export const QualityReviewAgreementSchema = z
 
 export const QualityCoverageSchema = z
   .object({
-    /** Runs with a decision-eligible proposal / eligible completed runs. */
+    /**
+     * Runs with at least one decision-eligible (non-abstention) proposal /
+     * eligible completed runs. A proposal is decision-eligible when produced
+     * for review (pending included) — a run awaiting review is never a silent
+     * miss. A run with no decision-eligible proposal is uncovered, surfaced
+     * with a warning. Null (with a warning) when no eligible run has produced
+     * a decision-eligible proposal — never a misleading zero.
+     */
     value: z.number().min(0).max(1).nullable(),
     eligibleRuns: z.number().int().nonnegative(),
     decisionEligibleRuns: z.number().int().nonnegative(),
@@ -109,6 +116,12 @@ export const QualityCoverageSchema = z
 
 export const QualityAbstentionSchema = z
   .object({
+    /**
+     * Reviewable abstentions / ALL proposals in the group. (The plan wording
+     * says "over eligible runs"; the all-proposals denominator is the
+     * implemented, documented deviation — it is defensible because abstentions
+     * are proposals, and the schema fields make the denominator explicit.)
+     */
     rate: z.number().min(0).max(1).nullable(),
     reviewableAbstentions: z.number().int().nonnegative(),
     proposals: z.number().int().nonnegative(),
@@ -157,8 +170,10 @@ export const QualityModelRouteSchema = z
 
 /**
  * One version group: every run in the group shares the same config/runtime
- * snapshot hash, model-plan digest, rule-versions digest, and source kind, so
- * differing config/prompt/rule/model identities are never combined.
+ * snapshot hash, model-plan digest, rule-versions digest, source kind, AND
+ * executed model route identity (provider/model pairs from the run's actual
+ * model calls), so differing config/prompt/rule/model identities are never
+ * combined.
  */
 export const QualityVersionGroupSchema = z
   .object({

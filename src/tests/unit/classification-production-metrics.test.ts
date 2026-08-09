@@ -177,17 +177,48 @@ describe('computeQualityReport (issue #17 F)', () => {
     expect(report.warnings.some(w => /legacy schema-v1/.test(w))).toBe(true);
   });
 
-  it('returns null coverage (no misleading zero) when eligible runs exist but none is decision-eligible', () => {
+  it('returns null coverage (no misleading zero) when eligible runs exist but none produced a decision-eligible proposal', () => {
     const input = baseInput({
       runs: [run('r1')],
-      proposals: [proposal('p-pending')],
-      decisions: [], // no live decisions
+      // No non-abstention proposal at all: not even a pending one was produced.
+      proposals: [],
+      decisions: [],
       snapshots: [snap(HASH_A)],
     });
     const report = reportValid(input);
     expect(report.groups[0].coverage.value).toBeNull();
     expect(report.groups[0].coverage.eligibleRuns).toBe(1);
     expect(report.groups[0].coverage.decisionEligibleRuns).toBe(0);
+    expect(report.groups[0].coverage.warnings.some(w => /no misleading zero/.test(w))).toBe(true);
+  });
+
+  it('counts runs with pending (unreviewed) proposals as covered — never a silent miss (blocker 6)', () => {
+    const input = baseInput({
+      runs: [run('r1')],
+      // A pending non-abstention proposal is decision-eligible: it was produced
+      // for review. The run is covered even with zero live decisions.
+      proposals: [proposal('p-pending')],
+      decisions: [],
+      snapshots: [snap(HASH_A)],
+    });
+    const report = reportValid(input);
+    expect(report.groups[0].coverage.value).toBe(1);
+    expect(report.groups[0].coverage.decisionEligibleRuns).toBe(1);
+    expect(report.groups[0].coverage.warnings.some(w => /no misleading zero/.test(w))).toBe(false);
+  });
+
+  it('reports partial coverage with a warning when some eligible runs have no decision-eligible proposal (blocker 6)', () => {
+    const input = baseInput({
+      runs: [run('r1'), run('r2')],
+      proposals: [proposal('p1', { runId: 'r1' })],
+      decisions: [decision('p1')],
+      snapshots: [snap(HASH_A)],
+    });
+    const report = reportValid(input);
+    expect(report.groups[0].coverage.value).toBe(0.5);
+    expect(report.groups[0].coverage.eligibleRuns).toBe(2);
+    expect(report.groups[0].coverage.decisionEligibleRuns).toBe(1);
+    expect(report.groups[0].coverage.warnings.some(w => /count as uncovered/.test(w))).toBe(true);
   });
 
   it('computes correction rate and revisions per 100 adjudicated proposals', () => {
@@ -274,21 +305,25 @@ describe('computeQualityReport (issue #17 F)', () => {
         call('r1', { durationMs: 100, tokens: true, cost: 0 }),
         call('r1', { durationMs: 300, tokens: false, cost: null }), // unknown cost + no tokens
         call('r2', { durationMs: 200, tokens: true, cost: 0 }),
+        // r3 needs a call with the SAME route so all three runs share one
+        // version group (blocker 2: differing route identities never combine).
+        call('r3', { durationMs: 200, tokens: true, cost: 0 }),
       ],
-      snapshots: [snap(HASH_A), snap(HASH_A)],
+      snapshots: [snap(HASH_A), snap(HASH_A), snap(HASH_A)],
     });
     const report = reportValid(input);
     const g = report.groups[0];
+    expect(report.groups).toHaveLength(1);
     expect(g.latency.runSampleCount).toBe(3);
     expect(g.latency.runMedianMs).toBe(20000);
     expect(g.latency.runP95Ms).toBeCloseTo(38000, 0); // 20000 + 0.95*(40000-20000)
-    expect(g.latency.modelCallSampleCount).toBe(3);
+    expect(g.latency.modelCallSampleCount).toBe(4);
     expect(g.latency.modelCallMedianMs).toBe(200);
-    expect(g.cost.totalCalls).toBe(3);
-    expect(g.cost.knownCostCalls).toBe(2);
+    expect(g.cost.totalCalls).toBe(4);
+    expect(g.cost.knownCostCalls).toBe(3);
     expect(g.cost.totalKnownUsd).toBe(0);
-    expect(g.cost.knownCostFraction).toBeCloseTo(2 / 3, 5);
-    expect(g.cost.tokenCoverageFraction).toBeCloseTo(2 / 3, 5);
+    expect(g.cost.knownCostFraction).toBeCloseTo(3 / 4, 5);
+    expect(g.cost.tokenCoverageFraction).toBeCloseTo(3 / 4, 5);
     expect(g.cost.warnings.some(w => /unknown cost/.test(w))).toBe(true);
     expect(g.cost.warnings.some(w => /token counts/.test(w))).toBe(true);
   });
@@ -310,6 +345,60 @@ describe('computeQualityReport (issue #17 F)', () => {
     expect(g.cost.knownCostCalls).toBe(0);
     expect(g.cost.totalCalls).toBe(1);
     expect(g.cost.knownCostFraction).toBe(0);
+  });
+
+  it('never counts a numeric cost with an unknown basis as known cost (review note A)', () => {
+    const input = baseInput({
+      runs: [run('r1')],
+      proposals: [],
+      decisions: [],
+      modelCalls: [
+        // Numeric value but an EXPLICIT 'unknown' basis: not known cost.
+        { runId: 'r1', provider: 'cloud', model: 'm2', status: 'success', durationMs: 100, promptTokens: 1, completionTokens: 1, estimatedCostUsd: 7, costBasis: 'unknown' },
+      ],
+      snapshots: [snap(HASH_A)],
+    });
+    const report = reportValid(input);
+    const g = report.groups[0];
+    expect(g.cost.totalCalls).toBe(1);
+    expect(g.cost.knownCostCalls).toBe(0);
+    expect(g.cost.totalKnownUsd).toBeNull();
+    expect(g.cost.meanKnownUsd).toBeNull();
+    expect(g.cost.knownCostFraction).toBe(0);
+    expect(g.cost.warnings.some(w => /known cost basis/.test(w))).toBe(true);
+  });
+
+  it('never combines differing executed model routes in one version group (blocker 2)', () => {
+    const input = baseInput({
+      runs: [run('r1'), run('r2')],
+      proposals: [proposal('p1'), proposal('p2', { runId: 'r2' })],
+      decisions: [decision('p1'), decision('p2')],
+      modelCalls: [
+        { runId: 'r1', provider: 'ollama', model: 'm1', status: 'success', durationMs: 100, promptTokens: 1, completionTokens: 1, estimatedCostUsd: 0, costBasis: 'local_zero' },
+        { runId: 'r2', provider: 'cloud', model: 'm2', status: 'success', durationMs: 100, promptTokens: 1, completionTokens: 1, estimatedCostUsd: 0, costBasis: 'local_zero' },
+      ],
+      // Identical config/plan/rules/sourceKind for both runs — only the route differs.
+      snapshots: [snap(HASH_A), snap(HASH_A)],
+    });
+    const report = reportValid(input);
+    expect(report.groups).toHaveLength(2);
+    const routeSummaries = report.groups.map(g => g.modelRoutes.map(r => `${r.provider}/${r.model}`).join(',')).sort();
+    expect(routeSummaries).toEqual(['cloud/m2', 'ollama/m1']);
+    // Identical routes still combine into one group (order/call-count insensitive).
+    const sameRoute = reportValid(
+      baseInput({
+        runs: [run('r1'), run('r2')],
+        proposals: [proposal('p1'), proposal('p2', { runId: 'r2' })],
+        decisions: [decision('p1'), decision('p2')],
+        modelCalls: [
+          { runId: 'r1', provider: 'ollama', model: 'm1', status: 'success', durationMs: 100, promptTokens: 1, completionTokens: 1, estimatedCostUsd: 0, costBasis: 'local_zero' },
+          { runId: 'r2', provider: 'ollama', model: 'm1', status: 'success', durationMs: 100, promptTokens: 1, completionTokens: 1, estimatedCostUsd: 0, costBasis: 'local_zero' },
+        ],
+        snapshots: [snap(HASH_A), snap(HASH_A)],
+      }),
+    );
+    expect(sameRoute.groups).toHaveLength(1);
+    expect(sameRoute.groups[0].modelRoutes).toEqual([{ provider: 'ollama', model: 'm1', count: 2 }]);
   });
 
   it('computes grounding (supporting coverage, contradiction rate, correction citations)', () => {
