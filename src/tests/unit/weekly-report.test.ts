@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mock } from 'bun:test';
 import { getDb, closeDb, initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { getWeeklyReportItems } from '../../db/repositories/onboarding-item-repo';
@@ -8,13 +7,15 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-// The weekly route's no-workspace path must not fall through to the live
-// single-store-catalog bootstrap (migrateLegacyWorkspaceIfNeeded re-points the
-// connection at storage/catalog/.shopsite-cms/app.db). Mock the workspace
-// lookup so the honest null-quality + warning branch is exercised in isolation.
-mock.module('../../server/services/workspace-service', () => ({
-  getCurrentWorkspace: () => null,
-}));
+// The weekly route's quality section must never touch the live catalog DB:
+// getCurrentWorkspace() unconditionally calls migrateLegacyWorkspaceIfNeeded()
+// when no workspace is found, which re-points the connection at
+// storage/catalog/.shopsite-cms/app.db and runs migrations on it. This suite
+// therefore seeds a workspace in its own isolated throwaway DB so the lookup
+// short-circuits before that fallback. (bun:test's mock.module cannot be
+// scoped reliably in Bun 1.3.x — file scope breaks for modules with their own
+// imports and mock.restore() cannot un-register a module mock — so module
+// mocks are not usable here.)
 
 const TEST_DB_PATH = path.join(__dirname, 'weekly-report-test.db');
 
@@ -135,21 +136,38 @@ describe('getWeeklyReportItems', () => {
     expect(items.some(i => i.id === itemId)).toBe(true);
   });
 
-  it('returns an honest null-quality summary WITH a warning when no workspace is active (issue #17 F note B)', async () => {
+  it('reports an honest quality section for an empty window (issue #17 F note B): 200 with n/a coverage — never a fabricated 0.0%', async () => {
+    // No module mock here: bun:test's mock.module cannot be scoped reliably in
+    // Bun 1.3.x (file scope breaks for modules with their own imports, and
+    // mock.restore() cannot un-register a module mock), so any module mock
+    // would leak into unrelated Bun suites sharing the process. Instead this
+    // test seeds a workspace in the isolated throwaway DB: getCurrentWorkspace()
+    // short-circuits on the first findWorkspace() hit and never reaches
+    // migrateLegacyWorkspaceIfNeeded(), so the live storage/catalog DB is
+    // never touched by the suite.
+    insertWorkspace({
+      id: 'ws-empty',
+      name: 'Empty Window Test',
+      workspacePath: TEST_DB_PATH,
+      gitPath: TEST_DB_PATH,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
     const { Hono } = await import('hono');
     const { default: onboardingRoutes } = await import('../../server/routes/onboarding-routes');
     const app = new Hono();
     app.route('/api', onboardingRoutes);
 
-    // getCurrentWorkspace is mocked to null in this suite, so the route takes
-    // the honest no-workspace branch: a display object whose warnings explain
-    // the unavailable quality section — never a fabricated zero.
     const res = await app.request('/api/onboarding/weekly-report');
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.qualitySummary).not.toBeNull();
-    expect(body.qualitySummary.summaryRows).toEqual([]);
     expect(body.qualitySummary.hasGroups).toBe(false);
-    expect(body.qualitySummary.warnings.some((w: string) => /No active workspace/.test(w))).toBe(true);
+    const coverageRow = body.qualitySummary.summaryRows.find((r: any) => r.label === 'Coverage');
+    // Honest n/a for an empty window — the misleading 0.0% coverage display is
+    // the exact bug this guards against.
+    expect(coverageRow.value).toBe('n/a');
   });
 });
