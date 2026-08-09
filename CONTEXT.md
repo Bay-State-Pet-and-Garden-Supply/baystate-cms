@@ -873,3 +873,35 @@ Catalog Product Classification extends the classification pipeline to existing S
 - Older catalog-run proposals are marked stale (`stale` status) when a newer run completes.
 - Catalog runs cannot rename products or write Primary Product Type to ShopSite.
 - Refresh queue defers catalog classification to the Product Detail Rerun action; auto-refresh for catalog products is deferred to a future release.
+
+## Operational state (2026-08-09, issue #17 D2/C2)
+
+- **Active Classification Configuration**: the Bay State workspace's v2 bundle is
+  activated through the config store (CAS, catalog-evidence verifier, verified
+  Page IDs): bundle `b5ca076f…`, catalog evidence `3b276fed…`, nested catalog
+  commit `024c6412` (scope `store/classification/**` only). The `store-pages`
+  Category Page target is **enabled** (`optionSource: live_store`) against the
+  active verified Page import `96d018cb` (211 `exported_guid` records, source
+  hash `20d94f68…`). Model policy: Ollama/local-only; all ML features disabled.
+- **Category Page Identity**: a Category Page assignment is validated against
+  the verified Page snapshot (`captureVerifiedPageSnapshot` — one coherent
+  transactional read of the active import + verified `page_index` rows);
+  assignments reference page IDs, never display names, and page proposals
+  abstain until a reviewed Primary Product Type exists.
+- **Integrity**: the C2 live repair (2026-08-09) removed orphaned classification
+  data (637 stage results, 2003 evidence, 191 proposals, 42 decisions, 180
+  onboarding sources, 50 extractions, 1 profile revision, 22 dangling embedded
+  proposals) in one transaction against a verified backup; post-audit clean.
+- **Controlled Value Identity**: a controlled value ID is exactly its stored
+  canonical string (NFC-normalized, trimmed); label equals ID by v2 policy.
+  `src/classification/controlled-value-identity.ts` centralizes comparison
+  keys, canonical validation (rejecting empty/control characters, non-NFC/
+  non-trimmed values, duplicates, normalized/case-fold collision pairs, and
+  aliases whose `mapsTo` is not an exact allowed ID), alias→exact-ID
+  resolution, and `{value: id, label: id}` options (ADR-0012).
+- **Built-in Output Policy**: `src/shopsite/built-in-output-policy.ts` is the
+  immutable adapter-owned policy for built-in ShopSite output fields (Name,
+  FileName, Price, SaleAmount, ProductDescription, MinimumQuantity,
+  ProductType, Weight, Graphic, SearchKeywords, MoreInfoImage1–20); DTD-level
+  behavior is not workspace-configurable (ADR-0011). Custom `ProductField*`
+  values remain classification-managed via Catalog Field Serialization.

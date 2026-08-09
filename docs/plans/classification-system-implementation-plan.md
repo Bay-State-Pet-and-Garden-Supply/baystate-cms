@@ -707,3 +707,15 @@ These must not be created from guessed XML.
 - **Existing lint debt:** Broad unrelated failures must be separated with before/after evidence rather than hidden through new exclusions.
 - **Refresh semantics:** Accepted reviewed facts must be source/config compatible; careless carry-forward could reintroduce stale classifications.
 - **Corpus shrinkage:** Strict validation may reject most of the current 73 records. That is expected and safer than retaining contaminated examples.
+## Post-recovery addendum (issue #17, 2026-08-09)
+
+The issue-17 remediation plan (`docs/plans/` + governance doc) executed passes
+A–M after the M0–M11 recovery: local-only model boundary (A), accepted-only
+promotion (B/K), verified Page snapshot + readiness (D1/L), model-call
+provenance (E), target evidence + citations (H/I), integrity tooling (C1),
+production telemetry (F), controlled-value identity (G), built-in output
+policy (J), live integrity repair (C2), and the user-reviewed config-store
+activation enabling the Category Page target (D2). See
+`docs/governance-17-alignment.md` for the evidence-backed registry with
+commit IDs, hashes, and operational results. M0–M11 decisions above remain
+authoritative.
