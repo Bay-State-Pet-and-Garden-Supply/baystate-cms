@@ -229,6 +229,54 @@ describe('GET /api/classification/runs/:id (issue #17 E)', () => {
     expect(body.drift.configDrift).toBe(true);
     expect(body.drift.sourceDrift).toBe(true);
   });
+
+  it('reports sourceDrift=true for a completed run whose recorded source file has disappeared (pass 4c)', async () => {
+    const run = createRun(wsA.id, 'SKU-MISSING-SRC', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'p-missing' });
+    const { completeRun } = await import('../../db/repositories/classification-run-repo');
+    completeRun(run.id, 'completed');
+    // The product file was never written (or was removed): readProductFile
+    // returns null, which IS drift for a completed run.
+    const res = await makeApp().request(`/api/classification/runs/${run.id}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.drift.sourceDrift).toBe(true);
+  });
+
+  it('drops credential-shaped OBJECT KEYS (sk-*, bearer) from the run-detail body (pass 4c)', async () => {
+    const run = createRun(wsA.id, 'SKU-6', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'p6' });
+    // Seed evidence metadata with credential-shaped KEYS (sk-live-abcdef,
+    // bearer header, secretKey) — these must be absent from the body.
+    getDb().run(
+      `INSERT INTO classification_evidence
+       (id, run_id, product_sku, stage_name, source, reliability, attribute_id, source_url, source_field, snippet, value_json, metadata_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        run.id,
+        'SKU-6',
+        'evidence_extraction',
+        'official_product_page',
+        'medium',
+        'flavor',
+        'https://example.com/',
+        'llm_flavor',
+        'plain snippet',
+        JSON.stringify('Chicken'),
+        JSON.stringify({ 'sk-live-abcdef': 'secret-material', bearer: 'Bearer tok', secretKey: 'x', provenance: 'llm' }),
+        new Date().toISOString(),
+      ],
+    );
+    const res = await makeApp().request(`/api/classification/runs/${run.id}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain('sk-live-abcdef');
+    expect(serialized).not.toContain('secret-material');
+    expect(serialized).not.toContain('secretKey');
+    expect(serialized).not.toContain('Bearer tok');
+    // The non-secret key survives.
+    expect(serialized).toContain('provenance');
+  });
 });
 
 // Helper: update the run row's config_snapshot_hash so the route resolves the

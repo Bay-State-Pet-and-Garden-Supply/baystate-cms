@@ -89,22 +89,40 @@ export async function consolidateProductTitle(
     snapshot?: import('../classification/runtime-snapshot').RuntimeClassificationSnapshot | null;
   },
 ): Promise<TitleResult> {
-  const llmConfig = getLlmConfigForTask('product_curation', {
-    allowFallback: true,
-    modelPolicy,
-    protectedOperation: 'title_consolidation',
-  });
+  // Protected route resolution can throw (missing credential, policy
+  // denial). A denied attempt is still observable via exactly ONE durable
+  // `policy_denied` row — never zero, and never double-counted with the
+  // no-config `unavailable` row below (issue #17 pass 4c).
+  let llmConfig: import('./llm-client').LlmConfig | null = null;
+  let preflightRecorded = false;
+  try {
+    llmConfig = getLlmConfigForTask('product_curation', {
+      allowFallback: true,
+      modelPolicy,
+      protectedOperation: 'title_consolidation',
+    });
+  } catch (err: any) {
+    recordTerminalPreflight(
+      audit?.modelCall,
+      modelPolicy?.policyDigest ?? '',
+      MODEL_CALL_STATUS.policyDenied,
+      `Model policy denied title consolidation (${err?.code ?? err?.message ?? 'error'}).`,
+    );
+    preflightRecorded = true;
+  }
 
   // If LLM is not configured, prefer spreadsheet name (has variant tokens like LG, SM, YELLOW)
   // over web title which may strip them. OCR title still wins when available.
   // The attempted-but-unavailable call is still observable (durable row).
   if (!llmConfig) {
-    recordTerminalPreflight(
-      audit?.modelCall,
-      modelPolicy?.policyDigest ?? '',
-      MODEL_CALL_STATUS.unavailable,
-      'No LLM config available for title consolidation.',
-    );
+    if (!preflightRecorded) {
+      recordTerminalPreflight(
+        audit?.modelCall,
+        modelPolicy?.policyDigest ?? '',
+        MODEL_CALL_STATUS.unavailable,
+        'No LLM config available for title consolidation.',
+      );
+    }
     if (signals.ocrTitle) {
       return { title: signals.ocrTitle, source: 'ocr' };
     }

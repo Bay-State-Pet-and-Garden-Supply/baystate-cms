@@ -14,7 +14,7 @@ import { redactTransportText } from './model-policy-gateway';
 import { MODEL_CALL_STATUS } from './model-operation-registry';
 import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
 import { modelPolicyViewFromConfig } from '../onboarding/model-policy-snapshot';
-import { buildModelCallContext } from './runtime-snapshot';
+import { buildModelCallContext, requireModelCallContext, getModelExecutionPlanEntry } from './runtime-snapshot';
 import { getCachedBrands, getCachedDataSharingPolicy } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from './brand-resolution';
 import type { StageInput, StageContext } from './types';
@@ -716,22 +716,55 @@ export async function extractProductEvidence(
       localStatus = 'no_image';
     }
 
+    // Build the frozen evidence-extraction policy view + run-bound call
+    // context ONCE before the image loop. Run-bound calls REQUIRE a compatible
+    // frozen plan: a legacy/no-plan snapshot fails closed (abstain, no
+    // transport, no evidence). The frozen local VLM route comes from the
+    // snapshot plan entry so the transport can never read mutable settings.
+    const evidencePolicyView = context.snapshot
+      ? modelPolicyViewFromConfig(
+          context.snapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+          context.snapshot.snapshotHash,
+        )
+      : null;
+    let localModelCall: import('../classification/model-operation-registry').ModelCallContext | null = null;
+    let localFrozenRoute: { baseUrl: string; model: string } | null = null;
+    if (context.snapshot) {
+      try {
+        localModelCall = requireModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1);
+        const entry = getModelExecutionPlanEntry(context.snapshot, 'evidence_extraction');
+        if (entry?.localVlmBaseUrl && entry?.localVlmModel) {
+          localFrozenRoute = { baseUrl: entry.localVlmBaseUrl, model: entry.localVlmModel };
+        }
+      } catch (err: any) {
+        localStatus = 'failed';
+        console.warn(
+          `[EvidenceExtraction] Local VLM OCR abstained for SKU ${sku}: no compatible frozen plan — ${redactTransportText(err.message)}`,
+        );
+      }
+    }
+
     for (let i = 0; i < imageUrls.length; i++) {
       const imgUrl = imageUrls[i];
+      // When run-bound but no compatible plan, skip every image (no transport,
+      // no evidence from the model call).
+      if (context.snapshot && !localModelCall) continue;
       try {
         // Run-bound local VLM calls are audited (issue #17 E): the call
         // context binds the transport to the run snapshot plan and the
         // resulting callId flows into the OCR evidence metadata.
-        const localModelCall = context.snapshot
-          ? buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1)
-          : null;
         const ocrResult = await extractPackagingOcr({
           imageUrl: imgUrl,
           workspacePath: input.workspacePath,
           imageSourceUrl: imgUrl,
           sku,
           ...(localModelCall && context.snapshot
-            ? { modelCall: localModelCall, snapshot: context.snapshot }
+            ? {
+                modelCall: localModelCall,
+                snapshot: context.snapshot,
+                frozenVlmRoute: localFrozenRoute,
+                modelPolicyDigest: evidencePolicyView?.policyDigest ?? '',
+              }
             : {}),
         });
 
@@ -781,29 +814,47 @@ export async function extractProductEvidence(
           )
         : null;
       const { extractPackagingOcrFromCloud } = await import('../onboarding/cloud-vlm-client');
-      const cloudOcrResult = await extractPackagingOcrFromCloud({
-        imageUrl: String(input.primaryImage),
-        modelPolicy: evidencePolicyView,
-        ...(context.snapshot
-          ? {
-              modelCall: buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1),
-              snapshot: context.snapshot,
-            }
-          : {}),
-      });
-
-      if (cloudOcrResult && hasOcrContent(cloudOcrResult)) {
-        packagingOcrData = cloudOcrResult;
-        cloudStatus = 'succeeded';
-        const cloudModelCallIds = (cloudOcrResult as { metadata?: { modelCallIds?: string[] } }).metadata?.modelCallIds;
-        const cloudEvidence = packagingOcrDataToEvidence(cloudOcrResult, {
-          runId: context.runId,
-          sku,
-          model: (cloudOcrResult as any).metadata?.model ?? 'cloud-vision',
-          ...(cloudModelCallIds?.length ? { modelCallIds: cloudModelCallIds } : {}),
+      // Run-bound cloud VLM calls REQUIRE a compatible frozen plan: a
+      // legacy/no-plan snapshot abstains (no transport).
+      let cloudModelCall: import('../classification/model-operation-registry').ModelCallContext | null = null;
+      if (context.snapshot) {
+        try {
+          cloudModelCall = requireModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1);
+        } catch (err: any) {
+          cloudStatus = 'failed';
+          console.warn(
+            `[EvidenceExtraction] Cloud VLM OCR abstained for SKU ${sku}: no compatible frozen plan — ${redactTransportText(err.message)}`,
+          );
+          cloudModelCall = null;
+        }
+      }
+      if (context.snapshot && !cloudModelCall) {
+        // No compatible plan: no transport, no evidence from the call.
+      } else {
+        const cloudOcrResult = await extractPackagingOcrFromCloud({
+          imageUrl: String(input.primaryImage),
+          modelPolicy: evidencePolicyView,
+          ...(cloudModelCall && context.snapshot
+            ? {
+                modelCall: cloudModelCall,
+                snapshot: context.snapshot,
+              }
+            : {}),
         });
-        evidence.push(...cloudEvidence);
-        console.log(`[EvidenceExtraction] Added ${cloudEvidence.length} evidence entries from cloud packaging OCR`);
+
+        if (cloudOcrResult && hasOcrContent(cloudOcrResult)) {
+          packagingOcrData = cloudOcrResult;
+          cloudStatus = 'succeeded';
+          const cloudModelCallIds = (cloudOcrResult as { metadata?: { modelCallIds?: string[] } }).metadata?.modelCallIds;
+          const cloudEvidence = packagingOcrDataToEvidence(cloudOcrResult, {
+            runId: context.runId,
+            sku,
+            model: (cloudOcrResult as any).metadata?.model ?? 'cloud-vision',
+            ...(cloudModelCallIds?.length ? { modelCallIds: cloudModelCallIds } : {}),
+          });
+          evidence.push(...cloudEvidence);
+          console.log(`[EvidenceExtraction] Added ${cloudEvidence.length} evidence entries from cloud packaging OCR`);
+        }
       }
     } catch (err: any) {
       console.warn(`[EvidenceExtraction] Cloud packaging OCR failed: ${redactTransportText(err.message)}`);
@@ -824,6 +875,10 @@ export async function extractProductEvidence(
     const preflightModelCall = context.snapshot
       ? buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1)
       : null;
+    // Track whether a preflight terminal row was already written so a denied
+    // attempt never records BOTH policy_denied and unavailable (one attempt =
+    // exactly one terminal row, issue #17 pass 4c).
+    let preflightRecorded = false;
     let llmConfig: import('../onboarding/llm-client').LlmConfig | null;
     try {
       llmConfig = getLlmConfigForTask('classification_evidence_extraction', {
@@ -838,6 +893,7 @@ export async function extractProductEvidence(
         MODEL_CALL_STATUS.policyDenied,
         `Model policy denied text evidence extraction (${err instanceof Error ? err.message : String(err)}).`,
       );
+      preflightRecorded = true;
       llmConfig = null;
     }
     if (llmConfig) {
@@ -852,12 +908,22 @@ export async function extractProductEvidence(
 
       if (allText.length > 10) {
         // Durable model-call audit context (issue #17 E): bound to the run
-        // snapshot plan; null when the snapshot has no compatible plan (then
-        // the wrapper fails closed before transport).
-        const modelCall = context.snapshot
-          ? buildModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1)
-          : null;
-        try {
+        // snapshot plan. Run-bound calls REQUIRE a compatible frozen plan — a
+        // legacy/no-plan snapshot abstains (no transport).
+        let modelCall: import('../classification/model-operation-registry').ModelCallContext | null = null;
+        let planBlocked = false;
+        if (context.snapshot) {
+          try {
+            modelCall = requireModelCallContext(context.snapshot, context.runId, 'evidence_extraction', 1);
+          } catch (err: any) {
+            planBlocked = true;
+            llmStatus = 'failed';
+            console.warn(
+              `[EvidenceExtraction] LLM text extraction abstained for SKU ${sku}: no compatible frozen plan — ${redactTransportText(err.message)}`,
+            );
+          }
+        }
+        if (!planBlocked) try {
           const prompt = `Extract the following attributes from this product text. Return ONLY valid JSON with these keys (omit any you cannot determine): {"flavor": "..." | null, "color": "..." | null, "material": "..." | null, "size": "..." | null, "lifeStage": "..." | null, "breedSize": "..." | null, "productForm": "..." | null, "healthConcern": "..." | null, "ingredientKeywords": ["..."]}. Do not guess. Only include values that are explicitly mentioned.\n\nProduct text:\n${allText.slice(0, 3000)}`;
 
           const response = await callLlmForTaskWithProvenance('classification_evidence_extraction', prompt, 'You are a precise product data extraction assistant. Return only valid JSON.', {
@@ -902,15 +968,18 @@ export async function extractProductEvidence(
         llmStatus = 'no_text';
       }
     } else {
-      // Preflight decided not to call the model (no config): the attempted
-      // call is still observable via a durable `unavailable` terminal row.
+      // Preflight decided not to call the model: the attempted call is still
+      // observable via exactly ONE durable terminal row. If a policy denial
+      // was already recorded above, do not also write `unavailable`.
       llmStatus = 'failed';
-      recordTerminalPreflight(
-        preflightModelCall,
-        evidencePolicyView?.policyDigest ?? '',
-        MODEL_CALL_STATUS.unavailable,
-        'No LLM config available for text evidence extraction.',
-      );
+      if (!preflightRecorded) {
+        recordTerminalPreflight(
+          preflightModelCall,
+          evidencePolicyView?.policyDigest ?? '',
+          MODEL_CALL_STATUS.unavailable,
+          'No LLM config available for text evidence extraction.',
+        );
+      }
     }
   }
 

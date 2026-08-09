@@ -29,7 +29,7 @@ const router = new Hono();
  */
 const CREDENTIAL_CONTENT_PATTERN =
   /(api[_-]?key|authorization|bearer\s|sk-[a-z0-9]{4,}|refresh_token|access_token|\{\s*"api_key|\{\s*"token)/i;
-const SECRET_KEY_PATTERN = /(api[_-]?key|authorization|token|secret|password)/i;
+const SECRET_KEY_PATTERN = /(api[_-]?key|authorization|bearer|token|secret|password|sk-|sk_)/i;
 
 function sanitizeForRunDetail(value: unknown): unknown {
   if (typeof value === 'string') {
@@ -253,7 +253,11 @@ router.get('/classification/runs/:id', (c) => {
   ) {
     try {
       const product = readProductFile(ws.workspacePath, run.productSku);
-      if (product && computeProductHash(product) !== run.sourceProductHash) {
+      // A completed run whose recorded source file has disappeared IS drift
+      // (null product = drift for completed runs, issue #17 pass 4c).
+      if (!product) {
+        sourceDrift = true;
+      } else if (computeProductHash(product) !== run.sourceProductHash) {
         sourceDrift = true;
       }
     } catch {

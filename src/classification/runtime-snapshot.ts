@@ -32,6 +32,7 @@ import {
   type ReviewedFact,
 } from './reviewed-facts';
 import { buildModelPolicyView } from './model-policy-gateway';
+import { getVlmConfig } from '../onboarding/vlm-client';
 import {
   buildModelExecutionPlan,
   buildRuntimeRuleVersions,
@@ -239,6 +240,24 @@ function resolveAuthorityFields(authority: RuntimeConfigAuthority): {
  * The snapshot hash covers every stage-visible field; `createdAt` and the
  * hash field itself are excluded so identical inputs produce identical hashes.
  */
+/**
+ * Capture the configured local VLM endpoint ONCE at snapshot build time.
+ * Returns null when the VLM is unconfigured/disabled so the plan entry
+ * carries no frozen route and run-bound local VLM calls fail closed. The
+ * captured base URL/model are the ONLY endpoint a run-bound local VLM call
+ * may use — never mutable settings read mid-run.
+ */
+function captureLocalVlmConfig(): { baseUrl: string; model: string } | null {
+  try {
+    const config = getVlmConfig();
+    if (!config || !config.enabled) return null;
+    return { baseUrl: config.baseUrl, model: config.model };
+  } catch {
+    // No DB / unreadable settings at snapshot build: fail closed (no route).
+    return null;
+  }
+}
+
 export function buildRuntimeSnapshot(input: RuntimeSnapshotInput): RuntimeClassificationSnapshot {
   if (!input.authority && !input.config) {
     throw new Error('buildRuntimeSnapshot requires either a runtime config authority or a legacy v1 config.');
@@ -288,11 +307,15 @@ export function buildRuntimeSnapshot(input: RuntimeSnapshotInput): RuntimeClassi
     pageContextReliability: 'low',
     // Schema-v2 only: freeze the model-execution plan + rule versions from the
     // v2 model policy. Legacy v1 snapshots carry no plan — a new model call
-    // from them fails closed (no compatible plan).
+    // from them fails closed (no compatible plan). The local VLM endpoint is
+    // captured ONCE at snapshot build time so a run-bound local VLM call
+    // can never read mutable `ollama_vlm` settings mid-run, and the audit row
+    // resolves locality from the ACTUAL base URL used (loopback ⇒ local).
     ...(isV2
       ? {
           modelExecutionPlan: buildModelExecutionPlan(
             buildModelPolicyView(fields.modelPolicy as Parameters<typeof buildModelPolicyView>[0]),
+            captureLocalVlmConfig(),
           ),
           runtimeRuleVersions: buildRuntimeRuleVersions(),
         }
@@ -558,6 +581,31 @@ export function getModelExecutionPlanEntry(
 ): ModelExecutionPlanEntry | null {
   if (!snapshot || snapshot.schemaVersion !== 2 || !snapshot.modelExecutionPlan) return null;
   return snapshot.modelExecutionPlan.entries.find(e => e.operation === operation) ?? null;
+}
+
+/**
+ * Build the durable model-call audit context for a run-bound protected call
+ * from the frozen snapshot plan, FAILING CLOSED when the snapshot has no
+ * compatible plan entry (legacy schema-v1 snapshot, missing entry, version
+ * drift). Returns null only for NON-run-bound callers (pre-run discovery,
+ * no snapshot) so the legacy/no-plan path stays available there.
+ */
+export function requireModelCallContext(
+  snapshot: RuntimeClassificationSnapshot | null | undefined,
+  runId: string,
+  operation: ProtectedOperation,
+  attempt: number,
+): ModelCallContext | null {
+  if (!snapshot) return null;
+  assertModelPlanCompatible(snapshot, operation);
+  const ctx = buildModelCallContext(snapshot, runId, operation, attempt);
+  if (!ctx) {
+    throw new Error(
+      `Model plan incompatible: run-bound ${operation} call has no compatible frozen plan ` +
+        `(legacy/no-plan snapshot).`,
+    );
+  }
+  return ctx;
 }
 
 /**

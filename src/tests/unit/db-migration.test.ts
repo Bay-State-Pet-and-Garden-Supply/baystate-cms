@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { unlinkSync } from 'node:fs';
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { getDb } from '../../db/connection';
@@ -228,6 +230,15 @@ describe('SQLite Migration', () => {
     // Idempotent re-run leaves the marker set.
     const marker = db.query('SELECT value FROM app_meta WHERE key = ?').get('model_calls_schema_version') as { value: string } | undefined;
     expect(marker?.value).toBe('1');
+  });
+
+  it('schema.sql defines classification_proposals with an executable model_call_ids_json column (pass 4c)', () => {
+    const schemaSql = fs.readFileSync(path.resolve(import.meta.dirname, '../../db/schema.sql'), 'utf-8');
+    // The proposals CREATE TABLE in schema.sql must carry the column
+    // definition (not merely a comment) so fresh DBs get it from schema.sql.
+    const proposalsBlock = schemaSql.match(/CREATE TABLE IF NOT EXISTS classification_proposals\s*\([^;]*?\);/s);
+    expect(proposalsBlock).not.toBeNull();
+    expect(proposalsBlock![0]).toContain('model_call_ids_json TEXT');
   });
 
   it('should support minimal classification audit inserts', () => {

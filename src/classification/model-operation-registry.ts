@@ -131,6 +131,14 @@ export interface ModelExecutionPlanEntry {
   fromOverride: boolean;
   promptTemplateVersion: string;
   ruleVersion: string;
+  /**
+   * Frozen local VLM endpoint (evidence_extraction local OCR only). Captured
+   * once at snapshot build time so the local VLM transport never reads
+   * mutable `ollama_vlm` settings mid-run; the audit row resolves locality
+   * from the ACTUAL base URL used (loopback ⇒ local).
+   */
+  localVlmBaseUrl?: string | null;
+  localVlmModel?: string | null;
 }
 
 /** Frozen model-execution plan of a run snapshot (v2+). */
@@ -218,8 +226,15 @@ export function verifyRuntimeRuleVersionsIntegrity(rules: RuntimeRuleVersions): 
  * come from the policy (stage override or default) and the declared locality
  * is recorded. The plan is a frozen intent — the gateway re-resolves the
  * route at call time and the call row records the actual provider/model.
+ *
+ * `localVlmConfig` (optional) freezes the local VLM endpoint/model for
+ * evidence_extraction local OCR at snapshot build time; when absent the entry
+ * carries no local route and run-bound local VLM calls fail closed.
  */
-export function buildModelExecutionPlan(view: ModelPolicyView): ModelExecutionPlan {
+export function buildModelExecutionPlan(
+  view: ModelPolicyView,
+  localVlmConfig?: { baseUrl: string; model: string } | null,
+): ModelExecutionPlan {
   const entries: ModelExecutionPlanEntry[] = RUN_BOUND_OPERATIONS.map(operation => {
     const stage = OPERATION_TO_STAGE[operation] as ClassificationStageName;
     const override = view.stageOverrides[stage];
@@ -235,6 +250,9 @@ export function buildModelExecutionPlan(view: ModelPolicyView): ModelExecutionPl
       fromOverride,
       promptTemplateVersion: PROMPT_TEMPLATE_VERSIONS[operation],
       ruleVersion: RULE_VERSIONS[operation],
+      ...(operation === 'evidence_extraction' && localVlmConfig
+        ? { localVlmBaseUrl: localVlmConfig.baseUrl, localVlmModel: localVlmConfig.model }
+        : {}),
     };
   });
   const payload = {

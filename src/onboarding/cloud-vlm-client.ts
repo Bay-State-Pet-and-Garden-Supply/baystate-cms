@@ -51,7 +51,17 @@ export interface CloudVlmParams {
 /**
  * Fetch a remote image, validate size, and return base64 + MIME type.
  * Logged URLs are redacted (query strings can carry signed credentials).
+ * Throws an `ImageFetchAbortError` on abort/timeout so the caller can record
+ * a durable `cancelled` terminal row (never a misleading `failed`); other
+ * failures return null.
  */
+export class ImageFetchAbortError extends Error {
+  constructor(message = 'Image fetch aborted') {
+    super(message);
+    this.name = 'ImageFetchAbortError';
+  }
+}
+
 async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeType: string } | null> {
   const logUrl = redactImageUrl(url);
   try {
@@ -87,6 +97,14 @@ async function fetchImageAsBase64(url: string): Promise<{ base64: string; mimeTy
 
     return { base64: buffer.toString('base64'), mimeType: contentType };
   } catch (err: any) {
+    const isAbort =
+      err?.name === 'AbortError' ||
+      err?.name === 'TimeoutError' ||
+      String(err?.message ?? '').toLowerCase().includes('abort');
+    if (isAbort) {
+      console.warn(`[CloudVlm] Image fetch aborted: ${logUrl}`);
+      throw new ImageFetchAbortError();
+    }
     console.warn(`[CloudVlm] Failed to fetch image ${logUrl}: ${redactTransportText(err.message)}`);
     return null;
   }
@@ -117,11 +135,20 @@ export async function extractPackagingOcrFromCloud(
   }
 
   // 0a. Fail closed on snapshot-plan compatibility BEFORE any config
-  //     resolution or transport: a run-bound cloud VLM call without a
-  //     compatible frozen plan (or with a forged call context) never
-  //     proceeds. Matches the audited LLM wrapper's boundary.
-  if (params.modelCall) {
+  //     resolution or transport: a run-bound cloud VLM call WITHOUT a
+  //     compatible frozen plan — or without an audit context at all — never
+  //     proceeds (issue #17 pass 4c). Only non-run-bound callers (no
+  //     snapshot) may take the legacy/no-plan path.
+  if (params.snapshot) {
     assertModelPlanCompatible(params.snapshot, 'evidence_extraction', params.modelCall);
+    if (!params.modelCall) {
+      throw new Error(
+        'Run-bound cloud VLM call without a model-call audit context (no compatible frozen plan).',
+      );
+    }
+  } else if (params.modelCall) {
+    // A supplied context without a snapshot cannot be validated: fail closed.
+    throw new Error('Cloud VLM call supplied a model-call audit context without a runtime snapshot.');
   }
 
   // 0. Resolve the vision route through the frozen policy BEFORE any
@@ -247,8 +274,24 @@ export async function extractPackagingOcrFromCloud(
 
 
   // 1. Get the image as base64 (image transport was already authorized by
-  //    the policy route resolution above).
-  const imageData = await fetchImageAsBase64(imageUrl);
+  //    the policy route resolution above). An aborted image fetch is a
+  //    cancellation — never a misleading `failed` row.
+  let imageData: { base64: string; mimeType: string } | null;
+  try {
+    imageData = await fetchImageAsBase64(imageUrl);
+  } catch (err: any) {
+    const isAbort = err instanceof ImageFetchAbortError;
+    markTerminal(
+      isAbort ? MODEL_CALL_STATUS.cancelled : MODEL_CALL_STATUS.failed,
+      isAbort
+        ? `Image fetch aborted: ${redactImageUrl(imageUrl)}`
+        : `Could not load image: ${redactTransportText(err?.message ?? String(err))}`,
+    );
+    console.warn(
+      `[CloudVlm] ${isAbort ? 'Cancelled' : 'Failed'} image fetch: ${redactImageUrl(imageUrl)} — ${redactTransportText(err?.message ?? String(err))}`,
+    );
+    return null;
+  }
   if (!imageData) {
     markTerminal(MODEL_CALL_STATUS.failed, `Could not load image: ${redactImageUrl(imageUrl)}`);
     console.warn(`[CloudVlm] Could not load image: ${redactImageUrl(imageUrl)}`);

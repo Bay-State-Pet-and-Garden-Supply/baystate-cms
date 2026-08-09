@@ -11,18 +11,18 @@
  * them as URLs). We fetch them in-memory — no local download required.
  */
 
-import { getVlmConfig, callVlm } from './vlm-client';
-import { redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
+import { getVlmConfig, callVlm, type VlmConfig } from './vlm-client';
+import { isLoopbackBaseUrl, redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
 import {
   computePromptHashes,
   MODEL_CALL_STATUS,
   COST_BASIS,
   type ModelCallContext,
 } from '../classification/model-operation-registry';
-import { assertModelPlanCompatible } from '../classification/runtime-snapshot';
 import {
   insertModelCallStart,
   completeModelCall,
+  recordTerminalPreflight,
 } from '../db/repositories/classification-model-call-repo';
 import { PackagingOcrDataSchema } from '../shared/schemas/onboarding';
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
@@ -355,6 +355,15 @@ export interface ExtractPackagingOcrParams {
   modelCall?: ModelCallContext | null;
   /** Runtime snapshot the call is bound to (plan compatibility). */
   snapshot?: import('../classification/runtime-snapshot').RuntimeClassificationSnapshot | null;
+  /**
+   * Frozen local VLM route from the run snapshot plan entry. When provided
+   * (run-bound), the transport uses ONLY this base URL/model — never mutable
+   * `ollama_vlm` settings — and locality is resolved from the ACTUAL URL used
+   * (loopback ⇒ local; non-loopback ⇒ deny before transport).
+   */
+  frozenVlmRoute?: { baseUrl: string; model: string } | null;
+  /** Frozen model-policy digest bound to the snapshot (for the audit row). */
+  modelPolicyDigest?: string | null;
 }
 
 /**
@@ -376,32 +385,58 @@ export async function extractPackagingOcr(
 ): Promise<(PackagingOcrData & { contentHash: string | null }) | null> {
   const { imageUrl, workspacePath, imageLocalPath, imageSourceUrl, sku, fetchFn, modelFetchFn } = params;
 
-  const vlmConfig = getVlmConfig();
-  if (!vlmConfig?.enabled) {
-    console.log(`[PackagingOcr] VLM not enabled — skipping OCR for ${sku ?? imageUrl}`);
-    return null;
-  }
-
-  // Load the image
-  const base64Image = await loadProductImageAsBase64(imageUrl, workspacePath, imageLocalPath, fetchFn);
-  if (!base64Image) {
-    console.warn(`[PackagingOcr] Could not load image for OCR: ${imageUrl}`);
-    return null;
-  }
-
-  // Round-4: byte-hash binding — the SHA-256 of the EXACT downloaded bytes.
-  // OCR facts are bound to this hash so image A's facts can never authorize
-  // identity while image B is being inspected.
-  const contentHash = sha256Hex(Buffer.from(base64Image, 'base64'));
-
-  // Durable audit for run-bound local VLM calls (issue #17 E): fail closed on
-  // plan compatibility, insert the `started` row BEFORE transport, and write a
-  // terminal row on every path so the local VLM output is observable. Without
-  // a durable start row the model is never invoked.
   const auditCtx = params.modelCall ?? null;
+  const runBound = Boolean(params.snapshot);
+
+  // Resolve the local VLM route. Run-bound calls MUST use the frozen route
+  // captured in the snapshot plan (never mutable `ollama_vlm` settings) and
+  // MUST pass plan compatibility. A run-bound call without a frozen route or
+  // with a non-loopback frozen URL is denied BEFORE any transport (image
+  // fetch or model call) and recorded as `policy_denied` — never a false
+  // 'local' success row.
+  let vlmConfig: VlmConfig | null;
+  let routeLocality: 'local' | null = null;
+  if (runBound) {
+    if (!auditCtx) {
+      throw new Error(
+        'Run-bound local VLM call without a model-call audit context (no compatible frozen plan).',
+      );
+    }
+    const frozen = params.frozenVlmRoute ?? null;
+    if (!frozen) {
+      recordTerminalPreflight(
+        auditCtx,
+        params.modelPolicyDigest ?? '',
+        MODEL_CALL_STATUS.policyDenied,
+        'Local VLM route denied: no frozen local VLM route in the run snapshot plan.',
+      );
+      return null;
+    }
+    if (!isLoopbackBaseUrl(frozen.baseUrl)) {
+      recordTerminalPreflight(
+        auditCtx,
+        params.modelPolicyDigest ?? '',
+        MODEL_CALL_STATUS.policyDenied,
+        `Local VLM route denied: frozen base URL ${redactImageUrl(frozen.baseUrl)} is not loopback.`,
+      );
+      return null;
+    }
+    vlmConfig = { baseUrl: frozen.baseUrl, model: frozen.model, enabled: true };
+    routeLocality = 'local';
+  } else {
+    vlmConfig = getVlmConfig();
+    if (!vlmConfig?.enabled) {
+      console.log(`[PackagingOcr] VLM not enabled — skipping OCR for ${sku ?? imageUrl}`);
+      return null;
+    }
+  }
+
+  // Durable audit for run-bound local VLM calls (issue #17 E): insert the
+  // `started` row BEFORE any transport (image fetch + model call) so the
+  // model is never invoked without provenance. Without a durable start row
+  // the model is never invoked.
   let callId: string | null = null;
   if (auditCtx) {
-    assertModelPlanCompatible(params.snapshot, 'evidence_extraction', auditCtx);
     const hashes = computePromptHashes(PACKAGING_OCR_PROMPT, '');
     callId = insertModelCallStart({
       runId: auditCtx.runId,
@@ -409,16 +444,37 @@ export async function extractPackagingOcr(
       operation: auditCtx.operation,
       attempt: auditCtx.attempt,
       provider: 'ollama',
-      model: vlmConfig.model,
-      locality: 'local',
+      model: vlmConfig?.model ?? 'unknown',
+      locality: routeLocality ?? null,
       snapshotHash: auditCtx.snapshotHash,
-      modelPolicyDigest: '',
+      modelPolicyDigest: params.modelPolicyDigest ?? '',
       promptTemplateVersion: auditCtx.promptTemplateVersion,
       ruleVersion: auditCtx.ruleVersion,
       systemPromptHash: hashes.systemPromptHash,
       userPromptHash: hashes.userPromptHash,
     });
   }
+
+  // Load the image
+  const base64Image = await loadProductImageAsBase64(imageUrl, workspacePath, imageLocalPath, fetchFn);
+  if (!base64Image) {
+    console.warn(`[PackagingOcr] Could not load image for OCR: ${imageUrl}`);
+    if (callId) {
+      completeModelCall(callId, {
+        status: MODEL_CALL_STATUS.failed,
+        durationMs: 0,
+        errorMessage: 'Could not load image for OCR.',
+        estimatedCostUsd: routeLocality === 'local' ? 0 : null,
+        costBasis: routeLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
+      });
+    }
+    return null;
+  }
+
+  // Round-4: byte-hash binding — the SHA-256 of the EXACT downloaded bytes.
+  // OCR facts are bound to this hash so image A's facts can never authorize
+  // identity while image B is being inspected.
+  const contentHash = sha256Hex(Buffer.from(base64Image, 'base64'));
 
   const startedAt = Date.now();
   let terminalWritten = false;
@@ -432,8 +488,8 @@ export async function extractPackagingOcr(
       status,
       durationMs: Date.now() - startedAt,
       errorMessage,
-      estimatedCostUsd: 0,
-      costBasis: COST_BASIS.localZero,
+      estimatedCostUsd: routeLocality === 'local' ? 0 : null,
+      costBasis: routeLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
     });
   };
 
@@ -587,8 +643,26 @@ export function mergeOcrResults(results: PackagingOcrData[]): PackagingOcrData {
   }
   merged.confidenceByField = mergedConfidence;
 
-  // metadata — keep the primary image's (first result)
-  merged.metadata = results[0].metadata;
+  // metadata — keep the primary image's metadata, but UNION the durable
+  // model-call IDs across ALL images' results so every influencing call is
+  // traceable from the merged OCR evidence (issue #17 pass 4c). A call that
+  // supplied a value selected by the merge must never be dropped.
+  const callIdUnion = new Set<string>();
+  for (const r of results) {
+    const ids = (r.metadata as { modelCallIds?: string[] } | null)?.modelCallIds ?? [];
+    if (Array.isArray(ids)) {
+      for (const id of ids) {
+        if (id && typeof id === 'string') callIdUnion.add(id);
+      }
+    }
+  }
+  const mergedMetadata = results[0].metadata
+    ? { ...results[0].metadata }
+    : (callIdUnion.size > 0 ? {} : null);
+  if (callIdUnion.size > 0 && mergedMetadata) {
+    (mergedMetadata as { modelCallIds?: string[] }).modelCallIds = [...callIdUnion];
+  }
+  merged.metadata = mergedMetadata;
 
   return merged as PackagingOcrData;
 }

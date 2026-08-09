@@ -343,10 +343,28 @@ CREATE INDEX IF NOT EXISTS idx_benchmark_qualification_receipts_digest ON benchm
 
 -- ─── Classification model-call provenance (issue #17 E) ────────────────────
 -- Durable per-call observability for protected model calls bound to a
--- classification run. classification_runs / classification_proposals are
--- created by classification-migration.sql (loaded in runMigrations); the
--- proposal column model_call_ids_json is added by the guarded
--- model_calls_schema_version migration so old-shape upgrade DBs stay valid.
+-- classification run. classification_runs is created by
+-- classification-migration.sql (loaded in runMigrations). The proposals table
+-- carries model_call_ids_json here (executable fresh-DB definition mirroring
+-- classification-migration.sql); the guarded model_calls_schema_version
+-- migration adds the column to old-shape upgrade DBs that lack it.
+CREATE TABLE IF NOT EXISTS classification_proposals (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
+  product_sku TEXT NOT NULL,
+  proposal_type TEXT NOT NULL CHECK (proposal_type IN ('primary_product_type', 'category_page', 'field_assignment', 'configuration_gap', 'reviewable_abstention')),
+  target_id TEXT,
+  proposed_value_json TEXT,
+  confidence REAL NOT NULL DEFAULT 0 CHECK (confidence >= 0 AND confidence <= 1),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected', 'deferred', 'stale')),
+  is_bulk_acceptable INTEGER NOT NULL DEFAULT 0 CHECK (is_bulk_acceptable IN (0, 1)),
+  is_stale INTEGER NOT NULL DEFAULT 0 CHECK (is_stale IN (0, 1)),
+  staleness_reason TEXT,
+  config_snapshot_hash TEXT,
+  model_call_ids_json TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS classification_model_calls (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES classification_runs(id) ON DELETE CASCADE,
