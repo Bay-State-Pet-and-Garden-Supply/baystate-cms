@@ -24,6 +24,7 @@ import type {
   PipelineStage,
   StageStatus,
   BrandSite,
+  ResolveSourcingRequest,
 } from '../../shared/schemas/onboarding';
 import type {
   ClassificationProposal,
@@ -54,6 +55,8 @@ import { ProductImageGallery } from './pipeline-drawer/ProductImageGallery';
 import { DiscoveryStagePanel } from './pipeline-drawer/DiscoveryStagePanel';
 import { ExtractionStagePanel } from './pipeline-drawer/ExtractionStagePanel';
 import { CurationStagePanel } from './pipeline-drawer/CurationStagePanel';
+import { SourcingStagePanel } from './pipeline-drawer/SourcingStagePanel';
+import { SourcingIdentitySummary } from './pipeline-drawer/SourcingIdentitySummary';
 import { readinessViewFromReport } from '../classification-readiness-view';
 
 const STAGES: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
@@ -164,6 +167,7 @@ export function PipelineBoard({
   const reviewItemRef = React.useRef<string | null>(null);
   const reviewGenerationRef = React.useRef(0);
   const [reviewSources, setReviewSources] = useState<OnboardingSource[]>([]);
+  const [reviewEvidenceAttempts, setReviewEvidenceAttempts] = useState<any[]>([]);
   const [reviewExtraction, setReviewExtraction] = useState<ExtractionData | null>(null);
   const [editFields, setEditFields] = useState<Partial<ExtractionData>>({});
   const [activeImageIdx, setActiveImageIdx] = useState(0);
@@ -669,6 +673,7 @@ export function PipelineBoard({
 
       setReviewItem(res.item);
       setReviewSources(res.sources);
+      setReviewEvidenceAttempts(res.evidenceAttempts ?? []);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
       // Prefer extraction from the dedicated extractions table, then fall
       // back to extraction_data_json stored on the item itself so the
@@ -1174,6 +1179,33 @@ export function PipelineBoard({
   const proposalControlsDisabled = reviewTransitioning || Boolean(
     reviewItem && getDecisionTransport(reviewItem.id).decisionQueue.hasFailure(),
   );
+
+  const handleResolveSourcing = async (request: ResolveSourcingRequest) => {
+    if (!reviewItem) return;
+    setSaveStatus('saving');
+    setSaveError(null);
+    try {
+      const res = await fetch(`/api/onboarding/items/${reviewItem.id}/resolve-sourcing`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to resolve sourcing');
+      }
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 1500);
+
+      const detail = await getItemDetail(reviewItem.id);
+      setReviewItem(detail.item);
+      setReviewEvidenceAttempts(detail.evidenceAttempts ?? []);
+      await fetchStaged();
+    } catch (err) {
+      setSaveStatus('error');
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -1729,72 +1761,94 @@ export function PipelineBoard({
           onApproveAndNext={handleApproveAndNext}
           onAdvanceStage={handleAdvanceSingle}
           leftColumnContent={
-            <ProductImageGallery
-              primaryImage={editFields.primaryImage || null}
-              additionalImages={editFields.additionalImages || []}
-              activeImageIdx={activeImageIdx}
-              setActiveImageIdx={setActiveImageIdx}
-              manualImageUrl={manualImageUrl}
-              setManualImageUrl={setManualImageUrl}
-              onSetPrimary={(newPrimary) => {
-                const oldPrimary = editFields.primaryImage;
-                const newAdditional = [
-                  ...(oldPrimary ? [oldPrimary] : []),
-                  ...(editFields.additionalImages || []).filter((x) => x !== newPrimary),
-                ];
-                const nextEdit = {
-                  ...editFields,
-                  primaryImage: newPrimary,
-                  additionalImages: newAdditional,
-                };
-                setEditFields(nextEdit);
-                saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
-              }}
-              onRemoveImage={(urlToRemove, isPrimary) => {
-                let nextEdit;
-                const additional = editFields.additionalImages || [];
-                if (isPrimary) {
-                  const newPrimary = additional[0] || null;
-                  const newAdditional = additional.slice(1);
-                  nextEdit = {
+            reviewItem.stage === 'sourcing' ? (
+              <SourcingIdentitySummary reviewItem={reviewItem} />
+            ) : (
+              <ProductImageGallery
+                primaryImage={editFields.primaryImage || null}
+                additionalImages={editFields.additionalImages || []}
+                activeImageIdx={activeImageIdx}
+                setActiveImageIdx={setActiveImageIdx}
+                manualImageUrl={manualImageUrl}
+                setManualImageUrl={setManualImageUrl}
+                onSetPrimary={(newPrimary) => {
+                  const oldPrimary = editFields.primaryImage;
+                  const newAdditional = [
+                    ...(oldPrimary ? [oldPrimary] : []),
+                    ...(editFields.additionalImages || []).filter((x) => x !== newPrimary),
+                  ];
+                  const nextEdit = {
                     ...editFields,
                     primaryImage: newPrimary,
                     additionalImages: newAdditional,
                   };
-                } else {
-                  nextEdit = {
-                    ...editFields,
-                    additionalImages: additional.filter((x) => x !== urlToRemove),
-                  };
-                }
-                setEditFields(nextEdit);
-                saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
-                setActiveImageIdx((prev) => Math.max(0, prev - 1));
-              }}
-              onAddManualUrl={(urlToAdd) => {
-                let nextEdit;
-                if (!editFields.primaryImage) {
-                  nextEdit = { ...editFields, primaryImage: urlToAdd };
-                  setActiveImageIdx(0);
-                } else {
+                  setEditFields(nextEdit);
+                  saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
+                }}
+                onRemoveImage={(urlToRemove, isPrimary) => {
+                  let nextEdit;
                   const additional = editFields.additionalImages || [];
-                  if (!additional.includes(urlToAdd) && editFields.primaryImage !== urlToAdd) {
+                  if (isPrimary) {
+                    const newPrimary = additional[0] || null;
+                    const newAdditional = additional.slice(1);
                     nextEdit = {
                       ...editFields,
-                      additionalImages: [...additional, urlToAdd],
+                      primaryImage: newPrimary,
+                      additionalImages: newAdditional,
                     };
-                    setActiveImageIdx((editFields.primaryImage ? 1 : 0) + additional.length);
                   } else {
-                    nextEdit = editFields;
+                    nextEdit = {
+                      ...editFields,
+                      additionalImages: additional.filter((x) => x !== urlToRemove),
+                    };
                   }
-                }
-                setEditFields(nextEdit);
-                saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
-              }}
-            />
+                  setEditFields(nextEdit);
+                  saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
+                  setActiveImageIdx((prev) => Math.max(0, prev - 1));
+                }}
+                onAddManualUrl={(urlToAdd) => {
+                  let nextEdit;
+                  if (!editFields.primaryImage) {
+                    nextEdit = { ...editFields, primaryImage: urlToAdd };
+                    setActiveImageIdx(0);
+                  } else {
+                    const additional = editFields.additionalImages || [];
+                    if (!additional.includes(urlToAdd) && editFields.primaryImage !== urlToAdd) {
+                      nextEdit = {
+                        ...editFields,
+                        additionalImages: [...additional, urlToAdd],
+                      };
+                      setActiveImageIdx((editFields.primaryImage ? 1 : 0) + additional.length);
+                    } else {
+                      nextEdit = editFields;
+                    }
+                  }
+                  setEditFields(nextEdit);
+                  saveItemChangesQuietly(reviewItem.id, nextEdit, curationFields);
+                }}
+              />
+            )
           }
           rightColumnContent={
             <>
+              {reviewItem.stage === 'sourcing' && (
+                <SourcingStagePanel
+                  reviewItem={reviewItem}
+                  evidenceAttempts={reviewEvidenceAttempts}
+                  onResolveSourcing={handleResolveSourcing}
+                  onRetrySourcing={async () => {
+                    if (!reviewItem) return;
+                    await resetStageItems([reviewItem.id]);
+                    const detail = await getItemDetail(reviewItem.id);
+                    setReviewItem(detail.item);
+                    if (detail.evidenceAttempts) {
+                      setReviewEvidenceAttempts(detail.evidenceAttempts);
+                    }
+                    await fetchStaged();
+                  }}
+                />
+              )}
+
               {reviewItem.stage === 'discovery' && (
                 <DiscoveryStagePanel
                   reviewItem={reviewItem}

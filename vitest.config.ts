@@ -107,6 +107,7 @@ export default defineConfig({
       'src/tests/unit/embedding-routes.test.ts',
       'src/tests/unit/classification-page-snapshot.test.ts',
       'src/tests/unit/classification-readiness-routes.test.ts',
+      'src/tests/unit/sourcing-resolution.test.ts',
     ],
   },
 });

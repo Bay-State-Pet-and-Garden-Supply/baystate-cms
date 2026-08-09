@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { getLocalRuntimeStatus } from '../../ai/local-runtime-coordinator';
 import { streamSSE } from 'hono/streaming';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,8 +31,11 @@ import {
   sendItemsToPreviousStage,
   skipItems,
   getWeeklyReportItems,
+  updateSourcingDecision,
 } from '../../db/repositories/onboarding-item-repo';
-import type { PipelineStage } from '../../shared/schemas/onboarding';
+import type { PipelineStage, SourcingDecision } from '../../shared/schemas/onboarding';
+import { ResolveSourcingRequestSchema } from '../../shared/schemas/onboarding';
+import { getEvidenceAttemptsForItem } from '../../db/repositories/onboarding-evidence-repo';
 import { convertToLbs } from '../../shared/weight-converter';
 import {
   listSourcesByItem,
@@ -839,10 +843,13 @@ route.get('/onboarding/items/:id', async (c) => {
       }
     : item;
 
+  const evidenceAttempts = getEvidenceAttemptsForItem(itemId);
+
   return c.json({
     item: hydratedItem,
     sources,
     extraction: extractionData,
+    evidenceAttempts,
     consistencyWarnings,
   });
 });
@@ -1094,6 +1101,54 @@ route.post('/onboarding/items/:id/skip', (c) => {
   return c.json({ success: true });
 });
 
+/**
+ * POST /api/onboarding/items/:id/resolve-sourcing
+ * Resolves sourcing conflicts by either choosing an evidence attempt bundle or falling back to Discovery.
+ */
+route.post('/onboarding/items/:id/resolve-sourcing', async (c) => {
+  const itemId = c.req.param('id');
+  const body = await c.req.json();
+
+  const parseResult = ResolveSourcingRequestSchema.safeParse(body);
+  if (!parseResult.success) {
+    return c.json({ error: 'Invalid resolve sourcing payload', details: parseResult.error.format() }, 400);
+  }
+
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Onboarding item not found' }, 404);
+  }
+
+  const data = parseResult.data;
+  const now = new Date().toISOString();
+
+  if (data.action === 'use_selected_bundle') {
+    const decision: SourcingDecision = {
+      route: 'bundle_to_curation',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: data.selectedAttemptIds,
+      providerIds: [],
+      conflicts: [],
+      warnings: [],
+      decidedAt: now,
+    };
+    updateSourcingDecision(itemId, decision);
+  } else if (data.action === 'fallback_to_discovery') {
+    const decision: SourcingDecision = {
+      route: 'fallback_to_discovery',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: [],
+      providerIds: [],
+      conflicts: [],
+      warnings: [],
+      decidedAt: now,
+    };
+    updateSourcingDecision(itemId, decision, 'discovery');
+  }
+
+  return c.json({ success: true, item: findItemById(itemId) });
+});
+
 // ─── DEPRECATED BATCH LIFECYCLE ROUTES ─────────────────────────────────────────
 // These remain for backward compatibility during migration.
 // Use /onboarding/items/advance in the new stage-based model.
@@ -1123,7 +1178,15 @@ const KNOWN_DEEPSEEK_MODELS = [
   'deepseek-reasoner',
 ];
 
+route.get('/onboarding/settings/ollama/status', async (c) => {
+  const row = getApiKey('ollama');
+  const baseUrl = row?.base_url || 'http://localhost:11434';
+  const status = await getLocalRuntimeStatus(baseUrl);
+  return c.json(status);
+});
+
 route.get('/onboarding/settings/ollama/models', async (c) => {
+
   const row = getApiKey('ollama');
   const storedBaseUrl = row?.base_url || 'http://localhost:11434/v1';
 

@@ -222,10 +222,47 @@ interface LlmTaskConfigRowProps {
   onCleared: () => Promise<void> | void;
 }
 
+const RECOMMENDED_MODELS: Record<string, { provider: LlmProvider; model: string; label: string }> = {
+  brand_inference: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
+  product_name_consolidation: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
+  product_field_refactor: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
+  store_manager_assistant: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
+};
+
+function getModelCapabilityBadges(modelName: string): string[] {
+  const m = modelName.toLowerCase();
+  const badges: string[] = [];
+
+  if (m.includes('gemma4') || m.includes('qwen3.5') || m.includes('ministral') || m.includes('ollama')) {
+    badges.push('⚡ Local');
+  } else {
+    badges.push('☁️ Cloud');
+  }
+
+  if (m.includes('gemma') || m.includes('qwen') || m.includes('mini') || m.includes('deepseek') || m.includes('gpt')) {
+    badges.push('Tools');
+    badges.push('JSON');
+  }
+
+  if (m.includes('vl') || m.includes('4o') || m.includes('gemma4')) {
+    badges.push('Vision');
+  }
+
+  if (m.includes('reason') || m.includes('pro') || m.includes('qwen3.5') || m.includes('gemma4')) {
+    badges.push('Reasoning');
+  }
+
+  return badges;
+}
+
 function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
   const { task, config, onSaved, onCleared } = props;
   const [provider, setProvider] = useState<LlmProvider>(config?.provider ?? 'deepseek');
   const [model, setModel] = useState<string>(config?.model ?? '');
+  const [fallbackProvider, setFallbackProvider] = useState<LlmProvider | ''>((config as any)?.fallbackProvider ?? '');
+  const [fallbackModel, setFallbackModel] = useState<string>((config as any)?.fallbackModel ?? '');
+  const [showEscalation, setShowEscalation] = useState<boolean>(Boolean((config as any)?.fallbackProvider));
+
   const [temperature, setTemperature] = useState<string>(
     config?.temperature !== null && config?.temperature !== undefined ? String(config.temperature) : '',
   );
@@ -242,11 +279,13 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
   useEffect(() => {
     setProvider(config?.provider ?? 'deepseek');
     setModel(config?.model ?? '');
+    setFallbackProvider((config as any)?.fallbackProvider ?? '');
+    setFallbackModel((config as any)?.fallbackModel ?? '');
     setTemperature(
       config?.temperature !== null && config?.temperature !== undefined ? String(config.temperature) : '',
     );
     setReasoningEffort((config as any)?.reasoningEffort ?? '');
-  }, [config?.id, config?.provider, config?.model, config?.temperature, (config as any)?.reasoningEffort]);
+  }, [config?.id, config?.provider, config?.model, (config as any)?.fallbackProvider, (config as any)?.fallbackModel, config?.temperature, (config as any)?.reasoningEffort]);
 
   // Fetch models when provider changes
   const loadModels = useCallback(async (p: LlmProvider) => {
@@ -254,7 +293,6 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
     try {
       const models = await fetchModelsForProvider(p);
       setAvailableModels(models);
-      // Auto-select first model if current model isn't in the list
       if (models.length > 0 && !models.includes(model) && !model) {
         setModel(models[0]);
       }
@@ -271,6 +309,8 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
 
   const required = REQUIRED_TASKS.includes(task);
   const missing = !config;
+  const recommendation = RECOMMENDED_MODELS[task];
+  const capabilityBadges = getModelCapabilityBadges(model);
 
   const handleSave = async () => {
     setError('');
@@ -289,6 +329,8 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
       await upsertLlmTaskConfig(task, {
         provider,
         model: model.trim(),
+        fallbackProvider: fallbackProvider ? fallbackProvider : null,
+        fallbackModel: fallbackModel.trim() ? fallbackModel.trim() : null,
         baseUrlOverride: null,
         temperature: temperatureNum,
         reasoningEffort: reasoningEffort || null,
@@ -327,6 +369,21 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
         <div>
           <strong style={{ fontSize: 13 }}>{TASK_LABELS[task]}</strong>
+          {recommendation && (
+            <span
+              style={{
+                marginLeft: 8,
+                fontSize: 11,
+                fontWeight: 500,
+                color: '#166534',
+                background: '#dcfce7',
+                padding: '2px 6px',
+                borderRadius: 4,
+              }}
+            >
+              {recommendation.label}
+            </span>
+          )}
           {required && (
             <span
               style={{
@@ -375,7 +432,28 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
           </button>
         )}
       </div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        {capabilityBadges.map((badge) => (
+          <span
+            key={badge}
+            style={{
+              fontSize: 10,
+              fontWeight: 500,
+              color: '#4b5563',
+              background: '#f3f4f6',
+              padding: '1px 6px',
+              borderRadius: 4,
+              border: '1px solid #e5e7eb',
+            }}
+          >
+            {badge}
+          </span>
+        ))}
+      </div>
+
       <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 8px' }}>{TASK_HINTS[task]}</p>
+
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <label style={{ fontSize: 12 }}>
           <span style={{ display: 'block', color: '#4b5563', marginBottom: 2 }}>Provider</span>
@@ -487,6 +565,23 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
         </label>
         <button
           type="button"
+          onClick={() => setShowEscalation(!showEscalation)}
+          style={{
+            background: 'none',
+            border: '1px solid #d1d5db',
+            borderRadius: 4,
+            padding: '5px 10px',
+            fontSize: 11,
+            color: '#4b5563',
+            cursor: 'pointer',
+            alignSelf: 'flex-end',
+            marginBottom: 1,
+          }}
+        >
+          {showEscalation ? 'Hide Escalation' : 'Escalation & Fallback'}
+        </button>
+        <button
+          type="button"
           onClick={handleSave}
           disabled={busy}
           style={{
@@ -505,9 +600,64 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
           {busy ? 'Saving…' : 'Save'}
         </button>
       </div>
+
+      {showEscalation && (
+        <div
+          style={{
+            marginTop: 10,
+            padding: 10,
+            borderRadius: 6,
+            background: '#f9fafb',
+            border: '1px solid #e5e7eb',
+            display: 'flex',
+            gap: 12,
+            alignItems: 'center',
+          }}
+        >
+          <span style={{ fontSize: 12, fontWeight: 600, color: '#374151', minWidth: 120 }}>
+            ☁️ Cloud Fallback:
+          </span>
+          <label style={{ fontSize: 12 }}>
+            <span style={{ display: 'block', color: '#6b7280', marginBottom: 2 }}>Fallback Provider</span>
+            <select
+              value={fallbackProvider}
+              onChange={(e) => setFallbackProvider(e.target.value as LlmProvider | '')}
+              disabled={busy}
+              style={{ padding: '4px 6px', border: '1px solid #d1d5db', borderRadius: 4, fontSize: 12 }}
+            >
+              <option value="">None (Fail / Local Only)</option>
+              {PROVIDERS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label style={{ fontSize: 12, flex: 1 }}>
+            <span style={{ display: 'block', color: '#6b7280', marginBottom: 2 }}>Fallback Model</span>
+            <input
+              type="text"
+              value={fallbackModel}
+              onChange={(e) => setFallbackModel(e.target.value)}
+              disabled={busy}
+              placeholder="e.g. deepseek-v4-flash"
+              style={{
+                width: '100%',
+                padding: '4px 6px',
+                border: '1px solid #d1d5db',
+                borderRadius: 4,
+                fontSize: 12,
+                boxSizing: 'border-box',
+              }}
+            />
+          </label>
+        </div>
+      )}
+
       {error && (
         <p style={{ color: '#dc2626', fontSize: 12, margin: '6px 0 0' }}>{error}</p>
       )}
     </div>
   );
 }
+

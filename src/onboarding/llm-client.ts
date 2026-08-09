@@ -57,26 +57,7 @@ import {
   computeModelCallCost,
 } from '../db/repositories/classification-model-call-repo';
 
-// ── LLM Concurrency Gate ──────────────────────────────────────────────────────
-// Local Ollama models buckle under parallel requests. Serialize so only one
-// callLlm() runs at a time, preventing 3× concurrent timeout pile-ups.
-let llmBusy = false;
-const llmQueue: Array<() => void> = [];
-
-async function acquireLlmSlot(provider: string): Promise<void> {
-  if (provider !== 'ollama') return; // Cloud providers can handle parallelism
-  while (llmBusy) {
-    await new Promise<void>(resolve => llmQueue.push(resolve));
-  }
-  llmBusy = true;
-}
-
-function releaseLlmSlot(provider: string): void {
-  if (provider !== 'ollama') return;
-  llmBusy = false;
-  const next = llmQueue.shift();
-  if (next) next();
-}
+import { acquireLocalSlot as acquireLlmSlot, releaseLocalSlot as releaseLlmSlot } from '../ai/local-runtime-coordinator';
 
 export interface LlmConfig {
   provider: LlmProvider;

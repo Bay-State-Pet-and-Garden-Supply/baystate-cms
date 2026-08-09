@@ -889,4 +889,30 @@ describe('SQLite Migration', () => {
     expect(sql).toContain("relation TEXT NOT NULL DEFAULT 'legacy' CHECK");
   });
 
+  it('handles upgrade DB where classification_proposal_evidence lacks relation column and evidence_citation_schema_version is set', () => {
+    const db = getDb();
+    db.exec('DROP TABLE IF EXISTS classification_proposal_evidence_old;');
+    db.exec('DROP TABLE IF EXISTS classification_proposal_evidence;');
+    db.exec(`
+      CREATE TABLE classification_proposal_evidence (
+        proposal_id TEXT NOT NULL,
+        evidence_id TEXT NOT NULL,
+        PRIMARY KEY (proposal_id, evidence_id)
+      )
+    `);
+    db.exec("INSERT INTO classification_proposal_evidence (proposal_id, evidence_id) VALUES ('p1', 'e1')");
+    db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('evidence_citation_schema_version', '1')");
+
+    expect(() => runMigrations()).not.toThrow();
+
+    const joinSql = db.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposal_evidence'",
+    ).get() as { sql: string };
+    expect(joinSql.sql).toContain('relation');
+    expect(/CHECK\s*\(/.test(joinSql.sql)).toBe(true);
+
+    const row = db.query("SELECT relation FROM classification_proposal_evidence WHERE proposal_id = 'p1'").get() as { relation: string };
+    expect(row.relation).toBe('legacy');
+  });
+
 });

@@ -27,42 +27,13 @@ import {
 import { getProductWithDraft } from '../services/product-service';
 import { getLlmConfigForTask } from '../../onboarding/llm-client';
 
+import { computeApiCost } from '../../ai/model-pricing';
+
 const route = new Hono();
 
 // Global map to track the latest usage tokens for active streaming chats
 const lastStreamUsage = new Map<string, { promptTokens: number; completionTokens: number; model: string }>();
 
-/**
- * Calculates prompt and completion token costs based on model-specific pricing rates.
- */
-function calculateCost(model: string, promptTokens: number, completionTokens: number): number {
-  let inputRate = 0; // per 1M tokens
-  let outputRate = 0; // per 1M tokens
-
-  const modelLower = model.toLowerCase();
-  if (modelLower.includes('deepseek')) {
-    if (modelLower.includes('pro')) {
-      inputRate = 0.55;
-      outputRate = 2.19;
-    } else {
-      inputRate = 0.14;
-      outputRate = 0.28;
-    }
-  } else if (modelLower.includes('gpt-4o-mini')) {
-    inputRate = 0.15;
-    outputRate = 0.60;
-  } else if (modelLower.includes('gpt-4o')) {
-    inputRate = 2.50;
-    outputRate = 10.00;
-  } else {
-    // Local Ollama models are free
-    return 0;
-  }
-
-  const inputCost = (promptTokens / 1000000) * inputRate;
-  const outputCost = (completionTokens / 1000000) * outputRate;
-  return inputCost + outputCost;
-}
 
 /**
  * POST /api/store-manager/chat
@@ -343,12 +314,12 @@ route.post('/store-manager/chat/:threadId/save', async (c) => {
     if (usageInfo && messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.usage) {
-        const cost = calculateCost(usageInfo.model, usageInfo.promptTokens, usageInfo.completionTokens);
+        const { estimatedApiCostUsd } = computeApiCost('', usageInfo.model, null, usageInfo.promptTokens, usageInfo.completionTokens);
         lastMsg.usage = {
           promptTokens: usageInfo.promptTokens,
           completionTokens: usageInfo.completionTokens,
           model: usageInfo.model,
-          cost,
+          cost: estimatedApiCostUsd ?? 0,
         };
         lastStreamUsage.delete(threadId);
       }

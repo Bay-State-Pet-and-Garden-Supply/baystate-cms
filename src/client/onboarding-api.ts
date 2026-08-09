@@ -264,6 +264,7 @@ export interface ItemDetailResponse {
   item: OnboardingItem;
   sources: OnboardingSource[];
   extraction: ExtractionData | null;
+  evidenceAttempts?: any[];
   consistencyWarnings: ConsistencyWarning[];
 }
 
@@ -492,6 +493,19 @@ export async function getOllamaModels(baseUrl?: string): Promise<{ models: strin
   return request<{ models: string[] }>(`/settings/ollama/models${qs}`);
 }
 
+export interface LocalRuntimeStatusResponse {
+  maxConcurrency: number;
+  activeRequests: number;
+  queuedRequests: number;
+  connected: boolean;
+  runningModels: Array<{ name: string; size?: number; digest?: string }>;
+}
+
+export async function getLocalRuntimeStatusApi(): Promise<LocalRuntimeStatusResponse> {
+  return request<LocalRuntimeStatusResponse>('/settings/ollama/status');
+}
+
+
 // ─── Classification API ──────────────────────────────────────────────────────
 
 export interface ClassificationConfigResponse {
@@ -607,6 +621,8 @@ export async function upsertLlmTaskConfig(
   data: {
     provider: LlmProvider;
     model: string;
+    fallbackProvider?: LlmProvider | null;
+    fallbackModel?: string | null;
     baseUrlOverride?: string | null;
     temperature?: number | null;
     reasoningEffort?: string | null;

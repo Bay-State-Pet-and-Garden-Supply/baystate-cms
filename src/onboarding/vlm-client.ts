@@ -1,4 +1,5 @@
 import { getApiKey } from '../db/repositories/api-key-repo';
+import { acquireLocalSlot, releaseLocalSlot } from '../ai/local-runtime-coordinator';
 
 /** Minimal structural fetch signature — lets callers inject the PI
  *  policy-gateway bound fetch (P0-1). */
@@ -55,47 +56,53 @@ export async function callVlm(
   const url = `${config.baseUrl}/api/chat`;
   console.log(`[VlmClient] Invoking local vision model "${config.model}" at ${url}`);
 
-  let response: Response;
+  await acquireLocalSlot('ollama');
   try {
-    response = await fetchFn(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          {
-            role: 'user',
-            content: prompt,
-            images: [imageBase64],
-          },
-        ],
-        stream: false,
-      }),
-      signal: AbortSignal.timeout(120_000),
-    });
-  } catch (err: unknown) {
-    const errorName = err instanceof Error ? err.name : '';
-    if (errorName === 'AbortError' || errorName === 'TimeoutError') {
-      throw new Error('VLM request timed out after 120s', { cause: err });
+    let response: Response;
+    try {
+      response = await fetchFn(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages: [
+            {
+              role: 'user',
+              content: prompt,
+              images: [imageBase64],
+            },
+          ],
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (err: unknown) {
+      const errorName = err instanceof Error ? err.name : '';
+      if (errorName === 'AbortError' || errorName === 'TimeoutError') {
+        throw new Error('VLM request timed out after 120s', { cause: err });
+      }
+      throw err;
     }
-    throw err;
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`VLM request failed: ${response.status} - ${errorText}`);
+    }
+
+    const data = (await response.json()) as {
+      message?: { content?: string };
+    };
+
+    const content = data.message?.content;
+    if (!content) {
+      throw new Error('VLM returned an empty response.');
+    }
+
+    return content.trim();
+  } finally {
+    releaseLocalSlot('ollama');
   }
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`VLM request failed: ${response.status} - ${errorText}`);
-  }
-
-  const data = (await response.json()) as {
-    message?: { content?: string };
-  };
-
-  const content = data.message?.content;
-  if (!content) {
-    throw new Error('VLM returned an empty response.');
-  }
-
-  return content.trim();
 }
+

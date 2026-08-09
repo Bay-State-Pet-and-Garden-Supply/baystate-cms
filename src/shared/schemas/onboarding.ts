@@ -574,6 +574,8 @@ export const LlmTaskConfigSchema = z.object({
   task: LlmTaskEnum,
   provider: LlmProviderEnum,
   model: z.string().min(1),
+  fallbackProvider: LlmProviderEnum.nullable().default(null),
+  fallbackModel: z.string().nullable().default(null),
   baseUrlOverride: z.string().url().nullable().default(null),
   temperature: z.number().min(0).max(2).nullable().default(null),
   reasoningEffort: ReasoningEffortEnum.nullable().default(null),
@@ -585,10 +587,13 @@ export type LlmTaskConfig = z.infer<typeof LlmTaskConfigSchema>;
 export const LlmTaskConfigUpsertSchema = z.object({
   provider: LlmProviderEnum,
   model: z.string().min(1),
+  fallbackProvider: LlmProviderEnum.nullable().optional(),
+  fallbackModel: z.string().nullable().optional(),
   baseUrlOverride: z.string().url().nullable().optional(),
   temperature: z.number().min(0).max(2).nullable().optional(),
   reasoningEffort: ReasoningEffortEnum.nullable().optional(),
 });
+
 
 /**
  * The full set of standard selector fields.

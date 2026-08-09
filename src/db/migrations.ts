@@ -12,7 +12,21 @@ const STAGE_PIPELINE_MIGRATION_PATH = path.resolve(import.meta.dirname, 'stage-p
 export function runMigrations(): void {
   const db = getDb();
   const sql = fs.readFileSync(SCHEMA_PATH, 'utf-8');
-  db.exec(sql);
+  try {
+    db.exec(sql);
+  } catch (_e) {
+    const statements = sql
+      .split(';')
+      .map(s => s.trim())
+      .filter(Boolean);
+    for (const stmt of statements) {
+      try {
+        db.exec(stmt);
+      } catch (stmtErr) {
+        console.warn('[Migrations] Initial schema statement deferred:', stmtErr);
+      }
+    }
+  }
 
   // Run onboarding migration if not already applied
   const onboardingVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('onboarding_schema_version') as
@@ -399,6 +413,8 @@ export function runMigrations(): void {
         task TEXT NOT NULL UNIQUE,
         provider TEXT NOT NULL,
         model TEXT NOT NULL,
+        fallback_provider TEXT,
+        fallback_model TEXT,
         base_url_override TEXT,
         temperature REAL,
         created_at TEXT NOT NULL,
@@ -416,6 +432,50 @@ export function runMigrations(): void {
   try {
     db.exec('ALTER TABLE llm_task_configs ADD COLUMN reasoning_effort TEXT');
   } catch { /* column already exists */ }
+
+  try {
+    db.exec('ALTER TABLE llm_task_configs ADD COLUMN fallback_provider TEXT');
+  } catch { /* column already exists */ }
+
+  try {
+    db.exec('ALTER TABLE llm_task_configs ADD COLUMN fallback_model TEXT');
+  } catch { /* column already exists */ }
+
+  // ── General AI Model Calls Telemetry Table (PR 3) ─────────────────────────
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ai_model_calls (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        locality TEXT NOT NULL CHECK (locality IN ('local', 'cloud')),
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        duration_ms INTEGER,
+        prompt_tokens INTEGER,
+        completion_tokens INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed', 'cancelled', 'policy_denied', 'unavailable')),
+        fallback_from_call_id TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        estimated_api_cost_usd REAL,
+        cost_basis TEXT NOT NULL CHECK (cost_basis IN ('local_zero', 'published_rate', 'unknown')),
+        prompt_template_version TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_ai_model_calls_ws_task ON ai_model_calls(workspace_id, task);
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_ai_model_calls_started ON ai_model_calls(started_at);
+    `);
+  } catch (e) {
+    console.error('[Migrations] Failed to create ai_model_calls table:', e);
+  }
+
 
   // Ensure serper_cache table exists
   try {
@@ -696,9 +756,10 @@ export function runMigrations(): void {
         }
       };
 
-      // 1. onboarding_items — worker claim columns
+      // 1. onboarding_items — worker claim & sourcing decision columns
       addCol('onboarding_items', 'claimed_by', 'TEXT');
       addCol('onboarding_items', 'claimed_at', 'TEXT');
+      addCol('onboarding_items', 'sourcing_decision_json', 'TEXT');
 
       // 2. classification_proposals — evidence denormalization, staleness, metadata
       addCol('classification_proposals', 'evidence_ids_json', "TEXT DEFAULT '[]'");
@@ -1467,12 +1528,12 @@ export function runMigrations(): void {
   //   proposals hydrate with the authoritative role split.
   // Idempotent; guarded by `evidence_citation_schema_version`.
   try {
+    const cols = (tbl: string) => db.query('PRAGMA table_info(' + tbl + ')').all() as Array<{ name: string }>;
     const evidenceCitationVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('evidence_citation_schema_version') as
       | { value: string }
       | undefined;
     if (!evidenceCitationVersion) {
       console.log('[Migrations] Running evidence relation/citation migration...');
-      const cols = (tbl: string) => db.query('PRAGMA table_info(' + tbl + ')').all() as Array<{ name: string }>;
       const addCol = (tbl: string, col: string, def: string) => {
         if (!cols(tbl).some((c: { name: string }) => c.name === col)) {
           db.exec('ALTER TABLE ' + tbl + ' ADD COLUMN ' + col + ' ' + def);
@@ -1517,25 +1578,40 @@ export function runMigrations(): void {
     // ALTER, so rebuild the (small) join table when the CHECK is absent — for
     // DBs that ran an earlier version of this migration with a CHECK-less
     // ALTER-added relation column.
+    const propEvCols = cols('classification_proposal_evidence');
+    if (propEvCols.length > 0 && !propEvCols.some(c => c.name === 'relation')) {
+      db.exec(`ALTER TABLE classification_proposal_evidence ADD COLUMN relation TEXT NOT NULL DEFAULT 'legacy'`);
+      console.log('[Migrations] Added classification_proposal_evidence.relation');
+    }
+
     const proposalEvidenceSql = db.query(
       "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposal_evidence'",
     ).get() as { sql: string } | undefined;
     if (proposalEvidenceSql && !/CHECK\s*\(/i.test(proposalEvidenceSql.sql)) {
-      db.exec(`
-        CREATE TABLE classification_proposal_evidence_new (
-          proposal_id TEXT NOT NULL REFERENCES classification_proposals(id) ON DELETE CASCADE,
-          evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
-          relation TEXT NOT NULL DEFAULT 'legacy' CHECK (relation IN ('supporting', 'contradicting', 'context', 'legacy')),
-          PRIMARY KEY (proposal_id, evidence_id)
-        )
-      `);
-      db.exec(`
-        INSERT INTO classification_proposal_evidence_new (proposal_id, evidence_id, relation)
-        SELECT proposal_id, evidence_id, COALESCE(relation, 'legacy')
-        FROM classification_proposal_evidence
-      `);
-      db.exec('DROP TABLE classification_proposal_evidence;');
-      db.exec('ALTER TABLE classification_proposal_evidence_new RENAME TO classification_proposal_evidence;');
+      const liveCols = cols('classification_proposal_evidence').map(c => c.name);
+      const relationExpr = liveCols.includes('relation') ? "COALESCE(relation, 'legacy')" : "'legacy'";
+      const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+      const fkWasOn = fkRow ? Number(fkRow.foreign_keys) === 1 : false;
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.exec(`
+          CREATE TABLE classification_proposal_evidence_new (
+            proposal_id TEXT NOT NULL REFERENCES classification_proposals(id) ON DELETE CASCADE,
+            evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
+            relation TEXT NOT NULL DEFAULT 'legacy' CHECK (relation IN ('supporting', 'contradicting', 'context', 'legacy')),
+            PRIMARY KEY (proposal_id, evidence_id)
+          )
+        `);
+        db.exec(`
+          INSERT INTO classification_proposal_evidence_new (proposal_id, evidence_id, relation)
+          SELECT proposal_id, evidence_id, ${relationExpr}
+          FROM classification_proposal_evidence
+        `);
+        db.exec('DROP TABLE classification_proposal_evidence;');
+        db.exec('ALTER TABLE classification_proposal_evidence_new RENAME TO classification_proposal_evidence;');
+      } finally {
+        if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+      }
       db.exec('CREATE INDEX IF NOT EXISTS idx_classification_proposal_evidence_relation ON classification_proposal_evidence(relation);');
       console.log('[Migrations] Rebuilt classification_proposal_evidence with the relation CHECK constraint.');
     }

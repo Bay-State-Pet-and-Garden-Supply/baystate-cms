@@ -16,6 +16,7 @@ import {
 import { readinessViewFromReport } from '../classification-readiness-view';
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
 import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
+import { LocalAiStatusPanel } from './LocalAiStatusPanel';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
@@ -592,6 +593,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
           LLM Providers section above. Profile generation and revision are required to be
           configured explicitly — the system will not silently fall back to another model.
         </p>
+        <LocalAiStatusPanel />
         <LlmTaskConfigPanel onChange={() => setError('')} />
       </div>
       </div>

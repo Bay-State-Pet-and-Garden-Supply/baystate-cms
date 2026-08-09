@@ -62,6 +62,8 @@ export interface LlmTaskConfig {
   task: LlmTask;
   provider: LlmProvider;
   model: string;
+  fallbackProvider: LlmProvider | null;
+  fallbackModel: string | null;
   baseUrlOverride: string | null;
   temperature: number | null;
   reasoningEffort: ReasoningEffort | null;
@@ -74,6 +76,8 @@ interface DbLlmTaskConfig {
   task: string;
   provider: string;
   model: string;
+  fallback_provider: string | null;
+  fallback_model: string | null;
   base_url_override: string | null;
   temperature: number | null;
   reasoning_effort: string | null;
@@ -95,6 +99,8 @@ function mapToConfig(row: DbLlmTaskConfig): LlmTaskConfig {
     task: isLlmTask(row.task) ? row.task : (row.task as LlmTask),
     provider: isLlmProvider(row.provider) ? row.provider : 'openai',
     model: row.model,
+    fallbackProvider: row.fallback_provider && isLlmProvider(row.fallback_provider) ? row.fallback_provider : null,
+    fallbackModel: row.fallback_model,
     baseUrlOverride: row.base_url_override,
     temperature: row.temperature,
     reasoningEffort: row.reasoning_effort as ReasoningEffort | null,
@@ -107,6 +113,8 @@ export interface UpsertLlmTaskConfigInput {
   task: LlmTask;
   provider: LlmProvider;
   model: string;
+  fallbackProvider?: LlmProvider | null;
+  fallbackModel?: string | null;
   baseUrlOverride?: string | null;
   temperature?: number | null;
   reasoningEffort?: string | null;
@@ -121,6 +129,8 @@ export function upsertLlmTaskConfig(
     .query('SELECT * FROM llm_task_configs WHERE task = ?')
     .get(input.task) as DbLlmTaskConfig | undefined;
 
+  const fallbackProvider = input.fallbackProvider ?? null;
+  const fallbackModel = input.fallbackModel ?? null;
   const baseUrlOverride = input.baseUrlOverride ?? null;
   const temperature = input.temperature ?? null;
   const reasoningEffort = input.reasoningEffort ?? null;
@@ -128,11 +138,13 @@ export function upsertLlmTaskConfig(
   if (existing) {
     db.query(`
       UPDATE llm_task_configs
-      SET provider = ?, model = ?, base_url_override = ?, temperature = ?, reasoning_effort = ?, updated_at = ?
+      SET provider = ?, model = ?, fallback_provider = ?, fallback_model = ?, base_url_override = ?, temperature = ?, reasoning_effort = ?, updated_at = ?
       WHERE task = ?
     `).run(
       input.provider,
       input.model,
+      fallbackProvider,
+      fallbackModel,
       baseUrlOverride,
       temperature,
       reasoningEffort,
@@ -143,6 +155,8 @@ export function upsertLlmTaskConfig(
       ...existing,
       provider: input.provider,
       model: input.model,
+      fallback_provider: fallbackProvider,
+      fallback_model: fallbackModel,
       base_url_override: baseUrlOverride,
       temperature,
       reasoning_effort: reasoningEffort,
@@ -152,13 +166,15 @@ export function upsertLlmTaskConfig(
 
   const id = randomUUID();
   db.query(`
-    INSERT INTO llm_task_configs (id, task, provider, model, base_url_override, temperature, reasoning_effort, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO llm_task_configs (id, task, provider, model, fallback_provider, fallback_model, base_url_override, temperature, reasoning_effort, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.task,
     input.provider,
     input.model,
+    fallbackProvider,
+    fallbackModel,
     baseUrlOverride,
     temperature,
     reasoningEffort,
@@ -171,6 +187,8 @@ export function upsertLlmTaskConfig(
     task: input.task,
     provider: input.provider,
     model: input.model,
+    fallbackProvider,
+    fallbackModel,
     baseUrlOverride,
     temperature,
     reasoningEffort: reasoningEffort as ReasoningEffort | null,
@@ -178,6 +196,7 @@ export function upsertLlmTaskConfig(
     updatedAt: now,
   };
 }
+
 
 export function getLlmTaskConfig(task: LlmTask): LlmTaskConfig | null {
   const db = getDb();

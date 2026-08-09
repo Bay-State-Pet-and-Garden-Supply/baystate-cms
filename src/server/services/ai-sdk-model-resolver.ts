@@ -1,42 +1,68 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { getLlmConfigForTask } from '../../onboarding/llm-client';
 import { getApiKey } from '../../db/repositories/api-key-repo';
+import { getProviderDefinition } from '../../ai/provider-registry';
+import { getModelProfile } from '../../ai/model-registry';
+
+export interface ResolveAiSdkModelOptions {
+  provider?: string;
+  model?: string;
+}
 
 /**
  * Resolves the configured LLM provider and model, returning a Vercel AI SDK model instance.
- * Supports a user-selected model override with automatic provider credentials mapping.
+ * Supports explicit `{ provider, model }` options, a user-selected model string, or task config fallback.
  */
-export function resolveAiSdkModel(selectedModel?: string) {
+export function resolveAiSdkModel(input?: string | ResolveAiSdkModelOptions) {
+  let providerName: string | undefined;
+  let modelName: string | undefined;
+
+  if (typeof input === 'string') {
+    modelName = input;
+    const profile = getModelProfile(input);
+    if (profile) {
+      providerName = profile.provider;
+    } else {
+      if (input.startsWith('gpt-') || input.startsWith('o1-') || input.startsWith('o3-')) {
+        providerName = 'openai';
+      } else if (input.startsWith('deepseek-')) {
+        providerName = 'deepseek';
+      } else {
+        providerName = 'ollama';
+      }
+    }
+  } else if (input) {
+    providerName = input.provider;
+    modelName = input.model;
+    if (!providerName && modelName) {
+      const profile = getModelProfile(modelName);
+      if (profile) providerName = profile.provider;
+    }
+  }
+
   let config: { baseUrl: string; apiKey: string; model: string } | null = null;
 
-  if (selectedModel) {
-    const provider =
-      selectedModel.startsWith('gpt-') ||
-      selectedModel.startsWith('o1-') ||
-      selectedModel.startsWith('o3-')
-        ? 'openai'
-        : selectedModel.startsWith('deepseek-')
-        ? 'deepseek'
-        : 'ollama';
-
-    const credential = getApiKey(provider);
+  if (providerName && modelName) {
+    const providerDef = getProviderDefinition(providerName);
+    const credential = getApiKey(providerName);
     if (credential && credential.api_key && !credential.api_key.includes('•')) {
-      const defaultUrl =
-        provider === 'openai'
+      const defaultUrl = providerDef?.defaultBaseUrl ?? (
+        providerName === 'openai'
           ? 'https://api.openai.com/v1'
-          : provider === 'deepseek'
+          : providerName === 'deepseek'
           ? 'https://api.deepseek.com'
-          : 'http://localhost:11434/v1';
+          : 'http://localhost:11434/v1'
+      );
 
       config = {
         baseUrl: credential.base_url || defaultUrl,
         apiKey: credential.api_key,
-        model: selectedModel,
+        model: modelName,
       };
     }
   }
 
-  // Fallback to task configuration if no valid override is found
+  // Fallback to task configuration if no valid explicit model config resolved
   if (!config) {
     const taskConfig = getLlmConfigForTask('store_manager_assistant', { allowFallback: true });
     if (!taskConfig) {
@@ -57,6 +83,6 @@ export function resolveAiSdkModel(selectedModel?: string) {
     apiKey: config.apiKey,
   });
 
-  // Return the model instance (which is a standard LanguageModelV4) using standard chat completions
+  // Return the model instance (standard LanguageModelV4)
   return openaiCompatibleProvider.chat(config.model);
 }

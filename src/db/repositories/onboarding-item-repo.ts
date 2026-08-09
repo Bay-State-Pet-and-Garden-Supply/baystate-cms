@@ -1,6 +1,6 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
-import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus } from '../../shared/schemas/onboarding';
+import type { OnboardingItem, ItemStatus, PipelineStage, StageStatus, SourcingDecision } from '../../shared/schemas/onboarding';
 
 export interface OnboardingItemRow {
   id: string;
@@ -793,5 +793,32 @@ export function getWeeklyReportItems(startDateIso: string, endDateIso: string): 
       updatedAt: r.updated_at,
     };
   });
+}
+
+/**
+  * Update an item's sourcing decision and option stage / stage_status.
+  */
+export function updateSourcingDecision(
+  id: string,
+  decision: SourcingDecision,
+  nextStage?: PipelineStage,
+): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const jsonStr = JSON.stringify(decision);
+
+  if (nextStage) {
+    db.query(
+      `UPDATE onboarding_items
+       SET sourcing_decision_json = ?, stage = ?, stage_status = 'pending', error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    ).run(jsonStr, nextStage, now, id);
+  } else {
+    db.query(
+      `UPDATE onboarding_items
+       SET sourcing_decision_json = ?, stage_status = 'completed', error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+       WHERE id = ?`,
+    ).run(jsonStr, now, id);
+  }
 }
 
