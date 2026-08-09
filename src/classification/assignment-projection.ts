@@ -1,6 +1,7 @@
 import type { AttributeMappingConfig, ClassificationProposal, ProductAttributeConfig } from '../shared/types';
 import type { SerializationConfigV2 } from '../shared/schemas/classification';
 import { pageNameFromPageValue } from '../shared/proposal-display';
+import { resolveAlias } from './controlled-value-identity';
 
 /** Return the reviewed correction when present, including an explicit null. */
 export function getEffectiveProposalValue(proposal: ClassificationProposal): unknown {
@@ -158,11 +159,14 @@ export function validateSerializableValue(
   if (attribute?.valueMode === 'controlled' && (attribute.allowedValues?.length ?? 0) > 0) {
     for (const item of values) {
       const str = String(item);
+      // Exact canonical membership OR an alias that resolves to an exact
+      // allowed ID. An unknown/near-match value is never serialized as a
+      // controlled value (fail closed).
       const allowed = attribute.allowedValues.includes(str);
-      const alias = (attribute.valueAliases ?? []).some(
-        candidate => candidate.alias === str || candidate.alias.toLowerCase() === str.toLowerCase(),
-      );
-      if (!allowed && !alias) {
+      const aliasTarget = allowed
+        ? str
+        : resolveAlias(str, attribute.valueAliases ?? [], attribute.allowedValues);
+      if (aliasTarget === null) {
         return {
           ok: false,
           code: 'controlled_membership',

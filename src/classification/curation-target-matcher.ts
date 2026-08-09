@@ -6,6 +6,7 @@
  * proposal stages instead of each stage reimplementing its own matcher.
  */
 import type { ClassificationEvidence, ProductAttributeConfig } from '../shared/schemas/classification';
+import { matchCanonicalValue } from './controlled-value-identity';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -100,13 +101,14 @@ export function tokenize(text: string, stopWords?: Set<string>): string[] {
 // ─── Option Normalization ─────────────────────────────────────────────────────
 
 /**
- * Find the exact option matching a candidate value (case-insensitive).
- * Returns the canonical option value or null.
+ * Find the exact allowed option matching a candidate value (comparison-key
+ * match, NFC + trim + case fold). Returns the canonical option value or null.
+ * Ambiguity fails closed: when more than one allowed value shares the
+ * candidate's comparison key the candidate is rejected (the collision should
+ * have been caught by config validation).
  */
 export function normalizeOption(candidate: unknown, options: string[]): string | null {
-  const raw = String(candidate ?? '').trim();
-  if (!raw) return null;
-  return options.find(o => o.toLowerCase() === raw.toLowerCase()) ?? null;
+  return matchCanonicalValue(candidate, options);
 }
 
 // ─── Keyword / Token Overlap Matching ─────────────────────────────────────────
@@ -195,7 +197,11 @@ export function matchAttributeOptions(
     for (const alias of attribute.valueAliases) {
       if (seen.has(alias.mapsTo)) continue;
       if (new RegExp('\\b' + escapeRegex(alias.alias.toLowerCase()) + '\\b', 'i').test(textLower)) {
-        const canonical = normalizeOption(alias.mapsTo, options) ?? alias.mapsTo;
+        // Fail closed: the alias target must be one of the exact allowed
+        // option values — an alias pointing outside the set is never guessed
+        // into a canonical ID.
+        const canonical = normalizeOption(alias.mapsTo, options);
+        if (!canonical) continue;
         if (seen.has(canonical)) continue;
         found.push({ value: canonical, confidence: 0.60, matchedBy: 'alias' });
         seen.add(canonical);

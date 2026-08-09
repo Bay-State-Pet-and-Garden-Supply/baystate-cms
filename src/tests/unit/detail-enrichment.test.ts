@@ -433,6 +433,41 @@ describe('enrichProductDetails - allowedValues filtering', () => {
     expect(flavor.length).toBe(1);
     expect(flavor[0].value).toBe('Salmon');
   });
+
+  it('resolves OCR values to the exact canonical allowed ID (issue #17 G)', () => {
+    const result = enrichProductDetails({
+      evidenceText: 'premium dog food',
+      packagingOcrData: {
+        species: 'dog',
+        flavorVariety: 'chicken',
+      } as any,
+      allowedValues: ['Dog', 'Chicken'],
+    });
+    const species = result.find(c => c.attributeId === 'species');
+    expect(species).toBeDefined();
+    expect(species!.value).toBe('Dog'); // canonical ID, never the raw OCR string
+    const flavor = result.find(c => c.attributeId === 'flavor');
+    expect(flavor).toBeDefined();
+    expect(flavor!.value).toBe('Chicken');
+  });
+
+  it('drops OCR values that are not in the allowed set (near-match fails closed)', () => {
+    const result = enrichProductDetails({
+      evidenceText: 'premium food',
+      packagingOcrData: { species: 'canine' } as any,
+      allowedValues: ['Dog'],
+    });
+    expect(result.filter(c => c.attributeId === 'species').length).toBe(0);
+  });
+
+  it('keeps an alias target that is not in the allowed set from serializing (fail closed)', () => {
+    const result = enrichProductDetails({
+      evidenceText: 'handmade ceramic dog bowl',
+      aliases: [{ alias: 'ceramic', mapsTo: 'Ceramic' }],
+      allowedValues: ['Clay'],
+    });
+    expect(result.filter(c => c.attributeId === 'material').length).toBe(0);
+  });
 });
 
 // ─── Alias Matching ────────────────────────────────────────────────────────────

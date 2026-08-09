@@ -15,6 +15,7 @@ import {
   type CurationTargetConfig,
   type ProductAttributeConfig,
 } from '../shared/schemas/classification';
+import { canonicalOption } from './controlled-value-identity';
 import {
   getExplicitCurationTargets,
   resolveAttributeAllowedValues,
@@ -93,10 +94,7 @@ export function resolveEnabledTargets(
           continue;
         }
         const allowedValues = resolveAttributeAllowedValues(config, attribute, target);
-        const options: ResolvedTargetOption[] = allowedValues.map(v => ({
-          value: v,
-          label: v,
-        }));
+        const options: ResolvedTargetOption[] = allowedValues.map(v => canonicalOption(v));
         productFields.push({ config: target, options, attribute });
         break;
       }

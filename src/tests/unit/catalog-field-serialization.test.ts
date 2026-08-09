@@ -136,6 +136,20 @@ describe('validateSerializableValue', () => {
     expect(validateSerializableValue('chicken', attribute)).toEqual({ ok: true });
   });
 
+  it('rejects near-match values and aliases whose mapsTo is not an exact allowed ID (issue #17 G fail-closed)', () => {
+    // A case-variant of an allowed value is a near-match, not the canonical ID.
+    const nearMatch = { id: 'flavor', valueMode: 'controlled' as const, allowedValues: ['Chicken'], valueAliases: [] };
+    const rejected = validateSerializableValue('CHICKEN', nearMatch);
+    expect(rejected.ok).toBe(false);
+    if (!rejected.ok) expect(rejected.code).toBe('controlled_membership');
+
+    // An alias whose mapsTo points outside the allowed set never serializes.
+    const danglingAlias = { id: 'flavor', valueMode: 'controlled' as const, allowedValues: ['Chicken'], valueAliases: [{ alias: 'bird', mapsTo: 'Turkey' }] };
+    const rejectedAlias = validateSerializableValue('bird', danglingAlias);
+    expect(rejectedAlias.ok).toBe(false);
+    if (!rejectedAlias.ok) expect(rejectedAlias.code).toBe('controlled_membership');
+  });
+
   it('accepts finite measured values and rejects non-finite', () => {
     const measured = { id: 'weight', valueMode: 'measured' as const, allowedValues: [], valueAliases: [] };
     expect(validateSerializableValue(15, measured)).toEqual({ ok: true });

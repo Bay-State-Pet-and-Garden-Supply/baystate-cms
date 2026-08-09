@@ -8,6 +8,11 @@ import {
   type ClassificationManifestV2,
 } from '../shared/schemas/classification';
 import { hashCanonicalJson, sha256Hex } from '../shared/stable-id';
+import {
+  comparisonKey,
+  findCanonicalCollisions,
+  validateCanonicalValue,
+} from './controlled-value-identity';
 
 export type ClassificationConfigFindingSeverity = 'error' | 'warning';
 
@@ -199,7 +204,7 @@ function addDuplicateLabelWarnings(
 ): void {
   const labels = new Map<string, string>();
   values.forEach((value, index) => {
-    const normalized = value.name.trim().toLocaleLowerCase('en-US');
+    const normalized = comparisonKey(value.name);
     const prior = labels.get(normalized);
     if (prior && prior !== value.id) {
       findings.push({
@@ -622,6 +627,30 @@ export function validateClassificationConfigBundle(
           code: 'duplicate_controlled_value',
           path: `$.attributes[${index}].allowedValues`,
           message: 'Controlled values must be unique.',
+        });
+      }
+      // Canonical identity (issue #17 G): every controlled value must be its
+      // own canonical form (non-empty, NFC, trimmed, no control characters)
+      // and the set must be free of normalized/case-fold collision pairs — an
+      // ambiguous set can never activate.
+      attribute.allowedValues.forEach((value, valueIndex) => {
+        const valuePath = `$.attributes[${index}].allowedValues[${valueIndex}]`;
+        const canonical = validateCanonicalValue(value);
+        if (!canonical.ok) {
+          findings.push({
+            severity: 'error',
+            code: 'non_canonical_controlled_value',
+            path: valuePath,
+            message: `Controlled value ${JSON.stringify(value)} is not canonical (${canonical.reason}); store the NFC-normalized, trimmed form.`,
+          });
+        }
+      });
+      for (const collision of findCanonicalCollisions(attribute.allowedValues)) {
+        findings.push({
+          severity: 'error',
+          code: 'ambiguous_controlled_value',
+          path: `$.attributes[${index}].allowedValues`,
+          message: `Controlled values ${JSON.stringify(collision.a)} and ${JSON.stringify(collision.b)} collide (${collision.kind}); an ambiguous set can never activate.`,
         });
       }
       const aliases = aliasesForAttribute(attribute);

@@ -70,6 +70,11 @@ export const ProductAttributeConfigSchema = z.object({
   description: z.string().nullable().default(null),
   valueMode: ValueModeEnum,
   canonicalUnit: z.string().nullable().default(null),
+  // Controlled-value identity (issue #17 G): each string must be the stored
+  // canonical form (NFC-normalized + trimmed). Labels equal IDs by v2 policy;
+  // config validation rejects empty/control-char/non-NFC/non-trimmed values
+  // and normalized/case-fold collision pairs. See
+  // `src/classification/controlled-value-identity.ts`.
   allowedValues: z.array(z.string()).default(() => []),
   valueAliases: z
     .array(
@@ -432,6 +437,10 @@ export const ProductAttributeConfigV2Schema = z.object({
   description: z.string().nullable(),
   valueMode: ValueModeEnum,
   canonicalUnit: z.string().nullable(),
+  // Controlled-value identity (issue #17 G): strings are exact canonical IDs
+  // (NFC + trimmed); labels equal IDs by v2 policy. The shape is unchanged for
+  // schema-v2 string compatibility — canonicality is enforced by config
+  // validation (`controlled-value-identity.ts`), not the schema.
   allowedValues: z.array(z.string()),
   valueAliases: z.array(z.object({ alias: z.string(), mapsTo: z.string() }).strict()),
   visualEvidenceEligibility: VisualEvidenceEligibilityEnum,
@@ -443,6 +452,17 @@ export const ProductAttributeConfigV2Schema = z.object({
   oldIdAliases: z.array(ClassificationSlugSchema),
 }).strict();
 export type ProductAttributeConfigV2 = z.infer<typeof ProductAttributeConfigV2Schema>;
+
+/**
+ * Canonical controlled-value option: `value` and `label` are the SAME exact
+ * canonical ID by the documented v2 policy (issue #17 G). Builders must use
+ * `controlled-value-identity.canonicalOption()` rather than inventing a
+ * display label distinct from the identity.
+ */
+export interface CanonicalControlledValueOptionV2 {
+  value: string;
+  label: string;
+}
 
 export const AttributeProfileAttributeV2Schema = z.object({
   attributeId: ClassificationSlugSchema,

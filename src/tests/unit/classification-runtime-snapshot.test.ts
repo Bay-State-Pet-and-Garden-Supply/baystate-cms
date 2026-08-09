@@ -18,6 +18,7 @@ import {
   runtimeSnapshotHashMatchesConfig,
 } from '../../classification/runtime-snapshot';
 import type { RuntimeSnapshotInput } from '../../classification/runtime-snapshot';
+import { resolveTargetsFromSnapshot } from '../../classification/curation-target-resolver';
 
 let workspacePath: string;
 let workspaceId: string;
@@ -137,6 +138,21 @@ describe('classification runtime snapshot', () => {
     // Two builds at different wall-clock times must deduplicate by hash.
     expect(a.snapshotHash).toBe(b.snapshotHash);
     expect(snapshotHash(a)).toBe(snapshotHash(b));
+  });
+
+  it('resolves product-field options with canonical controlled-value identity (issue #17 G)', () => {
+    const snapshot = buildRuntimeSnapshot(buildInput());
+    const resolved = resolveTargetsFromSnapshot(snapshot);
+    const flavorTarget = resolved.productFields.find(target => target.config.id === 'flavor');
+    expect(flavorTarget).toBeDefined();
+    // Options carry {value: id, label: id} — label equals the exact canonical ID.
+    const options = flavorTarget!.options;
+    expect(options.length).toBeGreaterThan(0);
+    for (const option of options) {
+      expect(option.value).toBe(option.label);
+      expect(option.value).toBe(option.value.trim());
+      expect(option.value).toBe(option.value.normalize('NFC'));
+    }
   });
 
   it('persists the snapshot and recomputes an identical hash after persistence', () => {

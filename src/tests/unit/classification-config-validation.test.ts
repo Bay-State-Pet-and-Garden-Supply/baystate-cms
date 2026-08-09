@@ -231,6 +231,32 @@ describe('classification v2 structural and semantic validation', () => {
     expect(findingCodes(measured)).toEqual(expect.arrayContaining(['measured_unit_required', 'measured_unit_mismatch']));
   });
 
+  it('rejects non-canonical and ambiguous controlled values (issue #17 G)', () => {
+    const nonCanonical = structuredClone(migrated().bundle);
+    nonCanonical.attributes[0].allowedValues = [' Chicken', 'Beef'];
+    expect(findingCodes(nonCanonical)).toContain('non_canonical_controlled_value');
+
+    const controlChar = structuredClone(migrated().bundle);
+    controlChar.attributes[0].allowedValues = ['Dog\u0007', 'Beef'];
+    expect(findingCodes(controlChar)).toContain('non_canonical_controlled_value');
+
+    const caseCollision = structuredClone(migrated().bundle);
+    caseCollision.attributes[0].allowedValues = ['Dog', 'dog'];
+    const caseCodes = findingCodes(caseCollision);
+    expect(caseCodes).toContain('ambiguous_controlled_value');
+    expect(caseCodes).not.toContain('non_canonical_controlled_value');
+    expect(validateClassificationConfigBundle(caseCollision).valid).toBe(false);
+
+    const whitespaceCollision = structuredClone(migrated().bundle);
+    whitespaceCollision.attributes[0].allowedValues = ['Beef', 'Beef '];
+    expect(findingCodes(whitespaceCollision)).toContain('ambiguous_controlled_value');
+
+    // A clean distinct canonical set stays valid.
+    const clean = structuredClone(migrated().bundle);
+    clean.attributes[0].allowedValues = ['Chicken', 'Beef'];
+    expect(validateClassificationConfigBundle(clean).valid).toBe(true);
+  });
+
   it('rejects serialization/cardinality mismatches', () => {
     const result = migrated({
       productTypes: [{ id: 'dog-food', name: 'Dog Food', description: null, attributeProfileId: 'dog-food-profile', oldIdAliases: [] }],

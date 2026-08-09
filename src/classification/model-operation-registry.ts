@@ -16,14 +16,19 @@
 import type { ProtectedOperation, ModelPolicyView, ProviderLocality } from './model-policy-gateway';
 import type { ClassificationStageName } from './types';
 import { hashCanonicalJson } from '../shared/stable-id';
+import { SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION } from '../shopsite/built-in-output-policy';
 
 export type { ProtectedOperation };
 
 /** Bump ONLY when the operation→rule/prompt/parameter contract changes. */
 export const MODEL_OPERATION_REGISTRY_VERSION = 1;
 
-/** Bump when the built-in ShopSite output policy version participates in runs. */
-export const OUTPUT_POLICY_VERSION = 'shopsite-built-in-output-policy-v1';
+/**
+ * Built-in ShopSite output policy version participating in runs. Single
+ * source of truth lives in `src/shopsite/built-in-output-policy.ts`; bump the
+ * policy there and this value follows automatically.
+ */
+export const OUTPUT_POLICY_VERSION = SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION;
 
 /**
  * Prompt-template version per protected operation. Bump a version whenever

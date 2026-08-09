@@ -11,7 +11,7 @@
  * labels) require direct textual evidence and are never inferred.
  */
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
-import { normalizeOption } from './curation-target-matcher';
+import { matchCanonicalValue, resolveAlias } from './controlled-value-identity';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -80,8 +80,11 @@ function ocrOrKeyword(
 ): EnrichmentCandidate[] {
   // 1. Check OCR data first (most reliable)
   if (ocrValue) {
-    const value = ocrValue.trim();
-    if (!allowedValues || allowedValues.some(av => av.toLowerCase() === value.toLowerCase())) {
+    const canonical = matchCanonicalValue(ocrValue, allowedValues ?? []);
+    // With an allowed set the OCR value must resolve to one exact canonical
+    // ID (near-matches fail closed); without one the raw value is the ID.
+    if (canonical !== null || !allowedValues) {
+      const value = canonical ?? ocrValue.trim();
       return [{
         attributeId,
         value,
@@ -96,17 +99,17 @@ function ocrOrKeyword(
   if (ocrArray && ocrArray.length > 0) {
     const results: EnrichmentCandidate[] = [];
     for (const val of ocrArray) {
-      const trimmed = val.trim();
-      if (!trimmed) continue;
-      if (!allowedValues || allowedValues.some(av => av.toLowerCase() === trimmed.toLowerCase())) {
-        results.push({
-          attributeId,
-          value: trimmed,
-          confidence: 0.75,
-          matchedBy: 'evidence',
-          evidenceSnippet: `ocr:${trimmed}`,
-        });
-      }
+      const canonical = matchCanonicalValue(val, allowedValues ?? []);
+      if (canonical === null && allowedValues) continue;
+      const value = canonical ?? val.trim();
+      if (!value) continue;
+      results.push({
+        attributeId,
+        value,
+        confidence: 0.75,
+        matchedBy: 'evidence',
+        evidenceSnippet: `ocr:${value}`,
+      });
     }
     if (results.length > 0) return results;
   }
@@ -116,8 +119,9 @@ function ocrOrKeyword(
   const allSources = [textLower, title?.toLowerCase() ?? ''].filter(Boolean);
 
   for (const [canonicalValue, matchPatterns] of Object.entries(keywords)) {
-    // If allowedValues is provided, skip values not in the set
-    if (allowedValues && !allowedValues.some(av => av.toLowerCase() === canonicalValue.toLowerCase())) {
+    // If allowedValues is provided, skip values not in the set (comparison-
+    // key match; never an ad hoc case-insensitive guess).
+    if (allowedValues && matchCanonicalValue(canonicalValue, allowedValues) === null) {
       continue;
     }
 
@@ -140,8 +144,13 @@ function ocrOrKeyword(
     for (const source of allSources) {
       for (const alias of aliases) {
         if (source.includes(alias.alias.toLowerCase())) {
-          const canonical = normalizeOption(alias.mapsTo, allowedValues ?? []) ?? alias.mapsTo;
-          if (allowedValues && !allowedValues.some(av => av.toLowerCase() === canonical.toLowerCase())) continue;
+          // The alias target must resolve to one exact canonical ID. When no
+          // allowed set is provided the alias target itself is the canonical
+          // ID; otherwise a target outside the set fails closed.
+          const canonical = allowedValues
+            ? resolveAlias(alias.mapsTo, aliases, allowedValues)
+            : alias.mapsTo;
+          if (!canonical) continue;
           return [{
             attributeId,
             value: canonical,
@@ -174,23 +183,23 @@ function evidenceOnlyExtractor(
   // Check OCR array first
   if (ocrArray && ocrArray.length > 0) {
     for (const val of ocrArray) {
-      const trimmed = val.trim();
-      if (!trimmed) continue;
-      if (!allowedValues || allowedValues.some(av => av.toLowerCase() === trimmed.toLowerCase())) {
-        results.push({
-          attributeId,
-          value: trimmed,
-          confidence: 0.8,
-          matchedBy: 'evidence',
-          evidenceSnippet: `ocr:${trimmed}`,
-        });
-      }
+      const canonical = matchCanonicalValue(val, allowedValues ?? []);
+      if (canonical === null && allowedValues) continue;
+      const value = canonical ?? val.trim();
+      if (!value) continue;
+      results.push({
+        attributeId,
+        value,
+        confidence: 0.8,
+        matchedBy: 'evidence',
+        evidenceSnippet: `ocr:${value}`,
+      });
     }
   }
 
   // Then check evidence text
   for (const [canonicalValue, matchPatterns] of Object.entries(keywords)) {
-    if (allowedValues && !allowedValues.some(av => av.toLowerCase() === canonicalValue.toLowerCase())) continue;
+    if (allowedValues && matchCanonicalValue(canonicalValue, allowedValues) === null) continue;
 
     for (const pattern of matchPatterns) {
       const snippet = findKeyword(textLower, pattern.toLowerCase());

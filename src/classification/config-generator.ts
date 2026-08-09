@@ -46,6 +46,11 @@ import {
 } from '../shared/schemas/classification';
 import { canonicalJsonFileString, sha256Hex } from '../shared/stable-id';
 import {
+  canonicalForm,
+  findCanonicalCollisions,
+  validateCanonicalValue,
+} from './controlled-value-identity';
+import {
   computeClassificationBundleHash,
   validateClassificationConfigBundle,
   type ClassificationConfigFinding,
@@ -201,12 +206,46 @@ function makeManifest(seed: BayStateSeed, fileVersions: Record<string, string>):
 export function generateCandidate(seed: BayStateSeed, evidence: CatalogEvidence): ClassificationCandidateV2 {
   const findings: ClassificationConfigFinding[] = [];
 
-  // Attributes with conservative policies applied.
-  const attributes: ProductAttributeConfigV2[] = seed.attributes.map(attribute => ({
-    ...attribute,
-    oldIdAliases: attribute.oldIdAliases ?? [],
-    evidencePolicy: attribute.evidencePolicy ?? defaultEvidencePolicy(attribute),
-  }));
+  // Attributes with conservative policies applied. Allowed values and value
+  // aliases are canonicalized (NFC + trim) at generation time and checked for
+  // canonical validity / collision pairs so the generated bundle never carries
+  // a non-canonical or ambiguous controlled-value identity.
+  const attributes: ProductAttributeConfigV2[] = seed.attributes.map(attribute => {
+    const allowedValues = attribute.allowedValues.map(canonicalForm);
+    const valueAliases = attribute.valueAliases.map(alias => ({
+      alias: canonicalForm(alias.alias),
+      mapsTo: canonicalForm(alias.mapsTo),
+    }));
+    for (const value of allowedValues) {
+      const canonical = validateCanonicalValue(value);
+      if (!canonical.ok) {
+        throw new Error(
+          `Attribute "${attribute.id}" has a non-canonical controlled value ${JSON.stringify(value)} (${canonical.reason}); repair the seed before generation.`,
+        );
+      }
+    }
+    const collisions = findCanonicalCollisions(allowedValues);
+    if (collisions.length > 0) {
+      throw new Error(
+        `Attribute "${attribute.id}" has an ambiguous controlled-value set (${collisions.map(c => `${c.a}~${c.b}:${c.kind}`).join(', ')}); repair the seed before generation.`,
+      );
+    }
+    const allowedSet = new Set(allowedValues);
+    for (const alias of valueAliases) {
+      if (!allowedSet.has(alias.mapsTo)) {
+        throw new Error(
+          `Attribute "${attribute.id}" has an alias target "${alias.mapsTo}" that is not an exact allowed value; repair the seed before generation.`,
+        );
+      }
+    }
+    return {
+      ...attribute,
+      allowedValues,
+      valueAliases,
+      oldIdAliases: attribute.oldIdAliases ?? [],
+      evidencePolicy: attribute.evidencePolicy ?? defaultEvidencePolicy(attribute),
+    };
+  });
 
   const attributeIds = new Set(attributes.map(attribute => attribute.id));
   const productTypeIds = new Set(seed.productTypes.map(type => type.id));
@@ -236,7 +275,10 @@ export function generateCandidate(seed: BayStateSeed, evidence: CatalogEvidence)
           applicabilityConditions: entry.applicabilityConditions ?? [],
           constraints: entry.constraints ?? {},
           confidenceThresholds: entry.confidenceThresholds ?? {},
-          valueAliases: entry.valueAliases ?? [],
+          valueAliases: (entry.valueAliases ?? []).map(alias => ({
+            alias: canonicalForm(alias.alias),
+            mapsTo: canonicalForm(alias.mapsTo),
+          })),
         };
       });
       profiles.push({

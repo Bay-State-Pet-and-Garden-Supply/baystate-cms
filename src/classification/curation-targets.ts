@@ -8,6 +8,7 @@ import {
   type ProductAttributeConfig,
   type AttributeMappingConfig,
 } from '../shared/schemas/classification';
+import { canonicalForm } from './controlled-value-identity';
 
 export interface CurationTargetOption {
   value: string;
@@ -40,13 +41,15 @@ function toClassificationSlug(input: string, fallback = 'target'): string {
 }
 
 function uniqueSorted(values: Array<string | null | undefined>): string[] {
-  const seen = new Set<string>();
+  const seen = new Map<string, string>();
   for (const raw of values) {
-    const value = String(raw ?? '').trim();
+    const value = canonicalForm(String(raw ?? ''));
     if (!value) continue;
-    seen.add(value);
+    // Deduplicate by canonical form; keep the first occurrence's exact bytes
+    // (canonical config already stores the NFC/trimmed representation).
+    if (!seen.has(value)) seen.set(value, value);
   }
-  return [...seen].sort((a, b) => a.localeCompare(b));
+  return [...seen.values()].sort((a, b) => a.localeCompare(b));
 }
 
 function parseSampleValues(sampleValuesJson: string | null): string[] {
@@ -60,9 +63,9 @@ function parseSampleValues(sampleValuesJson: string | null): string[] {
     for (const v of parsed) {
       const str = String(v);
       if (str.includes('|')) {
-        result.push(...str.split('|').map(s => s.trim()).filter(Boolean));
+        result.push(...str.split('|').map(s => canonicalForm(s)).filter(Boolean));
       } else {
-        result.push(str.trim());
+        result.push(canonicalForm(str));
       }
     }
     return result;
@@ -101,9 +104,9 @@ function listCatalogFieldOptions(catalogField: string, limit = 250): string[] {
   const split: string[] = [];
   for (const value of values) {
     if (value.includes('|')) {
-      split.push(...value.split('|').map(v => v.trim()).filter(Boolean));
+      split.push(...value.split('|').map(v => canonicalForm(v)).filter(Boolean));
     } else {
-      split.push(value.trim());
+      split.push(canonicalForm(value));
     }
   }
 

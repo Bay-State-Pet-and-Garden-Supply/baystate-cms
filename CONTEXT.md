@@ -136,6 +136,14 @@ _Avoid_: Replacement value, hidden rewrite
 An Attribute Value Alias that could map to different values in different Product Types or contexts.
 _Avoid_: Bad alias, automatic match
 
+**Canonical Controlled Value**:
+A controlled Product Attribute value whose stored string IS its identity: NFC-normalized and trimmed, with label equal to the ID (v2 policy). Config validation rejects empty/control-character/non-NFC/non-trimmed values, exact duplicates, normalized/case-fold collision pairs, and aliases whose target is not an exact allowed value. Evidence-text matching is case-tolerant, but the emitted value is always the exact canonical ID — the runtime never guesses an ID from a display label. See `src/classification/controlled-value-identity.ts` and ADR 0012.
+_Avoid_: Display string as ID, case-variant values, silent rewrite
+
+**ShopSite Built-in Output Field**:
+A DTD-level ShopSite product element governed by the immutable adapter-owned output policy (Name, FileName, Price, SaleAmount, ProductDescription, MinimumQuantity, ProductType, Weight, Graphic, MoreInformationText, MoreInformationGraphic, SearchKeywords, MoreInfoImage1–20). The policy fixes each field's omission/default/encoding/cardinality rule; it is not workspace-configurable, and `ProductField*` values are never built-ins. See `src/shopsite/built-in-output-policy.ts` and ADR 0011.
+_Avoid_: Store-specific config for DTD behavior
+
 **Catalog Field**:
 A store-specific product field present in the live ShopSite XML pulled from the store.
 _Avoid_: Database column, classifier slot, planned field

@@ -211,5 +211,16 @@ describe('Curation Target Matcher', () => {
       const result = matchAttributeOptions(attribute, 'tuna fish', attribute.allowedValues, 'single');
       expect(result).toEqual([]);
     });
+
+    it('fails closed when an alias mapsTo is not an exact allowed option (issue #17 G)', () => {
+      const danglingAliasAttribute: ProductAttributeConfig = {
+        ...attribute,
+        valueAliases: [{ alias: 'bird', mapsTo: 'Turkey' }],
+      };
+      // 'Turkey' is not in the allowed options: the alias must never emit a
+      // non-canonical guess.
+      const result = matchAttributeOptions(danglingAliasAttribute, 'bird meat', attribute.allowedValues, 'multiple');
+      expect(result.filter(r => r.matchedBy === 'alias')).toEqual([]);
+    });
   });
 });

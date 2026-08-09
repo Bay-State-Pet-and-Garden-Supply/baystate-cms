@@ -1,6 +1,11 @@
 import type { Product } from '@/shared/types';
 import { sanitizeXml } from './xml-sanitizer';
 import { isValidXmlTagName, escapeCdata } from './multipart-upload';
+import {
+  builtInDefaultValue,
+  isBuiltInOutputField,
+  SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION,
+} from './built-in-output-policy';
 
 /**
  * Generate an HTML file name from a product name.
@@ -83,19 +88,21 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
   // Taxable
   lines.push(`  <Taxable>${product.core.taxable ? 'checked' : 'uncheck'}</Taxable>`);
 
-  // MinimumQuantity — required by ShopSite DTD (default to '0' if omitted)
+  // MinimumQuantity — required by ShopSite DTD (default '0' per the built-in
+  // output policy when omitted).
   const minQty = product.customFields['MinimumQuantity']
     || (product.shopsite.preserved.unknownElements['MinimumQuantity'] != null
         ? String(product.shopsite.preserved.unknownElements['MinimumQuantity'])
-        : '0');
+        : builtInDefaultValue('MinimumQuantity') ?? '0');
   lines.push(`  <MinimumQuantity>${escapeXml(minQty)}</MinimumQuantity>`);
 
-  // ShopSite <ProductType> — default to Tangible for physical goods if not specified.
+  // ShopSite <ProductType> — default to Tangible (policy DTD default) for
+  // physical goods if not specified.
   // Note: Internal Primary Product Type (e.g. dog_food_dry) must never be mapped to ShopSite <ProductType>.
   const shopSiteProductType = product.customFields['ProductType']
     || (product.shopsite.preserved.unknownElements['ProductType'] != null
         ? String(product.shopsite.preserved.unknownElements['ProductType'])
-        : 'Tangible');
+        : builtInDefaultValue('ProductType') ?? 'Tangible');
   lines.push(`  <ProductType>${escapeXml(shopSiteProductType)}</ProductType>`);
 
   // QuantityOnHand
@@ -113,16 +120,17 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     lines.push(`  <Availability>${escapeXml(product.core.availability)}</Availability>`);
   }
 
-  // Image
+  // Image — Graphic is always emitted (policy omission: 'always'); the DTD
+  // default 'none' applies when no primary image exists.
   if (product.core.media.primary) {
     lines.push(`  <Graphic>${escapeXml(product.core.media.primary)}</Graphic>`);
     if (!product.shopsite.preserved.unknownElements['MoreInformationGraphic']) {
       lines.push(`  <MoreInformationGraphic>${escapeXml(product.core.media.primary)}</MoreInformationGraphic>`);
     }
   } else {
-    lines.push('  <Graphic>none</Graphic>');
+    lines.push(`  <Graphic>${builtInDefaultValue('Graphic') ?? 'none'}</Graphic>`);
     if (!product.shopsite.preserved.unknownElements['MoreInformationGraphic']) {
-      lines.push('  <MoreInformationGraphic>none</MoreInformationGraphic>');
+      lines.push(`  <MoreInformationGraphic>${builtInDefaultValue('MoreInformationGraphic') ?? 'none'}</MoreInformationGraphic>`);
     }
   }
 
@@ -139,9 +147,14 @@ export function denormalizeProduct(product: Product): DenormalizedResult {
     lines.push(`  <SearchKeywords><![CDATA[${escapeCdata(product.core.seo.searchKeywords)}]]></SearchKeywords>`);
   }
 
-  // ProductField mappings from customFields - validate tag names
+  // ProductField mappings from customFields - validate tag names. Custom
+  // ProductField* values are NOT ShopSite built-ins (issue #17 J): they stay
+  // on classification mapping/serialization, and the immutable built-in
+  // output policy governs only the DTD fields above. An unknown built-in
+  // policy key is never emitted through this generic path.
   for (const [field, value] of Object.entries(product.customFields)) {
     if (!value) continue;
+    if (isBuiltInOutputField(field)) continue; // governed by the policy, not custom serialization
     if (!isValidXmlTagName(field)) {
       warnings.push(`Skipping custom field "${field}" because it is not a valid XML tag name.`);
       continue;
