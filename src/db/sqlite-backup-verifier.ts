@@ -13,12 +13,31 @@
  * count checks inspect (issue #17 pass 6c blocker 1).
  *
  * Creation binds the SOURCE identity to the snapshot: the source content
- * identity is captured BEFORE `VACUUM INTO` and again AFTER; any drift during
- * snapshot creation aborts and removes every artifact this operation created
- * (issue #17 pass 6c blocker 2). Artifact creation is atomic: the manifest
- * path is reserved exclusively (`wx`) before the snapshot and the manifest is
- * emitted by renaming over that reservation, so no other process's file can
- * be overwritten (blocker 5).
+ * identity AND its monotonic `PRAGMA data_version` commit counter are read
+ * BEFORE and AFTER `VACUUM INTO` from the SAME held connection (issue #17
+ * pass 6e blocker 1) — any intervening commit by ANY connection (including
+ * an ABA schedule that reverts content) advances the counter, so the
+ * recorded source identity always describes the same database moment as the
+ * snapshot. Any drift aborts creation and removes every artifact this
+ * operation created (blocker 2).
+ *
+ * Artifact creation is atomic NO-CLOBBER (pass 6e blockers 3 + 4):
+ * - The backup is produced by `VACUUM INTO` to a UNIQUE private temp name
+ *   and published to the final destination with `fs.link` (a hard link that
+ *   FAILS with EEXIST if any file — including a raced foreign file —
+ *   occupies the destination), then the temp is unlinked. A foreign file at
+ *   the destination is never created-over.
+ * - The manifest is written to a unique private temp file (fsync) and
+ *   published with the same no-clobber `fs.link`, then the temp is
+ *   unlinked. A sentinel raced in at the manifest path aborts creation
+ *   without ever being overwritten.
+ * - A dedicated reservation file (`<manifest>.reservation`) is created
+ *   exclusively (`wx`) up front as the operation claim; it is removed
+ *   (inode-checked) on both success and failure.
+ * - Failure cleanup removes ONLY files this operation created: unique temp
+ *   names (ours by construction) plus published files whose current path
+ *   inode matches the inode this operation created. Another process's file
+ *   is never deleted.
  *
  * Row digests use a deterministic typed SQLite-value encoding (BLOBs become
  * `{t:'blob', b: base64}`) and stream one row at a time via `iterate()`, so
@@ -26,7 +45,8 @@
  * without materializing the whole table (blocker 4).
  *
  * The backup path and manifest are created with mode 0600 and never
- * overwrite any existing artifact (main file, manifest, or sidecar paths).
+ * overwrite any existing artifact (main file, manifest, reservation, or
+ * sidecar paths).
  */
 import fs from 'fs';
 import path from 'path';
@@ -267,44 +287,46 @@ function escapeSingleQuotes(value: string): string {
  * Uses SQLite `VACUUM INTO` so the backup is a consistent standalone
  * snapshot of the source (WAL/SHM content absorbed, no sidecar artifacts),
  * then stream-hashes the complete artifact. The source identity AND its
- * `PRAGMA data_version` (a monotonic commit counter) are captured BEFORE and
- * AFTER the snapshot; any drift aborts creation (the artifact and its
- * manifest always describe the SAME source moment).
+ * `PRAGMA data_version` (a monotonic commit counter) are read BEFORE and
+ * AFTER the snapshot FROM THE SAME HELD CONNECTION (pass 6e blocker 1):
+ * `data_version` is connection-observed and advances on every committed
+ * write by ANY connection, so ANY intervening commit — including an ABA
+ * schedule that reverts content to the original state — is detected exactly.
+ * Before/after equality of BOTH the identity and the counter proves no
+ * commit occurred during the snapshot window, so the artifact and its
+ * recorded source identity always describe the SAME source moment. The C2
+ * maintenance window still requires app/API/worker writers to be stopped.
  *
- * `VACUUM INTO` cannot run inside a SQLite transaction, so a held write
- * lock cannot span the snapshot; instead, the monotonic `data_version`
- * counter bounds the window: ANY commit by ANY connection between the two
- * reads changes the counter, so ABA drift (an intervening write that
- * reverts to the original state) is detected exactly — before/after
- * equality of BOTH the identity and the counter proves no commit occurred
- * during the snapshot window. The C2 maintenance window still requires
- * app/API/worker writers to be stopped.
+ * Artifact creation is atomic NO-CLOBBER (pass 6e blockers 3 + 4):
+ * - `VACUUM INTO` writes to a UNIQUE private temp name; the final
+ *   destination is published with `fs.link` (a hard link that FAILS with
+ *   EEXIST if any file occupies the destination — a raced foreign file is
+ *   never created-over) and the temp is then unlinked.
+ * - The manifest is written to a unique private temp file and published
+ *   with the same no-clobber `fs.link`; a sentinel raced in at the manifest
+ *   path aborts creation without being overwritten.
+ * - A dedicated reservation file is created exclusively (`wx`) up front as
+ *   the operation claim and removed (inode-checked) on success and failure.
+ * - On ANY failure, ONLY files created by this operation are removed:
+ *   unique temp names (ours by construction) and published files whose
+ *   current path inode matches the inode this operation created. Another
+ *   process's file is never deleted.
  *
- * Artifact creation is atomic:
- * - The manifest path is reserved exclusively (`wx`) BEFORE the snapshot and
- *   the open descriptor's dev/ino identity is retained. The final emit only
- *   replaces that owned inode (a sentinel raced in at the path aborts
- *   creation), and failure cleanup only unlinks the path when it still
- *   refers to the owned inode (another process's file is never deleted).
- * - `VACUUM INTO` itself requires the destination to not exist (atomic
- *   exclusive creation); the destination is added to the created-set BEFORE
- *   the call so a real mid-VACUUM I/O failure is cleaned up and a retry is
- *   possible.
- * - On ANY failure, ONLY files created by this operation are removed.
- *
- * Refuses to overwrite ANY existing artifact (main file, manifest, or
- * sidecar paths).
+ * Refuses to overwrite ANY existing artifact (main file, manifest,
+ * reservation, or sidecar paths).
  */
 export function createSqliteBackup(
   sourceDbPath: string,
   backupPath: string,
-  testHooks?: { __afterSnapshot?: () => void },
+  testHooks?: { __afterSnapshot?: () => void; __beforeSnapshot?: () => void; __beforePostCheck?: () => void },
 ): BackupManifest {
   const resolvedBackup = path.resolve(backupPath);
   const manifestPath = `${resolvedBackup}.manifest.json`;
+  const reservationPath = `${manifestPath}.reservation`;
   const artifactPaths = [
     resolvedBackup,
     manifestPath,
+    reservationPath,
     ...SIDECAR_SUFFIXES.map(suffix => `${resolvedBackup}${suffix}`),
   ];
   for (const artifact of artifactPaths) {
@@ -322,78 +344,67 @@ export function createSqliteBackup(
     fs.mkdirSync(dir, { recursive: true });
   }
 
-  /** Files created by THIS operation (removed on any failure). */
-  const created: string[] = [];
-  let manifestReservationFd: number | null = null;
+  /** Unique private temp files created by THIS operation (removed by path). */
+  const tempPaths: string[] = [];
+  /** Files published via no-clobber link (removed only if inode still ours). */
+  const published: Array<{ path: string; dev: number; ino: number }> = [];
+  let reservationFd: number | null = null;
   let reservationStat: fs.Stats | null = null;
 
-  /**
-   * True when `p` still refers to the reservation inode we own AND its
-   * content is untouched (size unchanged — we never write to the
-   * reservation, so any content change means another process modified it).
-   */
-  const pathIsReservation = (p: string): boolean => {
-    if (!reservationStat) return false;
+  /** True when `p` still refers to the inode recorded in `stat`. */
+  const isOwnedInode = (p: string, stat: fs.Stats): boolean => {
     try {
       const s = fs.statSync(p);
-      return (
-        s.dev === reservationStat.dev &&
-        s.ino === reservationStat.ino &&
-        s.size === reservationStat.size
-      );
+      return s.dev === stat.dev && s.ino === stat.ino;
     } catch {
       return false;
     }
   };
 
   try {
-    // Atomic reservation of the manifest path. This file is exclusively
-    // OURS ('wx' fails if anything exists). We retain the open descriptor
-    // and its dev/ino/size so the final emit and failure cleanup act only on
-    // the inode we own with unchanged content — never truncating or deleting
-    // another process's file.
-    manifestReservationFd = fs.openSync(manifestPath, 'wx', 0o600);
-    reservationStat = fs.fstatSync(manifestReservationFd);
+    // Upfront operation claim: a dedicated reservation marker created
+    // exclusively ('wx' fails if anything — including a raced foreign file
+    // or a leftover from a crashed run — occupies the path).
+    reservationFd = fs.openSync(reservationPath, 'wx', 0o600);
+    reservationStat = fs.fstatSync(reservationFd);
 
-    // Pre-snapshot source identity + commit counter. data_version is
-    // monotonic across EVERY committed write by ANY connection.
-    const preSourceDb = new Database(sourceDbPath, { readonly: true });
+    // ONE held source connection for the whole operation: the monotonic
+    // data_version counter and the content identity read BEFORE and AFTER
+    // the VACUUM snapshot. A connection-local counter read from a fresh
+    // connection would not see intervening commits; the held connection
+    // observes every commit (ABA included) so pre/post equality is exact.
+    const vacuumTmp = `${resolvedBackup}.vacuum-tmp-${process.pid}-${crypto.randomUUID()}`;
+    tempPaths.push(vacuumTmp); // tracked BEFORE VACUUM (mid-failure cleanup)
+    const sourceDb = new Database(sourceDbPath);
     let sourceIdentityHash: string;
-    let preDataVersion: number;
-    try {
-      sourceIdentityHash = computeSourceIdentityHash(preSourceDb);
-      preDataVersion = (preSourceDb.query('PRAGMA data_version').get() as { data_version: number })
-        .data_version;
-    } finally {
-      preSourceDb.close();
-    }
-
-    // Consistent standalone snapshot. The destination is tracked BEFORE the
-    // call so a real mid-VACUUM failure (disk full, RLIMIT_FSIZE, I/O error)
-    // is cleaned up and a retry is possible. `VACUUM INTO` requires the
-    // destination to not already exist (atomic exclusive creation).
-    created.push(resolvedBackup);
-    const sourceWriter = new Database(sourceDbPath);
-    try {
-      sourceWriter.exec(`VACUUM INTO '${escapeSingleQuotes(resolvedBackup)}'`);
-    } finally {
-      sourceWriter.close();
-    }
-    fs.chmodSync(resolvedBackup, 0o600);
-
-    // Post-snapshot source identity + commit counter: the source must be the
-    // SAME database moment as the snapshot. Any drift (content OR a commit
-    // counter change — which also catches ABA reverts) aborts creation and
-    // removes every artifact this operation created.
-    const postSourceDb = new Database(sourceDbPath, { readonly: true });
     let sourceIdentityHashAfter: string;
+    let preDataVersion: number;
     let postDataVersion: number;
     try {
-      sourceIdentityHashAfter = computeSourceIdentityHash(postSourceDb);
-      postDataVersion = (postSourceDb.query('PRAGMA data_version').get() as { data_version: number })
+      preDataVersion = (sourceDb.query('PRAGMA data_version').get() as { data_version: number })
         .data_version;
+      sourceIdentityHash = computeSourceIdentityHash(sourceDb);
+
+      // TEST-ONLY injection (never supplied by production callers): commits
+      // an intervening write BEFORE the snapshot to deterministically prove
+      // the held-connection counter catches it (ABA schedule).
+      testHooks?.__beforeSnapshot?.();
+
+      // Consistent standalone snapshot into the unique private temp. The
+      // temp is tracked before the call so a real mid-VACUUM failure (disk
+      // full, RLIMIT_FSIZE, I/O error) is cleaned up and a retry is possible.
+      sourceDb.exec(`VACUUM INTO '${escapeSingleQuotes(vacuumTmp)}'`);
+      fs.chmodSync(vacuumTmp, 0o600);
+
+      // TEST-ONLY injection: a second intervening write (e.g. the ABA revert)
+      // before the post reads.
+      testHooks?.__beforePostCheck?.();
+
+      postDataVersion = (sourceDb.query('PRAGMA data_version').get() as { data_version: number })
+        .data_version;
+      sourceIdentityHashAfter = computeSourceIdentityHash(sourceDb);
     } finally {
-      postSourceDb.close();
+      sourceDb.close();
     }
     if (sourceIdentityHashAfter !== sourceIdentityHash || postDataVersion !== preDataVersion) {
       throw new Error(
@@ -402,23 +413,43 @@ export function createSqliteBackup(
       );
     }
 
+    // Publish the backup atomically (no-clobber): link fails with EEXIST if
+    // any file — including a foreign file raced in at the destination —
+    // occupies the final path, so a foreign file is never created-over.
+    try {
+      fs.linkSync(vacuumTmp, resolvedBackup);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(
+          'Backup destination was created by another process; aborting backup.',
+          { cause: err },
+        );
+      }
+      throw err;
+    }
+    fs.unlinkSync(vacuumTmp);
+    tempPaths.splice(tempPaths.indexOf(vacuumTmp), 1);
+    const bkStat = fs.statSync(resolvedBackup);
+    published.push({ path: resolvedBackup, dev: bkStat.dev, ino: bkStat.ino });
+
     // TEST-ONLY injection point (never supplied by production callers): lets
-    // a regression test deterministically race the manifest reservation (write
-    // into it or replace it) after the snapshot and before the inode check.
+    // a regression test deterministically race the manifest destination (a
+    // sentinel written/replaced there) after the backup is published and
+    // before the manifest's no-clobber link.
     testHooks?.__afterSnapshot?.();
 
     const sizeBytes = fs.statSync(resolvedBackup).size;
     const sha256 = sha256FileSync(resolvedBackup);
 
     const snapshotDb = new Database(resolvedBackup, { readonly: true });
-    const sourceDb = new Database(sourceDbPath, { readonly: true });
+    const manifestSourceDb = new Database(sourceDbPath, { readonly: true });
     let manifest: BackupManifest;
     try {
       manifest = buildBackupManifest(
         sourceDbPath,
         resolvedBackup,
         snapshotDb,
-        sourceDb,
+        manifestSourceDb,
         sourceIdentityHash,
         sourceIdentityHashAfter,
         sha256,
@@ -426,64 +457,94 @@ export function createSqliteBackup(
       );
     } finally {
       snapshotDb.close();
-      sourceDb.close();
+      manifestSourceDb.close();
     }
 
-    // Emit the manifest by writing a private temp file and ATOMICALLY
-    // renaming it over OUR OWN reservation. Before the rename, confirm the
-    // manifest path still refers to the reserved inode: a file raced into
-    // the path aborts creation instead of being overwritten.
+    // Emit the manifest by writing a unique private temp file and publishing
+    // it with the same atomic no-clobber link. A file raced in at the
+    // manifest path (write into a stale file or a brand-new sentinel inode)
+    // makes the link fail with EEXIST and aborts creation — the sentinel is
+    // never overwritten.
     const tmpManifest = `${manifestPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    tempPaths.push(tmpManifest);
     const tmpFd = fs.openSync(tmpManifest, 'wx', 0o600);
-    created.push(tmpManifest);
     try {
       fs.writeFileSync(tmpFd, JSON.stringify(manifest, null, 2));
+      fs.fsyncSync(tmpFd);
     } finally {
       fs.closeSync(tmpFd);
     }
-    if (!pathIsReservation(manifestPath)) {
-      throw new Error(
-        'Manifest reservation was replaced by another process; aborting backup.',
-      );
+    try {
+      fs.linkSync(tmpManifest, manifestPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(
+          'Manifest destination was created by another process; aborting backup.',
+          { cause: err },
+        );
+      }
+      throw err;
     }
-    fs.renameSync(tmpManifest, manifestPath);
-    // Close the (now stale, unlinked) reservation descriptor and stop
-    // tracking both emitted paths: they are ours and must survive cleanup.
-    if (manifestReservationFd !== null) {
+    fs.unlinkSync(tmpManifest);
+    tempPaths.splice(tempPaths.indexOf(tmpManifest), 1);
+    const mStat = fs.statSync(manifestPath);
+    published.push({ path: manifestPath, dev: mStat.dev, ino: mStat.ino });
+    fs.chmodSync(manifestPath, 0o600);
+
+    // Success: remove our reservation marker (inode-checked — never another
+    // process's file) and close the descriptor.
+    if (reservationStat && isOwnedInode(reservationPath, reservationStat)) {
       try {
-        fs.closeSync(manifestReservationFd);
+        fs.rmSync(reservationPath, { force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    if (reservationFd !== null) {
+      try {
+        fs.closeSync(reservationFd);
       } catch {
         // already closed
       }
-      manifestReservationFd = null;
-      reservationStat = null;
     }
-    created.splice(created.indexOf(tmpManifest), 1);
-    fs.chmodSync(manifestPath, 0o600);
+    reservationFd = null;
+    reservationStat = null;
 
     return manifest;
   } catch (err) {
-    // Remove ONLY files this operation created. The manifest reservation is
-    // exclusively ours: unlink its path only when it still refers to the
-    // inode we own (never delete another process's replacement), and always
-    // close the descriptor (no fd leak on the failure path).
-    if (manifestReservationFd !== null) {
-      if (pathIsReservation(manifestPath)) {
+    // Remove ONLY files this operation created:
+    // - the reservation marker, when its path still refers to the inode we
+    //   created (a foreign replacement is never deleted);
+    // - published files whose current path inode matches the inode this
+    //   operation created (another process's replacement is never deleted);
+    // - unique temp names, which are ours by construction.
+    if (reservationFd !== null) {
+      if (reservationStat && isOwnedInode(reservationPath, reservationStat)) {
         try {
-          fs.rmSync(manifestPath, { force: true });
+          fs.rmSync(reservationPath, { force: true });
         } catch {
           // best-effort cleanup
         }
       }
       try {
-        fs.closeSync(manifestReservationFd);
+        fs.closeSync(reservationFd);
       } catch {
         // already closed
       }
     }
-    for (const artifact of created) {
+    for (const artifact of published) {
       try {
-        fs.rmSync(artifact, { force: true });
+        const s = fs.statSync(artifact.path);
+        if (s.dev === artifact.dev && s.ino === artifact.ino) {
+          fs.rmSync(artifact.path, { force: true });
+        }
+      } catch {
+        // already gone or foreign — leave it
+      }
+    }
+    for (const temp of tempPaths) {
+      try {
+        fs.rmSync(temp, { force: true });
       } catch {
         // best-effort cleanup
       }
@@ -554,13 +615,21 @@ export async function verifySqliteBackup(
       `Unsupported manifest format/version: ${manifest.format}/${manifest.version}`,
     );
   }
-  // Recorded source-identity invariant: the post-snapshot identity must
-  // equal the pre-snapshot identity (both describe the same source moment).
-  // Tampering either field independently is rejected.
-  if (
+  // Recorded source-identity invariant: both identity fields are REQUIRED
+  // non-empty strings (a manifest with either field missing/undefined is
+  // rejected immediately — never fail-open), and the post-snapshot identity
+  // must equal the pre-snapshot identity (both describe the same source
+  // moment). Tampering either field independently is rejected.
+  const hasRequiredIdentityFields =
+    typeof manifest.sourceIdentityHash === 'string' &&
+    manifest.sourceIdentityHash.length > 0 &&
     typeof manifest.sourceIdentityHashAfter === 'string' &&
-    manifest.sourceIdentityHashAfter !== manifest.sourceIdentityHash
-  ) {
+    manifest.sourceIdentityHashAfter.length > 0;
+  if (!hasRequiredIdentityFields) {
+    errors.push(
+      `Manifest missing required source identity fields (sourceIdentityHash / sourceIdentityHashAfter).`,
+    );
+  } else if (manifest.sourceIdentityHashAfter !== manifest.sourceIdentityHash) {
     errors.push(
       `Manifest source identity invariant violated: sourceIdentityHashAfter differs from sourceIdentityHash.`,
     );

@@ -490,45 +490,104 @@ describe('SQLite backup verifier (Issue #17 C1)', () => {
     expect((await verifySqliteBackup(path.join(dir, 'bb.db'), mb, { sourceDbPath: b })).ok).toBe(true);
   });
 
-  it('aborts when the reservation content is modified mid-operation (overwrite variant, pass 6d)', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-ow-6d-'));
+  // ── Issue #17 pass 6e regression tests ──────────────────────────────────
+
+  it('aborts when a sentinel appears at the manifest destination in the final gap (pass 6e)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-gap-6e-'));
     const source = makeSourceDb(dir);
     const backup = path.join(dir, 'backup.db');
     const manifestPath = `${backup}.manifest.json`;
-    // TEST-ONLY hook: after the snapshot, another writer writes INTO the
-    // reservation. Creation must abort with the sentinel untouched (the
-    // reservation content changed, so it is no longer safely ours).
+    // TEST-ONLY hook: after the backup is published, another process creates
+    // a sentinel at the manifest destination. The no-clobber link must fail
+    // (EEXIST) and abort creation — the sentinel is NEVER overwritten — and
+    // the published backup must be removed (it is ours).
     expect(() =>
       createSqliteBackup(source, backup, {
         __afterSnapshot: () => {
           fs.writeFileSync(manifestPath, 'RACE SENTINEL');
         },
       }),
-    ).toThrow(/reservation|aborting/i);
+    ).toThrow(/aborting/i);
     expect(fs.existsSync(backup)).toBe(false);
     expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('RACE SENTINEL');
     fs.rmSync(manifestPath);
   });
 
-  it('aborts when the reservation inode is replaced mid-operation (replace variant, pass 6d)', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-rp-6d-'));
+  it('aborts when a foreign file appears at the backup destination before publish (pass 6e)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-fdest-6e-'));
     const source = makeSourceDb(dir);
     const backup = path.join(dir, 'backup.db');
-    const manifestPath = `${backup}.manifest.json`;
-    // TEST-ONLY hook: after the snapshot, the reservation is unlinked and a
-    // NEW foreign file appears at the path. Creation must abort and cleanup
-    // must never delete the foreign inode.
+    // TEST-ONLY hook: after the VACUUM snapshot (into the unique temp) but
+    // before the no-clobber publish, another process creates a foreign file
+    // at the FINAL backup destination. The link must fail (EEXIST) without
+    // creating-over the foreign file, and cleanup must not delete it.
     expect(() =>
       createSqliteBackup(source, backup, {
-        __afterSnapshot: () => {
-          fs.rmSync(manifestPath);
-          fs.writeFileSync(manifestPath, 'RACE SENTINEL');
+        __beforePostCheck: () => {
+          fs.writeFileSync(backup, 'FOREIGN FILE');
         },
       }),
-    ).toThrow(/reservation|aborting/i);
+    ).toThrow(/aborting/i);
+    expect(fs.readFileSync(backup, 'utf-8')).toBe('FOREIGN FILE');
+    expect(fs.existsSync(`${backup}.manifest.json`)).toBe(false);
+    fs.rmSync(backup);
+  });
+
+  it('detects ABA drift via the held-connection commit counter (pass 6e)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-aba-6e-'));
+    const source = path.join(dir, 's.db');
+    {
+      const db = new Database(source);
+      db.exec('PRAGMA journal_mode = WAL;');
+      db.exec('CREATE TABLE t (v TEXT); INSERT INTO t VALUES (\'before\');');
+      db.close();
+    }
+    const backup = path.join(dir, 'backup.db');
+    const w = new Database(source);
+    // Deterministic ABA schedule: an intervening commit BEFORE the snapshot
+    // (so VACUUM captures 'intermediate') and a revert AFTER the snapshot
+    // (back to 'before') — the content identity returns to its original
+    // value, but the monotonic data_version counter observed by the SAME
+    // held connection advances 2->3->4 and creation MUST abort.
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __beforeSnapshot: () => {
+          w.exec("UPDATE t SET v = 'intermediate';");
+        },
+        __beforePostCheck: () => {
+          w.exec("UPDATE t SET v = 'before';");
+        },
+      }),
+    ).toThrow(/changed during backup/i);
+    w.close();
+    // Zero artifacts left; the source keeps its original content.
     expect(fs.existsSync(backup)).toBe(false);
-    expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('RACE SENTINEL');
-    fs.rmSync(manifestPath);
+    expect(fs.existsSync(`${backup}.manifest.json`)).toBe(false);
+    const db = new Database(source, { readonly: true });
+    expect((db.query('SELECT v FROM t').get() as { v: string }).v).toBe('before');
+    db.close();
+  });
+
+  it('rejects a manifest missing the required source identity fields (pass 6e)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-missid-6e-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifest = createSqliteBackup(source, backup);
+
+    // Deleting the post-snapshot identity field must fail verification
+    // immediately (the field is REQUIRED, never fail-open).
+    const { sourceIdentityHashAfter: _dropped, ...withoutAfter } = manifest;
+    const tampered = withoutAfter as unknown as BackupManifest;
+    const verification = await verifySqliteBackup(backup, tampered, { sourceDbPath: source });
+    expect(verification.ok).toBe(false);
+    expect(verification.errors.some(e => /missing required source identity/i.test(e))).toBe(true);
+
+    // Same for the pre-snapshot field.
+    const { sourceIdentityHash: _dropped2, ...withoutBefore } = manifest;
+    const tampered2 = withoutBefore as unknown as BackupManifest;
+    const verification2 = await verifySqliteBackup(backup, tampered2, { sourceDbPath: source });
+    expect(verification2.ok).toBe(false);
+    expect(verification2.errors.some(e => /missing required source identity/i.test(e))).toBe(true);
   });
 
   it('cleans every artifact on a real mid-VACUUM disk I/O failure and allows a retry (RLIMIT, pass 6d)', async () => {
