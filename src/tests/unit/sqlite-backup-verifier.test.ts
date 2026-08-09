@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import crypto from 'node:crypto';
 import { Database } from '../../db/driver';
 import {
   createSqliteBackup,
@@ -310,5 +311,111 @@ describe('SQLite backup verifier (Issue #17 C1)', () => {
     }
     expect(manifest.counts.onboarding_items).toBe(1);
     expect(manifest.counts.classification_runs).toBe(1);
+  });
+
+  it('binds the source identity to the snapshot (pre/post identities equal and recorded)', async () => {
+    // Blocker 2: the manifest records the source identity captured BEFORE the
+    // snapshot and the identity captured AFTER; creation aborts if they ever
+    // differ, so the artifact and its recorded source identity always describe
+    // the SAME database moment.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-identity-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifest = createSqliteBackup(source, backup);
+    expect(manifest.sourceIdentityHash).toBeTruthy();
+    expect(manifest.sourceIdentityHashAfter).toBe(manifest.sourceIdentityHash);
+    // The identity covers the source content: changing a value later makes
+    // verification against the source fail (bound to the snapshot).
+    const db = new Database(source);
+    db.exec("UPDATE onboarding_items SET name = 'LATER' WHERE id = 'i2'");
+    db.close();
+    const verification = await verifySqliteBackup(backup, manifest, { sourceDbPath: source });
+    expect(verification.ok).toBe(false);
+    expect(verification.errors.some(e => /content has changed/i.test(e))).toBe(true);
+  });
+
+  it('rejects a backup with an unexpected WAL/SHM sidecar (immutable verification)', async () => {
+    // Blocker 1: a valid copied -wal/-shm beside the artifact changes the
+    // logical database WITHOUT changing the attested main SHA. Verification
+    // must reject the sidecar and open the artifact immutably so the SHA
+    // always covers the inspected logical contents.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-sidecar-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifest = createSqliteBackup(source, backup);
+    const originalSha = manifest.sha256;
+
+    // Clone the standalone artifact, enable WAL on the clone, commit a
+    // same-count change with the writer LEFT OPEN (so the change lives only
+    // in the WAL), then copy the clone's valid WAL/SHM beside the ORIGINAL.
+    const clone = path.join(dir, 'clone.db');
+    fs.copyFileSync(backup, clone);
+    const writer = new Database(clone);
+    writer.exec('PRAGMA journal_mode = WAL');
+    writer.exec("UPDATE onboarding_items SET name = 'tampered-via-copied-wal' WHERE id = 'i1'");
+    fs.copyFileSync(`${clone}-wal`, `${backup}-wal`);
+    fs.copyFileSync(`${clone}-shm`, `${backup}-shm`);
+    writer.close();
+
+    // The main artifact SHA is unchanged (the logical change is only in the
+    // sidecar) — so without the sidecar rejection the verification would
+    // falsely pass.
+    const hash = crypto.createHash('sha256');
+    hash.update(fs.readFileSync(backup));
+    expect(hash.digest('hex')).toBe(originalSha);
+
+    const verification = await verifySqliteBackup(backup, manifest, { sourceDbPath: source });
+    expect(verification.ok).toBe(false);
+    expect(verification.errors.some(e => /sidecar/i.test(e))).toBe(true);
+
+    // After removing the sidecars, the artifact verifies cleanly (immutable
+    // open reads only the main file).
+    fs.rmSync(`${backup}-wal`);
+    fs.rmSync(`${backup}-shm`);
+    const clean = await verifySqliteBackup(backup, manifest, { sourceDbPath: source });
+    expect(clean.ok).toBe(true);
+  });
+
+  it('backs up and verifies a source with BLOB columns (typed identity encoding)', async () => {
+    // Blocker 4: product_embeddings.embedding_blob BLOB values must be
+    // canonicalized deterministically (typed encoding) so a production DB with
+    // embeddings can pass the backup gate with a complete artifact + manifest.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-blob-'));
+    const source = path.join(dir, 'blob-source.db');
+    const db = new Database(source);
+    db.exec('CREATE TABLE product_embeddings (id TEXT PRIMARY KEY, embedding_blob BLOB NOT NULL);');
+    db.exec("INSERT INTO product_embeddings VALUES ('e1', X'0102030405')");
+    db.exec("INSERT INTO product_embeddings VALUES ('e2', X'FFFFFFFF')");
+    db.close();
+
+    const backup = path.join(dir, 'backup.db');
+    const manifest = createSqliteBackup(source, backup);
+    expect(fs.existsSync(backup)).toBe(true);
+    expect(fs.existsSync(`${backup}.manifest.json`)).toBe(true);
+    const verification = await verifySqliteBackup(backup, manifest, { sourceDbPath: source });
+    expect(verification.ok).toBe(true);
+    expect(verification.errors).toEqual([]);
+  });
+
+  it('leaves no artifacts on failure and allows a clean retry', () => {
+    // Blocker 5/4: creation failure removes ONLY artifacts this operation
+    // created (never another file), and a retry is not blocked by leftovers.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-cleanup-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifestPath = `${backup}.manifest.json`;
+    // A DIRECTORY at the manifest path makes the exclusive 'wx' reservation
+    // fail before any snapshot work; no artifact may be left behind.
+    fs.mkdirSync(manifestPath);
+    expect(() => createSqliteBackup(source, backup)).toThrow();
+    expect(fs.existsSync(backup)).toBe(false);
+    expect(fs.statSync(manifestPath).isDirectory()).toBe(true);
+    fs.rmdirSync(manifestPath);
+
+    // Retry succeeds — no leftover main file blocks it.
+    const manifest = createSqliteBackup(source, backup);
+    expect(fs.existsSync(backup)).toBe(true);
+    expect(fs.existsSync(manifestPath)).toBe(true);
+    expect(manifest.sizeBytes).toBe(fs.statSync(backup).size);
   });
 });

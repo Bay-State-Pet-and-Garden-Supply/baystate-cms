@@ -70,6 +70,10 @@ function openDb(dbPath: string, readonly = false): Database {
   if (!fs.existsSync(dbPath)) fail(`database does not exist: ${dbPath}`);
   const db = readonly ? new Database(dbPath, { readonly: true }) : new Database(dbPath);
   db.exec('PRAGMA busy_timeout = 5000;');
+  // Match the application setting (src/db/connection.ts) so the repair
+  // transaction's physical deletion set EXACTLY equals the reviewed manifest
+  // (FK ON cascades children the same way the closure enumerates them).
+  db.exec('PRAGMA foreign_keys = ON;');
   return db;
 }
 
@@ -148,7 +152,9 @@ async function modeBackup(args: Record<string, string | boolean>): Promise<void>
   if (!backupPath) fail('--backup <path> is required.');
   if (!dbPath) fail('--db <path> is required.');
   const manifest = createSqliteBackup(dbPath, backupPath);
-  const verification = await verifySqliteBackup(backupPath, manifest);
+  // The immediate verification binds the source: the backup must be the
+  // snapshot of the CURRENT source at the same moment (blocker 2).
+  const verification = await verifySqliteBackup(backupPath, manifest, { sourceDbPath: dbPath });
   printReport({ backupPath, manifest, verification });
   if (!verification.ok) {
     fail(`backup verification failed: ${verification.errors.join('; ')}`);

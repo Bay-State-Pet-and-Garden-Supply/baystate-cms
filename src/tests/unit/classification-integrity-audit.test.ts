@@ -450,4 +450,69 @@ describe('Classification Integrity Audit & Repair extended (Issue #17 C1)', () =
     expect(JSON.parse(row.curation_data_json).classificationProposals.map((p: any) => p.id)).toEqual(['keep-1']);
     expect(JSON.parse(row.curation_data_json).store).toEqual({ name: 'Bay State' });
   });
+
+  it('plans and repairs the complete descendant closure (FK-off and FK-on identical)', () => {
+    // Blocker 3: an orphan proposal (run missing) with a currently-valid
+    // decision, proposal-evidence link, and decision-evidence citation must
+    // have ALL FOUR rows in the planned-deletion manifest, and the repair
+    // must delete exactly that set with a clean post-audit under BOTH
+    // foreign_keys=OFF and foreign_keys=ON (the physical set equals the
+    // manifest in both modes).
+    function fixture(): Database {
+      const d = new Database(':memory:');
+      d.exec(`
+        CREATE TABLE classification_runs (id TEXT PRIMARY KEY);
+        CREATE TABLE classification_proposals (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES classification_runs(id));
+        CREATE TABLE classification_evidence (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES classification_runs(id), source_kind TEXT NOT NULL);
+        CREATE TABLE classification_proposal_decisions (id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL REFERENCES classification_proposals(id), decision TEXT NOT NULL);
+        CREATE TABLE classification_proposal_evidence (proposal_id TEXT NOT NULL REFERENCES classification_proposals(id), evidence_id TEXT NOT NULL REFERENCES classification_evidence(id), relation TEXT NOT NULL DEFAULT 'legacy', PRIMARY KEY (proposal_id, evidence_id));
+        CREATE TABLE classification_proposal_decision_evidence (decision_id TEXT NOT NULL REFERENCES classification_proposal_decisions(id), evidence_id TEXT NOT NULL REFERENCES classification_evidence(id), PRIMARY KEY (decision_id, evidence_id));
+      `);
+      d.run(`INSERT INTO classification_runs VALUES ('run-ok')`);
+      d.run(`INSERT INTO classification_evidence VALUES ('ev-ok', 'run-ok', 'catalog_product')`);
+      // The ORPHAN: proposal whose run is gone, but with fully VALID
+      // descendants (decision + proposal-evidence + decision-evidence).
+      d.run(`INSERT INTO classification_proposals VALUES ('prop-orphan', 'run-ghost')`);
+      d.run(`INSERT INTO classification_proposal_decisions VALUES ('dec-valid', 'prop-orphan', 'accepted')`);
+      d.run(`INSERT INTO classification_proposal_evidence VALUES ('prop-orphan', 'ev-ok', 'supporting')`);
+      d.run(`INSERT INTO classification_proposal_decision_evidence VALUES ('dec-valid', 'ev-ok')`);
+      return d;
+    }
+
+    for (const fkMode of ['OFF', 'ON'] as const) {
+      const d = fixture();
+      d.exec(`PRAGMA foreign_keys = ${fkMode};`);
+
+      const audit = auditClassificationIntegrity(d);
+      // Only the proposal is a DIRECT orphan; its descendants are valid.
+      expect(audit.orphanProposals).toBe(1);
+      expect(audit.orphanProposalDecisions).toBe(0);
+      expect(audit.orphanProposalEvidence).toBe(0);
+      expect(audit.orphanProposalDecisionEvidence).toBe(0);
+
+      const planned = buildIntegrityManifest(d, audit).manifest.plannedDeletions;
+      const byTable = (t: string) => planned.filter(p => p.table === t);
+      expect(byTable('classification_proposals')).toHaveLength(1);
+      expect(byTable('classification_proposals')[0]!.key).toBe('prop-orphan');
+      expect(byTable('classification_proposal_decisions')).toHaveLength(1);
+      expect(byTable('classification_proposal_evidence')).toHaveLength(1);
+      expect(byTable('classification_proposal_decision_evidence')).toHaveLength(1);
+      expect(planned).toHaveLength(4);
+
+      const repair = repairClassificationIntegrity(d, { dryRun: false });
+      expect(repair.postAudit.isClean).toBe(true);
+      expect(repair.repairedProposals).toBe(1);
+      expect(repair.repairedProposalDecisions).toBe(1);
+      expect(repair.repairedProposalEvidence).toBe(1);
+      expect(repair.repairedProposalDecisionEvidence).toBe(1);
+      expect((d.query('SELECT COUNT(*) c FROM classification_proposals').get() as { c: number }).c).toBe(0);
+      expect((d.query('SELECT COUNT(*) c FROM classification_proposal_decisions').get() as { c: number }).c).toBe(0);
+      expect((d.query('SELECT COUNT(*) c FROM classification_proposal_evidence').get() as { c: number }).c).toBe(0);
+      expect((d.query('SELECT COUNT(*) c FROM classification_proposal_decision_evidence').get() as { c: number }).c).toBe(0);
+      // The valid run + evidence are preserved.
+      expect((d.query('SELECT COUNT(*) c FROM classification_runs').get() as { c: number }).c).toBe(1);
+      expect((d.query('SELECT COUNT(*) c FROM classification_evidence').get() as { c: number }).c).toBe(1);
+      d.close();
+    }
+  });
 });

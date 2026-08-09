@@ -367,127 +367,224 @@ export function auditClassificationIntegrity(db: Database): IntegrityAuditResult
 }
 
 /**
+ * Deletion dependency order: children before parents, matching the schema's
+ * FK cascade relationships. The planned-deletion set and `runRepair` both
+ * use this exact ordering so the physical deletion set equals the manifest.
+ */
+const DEPENDENCY_ORDER = [
+  'classification_proposal_decision_evidence',
+  'classification_proposal_evidence',
+  'classification_proposal_decisions',
+  'classification_proposals',
+  'classification_evidence',
+  'classification_stage_results',
+  'classification_model_calls',
+  'onboarding_sources',
+  'onboarding_extractions',
+  'profile_generation_revisions',
+] as const;
+
+/**
+ * Parent → child FK relations used to expand a planned deletion into its
+ * complete descendant closure (children of parents scheduled for deletion
+ * are themselves scheduled, even when their immediate parents currently
+ * exist). Only parent tables that are ever planned participate; link tables
+ * (no `id` column) have no children.
+ */
+const CHILD_RELATIONS = [
+  { parentTable: 'classification_proposals', childTable: 'classification_proposal_decisions', fkCol: 'proposal_id' },
+  { parentTable: 'classification_proposals', childTable: 'classification_proposal_evidence', fkCol: 'proposal_id' },
+  { parentTable: 'classification_proposal_decisions', childTable: 'classification_proposal_decision_evidence', fkCol: 'decision_id' },
+  { parentTable: 'classification_evidence', childTable: 'classification_proposal_evidence', fkCol: 'evidence_id' },
+  { parentTable: 'classification_evidence', childTable: 'classification_proposal_decision_evidence', fkCol: 'evidence_id' },
+] as const;
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
+interface PlannedRow {
+  rowid: number;
+  id?: string | null;
+  values: unknown[];
+}
+
+/**
  * Enumerate the EXACT SQL rows the repair is authorized to delete, in
  * dependency order matching `runRepair`. Each entry carries the SQLite
  * rowid plus a deterministic non-sensitive identity key (the table's `id`
  * column when present, else a canonical row-content hash) so the reviewed
  * manifest binds the concrete deletion set. A same-count replacement of a
  * reviewed orphan therefore changes the manifest hash and aborts repair.
+ *
+ * The set is the complete descendant CLOSURE: every current orphan PLUS
+ * every child row whose parent is itself planned for deletion (following the
+ * schema's FK/cascade relations), so the transaction's physical deletion set
+ * EXACTLY equals the manifest under both foreign_keys=OFF and ON.
  */
 export function collectPlannedDeletions(db: Database): PlannedDeletion[] {
-  const out: PlannedDeletion[] = [];
+  const planned = new Map<string, Map<number, PlannedDeletion>>();
+  const idValuesByTable = new Map<string, Set<string>>();
 
-  function pushRows(
-    table: string,
-    hasId: boolean,
-    rows: Array<{ rowid: number; id?: string | null; values: unknown[] }>,
-  ): void {
-    for (const r of rows) {
-      const key =
-        hasId && typeof r.id === 'string' && r.id
-          ? r.id
-          : sha256Hex(canonicalJsonStringify([table, r.rowid, r.values]));
-      out.push({ table, rowid: r.rowid, key });
+  function addRow(table: string, row: PlannedRow): void {
+    let byRow = planned.get(table);
+    if (!byRow) {
+      byRow = new Map();
+      planned.set(table, byRow);
+    }
+    if (byRow.has(row.rowid)) return;
+    const key =
+      typeof row.id === 'string' && row.id
+        ? row.id
+        : sha256Hex(canonicalJsonStringify([table, row.rowid, row.values]));
+    byRow.set(row.rowid, { table, rowid: row.rowid, key });
+    if (typeof row.id === 'string' && row.id) {
+      let ids = idValuesByTable.get(table);
+      if (!ids) {
+        ids = new Set();
+        idValuesByTable.set(table, ids);
+      }
+      ids.add(row.id);
     }
   }
 
-  function collect(table: string, predicateSql: string, hasId: boolean): void {
+  function collectRoots(table: string, predicateSql: string): void {
     if (!tableExists(db, table)) return;
     const rows = db.query(
-      `SELECT rowid${hasId ? ', id' : ''}, * FROM ${table} WHERE ${predicateSql}`,
-    ).all() as Array<{ rowid: number; id?: string }>;
-    pushRows(
-      table,
-      hasId,
-      rows.map(r => {
-        const { rowid, id, ...rest } = r as { rowid: number; id?: string };
-        return { rowid, id, values: Object.values(rest) };
-      }),
-    );
+      `SELECT rowid, * FROM ${table} WHERE ${predicateSql}`,
+    ).all() as Array<Record<string, unknown> & { rowid: number; id?: string }>;
+    for (const r of rows) {
+      const values = Object.entries(r)
+        .filter(([k]) => k !== 'rowid')
+        .map(([, v]) => v);
+      addRow(table, { rowid: r.rowid, id: r.id ?? null, values });
+    }
   }
 
+  // Roots: current orphans per class (parents missing).
   if (tableExists(db, 'classification_proposal_decisions') && tableExists(db, 'classification_proposals')) {
-    collect(
+    collectRoots(
       'classification_proposal_decisions',
       `id IN (SELECT d.id FROM classification_proposal_decisions d
               LEFT JOIN classification_proposals p ON p.id = d.proposal_id WHERE p.id IS NULL)`,
-      true,
     );
   }
   if (tableExists(db, 'classification_proposal_evidence')) {
-    collect(
+    collectRoots(
       'classification_proposal_evidence',
       `NOT EXISTS (SELECT 1 FROM classification_proposals p WHERE p.id = classification_proposal_evidence.proposal_id)
         OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = classification_proposal_evidence.evidence_id)`,
-      false,
     );
   }
   if (tableExists(db, 'classification_proposal_decision_evidence')) {
-    collect(
+    collectRoots(
       'classification_proposal_decision_evidence',
       `NOT EXISTS (SELECT 1 FROM classification_proposal_decisions d WHERE d.id = classification_proposal_decision_evidence.decision_id)
         OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = classification_proposal_decision_evidence.evidence_id)`,
-      false,
     );
   }
   if (tableExists(db, 'classification_proposals') && tableExists(db, 'classification_runs')) {
-    collect(
+    collectRoots(
       'classification_proposals',
       `id IN (SELECT p.id FROM classification_proposals p
               LEFT JOIN classification_runs r ON r.id = p.run_id WHERE r.id IS NULL)`,
-      true,
     );
   }
   if (tableExists(db, 'classification_evidence') && tableExists(db, 'classification_runs')) {
-    collect(
+    collectRoots(
       'classification_evidence',
       `id IN (SELECT e.id FROM classification_evidence e
               LEFT JOIN classification_runs r ON r.id = e.run_id WHERE r.id IS NULL)`,
-      true,
     );
   }
   if (tableExists(db, 'classification_stage_results') && tableExists(db, 'classification_runs')) {
-    collect(
+    collectRoots(
       'classification_stage_results',
       `id IN (SELECT s.id FROM classification_stage_results s
               LEFT JOIN classification_runs r ON r.id = s.run_id WHERE r.id IS NULL)`,
-      true,
     );
   }
   if (tableExists(db, 'classification_model_calls')) {
-    collect(
+    collectRoots(
       'classification_model_calls',
       `NOT EXISTS (SELECT 1 FROM classification_runs r WHERE r.id = classification_model_calls.run_id)`,
-      true,
     );
   }
   if (tableExists(db, 'onboarding_sources') && tableExists(db, 'onboarding_items')) {
-    collect(
+    collectRoots(
       'onboarding_sources',
       `item_id IN (SELECT s.item_id FROM onboarding_sources s
                    LEFT JOIN onboarding_items i ON i.id = s.item_id WHERE i.id IS NULL)`,
-      true,
     );
   }
   if (tableExists(db, 'onboarding_extractions') && tableExists(db, 'onboarding_items')) {
-    collect(
+    collectRoots(
       'onboarding_extractions',
       `item_id IN (SELECT x.item_id FROM onboarding_extractions x
                    LEFT JOIN onboarding_items i ON i.id = x.item_id WHERE i.id IS NULL)`,
-      true,
     );
   }
   if (tableExists(db, 'profile_generation_revisions') && tableExists(db, 'profile_generations')) {
-    collect(
+    collectRoots(
       'profile_generation_revisions',
       `generation_id IN (SELECT r.generation_id FROM profile_generation_revisions r
                          LEFT JOIN profile_generations g ON g.id = r.generation_id WHERE g.id IS NULL)`,
-      true,
     );
   }
 
-  out.sort((a, b) => (a.table === b.table ? a.rowid - b.rowid : a.table.localeCompare(b.table)));
+  // Descendant closure: children of planned rows are also planned, even when
+  // their immediate parents currently exist (they become orphans the moment
+  // the parent is deleted). Iterate to a fixpoint for transitive children.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const { parentTable, childTable, fkCol } of CHILD_RELATIONS) {
+      const parentIds = idValuesByTable.get(parentTable);
+      if (!parentIds || parentIds.size === 0) continue;
+      if (!tableExists(db, childTable)) continue;
+      const ids = [...parentIds];
+      for (const chunk of chunkArray(ids, 400)) {
+        const placeholders = chunk.map(() => '?').join(', ');
+        const rows = db.query(
+          `SELECT rowid, * FROM ${childTable} WHERE ${fkCol} IN (${placeholders})`,
+        ).all(...chunk) as Array<Record<string, unknown> & { rowid: number; id?: string }>;
+        for (const r of rows) {
+          const byRow = planned.get(childTable);
+          if (byRow?.has(r.rowid)) continue;
+          const values = Object.entries(r)
+            .filter(([k]) => k !== 'rowid')
+            .map(([, v]) => v);
+          addRow(childTable, { rowid: r.rowid, id: r.id ?? null, values });
+          changed = true;
+        }
+      }
+    }
+  }
+
+  const order = new Map<string, number>(DEPENDENCY_ORDER.map((t, i) => [t, i]));
+  const out: PlannedDeletion[] = [];
+  for (const byRow of planned.values()) {
+    for (const plan of byRow.values()) out.push(plan);
+  }
+  out.sort((a, b) => {
+    const oa = order.get(a.table) ?? 999;
+    const ob = order.get(b.table) ?? 999;
+    return oa === ob ? a.rowid - b.rowid : oa - ob;
+  });
   return out;
+}
+
+/** Planned deletion count per table (for the repair result counters). */
+function plannedCounts(planned: PlannedDeletion[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const p of planned) {
+    counts[p.table] = (counts[p.table] ?? 0) + 1;
+  }
+  return counts;
 }
 
 export function buildIntegrityManifest(db: Database, audit: IntegrityAuditResult): IntegrityManifestResult {
@@ -546,101 +643,27 @@ function assertRepairAllowed(audit: IntegrityAuditResult): void {
 }
 
 function runRepair(db: Database, dangling: DanglingEmbeddedProposal[]): void {
-  // Dependency order: children before parents; the embedded JSON cleanup last.
-  // Each DELETE is guarded by table existence so the repair runs on any
-  // schema shape (minimal fixtures and full databases alike).
-
-  // classification_proposal_decision_evidence is a child of BOTH decisions
-  // and evidence — remove its orphans before either parent class.
-  if (tableExists(db, 'classification_proposal_decision_evidence')) {
-    db.run(
-      `DELETE FROM classification_proposal_decision_evidence
-       WHERE NOT EXISTS (SELECT 1 FROM classification_proposal_decisions d WHERE d.id = classification_proposal_decision_evidence.decision_id)
-          OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = classification_proposal_decision_evidence.evidence_id)`,
-    );
+  // The EXACT deletion set (roots + descendant closure) — the same set the
+  // reviewed manifest binds. Children are deleted before parents in
+  // dependency order so the physical deletion set equals the planned set
+  // under both foreign_keys=OFF and ON.
+  const planned = collectPlannedDeletions(db);
+  const rowidsByTable = new Map<string, number[]>();
+  for (const p of planned) {
+    let list = rowidsByTable.get(p.table);
+    if (!list) {
+      list = [];
+      rowidsByTable.set(p.table, list);
+    }
+    list.push(p.rowid);
   }
-  if (tableExists(db, 'classification_proposal_decisions')) {
-    db.run(
-      `DELETE FROM classification_proposal_decisions
-       WHERE proposal_id IN (
-         SELECT d.proposal_id FROM classification_proposal_decisions d
-         LEFT JOIN classification_proposals p ON p.id = d.proposal_id
-         WHERE p.id IS NULL
-       )`,
-    );
-  }
-  if (tableExists(db, 'classification_proposal_evidence')) {
-    db.run(
-      `DELETE FROM classification_proposal_evidence
-       WHERE NOT EXISTS (SELECT 1 FROM classification_proposals p WHERE p.id = classification_proposal_evidence.proposal_id)
-          OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = classification_proposal_evidence.evidence_id)`,
-    );
-  }
-  if (tableExists(db, 'classification_proposals')) {
-    db.run(
-      `DELETE FROM classification_proposals
-       WHERE id IN (
-         SELECT p.id FROM classification_proposals p
-         LEFT JOIN classification_runs r ON r.id = p.run_id
-         WHERE r.id IS NULL
-       )`,
-    );
-  }
-  if (tableExists(db, 'classification_evidence')) {
-    db.run(
-      `DELETE FROM classification_evidence
-       WHERE id IN (
-         SELECT e.id FROM classification_evidence e
-         LEFT JOIN classification_runs r ON r.id = e.run_id
-         WHERE r.id IS NULL
-       )`,
-    );
-  }
-  if (tableExists(db, 'classification_stage_results')) {
-    db.run(
-      `DELETE FROM classification_stage_results
-       WHERE id IN (
-         SELECT s.id FROM classification_stage_results s
-         LEFT JOIN classification_runs r ON r.id = s.run_id
-         WHERE r.id IS NULL
-       )`,
-    );
-  }
-  if (tableExists(db, 'classification_model_calls')) {
-    db.run(
-      `DELETE FROM classification_model_calls
-       WHERE NOT EXISTS (SELECT 1 FROM classification_runs r WHERE r.id = classification_model_calls.run_id)`,
-    );
-  }
-  if (tableExists(db, 'onboarding_sources')) {
-    db.run(
-      `DELETE FROM onboarding_sources
-       WHERE item_id IN (
-         SELECT s.item_id FROM onboarding_sources s
-         LEFT JOIN onboarding_items i ON i.id = s.item_id
-         WHERE i.id IS NULL
-       )`,
-    );
-  }
-  if (tableExists(db, 'onboarding_extractions')) {
-    db.run(
-      `DELETE FROM onboarding_extractions
-       WHERE item_id IN (
-         SELECT x.item_id FROM onboarding_extractions x
-         LEFT JOIN onboarding_items i ON i.id = x.item_id
-         WHERE i.id IS NULL
-       )`,
-    );
-  }
-  if (tableExists(db, 'profile_generation_revisions')) {
-    db.run(
-      `DELETE FROM profile_generation_revisions
-       WHERE generation_id IN (
-         SELECT r.generation_id FROM profile_generation_revisions r
-         LEFT JOIN profile_generations g ON g.id = r.generation_id
-         WHERE g.id IS NULL
-       )`,
-    );
+  for (const table of DEPENDENCY_ORDER) {
+    const rowids = rowidsByTable.get(table);
+    if (!rowids || rowids.length === 0) continue;
+    for (const chunk of chunkArray(rowids, 400)) {
+      const placeholders = chunk.map(() => '?').join(', ');
+      db.run(`DELETE FROM ${table} WHERE rowid IN (${placeholders})`, chunk);
+    }
   }
 
   // Embedded dangling proposals: remove ONLY the missing proposal objects,
@@ -679,14 +702,9 @@ function runRepair(db: Database, dangling: DanglingEmbeddedProposal[]): void {
   }
 }
 
-export function repairClassificationIntegrity(
-  db: Database,
-  options: { dryRun?: boolean; simulateLateFailure?: boolean } = {},
-): IntegrityRepairResult {
-  const dryRun = options.dryRun ?? false;
-  const preAudit = auditClassificationIntegrity(db);
-
-  const zeroCounts = {
+/** Zero-fill the repair counters for dry-run / clean pre-audit returns. */
+function zeroRepairCounters() {
+  return {
     repairedStageResults: 0,
     repairedEvidence: 0,
     repairedProposals: 0,
@@ -699,21 +717,56 @@ export function repairClassificationIntegrity(
     repairedProfileGenerationRevisions: 0,
     repairedEmbeddedProposals: 0,
   };
+}
+
+/**
+ * Map the planned deletion counts onto the repair result's would/repaired
+ * fields. The planned set (roots + closure) is the ACTUAL set the repair
+ * deletes, so the counters reflect it rather than only current orphans.
+ */
+function plannedCountFields(db: Database): {
+  wouldRepairStageResults: number;
+  wouldRepairEvidence: number;
+  wouldRepairProposals: number;
+  wouldRepairProposalDecisions: number;
+  wouldRepairProposalEvidence: number;
+  wouldRepairProposalDecisionEvidence: number;
+  wouldRepairModelCalls: number;
+  wouldRepairOnboardingSources: number;
+  wouldRepairOnboardingExtractions: number;
+  wouldRepairProfileGenerationRevisions: number;
+} {
+  const counts = plannedCounts(collectPlannedDeletions(db));
+  return {
+    wouldRepairStageResults: counts['classification_stage_results'] ?? 0,
+    wouldRepairEvidence: counts['classification_evidence'] ?? 0,
+    wouldRepairProposals: counts['classification_proposals'] ?? 0,
+    wouldRepairProposalDecisions: counts['classification_proposal_decisions'] ?? 0,
+    wouldRepairProposalEvidence: counts['classification_proposal_evidence'] ?? 0,
+    wouldRepairProposalDecisionEvidence: counts['classification_proposal_decision_evidence'] ?? 0,
+    wouldRepairModelCalls: counts['classification_model_calls'] ?? 0,
+    wouldRepairOnboardingSources: counts['onboarding_sources'] ?? 0,
+    wouldRepairOnboardingExtractions: counts['onboarding_extractions'] ?? 0,
+    wouldRepairProfileGenerationRevisions: counts['profile_generation_revisions'] ?? 0,
+  };
+}
+
+export function repairClassificationIntegrity(
+  db: Database,
+  options: { dryRun?: boolean; simulateLateFailure?: boolean } = {},
+): IntegrityRepairResult {
+  const dryRun = options.dryRun ?? false;
+  const preAudit = auditClassificationIntegrity(db);
+
+  // The ACTUAL deletion set (roots + descendant closure) is what the repair
+  // deletes and what the reviewed manifest binds; the counters reflect it.
+  const wouldFields = plannedCountFields(db);
 
   const base = {
     preAudit,
-    wouldRepairStageResults: preAudit.orphanStageResults,
-    wouldRepairEvidence: preAudit.orphanEvidence,
-    wouldRepairProposals: preAudit.orphanProposals,
-    wouldRepairProposalDecisions: preAudit.orphanProposalDecisions,
-    wouldRepairProposalEvidence: preAudit.orphanProposalEvidence,
-    wouldRepairProposalDecisionEvidence: preAudit.orphanProposalDecisionEvidence,
-    wouldRepairModelCalls: preAudit.orphanModelCalls,
-    wouldRepairOnboardingSources: preAudit.orphanOnboardingSources,
-    wouldRepairOnboardingExtractions: preAudit.orphanOnboardingExtractions,
-    wouldRepairProfileGenerationRevisions: preAudit.orphanProfileGenerationRevisions,
+    ...wouldFields,
     wouldRepairEmbeddedProposals: preAudit.danglingEmbeddedProposals.length,
-    ...zeroCounts,
+    ...zeroRepairCounters(),
   };
 
   if (dryRun || preAudit.isClean) {
@@ -740,30 +793,20 @@ export function repairClassificationIntegrity(
     result = {
       dryRun: false,
       preAudit,
-      wouldRepairStageResults: preAudit.orphanStageResults,
-      wouldRepairEvidence: preAudit.orphanEvidence,
-      wouldRepairProposals: preAudit.orphanProposals,
-      wouldRepairProposalDecisions: preAudit.orphanProposalDecisions,
-      wouldRepairProposalEvidence: preAudit.orphanProposalEvidence,
-      wouldRepairProposalDecisionEvidence: preAudit.orphanProposalDecisionEvidence,
-      wouldRepairModelCalls: preAudit.orphanModelCalls,
-      wouldRepairOnboardingSources: preAudit.orphanOnboardingSources,
-      wouldRepairOnboardingExtractions: preAudit.orphanOnboardingExtractions,
-      wouldRepairProfileGenerationRevisions: preAudit.orphanProfileGenerationRevisions,
+      ...wouldFields,
       wouldRepairEmbeddedProposals: preAudit.danglingEmbeddedProposals.length,
-      repairedStageResults: preAudit.orphanStageResults - postAudit.orphanStageResults,
-      repairedEvidence: preAudit.orphanEvidence - postAudit.orphanEvidence,
-      repairedProposals: preAudit.orphanProposals - postAudit.orphanProposals,
-      repairedProposalDecisions: preAudit.orphanProposalDecisions - postAudit.orphanProposalDecisions,
-      repairedProposalEvidence: preAudit.orphanProposalEvidence - postAudit.orphanProposalEvidence,
-      repairedProposalDecisionEvidence:
-        preAudit.orphanProposalDecisionEvidence - postAudit.orphanProposalDecisionEvidence,
-      repairedModelCalls: preAudit.orphanModelCalls - postAudit.orphanModelCalls,
-      repairedOnboardingSources: preAudit.orphanOnboardingSources - postAudit.orphanOnboardingSources,
-      repairedOnboardingExtractions:
-        preAudit.orphanOnboardingExtractions - postAudit.orphanOnboardingExtractions,
-      repairedProfileGenerationRevisions:
-        preAudit.orphanProfileGenerationRevisions - postAudit.orphanProfileGenerationRevisions,
+      // The planned set (roots + closure) is EXACTLY what the repair deletes;
+      // under the no-writer maintenance gate the pre/post sets are identical.
+      repairedStageResults: wouldFields.wouldRepairStageResults,
+      repairedEvidence: wouldFields.wouldRepairEvidence,
+      repairedProposals: wouldFields.wouldRepairProposals,
+      repairedProposalDecisions: wouldFields.wouldRepairProposalDecisions,
+      repairedProposalEvidence: wouldFields.wouldRepairProposalEvidence,
+      repairedProposalDecisionEvidence: wouldFields.wouldRepairProposalDecisionEvidence,
+      repairedModelCalls: wouldFields.wouldRepairModelCalls,
+      repairedOnboardingSources: wouldFields.wouldRepairOnboardingSources,
+      repairedOnboardingExtractions: wouldFields.wouldRepairOnboardingExtractions,
+      repairedProfileGenerationRevisions: wouldFields.wouldRepairProfileGenerationRevisions,
       repairedEmbeddedProposals:
         preAudit.danglingEmbeddedProposals.length - postAudit.danglingEmbeddedProposals.length,
       postAudit,
