@@ -302,6 +302,35 @@ describe('pipeline decision effective state', () => {
     expect(action).toBeNull();
   });
 
+  it('removing the SOLE stored citation produces a revision action with empty evidenceIds', () => {
+    // Canonical install now seeds the prior snapshot with the hydrated decision
+    // citations (issue #17 pass 5c). Unchecking the only stored citation must
+    // therefore produce a DIFFERENT snapshot and a real revision action with
+    // no evidenceIds — not a null no-op.
+    const accepted = { ...proposal(), status: 'accepted' as const };
+    const prior = { ...proposalDecisionSnapshot(accepted), evidenceIds: ['e1'] };
+    const action = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: prior,
+      expectedRevisionId: null,
+      evidenceIds: [],
+      createId: () => 'x',
+      createActionToken: () => 'y',
+    });
+    expect(action).not.toBeNull();
+    expect(action!.input.evidenceIds).toBeUndefined();
+    expect(action!.snapshot.evidenceIds).toBeUndefined();
+    expect(action!.semanticKey).not.toContain('e1');
+  });
+
+  it('proposalDecisionSnapshot carries stored citations for the canonical prior', () => {
+    const accepted = { ...proposal(), status: 'accepted' as const };
+    const snapshot = proposalDecisionSnapshot(accepted, ['e2', 'e1', 'e2']);
+    expect(snapshot.evidenceIds).toEqual(['e1', 'e2']);
+    // Without citations no evidenceIds key is emitted.
+    expect(proposalDecisionSnapshot(accepted).evidenceIds).toBeUndefined();
+  });
+
   it('strips run-owned classification arrays from ordinary item autosaves', () => {
     const editable = editableCurationData({
       curatedTitle: 'Reviewed title',

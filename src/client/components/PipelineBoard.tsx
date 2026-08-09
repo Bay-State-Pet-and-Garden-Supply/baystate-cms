@@ -225,17 +225,24 @@ export function PipelineBoard({
       transport.revisionIds = Object.fromEntries(
         proposals.map(proposal => [proposal.id, proposal.currentDecisionId ?? null]),
       );
+      // Prior snapshots include the stored citations from the hydrated live
+      // decisions so a later citation toggle produces a DIFFERENT snapshot and
+      // a real revision action (issue #17 pass 5c).
+      const decisionCitations = citationsFromDecisions(item);
       transport.proposalSnapshots = Object.fromEntries(
-        proposals.map(proposal => [proposal.id, proposalDecisionSnapshot(proposal)]),
+        proposals.map(proposal => [
+          proposal.id,
+          proposalDecisionSnapshot(proposal, decisionCitations[proposal.id] ?? []),
+        ]),
       );
       transport.pendingActions = {};
+      // Initialize reviewer citation selections from the hydrated LIVE decision
+      // for each proposal (issue #17 pass 5b). Stored citations render and stay
+      // selected across canonical loads; they are never silently cleared.
+      setCitationSelections(decisionCitations);
     }
     setClassificationProposals(proposals);
     setClassificationEvidence(evidence);
-    // Initialize reviewer citation selections from the hydrated LIVE decision
-    // for each proposal (issue #17 pass 5b). Stored citations render and stay
-    // selected across canonical loads; they are never silently cleared.
-    setCitationSelections(citationsFromDecisions(item));
     return true;
   };
 
@@ -953,6 +960,21 @@ export function PipelineBoard({
           ? { ...proposal, currentDecisionId: decision.id }
           : proposal,
       ));
+      // Refresh the hydrated live decision paired for citation rendering so
+      // the derived citation state is fresh without waiting for a canonical
+      // refresh (issue #17 pass 5c).
+      setReviewItem(previous => {
+        if (!previous?.curationData) return previous;
+        const existing = previous.curationData.classificationDecisions ?? [];
+        const withoutStale = existing.filter(d => d.proposalId !== action.input.proposalId);
+        return {
+          ...previous,
+          curationData: {
+            ...previous.curationData,
+            classificationDecisions: [...withoutStale, decision],
+          },
+        };
+      });
     }
     markSavedWhenIdle(itemId, generation);
   };

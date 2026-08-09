@@ -29,6 +29,7 @@ import { runPipeline } from '../../classification/pipeline-runner';
 import type { ClassificationStageName } from '../../classification/types';
 import type { ClassificationEvidence } from '../../shared/types';
 import { evidenceExtractionStage, nameConsolidationStage, categoryPageProposalsStage, productAttributeProposalsStage, attributeApplicabilityStage, primaryProductTypeStage } from '../../classification';
+import { processProductFieldTarget } from '../../classification/curation-target-processor';
 import { upsertPage } from '../../db/repositories/page-repo';
 import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
@@ -1679,5 +1680,124 @@ describe('Classification Pipeline Integration', () => {
     ).get(run.id) as { supporting_evidence_ids_json: string; contradicting_evidence_ids_json: string };
     expect(JSON.parse(hydrated.supporting_evidence_ids_json)).toEqual(['ev-support']);
     expect(JSON.parse(hydrated.contradicting_evidence_ids_json)).toEqual(['ev-contradict']);
+  });
+
+  it('persists a reviewable brand proposal with DISJOINT roles when brand assertions disagree by case (issue #17 pass 5c)', async () => {
+    const baseConfig = loadClassificationConfig(workspacePath);
+    const brandAttribute = {
+      id: 'brand',
+      name: 'Brand',
+      description: null,
+      valueMode: 'controlled' as const,
+      canonicalUnit: null,
+      allowedValues: ['Blue Buffalo', 'Dr. Marty'],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible' as const,
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Identity',
+    };
+    const brandTargetCfg = {
+      id: 'brand-target',
+      kind: 'product_field' as const,
+      label: 'Brand',
+      enabled: true,
+      selectionMode: 'single' as const,
+      attributeId: 'brand',
+      catalogField: 'ProductField16',
+      optionSource: 'configured' as const,
+      required: false,
+      mandatory: false,
+      sortOrder: 3,
+    };
+    const brandConfig = {
+      ...baseConfig,
+      attributes: [...(baseConfig.attributes ?? []), brandAttribute],
+      curationTargets: [...(baseConfig.curationTargets ?? []), brandTargetCfg],
+    };
+    saveClassificationConfig(workspacePath, brandConfig);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, brandConfig);
+    const run = createRun(workspaceId, 'SKU-BRAND-CASE', snapId, snapHash);
+    const now = new Date().toISOString();
+    const evidence: ClassificationEvidence[] = [
+      {
+        id: 'brand-ev-one', runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'SKU-BRAND-CASE',
+        attributeId: null, source: 'official_product_page' as const, reliability: 'high' as const,
+        sourceUrl: null, sourceField: 'brand', snippet: null, value: 'Blue Buffalo', metadata: {}, capturedAt: now,
+      },
+      {
+        id: 'brand-ev-two', runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'SKU-BRAND-CASE',
+        attributeId: null, source: 'official_product_page' as const, reliability: 'high' as const,
+        sourceUrl: null, sourceField: 'brand', snippet: null, value: 'BLUE BUFFALO', metadata: {}, capturedAt: now,
+      },
+    ];
+    persistFixtureEvidence(run.id, evidence);
+
+    const resolvedBrandTarget = {
+      config: brandTargetCfg,
+      options: [
+        { value: 'Blue Buffalo', label: 'Blue Buffalo' },
+        { value: 'Dr. Marty', label: 'Dr. Marty' },
+      ],
+      attribute: brandAttribute,
+    };
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => {
+        const result = await processProductFieldTarget(
+          resolvedBrandTarget as never,
+          { sku: 'SKU-BRAND-CASE', evidence, acceptedProposals: [], allProposals: [] },
+          {
+            workspacePath,
+            workspaceId,
+            runId: run.id,
+            configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+          },
+          { cardinality: 'single' },
+        );
+        return {
+          status: 'succeeded' as const,
+          output: {
+            evidence: [],
+            proposals: result.proposals,
+            abstained: false,
+          },
+        };
+      },
+    };
+
+    const result = await runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-BRAND-CASE', evidence, acceptedProposals: [], allProposals: [] });
+
+    // No rollback: exactly one persisted proposal.
+    expect(result.proposals).toHaveLength(1);
+    const persisted = getDb().query(
+      'SELECT COUNT(*) AS c FROM classification_proposals WHERE run_id = ?',
+    ).get(run.id) as { c: number };
+    expect(persisted.c).toBe(1);
+
+    // Disjoint roles: case-distinct disagreement is a visible conflict with
+    // ONLY contradicting ids — the selected assertion is never also supporting.
+    const proposal = result.proposals[0];
+    const support = proposal.supportingEvidenceIds ?? [];
+    const conflict = proposal.contradictingEvidenceIds ?? [];
+    expect(support).toEqual([]);
+    expect([...conflict].sort()).toEqual(['brand-ev-one', 'brand-ev-two']);
+    expect(proposal.isBulkAcceptable).toBe(false);
+
+    const links = getDb().query(
+      'SELECT evidence_id, relation FROM classification_proposal_evidence WHERE proposal_id = ? ORDER BY evidence_id',
+    ).all(proposal.id) as Array<{ evidence_id: string; relation: string }>;
+    expect(links).toEqual([
+      { evidence_id: 'brand-ev-one', relation: 'contradicting' },
+      { evidence_id: 'brand-ev-two', relation: 'contradicting' },
+    ]);
   });
 });

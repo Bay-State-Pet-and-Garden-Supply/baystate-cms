@@ -1539,6 +1539,83 @@ export function runMigrations(): void {
       db.exec('CREATE INDEX IF NOT EXISTS idx_classification_proposal_evidence_relation ON classification_proposal_evidence(relation);');
       console.log('[Migrations] Rebuilt classification_proposal_evidence with the relation CHECK constraint.');
     }
+
+    // Upgrade parity for classification_proposals role columns (runs on EVERY
+    // migration invocation, even when evidence_citation_schema_version is set):
+    // SQLite cannot change an existing column's NOT NULL constraint via ALTER,
+    // so rebuild the proposals table whenever any role column is still
+    // nullable (a DB that ran an earlier evidence-citation migration). The
+    // live CREATE TABLE SQL is patched to force all three role columns to
+    // NOT NULL DEFAULT '[]'; every other column, constraint, and row is
+    // preserved. No-op when the columns are already correct.
+    const proposalCols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+      pk: number;
+    }>;
+    const roleCols = ['evidence_ids_json', 'supporting_evidence_ids_json', 'contradicting_evidence_ids_json'];
+    const needsProposalRebuild = roleCols.some(name => {
+      const col = proposalCols.find(c => c.name === name);
+      return col !== undefined && col.notnull === 0;
+    });
+    if (needsProposalRebuild) {
+      const proposalsSql = db.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposals'",
+      ).get() as { sql: string } | undefined;
+      if (proposalsSql) {
+        let patched = proposalsSql.sql;
+        for (const name of roleCols) {
+          // Replace each role column's definition with the strict form,
+          // regardless of the earlier migration's column shape.
+          patched = patched.replace(
+            new RegExp(`(\\b${name}\\s+)[^,)]*`),
+            `$1TEXT NOT NULL DEFAULT '[]'`,
+          );
+        }
+        // Point the rebuilt DDL at a staging table name so the established
+        // CREATE-new → copy → drop-old → rename pattern applies (the same
+        // pattern as the page_index rebuild). Handles both 'CREATE TABLE
+        // classification_proposals' and 'CREATE TABLE IF NOT EXISTS
+        // classification_proposals' forms stored in sqlite_master.
+        patched = patched.replace(
+          /CREATE TABLE (?:IF NOT EXISTS )?classification_proposals\b/,
+          'CREATE TABLE classification_proposals_new',
+        );
+        const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number } | undefined;
+        const fkWasOn = fkRow ? Number(fkRow.foreign_keys) === 1 : false;
+        if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+        try {
+          db.transaction(() => {
+            db.exec(patched);
+            // Copy ONLY the columns that exist in the live table (upgrade DBs
+            // may predate some columns, e.g. model_call_ids_json). Nullable
+            // role columns are COALESCE'd to '[]'.
+            const liveCols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string }>;
+            const copyCols = liveCols.map(c => c.name);
+            const roleColumnSet = new Set(roleCols);
+            const insertList = copyCols.map(name => `"${name}"`).join(', ');
+            const selectList = copyCols
+              .map(name => (roleColumnSet.has(name) ? `COALESCE("${name}", '[]')` : `"${name}"`))
+              .join(', ');
+            db.exec(`
+              INSERT INTO classification_proposals_new (${insertList})
+              SELECT ${selectList}
+              FROM classification_proposals
+            `);
+            db.exec('DROP TABLE classification_proposals;');
+            db.exec('ALTER TABLE classification_proposals_new RENAME TO classification_proposals;');
+          })();
+        } finally {
+          if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+        }
+        db.exec('CREATE INDEX IF NOT EXISTS idx_classification_proposals_run ON classification_proposals(run_id);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_classification_proposals_product_status ON classification_proposals(product_sku, status);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_classification_proposals_product ON classification_proposals(product_sku);');
+        console.log('[Migrations] Rebuilt classification_proposals with NOT NULL role columns.');
+      }
+    }
   } catch (e) {
     console.error('[Migrations] Evidence relation/citation migration failed:', e);
     throw e;

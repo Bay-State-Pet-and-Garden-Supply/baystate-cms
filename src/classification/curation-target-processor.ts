@@ -54,6 +54,7 @@ const KEYWORD_MATCH_MIN_CONFIDENCE = 0.7;
 const PAGE_CONTEXT_SOURCE_FIELDS = [
   'name',
   'title',
+  'description',
   'page_name',
   'category',
   'species',
@@ -334,11 +335,16 @@ export async function processProductFieldTarget(
     isGroundingSupport: tokenGroundingSupport,
   });
   let contradictingEvidenceIds = rolePacket.contradictingEvidenceIds;
-  const supportingEvidenceIds = rolePacket.supportingEvidenceIds;
+  let supportingEvidenceIds = rolePacket.supportingEvidenceIds;
   let hasConflict = rolePacket.hasConflict;
   if (brandConflictEvidenceIds.length > 0) {
     // Disagreeing brand assertions are visible contradicting evidence and the
-    // proposal is forced to individual review.
+    // proposal is forced to individual review. The role sets MUST remain
+    // pairwise disjoint: any assertion participating in the brand conflict is
+    // removed from supporting (it cannot be both supporting and
+    // contradicting), and the visible conflict shows ONLY contradicting ids.
+    const conflictSet = new Set(brandConflictEvidenceIds);
+    supportingEvidenceIds = supportingEvidenceIds.filter(id => !conflictSet.has(id));
     contradictingEvidenceIds = [...new Set([...contradictingEvidenceIds, ...brandConflictEvidenceIds])];
     hasConflict = true;
   }
@@ -396,11 +402,8 @@ export async function processPageTarget(
     context.snapshot?.pages.state === 'verified' ? context.snapshot.pages.records : [],
   );
 
-  // ── Extract product context from evidence and proposals ────────────────
-  const productContext = extractProductContext(input.evidence, input.allProposals);
-
-  // Restricted page-evidence packet built ONCE before assignment: the full run
-  // evidence never leaks into page context. Only identity/species/type/
+  // ── Restricted page-evidence packet built ONCE before assignment: the full
+  // run evidence never leaks into page context. Only identity/species/type/
   // category records (by source field OR explicit attribute id) enter; the
   // reviewed species value (never first evidence) drives cross-species
   // contradiction labeling.
@@ -411,6 +414,19 @@ export async function processPageTarget(
     sourceField: null,
     speciesValue,
   });
+
+  // ── Extract product context ONLY from the restricted packet records ────
+  // The LLM prompt is built from the frozen packet (supporting/contradicting/
+  // context), deterministically ordered by evidence id so reversing the input
+  // evidence order cannot change the prompt content or species order, and a
+  // row excluded from the page packet (e.g. healthConcern) can never reach
+  // the prompt (issue #17 pass 5c).
+  const pageContextEvidence = [
+    ...pagePacket.supporting,
+    ...pagePacket.contradicting,
+    ...pagePacket.context,
+  ].sort((a, b) => (a.id ?? '').localeCompare(b.id ?? ''));
+  const productContext = extractProductContext(pageContextEvidence, input.allProposals);
 
   const groupedSkus = context.productLineContext?.siblingSkus ?? [];
   const isMultiItemGroup = groupedSkus.length >= 2;

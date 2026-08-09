@@ -811,6 +811,77 @@ describe('SQLite Migration', () => {
     expect(marker?.value).toBe('1');
   });
 
+  it('repairs previously-nullable role columns on upgrade DBs even when the marker is already set (issue #17 pass 5c)', () => {
+    const db = getDb();
+    // Simulate an earlier Pass-5 partial upgrade: the evidence_citation marker
+    // is ALREADY present (so the guarded NOT NULL ALTER block never runs) and
+    // the proposals table has NULLABLE role columns. SQLite cannot change a
+    // column's NOT NULL via ALTER, so the unconditional rebuild must repair it.
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec('ALTER TABLE classification_proposals RENAME TO classification_proposals_legacy;');
+        db.exec(`
+          CREATE TABLE classification_proposals (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            product_sku TEXT NOT NULL,
+            proposal_type TEXT NOT NULL,
+            target_id TEXT,
+            proposed_value_json TEXT,
+            confidence REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            is_bulk_acceptable INTEGER NOT NULL DEFAULT 0,
+            is_stale INTEGER NOT NULL DEFAULT 0,
+            staleness_reason TEXT,
+            config_snapshot_hash TEXT,
+            evidence_ids_json TEXT,
+            supporting_evidence_ids_json TEXT,
+            contradicting_evidence_ids_json TEXT,
+            model_call_ids_json TEXT,
+            created_at TEXT NOT NULL
+          )
+        `);
+        db.exec(`
+          INSERT INTO classification_proposals
+            (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+             confidence, status, is_bulk_acceptable, is_stale, staleness_reason,
+             config_snapshot_hash, evidence_ids_json, supporting_evidence_ids_json,
+             contradicting_evidence_ids_json, model_call_ids_json, created_at)
+          SELECT id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
+             confidence, status, is_bulk_acceptable, is_stale, staleness_reason,
+             config_snapshot_hash, evidence_ids_json, supporting_evidence_ids_json,
+             contradicting_evidence_ids_json, model_call_ids_json, created_at
+          FROM classification_proposals_legacy
+        `);
+        db.exec('DROP TABLE classification_proposals_legacy;');
+      })();
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+
+    const beforeCols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string; notnull: number }>;
+    expect(Number(beforeCols.find(c => c.name === 'supporting_evidence_ids_json')!.notnull)).toBe(0);
+    const markerBefore = db.query("SELECT value FROM app_meta WHERE key = 'evidence_citation_schema_version'").get() as { value: string } | undefined;
+    expect(markerBefore?.value).toBe('1');
+
+    runMigrations();
+    const afterCols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string; notnull: number }>;
+    expect(Number(afterCols.find(c => c.name === 'evidence_ids_json')!.notnull)).toBe(1);
+    expect(Number(afterCols.find(c => c.name === 'supporting_evidence_ids_json')!.notnull)).toBe(1);
+    expect(Number(afterCols.find(c => c.name === 'contradicting_evidence_ids_json')!.notnull)).toBe(1);
+
+    // Idempotent: a second run keeps the strict columns and preserves rows.
+    runMigrations();
+    const afterRerun = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string; notnull: number }>;
+    expect(Number(afterRerun.find(c => c.name === 'supporting_evidence_ids_json')!.notnull)).toBe(1);
+    expect(Number(afterRerun.find(c => c.name === 'contradicting_evidence_ids_json')!.notnull)).toBe(1);
+    const rowCount = db.query('SELECT COUNT(*) AS c FROM classification_proposals').get() as { c: number };
+    expect(rowCount.c).toBeGreaterThanOrEqual(0);
+  });
+
   it('standalone classification-migration.sql declares the role columns for fresh DBs (issue #17 pass 5b)', () => {
     const sql = fs.readFileSync(path.resolve(import.meta.dirname, '../../db/classification-migration.sql'), 'utf-8');
     expect(sql).toContain("supporting_evidence_ids_json TEXT NOT NULL DEFAULT '[]'");

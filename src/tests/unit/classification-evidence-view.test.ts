@@ -85,7 +85,18 @@ describe('classification-evidence-view (issue #17 I)', () => {
   });
 
   it('reports uncited vs cited decision state explicitly', () => {
-    const uncited = deriveEvidenceView({ proposal: proposal({}), evidence: [evidence('e1')] });
+    // No decision at all → neutral no-correction state, NEVER the uncited
+    // wording (issue #17 pass 5c).
+    const neutral = deriveEvidenceView({ proposal: proposal({}), evidence: [evidence('e1')] });
+    expect(neutral.citation.isCited).toBe(false);
+    expect(neutral.citation.isUncited).toBe(false);
+
+    // A correction (decision) with ZERO citations → explicit uncited state.
+    const uncited = deriveEvidenceView({
+      proposal: proposal({}),
+      evidence: [evidence('e1')],
+      decision: decision({ evidenceIds: [] }),
+    });
     expect(uncited.citation.isCited).toBe(false);
     expect(uncited.citation.isUncited).toBe(true);
 

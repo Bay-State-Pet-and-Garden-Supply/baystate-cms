@@ -151,7 +151,10 @@ export function withReviewedProposalTarget(
   return { ...proposal, revisedTargetId: reviewedTargetId, hasRevisedTargetId: true };
 }
 
-export function proposalDecisionSnapshot(proposal: ClassificationProposal): ProposalDecisionSnapshot {
+export function proposalDecisionSnapshot(
+  proposal: ClassificationProposal,
+  evidenceIds?: string[],
+): ProposalDecisionSnapshot {
   const hasRevisedValue = proposal.hasRevisedValue === true;
   const hasRevisedTargetId = proposal.hasRevisedTargetId === true;
   return {
@@ -160,6 +163,10 @@ export function proposalDecisionSnapshot(proposal: ClassificationProposal): Prop
     ...(hasRevisedValue ? { revisedValue: proposal.revisedValue } : {}),
     hasRevisedTargetId,
     ...(hasRevisedTargetId ? { revisedTargetId: proposal.revisedTargetId ?? null } : {}),
+    // Stored citations from the hydrated live decision become part of the
+    // canonical prior snapshot, so removing the SOLE stored citation produces
+    // a different snapshot and a real revision action (issue #17 pass 5c).
+    ...(evidenceIds && evidenceIds.length > 0 ? { evidenceIds: [...new Set(evidenceIds)].sort() } : {}),
   };
 }
 

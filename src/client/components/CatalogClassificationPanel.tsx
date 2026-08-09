@@ -250,7 +250,7 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
                     evidence: (detail?.evidence || []) as unknown as import('../../shared/schemas/classification').ClassificationEvidence[],
                     decision: (liveDecision ?? null) as import('../../shared/schemas/classification').ClassificationProposalDecision | null,
                   });
-                  return <EvidenceCitationList rows={view.rows} showUncited isUncited={view.citation.isUncited} />;
+                  return <EvidenceCitationList rows={view.rows} selectedIds={view.citation.citedIds} showUncited isUncited={view.citation.isUncited} />;
                 })()}
               </div>
             ))}

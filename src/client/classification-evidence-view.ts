@@ -120,6 +120,10 @@ export function deriveEvidenceView(input: {
   for (const id of contextIds) pushRow(id, 'context');
 
   const citedIds = [...new Set(decision?.evidenceIds ?? [])].sort();
+  // "Uncited correction" means a correction (decision) EXISTS but carries no
+  // citations. A proposal with no decision at all is a neutral no-correction
+  // state and must never render the uncited wording (issue #17 pass 5c).
+  const hasDecision = decision !== null && decision !== undefined;
 
   return {
     rows,
@@ -132,7 +136,7 @@ export function deriveEvidenceView(input: {
     citation: {
       citedIds,
       isCited: citedIds.length > 0,
-      isUncited: citedIds.length === 0,
+      isUncited: hasDecision && citedIds.length === 0,
     },
   };
 }

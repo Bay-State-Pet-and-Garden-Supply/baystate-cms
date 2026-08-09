@@ -283,6 +283,76 @@ describe('processPageTarget (LLM-first)', () => {
     expect(proposal.proposedValue).toHaveProperty('pageName', 'Dog Food Dry');
     expect(proposal.confidence).toBeGreaterThanOrEqual(0);
   });
+
+  it('builds the LLM product context ONLY from the restricted page packet (excludes healthConcern, id-ordered)', async () => {
+    vi.mocked(buildPageHierarchy).mockReturnValue([
+      { id: 'dog-food-dry', name: 'Dog Food Dry', parentName: null },
+    ]);
+    vi.mocked(extractProductContext).mockReturnValue({
+      productName: 'Test',
+      productDescription: '',
+      ocrSummary: {
+        species: [], flavor: null, lifeStage: null, productForm: null,
+        healthConcern: [], productName: null, brand: null,
+      },
+      productType: null,
+    });
+    vi.mocked(llmAssignCategoryPages).mockResolvedValue({
+      pages: [{ pageId: 'dog-food-dry', pageName: 'Dog Food Dry', confidence: 0.8 }],
+    });
+
+    const context = makeContext();
+    const base: Partial<ClassificationEvidence> = {
+      runId: context.runId,
+      stageName: 'evidence_extraction',
+      productSku: 'test-sku',
+      reliability: 'high',
+      sourceUrl: null,
+      snippet: null,
+      metadata: {},
+      capturedAt: new Date().toISOString(),
+    };
+    const input = makeInput({
+      evidence: [
+        { ...base, id: 'ev-z-species-cat', attributeId: 'species', source: 'official_product_page', sourceField: 'species', value: 'Cat' },
+        { ...base, id: 'ev-a-species-dog', attributeId: 'species', source: 'official_product_page', sourceField: 'species', value: 'Dog' },
+        { ...base, id: 'ev-m-category', attributeId: null, source: 'official_product_page', sourceField: 'category', value: 'Dog Food' },
+        { ...base, id: 'ev-n-name', attributeId: null, source: 'spreadsheet', sourceField: 'name', value: 'Test Product' },
+        { ...base, id: 'ev-x-health', attributeId: null, source: 'visual_product_evidence', sourceField: 'healthConcern', value: 'Sensitive Stomach' },
+      ] as ClassificationEvidence[],
+    });
+
+    const result = await processPageTarget(
+      {
+        config: {
+          id: 'page-assignment',
+          kind: 'page',
+          label: 'Store Category Pages',
+          enabled: true,
+          mandatory: false,
+          selectionMode: 'multiple',
+          attributeId: null,
+          catalogField: null,
+          optionSource: 'configured',
+          required: false,
+          sortOrder: 0,
+        },
+        options: [{ value: 'dog-food-dry', label: 'Dog Food Dry' }],
+      },
+      input,
+      context,
+    );
+
+    expect(result.proposals).toHaveLength(1);
+    // The restricted packet reaches extractProductContext: id-ordered, and the
+    // excluded healthConcern record never appears (issue #17 pass 5c).
+    expect(extractProductContext).toHaveBeenCalledTimes(1);
+    const contextEvidence = vi.mocked(extractProductContext).mock.calls[0][0];
+    const ids = contextEvidence.map(e => e.id);
+    expect(ids).toEqual(['ev-a-species-dog', 'ev-m-category', 'ev-n-name', 'ev-z-species-cat']);
+    expect(ids).not.toContain('ev-x-health');
+    expect(ids).toEqual([...ids].sort());
+  });
 });
 
 // ─── Brand shortcut (issue #17 pass 5b) ───────────────────────────────────────
@@ -379,6 +449,18 @@ describe('brand shortcut (issue #17 pass 5b)', () => {
     const two = brandEvidence('ev-two', { value: 'BLUE BUFFALO' });
     const result = await processProductFieldTarget(brandTarget(), makeInput({ evidence: [one, two] }), makeContext());
     expect(result.proposals).toHaveLength(1);
+    // Both disagreeing assertions are visible contradicting evidence and the
+    // role sets are pairwise DISJOINT: the selected assertion cannot be both
+    // supporting and contradicting (issue #17 pass 5c — the pipeline linkage
+    // rolls back on overlap, so disjointness is required for a reviewable
+    // proposal).
     expect(result.proposals[0].contradictingEvidenceIds?.sort()).toEqual(['ev-one', 'ev-two'].sort());
+    expect(result.proposals[0].supportingEvidenceIds ?? []).toEqual([]);
+    const support = new Set(result.proposals[0].supportingEvidenceIds ?? []);
+    const conflict = new Set(result.proposals[0].contradictingEvidenceIds ?? []);
+    for (const id of conflict) {
+      expect(support.has(id)).toBe(false);
+    }
+    expect(result.proposals[0].isBulkAcceptable).toBe(false);
   });
 });

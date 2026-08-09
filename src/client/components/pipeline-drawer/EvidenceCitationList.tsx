@@ -102,6 +102,14 @@ export function EvidenceCitationList({
                           <span className="text-gray-600">cite</span>
                         </label>
                       ) : null}
+                      {!selectable && isSelected ? (
+                        <span
+                          title="Cited in the reviewer's correction"
+                          className="ml-2 flex shrink-0 items-center gap-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-800"
+                        >
+                          ✓ cited
+                        </span>
+                      ) : null}
                     </div>
                   </li>
                 );
