@@ -99,8 +99,8 @@ describe('Sourcing Resolution Logic & Repositories', () => {
       totalItems: 2,
     });
     const [bundleItem, fallbackItem] = insertItems(batch.id, [
-      { upc: '012345678903', name: 'Bundle Item', rowNumber: 3 },
-      { upc: '012345678904', name: 'Fallback Item', rowNumber: 4 },
+      { upc: '012345678903', name: 'Bundle Item', rowNumber: 3, stage: 'sourcing' },
+      { upc: '012345678904', name: 'Fallback Item', rowNumber: 4, stage: 'sourcing' },
     ]);
 
     updateSourcingDecision(bundleItem.id, {

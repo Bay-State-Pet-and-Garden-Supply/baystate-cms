@@ -2547,6 +2547,40 @@ export function runMigrations(): void {
     console.log('[Migrations] Pi round-12 brand-evidence schema migration complete.');
   }
 
+  // Onboarding evidence attempts table (distributor evidence lookups).
+  // Referenced by the committed onboarding-evidence-repo and the item
+  // detail / resolve-sourcing routes, but previously only created by
+  // uncommitted multi-distributor V2 work; without it every item detail
+  // fetch 500s. The pending V2 work extends this table defensively via
+  // PRAGMA-guarded ALTERs, so a pre-existing table is compatible.
+  const evidenceAttemptsTable = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'onboarding_evidence_attempts'")
+    .get();
+  if (!evidenceAttemptsTable) {
+    db.exec(`
+      CREATE TABLE onboarding_evidence_attempts (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+        provider_id TEXT NOT NULL,
+        lookup_upc TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.0,
+        evidence_url TEXT,
+        matched_fields_json TEXT NOT NULL DEFAULT '[]',
+        identity_json TEXT,
+        warnings_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_onboarding_evidence_attempts_item ON onboarding_evidence_attempts(item_id);
+      CREATE INDEX IF NOT EXISTS idx_onboarding_evidence_attempts_provider ON onboarding_evidence_attempts(provider_id);
+      CREATE INDEX IF NOT EXISTS idx_onboarding_evidence_attempts_upc ON onboarding_evidence_attempts(lookup_upc);
+    `);
+    db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('onboarding_evidence_attempts_schema_version', '1');");
+    console.log('[Migrations] Onboarding evidence attempts table migration complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

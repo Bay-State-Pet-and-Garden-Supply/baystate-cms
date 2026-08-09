@@ -65,7 +65,7 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
     acceptedEvidenceAttemptIds: (row as any).accepted_evidence_attempt_ids_json ? JSON.parse((row as any).accepted_evidence_attempt_ids_json) : [],
     acceptedEvidenceAttemptId: (row as any).accepted_evidence_attempt_id ?? null,
     sourcingDecision: (row as any).sourcing_decision_json ? JSON.parse((row as any).sourcing_decision_json) : null,
-    stage: (row.stage || 'sourcing') as PipelineStage,
+    stage: (row.stage || 'discovery') as PipelineStage,
     stageStatus: (row.stage_status || 'pending') as StageStatus,
     status: (row.status || 'imported') as ItemStatus,
     errorMessage: row.error_message,
@@ -99,7 +99,7 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
     for (const item of items) {
       const id = randomUUID();
       const isDuplicateNum = item.isDuplicate ? 1 : 0;
-      const targetStage = item.stage ?? 'sourcing';
+      const targetStage = item.stage ?? 'discovery';
       const targetStageStatus = item.stageStatus ?? 'pending';
       stmt.run(
         id,

@@ -7,7 +7,7 @@ import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions, listPages } from '../db/repositories/page-repo';
+import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
 import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
@@ -358,13 +358,9 @@ export async function promoteItems(
       // a verified Page ID always resolves to the verified page's canonical
       // name (never the proposal's variant text, never the raw Page ID).
       // Without an active import the set is empty — fail closed.
-      let verifiedPageOptions = listVerifiedPageOptions(batch.workspaceId);
-      if (verifiedPageOptions.length === 0) {
-        verifiedPageOptions = listPages();
-      }
+      const verifiedPageOptions = listVerifiedPageOptions(batch.workspaceId);
       const verifiedPageIds = new Set(verifiedPageOptions.map(p => p.id));
       const verifiedNameById = new Map(verifiedPageOptions.map(p => [p.id, p.name]));
-      const verifiedIdByName = new Map(verifiedPageOptions.map(p => [p.name, p.id]));
       if (activeProposals.length > 0) {
         const mappings = getCachedAttributeMappings(workspaceId);
 
@@ -417,29 +413,16 @@ export async function promoteItems(
           const dbPages = getProductPageAssignments(item.upc);
           for (const p of dbPages) {
             if (p.pageName) {
-              const matchedId = p.pageId || verifiedIdByName.get(p.pageName);
-              if (matchedId) {
-                const verifiedName = verifiedNameById.get(matchedId) ?? p.pageName;
+              if (p.pageId && verifiedPageIds.has(p.pageId)) {
+                const verifiedName = verifiedNameById.get(p.pageId) ?? p.pageName;
                 classificationPageNames.push(verifiedName);
-                classificationPageProposals.push({ pageId: matchedId, pageName: verifiedName });
+                classificationPageProposals.push({ pageId: p.pageId, pageName: verifiedName });
               } else {
-                classificationPageNames.push(p.pageName);
-                classificationPageProposals.push({ pageId: randomUUID(), pageName: p.pageName });
+                skippedPageRefs.push({ proposalId: `db:${p.pageName}`, pageName: p.pageName });
               }
             }
           }
         } catch { /* ignore */ }
-
-        // Fallback to curationData.suggestedPages
-        if (classificationPageProposals.length === 0 && Array.isArray(item.curationData?.suggestedPages)) {
-          for (const pageName of item.curationData.suggestedPages) {
-            if (pageName) {
-              const pageId = verifiedIdByName.get(pageName) || randomUUID();
-              classificationPageNames.push(pageName);
-              classificationPageProposals.push({ pageId, pageName });
-            }
-          }
-        }
       }
 
       // Mandatory Pages gate (fail closed): at least one VERIFIED page
