@@ -37,7 +37,7 @@ export const DEFAULT_PRODUCT_INTELLIGENCE_FLAGS: ProductIntelligenceFlags = {
   killSwitch: false,
 };
 
-export const PRODUCT_INTELLIGENCE_FLAG_ENV: Record<keyof ProductIntelligenceFlags, string> = {
+const PRODUCT_INTELLIGENCE_FLAG_ENV: Record<keyof ProductIntelligenceFlags, string> = {
   productIntelligenceEnabled: 'BAYSTATE_CMS_PRODUCT_INTELLIGENCE_ENABLED',
   piEnabled: 'BAYSTATE_CMS_PI_ENABLED',
   shadowOnly: 'BAYSTATE_CMS_PI_SHADOW_ONLY',

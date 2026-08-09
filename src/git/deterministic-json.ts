@@ -1,7 +1,4 @@
-import {
-  canonicalJsonFileString,
-  hashCanonicalJson,
-} from '../shared/stable-id';
+import { canonicalJsonFileString } from '../shared/stable-id';
 
 /**
  * Deterministic JSON serialization with stable recursive key ordering and a
@@ -44,9 +41,6 @@ export function hashJson(value: unknown): string {
   }
   return Math.abs(hash).toString(36);
 }
-
-/** Canonical SHA-256 for new identities. */
-export const hashJsonSha256 = hashCanonicalJson;
 
 // fallow-ignore-next-line unused-export
 export function parseJsonFile<T>(content: string): T {

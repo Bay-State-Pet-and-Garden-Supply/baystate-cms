@@ -25,19 +25,7 @@ import {
   structuredSingleVariantProof,
   type PageExtractionContract,
 } from '../tools/contract';
-import {
-  fetchPageHtml,
-  parseStructuredSignals,
-  detectPlatform,
-  parseNextJsData,
-  parseNuxtData,
-  shopifyProductUrl,
-  fetchShopifyProductJson,
-  parseWooCommerceStoreApi,
-  gtinFromAny,
-  findProductLike,
-  type FetchedPage,
-} from './platforms';
+import { fetchPageHtml, parseStructuredSignals, detectPlatform, parseNextJsData, parseNuxtData, shopifyProductUrl, fetchShopifyProductJson, parseWooCommerceStoreApi, gtinFromAny, type FetchedPage } from './platforms';
 import { evidenceFromBrowserSnapshot, evidenceFromProductPayload, runBrowserInteraction, type BrowserSnapshotFn } from './browser';
 import type { ManagedFallbackRegistry, ManagedPage } from './managed-fallback';
 import { isLlmAvailable, type LlmExtractionAdapter } from './llm';
@@ -672,11 +660,6 @@ export async function runExtractionLadder(
   }
 }
 
-/** Identity function for callers that want the contract-shaped result. */
-export function ladderResultToContract(run: LadderRun): PageExtractionResult {
-  return run.result;
-}
-
 /** PageExtractionContract adapter over the ladder (drop-in for the tool). */
 export function createLadderExtractionContract(options: LadderOptions = {}): PageExtractionContract {
   return {
@@ -695,4 +678,3 @@ export function createLadderExtractionContract(options: LadderOptions = {}): Pag
 }
 
 /** Re-exported for consumers that classify product-like payloads directly. */
-export { findProductLike };

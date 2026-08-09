@@ -120,12 +120,7 @@ export interface ExportResult {
 
 // Store Workspace
 export function getWorkspace() { return request<{ workspace: Workspace | null }>('/workspace'); }
-export function openWorkspace() { return request<{ success: boolean; workspace: Workspace }>('/workspace/open', { method: 'POST' }); }
 export function closeWorkspace() { return request<{ success: boolean; message: string }>('/workspace/close', { method: 'POST' }); }
-export function getRecentWorkspaces() { return Promise.resolve({ success: true, workspaces: [] }); }
-export function removeRecentWorkspace(_path: string) { return Promise.resolve({ success: true }); }
-export function pickDirectory() { return Promise.resolve({ success: false, error: 'unsupported' }); }
-export function initWorkspace(_name: string, _path: string) { return getWorkspace().then(res => ({ success: true, workspace: res.workspace! })); }
 
 
 
@@ -271,27 +266,6 @@ export function runCatalogClassification(sku: string) {
   }>(`/products/${encodeURIComponent(sku)}/classification/runs`, {
     method: 'POST',
   });
-}
-
-export function submitCatalogDecisions(
-  sku: string,
-  runId: string,
-  decisions: Array<{
-    proposalId: string;
-    decision: 'accepted' | 'rejected' | 'deferred';
-    reviewerNote?: string | null;
-    revisedValue?: unknown;
-    revisedTargetId?: string | null;
-    /** Evidence citations for this correction (issue #17 I). */
-    evidenceIds?: string[];
-    actionToken?: string;
-    expectedRevisionId?: string | null;
-  }>,
-) {
-  return request<{ ok: boolean; decisions: unknown[] }>(
-    `/products/${encodeURIComponent(sku)}/classification/runs/${encodeURIComponent(runId)}/decisions`,
-    { method: 'POST', body: JSON.stringify({ decisions }) },
-  );
 }
 
 export function applyCatalogClassification(sku: string, runId: string) {
@@ -446,13 +420,6 @@ export function deletePage(id: string) {
 // fallow-ignore-next-line unused-export — used by tests
 export function getProductPages(sku: string) {
   return request<{ pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`);
-}
-
-function saveProductPages(sku: string, pages: string[]) {
-  return request<{ success: boolean; pages: string[] }>(`/products/${encodeURIComponent(sku)}/pages`, {
-    method: 'POST',
-    body: JSON.stringify({ pages }),
-  });
 }
 
 // --- Dashboard ---

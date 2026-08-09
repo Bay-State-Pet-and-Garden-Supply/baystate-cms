@@ -157,13 +157,6 @@ export function getEvidenceByRun(runId: string): ClassificationEvidence[] {
   return rows.map(mapEvidence);
 }
 
-function getEvidenceBySku(productSku: string): ClassificationEvidence[] {
-  const rows = getDb()
-    .query('SELECT * FROM classification_evidence WHERE product_sku = ? ORDER BY created_at DESC')
-    .all(productSku) as Record<string, any>[];
-  return rows.map(mapEvidence);
-}
-
 // ─── Proposals ─────────────────────────────────────────────────────────────────
 
 export function getProposalsByRun(runId: string): ClassificationProposal[] {
@@ -187,30 +180,6 @@ export function getProposalsByRun(runId: string): ClassificationProposal[] {
         ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
       FROM classification_proposals p WHERE p.run_id = ?`)
     .all(runId) as Record<string, any>[];
-  return rows.map(mapProposal);
-}
-
-function getProposalsBySku(productSku: string): ClassificationProposal[] {
-  const rows = getDb()
-    .query(`SELECT p.*,
-      (SELECT d.revised_value_json FROM classification_proposal_decisions d
-        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
-        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_value_json,
-      (SELECT d.revised_target_id FROM classification_proposal_decisions d
-        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
-        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS revised_target_id,
-      (SELECT d.id FROM classification_proposal_decisions d
-        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
-        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS current_decision_id,
-      (SELECT CASE WHEN d.revised_value_json IS NULL THEN 0 ELSE 1 END FROM classification_proposal_decisions d
-        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
-        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_value,
-      (SELECT COALESCE(d.has_revised_target, CASE WHEN d.revised_target_id IS NULL THEN 0 ELSE 1 END)
-        FROM classification_proposal_decisions d
-        WHERE d.proposal_id = p.id AND d.superseded_at IS NULL
-        ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) AS has_revised_target_id
-      FROM classification_proposals p WHERE p.product_sku = ? ORDER BY p.created_at DESC`)
-    .all(productSku) as Record<string, any>[];
   return rows.map(mapProposal);
 }
 
@@ -375,7 +344,7 @@ function rowMatchesInput(row: Record<string, any>, input: DecisionRowInput): boo
 }
 
 /** Sorted, deduplicated evidence ids cited by a decision (issue #17 I). */
-export function getDecisionEvidenceIds(db: Database, decisionId: string): string[] {
+function getDecisionEvidenceIds(db: Database, decisionId: string): string[] {
   const rows = db.query(
     'SELECT evidence_id FROM classification_proposal_decision_evidence WHERE decision_id = ? ORDER BY evidence_id',
   ).all(decisionId) as Array<{ evidence_id: string }>;
@@ -565,13 +534,6 @@ export function getLiveDecisionsByRun(runId: string): ClassificationProposalDeci
   return rows.map(mapDecision);
 }
 
-function getDecisionsByProposal(proposalId: string): ClassificationProposalDecision[] {
-  const rows = getDb()
-    .query('SELECT * FROM classification_proposal_decisions WHERE proposal_id = ? ORDER BY created_at DESC, rowid DESC')
-    .all(proposalId) as Record<string, any>[];
-  return rows.map(mapDecision);
-}
-
 // ─── History Events ────────────────────────────────────────────────────────────
 
 export function recordHistoryEvent(
@@ -599,12 +561,6 @@ export function recordHistoryEvent(
       now(),
     ],
   );
-}
-
-function getHistoryBySku(productSku: string): Record<string, any>[] {
-  return getDb()
-    .query('SELECT * FROM classification_history_events WHERE product_sku = ? ORDER BY created_at DESC')
-    .all(productSku) as Record<string, any>[];
 }
 
 // ─── Dependent Refresh Queue ────────────────────────────────────────────────────

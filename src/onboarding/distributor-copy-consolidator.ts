@@ -32,43 +32,6 @@ export interface ConsolidationResult {
 }
 
 /**
- * Collect all distributor title signals from accepted attempts.
- * Titles are ordered by confidence descending, then provider ID.
- */
-export function collectDistributorTitles(
-  attempts: EvidenceAttempt[],
-): DistributorTitleSignal[] {
-  const signals: DistributorTitleSignal[] = [];
-
-  for (const attempt of attempts) {
-    if (attempt.outcome !== 'found' || !attempt.identityJson) continue;
-
-    try {
-      const raw = JSON.parse(attempt.identityJson);
-      const result = ProductIdentityEvidenceSchema.safeParse(raw);
-      if (result.success && result.data.name) {
-        signals.push({
-          title: result.data.name,
-          providerId: attempt.providerId,
-          attemptId: attempt.id,
-          confidence: attempt.confidence,
-        });
-      }
-    } catch {
-      // Skip malformed identities
-    }
-  }
-
-  // Sort by confidence descending, then provider ID for determinism
-  signals.sort((a, b) => {
-    if (b.confidence !== a.confidence) return b.confidence - a.confidence;
-    return a.providerId.localeCompare(b.providerId);
-  });
-
-  return signals;
-}
-
-/**
  * Consolidate all distributor provider descriptions into a single curated copy.
  *
  * Rules:

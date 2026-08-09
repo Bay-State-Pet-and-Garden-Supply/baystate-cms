@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { sha256Hex } from '../shared/stable-id.js';
 
-export const AcquisitionModeEnum = z.enum([
+const AcquisitionModeEnum = z.enum([
   'browser_parse',
   'http_fetch',
   'cloud_scraper',
@@ -9,11 +9,11 @@ export const AcquisitionModeEnum = z.enum([
   'import_file',
 ]);
 
-export const LicenseStatusEnum = z.enum(['open_licensed', 'proprietary', 'unknown']);
+const LicenseStatusEnum = z.enum(['open_licensed', 'proprietary', 'unknown']);
 
-export const ValidationStateEnum = z.enum(['unvalidated', 'valid', 'rejected']);
+const ValidationStateEnum = z.enum(['unvalidated', 'valid', 'rejected']);
 
-export const PageKindEnum = z.enum(['product', 'category', 'interstitial', 'blocked', 'unknown']);
+const PageKindEnum = z.enum(['product', 'category', 'interstitial', 'blocked', 'unknown']);
 
 export const ScrapedProductEvidenceSchema = z.object({
   /** Stable identifier for the scraped item (legacy prefix-derived IDs are replaced by SHA-256 entity IDs). */
@@ -70,17 +70,6 @@ export const ScrapedProductEvidenceSchema = z.object({
 });
 
 export type ScrapedProductEvidence = z.input<typeof ScrapedProductEvidenceSchema>;
-
-export const SiteCrawlConfigSchema = z.object({
-  domain: z.string(),
-  startUrls: z.array(z.string().url()),
-  maxItems: z.number().optional().default(100),
-  maxConcurrency: z.number().optional().default(2),
-  requestDelayMs: z.number().optional().default(1000),
-  useBrowser: z.boolean().optional().default(false),
-});
-
-export type SiteCrawlConfig = z.infer<typeof SiteCrawlConfigSchema>;
 
 /**
  * GTIN/UPC/EAN checksum validation (mod-10).

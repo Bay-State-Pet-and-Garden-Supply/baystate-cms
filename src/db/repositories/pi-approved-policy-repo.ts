@@ -15,7 +15,7 @@ import { getDb } from '../connection';
 const now = () => new Date().toISOString();
 
 /** Name of the seeded default policy record for each workspace. */
-export const DEFAULT_POLICY_NAME = 'default';
+const DEFAULT_POLICY_NAME = 'default';
 
 export interface ApprovedPolicyRow {
   id: string;

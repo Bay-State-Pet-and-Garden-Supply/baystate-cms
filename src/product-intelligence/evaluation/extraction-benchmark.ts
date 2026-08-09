@@ -46,7 +46,7 @@ export interface StubPageFixture {
  * Deterministic stub provider over a URL → fixture map. Missing URLs are
  * treated as retrieval failures (404) — the blocked-page case.
  */
-export class StubExtractionProvider implements ExtractionProviderAdapter {
+class StubExtractionProvider implements ExtractionProviderAdapter {
   readonly name = 'stub';
   readonly version = '1.0.0';
   private fixtures: Map<string, StubPageFixture>;
@@ -83,7 +83,7 @@ export class StubExtractionProvider implements ExtractionProviderAdapter {
  * approximated from the contract result (the contract does not expose raw
  * HTTP status); network access requires the benchmark network flag.
  */
-export class HttpExtractionProvider implements ExtractionProviderAdapter {
+class HttpExtractionProvider implements ExtractionProviderAdapter {
   readonly name = 'http';
   readonly version = '1.0.0';
   private contract: PageExtractionContract;
@@ -131,7 +131,7 @@ export class HttpExtractionProvider implements ExtractionProviderAdapter {
  * enforcement point. Retrieval success is still ALWAYS distinguished from
  * correct product extraction.
  */
-export class ManagedExtractionProvider implements ExtractionProviderAdapter {
+class ManagedExtractionProvider implements ExtractionProviderAdapter {
   readonly name: string;
   readonly version: string;
   private provider: ManagedBrowserProvider;

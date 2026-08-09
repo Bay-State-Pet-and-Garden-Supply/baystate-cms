@@ -30,7 +30,7 @@ export type PiOutcome =
   | 'cancelled'
   | 'unavailable';
 
-export const PI_OUTCOMES: PiOutcome[] = [
+const PI_OUTCOMES: PiOutcome[] = [
   'submitted',
   'abstained',
   'parent_product_only',

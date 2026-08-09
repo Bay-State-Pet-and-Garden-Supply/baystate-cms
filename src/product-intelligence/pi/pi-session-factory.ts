@@ -319,7 +319,7 @@ let cachedVersion: string | null | undefined;
  * package version; subsequent calls reuse both. Never called by onboarding
  * code paths — only by Pi execution.
  */
-export async function importSdk(): Promise<PiSdkModule> {
+async function importSdk(): Promise<PiSdkModule> {
   if (!sdkPromise) {
     sdkPromise = (async () => {
       const sdk = (await import('@earendil-works/pi-coding-agent')) as PiSdkModule;

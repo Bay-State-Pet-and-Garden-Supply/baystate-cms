@@ -16,6 +16,8 @@
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
 import { sha256Hex } from '../../shared/stable-id';
+import type { PiConflictRow } from '../../shared/schemas/product-intelligence';
+export type { PiConflictRow };
 
 const now = () => new Date().toISOString();
 
@@ -650,20 +652,6 @@ export function listPiEvidenceByToolEvidenceId(runId: string, toolEvidenceIds: s
     .all(runId, ...toolEvidenceIds) as PiEvidenceRow[];
 }
 
-export interface PiConflictRow {
-  id: string;
-  runId: string;
-  field: string;
-  severity: 'low' | 'medium' | 'high';
-  status: 'open' | 'resolved' | 'dismissed';
-  competingValuesJson: string;
-  evidenceIdsJson: string;
-  resolutionJson: string | null;
-  resolvedBy: string | null;
-  resolvedAt: string | null;
-  createdAt: string;
-}
-
 export function insertPiConflict(input: {
   runId: string;
   field: string;
@@ -1018,7 +1006,7 @@ const PAGE_ARTIFACT_SELECT = `
 
 /** Cap for retained page content (bytes). Larger pages are not retained —
  *  artifact-driven discovery is simply unavailable for them (no artifact id). */
-export const MAX_PI_PAGE_ARTIFACT_BYTES = 2 * 1024 * 1024;
+const MAX_PI_PAGE_ARTIFACT_BYTES = 2 * 1024 * 1024;
 
 export function insertPiPageArtifact(input: {
   runId: string;
@@ -1040,11 +1028,6 @@ export function insertPiPageArtifact(input: {
     [id, input.runId, input.url, input.contentHash, input.content, sizeBytes, input.artifactType ?? 'page_html', now()],
   );
   return db.query(`${PAGE_ARTIFACT_SELECT} WHERE id = ?`).get(id) as PiPageArtifactRow;
-}
-
-export function getPiPageArtifact(id: string): PiPageArtifactRow | undefined {
-  const db = getDb();
-  return db.query(`${PAGE_ARTIFACT_SELECT} WHERE id = ?`).get(id) as PiPageArtifactRow | undefined;
 }
 
 /** Round-10 (review P0): artifact lookup is scoped to the CURRENT run —
@@ -1175,12 +1158,6 @@ export function getPiAssetsByIds(ids: string[]): PiAssetRow[] {
   return db.query(`${ASSET_SELECT} WHERE id IN (${placeholders})`).all(...ids) as PiAssetRow[];
 }
 
-export function countPiAssets(runId: string): number {
-  const db = getDb();
-  const row = db.query('SELECT COUNT(*) AS c FROM product_intelligence_assets WHERE run_id = ?').get(runId) as { c: number };
-  return Number(row.c);
-}
-
 // ---------------------------------------------------------------------------
 // Onboarding imports (PI-8)
 // ---------------------------------------------------------------------------
@@ -1253,7 +1230,7 @@ export function insertPiImport(input: {
   return getPiImport(id) as PiImportRow;
 }
 
-export function getPiImport(id: string): PiImportRow | undefined {
+function getPiImport(id: string): PiImportRow | undefined {
   const db = getDb();
   return db.query(`${IMPORT_SELECT} WHERE id = ?`).get(id) as PiImportRow | undefined;
 }
@@ -1263,13 +1240,6 @@ export function getPiImportByRunAndItem(runId: string, onboardingItemId: string)
   return db
     .query(`${IMPORT_SELECT} WHERE run_id = ? AND onboarding_item_id = ?`)
     .get(runId, onboardingItemId) as PiImportRow | undefined;
-}
-
-export function listPiImportsByItem(onboardingItemId: string): PiImportRow[] {
-  const db = getDb();
-  return db
-    .query(`${IMPORT_SELECT} WHERE onboarding_item_id = ? ORDER BY created_at DESC`)
-    .all(onboardingItemId) as PiImportRow[];
 }
 
 export function listPiImportsByRun(runId: string): PiImportRow[] {
@@ -1286,23 +1256,13 @@ export function updatePiImportStatus(id: string, status: PiImportStatus): boolea
 }
 
 /** Mark every active import of a run stale (run deletion / retention). */
-export function markPiImportsStaleByRun(runId: string): number {
+function markPiImportsStaleByRun(runId: string): number {
   const db = getDb();
   const result = db.run(
     "UPDATE product_intelligence_imports SET status = 'stale' WHERE run_id = ? AND status = 'active'",
     [runId],
   );
   return Number(result.changes);
-}
-
-/** All runs that ever imported into an onboarding item (newest first). */
-export function listPiRunsByItem(onboardingItemId: string): PiRunRow[] {
-  const db = getDb();
-  return db
-    .query(
-      `${RUN_SELECT} WHERE id IN (SELECT run_id FROM product_intelligence_imports WHERE onboarding_item_id = ? AND run_id IS NOT NULL) ORDER BY started_at DESC`,
-    )
-    .all(onboardingItemId) as PiRunRow[];
 }
 
 // ---------------------------------------------------------------------------

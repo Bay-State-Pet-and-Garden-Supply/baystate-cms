@@ -99,7 +99,7 @@ interface OcrToEvidenceParams {
  * Each visible field produces one or more evidence records with appropriate
  * sourceField, attributeId, and reliability derived from per-field confidence.
  */
-export function packagingOcrDataToEvidence(
+function packagingOcrDataToEvidence(
   ocrData: PackagingOcrData,
   params: OcrToEvidenceParams,
 ): ClassificationEvidence[] {

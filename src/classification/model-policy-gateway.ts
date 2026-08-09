@@ -37,26 +37,12 @@ export type ProtectedOperation =
   | 'brand_inference'
   | 'sitemap_selection';
 
-export const PROTECTED_OPERATIONS: readonly ProtectedOperation[] = [
-  'evidence_extraction',
-  'product_type_ranking',
-  'attribute_ranking',
-  'page_assignment',
-  'cohort_page_assignment',
-  'title_consolidation',
-  'cohort_title_consolidation',
-  'distributor_copy_consolidation',
-  'discovery_name_consolidation',
-  'brand_inference',
-  'sitemap_selection',
-];
-
 /**
  * Classification stage key used for `stageOverrides` lookup per protected
  * operation. `null` means the operation is not tied to a classification
  * stage and resolves from the snapshot default provider/model.
  */
-export const PROTECTED_OPERATION_STAGE: Readonly<Record<ProtectedOperation, string | null>> = {
+const PROTECTED_OPERATION_STAGE: Readonly<Record<ProtectedOperation, string | null>> = {
   evidence_extraction: 'evidence_extraction',
   product_type_ranking: 'primary_product_type_proposal',
   attribute_ranking: 'product_attribute_proposals',

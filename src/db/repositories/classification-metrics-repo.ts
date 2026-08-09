@@ -72,7 +72,7 @@ function parseStringArray(json: string | null | undefined): string[] {
 }
 
 /** Completed-or-terminal runs started within the window for the workspace. */
-export function getQualityRuns(workspaceId: string, startIso: string, endIso: string): QualityRunInput[] {
+function getQualityRuns(workspaceId: string, startIso: string, endIso: string): QualityRunInput[] {
   const rows = getDb()
     .query(
       `SELECT id, source_kind, source_product_hash, product_sku, config_snapshot_hash, status, started_at, completed_at
@@ -94,7 +94,7 @@ export function getQualityRuns(workspaceId: string, startIso: string, endIso: st
 }
 
 /** Proposals for the given runs, with supporting/contradicting role arrays. */
-export function getQualityProposals(
+function getQualityProposals(
   workspaceId: string,
   runIds: string[],
   startIso: string,
@@ -133,7 +133,7 @@ export function getQualityProposals(
  * Decision creation timestamps are bounded to the window so no historical
  * decision outside the report window leaks in.
  */
-export function getQualityLiveDecisions(
+function getQualityLiveDecisions(
   workspaceId: string,
   runIds: string[],
   startIso: string,
@@ -194,7 +194,7 @@ export function getQualityLiveDecisions(
 }
 
 /** Model calls bound to the given runs (all statuses; cost/latency filtered purely). */
-export function getQualityModelCalls(workspaceId: string, runIds: string[], startIso: string, endIso: string): QualityModelCallInput[] {
+function getQualityModelCalls(workspaceId: string, runIds: string[], startIso: string, endIso: string): QualityModelCallInput[] {
   if (runIds.length === 0) return [];
   const placeholders = runIds.map(() => '?').join(', ');
   const rows = getDb()
@@ -226,7 +226,7 @@ export function getQualityModelCalls(workspaceId: string, runIds: string[], star
  * window. Unresolvable hashes simply have no entry (the pure aggregation
  * warns + excludes legacy denominators).
  */
-export function getQualitySnapshotDigests(workspaceId: string, configSnapshotHashes: string[]): QualitySnapshotDigest[] {
+function getQualitySnapshotDigests(workspaceId: string, configSnapshotHashes: string[]): QualitySnapshotDigest[] {
   const unique = [...new Set(configSnapshotHashes.filter(Boolean))];
   if (unique.length === 0) return [];
   const placeholders = unique.map(() => '?').join(', ');
@@ -266,7 +266,7 @@ export function getQualitySnapshotDigests(workspaceId: string, configSnapshotHas
  * report reads, bounded to the window and workspace. Used for deterministic
  * "as of" labeling; a null watermark means no data was found.
  */
-export function getQualitySourceWatermark(workspaceId: string, startIso: string, endIso: string): string | null {
+function getQualitySourceWatermark(workspaceId: string, startIso: string, endIso: string): string | null {
   const db = getDb();
   const rows = db
     .query(

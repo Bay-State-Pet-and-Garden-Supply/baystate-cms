@@ -11,9 +11,9 @@
 import { sha256Hex } from '../shared/stable-id';
 
 export const EMBEDDING_DOCUMENT_VERSION = 2;
-export const EMBEDDING_DOCUMENT_SCHEMA_VERSION = 1;
-export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
-export const DEFAULT_EMBEDDING_PROVIDER = 'ollama';
+const EMBEDDING_DOCUMENT_SCHEMA_VERSION = 1;
+const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
+const DEFAULT_EMBEDDING_PROVIDER = 'ollama';
 
 export type EmbeddingNamespace = 'production' | 'evaluation';
 

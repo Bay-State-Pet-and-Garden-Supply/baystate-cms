@@ -6,8 +6,8 @@ import { runMigrations } from '../../db/migrations';
 
 const lazyRequire = createRequire(import.meta.url);
 
-export const DEFAULT_WORKSPACE_ID = 'default';
-export const DEFAULT_WORKSPACE_NAME = 'Bay State Store';
+const DEFAULT_WORKSPACE_ID = 'default';
+const DEFAULT_WORKSPACE_NAME = 'Bay State Store';
 
 export function getStoreCatalogPath(): string {
   return path.resolve(process.cwd(), 'storage', 'catalog');

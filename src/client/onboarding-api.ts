@@ -36,11 +36,7 @@ import type {
   CurationTargetConfig,
   ProposalDecisionInput,
 } from '../shared/schemas/classification';
-import type {
-  GenerateSelectorsResponse,
-  GenerateSelectorsRequest,
-  SnapshotContext,
-} from '../shared/schemas/selector-generation';
+import type { GenerateSelectorsResponse, GenerateSelectorsRequest } from '../shared/schemas/selector-generation';
 
 const API_BASE = '/api/onboarding';
 
@@ -166,17 +162,6 @@ export async function moveToPreviousStage(
   return request<{ success: boolean; moved: number; skipped: number }>('/items/move-to-previous', {
     method: 'POST',
     body: JSON.stringify({ itemIds }),
-  });
-}
-
-
-async function resetItemsToStage(
-  itemIds: string[],
-  targetStage: string,
-): Promise<{ success: boolean; reset: number }> {
-  return request<{ success: boolean; reset: number }>('/items/reset-to-stage', {
-    method: 'POST',
-    body: JSON.stringify({ itemIds, targetStage }),
   });
 }
 
@@ -349,12 +334,6 @@ export async function getBrandSites(): Promise<{ brandSites: BrandSite[]; catalo
   return request<{ brandSites: BrandSite[]; catalogBrands?: string[] }>('/settings/brand-sites');
 }
 
-async function deleteBrandSite(id: string): Promise<{ success: boolean }> {
-  return request<{ success: boolean }>(`/settings/brand-sites/${id}`, {
-    method: 'DELETE',
-  });
-}
-
 export async function getOpenaiModels(apiKey?: string, baseUrl?: string): Promise<{ models: string[] }> {
   const params = new URLSearchParams();
   if (apiKey) params.set('apiKey', apiKey);
@@ -395,12 +374,6 @@ export async function saveExtractorProfile(data: SaveExtractorProfilePayload): P
   return request<{ success: boolean; profile: ExtractorProfile }>('/settings/extractor-profiles', {
     method: 'POST',
     body: JSON.stringify(data),
-  });
-}
-
-async function deleteExtractorProfile(id: string): Promise<{ success: boolean }> {
-  return request<{ success: boolean }>(`/settings/extractor-profiles/${id}`, {
-    method: 'DELETE',
   });
 }
 
@@ -582,12 +555,6 @@ export async function saveCurationTargets(
   return classificationRequest<CurationTargetsResponse & { success: boolean }>('/curation-targets', {
     method: 'PUT',
     body: JSON.stringify({ targets }),
-  });
-}
-
-async function migrateLegacyClassification(): Promise<{ success: boolean; summary: any }> {
-  return classificationRequest<{ success: boolean; summary: any }>('/migrate-legacy', {
-    method: 'POST',
   });
 }
 
@@ -890,12 +857,6 @@ export async function validateProfileDraft(
   });
 }
 
-async function getDomainDiagnosticsForDomain(
-  domain: string,
-): Promise<DomainDiagnosticsEntry> {
-  return request(`/settings/domain-diagnostics/${encodeURIComponent(domain)}`);
-}
-
 export async function getProfileRetryPreview(
   domain: string,
 ): Promise<{ items: ProfileBlockedItem[] }> {
@@ -965,17 +926,6 @@ export interface WeeklyReportResponse {
 
 export interface QualityReportResponse {
   report: import('../shared/schemas/classification-metrics').QualityReport;
-}
-
-/** GET /api/classification/quality-report — workspace-scoped, bounded, read-only. */
-export async function getClassificationQualityReport(
-  start: string,
-  end: string,
-): Promise<QualityReportResponse> {
-  const params = new URLSearchParams();
-  params.set('start', start);
-  params.set('end', end);
-  return request(`/classification/quality-report?${params.toString()}`);
 }
 
 export async function getWeeklyReport(startDate?: string, endDate?: string): Promise<WeeklyReportResponse> {

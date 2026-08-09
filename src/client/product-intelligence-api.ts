@@ -11,12 +11,14 @@
  */
 
 import type { ProductIntelligenceFlags } from '../product-intelligence/flags';
+import type { PiConflictRow } from '../shared/schemas/product-intelligence';
 
 // ---------------------------------------------------------------------------
 // Wire types (mirror server row shapes — JSON strings are left as strings)
 // ---------------------------------------------------------------------------
 
 export type { ProductIntelligenceFlags } from '../product-intelligence/flags';
+export type { PiConflictRow };
 
 export type PiRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type PiRunMode = 'shadow' | 'interactive' | 'onboarding';
@@ -107,20 +109,6 @@ export interface PiEvidenceRow {
   directSupport: number;
   snippet: string | null;
   metadataJson: string | null;
-  createdAt: string;
-}
-
-export interface PiConflictRow {
-  id: string;
-  runId: string;
-  field: string;
-  severity: 'low' | 'medium' | 'high';
-  status: 'open' | 'resolved' | 'dismissed';
-  competingValuesJson: string;
-  evidenceIdsJson: string;
-  resolutionJson: string | null;
-  resolvedBy: string | null;
-  resolvedAt: string | null;
   createdAt: string;
 }
 

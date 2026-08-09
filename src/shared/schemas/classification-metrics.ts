@@ -22,14 +22,14 @@ export const QUALITY_METRIC_DEFINITION_VERSION = 1;
 /** Hard cap on the requested report window. */
 export const QUALITY_REPORT_MAX_RANGE_DAYS = 90;
 
-export const QualityWindowSchema = z
+const QualityWindowSchema = z
   .object({
     start: StrictIsoDateTimeStringSchema,
     end: StrictIsoDateTimeStringSchema,
   })
   .strict();
 
-export const QualitySampleCountsSchema = z
+const QualitySampleCountsSchema = z
   .object({
     runs: z.number().int().nonnegative(),
     completedRuns: z.number().int().nonnegative(),
@@ -40,7 +40,7 @@ export const QualitySampleCountsSchema = z
   })
   .strict();
 
-export const QualityCalibrationBinSchema = z
+const QualityCalibrationBinSchema = z
   .object({
     bin: z.number().int().min(0),
     count: z.number().int().nonnegative(),
@@ -49,7 +49,7 @@ export const QualityCalibrationBinSchema = z
   })
   .strict();
 
-export const QualityCalibrationSchema = z
+const QualityCalibrationSchema = z
   .object({
     /** Expected calibration error over reviewer-agreement labels, or null when no labeled examples exist. */
     ece: z.number().min(0).nullable(),
@@ -59,7 +59,7 @@ export const QualityCalibrationSchema = z
   })
   .strict();
 
-export const QualityLatencySchema = z
+const QualityLatencySchema = z
   .object({
     runMedianMs: z.number().nonnegative().nullable(),
     runP95Ms: z.number().nonnegative().nullable(),
@@ -71,7 +71,7 @@ export const QualityLatencySchema = z
   })
   .strict();
 
-export const QualityCostSchema = z
+const QualityCostSchema = z
   .object({
     totalKnownUsd: z.number().nonnegative().nullable(),
     meanKnownUsd: z.number().nonnegative().nullable(),
@@ -85,7 +85,7 @@ export const QualityCostSchema = z
   })
   .strict();
 
-export const QualityReviewAgreementSchema = z
+const QualityReviewAgreementSchema = z
   .object({
     /** accepted-unchanged / (accepted-unchanged + accepted-corrected + rejected); deferred excluded. */
     precision: z.number().min(0).max(1).nullable(),
@@ -97,7 +97,7 @@ export const QualityReviewAgreementSchema = z
   })
   .strict();
 
-export const QualityCoverageSchema = z
+const QualityCoverageSchema = z
   .object({
     /**
      * Runs with at least one decision-eligible (non-abstention) proposal /
@@ -114,7 +114,7 @@ export const QualityCoverageSchema = z
   })
   .strict();
 
-export const QualityAbstentionSchema = z
+const QualityAbstentionSchema = z
   .object({
     /**
      * Reviewable abstentions / ALL proposals in the group. (The plan wording
@@ -130,7 +130,7 @@ export const QualityAbstentionSchema = z
   })
   .strict();
 
-export const QualityCorrectionsSchema = z
+const QualityCorrectionsSchema = z
   .object({
     /** Live accepted decisions with a revised value/target / live accepted decisions. */
     rate: z.number().min(0).max(1).nullable(),
@@ -143,7 +143,7 @@ export const QualityCorrectionsSchema = z
   })
   .strict();
 
-export const QualityGroundingSchema = z
+const QualityGroundingSchema = z
   .object({
     /** Proposals with >= 1 supporting evidence / non-abstention proposals. */
     supportingCitationCoverage: z.number().min(0).max(1).nullable(),
@@ -160,7 +160,7 @@ export const QualityGroundingSchema = z
   })
   .strict();
 
-export const QualityModelRouteSchema = z
+const QualityModelRouteSchema = z
   .object({
     provider: z.string(),
     model: z.string(),
@@ -175,7 +175,7 @@ export const QualityModelRouteSchema = z
  * model calls), so differing config/prompt/rule/model identities are never
  * combined.
  */
-export const QualityVersionGroupSchema = z
+const QualityVersionGroupSchema = z
   .object({
     configSnapshotHash: z.string().nullable(),
     modelPlanDigest: z.string().nullable(),

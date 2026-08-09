@@ -12,17 +12,10 @@
 import { fetchEmbedding } from './embedding-client';
 import * as embeddingRepo from '../db/repositories/embedding-repo';
 import * as classRunRepo from '../db/repositories/classification-run-repo';
-import {
-  InMemoryRetrievalIndex,
-  VectorValidationError,
-  embeddingDocumentId,
-  type VectorEntry,
-  type RetrievalIndex,
-} from './retrieval-index';
+import { InMemoryRetrievalIndex, embeddingDocumentId, type VectorEntry, type RetrievalIndex } from './retrieval-index';
 import { evaluateFeaturePolicy, type FeaturePolicyOptions } from './feature-policy';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
 import { pageNameFromPageValue } from '../shared/proposal-display';
-import { sha256Hex, canonicalJsonStringify } from '../shared/stable-id';
 
 export interface SimilarProduct {
   sku: string;
@@ -82,7 +75,7 @@ export function assertProductionRetrievalAllowed(
 }
 
 /** Convert stored rows into validated vector entries behind the index. */
-export function loadRetrievalIndex(
+function loadRetrievalIndex(
   workspaceId: string,
   model: string,
   provider: string,
@@ -211,55 +204,6 @@ export async function findSimilarApprovedProducts(
   return results;
 }
 
-/**
- * Index an approved product into the embedding table. Produces a canonical,
- * versioned embedding document bound to source/config/decision provenance.
- */
-export async function indexApprovedProduct(
-  workspaceId: string,
-  sku: string,
-  options?: { model?: string; provider?: string; fetch?: typeof fetch },
-): Promise<void> {
-  const run = classRunRepo.getRecentRun(workspaceId, sku);
-  if (!run) return;
-
-  const evidence = classRunRepo.getEvidenceByRun(run.id);
-  let name = sku;
-  const textParts: string[] = [];
-
-  for (const ev of evidence) {
-    if (ev.sourceField === 'product_name' && ev.snippet) {
-      name = ev.snippet;
-    }
-    if (ev.snippet) {
-      textParts.push(ev.snippet);
-    }
-  }
-
-  const canonicalText = `${name} | ${textParts.slice(0, 5).join(' ')}`;
-  const model = options?.model || 'nomic-embed-text';
-  const provider = options?.provider || 'ollama';
-
-  const response = await fetchEmbedding(canonicalText, { model, provider, fetch: options?.fetch });
-  const sourceHash = sha256Hex(canonicalJsonStringify({ text: canonicalText }));
-
-  embeddingRepo.upsertEmbeddingV2({
-    workspaceId,
-    productSku: sku,
-    model,
-    provider,
-    text: canonicalText,
-    embedding: response.vector,
-    dimension: response.vector.length,
-    sourceHash,
-    namespace: 'production',
-    schemaVersion: response.schemaVersion,
-    sourceConfigHash: run.configSnapshotHash ?? null,
-    decisionRunId: run.id,
-  });
-}
-
-export { VectorValidationError };
 
 // ─── Benchmark retrieval index (train-only, leakage-free) ──────────────────────
 

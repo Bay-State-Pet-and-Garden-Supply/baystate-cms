@@ -113,7 +113,7 @@ function speciesOfType(productType: string | null): { dog: boolean; cat: boolean
 }
 
 /** Deterministic PRNG (mulberry32) seeded from a hex digest. */
-export function seededRandom(seedDigest: string): () => number {
+function seededRandom(seedDigest: string): () => number {
   const seed = parseInt(seedDigest.replace(/[^0-9a-f]/gi, '').slice(0, 8) || '0', 16) >>> 0;
   let a = seed;
   return () => {
@@ -132,7 +132,7 @@ export interface PerExamplePrimaryMetric {
 }
 
 /** Per-example paired values for the primary metric (product type accuracy). */
-export function computePerExamplePrimaryMetric(
+function computePerExamplePrimaryMetric(
   gold: GoldExampleForEvaluation[],
   candidate: BenchmarkPredictionEntry[],
   baseline: BenchmarkPredictionEntry[] | null,
@@ -156,7 +156,7 @@ export function computePerExamplePrimaryMetric(
  * bundle digest (plus an optional extra digest) so identical inputs produce
  * identical intervals.
  */
-export function computePairedBootstrap(
+function computePairedBootstrap(
   pairs: PerExamplePrimaryMetric[],
   seedDigest: string,
   bootstrapRuns = 2000,
@@ -213,7 +213,7 @@ function computeEce(
 /**
  * Pure metrics computation. No database, no runs, no decisions.
  */
-export function computeMetrics(
+function computeMetrics(
   gold: GoldExampleForEvaluation[],
   predictions: BenchmarkPredictionEntry[],
   options: ComputeMetricsOptions = {},

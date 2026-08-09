@@ -55,7 +55,7 @@ export interface CloudVlmParams {
  * a durable `cancelled` terminal row (never a misleading `failed`); other
  * failures return null.
  */
-export class ImageFetchAbortError extends Error {
+class ImageFetchAbortError extends Error {
   constructor(message = 'Image fetch aborted') {
     super(message);
     this.name = 'ImageFetchAbortError';

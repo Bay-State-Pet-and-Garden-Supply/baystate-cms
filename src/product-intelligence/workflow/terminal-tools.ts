@@ -147,7 +147,7 @@ export const BundleTypeBoxSchema = Type.Object({
   ]),
 });
 
-export const InsufficientEvidenceTypeBoxSchema = Type.Object({
+const InsufficientEvidenceTypeBoxSchema = Type.Object({
   schemaVersion: Type.Literal(1),
   gtin: Type.String({ maxLength: 64 }),
   inputName: Type.String({ maxLength: 512 }),
@@ -157,7 +157,7 @@ export const InsufficientEvidenceTypeBoxSchema = Type.Object({
   attemptedSteps: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 });
 
-export const IdentityConflictTypeBoxSchema = Type.Object({
+const IdentityConflictTypeBoxSchema = Type.Object({
   schemaVersion: Type.Literal(1),
   gtin: Type.String({ maxLength: 64 }),
   inputName: Type.String({ maxLength: 512 }),

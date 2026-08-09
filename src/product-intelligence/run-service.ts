@@ -37,44 +37,7 @@ import { getCurrentWorkspace } from '../server/services/workspace-service';
 import { getDb } from '../db/connection';
 import { checkPiRunStartBudget, checkPiStorageBudget } from './budgets';
 import { PolicyDeniedError } from './policy';
-import {
-  appendPiEvent,
-  completePiStep,
-  completePiToolCall,
-  countPiRuns,
-  createPiRun,
-  deletePiRun,
-  deletePiRunsOlderThan,
-  getPiAssetsByIds,
-  getPiResult,
-  getPiRun,
-  insertPiAsset,
-  insertPiComparison,
-  insertPiConflict,
-  insertPiEvidence,
-  insertPiResult,
-  insertPiSource,
-  insertPiStep,
-  insertPiToolCall,
-  latestPiEventSequence,
-  listPiAssetsByRun,
-  listPiComparisons,
-  listPiConflicts,
-  listPiEvents,
-  listPiEvidence,
-  listPiEvidenceByToolEvidenceId,
-  listPiRuns,
-  listPiSources,
-  listPiToolCalls,
-  transitionPiRunStatus,
-  type PiComparisonRow,
-  type PiConflictRow,
-  type PiEvidenceRow,
-  type PiResultRow,
-  type PiRunRow,
-  type PiSourceRow,
-  type PiToolCallRow,
-} from '../db/repositories/product-intelligence-repo';
+import { appendPiEvent, completePiStep, completePiToolCall, createPiRun, deletePiRunsOlderThan, getPiAssetsByIds, getPiResult, getPiRun, insertPiAsset, insertPiComparison, insertPiConflict, insertPiEvidence, insertPiResult, insertPiSource, insertPiStep, insertPiToolCall, latestPiEventSequence, listPiAssetsByRun, listPiComparisons, listPiConflicts, listPiEvents, listPiEvidence, listPiEvidenceByToolEvidenceId, listPiSources, listPiToolCalls, transitionPiRunStatus, type PiComparisonRow, type PiConflictRow, type PiEvidenceRow, type PiResultRow, type PiRunRow, type PiSourceRow, type PiToolCallRow } from '../db/repositories/product-intelligence-repo';
 import { sha256Hex } from '../shared/stable-id';
 import { verifyPolicySnapshot, assertReducingOverride, computePolicyConfigId } from './policy';
 import { buildResearchPrompt } from './pi/pi-prompt-builder';
@@ -82,7 +45,7 @@ import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
 import type { BundleImageCandidate } from './workflow/bundle';
 
-export const PI_RESULT_SCHEMA_VERSION = 1;
+const PI_RESULT_SCHEMA_VERSION = 1;
 
 // ---------------------------------------------------------------------------
 // Default immutable policy
@@ -129,7 +92,7 @@ export interface PiLiveEvent {
   createdAt: string;
 }
 
-export class RunEventBus {
+class RunEventBus {
   private readonly subscribers = new Map<string, Set<(event: PiLiveEvent) => void>>();
 
   subscribe(runId: string, listener: (event: PiLiveEvent) => void): () => void {
@@ -430,7 +393,7 @@ const DOMAIN_EVENT_MAP: Record<string, string> = {
   run_timeout: 'run.failed',
 };
 
-export function mapDomainEventType(type: string): string {
+function mapDomainEventType(type: string): string {
   return DOMAIN_EVENT_MAP[type] ?? type;
 }
 
@@ -472,7 +435,7 @@ export function cancelPiRun(id: string): boolean {
 }
 
 /** Best-effort CMS code commit (git HEAD of this repository). */
-export function captureCodeCommit(): string | null {
+function captureCodeCommit(): string | null {
   try {
     const headPath = path.join(process.cwd(), '.git', 'HEAD');
     const head = readFileSync(headPath, 'utf8').trim();
@@ -1312,7 +1275,7 @@ export function runRetentionCleanup(workspaceId: string, olderThanDays: number):
 // ---------------------------------------------------------------------------
 
 /** PI-10: runaway replay chains are refused at this depth (review PI-10-MINOR-6). */
-export const MAX_PI_REPLAY_DEPTH = 16;
+const MAX_PI_REPLAY_DEPTH = 16;
 
 /**
  * PI-10 replay. Every replay creates a NEW run linked to its origin
@@ -1498,5 +1461,4 @@ export async function replayPiRun(
   return { run: started.run, mode: 'rerun' };
 }
 
-export { createPiRun, countPiRuns, deletePiRun, getPiRun, listPiRuns };
 export type { PiRunRow };

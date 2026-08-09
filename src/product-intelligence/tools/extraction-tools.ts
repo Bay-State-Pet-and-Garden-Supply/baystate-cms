@@ -190,7 +190,7 @@ export class HttpPageExtractionAdapter implements PageExtractionContract {
   }
 }
 
-export const defaultPageExtractionContract: PageExtractionContract = createLadderExtractionContract(defaultLadderOptions());
+const defaultPageExtractionContract: PageExtractionContract = createLadderExtractionContract(defaultLadderOptions());
 
 /**
  * P0-1: ladder options whose HTTP layer rides the policy gateway. The ladder

@@ -21,7 +21,7 @@ import {
 import type { ExecutionEventSink, ProductIntelligenceExecutor } from './executor';
 import { emitExecutionEvent } from './executor';
 
-export const LEGACY_EXECUTOR_VERSION = '1.0.0';
+const LEGACY_EXECUTOR_VERSION = '1.0.0';
 
 export class LegacyProductIntelligenceExecutor implements ProductIntelligenceExecutor {
   readonly name = LEGACY_EXECUTOR_NAME;

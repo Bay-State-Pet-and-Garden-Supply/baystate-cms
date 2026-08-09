@@ -36,14 +36,11 @@ export const PiBudgetPolicySchema = z.object({
 });
 export type PiBudgetPolicy = z.infer<typeof PiBudgetPolicySchema>;
 
-/** Default budget policy: no limits configured. */
-export const DEFAULT_PI_BUDGET_POLICY: PiBudgetPolicy = {};
-
 /**
  * Tool-name → budget category mapping for the daily request budgets.
  * The browser bucket is reserved for PI-11 interaction tools (none exist yet).
  */
-export const PI_TOOL_CATEGORIES = {
+const PI_TOOL_CATEGORIES = {
   search: [
     'search_upc',
     'search_product_name',

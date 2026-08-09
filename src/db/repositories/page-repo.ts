@@ -26,12 +26,6 @@ export function listPages(): PageRow[] {
   return rows.map(mapPageRow);
 }
 
-export function getPage(id: string): PageRow | null {
-  const db = getDb();
-  const row = db.query('SELECT * FROM page_index WHERE id = ?').get(id) as Record<string, any> | undefined;
-  return row ? mapPageRow(row) : null;
-}
-
 // fallow-ignore-next-line unused-export
 export function getPageByName(name: string): PageRow | null {
   const db = getDb();
@@ -54,19 +48,6 @@ export function listVerifiedPageOptions(workspaceId: string): PageRow[] {
      ORDER BY p.name ASC`,
   ).all(workspaceId) as Record<string, any>[];
   return rows.map(mapPageRow);
-}
-
-/** Look up a page row by verified identity key (kind + key). */
-export function findPageByIdentity(
-  workspaceId: string,
-  identityKind: string,
-  identityKey: string,
-): PageRow | null {
-  const db = getDb();
-  const row = db.query(
-    `SELECT * FROM page_index WHERE workspace_id = ? AND identity_kind = ? AND identity_key = ? ORDER BY rowid ASC LIMIT 1`,
-  ).get(workspaceId, identityKind, identityKey) as Record<string, any> | undefined;
-  return row ? mapPageRow(row) : null;
 }
 
 /**
@@ -149,15 +130,6 @@ export function upsertPage(
     createdAt: now,
     updatedAt: now,
   };
-}
-
-export function deletePage(id: string): void {
-  const db = getDb();
-  const page = getPage(id);
-  if (page) {
-    db.run('DELETE FROM product_pages WHERE page_name = ?', [page.name]);
-  }
-  db.run('DELETE FROM page_index WHERE id = ?', [id]);
 }
 
 // ─── Product-Page Assignments ────────────────────────────────────────────────

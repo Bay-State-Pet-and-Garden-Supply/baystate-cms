@@ -280,8 +280,3 @@ export function verifyModelCallsBelongToRun(
   }
   return { ok: missing.length === 0, missing };
 }
-
-/** True when a model call has reached a terminal status. */
-export function isTerminalModelCallStatus(status: ModelCallStatus): boolean {
-  return status !== MODEL_CALL_STATUS.started;
-}

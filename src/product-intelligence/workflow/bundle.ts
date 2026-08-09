@@ -14,7 +14,7 @@
  */
 import { z } from 'zod';
 
-export const IdentityStatusSchema = z.enum([
+const IdentityStatusSchema = z.enum([
   'exact_match',
   'probable_match',
   'parent_product_only',
@@ -24,13 +24,13 @@ export const IdentityStatusSchema = z.enum([
 ]);
 export type IdentityStatus = z.infer<typeof IdentityStatusSchema>;
 
-export const NetContentSchema = z.object({
+const NetContentSchema = z.object({
   value: z.number().positive(),
   unit: z.string().min(1).max(16),
 });
 export type NetContent = z.infer<typeof NetContentSchema>;
 
-export const CommerceFactSchema = z.object({
+const CommerceFactSchema = z.object({
   field: z.string().min(1).max(128),
   value: z.unknown(),
   /** Evidence ids from tool outputs backing this fact. */
@@ -42,7 +42,7 @@ export const CommerceFactSchema = z.object({
 });
 export type CommerceFact = z.infer<typeof CommerceFactSchema>;
 
-export const BundleClassificationProposalSchema = z.object({
+const BundleClassificationProposalSchema = z.object({
   /** Stable CMS-controlled target id (Product Type, Category Page, or attribute). */
   targetId: z.string().min(1).max(128),
   /** Stable CMS-controlled option id/value selected for that target. */
@@ -52,11 +52,11 @@ export const BundleClassificationProposalSchema = z.object({
 });
 export type BundleClassificationProposal = z.infer<typeof BundleClassificationProposalSchema>;
 
-export const ImageRoleSchema = z.enum(['primary', 'alternate', 'nutrition', 'ingredients', 'comparison']);
+const ImageRoleSchema = z.enum(['primary', 'alternate', 'nutrition', 'ingredients', 'comparison']);
 export type ImageRole = z.infer<typeof ImageRoleSchema>;
-export const ImageRightsStatusSchema = z.enum(['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized', 'unknown']);
+const ImageRightsStatusSchema = z.enum(['supplier_authorized', 'manufacturer_authorized', 'licensed_dataset', 'retailer_authorized', 'unknown']);
 
-export const ImageExtractionMethodSchema = z.enum([
+const ImageExtractionMethodSchema = z.enum([
   'json_ld',
   'platform_api',
   'network_response',
@@ -65,7 +65,7 @@ export const ImageExtractionMethodSchema = z.enum([
   'manual',
 ]);
 
-export const ImageQualityStatusSchema = z.enum(['usable', 'low_quality', 'invalid']);
+const ImageQualityStatusSchema = z.enum(['usable', 'low_quality', 'invalid']);
 
 /**
  * A proposed image candidate (PI-6). The agent proposes candidates but can
@@ -85,7 +85,7 @@ export const ImageQualityStatusSchema = z.enum(['usable', 'low_quality', 'invali
  * parsing historical bundles; they are never trusted by validation or
  * persistence.
  */
-export const BundleImageCandidateSchema = z.object({
+const BundleImageCandidateSchema = z.object({
   sourceId: z.string().min(1),
   sourceArtifactId: z.string().min(1),
   url: z.string().url(),
@@ -139,7 +139,7 @@ export const BundleImageCandidateSchema = z.object({
 });
 export type BundleImageCandidate = z.infer<typeof BundleImageCandidateSchema>;
 
-export const BundleConflictSchema = z.object({
+const BundleConflictSchema = z.object({
   field: z.string().min(1).max(128),
   values: z.array(z.unknown()).min(1),
   evidenceIds: z.array(z.string().min(1)).default([]),
@@ -147,7 +147,7 @@ export const BundleConflictSchema = z.object({
 });
 export type BundleConflict = z.infer<typeof BundleConflictSchema>;
 
-export const BundleDispositionSchema = z.enum(['research_complete', 'needs_review', 'insufficient_evidence', 'identity_conflict']);
+const BundleDispositionSchema = z.enum(['research_complete', 'needs_review', 'insufficient_evidence', 'identity_conflict']);
 export type BundleDisposition = z.infer<typeof BundleDispositionSchema>;
 
 export const ProductResearchBundleSchema = z.object({

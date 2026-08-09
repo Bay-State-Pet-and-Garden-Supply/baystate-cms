@@ -16,7 +16,6 @@ export { categoryPageProposalsStage } from './stages/category-page-proposals';
 export { productDraftProjectionStage } from './stages/draft-projection';
 
 // ─── Shared Evidence Extractor ─────────────────────────────────────────────────
-export { extractProductEvidence, packagingOcrDataToEvidence } from './product-evidence-extractor';
 export type { NormalizedEvidenceInput, EvidenceExtractionResult } from './product-evidence-extractor';
 
 // ─── Catalog Evidence (Milestone 3/7) ─────────────────────────────────────────
@@ -39,23 +38,10 @@ export {
 export type { RuntimeConfigAuthority, VerifiedActivationContext } from './config-loader';
 
 // ─── Catalog Product Classification ────────────────────────────────────────────
-export { buildCatalogProductEvidenceInput, computeProductHash } from './catalog-product-source';
 export type { CatalogProductSource } from './catalog-product-source';
-export { createCatalogEvidenceExtractionStage } from './stages/catalog-product-evidence-extraction';
-export { classifyCatalogProduct } from './catalog-product-classifier';
 
 // ─── Immutable Runtime Snapshot ───────────────────────────────────────────────
-export {
-  buildRuntimeSnapshot,
-  deepFreeze,
-  snapshotHash,
-  persistRuntimeSnapshot,
-  getRuntimeSnapshotByHash,
-  runtimeSnapshotHashMatchesConfig,
-  authorityConfigHashMatches,
-  listEffectiveCurationTargets,
-  computeSnapshotFieldOptions,
-} from './runtime-snapshot';
+export { buildRuntimeSnapshot, deepFreeze, snapshotHash, persistRuntimeSnapshot, getRuntimeSnapshotByHash, runtimeSnapshotHashMatchesConfig, authorityConfigHashMatches } from './runtime-snapshot';
 export type {
   RuntimeClassificationSnapshot,
   RuntimeSnapshotInput,
@@ -64,20 +50,7 @@ export type {
 } from './runtime-snapshot';
 
 // ─── Model Operation Registry (issue #17 E) ───────────────────────────────────
-export {
-  MODEL_OPERATION_REGISTRY_VERSION,
-  OUTPUT_POLICY_VERSION,
-  PROMPT_TEMPLATE_VERSIONS,
-  RULE_VERSIONS,
-  OPERATION_PARAMETERS,
-  OPERATION_TO_STAGE,
-  RUN_BOUND_OPERATIONS,
-  MODEL_CALL_STATUS,
-  COST_BASIS,
-  buildRuntimeRuleVersions,
-  buildModelExecutionPlan,
-  computePromptHashes,
-} from './model-operation-registry';
+export { PROMPT_TEMPLATE_VERSIONS, RULE_VERSIONS, OPERATION_PARAMETERS, OPERATION_TO_STAGE, MODEL_CALL_STATUS, COST_BASIS, buildRuntimeRuleVersions, buildModelExecutionPlan, computePromptHashes } from './model-operation-registry';
 export type {
   ModelCallContext,
   ModelCallStatus,
@@ -88,11 +61,9 @@ export type {
 } from './model-operation-registry';
 
 // ─── Reviewed Facts ────────────────────────────────────────────────────────────
-export { collectReviewedFacts, isFactCompatible, filterCompatibleFacts } from './reviewed-facts';
 export type { ReviewedFact, CollectReviewedFactsInput } from './reviewed-facts';
 
 // ─── Proposal Safety ───────────────────────────────────────────────────────────
-export { validateProposalSafety } from './proposal-safety';
 export type {
   ProposalSafetyReport,
   ProposalSafetyFinding,
@@ -101,20 +72,13 @@ export type {
 } from './proposal-safety';
 
 // ─── Proposal Selection ───────────────────────────────────────────────────────
-export {
-  selectAcceptedPrimaryProductType,
-  selectPrimaryProductTypeProposal,
-  getProductTypeIdFromFact,
-  getReviewedPrimaryProductTypeId,
-} from './proposal-selection';
+export { selectPrimaryProductTypeProposal, getReviewedPrimaryProductTypeId } from './proposal-selection';
 export type { ProposalSelection } from './proposal-selection';
 
 // ─── Assignment Projection ────────────────────────────────────────────────────
-export { serializeAttributeValue, validateSerializableValue } from './assignment-projection';
 export type { SerializableValueValidation } from './assignment-projection';
 
 // ─── Dependent Refresh Queue ──────────────────────────────────────────────────
-export { enqueueClassificationRefresh } from '../db/repositories/classification-run-repo';
 
 // ─── Benchmark / Feature Policy (M9) ───────────────────────────────────────────
 export {
@@ -141,26 +105,11 @@ export {
   ALL_ML_FEATURES,
 } from './feature-policy';
 export type { FeatureRequest, FeatureRequestScope, FeaturePolicyOptions } from './feature-policy';
-export {
-  computeMetrics,
-  computePerExamplePrimaryMetric,
-  computePairedBootstrap,
-  seededRandom,
-} from './benchmark-evaluator';
+
 export type { GoldExampleForEvaluation, ControlledValues, ComputeMetricsOptions, EvaluateBenchmarkOptions, EvaluateBenchmarkResult } from './benchmark-evaluator';
 
 // ─── Retrieval Index (M10) ─────────────────────────────────────────────────────
-export {
-  InMemoryRetrievalIndex,
-  VectorValidationError,
-  assertFiniteVector,
-  assertVectorDimension,
-  embeddingDocumentId,
-  benchmarkEmbeddingDocumentId,
-  computeEmbeddingDocumentHash,
-  buildBenchmarkRetrievalIndex,
-  EMBEDDING_SCHEMA_VERSION,
-} from './retrieval-index';
+export { InMemoryRetrievalIndex, VectorValidationError, assertFiniteVector, embeddingDocumentId, benchmarkEmbeddingDocumentId, buildBenchmarkRetrievalIndex } from './retrieval-index';
 export type {
   VectorEntry,
   RetrievalIndex,
@@ -173,17 +122,7 @@ export type {
 } from './retrieval-index';
 
 // ─── Embedding Maintenance (M10) ───────────────────────────────────────────────
-export {
-  runEmbeddingMaintenance,
-  computeDesiredEmbeddings,
-  planEmbeddingMaintenance,
-  loadCurrentIndex,
-  EmbeddingMaintenanceLockedError,
-  EmbeddingPolicyDeniedError,
-  EMBEDDING_MODEL,
-  EMBEDDING_PROVIDER,
-  DEFAULT_BATCH_SIZE,
-} from './embedding-maintenance';
+export { runEmbeddingMaintenance, computeDesiredEmbeddings, planEmbeddingMaintenance, loadCurrentIndex, EmbeddingMaintenanceLockedError, EmbeddingPolicyDeniedError, EMBEDDING_MODEL, EMBEDDING_PROVIDER } from './embedding-maintenance';
 export type {
   DesiredEmbedding,
   MaintenancePlan,
@@ -192,13 +131,7 @@ export type {
 } from './embedding-maintenance';
 
 // ─── Retrieval / Rerank (M10) ──────────────────────────────────────────────────
-export {
-  findSimilarApprovedProducts,
-  indexApprovedProduct,
-  loadRetrievalIndex,
-  RetrievalPolicyDisabledError,
-  assertProductionRetrievalAllowed,
-} from './product-retrieval';
+export { findSimilarApprovedProducts, RetrievalPolicyDisabledError, assertProductionRetrievalAllowed } from './product-retrieval';
 export type { SimilarProduct, RetrievalOptions } from './product-retrieval';
 export {
   rerankPageProposals,

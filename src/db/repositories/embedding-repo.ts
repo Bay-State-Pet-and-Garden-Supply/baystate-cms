@@ -73,7 +73,7 @@ export function upsertEmbedding(
   upsertEmbeddingDocument(doc);
 }
 
-export function upsertEmbeddingDocument(input: EmbeddingDocumentInput): void {
+function upsertEmbeddingDocument(input: EmbeddingDocumentInput): void {
   const db = getDb();
   const blob = serializeEmbedding(input.vector);
   const now = new Date().toISOString();
@@ -198,7 +198,7 @@ export function deserializeEmbedding(buf: Buffer): Float32Array {
 }
 
 /** Stable model/provider fingerprint used for wrong-model detection. */
-export function fingerprintFor(model: string, provider: string): string {
+function fingerprintFor(model: string, provider: string): string {
   return `${provider}::${model}`;
 }
 
@@ -222,24 +222,6 @@ export function getEmbedding(
         $model: model,
         $namespace: namespace,
       }) as ProductEmbeddingRow | undefined) ?? null
-  );
-}
-
-export function getEmbeddingByDocumentHash(
-  workspaceId: string,
-  documentHash: string,
-  namespace: EmbeddingNamespace = 'production',
-): ProductEmbeddingRow | null {
-  const db = getDb();
-  return (
-    (db
-      .query(
-        `SELECT * FROM product_embeddings
-         WHERE workspace_id = $workspaceId AND document_hash = $documentHash AND namespace = $namespace`,
-      )
-      .get({ $workspaceId: workspaceId, $documentHash: documentHash, $namespace: namespace }) as
-      | ProductEmbeddingRow
-      | undefined) ?? null
   );
 }
 
@@ -271,57 +253,12 @@ export function listNamespaceRows(
     .all({ $workspaceId: workspaceId, $namespace: namespace }) as ProductEmbeddingRow[];
 }
 
-export function deleteEmbedding(
-  workspaceId: string,
-  sku: string,
-  model: string,
-  namespace: EmbeddingNamespace = 'production',
-): boolean {
-  const db = getDb();
-  const result = db.query(
-    `DELETE FROM product_embeddings
-     WHERE workspace_id = $workspaceId AND product_sku = $sku
-       AND embedding_model = $model AND namespace = $namespace`,
-  ).run({ $workspaceId: workspaceId, $sku: sku, $model: model, $namespace: namespace });
-  return Number(result.changes) > 0;
-}
-
-export function deleteEmbeddingById(id: string): boolean {
+function deleteEmbeddingById(id: string): boolean {
   const db = getDb();
   const result = db.query('DELETE FROM product_embeddings WHERE id = $id').run({ $id: id });
   return Number(result.changes) > 0;
 }
 
-export function setEmbeddingFailure(
-  workspaceId: string,
-  sku: string,
-  model: string,
-  namespace: EmbeddingNamespace,
-  status: string,
-): void {
-  const db = getDb();
-  db.query(
-    `UPDATE product_embeddings SET failure_status = $status, updated_at = $updatedAt
-     WHERE workspace_id = $workspaceId AND product_sku = $sku
-       AND embedding_model = $model AND namespace = $namespace`,
-  ).run({
-    $status: status,
-    $updatedAt: new Date().toISOString(),
-    $workspaceId: workspaceId,
-    $sku: sku,
-    $model: model,
-    $namespace: namespace,
-  });
-}
-
-export function listNamespaces(workspaceId: string): string[] {
-  const db = getDb();
-  const rows = db
-    .query('SELECT DISTINCT namespace FROM product_embeddings WHERE workspace_id = $workspaceId')
-    .all({ $workspaceId: workspaceId }) as Array<{ namespace: string }>;
-  return rows.map(r => r.namespace);
-}
-
-export function deserializeRowVector(row: ProductEmbeddingRow): Float32Array {
+function deserializeRowVector(row: ProductEmbeddingRow): Float32Array {
   return deserializeEmbeddingVector(row.embedding_blob);
 }

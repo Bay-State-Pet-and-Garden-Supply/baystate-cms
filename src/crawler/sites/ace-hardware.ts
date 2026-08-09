@@ -2,11 +2,7 @@ import type * as cheerio from 'cheerio';
 import type { ScrapedProductEvidence } from '../corpus-schema.js';
 import { computeEntityId } from '../url-policy.js';
 
-export function isAceHardwareUrl(url: string): boolean {
-  return url.includes('acehardware.com');
-}
-
-export function isAceHardwareProductUrl(url: string): boolean {
+function isAceHardwareProductUrl(url: string): boolean {
   return url.includes('/p/') || url.includes('/product/');
 }
 
@@ -98,21 +94,4 @@ export function parseAceHardwareProductHtml(url: string, $: cheerio.CheerioAPI):
     qualityFlags: [],
     pageKind: 'unknown',
   };
-}
-
-export function extractAceHardwareCatalogLinks($: cheerio.CheerioAPI, baseUrl: string): string[] {
-  const links = new Set<string>();
-  $('a[href*="/departments/"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (!href) return;
-    try {
-      const absoluteUrl = new URL(href, baseUrl).href;
-      if (absoluteUrl.includes('acehardware.com')) {
-        links.add(absoluteUrl);
-      }
-    } catch {
-      // Invalid URL
-    }
-  });
-  return Array.from(links);
 }

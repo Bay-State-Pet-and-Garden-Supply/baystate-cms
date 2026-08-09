@@ -13,7 +13,7 @@
 import { z } from 'zod';
 import { sha256Hex } from '../../shared/stable-id';
 
-export const ManagedFallbackProviderConfigSchema = z.object({
+const ManagedFallbackProviderConfigSchema = z.object({
   name: z.string().min(1).max(64),
   /** Pinned provider version — upgrades are explicit. */
   pinnedVersion: z.string().min(1).max(32),
@@ -27,7 +27,7 @@ export const ManagedFallbackProviderConfigSchema = z.object({
 });
 export type ManagedFallbackProviderConfig = z.infer<typeof ManagedFallbackProviderConfigSchema>;
 
-export const ManagedFallbackConfigSchema = z.object({
+const ManagedFallbackConfigSchema = z.object({
   providers: z.array(ManagedFallbackProviderConfigSchema).default(() => []),
 });
 export type ManagedFallbackConfig = z.infer<typeof ManagedFallbackConfigSchema>;
@@ -38,7 +38,7 @@ export type ManagedFallbackConfigInput = z.input<typeof ManagedFallbackConfigSch
  * No provider is adopted until it is benchmarked, versioned, domain-scoped,
  * and routed through the policy gateway (PI-9 benchmark + PI-5 gateway).
  */
-export const DEFAULT_MANAGED_FALLBACK_CONFIG: ManagedFallbackConfig = { providers: [] };
+const DEFAULT_MANAGED_FALLBACK_CONFIG: ManagedFallbackConfig = { providers: [] };
 
 export interface ManagedPage {
   finalUrl: string;
@@ -67,15 +67,6 @@ export interface ManagedBrowserProvider {
   /** The provider may only serve this exact URL (domain allowlist checked by the registry). */
   fetchPage(request: ManagedFetchRequest): Promise<ManagedPage>;
 }
-
-/** Documented benchmark candidates — none adopted by default. */
-export const MANAGED_FALLBACK_CANDIDATES: Array<{ name: string; vendor: string; notes: string }> = [
-  { name: 'zyte', vendor: 'Zyte API', notes: 'AutoExtract / smart proxy; benchmark before adopting' },
-  { name: 'firecrawl', vendor: 'Firecrawl', notes: 'Scrape API with LLM extras; benchmark before adopting' },
-  { name: 'browserbase-stagehand', vendor: 'Browserbase + Stagehand', notes: 'Browser cloud + natural-language interaction; bounded tasks only' },
-  { name: 'browserless', vendor: 'Browserless', notes: 'BrowserQL; deterministic actions only' },
-  { name: 'brightdata-webunlocker', vendor: 'Bright Data Web Unlocker', notes: 'Unlocking fallback; benchmark before adopting' },
-];
 
 /**
  * Registry of registered managed-browser providers plus the per-workspace

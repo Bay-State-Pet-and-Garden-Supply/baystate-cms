@@ -56,9 +56,10 @@ export async function fetchPageHtml(url: string, signal: AbortSignal, timeoutMs:
   return { html, finalUrl: response.url || url, status: response.status, contentHash: sha256Hex(html) };
 }
 
+
+
 export const PLATFORM_NAMES = ['shopify', 'woocommerce', 'nextjs', 'nuxt'] as const;
 export type PlatformName = (typeof PLATFORM_NAMES)[number];
-
 /** Platform detection from page markup; order matters (Shopify first). */
 export function detectPlatform(html: string, _finalUrl: string): PlatformName | 'generic' {
   if (/\/cdn\/shop\//.test(html) || /Shopify\.theme/.test(html) || /shopify\.com\/s\//.test(html)) return 'shopify';

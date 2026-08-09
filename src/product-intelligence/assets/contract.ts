@@ -49,9 +49,9 @@ export interface ImageVerificationContract {
 }
 
 /** Minimum edge length for a commerce-usable image. */
-export const MIN_USABLE_EDGE = 200;
+const MIN_USABLE_EDGE = 200;
 
-export class SharpImageVerificationAdapter implements ImageVerificationContract {
+class SharpImageVerificationAdapter implements ImageVerificationContract {
   readonly name = 'sharp_image_verification';
   readonly version = '1.0.0';
 

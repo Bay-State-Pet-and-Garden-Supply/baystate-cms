@@ -7,7 +7,7 @@ import type { TerminalResultSubmission } from '../../../../src/product-intellige
 import type { ProductResearchBundle, InsufficientEvidenceSubmission } from '../../../../src/product-intelligence/workflow/bundle';
 import type { PiSessionFactory, PiSessionHandle, PiSessionLike } from '../../../../src/product-intelligence/pi/pi-session-factory';
 
-export const VALID_GTIN = '085000079585';
+const VALID_GTIN = '085000079585';
 
 /**
  * A PI-4 workflow research bundle that passes validateTerminalSubmission:
@@ -173,7 +173,7 @@ export interface FakeSession extends PiSessionLike {
   emitAgentEnd(): void;
 }
 
-export function createFakeSession(): FakeSession {
+function createFakeSession(): FakeSession {
   let resolvePrompt: () => void = () => undefined;
   let rejectPrompt: (error: Error) => void = () => undefined;
   const promptPromise = new Promise<void>((resolve, reject) => {

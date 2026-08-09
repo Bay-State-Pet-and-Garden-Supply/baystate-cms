@@ -32,9 +32,6 @@ export const PiRetentionPolicySchema = z.object({
 });
 export type PiRetentionPolicy = z.infer<typeof PiRetentionPolicySchema>;
 
-/** Default retention policy: keep everything. */
-export const DEFAULT_PI_RETENTION_POLICY: PiRetentionPolicy = {};
-
 /** The workspace retention policy (defaults to keep-everything when unset). */
 export function getPiRetentionPolicy(workspaceId: string): PiRetentionPolicy {
   const row = getPiRetentionPolicyRow(workspaceId);

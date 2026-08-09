@@ -266,4 +266,3 @@ export function boundedString(max = 512, description?: string): TSchema {
   return Type.String({ maxLength: max, description });
 }
 
-export { Type };

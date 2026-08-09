@@ -29,7 +29,7 @@ import {
   computeManifestDigest,
   hashFileBytes,
 } from '../../crawler/corpus-manifest.js';
-import { WeakLabelRules, type WeakLabelConfig, type WeakLabelProductType, type WeakLabelAttribute } from './weak-label-rules.js';
+import { WeakLabelRules } from './weak-label-rules.js';
 
 export interface SilverDatasetItem {
   id: string;
@@ -111,7 +111,7 @@ interface BronzeObservation {
   validation: CorpusValidationResult;
 }
 
-export class SilverDatasetBuilder {
+class SilverDatasetBuilder {
   private weakRules: WeakLabelRules;
 
   constructor(weakRules: WeakLabelRules) {
@@ -421,19 +421,4 @@ function writeLinesAtomic(targetPath: string, lines: string[]): void {
   const tempPath = path.join(dir, `.${path.basename(targetPath)}.tmp-${process.pid}`);
   fs.writeFileSync(tempPath, content, 'utf-8');
   fs.renameSync(tempPath, targetPath);
-}
-
-/** Convenience: build weak rules from an active config bundle shape. */
-export function weakRulesFromBundle(bundle: {
-  productTypes?: WeakLabelProductType[];
-  attributes?: WeakLabelAttribute[];
-}): WeakLabelRules {
-  const config: WeakLabelConfig = {
-    productTypes: bundle.productTypes || [],
-    attributes: bundle.attributes || [],
-    speciesAttributeId: 'species',
-    foodFormAttributeId: 'food-form',
-    lifeStageAttributeId: 'life-stage',
-  };
-  return new WeakLabelRules(config);
 }

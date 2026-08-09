@@ -14,7 +14,7 @@ import { getDb } from '../../db/connection';
 import { getProductIntelligenceFlags } from '../flags';
 import type { PiAggregateReport } from './metrics';
 
-export const ROLLOUT_STAGES = ['shadow_only', 'manual_agent_lab', 'reviewed_import', 'optional_onboarding', 'automatic'] as const;
+const ROLLOUT_STAGES = ['shadow_only', 'manual_agent_lab', 'reviewed_import', 'optional_onboarding', 'automatic'] as const;
 export type RolloutStage = (typeof ROLLOUT_STAGES)[number];
 
 export interface RolloutGateThreshold {
@@ -32,7 +32,7 @@ export interface RolloutConfig {
   updatedAt: string;
 }
 
-export const DEFAULT_ROLLOUT_THRESHOLDS: Record<RolloutStage, RolloutGateThreshold[]> = {
+const DEFAULT_ROLLOUT_THRESHOLDS: Record<RolloutStage, RolloutGateThreshold[]> = {
   shadow_only: [],
   manual_agent_lab: [],
   reviewed_import: [

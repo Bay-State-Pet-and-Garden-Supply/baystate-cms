@@ -2,11 +2,7 @@ import type * as cheerio from 'cheerio';
 import type { ScrapedProductEvidence } from '../corpus-schema.js';
 import { computeEntityId } from '../url-policy.js';
 
-export function isTractorSupplyUrl(url: string): boolean {
-  return url.includes('tractorsupply.com');
-}
-
-export function isTractorSupplyProductUrl(url: string): boolean {
+function isTractorSupplyProductUrl(url: string): boolean {
   return url.includes('/tsc/product/');
 }
 
@@ -94,21 +90,4 @@ export function parseTractorSupplyProductHtml(url: string, $: cheerio.CheerioAPI
     qualityFlags: [],
     pageKind: 'unknown',
   };
-}
-
-export function extractTractorSupplyCatalogLinks($: cheerio.CheerioAPI, baseUrl: string): string[] {
-  const links = new Set<string>();
-  $('a[href*="/tsc/product/"], a[href*="/tsc/catalog/"]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (!href) return;
-    try {
-      const absoluteUrl = new URL(href, baseUrl).href;
-      if (absoluteUrl.includes('tractorsupply.com')) {
-        links.add(absoluteUrl);
-      }
-    } catch {
-      // Invalid URL
-    }
-  });
-  return Array.from(links);
 }

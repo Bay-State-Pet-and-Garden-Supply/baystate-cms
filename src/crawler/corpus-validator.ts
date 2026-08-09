@@ -78,7 +78,7 @@ const NON_PRODUCT_PATH_PATTERNS = [
 
 const BLOCKED_HOST_HINTS = [/recaptcha/i, /captcha/i, /interstitial/i];
 
-export function isProductPageEvidence(record: ScrapedProductEvidence): boolean {
+function isProductPageEvidence(record: ScrapedProductEvidence): boolean {
   const title = (record.title || '').trim();
   if (title.length < 3) return false;
   if (JUNK_TITLE_PATTERNS.some((pattern) => pattern.test(title))) return false;
@@ -93,7 +93,7 @@ export function isProductPageEvidence(record: ScrapedProductEvidence): boolean {
   return true;
 }
 
-export function isBlockedPage(record: ScrapedProductEvidence): boolean {
+function isBlockedPage(record: ScrapedProductEvidence): boolean {
   const title = (record.title || '').trim();
   return (
     /access denied|forbidden|captcha|recaptcha|blocked/i.test(title) ||
@@ -179,20 +179,3 @@ export function computeObservationId(entityId: string, payloadHash: string): str
 }
 
 export { computeEntityId };
-
-/**
- * Rejects JSON lines that fail schema validation outright. Used by the
- * exporter and offline rebuild so malformed records are reported, not dropped.
- */
-export function reportInvalidJson(lines: Array<{ index: number; raw: string }>): Array<{ index: number; reason: string }> {
-  return lines
-    .filter((entry) => {
-      try {
-        JSON.parse(entry.raw);
-        return false;
-      } catch {
-        return true;
-      }
-    })
-    .map((entry) => ({ index: entry.index, reason: 'invalid_json' }));
-}

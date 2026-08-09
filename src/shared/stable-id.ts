@@ -47,7 +47,7 @@ function assertValidUnicode(value: string, path: string): void {
  * are serialized by value. Object key order is canonical; array order is not
  * changed. Negative zero is normalized to JSON's canonical numeric zero.
  */
-export function canonicalizeJson(
+function canonicalizeJson(
   value: unknown,
   path = '$',
   ancestors: Set<object> = new Set(),
@@ -181,7 +181,7 @@ export function canonicalJsonFileString(value: unknown, indent = 2): string {
   return `${serializeCanonicalJson(canonicalizeJson(value), indent)}\n`;
 }
 
-export function canonicalJsonUtf8(value: unknown): Uint8Array {
+function canonicalJsonUtf8(value: unknown): Uint8Array {
   return new TextEncoder().encode(canonicalJsonStringify(value));
 }
 

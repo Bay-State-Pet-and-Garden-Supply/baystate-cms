@@ -117,26 +117,3 @@ export async function fetchOpenPetFoodFactsByGtin(
 
   return null;
 }
-
-/**
- * Imports a batch of GTIN barcodes from Open Pet Food Facts API with rate-limiting delay.
- */
-export async function importOpenPetFoodFactsBatch(
-  gtins: string[],
-  delayMs = 200,
-  fetchFn: typeof fetch = fetch
-): Promise<ScrapedProductEvidence[]> {
-  const results: ScrapedProductEvidence[] = [];
-
-  for (const gtin of gtins) {
-    const evidence = await fetchOpenPetFoodFactsByGtin(gtin, fetchFn);
-    if (evidence) {
-      results.push(evidence);
-    }
-    if (delayMs > 0) {
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-
-  return results;
-}

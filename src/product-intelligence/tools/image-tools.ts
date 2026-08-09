@@ -16,7 +16,7 @@
 import { Type } from 'typebox';
 import { createRequire } from 'node:module';
 import { defaultPolicyGateway, PolicyDeniedError } from '../policy';
-import { parseNetContent, verifyImageCandidate } from '../assets/verification';
+import { verifyImageCandidate } from '../assets/verification';
 import { discoverCandidates } from '../assets/discovery';
 import { refreshResolvedAuthoritiesForRun } from './verification-tools';
 import type { DiscoveredImageCandidate, ExtractionMethod, IdentityObservation, ProductAssetEvidence } from '../assets/schema';
@@ -818,4 +818,3 @@ function persistVerifiedAsset(runId: string, record: ProductAssetEvidence, candi
   }
 }
 
-export { parseNetContent };

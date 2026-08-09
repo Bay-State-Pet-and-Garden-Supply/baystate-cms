@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { canonicalJsonStringify, sha256Hex } from '../shared/stable-id.js';
 
-export const CORPUS_MANIFEST_FORMAT_VERSION = 1;
+const CORPUS_MANIFEST_FORMAT_VERSION = 1;
 
 export interface CorpusManifestFileEntry {
   name: string;
@@ -30,7 +30,7 @@ export function computeManifestDigest(manifest: CorpusManifest): string {
 }
 
 /** Canonical manifest filename for a given digest. */
-export function manifestFileName(digest: string): string {
+function manifestFileName(digest: string): string {
   return `manifest-${digest}.json`;
 }
 
@@ -62,22 +62,4 @@ export function writeCorpusManifestAtomic(dir: string, manifest: CorpusManifest)
   fs.writeFileSync(tempPath, content, 'utf-8');
   fs.renameSync(tempPath, targetPath);
   return targetPath;
-}
-
-/**
- * Scans a directory of artifact files and writes a manifest covering them.
- * Returns `{ manifest, manifestPath, digest }`.
- */
-export function writeManifestForDirectory(dir: string, fileNames: string[]): {
-  manifest: CorpusManifest;
-  manifestPath: string;
-  digest: string;
-} {
-  const fileDigests: Record<string, string> = {};
-  for (const name of fileNames.sort()) {
-    fileDigests[name] = hashFileBytes(path.join(dir, name));
-  }
-  const manifest = buildCorpusManifest(fileDigests);
-  const manifestPath = writeCorpusManifestAtomic(dir, manifest);
-  return { manifest, manifestPath, digest: computeManifestDigest(manifest) };
 }

@@ -69,7 +69,7 @@ function normalizeJson(value: unknown): unknown {
 }
 
 /** JSON-semantic equality for proposal values, independent of object key order. */
-export function proposalValuesEqual(left: unknown, right: unknown): boolean {
+function proposalValuesEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(normalizeJson(left)) === JSON.stringify(normalizeJson(right));
 }
 
@@ -170,7 +170,7 @@ export function proposalDecisionSnapshot(
   };
 }
 
-export function proposalDecisionSnapshotsEqual(
+function proposalDecisionSnapshotsEqual(
   left: ProposalDecisionSnapshot,
   right: ProposalDecisionSnapshot,
 ): boolean {

@@ -30,7 +30,7 @@ export const PiDifficultyTagSchema = z.enum([
   'abstention_correct',
 ]);
 
-export const PiExpectedImageSchema = z
+const PiExpectedImageSchema = z
   .object({
     identityMatch: z.enum(['exact', 'variant', 'wrong', 'unknown']),
     rightsStatus: z.enum(['approved', 'restricted', 'unknown']),
@@ -93,22 +93,3 @@ export const PiProductInputSchema = z.object({
 export type PiGoldLabels = z.infer<typeof PiGoldLabelsSchema>;
 export type PiProductInput = z.infer<typeof PiProductInputSchema>;
 export type PiDifficultyTag = z.infer<typeof PiDifficultyTagSchema>;
-
-export const DIFFICULTY_TAG_LABELS: Record<PiDifficultyTag, string> = {
-  upc_normalization: 'UPC padding / normalization variants',
-  json_ld_static: 'Static page with complete JSON-LD',
-  shopify_variant: 'Shopify variant page',
-  woocommerce_variant: 'WooCommerce variant page',
-  multi_variant: 'Multi-variant ecommerce page',
-  product_family: 'Product-family page without exact variant',
-  xhr_only: 'Data only in XHR/fetch/GraphQL responses',
-  interaction_required: 'Interaction required to reveal variant',
-  packaging_redesign: 'Packaging redesign',
-  wrong_size_retailer: 'Wrong-size retailer page',
-  discontinued: 'Discontinued product',
-  ambiguous_brand: 'Ambiguous brand',
-  blocked_official: 'Missing or blocked official page',
-  distributor_conflict: 'Conflicting distributor data',
-  image_rights_uncertainty: 'Image-rights uncertainty',
-  abstention_correct: 'Abstention is correct',
-};

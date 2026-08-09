@@ -33,7 +33,7 @@ export interface ProposalSelection {
  * Select the reviewed (accepted) Primary Product Type proposal from the run
  * input. Pending/deferred guesses are never accepted selections.
  */
-export function selectAcceptedPrimaryProductType(input: StageInput): ProposalSelection {
+function selectAcceptedPrimaryProductType(input: StageInput): ProposalSelection {
   const accepted = input.acceptedProposals.find(
     p => p.proposalType === 'primary_product_type' && p.status === 'accepted',
   );
@@ -72,7 +72,7 @@ export function selectPrimaryProductTypeProposal(input: StageInput): ProposalSel
  * Extract a Product Type ID from a carried reviewed fact. The accepted value
  * is either the proposed shape { productTypeId } or a plain string id.
  */
-export function getProductTypeIdFromFact(fact: ReviewedFact): string | null {
+function getProductTypeIdFromFact(fact: ReviewedFact): string | null {
   return getProductTypeIdFromValue(fact.value);
 }
 

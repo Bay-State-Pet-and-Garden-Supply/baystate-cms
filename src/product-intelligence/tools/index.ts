@@ -19,12 +19,6 @@ import type { PageExtractionContract } from './contract';
 
 export * from './contract';
 export * from './registry';
-export { identityTools } from './identity-tools';
-export { discoveryTools } from './discovery-tools';
-export { verificationTools } from './verification-tools';
-export { buildExtractionTools, HttpPageExtractionAdapter } from './extraction-tools';
-export { taxonomyTools } from './taxonomy-tools';
-export { imageTools } from './image-tools';
 
 /** All research tool names the default registry exposes (policy default allowlist). */
 export const DEFAULT_RESEARCH_TOOL_NAMES: readonly string[] = [

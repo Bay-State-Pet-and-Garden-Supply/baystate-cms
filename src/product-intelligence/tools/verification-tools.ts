@@ -18,7 +18,7 @@ import { boundedString } from './registry';
 
 const lazyRequire = createRequire(import.meta.url);
 
-export const verifyCandidatePage: PiToolAdapter = {
+const verifyCandidatePage: PiToolAdapter = {
   name: 'verify_candidate_page',
   version: '1.0.0',
   description:

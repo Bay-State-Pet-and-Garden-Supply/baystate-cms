@@ -57,7 +57,7 @@ import crypto from 'node:crypto';
 import { Database } from './driver';
 import { sha256Hex, canonicalJsonStringify } from '../shared/stable-id';
 
-export const BACKUP_MANIFEST_FORMAT = 'baystate-sqlite-backup';
+const BACKUP_MANIFEST_FORMAT = 'baystate-sqlite-backup';
 /**
  * v4: the published snapshot's OWN content identity (`snapshotContentIdentity`)
  * is bound to the recorded source identity and recorded in the manifest, so
@@ -66,7 +66,7 @@ export const BACKUP_MANIFEST_FORMAT = 'baystate-sqlite-backup';
  * the private temps BEFORE publication (a foreign file replaced in the
  * link->stat window is never treated as owned).
  */
-export const BACKUP_MANIFEST_VERSION = 4;
+const BACKUP_MANIFEST_VERSION = 4;
 
 export interface BackupManifest {
   format: string;
@@ -282,7 +282,7 @@ export function computeContentIdentityHash(db: Database): string {
   return sha256Hex(canonicalJsonStringify(payload));
 }
 
-export function computeSourceIdentityHash(db: Database): string {
+function computeSourceIdentityHash(db: Database): string {
   const payload = {
     userVersion: (db.query('PRAGMA user_version').get() as { user_version: number }).user_version,
     schemaVersion: (db.query('PRAGMA schema_version').get() as { schema_version: number }).schema_version,
@@ -292,7 +292,7 @@ export function computeSourceIdentityHash(db: Database): string {
   return sha256Hex(canonicalJsonStringify(payload));
 }
 
-export function buildBackupManifest(
+function buildBackupManifest(
   sourceDbPath: string,
   backupPath: string,
   snapshotDb: Database,

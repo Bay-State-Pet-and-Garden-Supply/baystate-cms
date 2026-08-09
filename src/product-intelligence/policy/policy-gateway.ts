@@ -127,7 +127,7 @@ export function isPrivateOrLinkLocal(address: string): boolean {
  * IPv4-mapped forms). Never DNS-resolves arbitrary hostnames — resolving a
  * hostile hostname for a "loopback test" would itself be an SSRF probe.
  */
-export function isExplicitLoopbackEndpoint(url: string): boolean {
+function isExplicitLoopbackEndpoint(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
@@ -150,7 +150,7 @@ export function isExplicitLoopbackEndpoint(url: string): boolean {
  * plus 80/443 for local proxies). Redirects from a local endpoint must
  * remain loopback AND within this port set.
  */
-export const LOCAL_MODEL_PORTS = new Set([80, 443, 11434, 11435]);
+const LOCAL_MODEL_PORTS = new Set([80, 443, 11434, 11435]);
 
 /** Model-call response cap (VLM/OCR), enforced on the body stream. */
 export const MAX_MODEL_RESPONSE_BYTES = 20 * 1024 * 1024;

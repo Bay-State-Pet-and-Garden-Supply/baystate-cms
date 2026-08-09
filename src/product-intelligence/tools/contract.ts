@@ -170,6 +170,7 @@ export const PAGE_IDENTITY_STATUSES = [
   'conflicting_identity',
   'insufficient_evidence',
 ] as const;
+
 export type PageIdentityStatus = (typeof PAGE_IDENTITY_STATUSES)[number];
 
 export interface ExtractedFieldEvidence {

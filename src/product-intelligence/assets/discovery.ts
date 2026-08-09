@@ -235,7 +235,7 @@ function firstString(record: Record<string, unknown>, keys: string[]): string | 
  * without requiring the whole page to be JSON. String-aware brace counting
  * makes this resilient to nested objects and escaped quotes.
  */
-export function extractBalancedObject(input: string, key: string): string | null {
+function extractBalancedObject(input: string, key: string): string | null {
   const keyIdx = input.indexOf(`"${key}"`);
   if (keyIdx < 0) return null;
   const colonIdx = input.indexOf(':', keyIdx);

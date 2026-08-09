@@ -12,6 +12,8 @@
  */
 import { z } from 'zod';
 
+
+
 export const LlmExtractionRequestSchema = z.object({
   /** Unresolved field names ONLY (e.g. ['size', 'packCount']). */
   unresolvedFields: z.array(z.string().min(1).max(64)).min(1).max(6),
@@ -29,8 +31,7 @@ export const LlmExtractionRequestSchema = z.object({
   deterministicValues: z.record(z.string(), z.string()).default(() => ({})),
 });
 export type LlmExtractionRequest = z.infer<typeof LlmExtractionRequestSchema>;
-
-export const LlmExtractionResponseSchema = z.object({
+const LlmExtractionResponseSchema = z.object({
   values: z
     .array(
       z.object({

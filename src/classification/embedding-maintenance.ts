@@ -24,21 +24,14 @@ import * as embeddingRepo from '../db/repositories/embedding-repo';
 import * as classRunRepo from '../db/repositories/classification-run-repo';
 import { fetchEmbedding } from './embedding-client';
 import { redactTransportText } from './model-policy-gateway';
-import {
-  InMemoryRetrievalIndex,
-  VectorValidationError,
-  assertFiniteVector,
-  embeddingDocumentId,
-  type VectorEntry,
-  type EmbeddingNamespace,
-} from './retrieval-index';
+import { assertFiniteVector, embeddingDocumentId, type VectorEntry, type EmbeddingNamespace } from './retrieval-index';
 import { evaluateFeaturePolicy, type FeaturePolicyOptions } from './feature-policy';
 import type { ModelPolicyConfigV2, MlFeatureId } from '../shared/schemas/classification';
 import { sha256Hex, canonicalJsonStringify } from '../shared/stable-id';
 
 export const EMBEDDING_MODEL = 'nomic-embed-text';
 export const EMBEDDING_PROVIDER = 'ollama';
-export const DEFAULT_BATCH_SIZE = 50;
+const DEFAULT_BATCH_SIZE = 50;
 const TOMBSTONE_GRACE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 export class EmbeddingMaintenanceLockedError extends Error {
@@ -156,7 +149,7 @@ export function computeDesiredEmbeddings(workspaceId: string, namespace: Embeddi
 }
 
 /** Canonical embedding text from the most recent evidence for a product. */
-export function buildDesiredEmbeddingText(workspaceId: string, sku: string): string {
+function buildDesiredEmbeddingText(workspaceId: string, sku: string): string {
   const run = classRunRepo.getRecentRun(workspaceId, sku);
   if (!run) return '';
   const evidence = classRunRepo.getEvidenceByRun(run.id);
@@ -277,7 +270,7 @@ export function planEmbeddingMaintenance(
  * Apply a maintenance plan in bounded batches. Returns a report plus the
  * cursor (last processed SKU) so callers can resume on the next invocation.
  */
-export async function applyMaintenancePlan(
+async function applyMaintenancePlan(
   workspaceId: string,
   namespace: EmbeddingNamespace,
   plan: MaintenancePlan,
@@ -449,4 +442,3 @@ export async function runEmbeddingMaintenance(
   }
 }
 
-export { InMemoryRetrievalIndex, VectorValidationError };

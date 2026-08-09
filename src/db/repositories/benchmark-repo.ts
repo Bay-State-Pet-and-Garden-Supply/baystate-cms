@@ -215,11 +215,6 @@ export function markFamilyReviewComplete(datasetId: string, reviewerId: string):
   `).run({ $reviewerId: reviewerId, $at: now(), $datasetId: datasetId });
 }
 
-export function isDatasetFrozen(datasetId: string): boolean {
-  const dataset = getDataset(datasetId);
-  return dataset !== null && dataset.status !== 'draft';
-}
-
 /**
  * Freeze a draft dataset. Requires family grouping review and at least one
  * example. Computes and persists the content-addressed datasetHash over the
@@ -516,12 +511,6 @@ export function getEvalRuns(datasetId: string): BenchmarkEvalRunRow[] {
   return rows.map(mapEvalRunRow);
 }
 
-export function getEvalRun(id: string): BenchmarkEvalRunRow | null {
-  const db = getDb();
-  const row = db.query('SELECT * FROM benchmark_eval_runs WHERE id = $id').get({ $id: id }) as Record<string, any> | undefined;
-  return row ? mapEvalRunRow(row) : null;
-}
-
 // ─── Qualification Receipts ────────────────────────────────────────────────────
 
 export function insertQualificationReceipt(receipt: {
@@ -601,12 +590,6 @@ function mapReceiptRow(row: Record<string, any>): BenchmarkQualificationReceiptR
 export function getQualificationReceipt(id: string): BenchmarkQualificationReceiptRow | null {
   const db = getDb();
   const row = db.query('SELECT * FROM benchmark_qualification_receipts WHERE id = $id').get({ $id: id }) as Record<string, any> | undefined;
-  return row ? mapReceiptRow(row) : null;
-}
-
-export function getQualificationReceiptByDigest(digest: string): BenchmarkQualificationReceiptRow | null {
-  const db = getDb();
-  const row = db.query('SELECT * FROM benchmark_qualification_receipts WHERE digest = $digest').get({ $digest: digest }) as Record<string, any> | undefined;
   return row ? mapReceiptRow(row) : null;
 }
 

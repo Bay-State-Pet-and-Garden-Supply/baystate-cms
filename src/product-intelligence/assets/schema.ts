@@ -13,7 +13,7 @@
  */
 import { z } from 'zod';
 
-export const ExtractionMethodSchema = z.enum([
+const ExtractionMethodSchema = z.enum([
   'json_ld',
   'platform_api',
   'network_response',
@@ -27,14 +27,14 @@ export const ExtractionMethodSchema = z.enum([
 ]);
 export type ExtractionMethod = z.infer<typeof ExtractionMethodSchema>;
 
-export const AssetRightsStatusSchema = z.enum(['approved', 'restricted', 'unknown']);
+const AssetRightsStatusSchema = z.enum(['approved', 'restricted', 'unknown']);
 export type AssetRightsStatus = z.infer<typeof AssetRightsStatusSchema>;
 
-export const AssetQualityStatusSchema = z.enum(['usable', 'low_quality', 'invalid']);
+const AssetQualityStatusSchema = z.enum(['usable', 'low_quality', 'invalid']);
 export type AssetQualityStatus = z.infer<typeof AssetQualityStatusSchema>;
 
 /** Structural twin of the workflow NetContent shape (avoids a module cycle). */
-export const NetContentSchema = z.object({
+const NetContentSchema = z.object({
   value: z.number().positive(),
   unit: z.string().min(1).max(16),
 });
@@ -48,7 +48,7 @@ export type NetContent = z.infer<typeof NetContentSchema>;
  * recorded for review but are never authoritative for exact matching or
  * commerce approval.
  */
-export const IdentityObservationSchema = z.object({
+const IdentityObservationSchema = z.object({
   brand: z.string().max(256).nullable().default(null),
   productName: z.string().max(512).nullable().default(null),
   variant: z.string().max(256).nullable().default(null),
@@ -58,7 +58,7 @@ export const IdentityObservationSchema = z.object({
 });
 export type IdentityObservation = z.infer<typeof IdentityObservationSchema>;
 
-export const ObservationProvenanceSchema = z.enum(['evidence', 'decoder', 'agent_asserted']);
+const ObservationProvenanceSchema = z.enum(['evidence', 'decoder', 'agent_asserted']);
 export type ObservationProvenance = z.infer<typeof ObservationProvenanceSchema>;
 
 /**
@@ -141,37 +141,8 @@ export const ProductAssetEvidenceSchema = z.object({
   brandEvidenceId: z.string().nullish(),
   brandEvidenceHash: z.string().nullish(),
 });
-export type ProductAssetEvidence = z.infer<typeof ProductAssetEvidenceSchema>;
 
-/** Verification input: the asset URL, expected product fields, and observed packaging evidence. */
-export const ImageVerificationInputSchema = z.object({
-  url: z.string().url(),
-  /** Where the candidate was discovered (page). */
-  sourcePageUrl: z.string().url().nullish(),
-  sourcePath: z.string().max(1024).nullish(),
-  sourceArtifactId: z.string().min(1).max(256).nullish(),
-  extractionMethod: ExtractionMethodSchema.nullish(),
-  expectedGtin: z.string().max(64).nullish(),
-  expectedBrand: z.string().max(256).nullish(),
-  expectedName: z.string().max(512).nullish(),
-  expectedVariant: z.string().max(256).nullish(),
-  expectedNetContent: NetContentSchema.nullish(),
-  expectedPackCount: z.number().int().positive().nullish(),
-  expectedFlavor: z.string().max(256).nullish(),
-  expectedFormula: z.string().max(256).nullish(),
-  /** Declared source kind (origin only — never by itself a reuse grant). */
-  declaredSourceType: z.string().max(128).nullish(),
-  declaredRightsBasis: z.string().max(512).nullish(),
-  declaredRightsEvidenceRef: z.string().max(512).nullish(),
-  /** Durable evidence-row ids (product_intelligence_evidence) the server
-   *  resolves into authoritative observations. Agent-supplied `observed`
-   *  below is recorded but never authoritative. */
-  evidenceIds: z.array(z.string().min(1)).optional(),
-  /** Packaging evidence gathered separately (OCR/structured) — recorded as
-   *  agent-asserted, never fed into exact matching or commerce approval. */
-  observed: IdentityObservationSchema.optional(),
-});
-export type ImageVerificationInput = z.infer<typeof ImageVerificationInputSchema>;
+export type ProductAssetEvidence = z.infer<typeof ProductAssetEvidenceSchema>;
 
 // ---------------------------------------------------------------------------
 // Image discovery artifacts (consumes #29-style structured captures)
@@ -198,6 +169,7 @@ export const DiscoveredImageCandidateSchema = z.object({
   entityKind: z.enum(['sku', 'platform_product_id', 'variation_id']).nullable().default(null),
   retrievedAt: z.string(),
 });
+
 export type DiscoveredImageCandidate = z.infer<typeof DiscoveredImageCandidateSchema>;
 
 /** A #29-style captured network response (JSON body only, no raw payloads). */

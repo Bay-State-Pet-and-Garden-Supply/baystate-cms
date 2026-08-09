@@ -27,17 +27,10 @@ import { getCachedAttributeProfiles } from '../../db/repositories/classification
 import { loadClassificationConfig } from '../config-loader';
 import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { getReviewedPrimaryProductTypeId } from '../proposal-selection';
-import {
-  evaluateAttributeApplicability,
-  evaluateConditions,
-  isUniversalAttribute,
-  type ApplicabilityState,
-  type ApplicabilityInput,
-  type AttributeApplicability,
-} from '../applicability-evaluator';
+import { evaluateAttributeApplicability, type ApplicabilityState, type ApplicabilityInput, type AttributeApplicability } from '../applicability-evaluator';
 
 export type { ApplicabilityState, AttributeApplicability };
-export { evaluateAttributeApplicability, evaluateConditions, isUniversalAttribute };
+export { evaluateAttributeApplicability };
 export type { ApplicabilityInput };
 
 /**
@@ -45,7 +38,7 @@ export type { ApplicabilityInput };
  * Returns evaluations keyed by attribute id plus the metadata payload used by
  * the applicability stage and the attribute proposals stage.
  */
-export function evaluateTargetApplicability(
+function evaluateTargetApplicability(
   resolvedProductFields: Array<{ attribute?: ProductAttributeConfig }>,
   options: {
     typeTargetEnabled: boolean;

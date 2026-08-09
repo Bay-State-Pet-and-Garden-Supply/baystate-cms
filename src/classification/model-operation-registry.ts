@@ -21,14 +21,14 @@ import { SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION } from '../shopsite/built-in-o
 export type { ProtectedOperation };
 
 /** Bump ONLY when the operation→rule/prompt/parameter contract changes. */
-export const MODEL_OPERATION_REGISTRY_VERSION = 1;
+const MODEL_OPERATION_REGISTRY_VERSION = 1;
 
 /**
  * Built-in ShopSite output policy version participating in runs. Single
  * source of truth lives in `src/shopsite/built-in-output-policy.ts`; bump the
  * policy there and this value follows automatically.
  */
-export const OUTPUT_POLICY_VERSION = SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION;
+const OUTPUT_POLICY_VERSION = SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION;
 
 /**
  * Prompt-template version per protected operation. Bump a version whenever
@@ -110,7 +110,7 @@ export const OPERATION_TO_STAGE: Readonly<Record<ProtectedOperation, Classificat
 };
 
 /** Run-bound protected operations (those mapped to a classification stage). */
-export const RUN_BOUND_OPERATIONS: readonly ProtectedOperation[] = (
+const RUN_BOUND_OPERATIONS: readonly ProtectedOperation[] = (
   Object.keys(OPERATION_TO_STAGE) as ProtectedOperation[]
 ).filter(op => OPERATION_TO_STAGE[op] !== null);
 

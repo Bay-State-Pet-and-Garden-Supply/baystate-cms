@@ -25,7 +25,7 @@ import { buildResearchPrompt } from './pi-prompt-builder';
 import type { PiSessionFactory, PiSessionHandle } from './pi-session-factory';
 import { PiSdkSessionFactory, PiSessionError } from './pi-session-factory';
 
-export const PI_EXECUTOR_VERSION = '1.0.0';
+const PI_EXECUTOR_VERSION = '1.0.0';
 
 /** Evidence relayed by the tool wrapper through SDK result.details. */
 export interface RelayedToolEvidence {
@@ -44,7 +44,7 @@ export interface RelayedToolEvidence {
 }
 
 /** Best-effort extraction of tool evidence from the SDK result.details. */
-export function extractToolEvidence(result: unknown): RelayedToolEvidence[] {
+function extractToolEvidence(result: unknown): RelayedToolEvidence[] {
   if (result === null || result === undefined || typeof result !== 'object') return [];
   const details = (result as { details?: unknown }).details;
   if (details === null || details === undefined || typeof details !== 'object') return [];
@@ -57,7 +57,7 @@ export function extractToolEvidence(result: unknown): RelayedToolEvidence[] {
 }
 
 /** Best-effort extraction of a tool-failure message from the SDK result. */
-export function extractToolError(result: unknown): string | undefined {
+function extractToolError(result: unknown): string | undefined {
   if (result === null || result === undefined) return undefined;
   if (typeof result === 'string') return result.slice(0, 500);
   if (result instanceof Error) return result.message.slice(0, 500);

@@ -2,11 +2,7 @@ import type * as cheerio from 'cheerio';
 import type { ScrapedProductEvidence } from '../corpus-schema.js';
 import { computeEntityId } from '../url-policy.js';
 
-export function isBurpeeUrl(url: string): boolean {
-  return url.includes('burpee.com');
-}
-
-export function isBurpeeProductUrl(url: string): boolean {
+function isBurpeeProductUrl(url: string): boolean {
   // Ignore root categories and non-product pages
   if (
     url === 'https://www.burpee.com/vegetables/' ||
@@ -114,30 +110,4 @@ export function parseBurpeeProductHtml(url: string, $: cheerio.CheerioAPI): Scra
     qualityFlags: [],
     pageKind: 'unknown',
   };
-}
-
-export function extractBurpeeCatalogLinks($: cheerio.CheerioAPI, baseUrl: string): string[] {
-  const links = new Set<string>();
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href');
-    if (!href) return;
-    try {
-      const absoluteUrl = new URL(href, baseUrl).href;
-      const parsed = new URL(absoluteUrl);
-      if (
-        parsed.hostname.includes('burpee.com') &&
-        !parsed.pathname.includes('/customer/') &&
-        !parsed.pathname.includes('/cart') &&
-        !parsed.pathname.includes('/checkout') &&
-        !parsed.pathname.includes('e-gift-card') &&
-        !href.startsWith('#') &&
-        !href.startsWith('javascript:')
-      ) {
-        links.add(absoluteUrl);
-      }
-    } catch {
-      // Invalid URL
-    }
-  });
-  return Array.from(links);
 }

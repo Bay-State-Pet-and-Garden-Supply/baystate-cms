@@ -61,10 +61,10 @@ export interface ValueAlias {
  * non-target records (color/weight/etc.) are excluded entirely — never
  * context, never citable (issue #17 pass 5b).
  */
-export const GENERAL_TEXT_SOURCE_FIELDS = new Set(['name', 'title', 'description']);
+const GENERAL_TEXT_SOURCE_FIELDS = new Set(['name', 'title', 'description']);
 
 /** True when an evidence record is general title/description text. */
-export function isGeneralTextEvidence(evidence: ClassificationEvidence): boolean {
+function isGeneralTextEvidence(evidence: ClassificationEvidence): boolean {
   return evidence.sourceField !== null && evidence.sourceField !== undefined
     && GENERAL_TEXT_SOURCE_FIELDS.has(evidence.sourceField);
 }
@@ -163,7 +163,7 @@ export function evidenceMatchesTarget(
 }
 
 /** Extract a comparable canonical assertion from an evidence record. */
-export function evidenceAssertion(
+function evidenceAssertion(
   evidence: ClassificationEvidence,
   aliases: ValueAlias[] = [],
 ): string | null {

@@ -9,11 +9,10 @@
  */
 
 import { sha256Hex } from '../shared/stable-id';
-import { cosineSimilarity, computeEmbeddingDocumentHash } from './embedding-client';
+import { cosineSimilarity } from './embedding-client';
 
-export { computeEmbeddingDocumentHash };
 
-export const EMBEDDING_SCHEMA_VERSION = 1;
+const EMBEDDING_SCHEMA_VERSION = 1;
 
 export type EmbeddingNamespace = 'production' | 'evaluation';
 
@@ -285,11 +284,6 @@ export function benchmarkEmbeddingDocumentId(
   exampleId: string,
 ): string {
   return sha256Hex(JSON.stringify({ workspaceId, datasetId, exampleId }));
-}
-
-/** Assert a vector matches an expected dimension (index-boundary check). */
-export function assertVectorDimension(vector: Float32Array, dimension: number): void {
-  assertValidEmbeddingVector(vector, dimension);
 }
 
 /**

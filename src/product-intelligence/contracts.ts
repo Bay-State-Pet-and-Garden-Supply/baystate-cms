@@ -49,13 +49,13 @@ export type ProductResearchInput = z.infer<typeof ProductResearchInputSchema>;
 // Execution context
 // ---------------------------------------------------------------------------
 
-export const ExecutionModeSchema = z.enum(['shadow', 'interactive', 'onboarding']);
+const ExecutionModeSchema = z.enum(['shadow', 'interactive', 'onboarding']);
 export type ExecutionMode = z.infer<typeof ExecutionModeSchema>;
 
-export const NetworkPolicySchema = z.enum(['local_only', 'allowlisted_remote']);
+const NetworkPolicySchema = z.enum(['local_only', 'allowlisted_remote']);
 export type NetworkPolicy = z.infer<typeof NetworkPolicySchema>;
 
-export const DataSharingPolicySchema = z.enum(['local_only', 'cloud_models_only', 'cloud_models_and_sources']);
+const DataSharingPolicySchema = z.enum(['local_only', 'cloud_models_only', 'cloud_models_and_sources']);
 export type DataSharingPolicy = z.infer<typeof DataSharingPolicySchema>;
 
 /**
@@ -64,13 +64,13 @@ export type DataSharingPolicy = z.infer<typeof DataSharingPolicySchema>;
  * allowlisted; the terminal submission tool is always available and is not
  * part of this list.
  */
-export const AllowedToolSchema = z.enum(['read', 'grep', 'find', 'ls']);
+const AllowedToolSchema = z.enum(['read', 'grep', 'find', 'ls']);
 export type AllowedTool = z.infer<typeof AllowedToolSchema>;
 
-export const ThinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+const ThinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 
-export const ModelRouteSchema = z.object({
+const ModelRouteSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
   thinkingLevel: ThinkingLevelSchema.default('medium'),
@@ -144,7 +144,7 @@ export type ProductResearchContext = z.infer<typeof ProductResearchContextSchema
 // Structured submission (terminal contract)
 // ---------------------------------------------------------------------------
 
-export const EvidenceSourceKindSchema = z.enum([
+const EvidenceSourceKindSchema = z.enum([
   'catalog',
   'supplier',
   'registry',
@@ -154,7 +154,7 @@ export const EvidenceSourceKindSchema = z.enum([
 ]);
 export type EvidenceSourceKind = z.infer<typeof EvidenceSourceKindSchema>;
 
-export const EvidenceSourceSchema = z.object({
+const EvidenceSourceSchema = z.object({
   id: z.string().min(1),
   url: z.string().url(),
   title: z.string().max(512).nullable(),
@@ -165,7 +165,7 @@ export const EvidenceSourceSchema = z.object({
 });
 export type EvidenceSource = z.infer<typeof EvidenceSourceSchema>;
 
-export const EvidenceItemSchema = z.object({
+const EvidenceItemSchema = z.object({
   id: z.string().min(1),
   /** Target field this evidence supports (e.g. "title", "brand", "gtin"). */
   field: z.string().min(1).max(128),
@@ -178,14 +178,14 @@ export const EvidenceItemSchema = z.object({
 export type EvidenceItem = z.infer<typeof EvidenceItemSchema>;
 
 /** A proposed product detail field. The agent proposes; the CMS validates. */
-export const ProductFieldProposalSchema = z.object({
+const ProductFieldProposalSchema = z.object({
   field: z.string().min(1).max(128),
   value: z.string().max(4096),
   evidenceIds: z.array(z.string().min(1)).default([]),
 });
 export type ProductFieldProposal = z.infer<typeof ProductFieldProposalSchema>;
 
-export const ProductProposalSchema = z.object({
+const ProductProposalSchema = z.object({
   fields: z.array(ProductFieldProposalSchema).max(64).default([]),
 });
 export type ProductProposal = z.infer<typeof ProductProposalSchema>;
@@ -196,7 +196,7 @@ export type ProductProposal = z.infer<typeof ProductProposalSchema>;
  * supplied when they reference existing CMS-controlled values; otherwise the
  * agent must abstain on that target.
  */
-export const ClassificationProposalSchema = z.object({
+const ClassificationProposalSchema = z.object({
   /** Stable id of an existing internal Product Type, or null to abstain. */
   productTypeId: z.string().min(1).nullable().default(null),
   /** Stable id of an existing Category Page, or null to abstain. */
@@ -215,10 +215,10 @@ export const ClassificationProposalSchema = z.object({
 });
 export type ClassificationProposal = z.infer<typeof ClassificationProposalSchema>;
 
-export const ImageRightsStatusSchema = z.enum(['unknown', 'confirmed', 'conflicting']);
+const ImageRightsStatusSchema = z.enum(['unknown', 'confirmed', 'conflicting']);
 export type ImageRightsStatus = z.infer<typeof ImageRightsStatusSchema>;
 
-export const ImageIdentityMatchSchema = z.enum(['unknown', 'exact', 'variant', 'wrong']);
+const ImageIdentityMatchSchema = z.enum(['unknown', 'exact', 'variant', 'wrong']);
 export type ImageIdentityMatch = z.infer<typeof ImageIdentityMatchSchema>;
 
 /**
@@ -226,7 +226,7 @@ export type ImageIdentityMatch = z.infer<typeof ImageIdentityMatchSchema>;
  * exact-product match or reuse status is unknown must never be proposed for
  * use — the agent must set `identityMatch: 'unknown'` and let the CMS block it.
  */
-export const ImageProposalSchema = z.object({
+const ImageProposalSchema = z.object({
   url: z.string().url(),
   sourceId: z.string().min(1),
   rightsStatus: ImageRightsStatusSchema,
@@ -238,10 +238,10 @@ export const ImageProposalSchema = z.object({
 });
 export type ImageProposal = z.infer<typeof ImageProposalSchema>;
 
-export const ConflictSeveritySchema = z.enum(['low', 'medium', 'high']);
+const ConflictSeveritySchema = z.enum(['low', 'medium', 'high']);
 export type ConflictSeverity = z.infer<typeof ConflictSeveritySchema>;
 
-export const ConflictSchema = z.object({
+const ConflictSchema = z.object({
   id: z.string().min(1),
   severity: ConflictSeveritySchema,
   /** Machine-readable category (e.g. "gtin_mismatch", "title_conflict"). */
@@ -253,7 +253,7 @@ export const ConflictSchema = z.object({
 });
 export type Conflict = z.infer<typeof ConflictSchema>;
 
-export const AbstentionSchema = z.object({
+const AbstentionSchema = z.object({
   /** Full abstention, or partial (scope lists the targets abstained on). */
   scope: z.enum(['full', 'partial']),
   reason: z.string().min(1).max(2048),
@@ -264,10 +264,10 @@ export const AbstentionSchema = z.object({
 });
 export type Abstention = z.infer<typeof AbstentionSchema>;
 
-export const GtinMatchStatusSchema = z.enum(['exact', 'variant', 'unknown', 'conflicting']);
+const GtinMatchStatusSchema = z.enum(['exact', 'variant', 'unknown', 'conflicting']);
 export type GtinMatchStatus = z.infer<typeof GtinMatchStatusSchema>;
 
-export const IdentityAssessmentSchema = z.object({
+const IdentityAssessmentSchema = z.object({
   /**
    * Whether sources confirm the GTIN resolves to the exact product (not a
    * variant, kit, or repackage).
@@ -360,6 +360,7 @@ export type ProductIntelligenceExecutionEvent = z.infer<
 
 /** Any terminal submission the run service persists: the legacy PI-1 evidence envelope or a PI-4 workflow submission. */
 export const TerminalResultSubmissionSchema = z.union([StructuredSubmissionSchema, TerminalSubmissionSchema]);
+
 /** Historical union type for parsing persisted rows (legacy + workflow). */
 export type HistoricalTerminalSubmission = z.infer<typeof TerminalResultSubmissionSchema>;
 
@@ -385,20 +386,11 @@ export function isLegacyTerminalSubmission(value: unknown): value is LegacyTermi
   return StructuredSubmissionSchema.safeParse(value).success;
 }
 
-/**
- * Parser for historical PI-1 envelopes (read-only rendering of old runs).
- * Returns null when the value is not a legacy envelope — live results never
- * contain one.
- */
-export function parseLegacySubmission(value: unknown): LegacyTerminalSubmission | null {
-  return isLegacyTerminalSubmission(value) ? value : null;
-}
-
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------
 
-export const ResearchOutcomeSchema = z.enum([
+const ResearchOutcomeSchema = z.enum([
   'submitted',
   'abstained',
   'unavailable',
@@ -408,7 +400,7 @@ export const ResearchOutcomeSchema = z.enum([
 ]);
 export type ResearchOutcome = z.infer<typeof ResearchOutcomeSchema>;
 
-export const ResearchFailureCodeSchema = z.enum([
+const ResearchFailureCodeSchema = z.enum([
   'invalid_input',
   'missing_submission',
   'deadline_exceeded',
@@ -421,13 +413,13 @@ export const ResearchFailureCodeSchema = z.enum([
 ]);
 export type ResearchFailureCode = z.infer<typeof ResearchFailureCodeSchema>;
 
-export const ResearchFailureSchema = z.object({
+const ResearchFailureSchema = z.object({
   code: ResearchFailureCodeSchema,
   message: z.string().min(1).max(4096),
 });
 export type ResearchFailure = z.infer<typeof ResearchFailureSchema>;
 
-export const ExtensionVersionSchema = z.object({
+const ExtensionVersionSchema = z.object({
   name: z.string().min(1),
   /** Exact version when the runtime reports one, otherwise null. */
   version: z.string().nullish(),
@@ -474,13 +466,6 @@ export const PI_EXECUTOR_NAME = 'pi' as const;
 export const LEGACY_EXECUTOR_NAME = 'legacy' as const;
 
 /**
- * @deprecated Legacy PI-1 terminal tool (P0-3). Removed from live Pi
- * sessions: it bypassed the PI-4 workflow validator. Kept only for parsing
- * and rendering historical runs and for schema-equivalence pinning.
- */
-export const SUBMISSION_TOOL_NAME = 'submit_product_research' as const;
-
-/**
  * The PI-4 workflow terminal tool every Pi research session exposes
  * regardless of policy. Session research ends through exactly one workflow
  * terminal tool (see WORKFLOW_TERMINAL_TOOLS in workflow/bundle); this is
@@ -494,6 +479,3 @@ export const TERMINAL_TOOLS: readonly string[] = [WORKFLOW_SUBMISSION_TOOL_NAME]
 
 /** Built-in Pi tools that may be referenced by policy.allowedTools. */
 export const KNOWN_BUILTIN_TOOLS: readonly string[] = ['read', 'grep', 'find', 'ls', 'bash', 'edit', 'write'];
-
-/** Default fail-closed allowlist for PI-1 (read-only coding tools only). */
-export const DEFAULT_ALLOWED_TOOLS: readonly AllowedTool[] = ['read', 'grep', 'find', 'ls'];

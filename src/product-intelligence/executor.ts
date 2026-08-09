@@ -1,22 +1,5 @@
-/**
- * Provider-neutral Product Intelligence executor interface (PI-1).
- *
- * Any agent runtime (Pi today, fakes in tests, others later) implements
- * `ProductIntelligenceExecutor`. The CMS workflow depends only on this
- * interface, so a runtime can be added, shadowed, disabled, or replaced
- * without rewriting onboarding, classification, review, or promotion.
- *
- * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/18
- */
-import { randomUUID } from 'node:crypto';
-import type {
-  ProductIntelligenceExecutionEvent,
-  ProductIntelligencePolicy,
-  ProductResearchContext,
-  ProductResearchInput,
-  ProductResearchResult,
-} from './contracts';
-import { ExecutionEventTypeSchema } from './contracts';
+
+import type { ProductIntelligenceExecutionEvent, ProductResearchContext, ProductResearchInput, ProductResearchResult } from './contracts';
 
 export interface ProductIntelligenceExecutor {
   /** Stable executor name recorded on results and events. */
@@ -88,16 +71,4 @@ export function emitExecutionEvent(
   fields?: Omit<Partial<ProductIntelligenceExecutionEvent>, 'type' | 'runId' | 'sequence' | 'timestamp'>,
 ): void {
   events.emit(type, fields);
-}
-
-export { ExecutionEventTypeSchema };
-
-/** Policy helper: hash a policy into an immutable config id. */
-export function buildPolicyWithConfigId(policy: Omit<ProductIntelligencePolicy, 'configId'>, configId: string): ProductIntelligencePolicy {
-  return { ...policy, configId };
-}
-
-/** Generate a run id (PI-2 will assign ids durably). */
-export function newRunId(): string {
-  return randomUUID();
 }

@@ -426,7 +426,7 @@ interface PlannedRow {
  * schema's FK/cascade relations), so the transaction's physical deletion set
  * EXACTLY equals the manifest under both foreign_keys=OFF and ON.
  */
-export function collectPlannedDeletions(db: Database): PlannedDeletion[] {
+function collectPlannedDeletions(db: Database): PlannedDeletion[] {
   const planned = new Map<string, Map<number, PlannedDeletion>>();
   const idValuesByTable = new Map<string, Set<string>>();
 

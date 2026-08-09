@@ -26,7 +26,7 @@ import { computeCommerceApproved } from './rights';
 import type { IdentityObservation, NetContent, ObservationProvenance, ProductAssetEvidence } from './schema';
 import type { ExtractionMethod } from './schema';
 
-export const MAX_VERIFICATION_BYTES = 10 * 1024 * 1024;
+const MAX_VERIFICATION_BYTES = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Net content parsing ("12 oz", "12oz", "1.5 lb" -> { value, unit })
@@ -67,7 +67,7 @@ const NET_CONTENT_RE = /^\s*(\d+(?:\.\d+)?)\s*([a-zA-Z\s]+?)\s*$/;
  * (the GTIN rule below is the primary gate).
  */
 const NET_CONTENT_SCAN_RE = /(\d+(?:\.\d+)?)\s*(fl\s?oz|oz|ounce|ounces|lb|lbs|pound|pounds|kg|kilogram|kilograms|g|gram|grams|ml|milliliter|milliliters|l|liter|liters|ct|pk|pack)\b/i;
-export function extractNetContentFromText(raw: string): NetContent | null {
+function extractNetContentFromText(raw: string): NetContent | null {
   const match = NET_CONTENT_SCAN_RE.exec(raw.trim());
   if (!match) return null;
   const value = Number(match[1]);
@@ -301,9 +301,6 @@ export interface DuplicateResult {
   referenceId: string | null;
   kind: 'exact' | 'perceptual' | null;
 }
-
-/** Maximum perceptual-hash distance (of 64 bits) treated as a duplicate. */
-export const PERCEPTUAL_DUPLICATE_THRESHOLD = 10;
 
 /**
  * Detect exact (same bytes) and perceptual (near dHash) duplicates against

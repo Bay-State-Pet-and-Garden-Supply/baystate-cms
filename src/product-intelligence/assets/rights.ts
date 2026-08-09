@@ -16,7 +16,7 @@
  */
 import type { AssetRightsStatus } from './schema';
 
-export const SOURCE_TIERS = [
+const SOURCE_TIERS = [
   'supplier',
   'manufacturer',
   'licensed_dataset',

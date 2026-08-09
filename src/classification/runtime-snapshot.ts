@@ -160,7 +160,7 @@ export interface RuntimeClassificationSnapshot {
 }
 
 /** Effective curation targets: enabled targets plus mandatory targets. */
-export function listEffectiveCurationTargets(config: ClassificationConfig): CurationTargetConfig[] {
+function listEffectiveCurationTargets(config: ClassificationConfig): CurationTargetConfig[] {
   const enabled = getExplicitCurationTargets(config);
   const all = [...enabled];
   for (const target of config.curationTargets ?? []) {
@@ -175,7 +175,7 @@ export function listEffectiveCurationTargets(config: ClassificationConfig): Cura
  * Pre-resolve product-field option lists at snapshot build time. This is the
  * only point where live-store values are read; stages consume the frozen lists.
  */
-export function computeSnapshotFieldOptions(config: ClassificationConfig): Record<string, ResolvedTargetOption[]> {
+function computeSnapshotFieldOptions(config: ClassificationConfig): Record<string, ResolvedTargetOption[]> {
   const result: Record<string, ResolvedTargetOption[]> = {};
   for (const target of listEffectiveCurationTargets(config)) {
     if (target.kind !== 'product_field') continue;

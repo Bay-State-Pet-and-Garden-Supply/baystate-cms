@@ -2,11 +2,7 @@ import type * as cheerio from 'cheerio';
 import type { ScrapedProductEvidence } from '../corpus-schema.js';
 import { computeEntityId } from '../url-policy.js';
 
-export function isChewyUrl(url: string): boolean {
-  return url.includes('chewy.com');
-}
-
-export function isChewyProductUrl(url: string): boolean {
+function isChewyProductUrl(url: string): boolean {
   return url.includes('/dp/');
 }
 
