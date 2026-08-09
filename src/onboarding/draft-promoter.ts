@@ -8,7 +8,6 @@ import { findBatchById, isBatchComplete, setBatchArchived } from '../db/reposito
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
 import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
-import { getActiveVerifiedPageIds } from '../shopsite/page-import-service';
 import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';

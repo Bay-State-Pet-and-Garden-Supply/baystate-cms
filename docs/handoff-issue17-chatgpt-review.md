@@ -34,6 +34,7 @@ maintenance tools.
 | 9 | C2 — LIVE integrity repair | executed 2026-08-09 | one transaction, post-audit clean (details §4) |
 | 10 | D2 — LIVE config activation | `b1c7d83` (CLI); nested catalog commit `024c6412` | `scripts/classification-config-admin.ts`; active bundle `b5ca076f…` |
 | 11 | M — registry/docs | `5786e91` | `docs/governance-17-alignment.md`, `CONTEXT.md` |
+| — | external review fixes | `dc65ba2` | `src/onboarding/draft-promoter.ts` (verified-page promotion gate), `src/shopsite/built-in-output-policy.ts` (runtime freeze), their tests |
 | — | lint cleanup + final review fix | `d1b9080` `06ffda2` | zero lint errors in issue-17-owned files |
 
 ## 3. What to review most carefully (probe list)
@@ -52,6 +53,16 @@ maintenance tools.
    read (import + verified `page_index` rows, strict 1:1 bijection, throws on
    drift). Both run creators enforce readiness (409 `classification_not_ready`);
    an enabled page target can never start with `no_verified_page_catalog`.
+   **Mandatory verified-page promotion gate** (review-fix `dc65ba2`): at
+   promotion, at least one VERIFIED page assignment is required — accepted
+   proposals with unverified IDs and name-only manual `product_pages` rows are
+   visible skips (diagnostic only) and never satisfy the gate. `ProductOnPages`
+   serializes ONLY the verified assignment set (no unchecked DB-name fallback),
+   and the verified catalog is the display-name authority (a verified Page ID
+   with no proposal name resolves to the verified page's canonical name; the
+   Page ID is never serialized as a name). Regression tests cover only-bogus →
+   blocked, name-only manual row → blocked, mixed verified+unverified → emits
+   only verified, and ID-only proposal → catalog-name resolution.
 4. **Model-call provenance (E)**: call row inserted BEFORE transport; terminal
    row recorded BEFORE output is consumed; missing/terminal row ⇒ output
    discarded. Run-detail endpoint returns no prompts/credentials (redaction +
@@ -79,8 +90,11 @@ maintenance tools.
    `matchCanonicalValue` (see `26165d4` — the initial `resolveAlias` misuse
    silently dropped valid aliases).
 9. **Built-in output policy (J)**: `SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1` is
-   immutable and adapter-owned (ADR-0011); `product-denormalizer.ts` consumes
-   it byte-compatibly (roundtrip tests unchanged).
+   immutable and adapter-owned (ADR-0011) — since review-fix `dc65ba2` it is
+   also RUNTIME-frozen (the exported array and every rule object are
+   `Object.freeze`d; the membership `Set` is module-private behind
+   `isBuiltInOutputField()`). `product-denormalizer.ts` consumes it
+   byte-compatibly (roundtrip tests unchanged).
 10. **Docs (M)**: every status in `docs/governance-17-alignment.md` is backed
     by commit/DB evidence; hashes were copied from command output, not
     guessed.
