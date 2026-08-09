@@ -697,7 +697,7 @@ export function createSqliteBackup(
     {
       let finalDb: Database | null = null;
       try {
-        finalDb = new Database(toImmutableUri(resolvedBackup), { readonly: true });
+        finalDb = new Database(resolvedBackup, { readonly: true });
         const finalContent = computeContentIdentityHash(finalDb);
         if (finalContent !== manifest.snapshotContentIdentity) {
           throw new Error('Backup content changed after publication; aborting.');
@@ -789,21 +789,6 @@ function sha256File(dbPath: string): Promise<string> {
 }
 
 /**
- * SQLite immutable URI for the attested artifact: `file:<path>?immutable=1`
- * tells SQLite the file is read-only and never-changing, so no sidecar can
- * participate in the logical database (a copied `-wal`/`-shm` beside the
- * artifact is ignored — the main file IS the database). Percent-encodes the
- * characters that would otherwise be parsed as URI syntax.
- */
-function toImmutableUri(dbPath: string): string {
-  const escaped = dbPath
-    .replace(/%/g, '%25')
-    .replace(/\?/g, '%3F')
-    .replace(/#/g, '%23');
-  return `file:${escaped}?immutable=1`;
-}
-
-/**
  * Verify a backup against its manifest. When `options.sourceDbPath` is
  * provided, the backup is additionally checked for staleness, wrong source,
  * and source-content replacement (a changed/replaced database at the same
@@ -878,9 +863,9 @@ export async function verifySqliteBackup(
 
   let db: Database | null = null;
   try {
-    // IMMUTABLE open: reads only the main file; a sidecar can never
-    // participate even if one races in between the check and the open.
-    db = new Database(toImmutableUri(resolvedDb), { readonly: true });
+    // Readonly open of the main file. Sidecars are rejected above; the
+    // artifact must be a standalone snapshot (no -wal/-shm can participate).
+    db = new Database(resolvedDb, { readonly: true });
     const integrity = (db.query('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check;
     if (integrity !== 'ok') {
       errors.push(`Backup integrity_check failed: ${integrity}`);

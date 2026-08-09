@@ -40,6 +40,10 @@ describe('catalog-evidence verifier (Milestone 7)', () => {
     );
 
     runGit(root, ['init']);
+    // CI runners have no global git identity; configure a local one so the
+    // seed commit succeeds everywhere.
+    runGit(root, ['config', 'user.email', 'catalog-evidence-verifier@example.com']);
+    runGit(root, ['config', 'user.name', 'Catalog Evidence Verifier Test']);
     runGit(root, ['add', '--', 'products/001.json', 'store/field-registry.json']);
     runGit(root, ['commit', '-m', 'seed evidence workspace']);
     sourceCommit = runGit(root, ['rev-parse', 'HEAD']);
