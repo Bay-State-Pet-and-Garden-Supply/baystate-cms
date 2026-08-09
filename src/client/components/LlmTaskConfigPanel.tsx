@@ -222,6 +222,8 @@ interface LlmTaskConfigRowProps {
   onCleared: () => Promise<void> | void;
 }
 
+import { getModelCapabilities, getModelProfile } from '../../ai/model-registry';
+
 const RECOMMENDED_MODELS: Record<string, { provider: LlmProvider; model: string; label: string }> = {
   brand_inference: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
   product_name_consolidation: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
@@ -230,26 +232,30 @@ const RECOMMENDED_MODELS: Record<string, { provider: LlmProvider; model: string;
 };
 
 function getModelCapabilityBadges(modelName: string): string[] {
-  const m = modelName.toLowerCase();
+  const profile = getModelProfile(modelName);
+  const caps = getModelCapabilities(modelName);
   const badges: string[] = [];
 
-  if (m.includes('gemma4') || m.includes('qwen3.5') || m.includes('ministral') || m.includes('ollama')) {
+  if (profile?.provider === 'ollama') {
     badges.push('⚡ Local');
   } else {
     badges.push('☁️ Cloud');
   }
 
-  if (m.includes('gemma') || m.includes('qwen') || m.includes('mini') || m.includes('deepseek') || m.includes('gpt')) {
-    badges.push('Tools');
-    badges.push('JSON');
+  if (caps.toolCalling !== 'none') {
+    badges.push(`Tools (${caps.toolCalling})`);
   }
 
-  if (m.includes('vl') || m.includes('4o') || m.includes('gemma4')) {
+  if (caps.structuredOutput !== 'prompted_json') {
+    badges.push(`JSON (${caps.structuredOutput})`);
+  }
+
+  if (caps.modalities.includes('image')) {
     badges.push('Vision');
   }
 
-  if (m.includes('reason') || m.includes('pro') || m.includes('qwen3.5') || m.includes('gemma4')) {
-    badges.push('Reasoning');
+  if (caps.reasoning !== 'none') {
+    badges.push(`Reasoning (${caps.reasoning})`);
   }
 
   return badges;

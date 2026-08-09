@@ -19,6 +19,7 @@ export interface QualificationEvaluation {
     jsonValidityPass: boolean;
     accuracyPass: boolean;
     criticalErrorPass: boolean;
+    latencySlaPass: boolean;
   };
   metrics: {
     candidateAccuracy: number;
@@ -36,6 +37,7 @@ export interface QualificationEvaluation {
 export function compareModelRuns(
   candidate: ModelEvalRunResult,
   baseline: ModelEvalRunResult,
+  maxP95LatencyMs = 15000,
 ): QualificationEvaluation {
   const reasons: string[] = [];
 
@@ -69,7 +71,15 @@ export function compareModelRuns(
     );
   }
 
-  const qualified = jsonValidityPass && accuracyPass && criticalErrorPass;
+  // Gate 4: Latency SLA threshold
+  const latencySlaPass = candidate.latencyP95Ms <= maxP95LatencyMs;
+  if (!latencySlaPass) {
+    reasons.push(
+      `p95 Latency (${candidate.latencyP95Ms}ms) exceeded maximum task SLA limit (${maxP95LatencyMs}ms).`,
+    );
+  }
+
+  const qualified = jsonValidityPass && accuracyPass && criticalErrorPass && latencySlaPass;
 
   return {
     candidateModel: candidate.model,
@@ -80,6 +90,7 @@ export function compareModelRuns(
       jsonValidityPass,
       accuracyPass,
       criticalErrorPass,
+      latencySlaPass,
     },
     metrics: {
       candidateAccuracy: candidate.accuracyRate,

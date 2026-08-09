@@ -56,6 +56,10 @@ describe('Pricing & Telemetry Repository (PR 3)', () => {
       expect(flash).not.toBeNull();
       expect(flash?.inputPerMillion).toBe(0.14);
 
+      const pro = getModelPricing('deepseek-v4-pro');
+      expect(pro?.inputPerMillion).toBe(0.435);
+      expect(pro?.outputPerMillion).toBe(0.87);
+
       const mini = getModelPricing('gpt-4o-mini');
       expect(mini?.outputPerMillion).toBe(0.60);
     });

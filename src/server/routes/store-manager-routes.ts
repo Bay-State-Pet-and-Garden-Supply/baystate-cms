@@ -314,12 +314,13 @@ route.post('/store-manager/chat/:threadId/save', async (c) => {
     if (usageInfo && messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.usage) {
-        const { estimatedApiCostUsd } = computeApiCost('', usageInfo.model, null, usageInfo.promptTokens, usageInfo.completionTokens);
+        const { estimatedApiCostUsd, costBasis } = computeApiCost('', usageInfo.model, null, usageInfo.promptTokens, usageInfo.completionTokens);
         lastMsg.usage = {
           promptTokens: usageInfo.promptTokens,
           completionTokens: usageInfo.completionTokens,
           model: usageInfo.model,
-          cost: estimatedApiCostUsd ?? 0,
+          cost: estimatedApiCostUsd,
+          costBasis,
         };
         lastStreamUsage.delete(threadId);
       }

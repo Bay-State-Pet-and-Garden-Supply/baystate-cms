@@ -8,6 +8,8 @@
 import React, { useEffect, useState } from 'react';
 import { getLocalRuntimeStatusApi, type LocalRuntimeStatusResponse } from '../onboarding-api';
 
+import { getModelCapabilities, getModelProfile } from '../../ai/model-registry';
+
 export function LocalAiStatusPanel(): React.ReactElement {
   const [status, setStatus] = useState<LocalRuntimeStatusResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -32,6 +34,22 @@ export function LocalAiStatusPanel(): React.ReactElement {
     const timer = setInterval(loadStatus, 15000);
     return () => clearInterval(timer);
   }, []);
+
+  const firstRunningModel = status?.runningModels[0]?.name;
+  const runningProfile = firstRunningModel ? getModelProfile(firstRunningModel) : null;
+  const runningCaps = firstRunningModel ? getModelCapabilities(firstRunningModel) : null;
+
+  const contextDisplay = runningProfile?.recommendedContext
+    ? `${Math.round(runningProfile.recommendedContext / 1024)}K (32K Recommended)`
+    : status?.connected
+    ? '32K Recommended'
+    : '—';
+
+  const capabilitiesDisplay = runningCaps
+    ? `${runningCaps.modalities.includes('image') ? 'Vision ' : ''}${runningCaps.toolCalling !== 'none' ? 'Tools' : ''}`.trim() || 'Text'
+    : status?.connected
+    ? 'Available'
+    : '—';
 
   return (
     <div
@@ -109,12 +127,12 @@ export function LocalAiStatusPanel(): React.ReactElement {
 
         <div style={{ background: '#fff', padding: 10, borderRadius: 6, border: '1px solid #e5e7eb' }}>
           <span style={{ display: 'block', fontSize: 11, color: '#6b7280' }}>Context Window</span>
-          <strong style={{ fontSize: 14, color: '#111827' }}>32K</strong>
+          <strong style={{ fontSize: 14, color: '#111827' }}>{contextDisplay}</strong>
         </div>
 
         <div style={{ background: '#fff', padding: 10, borderRadius: 6, border: '1px solid #e5e7eb' }}>
-          <span style={{ display: 'block', fontSize: 11, color: '#6b7280' }}>Vision & Tools</span>
-          <strong style={{ fontSize: 14, color: '#111827' }}>Available</strong>
+          <span style={{ display: 'block', fontSize: 11, color: '#6b7280' }}>Capabilities</span>
+          <strong style={{ fontSize: 14, color: '#111827' }}>{capabilitiesDisplay}</strong>
         </div>
       </div>
 

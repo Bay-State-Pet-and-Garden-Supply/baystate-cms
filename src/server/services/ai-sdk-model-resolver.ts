@@ -22,14 +22,6 @@ export function resolveAiSdkModel(input?: string | ResolveAiSdkModelOptions) {
     const profile = getModelProfile(input);
     if (profile) {
       providerName = profile.provider;
-    } else {
-      if (input.startsWith('gpt-') || input.startsWith('o1-') || input.startsWith('o3-')) {
-        providerName = 'openai';
-      } else if (input.startsWith('deepseek-')) {
-        providerName = 'deepseek';
-      } else {
-        providerName = 'ollama';
-      }
     }
   } else if (input) {
     providerName = input.provider;

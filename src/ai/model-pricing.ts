@@ -23,7 +23,7 @@ export interface ApiCostResult {
 const PUBLISHED_PRICING: Record<string, ModelPricing> = {
   'deepseek-v4-flash': { inputPerMillion: 0.14, outputPerMillion: 0.28, effectiveAt: '2026-01-01' },
   'deepseek-chat': { inputPerMillion: 0.14, outputPerMillion: 0.28, effectiveAt: '2026-01-01' },
-  'deepseek-v4-pro': { inputPerMillion: 0.55, outputPerMillion: 2.19, effectiveAt: '2026-01-01' },
+  'deepseek-v4-pro': { inputPerMillion: 0.435, outputPerMillion: 0.87, effectiveAt: '2026-01-01' },
   'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60, effectiveAt: '2026-01-01' },
   'gpt-4o': { inputPerMillion: 2.50, outputPerMillion: 10.00, effectiveAt: '2026-01-01' },
 };

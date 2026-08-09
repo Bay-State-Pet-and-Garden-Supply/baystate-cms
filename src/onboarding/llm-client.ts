@@ -56,6 +56,11 @@ import {
   insertTerminalModelCall,
   computeModelCallCost,
 } from '../db/repositories/classification-model-call-repo';
+import {
+  insertAiModelCallStart,
+  completeAiModelCall as completeAiModelCallGeneral,
+} from '../db/repositories/ai-model-call-repo';
+import { computeApiCost } from '../ai/model-pricing';
 
 import { acquireLocalSlot as acquireLlmSlot, releaseLocalSlot as releaseLlmSlot } from '../ai/local-runtime-coordinator';
 
@@ -777,8 +782,6 @@ export async function callLlmForTask(
   }
   if (!config) return null;
 
-  // Re-assert the frozen policy immediately before transport (issue #17 item
-  // A): validation at activation alone is insufficient.
   if (options.modelPolicy) {
     assertModelPolicyIntact(options.modelPolicy);
   }
@@ -786,58 +789,144 @@ export async function callLlmForTask(
   const temperature = resolveTemperature(task, options);
   const reasoningEffort = resolveReasoningEffort(task);
 
-  await acquireLlmSlot(config.provider);
-  try {
-    // Re-assert the frozen policy immediately at the transport boundary
-    // (after the queue wait): tampering or route drift denies the call.
-    if (options.modelPolicy) {
-      reassertProtectedRouteBeforeTransport(task, config, {
-        modelPolicy: options.modelPolicy,
-        protectedOperation: options.protectedOperation,
-        requiresImage: options.requiresImage,
+  const taskConfig = getLlmTaskConfig(task);
+  const fallbackProvider = taskConfig?.fallbackProvider ?? null;
+  const fallbackModel = taskConfig?.fallbackModel ?? null;
+
+  const locality = config.provider === 'ollama' ? 'local' : 'cloud';
+  const startedAt = Date.now();
+
+  const telemetryId = insertAiModelCallStart({
+    workspaceId: 'default',
+    task,
+    provider: config.provider,
+    model: config.model,
+    locality,
+  });
+
+  const makeSingleRequest = async (cfg: LlmConfig): Promise<{ content: string; promptTokens: number | null; completionTokens: number | null }> => {
+    await acquireLlmSlot(cfg.provider);
+    try {
+      if (options.modelPolicy) {
+        reassertProtectedRouteBeforeTransport(task, cfg, {
+          modelPolicy: options.modelPolicy,
+          protectedOperation: options.protectedOperation,
+          requiresImage: options.requiresImage,
+        });
+      }
+      const timeoutMs = cfg.provider === 'ollama' ? 120_000 : 60_000;
+      const requestBody: Record<string, unknown> = {
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt },
+        ],
+        temperature,
+      };
+      if (reasoningEffort) {
+        requestBody.reasoning_effort = reasoningEffort;
+      }
+      const response = await fetch(`${cfg.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${cfg.apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(timeoutMs),
       });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(
+          `LLM API request failed (${cfg.provider}): ${response.status} - ${redactTransportText(text)}`,
+        );
+      }
+
+      const data = (await response.json()) as {
+        choices: Array<{ message: { content: string } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content || !content.trim()) {
+        throw new Error('LLM returned an empty response.');
+      }
+      return {
+        content: content.trim(),
+        promptTokens: data.usage?.prompt_tokens ?? null,
+        completionTokens: data.usage?.completion_tokens ?? null,
+      };
+    } finally {
+      releaseLlmSlot(cfg.provider);
     }
-    const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
-    const requestBody: Record<string, unknown> = {
-      model: config.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt },
-      ],
-      temperature,
-    };
-    if (reasoningEffort) {
-      requestBody.reasoning_effort = reasoningEffort;
-    }
-    const response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(timeoutMs),
+  };
+
+  try {
+    const res = await makeSingleRequest(config);
+    const cost = computeApiCost(config.provider, config.model, locality, res.promptTokens, res.completionTokens);
+    completeAiModelCallGeneral(telemetryId, {
+      status: 'success',
+      durationMs: Date.now() - startedAt,
+      promptTokens: res.promptTokens,
+      completionTokens: res.completionTokens,
+      estimatedApiCostUsd: cost.estimatedApiCostUsd,
+      costBasis: cost.costBasis,
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      // Never embed the raw provider error body in the thrown error.
-      throw new Error(
-        `LLM API request failed (${config.provider}): ${response.status} - ${redactTransportText(text)}`,
-      );
+    return res.content;
+  } catch (primaryErr) {
+    if (fallbackProvider && fallbackModel && !options.modelPolicy) {
+      const fallbackCred = resolveProviderCredential(fallbackProvider);
+      if (fallbackCred) {
+        const fallbackConfig: LlmConfig = {
+          provider: fallbackProvider,
+          apiKey: fallbackCred.apiKey,
+          baseUrl: fallbackCred.baseUrl || DEFAULT_BASE_URLS[fallbackProvider],
+          model: fallbackModel,
+        };
+        const fallbackLocality = fallbackProvider === 'ollama' ? 'local' : 'cloud';
+        try {
+          const fallbackRes = await makeSingleRequest(fallbackConfig);
+          const cost = computeApiCost(
+            fallbackConfig.provider,
+            fallbackConfig.model,
+            fallbackLocality,
+            fallbackRes.promptTokens,
+            fallbackRes.completionTokens,
+          );
+          completeAiModelCallGeneral(telemetryId, {
+            status: 'success',
+            durationMs: Date.now() - startedAt,
+            promptTokens: fallbackRes.promptTokens,
+            completionTokens: fallbackRes.completionTokens,
+            fallbackCount: 1,
+            fallbackProvider,
+            fallbackModel,
+            estimatedApiCostUsd: cost.estimatedApiCostUsd,
+            costBasis: cost.costBasis,
+          });
+          return fallbackRes.content;
+        } catch (fallbackErr) {
+          completeAiModelCallGeneral(telemetryId, {
+            status: 'failed',
+            durationMs: Date.now() - startedAt,
+            errorCode: 'FALLBACK_FAILED',
+            fallbackCount: 1,
+            fallbackProvider,
+            fallbackModel,
+            costBasis: 'unknown',
+          });
+          throw fallbackErr;
+        }
+      }
     }
 
-    const data = (await response.json()) as {
-      choices: Array<{ message: { content: string } }>;
-    };
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error('LLM returned an empty response.');
-    }
-
-    return content.trim();
-  } finally {
-    releaseLlmSlot(config.provider);
+    completeAiModelCallGeneral(telemetryId, {
+      status: 'failed',
+      durationMs: Date.now() - startedAt,
+      errorCode: primaryErr instanceof Error ? primaryErr.name : 'PRIMARY_FAILED',
+      costBasis: 'unknown',
+    });
+    throw primaryErr;
   }
 }
 

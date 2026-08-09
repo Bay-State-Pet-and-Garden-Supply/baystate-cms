@@ -14,4 +14,6 @@ export interface ModelCapabilities {
   structuredOutput: StructuredOutputMode;
   reasoning: ReasoningCapability;
   maxContextTokens?: number;
+  recommendedContextTokens?: number;
 }
+
