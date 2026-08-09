@@ -40,6 +40,8 @@ export interface InsertItemData {
   rowNumber: number;
   isDuplicate?: boolean;
   existingSku?: string | null;
+  stage?: PipelineStage;
+  stageStatus?: StageStatus;
 }
 
 const STAGE_ORDER: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
@@ -63,7 +65,7 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
     acceptedEvidenceAttemptIds: (row as any).accepted_evidence_attempt_ids_json ? JSON.parse((row as any).accepted_evidence_attempt_ids_json) : [],
     acceptedEvidenceAttemptId: (row as any).accepted_evidence_attempt_id ?? null,
     sourcingDecision: (row as any).sourcing_decision_json ? JSON.parse((row as any).sourcing_decision_json) : null,
-    stage: (row.stage || 'discovery') as PipelineStage,
+    stage: (row.stage || 'sourcing') as PipelineStage,
     stageStatus: (row.stage_status || 'pending') as StageStatus,
     status: (row.status || 'imported') as ItemStatus,
     errorMessage: row.error_message,
@@ -88,7 +90,7 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
       (id, batch_id, upc, name, price, quantity, brand_hint, department_hint, source_url, expected_name,
        status, stage, stage_status, error_message, retry_count, is_duplicate, existing_sku,
        extraction_data_json, curation_data_json, row_number, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', 'discovery', 'pending', NULL, 0, ?, ?, NULL, NULL, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'imported', ?, ?, NULL, 0, ?, ?, NULL, NULL, ?, ?, ?)`,
   );
 
   const inserted: OnboardingItem[] = [];
@@ -97,6 +99,8 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
     for (const item of items) {
       const id = randomUUID();
       const isDuplicateNum = item.isDuplicate ? 1 : 0;
+      const targetStage = item.stage ?? 'sourcing';
+      const targetStageStatus = item.stageStatus ?? 'pending';
       stmt.run(
         id,
         batchId,
@@ -107,6 +111,8 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
         item.brandHint ?? null,
         item.departmentHint ?? null,
         item.sourceUrl ?? null,
+        targetStage,
+        targetStageStatus,
         isDuplicateNum,
         item.existingSku ?? null,
         item.rowNumber,
@@ -128,8 +134,8 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
         acceptedEvidenceAttemptIds: [],
         acceptedEvidenceAttemptId: null,
         sourcingDecision: null,
-        stage: 'discovery' as PipelineStage,
-        stageStatus: 'pending' as StageStatus,
+        stage: targetStage as PipelineStage,
+        stageStatus: targetStageStatus as StageStatus,
         status: 'imported' as ItemStatus,
         errorMessage: null,
         retryCount: 0,
@@ -365,14 +371,22 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
         continue;
       }
 
-      const currentIdx = STAGE_ORDER.indexOf(item.stage);
-      if (currentIdx < 0 || currentIdx >= STAGE_ORDER.length - 1) {
-        // Already at promotion or unknown stage — can't advance
-        skipped++;
-        continue;
+      let nextStage: PipelineStage;
+      if (item.stage === 'sourcing') {
+        if (item.sourcingDecision?.route === 'bundle_to_curation') {
+          nextStage = 'curation';
+        } else {
+          nextStage = 'discovery';
+        }
+      } else {
+        const currentIdx = STAGE_ORDER.indexOf(item.stage);
+        if (currentIdx < 0 || currentIdx >= STAGE_ORDER.length - 1) {
+          // Already at promotion or unknown stage — can't advance
+          skipped++;
+          continue;
+        }
+        nextStage = STAGE_ORDER[currentIdx + 1];
       }
-
-      const nextStage = STAGE_ORDER[currentIdx + 1];
 
       db.query(
         `UPDATE onboarding_items
@@ -652,7 +666,7 @@ export function updateItemSourceUrl(id: string, url: string): void {
   ).run(url, 'source_confirmed', now, id);
 }
 
-function updateItemExtractionData(id: string, extractionDataJson: string): void {
+export function updateItemExtractionData(id: string, extractionDataJson: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.query(

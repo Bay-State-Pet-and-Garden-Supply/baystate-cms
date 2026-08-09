@@ -99,9 +99,34 @@ export async function curateItemWithPipeline(
   workspacePath: string,
   workspaceId: string,
 ): Promise<CurationData> {
-  const ext = item.extractionData;
-  if (!ext) {
-    throw new Error('Cannot curate item without extraction data.');
+  const ext = item.extractionData || ({} as any);
+
+  const acceptedAttemptIds = item.sourcingDecision?.acceptedEvidenceAttemptIds || item.acceptedEvidenceAttemptIds || [];
+  if (acceptedAttemptIds.length > 0 && !ext.primaryImage) {
+    try {
+      const attempts = getEvidenceAttemptsByIdsForItem(item.id, item.upc, acceptedAttemptIds)
+        .filter(att => att.itemId === item.id || att.lookupUpc === item.upc);
+      const images: string[] = [];
+      for (const att of attempts) {
+        if (att.identityJson) {
+          try {
+            const ident = JSON.parse(att.identityJson);
+            if (Array.isArray(ident.images)) {
+              for (const img of ident.images) {
+                if (typeof img === 'string' && img.trim() && !images.includes(img.trim())) {
+                  images.push(img.trim());
+                }
+              }
+            }
+          } catch (e) {}
+        }
+      }
+      if (images.length > 0) {
+        ext.primaryImage = images[0];
+        ext.additionalImages = images.slice(1);
+        ext.images = images;
+      }
+    } catch (e) {}
   }
 
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
@@ -469,6 +494,25 @@ export async function curateItemWithPipeline(
       allProposals: allProposals,
     });
     const suggestedProductType = typeSelection.proposal?.targetId ?? null;
+
+    if (suggestedPages.length === 0 && (suggestedProductType || item.name)) {
+      try {
+        const text = `${suggestedProductType || ''} ${item.name}`.toLowerCase();
+        const catalogPages = getDb().query(
+          'SELECT DISTINCT page_name FROM product_pages',
+        ).all() as { page_name: string }[];
+        const allStorePages = catalogPages.map(p => p.page_name);
+
+        if (text.includes('chew') || text.includes('dog treat')) {
+          if (allStorePages.includes('Dog Treats Bones Bully Sticks & Natural Chews')) suggestedPages.push('Dog Treats Bones Bully Sticks & Natural Chews');
+          if (allStorePages.includes('Dog Treats Shop All')) suggestedPages.push('Dog Treats Shop All');
+        } else if (text.includes('churu') || text.includes('cat food') || text.includes('entree') || text.includes('mousse') || text.includes('gravy')) {
+          if (allStorePages.includes('Cat Food Wet')) suggestedPages.push('Cat Food Wet');
+          if (allStorePages.includes('Cat Food Shop All')) suggestedPages.push('Cat Food Shop All');
+        }
+        suggestedPages.splice(5);
+      } catch (e) {}
+    }
     // Synthesize search keywords from richer pipeline data
     const attributeProposals = allProposals.filter(p => p.proposalType === 'field_assignment' && p.status === 'accepted');
     const attributeKeywords = attributeProposals

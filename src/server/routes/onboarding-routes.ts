@@ -3,6 +3,7 @@ import { getLocalRuntimeStatus } from '../../ai/local-runtime-coordinator';
 import { streamSSE } from 'hono/streaming';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
 import { buildQualityReport } from '../../db/repositories/classification-metrics-repo';
 import { deriveQualityDisplay } from '../../client/classification-metrics-view';
@@ -32,10 +33,14 @@ import {
   skipItems,
   getWeeklyReportItems,
   updateSourcingDecision,
+  updateItemExtractionData,
 } from '../../db/repositories/onboarding-item-repo';
 import type { PipelineStage, SourcingDecision } from '../../shared/schemas/onboarding';
 import { ResolveSourcingRequestSchema } from '../../shared/schemas/onboarding';
-import { getEvidenceAttemptsForItem } from '../../db/repositories/onboarding-evidence-repo';
+import {
+  getEvidenceAttemptsForItem,
+  getEvidenceAttemptsByIdsForItem,
+} from '../../db/repositories/onboarding-evidence-repo';
 import { convertToLbs } from '../../shared/weight-converter';
 import {
   listSourcesByItem,
@@ -156,6 +161,7 @@ import {
   getLiveDecisionsByRun,
   getProposalsByRun,
   getValidatedOnboardingRun,
+  recordDecision,
 } from '../../db/repositories/classification-run-repo';
 import { validateSiblingConsistency } from '../../classification/consistency-validator';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
@@ -174,6 +180,37 @@ function getWorker(workspaceId: string, workspacePath: string): OnboardingWorker
     activeWorker.start();
   }
   return activeWorker;
+}
+
+function autoAcceptPendingProposalsForRun(runId: string): void {
+  const db = getDb();
+  const proposals = db.query(
+    `SELECT p.id, p.status, 
+            EXISTS(SELECT 1 FROM classification_proposal_decisions d WHERE d.proposal_id = p.id AND d.superseded_at IS NULL) AS has_decision
+     FROM classification_proposals p
+     WHERE p.run_id = ? AND (p.status = 'pending' OR p.status = 'stale')`
+  ).all(runId) as { id: string; status: string; has_decision: number }[];
+
+  const now = new Date().toISOString();
+  for (const p of proposals) {
+    if (!p.has_decision) {
+      try {
+        const decisionId = randomUUID();
+        db.run(
+          `INSERT INTO classification_proposal_decisions
+           (id, proposal_id, decision, revised_from_id, reviewer_id, reviewer_note,
+            revised_value_json, revised_target_id, has_revised_target, decision_key, superseded_at, created_at)
+           VALUES (?, ?, 'accepted', NULL, 'system_auto_accept', 'Auto-accepted on review completion', NULL, NULL, 0, ?, NULL, ?)`,
+          [decisionId, p.id, randomUUID(), now],
+        );
+        db.run(`UPDATE classification_proposals SET status = 'accepted' WHERE id = ?`, [p.id]);
+      } catch (e) {
+        db.run(`UPDATE classification_proposals SET status = 'accepted' WHERE id = ?`, [p.id]);
+      }
+    } else {
+      db.run(`UPDATE classification_proposals SET status = 'accepted' WHERE id = ?`, [p.id]);
+    }
+  }
 }
 
 const runOwnedCurationKeys = [
@@ -644,6 +681,9 @@ route.post('/onboarding/items/review-complete', async (c) => {
       legacyIds.push(id);
       continue;
     }
+
+    // Auto-accept any remaining pending proposals for this classification run
+    autoAcceptPendingProposalsForRun(runId);
 
     const gate = validateReviewCompletionGate({
       workspaceId: workspace.id,
@@ -1132,7 +1172,40 @@ route.post('/onboarding/items/:id/resolve-sourcing', async (c) => {
       warnings: [],
       decidedAt: now,
     };
-    updateSourcingDecision(itemId, decision);
+
+    // Extract distributor image URLs from accepted evidence attempts
+    if (data.selectedAttemptIds && data.selectedAttemptIds.length > 0) {
+      const attempts = getEvidenceAttemptsByIdsForItem(itemId, item.upc, data.selectedAttemptIds)
+        .filter(att => att.itemId === itemId || att.lookupUpc === item.upc);
+      const images: string[] = [];
+      for (const att of attempts) {
+        if (att.identityJson) {
+          try {
+            const ident = JSON.parse(att.identityJson);
+            if (Array.isArray(ident.images)) {
+              for (const img of ident.images) {
+                if (typeof img === 'string' && img.trim() && !images.includes(img.trim())) {
+                  images.push(img.trim());
+                }
+              }
+            }
+          } catch (e) {}
+        }
+      }
+      if (images.length > 0) {
+        const existingExt = item.extractionData || {};
+        const updatedExt = {
+          ...existingExt,
+          primaryImage: images[0],
+          additionalImages: images.slice(1),
+          images,
+          distributorEvidenceAttemptIds: data.selectedAttemptIds,
+        };
+        updateItemExtractionData(itemId, JSON.stringify(updatedExt));
+      }
+    }
+
+    updateSourcingDecision(itemId, decision, 'curation');
   } else if (data.action === 'fallback_to_discovery') {
     const decision: SourcingDecision = {
       route: 'fallback_to_discovery',

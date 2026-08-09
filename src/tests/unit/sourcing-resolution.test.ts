@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach } from 'vitest';
 import { getDb, initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { createBatch } from '../../db/repositories/onboarding-batch-repo';
-import { insertItems, findItemById, updateSourcingDecision } from '../../db/repositories/onboarding-item-repo';
+import { insertItems, findItemById, updateSourcingDecision, advanceItemsToNextStage } from '../../db/repositories/onboarding-item-repo';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { ResolveSourcingRequestSchema } from '../../shared/schemas/onboarding';
 
@@ -89,5 +89,50 @@ describe('Sourcing Resolution Logic & Repositories', () => {
     expect(updated?.stage).toBe('discovery');
     expect(updated?.stageStatus).toBe('pending');
     expect(updated?.sourcingDecision?.route).toEqual('fallback_to_discovery');
+  });
+
+  test('advanceItemsToNextStage routes bundle_to_curation to curation and others to discovery', () => {
+    const batch = createBatch({
+      workspaceId: 'w1',
+      name: 'Advance Batch',
+      fileName: 'advance.csv',
+      totalItems: 2,
+    });
+    const [bundleItem, fallbackItem] = insertItems(batch.id, [
+      { upc: '012345678903', name: 'Bundle Item', rowNumber: 3 },
+      { upc: '012345678904', name: 'Fallback Item', rowNumber: 4 },
+    ]);
+
+    updateSourcingDecision(bundleItem.id, {
+      route: 'bundle_to_curation',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: ['attempt-1'],
+      providerIds: ['unfi'],
+      conflicts: [],
+      warnings: [],
+      decidedAt: new Date().toISOString(),
+    });
+
+    updateSourcingDecision(fallbackItem.id, {
+      route: 'fallback_to_discovery',
+      origin: 'operator_override',
+      acceptedEvidenceAttemptIds: [],
+      providerIds: [],
+      conflicts: [],
+      warnings: [],
+      decidedAt: new Date().toISOString(),
+    });
+
+    // Advance both completed items from sourcing stage
+    const res = advanceItemsToNextStage([bundleItem.id, fallbackItem.id]);
+    expect(res.advanced).toBe(2);
+
+    const afterBundle = findItemById(bundleItem.id);
+    expect(afterBundle?.stage).toBe('curation');
+    expect(afterBundle?.stageStatus).toBe('pending');
+
+    const afterFallback = findItemById(fallbackItem.id);
+    expect(afterFallback?.stage).toBe('discovery');
+    expect(afterFallback?.stageStatus).toBe('pending');
   });
 });

@@ -23,10 +23,16 @@ export function SourcingStagePanel({
   onResolveSourcing,
   onRetrySourcing,
 }: SourcingStagePanelProps) {
-  const [selectedAttemptIds, setSelectedAttemptIds] = useState<string[]>(
-    reviewItem.sourcingDecision?.acceptedEvidenceAttemptIds ||
-    evidenceAttempts.filter(a => a.outcome === 'found').map(a => a.id),
-  );
+  const [selectedAttemptIds, setSelectedAttemptIds] = useState<string[]>([]);
+
+  React.useEffect(() => {
+    setSelectedAttemptIds(
+      reviewItem.sourcingDecision?.acceptedEvidenceAttemptIds ||
+      evidenceAttempts
+        .filter(a => a.outcome === 'found' && (!a.lookupUpc || a.lookupUpc === reviewItem.upc))
+        .map(a => a.id),
+    );
+  }, [reviewItem.id, reviewItem.sourcingDecision?.acceptedEvidenceAttemptIds, evidenceAttempts]);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 

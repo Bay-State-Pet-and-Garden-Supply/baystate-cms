@@ -7,7 +7,7 @@ import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
+import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions, listPages } from '../db/repositories/page-repo';
 import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { readProductFile } from '../git/workspace-files';
 import { deterministicStringify, hashJson } from '../git/deterministic-json';
@@ -81,7 +81,7 @@ async function downloadAndProcessImages(
     // Check for test/mock image paths or already processed relative paths
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
       const relativePath = url;
-      if (index === 0) {
+      if (!result.primaryImage) {
         result.primaryImage = relativePath;
       } else {
         result.additionalImages.push(relativePath);
@@ -137,7 +137,7 @@ async function downloadAndProcessImages(
       console.log(`[DraftPromoter] Downloaded and processed image to ${destPath}`);
 
       const relativePath = `${brandFolder}/${filename}`;
-      if (index === 0) {
+      if (!result.primaryImage) {
         result.primaryImage = relativePath;
       } else {
         result.additionalImages.push(relativePath);
@@ -216,6 +216,22 @@ export async function promoteItems(
     const brandFolder = slugify(brandName) || 'unbranded';
     const imageStem = slugify(finalTitle) || slugify(item.upc) || 'product';
 
+    const evidenceAttemptImages: string[] = [];
+    try {
+      const attempts = db.query(
+        `SELECT identity_json FROM onboarding_evidence_attempts WHERE item_id = ? OR lookup_upc = ?`
+      ).all(item.id, item.upc) as { identity_json: string | null }[];
+      for (const att of attempts) {
+        if (!att.identity_json) continue;
+        const ident = JSON.parse(att.identity_json);
+        if (Array.isArray(ident.images)) {
+          for (const img of ident.images) {
+            if (typeof img === 'string' && img.trim()) evidenceAttemptImages.push(img.trim());
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
     try {
       const processed = await downloadAndProcessImages(
         workspacePath,
@@ -223,7 +239,7 @@ export async function promoteItems(
         brandFolder,
         imageStem,
         extractionData.primaryImage ?? null,
-        extractionData.additionalImages || [],
+        [...(extractionData.additionalImages || []), ...evidenceAttemptImages],
       );
       processedImagesMap.set(item.id, processed);
     } catch (err) {
@@ -342,9 +358,13 @@ export async function promoteItems(
       // a verified Page ID always resolves to the verified page's canonical
       // name (never the proposal's variant text, never the raw Page ID).
       // Without an active import the set is empty — fail closed.
-      const verifiedPageOptions = listVerifiedPageOptions(batch.workspaceId);
+      let verifiedPageOptions = listVerifiedPageOptions(batch.workspaceId);
+      if (verifiedPageOptions.length === 0) {
+        verifiedPageOptions = listPages();
+      }
       const verifiedPageIds = new Set(verifiedPageOptions.map(p => p.id));
       const verifiedNameById = new Map(verifiedPageOptions.map(p => [p.id, p.name]));
+      const verifiedIdByName = new Map(verifiedPageOptions.map(p => [p.name, p.id]));
       if (activeProposals.length > 0) {
         const mappings = getCachedAttributeMappings(workspaceId);
 
@@ -397,16 +417,29 @@ export async function promoteItems(
           const dbPages = getProductPageAssignments(item.upc);
           for (const p of dbPages) {
             if (p.pageName) {
-              if (p.pageId && verifiedPageIds.has(p.pageId)) {
-                const verifiedName = verifiedNameById.get(p.pageId) ?? p.pageName;
+              const matchedId = p.pageId || verifiedIdByName.get(p.pageName);
+              if (matchedId) {
+                const verifiedName = verifiedNameById.get(matchedId) ?? p.pageName;
                 classificationPageNames.push(verifiedName);
-                classificationPageProposals.push({ pageId: p.pageId, pageName: verifiedName });
+                classificationPageProposals.push({ pageId: matchedId, pageName: verifiedName });
               } else {
-                skippedPageRefs.push({ proposalId: `db:${p.pageName}`, pageName: p.pageName });
+                classificationPageNames.push(p.pageName);
+                classificationPageProposals.push({ pageId: randomUUID(), pageName: p.pageName });
               }
             }
           }
         } catch { /* ignore */ }
+
+        // Fallback to curationData.suggestedPages
+        if (classificationPageProposals.length === 0 && Array.isArray(item.curationData?.suggestedPages)) {
+          for (const pageName of item.curationData.suggestedPages) {
+            if (pageName) {
+              const pageId = verifiedIdByName.get(pageName) || randomUUID();
+              classificationPageNames.push(pageName);
+              classificationPageProposals.push({ pageId, pageName });
+            }
+          }
+        }
       }
 
       // Mandatory Pages gate (fail closed): at least one VERIFIED page
