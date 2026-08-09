@@ -70,7 +70,7 @@ function linkProposalEvidence(
     if (contradictingSet.has(id)) {
       throw new Error(
         `Evidence linkage failed: proposal "${proposalId}" lists evidence "${id}" ` +
-          `as BOTH supporting and contradicting.`, 
+          `as BOTH supporting and contradicting.`,
       );
     }
   }
