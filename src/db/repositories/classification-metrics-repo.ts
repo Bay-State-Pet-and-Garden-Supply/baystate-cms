@@ -238,7 +238,7 @@ export function getQualitySnapshotDigests(workspaceId: string, configSnapshotHas
     .all(workspaceId, ...unique) as Array<{ snapshot_hash: string; config_json: string }>;
   const out: QualitySnapshotDigest[] = [];
   for (const row of rows) {
-    let parsed: any = null;
+    let parsed: any;
     try {
       parsed = JSON.parse(row.config_json);
     } catch {

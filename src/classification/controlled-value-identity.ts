@@ -57,7 +57,9 @@ export function validateCanonicalValue(value: string): CanonicalValueValidation 
   if (value.length === 0 || value.trim().length === 0) {
     return { ok: false, reason: 'empty' };
   }
-  if (/[\u0000-\u001f\u007f]/.test(value)) {
+  // eslint-disable-next-line no-control-regex -- intentional control-character rejection
+  const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
+  if (CONTROL_CHAR.test(value)) {
     return { ok: false, reason: 'control-character' };
   }
   if (value !== value.normalize('NFC')) {

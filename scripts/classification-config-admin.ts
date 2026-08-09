@@ -143,9 +143,9 @@ async function generatePreview(workspacePath: string, workspaceId: string, repor
     },
     modelPolicy: modelPolicySummary(candidate),
     enabledTargets: candidate.bundle.curationTargets
-      .filter(t => t.enabled)
-      .map(t => ({ id: t.id, kind: t.kind })),
-    storePagesEnabled: candidate.bundle.curationTargets.some(t => t.id === 'store-pages' && t.enabled),
+      .filter((t: { enabled: boolean }) => t.enabled)
+      .map((t: { id: string; kind: string }) => ({ id: t.id, kind: t.kind })),
+    storePagesEnabled: candidate.bundle.curationTargets.some((t: { id: string; enabled: boolean }) => t.id === 'store-pages' && t.enabled),
     findings: preview.report.findings.map(f => ({ severity: f.severity, code: f.code, message: f.message })),
     stagingDir: path.join(workspacePath, 'store', `.classification-staging-${preview.hash}`),
     note: 'Human review required before activate: verify semantic findings, Page count/import hash, model policy still local-only, ML features disabled, and the exact nested diff scope.',
@@ -168,7 +168,7 @@ async function activate(workspacePath: string, workspaceId: string, stagingHash:
 
   // Deterministic re-derivation: the staged bundle hash must equal the
   // reviewed --staging-hash exactly.
-  const { candidate, bundleHash, scan } = await derivedCandidate(workspacePath);
+  const { bundleHash, scan } = await derivedCandidate(workspacePath);
   if (bundleHash !== stagingHash) {
     fail(`re-derived bundle hash ${bundleHash} != reviewed staging hash ${stagingHash}; aborting.`);
   }
@@ -205,7 +205,6 @@ async function activate(workspacePath: string, workspaceId: string, stagingHash:
   if (outOfScope.length > 0) {
     fail(`nested commit ${result.commitHash} touched out-of-scope paths: ${outOfScope.join(', ')}`);
   }
-  const outerChanged = runGit(path.resolve(workspacePath, '..', '..'), ['status', '--porcelain']).split('\n').filter(Boolean);
 
   console.log(JSON.stringify({
     format: 'issue17-d2-activation',
