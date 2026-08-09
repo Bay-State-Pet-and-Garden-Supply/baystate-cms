@@ -7,7 +7,7 @@ import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
 import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
-import { clearProductPages, assignProductToPageId, getProductPageAssignments } from '../db/repositories/page-repo';
+import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
 import { getActiveVerifiedPageIds } from '../shopsite/page-import-service';
 import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { readProductFile } from '../git/workspace-files';
@@ -339,8 +339,13 @@ export async function promoteItems(
             (p: any) => p.status === 'accepted',
           );
       // Only identities verified in the currently active Page import are
-      // serializable. Without an active import the set is empty — fail closed.
-      const verifiedPageIds = getActiveVerifiedPageIds(batch.workspaceId);
+      // serializable, and the verified catalog is the DISPLAY-NAME authority:
+      // a verified Page ID always resolves to the verified page's canonical
+      // name (never the proposal's variant text, never the raw Page ID).
+      // Without an active import the set is empty — fail closed.
+      const verifiedPageOptions = listVerifiedPageOptions(batch.workspaceId);
+      const verifiedPageIds = new Set(verifiedPageOptions.map(p => p.id));
+      const verifiedNameById = new Map(verifiedPageOptions.map(p => [p.id, p.name]));
       if (activeProposals.length > 0) {
         const mappings = getCachedAttributeMappings(workspaceId);
 
@@ -357,24 +362,26 @@ export async function promoteItems(
               }
             }
           } else if (proposal.proposalType === 'category_page' && targetId) {
-            const pv = getEffectiveProposalValue(proposal);
             const pageId = getPageIdentityId(proposal);
-            const pageName = pageNameFromPageValue(pv);
+            const pageName = pageNameFromPageValue(getEffectiveProposalValue(proposal));
             if (!pageId || !verifiedPageIds.has(pageId)) {
               skippedPageRefs.push({ proposalId: proposal.id, pageName: pageName ?? '' });
               continue;
             }
-            // A verified page with no display name is a visible skip — the
-            // Page ID must never be serialized as a page name.
-            if (!pageName) {
+            // The verified catalog is the display-name authority: a verified
+            // Page ID with a missing/unusable proposal name still resolves to
+            // the verified page's canonical name. The Page ID is NEVER
+            // serialized as a page name.
+            const verifiedName = verifiedNameById.get(pageId) ?? '';
+            if (!verifiedName) {
               skippedPageRefs.push({
                 proposalId: proposal.id,
                 pageName: `[page ${pageId} missing display name]`,
               });
               continue;
             }
-            classificationPageNames.push(pageName);
-            classificationPageProposals.push({ pageId, pageName });
+            classificationPageNames.push(verifiedName);
+            classificationPageProposals.push({ pageId, pageName: verifiedName });
           } else if (proposal.proposalType === 'primary_product_type') {
             acceptedProductType = getEffectivePrimaryProductTypeId(proposal);
           }
@@ -383,16 +390,18 @@ export async function promoteItems(
 
 
       // Explicit/manual persisted page assignments are the fallback if we still
-      // have nothing. Only verified identities qualify; name-only rows are
-      // review context and are tracked as skipped.
+      // have nothing. Only verified identities qualify; the display name again
+      // comes from the verified catalog. Name-only rows are review context and
+      // are tracked as skipped — they never satisfy the mandatory Pages gate.
       if (classificationPageProposals.length === 0) {
         try {
           const dbPages = getProductPageAssignments(item.upc);
           for (const p of dbPages) {
             if (p.pageName) {
               if (p.pageId && verifiedPageIds.has(p.pageId)) {
-                classificationPageNames.push(p.pageName);
-                classificationPageProposals.push({ pageId: p.pageId, pageName: p.pageName });
+                const verifiedName = verifiedNameById.get(p.pageId) ?? p.pageName;
+                classificationPageNames.push(verifiedName);
+                classificationPageProposals.push({ pageId: p.pageId, pageName: verifiedName });
               } else {
                 skippedPageRefs.push({ proposalId: `db:${p.pageName}`, pageName: p.pageName });
               }
@@ -401,10 +410,15 @@ export async function promoteItems(
         } catch { /* ignore */ }
       }
 
-      // Check if we have anything to work with. Accepted-but-unverified pages
-      // are visible skips — they do not block the rest of the draft.
-      if (classificationPageProposals.length === 0 && skippedPageRefs.length === 0) {
-        const errMsg = 'No accepted product page proposals or manual page assignments exist for this item';
+      // Mandatory Pages gate (fail closed): at least one VERIFIED page
+      // assignment is required. Unverified accepted proposals and name-only
+      // manual rows are visible skips (reported in the failure payload) but
+      // they never satisfy the gate — a product must never promote with zero
+      // verified Category Page assignments.
+      if (classificationPageProposals.length === 0) {
+        const errMsg = skippedPageRefs.length > 0
+          ? 'No verified page assignments exist for this item (accepted page proposals were unverified or lacked a usable display name)'
+          : 'No accepted product page proposals or manual page assignments exist for this item';
         console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
         completePromotionStage(item.id, false, errMsg);
         failures.push({ itemId: item.id, error: errMsg });
@@ -459,9 +473,10 @@ export async function promoteItems(
       if (!mergedCustomFields['ProductField16']?.trim()) missingFields.push('Brand (ProductField16)');
       if (!coreProduct.media.primary) missingFields.push('Primary Image');
 
-      // Pages are mandatory — verified assignments count; unverified accepted
-      // page proposals are visible skips that do not block the rest of the draft.
-      const hasPages = classificationPageNames.length > 0 || skippedPageRefs.length > 0;
+      // Pages are mandatory — only VERIFIED assignments count. Unverified
+      // accepted page proposals are visible skips (reported) that never
+      // satisfy the mandatory gate.
+      const hasPages = classificationPageNames.length > 0;
       if (!hasPages) missingFields.push('Pages');
 
       if (missingFields.length > 0) {
@@ -502,24 +517,14 @@ export async function promoteItems(
       };
 
       // ── Inject ProductOnPages into preserved unknown elements ─────────
-      // Collect page names from: accepted proposals → suggestedPages → DB
+      // Serialize ONLY the verified assignments (they carry the verified
+      // catalog's display names). Never re-read unverified/name-only DB rows:
+      // an unchecked persisted name must not reach ProductOnPages.
       const pageNames: string[] = [];
-
-      if (classificationPageProposals.length > 0) {
-        for (const pp of classificationPageProposals) {
-          if (pp.pageName && !pageNames.includes(pp.pageName)) {
-            pageNames.push(pp.pageName);
-          }
+      for (const pp of classificationPageProposals) {
+        if (pp.pageName && !pageNames.includes(pp.pageName)) {
+          pageNames.push(pp.pageName);
         }
-      }
-
-      if (pageNames.length === 0) {
-        try {
-          const dbPages = getProductPageAssignments(item.upc);
-          for (const p of dbPages) {
-            if (p.pageName && !pageNames.includes(p.pageName)) pageNames.push(p.pageName);
-          }
-        } catch { /* ignore */ }
       }
 
       // Inject into preserved unknown elements as raw XML children

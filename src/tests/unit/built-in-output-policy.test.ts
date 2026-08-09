@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { parseProductsXml } from '../../shopsite/product-parser';
 import { denormalizeProduct } from '../../shopsite/product-denormalizer';
 import {
-  BUILT_IN_OUTPUT_POLICY_ELEMENTS,
   SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1,
   SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION,
   builtInDefaultValue,
@@ -73,8 +72,13 @@ function emittedElements(xml: string): string[] {
 describe('ShopSite built-in output policy (issue #17 J)', () => {
   it('is versioned and immutable', () => {
     expect(SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION).toBe('shopsite-built-in-output-policy-v1');
-    // The policy array must be a frozen readonly structure.
-    expect(Object.isFrozen(SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1)).toBe(false);
+    // The policy array AND every rule object must be runtime-frozen: an
+    // in-process mutation could otherwise change defaults/membership while
+    // provenance records only the version string.
+    expect(Object.isFrozen(SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1)).toBe(true);
+    for (const rule of SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1) {
+      expect(Object.isFrozen(rule)).toBe(true);
+    }
   });
 
   it('enumerates every governed built-in field with a rule', () => {
@@ -122,7 +126,7 @@ describe('ShopSite built-in output policy (issue #17 J)', () => {
     }
     const emitted = emittedElements(xml);
     for (const element of SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1) {
-      expect(BUILT_IN_OUTPUT_POLICY_ELEMENTS.has(element.element)).toBe(true);
+      expect(isBuiltInOutputField(element.element)).toBe(true);
     }
     // No ProductField element is governed by the built-in policy.
     for (const element of emitted) {

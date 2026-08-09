@@ -46,9 +46,16 @@ export interface BuiltInFieldOutputRule {
 
 /**
  * Immutable v1 policy. Field order matches the denormalizer's emission order
- * (deterministic output bytes).
+ * (deterministic output bytes). Deep-frozen at runtime: the array and every
+ * rule object are sealed so no in-process mutation can change defaults or
+ * membership while provenance records the policy version string.
  */
-export const SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1: readonly BuiltInFieldOutputRule[] = [
+function deepFreezeRules<T extends { element: string }>(rules: T[]): readonly T[] {
+  for (const rule of rules) Object.freeze(rule);
+  return Object.freeze(rules);
+}
+
+export const SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1: readonly BuiltInFieldOutputRule[] = deepFreezeRules([
   { element: 'Name', encoding: 'text', omission: 'always', cardinality: 'one' },
   { element: 'FileName', encoding: 'text', omission: 'always', cardinality: 'one' },
   { element: 'Price', encoding: 'text', omission: 'omit-empty', cardinality: 'zero-or-one' },
@@ -68,10 +75,10 @@ export const SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1: readonly BuiltInFieldOutputRul
     omission: 'omit-empty' as const,
     cardinality: 'zero-or-one' as const,
   })),
-];
+]);
 
-/** Every element governed by the policy (for membership checks). */
-export const BUILT_IN_OUTPUT_POLICY_ELEMENTS: ReadonlySet<string> = new Set(
+/** Every element governed by the policy (for membership checks). Not exported: a Set's mutators cannot be frozen, so it stays module-private. */
+const BUILT_IN_OUTPUT_POLICY_ELEMENTS: ReadonlySet<string> = new Set(
   SHOP_SITE_BUILT_IN_OUTPUT_POLICY_V1.map(rule => rule.element),
 );
 

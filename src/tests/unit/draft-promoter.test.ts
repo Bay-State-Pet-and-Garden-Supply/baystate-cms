@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { createHash } from 'node:crypto';
 import { unlinkSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'path';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
@@ -59,6 +60,26 @@ describe('Draft Promoter Service', () => {
     );
   }
 
+  /** Activate a verified import containing one page; returns its verified ID. */
+  function activateVerifiedPage(pageName: string, suffix: string): string {
+    const key = `vp-${suffix}-${pageName.replace(/\s+/g, '-').toLowerCase()}`;
+    activatePageImportFromRecords({
+      workspaceId: wsId,
+      sourceHash: createHash('sha256').update(key).digest('hex'),
+      parserFormatVersion: 'pages-xml-1',
+      records: [{
+        identity: { kind: 'exported_guid', key, status: 'verified' },
+        name: pageName,
+        parentRef: null,
+        availability: 'available',
+      }],
+      activatedBy: 'test',
+    });
+    const verified = listVerifiedPageOptions(wsId).find(p => p.name === pageName);
+    if (!verified) throw new Error(`verified page not created: ${pageName}`);
+    return verified.id;
+  }
+
   function seedAcceptedCategoryProposal(db: any, sku: string, pageName: string, runOverride?: string) {
     const runId = runOverride ?? `run-${sku}`;
     const now = new Date().toISOString();
@@ -78,18 +99,15 @@ describe('Draft Promoter Service', () => {
       [JSON.stringify(curationData), item.id],
     );
 
-    const pageId = `page-${pageName.replace(/\s+/g, '-').toLowerCase()}`;
-    db.run(
-      `INSERT OR IGNORE INTO page_index (id, name, file_name, page_hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [pageId, pageName, `${pageName.replace(/\s+/g, '-').toLowerCase()}.html`, 'dummy-hash', now, now]
-    );
+    // The proposal must reference a VERIFIED page from the ACTIVE import — an
+    // unverified page can no longer satisfy the mandatory Pages gate.
+    const pageId = activateVerifiedPage(pageName, sku);
 
     const proposalId = `prop-${sku}-${pageName.replace(/\s+/g, '-').toLowerCase()}`;
     db.run(
       `INSERT OR IGNORE INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [proposalId, runId, sku, 'category_page', pageName, JSON.stringify({ pageId, pageName }), 1.0, 'accepted', now]
+      [proposalId, runId, sku, 'category_page', pageId, JSON.stringify({ pageId, pageName }), 1.0, 'accepted', now]
     );
     db.run(
       `INSERT OR IGNORE INTO classification_proposal_decisions
@@ -828,11 +846,7 @@ describe('Draft Promoter Service', () => {
       'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
       [JSON.stringify({ ...curationData, classificationRunId: runId }), item.id],
     );
-    db.run(
-      `INSERT OR IGNORE INTO page_index (id, name, file_name, page_hash, created_at, updated_at)
-       VALUES ('page-toys', 'Toys', 'toys.html', 'dummy-hash', ?, ?)`,
-      [now, now],
-    );
+    const toysPageId = activateVerifiedPage('Toys', 'type-corrected');
     db.run(
       `INSERT INTO classification_proposals
        (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
@@ -844,8 +858,8 @@ describe('Draft Promoter Service', () => {
       `INSERT INTO classification_proposals
        (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
         confidence, status, created_at)
-       VALUES ('proposal-page-corrected', ?, ?, 'category_page', 'Toys', ?, 1.0, 'accepted', ?)`,
-      [runId, item.upc, JSON.stringify({ pageId: 'page-toys', pageName: 'Toys' }), now],
+       VALUES ('proposal-page-corrected', ?, ?, 'category_page', ?, ?, 1.0, 'accepted', ?)`,
+      [runId, item.upc, toysPageId, JSON.stringify({ pageId: toysPageId, pageName: 'Toys' }), now],
     );
     db.run(
       `INSERT INTO classification_proposal_decisions
@@ -932,17 +946,13 @@ describe('Draft Promoter Service', () => {
          VALUES (?, ?, ?, 'primary_product_type', 'dog-food-dry', ?, 0.9, 'accepted', ?)`,
         [proposalId, runId, item.upc, JSON.stringify({ productTypeId: 'dog-food-dry', matchedWords: ['dog', 'kibble'] }), now],
       );
-      db.run(
-        `INSERT OR IGNORE INTO page_index (id, name, file_name, page_hash, created_at, updated_at)
-         VALUES ('page-toys', 'Toys', 'toys.html', 'dummy-hash', ?, ?)`,
-        [now, now],
-      );
+      const toysPageId = activateVerifiedPage('Toys', `history-${scenario.suffix}`);
       db.run(
         `INSERT INTO classification_proposals
          (id, run_id, product_sku, proposal_type, target_id, proposed_value_json,
           confidence, status, created_at)
-         VALUES (?, ?, ?, 'category_page', 'Toys', ?, 1.0, 'accepted', ?)`,
-        [`proposal-page-history-${scenario.suffix}`, runId, item.upc, JSON.stringify({ pageId: 'page-toys', pageName: 'Toys' }), now],
+         VALUES (?, ?, ?, 'category_page', ?, ?, 1.0, 'accepted', ?)`,
+        [`proposal-page-history-${scenario.suffix}`, runId, item.upc, toysPageId, JSON.stringify({ pageId: toysPageId, pageName: 'Toys' }), now],
       );
       db.run(
         `INSERT INTO classification_proposal_decisions
@@ -996,7 +1006,8 @@ describe('Draft Promoter Service', () => {
     const db = getDb();
     const now = new Date().toISOString();
     seedAcceptedCategoryProposal(db, item.upc, 'Toys');
-    assignProductToPageId(item.upc, 'page-toys', 'Toys');
+    const toysId = listVerifiedPageOptions(wsId).find(p => p.name === 'Toys')!.id;
+    assignProductToPageId(item.upc, toysId, 'Toys');
     const runId = 'run-type-foreign';
     db.run(
       `INSERT INTO classification_runs
@@ -1234,6 +1245,7 @@ describe('Draft Promoter Service', () => {
       'LEGACY-EMB-001',
     );
     const db = getDb();
+    const legacyToysPageId = activateVerifiedPage('Toys', 'legacy-emb');
     // No classificationRunId — a genuine legacy item. Embedded proposals in the
     // curation JSON are the only classification input.
     const legacyProposals = [
@@ -1276,7 +1288,7 @@ describe('Draft Promoter Service', () => {
         id: 'legacy-page',
         proposalType: 'category_page',
         targetId: 'Toys',
-        proposedValue: { pageId: 'page-toys', pageName: 'Toys' },
+        proposedValue: { pageId: legacyToysPageId, pageName: 'Toys' },
         status: 'accepted',
       },
     ];
@@ -1389,7 +1401,7 @@ describe('Draft Promoter Service', () => {
     expect(draft.shopsite.preserved.unknownElements.ProductOnPages).toContain('Verified Food');
   });
 
-  it('skips (non-blocking) an accepted page proposal whose identity is NOT in the active import', async () => {
+  it('BLOCKS promotion when the only accepted page proposal is NOT in the active import (fail-closed page gate)', async () => {
     const batch = createBatch({ workspaceId: wsId, name: 'Unverified Pages', fileName: 'up.xlsx', totalItems: 1 });
     const items = insertItems(batch.id, [{ upc: '999000000002', name: 'Unverified Product', price: '$6.00', rowNumber: 1, brandHint: 'Test Brand' }]);
     const item = items[0];
@@ -1446,19 +1458,119 @@ describe('Draft Promoter Service', () => {
     );
 
     const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    // Unverified page identity is a visible, non-blocking skip.
+    // Fail closed: an unverified page identity can NEVER satisfy the mandatory
+    // Pages gate — the product must not promote with zero verified page
+    // assignments.
+    expect(result.failures).toHaveLength(1);
+    expect(result.count).toBe(0);
+    expect(result.failures[0].error).toContain('No verified page assignments exist');
+    const changeSetItem = db.query(
+      'SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1',
+    ).get(item.upc) as { draft_json: string } | null;
+    expect(changeSetItem).toBeNull();
+  });
+
+  it('BLOCKS promotion when the only page input is an unverified/name-only manual DB row (fail-closed page gate)', async () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'NameOnly Pages', fileName: 'np2.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [{ upc: '999000000004', name: 'NameOnly Product', price: '$8.00', rowNumber: 1, brandHint: 'Test Brand' }]);
+    const item = items[0];
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'NameOnly Product',
+      brand: 'Test Brand',
+      description: 'Promotion name-only manual row test.',
+      bulletPoints: [],
+      primaryImage: 'products/999000000004/images/primary.jpg',
+      additionalImages: [],
+      price: '$8.00',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: `https://example.test/999000000004`,
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const db = getDb();
+    db.query("UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(
+      JSON.stringify(extractionData),
+      JSON.stringify({ curatedTitle: 'NameOnly Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, curatedAt: new Date().toISOString(), curationMethod: 'auto' }),
+      item.id,
+    );
+    // Name-only manual assignment: no pageId (or an unverified one) — it must
+    // never satisfy the mandatory Pages gate.
+    db.run(
+      'INSERT INTO product_pages (product_sku, page_name, page_id, created_at) VALUES (?, ?, NULL, ?)',
+      [item.upc, 'Legacy Name-Only Row', new Date().toISOString()],
+    );
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
+    expect(result.failures).toHaveLength(1);
+    expect(result.count).toBe(0);
+    expect(result.failures[0].error).toContain('No verified page assignments exist');
+  });
+
+  it('promotes with a MIXED verified + unverified accepted set and serializes ONLY the verified page', async () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Mixed Pages', fileName: 'mx.xlsx', totalItems: 1 });
+    const items = insertItems(batch.id, [{ upc: '999000000005', name: 'Mixed Product', price: '$9.00', rowNumber: 1, brandHint: 'Test Brand' }]);
+    const item = items[0];
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'Mixed Product',
+      brand: 'Test Brand',
+      description: 'Promotion mixed verified/unverified test.',
+      bulletPoints: [],
+      primaryImage: 'products/999000000005/images/primary.jpg',
+      additionalImages: [],
+      price: '$9.00',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: `https://example.test/999000000005`,
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const db = getDb();
+    db.query("UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?").run(
+      JSON.stringify(extractionData),
+      JSON.stringify({ curatedTitle: 'Mixed Product', titleSource: 'web', suggestedPages: [], suggestedProductType: null, curatedAt: new Date().toISOString(), curationMethod: 'auto' }),
+      item.id,
+    );
+
+    seedAcceptedCategoryProposal(db, item.upc, 'Verified Only');
+    // Second accepted proposal referencing a bogus (unverified) page.
+    const now = new Date().toISOString();
+    const runId = `run-${item.upc}`;
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, ?, 'category_page', ?, ?, 1.0, 'accepted', ?)`,
+      ['prop-mixed-bogus', runId, item.upc, 'bogus-mixed', JSON.stringify({ pageId: 'bogus-mixed', pageName: 'Bogus Mixed' }), now],
+    );
+    db.run(
+      `INSERT OR IGNORE INTO classification_proposal_decisions
+       (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      ['decision-mixed-bogus', 'prop-mixed-bogus', 'mixed-bogus-token', now],
+    );
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
       'SELECT draft_json FROM change_set_items WHERE sku = ? LIMIT 1',
     ).get(item.upc) as { draft_json: string };
     const draft = JSON.parse(changeSetItem.draft_json);
-    const pagesXml = draft.shopsite?.preserved?.unknownElements?.ProductOnPages;
-    // Bogus page must never be serialized into ProductOnPages.
-    expect(pagesXml ?? '').not.toContain('Bogus Page');
+    const pagesXml = draft.shopsite?.preserved?.unknownElements?.ProductOnPages ?? '';
+    expect(pagesXml).toContain('Verified Only');
+    expect(pagesXml).not.toContain('Bogus Mixed');
   });
 
-  it('skips (non-blocking) a verified page whose proposal has no display name — never serializes the Page ID as a name', async () => {
+  it('resolves the verified page display name from the ACTIVE import when the proposal lacks one — never serializes the Page ID as a name', async () => {
     // Build a verified page in the active import, then seed an accepted
     // category_page proposal whose value carries only the stable Page ID
     // (no pageName). The Page ID must never be serialized as a page name.
@@ -1534,7 +1646,9 @@ describe('Draft Promoter Service', () => {
     );
 
     const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [item.id]);
-    // A nameless verified page is a visible, non-blocking skip.
+    // A verified Page ID is a real assignment: the verified catalog is the
+    // display-name authority, so the proposal resolves to the catalog name
+    // even though the proposal value carried no pageName.
     expect(result.failures).toHaveLength(0);
     expect(result.count).toBe(1);
     const changeSetItem = db.query(
@@ -1544,7 +1658,7 @@ describe('Draft Promoter Service', () => {
     const pagesXml = draft.shopsite?.preserved?.unknownElements?.ProductOnPages;
     // The Page ID must never be serialized as a page name.
     expect(pagesXml ?? '').not.toContain(verifiedNameless!.id);
-    // And without a display name no page content is written at all.
-    expect(pagesXml ?? '').toBe('');
+    // The verified catalog's display name IS serialized.
+    expect(pagesXml ?? '').toContain('Nameless Page');
   });
 });
