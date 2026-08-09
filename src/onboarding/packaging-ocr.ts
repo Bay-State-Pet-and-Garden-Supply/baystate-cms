@@ -392,6 +392,17 @@ export async function extractPackagingOcr(
   const auditCtx = params.modelCall ?? null;
   const runBound = Boolean(params.snapshot);
 
+  // Boundary-level parity with the cloud VLM transport: a supplied audit
+  // context WITHOUT a runtime snapshot cannot be validated against a frozen
+  // plan — fail closed before any config resolution or transport. Correctness
+  // of the exported single transport entry point cannot depend on every
+  // caller passing both arguments.
+  if (!runBound && auditCtx) {
+    throw new Error(
+      'Local VLM call supplied a model-call audit context without a runtime snapshot.',
+    );
+  }
+
   // Resolve the local VLM route. Run-bound calls MUST use the frozen route
   // captured in the snapshot plan (never mutable `ollama_vlm` settings) and
   // MUST pass plan compatibility. A run-bound call without a frozen route or

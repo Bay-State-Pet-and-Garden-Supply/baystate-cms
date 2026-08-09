@@ -1533,4 +1533,38 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('policy_denied');
   });
+
+  test('run-bound local VLM OCR rejects a model-call context without a snapshot (pass 4d)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { extractPackagingOcr } = await import('../../onboarding/packaging-ocr');
+    const run = createRun('ws', 'SKU-LVLM-NOSNAP', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'c7' });
+    let fetches = 0;
+    const modelFetch = (async () => { fetches += 1; return new Response(JSON.stringify({ message: { content: JSON.stringify({ productName: 'Bypass' }) } }), { status: 200 }); }) as unknown as typeof fetch;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lvlm-nosnap-'));
+    const imgPath = path.join(tmpDir, 'img.bin');
+    fs.writeFileSync(imgPath, Buffer.alloc(2048, 0x64));
+
+    // modelCall WITHOUT snapshot must fail closed before any transport or
+    // audit row (mirrors the cloud-VLM boundary parity).
+    await expect(extractPackagingOcr({
+      imageUrl: 'https://example.com/img.jpg',
+      imageLocalPath: 'img.bin',
+      workspacePath: tmpDir,
+      sku: 'SKU-LVLM-NOSNAP',
+      modelFetchFn: modelFetch,
+      modelCall: {
+        runId: run.id,
+        snapshotHash: 'p'.repeat(64),
+        stage: 'evidence_extraction',
+        operation: 'evidence_extraction',
+        attempt: 1,
+        promptTemplateVersion: 'evidence-extraction-prompt-v1',
+        ruleVersion: 'evidence-extraction-rules-v1',
+      },
+    })).rejects.toThrow(/audit context without a runtime snapshot/i);
+    expect(fetches).toBe(0);
+    expect(getModelCallsByRun(run.id)).toHaveLength(0);
+  });
 });
