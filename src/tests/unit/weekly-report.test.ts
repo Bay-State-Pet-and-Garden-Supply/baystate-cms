@@ -155,6 +155,40 @@ describe('getWeeklyReportItems', () => {
       bootstrapStatus: 'complete',
       baselineCommit: null,
     });
+    // One ELIGIBLE run (v2 snapshot with an enabled target, terminal status)
+    // but ZERO proposals: decision-eligible runs = 0, eligible runs = 1.
+    // The pre-pass-7b display code returned fmtPercent(0/1) = '0.0%' here — a
+    // fabricated coverage zero; the honest display is 'n/a'. This fixture is
+    // the exact regression the pass-7b fix guards.
+    const hash = 'a'.repeat(64);
+    getDb().run(
+      `INSERT INTO classification_config_snapshots
+       (id, workspace_id, snapshot_hash, config_json, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        'snap-1',
+        'ws-empty',
+        hash,
+        JSON.stringify({
+          schemaVersion: 2,
+          snapshotHash: hash,
+          config: { curationTargets: [{ id: 'pt-food', enabled: true }] },
+        }),
+        new Date().toISOString(),
+      ],
+    );
+    getDb().run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, source_kind, product_sku, config_snapshot_id, config_snapshot_hash, status, started_at, completed_at)
+       VALUES (?, ?, 'onboarding', 'SKU-1', 'snap-1', ?, 'completed', ?, ?)`,
+      [
+        'run-1',
+        'ws-empty',
+        hash,
+        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      ],
+    );
     const { Hono } = await import('hono');
     const { default: onboardingRoutes } = await import('../../server/routes/onboarding-routes');
     const app = new Hono();
@@ -164,10 +198,11 @@ describe('getWeeklyReportItems', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.qualitySummary).not.toBeNull();
-    expect(body.qualitySummary.hasGroups).toBe(false);
     const coverageRow = body.qualitySummary.summaryRows.find((r: any) => r.label === 'Coverage');
-    // Honest n/a for an empty window — the misleading 0.0% coverage display is
-    // the exact bug this guards against.
+    // Honest n/a when an eligible run produced no decision-eligible proposal —
+    // the old display returned the fabricated 0.0% for exactly this fixture
+    // (eligibleRuns=1, decisionEligibleRuns=0); the pass-7b fix makes it 'n/a'.
     expect(coverageRow.value).toBe('n/a');
+    expect(body.qualitySummary.warnings.some((w: string) => /decision-eligible proposal/.test(w))).toBe(true);
   });
 });
