@@ -42,8 +42,8 @@ const SAMPLE_TITLE_CASES: TitleEvalCase[] = [
 
 // Representative frozen VLM OCR cases for packaging experiment
 const SAMPLE_VLM_CASES = [
-  { id: 'v1', imagePath: '/pkg/woof.jpg', expectedUpc: '850067859598', expectedFields: { brand: 'Woof', name: 'Pupsicle Treat', weight: '2.64oz' } },
-  { id: 'v2', imagePath: '/pkg/purina.jpg', expectedUpc: '038100130548', expectedFields: { brand: 'Purina Pro Plan', name: 'Adult Salmon', weight: '30lb' } },
+  { id: 'v1', imagePath: 'src/tests/fixtures/pkg/woof.jpg', expectedUpc: '850067859598', expectedFields: { brand: 'Woof', name: 'Pupsicle Treat', weight: '2.64oz' } },
+  { id: 'v2', imagePath: 'src/tests/fixtures/pkg/purina.jpg', expectedUpc: '038100130548', expectedFields: { brand: 'Purina Pro Plan', name: 'Adult Salmon', weight: '30lb' } },
 ];
 
 // Minimal valid 1x1 transparent PNG base64 payload for smoke/dry-run mode
@@ -82,7 +82,7 @@ async function runModelEval(options: ModelEvalOptions): Promise<{
         model: options.model,
         messages: [
           { role: 'system', content: options.systemPrompt ?? 'You are a helpful assistant.' },
-          { role: 'user', content: prompt },
+          { role: 'user', content: options.prompt },
         ],
         temperature: 0.1,
       }),
@@ -142,6 +142,16 @@ export async function runBenchmark(models: string[], tasks: string[], options: R
     /* ok if db already initialized */
   }
 
+  // Fail fast in qualify mode if VLM image assets are missing on disk
+  if (mode === 'qualify') {
+    const missing = SAMPLE_VLM_CASES.filter((c) => !existsSync(c.imagePath));
+    if (missing.length > 0) {
+      throw new Error(
+        `Qualification dataset invalid: ${missing.length} VLM image(s) missing on disk (${missing.map((m) => m.imagePath).join(', ')}). Run with --smoke for dry-run testing.`
+      );
+    }
+  }
+
   // Resolve provider credentials from DB or environment
   const deepseekCred = getApiKey('deepseek')?.api_key || process.env.DEEPSEEK_API_KEY || '';
   const openaiCred = getApiKey('openai')?.api_key || process.env.OPENAI_API_KEY || '';
@@ -150,15 +160,12 @@ export async function runBenchmark(models: string[], tasks: string[], options: R
   const runResults = new Map<string, ReturnType<typeof computeEvalRunResult>>();
 
   for (const model of models) {
-    // Reuse model registry provider lookup, falling back to string inspection
+    // Require explicit registration in model registry
     const profile = getModelProfile(model);
-    const provider = (profile?.provider ?? (
-      model.includes('deepseek')
-        ? 'deepseek'
-        : model.includes('gpt')
-        ? 'openai'
-        : 'ollama'
-    )) as 'ollama' | 'deepseek' | 'openai';
+    if (!profile) {
+      throw new Error(`Benchmark model "${model}" is not registered in model registry.`);
+    }
+    const provider = profile.provider as 'ollama' | 'deepseek' | 'openai';
 
     const baseUrl = provider === 'deepseek'
       ? 'https://api.deepseek.com'
@@ -306,24 +313,6 @@ export async function runBenchmark(models: string[], tasks: string[], options: R
 
   for (const c of SAMPLE_VLM_CASES) {
     const imageExists = existsSync(c.imagePath);
-
-    if (!imageExists) {
-      if (mode === 'qualify') {
-        console.warn(`[VLM Benchmark] VLM case ${c.id} invalid: source image missing at ${c.imagePath}`);
-        vlmBaselinePreds.push({
-          caseId: c.id,
-          extractedUpc: '',
-          extractedFields: { brand: '', name: '', weight: '' },
-        });
-        vlmCandidatePreds.push({
-          caseId: c.id,
-          extractedUpc: '',
-          extractedFields: { brand: '', name: '', weight: '' },
-        });
-        continue;
-      }
-    }
-
     const imagePayload = imageExists
       ? readFileSync(c.imagePath).toString('base64')
       : SMOKE_EVAL_PNG_BASE64;
