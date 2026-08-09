@@ -1455,4 +1455,82 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
     expect(rows[0].provider).toBe('ollama');
     expect(rows[0].locality).toBe('local');
   });
+
+  test('run-bound local VLM OCR with a schema-v1 snapshot fails closed before transport (pass 4c)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { extractPackagingOcr } = await import('../../onboarding/packaging-ocr');
+    const run = createRun('ws', 'SKU-LVLM-V1', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'c5' });
+    const snapshotHash = 'n'.repeat(64);
+    let fetches = 0;
+    const modelFetch = (async () => { fetches += 1; return new Response(JSON.stringify({ message: { content: JSON.stringify({ productName: 'Bypass' }) } }), { status: 200 }); }) as unknown as typeof fetch;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lvlm-v1-'));
+    const imgPath = path.join(tmpDir, 'img.bin');
+    fs.writeFileSync(imgPath, Buffer.alloc(2048, 0x64));
+
+    // Schema-v1 snapshot (no frozen plan) + forged context/route: must fail
+    // closed at plan compatibility BEFORE any transport.
+    await expect(extractPackagingOcr({
+      imageUrl: 'https://example.com/img.jpg',
+      imageLocalPath: 'img.bin',
+      workspacePath: tmpDir,
+      sku: 'SKU-LVLM-V1',
+      modelFetchFn: modelFetch,
+      frozenVlmRoute: { baseUrl: 'http://127.0.0.1:11434', model: 'qwen2.5vl:latest' },
+      modelCall: {
+        runId: run.id,
+        snapshotHash,
+        stage: 'evidence_extraction',
+        operation: 'evidence_extraction',
+        attempt: 1,
+        promptTemplateVersion: 'evidence-extraction-prompt-v1',
+        ruleVersion: 'evidence-extraction-rules-v1',
+      },
+      snapshot: { schemaVersion: 1, snapshotHash } as any,
+    })).rejects.toThrow(/Model plan incompatible/i);
+    expect(fetches).toBe(0);
+    expect(getModelCallsByRun(run.id)).toHaveLength(0);
+  });
+
+  test('run-bound local VLM OCR rejects a forged loopback route not in the frozen plan (pass 4c)', async () => {
+    const { getDb } = await import('../../db/connection');
+    const { createRun } = await import('../../db/repositories/classification-run-repo');
+    const { getModelCallsByRun } = await import('../../db/repositories/classification-model-call-repo');
+    const { extractPackagingOcr } = await import('../../onboarding/packaging-ocr');
+    const run = createRun('ws', 'SKU-LVLM-FORGED', null, null, { sourceKind: 'catalog_product', sourceProductHash: 'c6' });
+    const snapshotHash = 'o'.repeat(64);
+    let fetches = 0;
+    const modelFetch = (async () => { fetches += 1; return new Response(JSON.stringify({ message: { content: JSON.stringify({ productName: 'Bypass' }) } }), { status: 200 }); }) as unknown as typeof fetch;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lvlm-forged-'));
+    const imgPath = path.join(tmpDir, 'img.bin');
+    fs.writeFileSync(imgPath, Buffer.alloc(2048, 0x64));
+
+    // Plan freezes 127.0.0.1:11888/frozen-at-build; caller supplies a
+    // different (also loopback) route + forged digest: must be denied with a
+    // policy_denied row and ZERO transport.
+    const result = await extractPackagingOcr({
+      imageUrl: 'https://example.com/img.jpg',
+      imageLocalPath: 'img.bin',
+      workspacePath: tmpDir,
+      sku: 'SKU-LVLM-FORGED',
+      modelFetchFn: modelFetch,
+      frozenVlmRoute: { baseUrl: 'http://127.0.0.1:19999', model: 'forged-not-in-plan' },
+      modelCall: {
+        runId: run.id,
+        snapshotHash,
+        stage: 'evidence_extraction',
+        operation: 'evidence_extraction',
+        attempt: 1,
+        promptTemplateVersion: 'evidence-extraction-prompt-v1',
+        ruleVersion: 'evidence-extraction-rules-v1',
+      },
+      snapshot: compatibleSnapshot(snapshotHash, { baseUrl: 'http://127.0.0.1:11888', model: 'frozen-at-build' }),
+    });
+    expect(result).toBeNull();
+    expect(fetches).toBe(0);
+    const rows = getModelCallsByRun(run.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('policy_denied');
+  });
 });

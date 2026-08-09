@@ -20,6 +20,10 @@ import {
   type ModelCallContext,
 } from '../classification/model-operation-registry';
 import {
+  assertModelPlanCompatible,
+  getModelExecutionPlanEntry,
+} from '../classification/runtime-snapshot';
+import {
   insertModelCallStart,
   completeModelCall,
   recordTerminalPreflight,
@@ -402,20 +406,42 @@ export async function extractPackagingOcr(
         'Run-bound local VLM call without a model-call audit context (no compatible frozen plan).',
       );
     }
-    const frozen = params.frozenVlmRoute ?? null;
-    if (!frozen) {
+    // The single transport entry point must bind to the snapshot itself:
+    // assert plan compatibility (schema-v2, digests, entry, versions,
+    // context) BEFORE any transport, then derive the route and the audit
+    // digest from the frozen plan entry — caller-supplied route/digest
+    // values are never trusted for run-bound calls.
+    assertModelPlanCompatible(params.snapshot, 'evidence_extraction', auditCtx);
+    const planEntry = getModelExecutionPlanEntry(params.snapshot, 'evidence_extraction');
+    const planDigest = params.snapshot?.modelExecutionPlan?.digest ?? '';
+    const frozen = planEntry?.localVlmBaseUrl
+      ? { baseUrl: planEntry.localVlmBaseUrl, model: planEntry.localVlmModel ?? '' }
+      : null;
+    if (!frozen || !frozen.model) {
       recordTerminalPreflight(
         auditCtx,
-        params.modelPolicyDigest ?? '',
+        planDigest,
         MODEL_CALL_STATUS.policyDenied,
         'Local VLM route denied: no frozen local VLM route in the run snapshot plan.',
+      );
+      return null;
+    }
+    // A caller-supplied route that disagrees with the frozen plan entry is a
+    // tampering signal — deny rather than trust the caller.
+    const supplied = params.frozenVlmRoute ?? null;
+    if (supplied && (supplied.baseUrl !== frozen.baseUrl || supplied.model !== frozen.model)) {
+      recordTerminalPreflight(
+        auditCtx,
+        planDigest,
+        MODEL_CALL_STATUS.policyDenied,
+        'Local VLM route denied: supplied route does not match the frozen plan entry.',
       );
       return null;
     }
     if (!isLoopbackBaseUrl(frozen.baseUrl)) {
       recordTerminalPreflight(
         auditCtx,
-        params.modelPolicyDigest ?? '',
+        planDigest,
         MODEL_CALL_STATUS.policyDenied,
         `Local VLM route denied: frozen base URL ${redactImageUrl(frozen.baseUrl)} is not loopback.`,
       );
@@ -447,7 +473,7 @@ export async function extractPackagingOcr(
       model: vlmConfig?.model ?? 'unknown',
       locality: routeLocality ?? null,
       snapshotHash: auditCtx.snapshotHash,
-      modelPolicyDigest: params.modelPolicyDigest ?? '',
+      modelPolicyDigest: params.snapshot?.modelExecutionPlan?.digest ?? params.modelPolicyDigest ?? '',
       promptTemplateVersion: auditCtx.promptTemplateVersion,
       ruleVersion: auditCtx.ruleVersion,
       systemPromptHash: hashes.systemPromptHash,
