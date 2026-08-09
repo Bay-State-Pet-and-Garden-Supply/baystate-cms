@@ -970,12 +970,15 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
   }
 
   // A minimal schema-v2 runtime snapshot carrying a compatible frozen plan.
-  function compatibleSnapshot(snapshotHash: string): any {
+  // `localVlm` (optional) freezes the local VLM endpoint into the
+  // evidence_extraction plan entry so run-bound local VLM calls have a
+  // loopback-verified route to use.
+  function compatibleSnapshot(snapshotHash: string, localVlm?: { baseUrl: string; model: string }): any {
     // Build a REAL compatible frozen plan + rule versions so content digests
     // match the registry's deterministic digest computation (the strengthened
     // plan-compat check recomputes and compares digests).
     const view = localView(snapshotHash);
-    const plan = buildModelExecutionPlan(view);
+    const plan = buildModelExecutionPlan(view, localVlm ?? null);
     const rules = buildRuntimeRuleVersions();
     return {
       schemaVersion: 2,
@@ -1431,6 +1434,7 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
       workspacePath: tmpDir,
       sku: 'SKU-LVLM',
       modelFetchFn: modelFetch,
+      frozenVlmRoute: { baseUrl: 'http://127.0.0.1:11434', model: 'qwen2.5vl:latest' },
       modelCall: {
         runId: run.id,
         snapshotHash,
@@ -1440,7 +1444,7 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
         promptTemplateVersion: 'evidence-extraction-prompt-v1',
         ruleVersion: 'evidence-extraction-rules-v1',
       },
-      snapshot: compatibleSnapshot(snapshotHash),
+      snapshot: compatibleSnapshot(snapshotHash, { baseUrl: 'http://127.0.0.1:11434', model: 'qwen2.5vl:latest' }),
     });
     expect(result).not.toBeNull();
     const callIds = (result!.metadata as any)?.modelCallIds as string[] | undefined;
