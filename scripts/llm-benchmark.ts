@@ -8,7 +8,8 @@
  * Usage:
  *   bun run scripts/llm-benchmark.ts \
  *     --models gemma4:12b-mlx,qwen3.5:9b,ministral-3:8b,deepseek-v4-flash \
- *     --tasks brand_inference,product_name_consolidation
+ *     --tasks brand_inference,product_name_consolidation \
+ *     --qualify (or --smoke)
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -19,6 +20,7 @@ import { compareModelRuns, formatComparisonMarkdown } from '../src/benchmarks/mo
 import { runVlmExperiment } from '../src/benchmarks/vlm-experiment';
 import { callVlm } from '../src/onboarding/vlm-client';
 import { getApiKey } from '../src/db/repositories/api-key-repo';
+import { getModelProfile } from '../src/ai/model-registry';
 import { initDb } from '../src/db/connection';
 import { runMigrations } from '../src/db/migrations';
 
@@ -44,8 +46,8 @@ const SAMPLE_VLM_CASES = [
   { id: 'v2', imagePath: '/pkg/purina.jpg', expectedUpc: '038100130548', expectedFields: { brand: 'Purina Pro Plan', name: 'Adult Salmon', weight: '30lb' } },
 ];
 
-// Minimal valid 1x1 transparent PNG base64 payload for evaluation fallback
-const FALLBACK_EVAL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+// Minimal valid 1x1 transparent PNG base64 payload for smoke/dry-run mode
+const SMOKE_EVAL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
 interface ModelEvalOptions {
   provider: 'ollama' | 'deepseek' | 'openai';
@@ -80,7 +82,7 @@ async function runModelEval(options: ModelEvalOptions): Promise<{
         model: options.model,
         messages: [
           { role: 'system', content: options.systemPrompt ?? 'You are a helpful assistant.' },
-          { role: 'user', content: options.prompt },
+          { role: 'user', content: prompt },
         ],
         temperature: 0.1,
       }),
@@ -121,8 +123,15 @@ async function runModelEval(options: ModelEvalOptions): Promise<{
   }
 }
 
-export async function runBenchmark(models: string[], tasks: string[]) {
+export interface RunBenchmarkOptions {
+  mode?: 'qualify' | 'smoke';
+}
+
+export async function runBenchmark(models: string[], tasks: string[], options: RunBenchmarkOptions = {}) {
+  const mode = options.mode ?? 'qualify';
+
   console.log(`\n=== Starting Baystate Local-LLM Revision Real Bakeoff ===`);
+  console.log(`Mode: ${mode.toUpperCase()} (${mode === 'qualify' ? 'Hard image validation required' : 'Synthetic 1x1 image fallback allowed'})`);
   console.log(`Models: ${models.join(', ')}`);
   console.log(`Tasks: ${tasks.join(', ')}\n`);
 
@@ -141,11 +150,15 @@ export async function runBenchmark(models: string[], tasks: string[]) {
   const runResults = new Map<string, ReturnType<typeof computeEvalRunResult>>();
 
   for (const model of models) {
-    const provider = model.includes('deepseek')
-      ? 'deepseek'
-      : model.includes('gpt')
-      ? 'openai'
-      : 'ollama';
+    // Reuse model registry provider lookup, falling back to string inspection
+    const profile = getModelProfile(model);
+    const provider = (profile?.provider ?? (
+      model.includes('deepseek')
+        ? 'deepseek'
+        : model.includes('gpt')
+        ? 'openai'
+        : 'ollama'
+    )) as 'ollama' | 'deepseek' | 'openai';
 
     const baseUrl = provider === 'deepseek'
       ? 'https://api.deepseek.com'
@@ -292,9 +305,28 @@ export async function runBenchmark(models: string[], tasks: string[]) {
   const vlmCandidatePreds = [];
 
   for (const c of SAMPLE_VLM_CASES) {
-    const imagePayload = existsSync(c.imagePath)
+    const imageExists = existsSync(c.imagePath);
+
+    if (!imageExists) {
+      if (mode === 'qualify') {
+        console.warn(`[VLM Benchmark] VLM case ${c.id} invalid: source image missing at ${c.imagePath}`);
+        vlmBaselinePreds.push({
+          caseId: c.id,
+          extractedUpc: '',
+          extractedFields: { brand: '', name: '', weight: '' },
+        });
+        vlmCandidatePreds.push({
+          caseId: c.id,
+          extractedUpc: '',
+          extractedFields: { brand: '', name: '', weight: '' },
+        });
+        continue;
+      }
+    }
+
+    const imagePayload = imageExists
       ? readFileSync(c.imagePath).toString('base64')
-      : FALLBACK_EVAL_PNG_BASE64;
+      : SMOKE_EVAL_PNG_BASE64;
 
     const vlmPrompt = 'Extract the product UPC/GTIN barcode and core package fields (brand, product name, weight) into a JSON object.';
 
@@ -316,7 +348,6 @@ export async function runBenchmark(models: string[], tasks: string[]) {
         },
       });
     } catch {
-      // Raw failure: DO NOT substitute expected ground truth!
       vlmBaselinePreds.push({
         caseId: c.id,
         extractedUpc: '',
@@ -342,7 +373,6 @@ export async function runBenchmark(models: string[], tasks: string[]) {
         },
       });
     } catch {
-      // Raw failure: DO NOT substitute expected ground truth!
       vlmCandidatePreds.push({
         caseId: c.id,
         extractedUpc: '',
@@ -364,16 +394,21 @@ if (import.meta.main || process.argv[1]?.endsWith('llm-benchmark.ts')) {
   const args = process.argv.slice(2);
   let models = ['gemma4:12b-mlx', 'qwen3.5:9b', 'ministral-3:8b', 'deepseek-v4-flash'];
   let tasks = ['brand_inference', 'product_name_consolidation'];
+  let mode: 'qualify' | 'smoke' = 'qualify';
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--models' && args[i + 1]) {
       models = args[i + 1].split(',').map((s) => s.trim());
     } else if (args[i] === '--tasks' && args[i + 1]) {
       tasks = args[i + 1].split(',').map((s) => s.trim());
+    } else if (args[i] === '--smoke') {
+      mode = 'smoke';
+    } else if (args[i] === '--qualify') {
+      mode = 'qualify';
     }
   }
 
-  runBenchmark(models, tasks).catch((err) => {
+  runBenchmark(models, tasks, { mode }).catch((err) => {
     console.error('Benchmark execution error:', err);
     process.exit(1);
   });
