@@ -39,7 +39,7 @@ const PROMPT_RULE_VERSION = 'cohort-pages-v1';
 const cache = new Map<string, Promise<Map<string, CohortPageMemberResult>>>();
 
 function stableKey(params: CohortPageCoordinationParams): string {
-  let model = null;
+  let model: { provider: string; model: string } | null;
   try {
     const config = getLlmConfigForTask('category_page_assignment', {
       allowFallback: true,
