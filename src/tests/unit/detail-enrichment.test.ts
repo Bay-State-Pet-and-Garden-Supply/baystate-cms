@@ -484,6 +484,30 @@ describe('enrichProductDetails - alias matching', () => {
     expect(mat[0].value).toBe('Ceramic');
     expect(mat[0].matchedBy).toBe('alias');
   });
+
+  it('keeps an alias whose TEXT differs from its TARGET when the target is allowed (reviewer regression: resolveAlias searched alias texts and silently dropped these)', () => {
+    const result = enrichProductDetails({
+      evidenceText: 'handmade chicken flavor bowl',
+      aliases: [
+        { alias: 'chicken flavor', mapsTo: 'Chicken' },
+        { alias: 'dogs', mapsTo: 'Dog' },
+      ],
+      allowedValues: ['Chicken', 'Dog'],
+    });
+    const mat = result.filter(c => c.attributeId === 'material');
+    expect(mat.length).toBe(1);
+    expect(mat[0].value).toBe('Chicken');
+    expect(mat[0].matchedBy).toBe('alias');
+  });
+
+  it('still fails closed when an alias target is outside the allowed set (target match, not alias-text match)', () => {
+    const result = enrichProductDetails({
+      evidenceText: 'handmade chicken flavor bowl',
+      aliases: [{ alias: 'chicken flavor', mapsTo: 'Turkey' }],
+      allowedValues: ['Chicken'],
+    });
+    expect(result.filter(c => c.attributeId === 'material').length).toBe(0);
+  });
 });
 
 // ─── Empty / Edge Cases ────────────────────────────────────────────────────────

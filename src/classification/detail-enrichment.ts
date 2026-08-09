@@ -11,7 +11,7 @@
  * labels) require direct textual evidence and are never inferred.
  */
 import type { PackagingOcrData } from '../shared/schemas/onboarding';
-import { matchCanonicalValue, resolveAlias } from './controlled-value-identity';
+import { matchCanonicalValue } from './controlled-value-identity';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -146,9 +146,12 @@ function ocrOrKeyword(
         if (source.includes(alias.alias.toLowerCase())) {
           // The alias target must resolve to one exact canonical ID. When no
           // allowed set is provided the alias target itself is the canonical
-          // ID; otherwise a target outside the set fails closed.
+          // ID; otherwise a target outside the set (or ambiguous in it) fails
+          // closed. matchCanonicalValue matches the TARGET against the allowed
+          // values — resolveAlias would search alias texts, which silently
+          // drops valid aliases whose text differs from their target.
           const canonical = allowedValues
-            ? resolveAlias(alias.mapsTo, aliases, allowedValues)
+            ? matchCanonicalValue(alias.mapsTo, allowedValues)
             : alias.mapsTo;
           if (!canonical) continue;
           return [{
