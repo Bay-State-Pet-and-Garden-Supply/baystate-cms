@@ -1,9 +1,6 @@
-import { config } from 'dotenv';
 import { BrightDataScraperClient } from '../src/crawler/importers/brightdata-scraper.js';
 import { DatasetExporter } from '../src/crawler/dataset-exporter.js';
 import type { ScrapedProductEvidence } from '../src/crawler/corpus-schema.js';
-
-config();
 
 const CHEWY_TARGET_URLS = [
   'https://www.chewy.com/dp/102534', // Blue Buffalo Life Protection Dry Dog Food

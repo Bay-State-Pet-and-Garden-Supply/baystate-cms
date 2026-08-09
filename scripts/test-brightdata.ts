@@ -1,6 +1,3 @@
-import { config } from 'dotenv';
-config();
-
 async function checkAccount() {
   const apiKey = process.env.BRIGHT_DATA_API_KEY;
   if (!apiKey) return;
