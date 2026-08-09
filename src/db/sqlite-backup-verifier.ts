@@ -571,8 +571,13 @@ export function createSqliteBackup(
     } finally {
       fs.closeSync(vacTmpFd);
     }
-    fs.unlinkSync(vacuumTmp);
-    tempPaths.splice(tempPaths.indexOf(vacuumTmp), 1);
+    // The vacuum temp is deliberately NOT unlinked here: its inode must stay
+    // allocated for the whole operation so the quarantine/ownership inode
+    // checks below are reliable. On Linux tmpfs, an unlinked inode number is
+    // reused immediately by the next created file, so a foreign file swapped
+    // into the backup path would land on the recorded inode and be mistaken
+    // for ours (deleted) or hide a replacement. The temp is unlinked on the
+    // success path (or by the failure-path temp cleanup).
 
     // TEST-ONLY injection point (never supplied by production callers): lets
     // a regression test deterministically race the manifest destination (a
@@ -657,9 +662,9 @@ export function createSqliteBackup(
     } finally {
       fs.closeSync(tmpFd);
     }
-    fs.unlinkSync(tmpManifest);
-    tempPaths.splice(tempPaths.indexOf(tmpManifest), 1);
     fs.chmodSync(manifestPath, 0o600);
+    // Same inode-allocated-until-success discipline as the vacuum temp: the
+    // manifest temp is unlinked only on success (or by failure-path cleanup).
 
     // TEST-ONLY injection: a foreign replacement at either published path
     // before the final ownership/content re-check.
@@ -716,6 +721,17 @@ export function createSqliteBackup(
         finalDb?.close();
       }
     }
+
+    // Success: the owned temp inodes are no longer needed (the published
+    // paths still reference them). Unlink here — never before the final
+    // checks — so a foreign file created during the operation can never
+    // reuse the recorded inode numbers (Linux tmpfs reuses freed inodes
+    // immediately, which would make the quarantine checks delete a foreign
+    // file or miss a replacement).
+    fs.unlinkSync(vacuumTmp);
+    tempPaths.splice(tempPaths.indexOf(vacuumTmp), 1);
+    fs.unlinkSync(tmpManifest);
+    tempPaths.splice(tempPaths.indexOf(tmpManifest), 1);
 
     // Success: remove our reservation marker via quarantine (never another
     // process's file) and close the descriptor.
