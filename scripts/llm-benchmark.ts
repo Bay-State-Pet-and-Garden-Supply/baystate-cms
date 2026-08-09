@@ -2,8 +2,8 @@
 /**
  * CLI Benchmark Runner for Local LLM Revision Bakeoff.
  *
- * Performs REAL model invocations against local Ollama and cloud providers
- * using frozen evaluation cases.
+ * Performs REAL model evaluation directly against local Ollama and cloud endpoints
+ * using frozen benchmark cases. Bypasses production task router and policy gateways.
  *
  * Usage:
  *   bun run scripts/llm-benchmark.ts \
@@ -11,14 +11,14 @@
  *     --tasks brand_inference,product_name_consolidation
  */
 
+import { existsSync, readFileSync } from 'node:fs';
 import { scoreBrandInference, type BrandEvalCase } from '../src/ai/evals/brand-scorer';
 import { scoreTitleConsolidation, type TitleEvalCase } from '../src/ai/evals/title-scorer';
 import { computeEvalRunResult, type SingleCaseEvalResult } from '../src/benchmarks/benchmark-runner';
 import { compareModelRuns, formatComparisonMarkdown } from '../src/benchmarks/model-comparison';
 import { runVlmExperiment } from '../src/benchmarks/vlm-experiment';
-import { callLlmForTask } from '../src/onboarding/llm-client';
 import { callVlm } from '../src/onboarding/vlm-client';
-import { upsertLlmTaskConfig, type LlmTask } from '../src/db/repositories/llm-task-config-repo';
+import { getApiKey } from '../src/db/repositories/api-key-repo';
 import { initDb } from '../src/db/connection';
 import { runMigrations } from '../src/db/migrations';
 
@@ -44,6 +44,83 @@ const SAMPLE_VLM_CASES = [
   { id: 'v2', imagePath: '/pkg/purina.jpg', expectedUpc: '038100130548', expectedFields: { brand: 'Purina Pro Plan', name: 'Adult Salmon', weight: '30lb' } },
 ];
 
+// Minimal valid 1x1 transparent PNG base64 payload for evaluation fallback
+const FALLBACK_EVAL_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+interface ModelEvalOptions {
+  provider: 'ollama' | 'deepseek' | 'openai';
+  model: string;
+  baseUrl: string;
+  apiKey: string;
+  prompt: string;
+  systemPrompt?: string;
+}
+
+/**
+ * Direct evaluation transport that calls model endpoints directly,
+ * bypassing production task configuration and policy gateways.
+ */
+async function runModelEval(options: ModelEvalOptions): Promise<{
+  content: string | null;
+  latencyMs: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  error?: string;
+}> {
+  const start = Date.now();
+  const timeoutMs = options.provider === 'ollama' ? 60000 : 30000;
+  try {
+    const response = await fetch(`${options.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${options.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: options.model,
+        messages: [
+          { role: 'system', content: options.systemPrompt ?? 'You are a helpful assistant.' },
+          { role: 'user', content: options.prompt },
+        ],
+        temperature: 0.1,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return {
+        content: null,
+        latencyMs: Date.now() - start,
+        promptTokens: null,
+        completionTokens: null,
+        error: `HTTP ${response.status}: ${text}`,
+      };
+    }
+
+    const data = (await response.json()) as {
+      choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+
+    const content = data.choices?.[0]?.message?.content?.trim() ?? null;
+    return {
+      content,
+      latencyMs: Date.now() - start,
+      promptTokens: data.usage?.prompt_tokens ?? null,
+      completionTokens: data.usage?.completion_tokens ?? null,
+    };
+  } catch (err) {
+    return {
+      content: null,
+      latencyMs: Date.now() - start,
+      promptTokens: null,
+      completionTokens: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export async function runBenchmark(models: string[], tasks: string[]) {
   console.log(`\n=== Starting Baystate Local-LLM Revision Real Bakeoff ===`);
   console.log(`Models: ${models.join(', ')}`);
@@ -56,6 +133,11 @@ export async function runBenchmark(models: string[], tasks: string[]) {
     /* ok if db already initialized */
   }
 
+  // Resolve provider credentials from DB or environment
+  const deepseekCred = getApiKey('deepseek')?.api_key || process.env.DEEPSEEK_API_KEY || '';
+  const openaiCred = getApiKey('openai')?.api_key || process.env.OPENAI_API_KEY || '';
+  const ollamaBaseUrl = getApiKey('ollama')?.base_url || 'http://localhost:11434/v1';
+
   const runResults = new Map<string, ReturnType<typeof computeEvalRunResult>>();
 
   for (const model of models) {
@@ -65,48 +147,54 @@ export async function runBenchmark(models: string[], tasks: string[]) {
       ? 'openai'
       : 'ollama';
 
-    for (const taskStr of tasks) {
-      const task = taskStr as LlmTask;
-      const caseResults: SingleCaseEvalResult[] = [];
+    const baseUrl = provider === 'deepseek'
+      ? 'https://api.deepseek.com'
+      : provider === 'openai'
+      ? 'https://api.openai.com/v1'
+      : ollamaBaseUrl;
 
-      // Route the task temporarily to candidate model under evaluation
-      upsertLlmTaskConfig({
-        task,
-        provider,
-        model,
-      });
+    const apiKey = provider === 'deepseek'
+      ? deepseekCred
+      : provider === 'openai'
+      ? openaiCred
+      : 'ollama-local';
+
+    for (const task of tasks) {
+      const caseResults: SingleCaseEvalResult[] = [];
 
       if (task === 'brand_inference') {
         for (const c of SAMPLE_BRAND_CASES) {
           const prompt = `Return a JSON object {"brand": "..."} extracting the exact brand from product title: "${c.searchTitle}". Return empty string if generic or unbranded.`;
-          const start = Date.now();
-          let responseText: string | null = null;
+          const evalRes = await runModelEval({
+            provider,
+            model,
+            baseUrl,
+            apiKey,
+            prompt,
+            systemPrompt: 'You extract brand names into JSON format.',
+          });
+
           let validJson = false;
           let success = false;
           let failureCategory: SingleCaseEvalResult['failureCategory'] = undefined;
 
-          try {
-            responseText = await callLlmForTask(task, prompt, 'You extract brand names into JSON.');
-            if (responseText) {
-              try {
-                const parsed = JSON.parse(responseText.replace(/```json|```/g, '').trim());
-                validJson = true;
-                const brand = (parsed.brand || parsed.brandName || '').trim().toLowerCase();
-                const expected = (c.expectedBrand || '').trim().toLowerCase();
-                if (brand === expected) {
-                  success = true;
-                } else {
-                  failureCategory = 'wrong_answer';
-                }
-              } catch {
-                validJson = false;
-                failureCategory = 'invalid_json';
+          if (evalRes.content) {
+            try {
+              const parsed = JSON.parse(evalRes.content.replace(/```json|```/g, '').trim());
+              validJson = true;
+              const brand = (parsed.brand || parsed.brandName || '').trim().toLowerCase();
+              const expected = (c.expectedBrand || '').trim().toLowerCase();
+              if (brand === expected) {
+                success = true;
+              } else {
+                failureCategory = 'wrong_answer';
               }
-            } else {
-              failureCategory = 'transport_failure';
+            } catch {
+              validJson = false;
+              failureCategory = 'invalid_json';
             }
-          } catch (err) {
-            const errStr = String(err).toLowerCase();
+          } else {
+            const errStr = (evalRes.error || '').toLowerCase();
             failureCategory = errStr.includes('timeout')
               ? 'timeout'
               : errStr.includes('policy')
@@ -118,36 +206,37 @@ export async function runBenchmark(models: string[], tasks: string[]) {
             caseId: c.id,
             success,
             validJson,
-            latencyMs: Date.now() - start,
-            promptTokens: 100,
-            completionTokens: 20,
+            latencyMs: evalRes.latencyMs,
+            promptTokens: evalRes.promptTokens ?? undefined,
+            completionTokens: evalRes.completionTokens ?? undefined,
             failureCategory,
-            output: responseText,
+            output: evalRes.content ?? undefined,
           });
         }
       } else if (task === 'product_name_consolidation') {
         for (const c of SAMPLE_TITLE_CASES) {
           const prompt = `Consolidate raw title "${c.rawName}" into clean Title Case. Preserve brand, size, weight, flavor, and pack count accurately.`;
-          const start = Date.now();
-          let responseText: string | null = null;
+          const evalRes = await runModelEval({
+            provider,
+            model,
+            baseUrl,
+            apiKey,
+            prompt,
+          });
+
           let success = false;
           let failureCategory: SingleCaseEvalResult['failureCategory'] = undefined;
 
-          try {
-            responseText = await callLlmForTask(task, prompt);
-            if (responseText) {
-              const lower = responseText.toLowerCase();
-              const preservedAll = c.protectedTokens.every((tok) => lower.includes(tok.toLowerCase()));
-              if (preservedAll) {
-                success = true;
-              } else {
-                failureCategory = 'wrong_answer';
-              }
+          if (evalRes.content) {
+            const lower = evalRes.content.toLowerCase();
+            const preservedAll = c.protectedTokens.every((tok) => lower.includes(tok.toLowerCase()));
+            if (preservedAll) {
+              success = true;
             } else {
-              failureCategory = 'transport_failure';
+              failureCategory = 'wrong_answer';
             }
-          } catch (err) {
-            const errStr = String(err).toLowerCase();
+          } else {
+            const errStr = (evalRes.error || '').toLowerCase();
             failureCategory = errStr.includes('timeout')
               ? 'timeout'
               : errStr.includes('policy')
@@ -158,12 +247,12 @@ export async function runBenchmark(models: string[], tasks: string[]) {
           caseResults.push({
             caseId: c.id,
             success,
-            validJson: true,
-            latencyMs: Date.now() - start,
-            promptTokens: 120,
-            completionTokens: 25,
+            validJson: true, // Non-JSON task
+            latencyMs: evalRes.latencyMs,
+            promptTokens: evalRes.promptTokens ?? undefined,
+            completionTokens: evalRes.completionTokens ?? undefined,
             failureCategory,
-            output: responseText,
+            output: evalRes.content ?? undefined,
           });
         }
       }
@@ -185,48 +274,81 @@ export async function runBenchmark(models: string[], tasks: string[]) {
       if (model === baselineModel) continue;
       const candidateRun = runResults.get(`${model}::${task}`);
       if (candidateRun) {
-        comparisons.push(compareModelRuns(candidateRun, baselineRun));
+        comparisons.push(
+          compareModelRuns(candidateRun, baselineRun, {
+            minimumCases: 3,
+            expectsJson: task === 'brand_inference',
+          }),
+        );
       }
     }
   }
 
   console.log(formatComparisonMarkdown(comparisons));
 
-  // Run Packaging VLM Experiment with real call attempts
-  console.log(`\n=== Packaging Vision OCR Real Experiment ===`);
+  // Run Packaging VLM Experiment (Gemma 4 12B vs Qwen2.5-VL)
+  console.log(`\n=== Packaging Vision OCR Real Experiment (Gemma 4 12B vs Qwen2.5-VL) ===`);
   const vlmBaselinePreds = [];
   const vlmCandidatePreds = [];
 
   for (const c of SAMPLE_VLM_CASES) {
+    const imagePayload = existsSync(c.imagePath)
+      ? readFileSync(c.imagePath).toString('base64')
+      : FALLBACK_EVAL_PNG_BASE64;
+
+    const vlmPrompt = 'Extract the product UPC/GTIN barcode and core package fields (brand, product name, weight) into a JSON object.';
+
+    // 1. Baseline Qwen2.5-VL evaluation
     try {
-      const baseRes = await callVlm('dummy-base64-image-data', 'Extract UPC and fields as JSON');
-      let extractedUpc = c.expectedUpc;
-      if (baseRes) {
-        try {
-          const parsed = JSON.parse(baseRes);
-          extractedUpc = parsed.upc || parsed.gtin || c.expectedUpc;
-        } catch {
-          /* fallback to expected if unparseable */
-        }
-      }
+      const qwenRaw = await callVlm(vlmPrompt, imagePayload, {
+        baseUrl: 'http://localhost:11434',
+        model: 'qwen2.5vl:latest',
+        enabled: true,
+      });
+      const parsed = JSON.parse(qwenRaw.replace(/```json|```/g, '').trim());
       vlmBaselinePreds.push({
         caseId: c.id,
-        extractedUpc,
-        extractedFields: c.expectedFields,
+        extractedUpc: parsed.upc || parsed.gtin || '',
+        extractedFields: {
+          brand: parsed.brand || '',
+          name: parsed.name || parsed.productName || '',
+          weight: parsed.weight || parsed.netContent || '',
+        },
       });
     } catch {
+      // Raw failure: DO NOT substitute expected ground truth!
       vlmBaselinePreds.push({
         caseId: c.id,
-        extractedUpc: c.expectedUpc,
-        extractedFields: c.expectedFields,
+        extractedUpc: '',
+        extractedFields: { brand: '', name: '', weight: '' },
       });
     }
 
-    vlmCandidatePreds.push({
-      caseId: c.id,
-      extractedUpc: c.expectedUpc,
-      extractedFields: c.expectedFields,
-    });
+    // 2. Candidate Gemma 4 12B VLM evaluation
+    try {
+      const gemmaRaw = await callVlm(vlmPrompt, imagePayload, {
+        baseUrl: 'http://localhost:11434',
+        model: 'gemma4:12b-mlx',
+        enabled: true,
+      });
+      const parsed = JSON.parse(gemmaRaw.replace(/```json|```/g, '').trim());
+      vlmCandidatePreds.push({
+        caseId: c.id,
+        extractedUpc: parsed.upc || parsed.gtin || '',
+        extractedFields: {
+          brand: parsed.brand || '',
+          name: parsed.name || parsed.productName || '',
+          weight: parsed.weight || parsed.netContent || '',
+        },
+      });
+    } catch {
+      // Raw failure: DO NOT substitute expected ground truth!
+      vlmCandidatePreds.push({
+        caseId: c.id,
+        extractedUpc: '',
+        extractedFields: { brand: '', name: '', weight: '' },
+      });
+    }
   }
 
   const vlmExp = runVlmExperiment(SAMPLE_VLM_CASES, vlmBaselinePreds, vlmCandidatePreds);

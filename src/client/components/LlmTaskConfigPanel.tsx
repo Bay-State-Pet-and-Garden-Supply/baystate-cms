@@ -225,10 +225,10 @@ interface LlmTaskConfigRowProps {
 import { getModelCapabilities, getModelProfile } from '../../ai/model-registry';
 
 const RECOMMENDED_MODELS: Record<string, { provider: LlmProvider; model: string; label: string }> = {
-  brand_inference: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
-  product_name_consolidation: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
-  product_field_refactor: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
-  store_manager_assistant: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Recommended: Gemma 4 12B (Local)' },
+  brand_inference: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
+  product_name_consolidation: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
+  product_field_refactor: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
+  store_manager_assistant: { provider: 'ollama', model: 'gemma4:12b-mlx', label: 'Candidate: Gemma 4 12B (Local)' },
 };
 
 function getModelCapabilityBadges(modelName: string): string[] {

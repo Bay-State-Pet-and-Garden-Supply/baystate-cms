@@ -1174,8 +1174,6 @@ route.get('/onboarding/settings/api-keys', (c) => {
 const KNOWN_DEEPSEEK_MODELS = [
   'deepseek-v4-flash',
   'deepseek-v4-pro',
-  'deepseek-chat',
-  'deepseek-reasoner',
 ];
 
 route.get('/onboarding/settings/ollama/status', async (c) => {

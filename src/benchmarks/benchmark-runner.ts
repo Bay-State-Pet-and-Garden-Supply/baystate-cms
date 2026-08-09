@@ -21,8 +21,8 @@ export interface SingleCaseEvalResult {
   success: boolean;
   validJson: boolean;
   latencyMs: number;
-  promptTokens: number;
-  completionTokens: number;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
   failureCategory?: BenchmarkFailureCategory;
   output?: unknown;
 }

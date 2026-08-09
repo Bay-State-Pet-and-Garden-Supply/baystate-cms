@@ -41,9 +41,6 @@ export interface GeneralModelCallTerminalUpdate {
   completionTokens?: number | null;
   estimatedApiCostUsd?: number | null;
   costBasis?: CostBasis | null;
-  fallbackCount?: number;
-  fallbackProvider?: string | null;
-  fallbackModel?: string | null;
   errorCode?: string | null;
 }
 

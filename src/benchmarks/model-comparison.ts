@@ -34,25 +34,56 @@ export interface QualificationEvaluation {
   disqualificationReasons: string[];
 }
 
+export interface CompareModelRunsOptions {
+  maxP95LatencyMs?: number;
+  minimumCases?: number;
+  expectsJson?: boolean;
+}
+
 export function compareModelRuns(
   candidate: ModelEvalRunResult,
   baseline: ModelEvalRunResult,
-  maxP95LatencyMs = 15000,
+  options: CompareModelRunsOptions = {},
 ): QualificationEvaluation {
+  const maxP95LatencyMs = options.maxP95LatencyMs ?? 15000;
+  const minimumCases = options.minimumCases ?? 1;
+  const expectsJson = options.expectsJson ?? true;
   const reasons: string[] = [];
 
-  // Gate 1: JSON / Schema validity >= 99%
-  const jsonValidityPass = candidate.parsedJsonValidityRate >= 0.99;
-  if (!jsonValidityPass) {
+  // Gate 0: Hard sample size & validity gate
+  const caseCountPass = candidate.totalCases >= minimumCases && candidate.totalCases === baseline.totalCases;
+  if (!caseCountPass) {
+    reasons.push(
+      `Sample size insufficient or case count mismatch (candidate: ${candidate.totalCases}, baseline: ${baseline.totalCases}, min required: ${minimumCases}).`,
+    );
+  }
+
+  const baselineSuccessPass = baseline.successCount > 0;
+  if (!baselineSuccessPass) {
+    reasons.push(
+      `Baseline model achieved 0 successful inferences; cannot qualify candidate against a failing baseline.`,
+    );
+  }
+
+  const candidateSuccessPass = candidate.successCount > 0;
+  if (!candidateSuccessPass) {
+    reasons.push(
+      `Candidate model achieved 0 successful inferences.`,
+    );
+  }
+
+  // Gate 1: JSON / Schema validity >= 99% (only for JSON-output tasks)
+  const jsonValidityPass = expectsJson ? candidate.parsedJsonValidityRate >= 0.99 : true;
+  if (expectsJson && !jsonValidityPass) {
     reasons.push(
       `JSON validity rate (${(candidate.parsedJsonValidityRate * 100).toFixed(1)}%) fell below 99.0% threshold.`,
     );
   }
 
-  // Gate 2: Quality >= 97% of baseline
-  const relativeAccuracy = baseline.accuracyRate > 0 ? candidate.accuracyRate / baseline.accuracyRate : 1;
-  const accuracyPass = relativeAccuracy >= 0.97;
-  if (!accuracyPass) {
+  // Gate 2: Quality >= 97% of baseline (relative accuracy requires a successful baseline)
+  const relativeAccuracy = baseline.accuracyRate > 0 ? candidate.accuracyRate / baseline.accuracyRate : 0;
+  const accuracyPass = candidateSuccessPass && baselineSuccessPass && relativeAccuracy >= 0.97;
+  if (!accuracyPass && baselineSuccessPass) {
     reasons.push(
       `Relative accuracy (${(relativeAccuracy * 100).toFixed(1)}%) fell below 97.0% of cloud baseline (${(baseline.accuracyRate * 100).toFixed(1)}%).`,
     );
@@ -79,7 +110,14 @@ export function compareModelRuns(
     );
   }
 
-  const qualified = jsonValidityPass && accuracyPass && criticalErrorPass && latencySlaPass;
+  const qualified =
+    caseCountPass &&
+    baselineSuccessPass &&
+    candidateSuccessPass &&
+    jsonValidityPass &&
+    accuracyPass &&
+    criticalErrorPass &&
+    latencySlaPass;
 
   return {
     candidateModel: candidate.model,

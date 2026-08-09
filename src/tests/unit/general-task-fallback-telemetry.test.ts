@@ -58,15 +58,25 @@ describe('General Task Fallback & Telemetry Integration', () => {
       const output = await callLlmForTask('product_field_refactor', 'Refactor field');
       expect(output).toBe('Refactored field');
 
-      // Verify ai_model_calls telemetry row was created and updated with fallback details
+      // Verify ai_model_calls wrote 2 telemetry rows (primary failure + fallback success)
       const calls = getAiModelCallsByWorkspace('default');
-      expect(calls.length).toBeGreaterThan(0);
-      const latestCall = calls[calls.length - 1];
-      expect(latestCall.task).toBe('product_field_refactor');
-      expect(latestCall.status).toBe('success');
-      expect(latestCall.prompt_tokens).toBe(50);
-      expect(latestCall.completion_tokens).toBe(15);
-      expect(latestCall.cost_basis).toBe('published_rate');
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+
+      const fallbackCall = calls[0]; // ordered DESC by started_at
+      const primaryCall = calls[1];
+
+      expect(primaryCall.task).toBe('product_field_refactor');
+      expect(primaryCall.provider).toBe('ollama');
+      expect(primaryCall.status).toBe('failed');
+
+      expect(fallbackCall.task).toBe('product_field_refactor');
+      expect(fallbackCall.provider).toBe('deepseek');
+      expect(fallbackCall.status).toBe('success');
+      expect(fallbackCall.fallback_from_call_id).toBe(primaryCall.id);
+      expect(fallbackCall.retry_count).toBe(1);
+      expect(fallbackCall.prompt_tokens).toBe(50);
+      expect(fallbackCall.completion_tokens).toBe(15);
+      expect(fallbackCall.cost_basis).toBe('published_rate');
     } finally {
       globalThis.fetch = originalFetch;
       deleteLlmTaskConfig('product_field_refactor');

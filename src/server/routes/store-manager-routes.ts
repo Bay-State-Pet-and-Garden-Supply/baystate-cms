@@ -28,11 +28,12 @@ import { getProductWithDraft } from '../services/product-service';
 import { getLlmConfigForTask } from '../../onboarding/llm-client';
 
 import { computeApiCost } from '../../ai/model-pricing';
+import { getModelProfile } from '../../ai/model-registry';
 
 const route = new Hono();
 
 // Global map to track the latest usage tokens for active streaming chats
-const lastStreamUsage = new Map<string, { promptTokens: number; completionTokens: number; model: string }>();
+const lastStreamUsage = new Map<string, { promptTokens: number; completionTokens: number; provider: string; model: string; locality: 'local' | 'cloud' }>();
 
 
 /**
@@ -99,12 +100,19 @@ route.post('/store-manager/chat', async (c) => {
       stopWhen: isStepCount(10),
       onFinish: ({ usage }) => {
         if (usage && threadId) {
-          const fallbackModel = getLlmConfigForTask('store_manager_assistant', { allowFallback: true })?.model || 'deepseek-chat';
+          const taskConfig = getLlmConfigForTask('store_manager_assistant', { allowFallback: true });
+          const fallbackModel = taskConfig?.model || 'deepseek-v4-flash';
           const resolvedModelName = selectedModel || fallbackModel;
+          const profile = getModelProfile(resolvedModelName);
+          const resolvedProvider = profile?.provider ?? taskConfig?.provider ?? (selectedModel ? 'ollama' : 'deepseek');
+          const locality = resolvedProvider === 'ollama' ? 'local' : 'cloud';
+
           lastStreamUsage.set(threadId, {
             promptTokens: usage.inputTokens || 0,
             completionTokens: usage.outputTokens || 0,
+            provider: resolvedProvider,
             model: resolvedModelName,
+            locality,
           });
         }
       }
@@ -314,10 +322,17 @@ route.post('/store-manager/chat/:threadId/save', async (c) => {
     if (usageInfo && messages.length > 0) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.usage) {
-        const { estimatedApiCostUsd, costBasis } = computeApiCost('', usageInfo.model, null, usageInfo.promptTokens, usageInfo.completionTokens);
+        const { estimatedApiCostUsd, costBasis } = computeApiCost(
+          usageInfo.provider,
+          usageInfo.model,
+          usageInfo.locality,
+          usageInfo.promptTokens,
+          usageInfo.completionTokens,
+        );
         lastMsg.usage = {
           promptTokens: usageInfo.promptTokens,
           completionTokens: usageInfo.completionTokens,
+          provider: usageInfo.provider,
           model: usageInfo.model,
           cost: estimatedApiCostUsd,
           costBasis,

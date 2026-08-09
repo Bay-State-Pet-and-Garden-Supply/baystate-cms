@@ -91,6 +91,7 @@ async function inferBrandViaLlm(
   upc: string,
   searchResults: Array<{ title: string; snippet: string; link: string }>,
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  modelCallInput?: import('../classification/model-operation-registry').ModelCallContext | null,
 ): Promise<{ brand: string; confidence: number } | null> {
   const resultsText = searchResults
     .slice(0, 5)
@@ -121,10 +122,21 @@ Respond ONLY with a JSON object in this format (do not include markdown block ma
 }
 `;
 
+  const modelCall = modelCallInput ?? (modelPolicy ? {
+    runId: `brand-inference-${Date.now()}`,
+    stage: 'evidence_extraction' as const,
+    operation: 'brand_inference' as const,
+    attempt: 1,
+    snapshotHash: modelPolicy.policyDigest,
+    promptTemplateVersion: 'v1',
+    ruleVersion: 'v1',
+  } : undefined);
+
   const response = await callLlmForTask('brand_inference', prompt, systemPrompt, {
     allowFallback: true,
     modelPolicy,
     protectedOperation: 'brand_inference',
+    modelCall,
   });
   if (!response) return null;
 

@@ -430,6 +430,8 @@ export interface CallLlmForTaskOptions {
   modelCall?: ModelCallContext;
   /** Immutable runtime snapshot the call is bound to (plan compatibility). */
   snapshot?: RuntimeClassificationSnapshot | null;
+  /** Workspace ID for general telemetry logging (defaults to 'default'). */
+  workspaceId?: string;
 }
 
 /** Result of an audited model call (issue #17 work item E). */
@@ -775,7 +777,7 @@ export async function callLlmForTask(
       requiresImage: options.requiresImage,
     });
   } catch (err) {
-    if (err instanceof MissingLlmTaskConfigError) {
+    if (err instanceof MissingLlmTaskConfigError || err instanceof ModelPolicyDeniedError) {
       throw err;
     }
     throw err;
@@ -789,15 +791,79 @@ export async function callLlmForTask(
   const temperature = resolveTemperature(task, options);
   const reasoningEffort = resolveReasoningEffort(task);
 
+  const protectedOp = options.protectedOperation ?? defaultProtectedOperationForTask(task);
+
+  // Standalone protected operation call without modelCall: perform protected transport
+  // WITHOUT inserting into ai_model_calls (preserving protected/general mutual exclusivity).
+  if (protectedOp) {
+    await acquireLlmSlot(config.provider);
+    try {
+      if (options.modelPolicy) {
+        reassertProtectedRouteBeforeTransport(task, config, {
+          modelPolicy: options.modelPolicy,
+          protectedOperation: options.protectedOperation,
+          requiresImage: options.requiresImage,
+        });
+      }
+      const timeoutMs = config.provider === 'ollama' ? 120_000 : 60_000;
+      const requestBody: Record<string, unknown> = {
+        model: config.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt },
+        ],
+        temperature,
+      };
+      if (reasoningEffort) {
+        requestBody.reasoning_effort = reasoningEffort;
+      }
+      const response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(
+          `LLM API request failed (${config.provider}): ${response.status} - ${redactTransportText(text)}`,
+        );
+      }
+
+      const data = (await response.json()) as {
+        choices: Array<{ message: { content: string } }>;
+      };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content || !content.trim()) {
+        throw new Error('LLM returned an empty response.');
+      }
+      return content.trim();
+    } finally {
+      releaseLlmSlot(config.provider);
+    }
+  }
+
+  if (options.modelPolicy) {
+    assertModelPolicyIntact(options.modelPolicy);
+  }
+
+  const temperature = resolveTemperature(task, options);
+  const reasoningEffort = resolveReasoningEffort(task);
+
   const taskConfig = getLlmTaskConfig(task);
   const fallbackProvider = taskConfig?.fallbackProvider ?? null;
   const fallbackModel = taskConfig?.fallbackModel ?? null;
 
+  const workspaceId = options.workspaceId ?? 'default';
   const locality = config.provider === 'ollama' ? 'local' : 'cloud';
-  const startedAt = Date.now();
+  const primaryStartAt = Date.now();
 
-  const telemetryId = insertAiModelCallStart({
-    workspaceId: 'default',
+  const primaryCallId = insertAiModelCallStart({
+    workspaceId,
     task,
     provider: config.provider,
     model: config.model,
@@ -864,9 +930,9 @@ export async function callLlmForTask(
   try {
     const res = await makeSingleRequest(config);
     const cost = computeApiCost(config.provider, config.model, locality, res.promptTokens, res.completionTokens);
-    completeAiModelCallGeneral(telemetryId, {
+    completeAiModelCallGeneral(primaryCallId, {
       status: 'success',
-      durationMs: Date.now() - startedAt,
+      durationMs: Date.now() - primaryStartAt,
       promptTokens: res.promptTokens,
       completionTokens: res.completionTokens,
       estimatedApiCostUsd: cost.estimatedApiCostUsd,
@@ -874,6 +940,13 @@ export async function callLlmForTask(
     });
     return res.content;
   } catch (primaryErr) {
+    completeAiModelCallGeneral(primaryCallId, {
+      status: 'failed',
+      durationMs: Date.now() - primaryStartAt,
+      errorCode: primaryErr instanceof Error ? primaryErr.name : 'PRIMARY_FAILED',
+      costBasis: locality === 'local' ? 'local_zero' : 'unknown',
+    });
+
     if (fallbackProvider && fallbackModel && !options.modelPolicy) {
       const fallbackCred = resolveProviderCredential(fallbackProvider);
       if (fallbackCred) {
@@ -884,6 +957,18 @@ export async function callLlmForTask(
           model: fallbackModel,
         };
         const fallbackLocality = fallbackProvider === 'ollama' ? 'local' : 'cloud';
+        const fallbackStartAt = Date.now();
+
+        const fallbackCallId = insertAiModelCallStart({
+          workspaceId,
+          task,
+          provider: fallbackProvider,
+          model: fallbackModel,
+          locality: fallbackLocality,
+          fallbackFromCallId: primaryCallId,
+          retryCount: 1,
+        });
+
         try {
           const fallbackRes = await makeSingleRequest(fallbackConfig);
           const cost = computeApiCost(
@@ -893,39 +978,27 @@ export async function callLlmForTask(
             fallbackRes.promptTokens,
             fallbackRes.completionTokens,
           );
-          completeAiModelCallGeneral(telemetryId, {
+          completeAiModelCallGeneral(fallbackCallId, {
             status: 'success',
-            durationMs: Date.now() - startedAt,
+            durationMs: Date.now() - fallbackStartAt,
             promptTokens: fallbackRes.promptTokens,
             completionTokens: fallbackRes.completionTokens,
-            fallbackCount: 1,
-            fallbackProvider,
-            fallbackModel,
             estimatedApiCostUsd: cost.estimatedApiCostUsd,
             costBasis: cost.costBasis,
           });
           return fallbackRes.content;
         } catch (fallbackErr) {
-          completeAiModelCallGeneral(telemetryId, {
+          completeAiModelCallGeneral(fallbackCallId, {
             status: 'failed',
-            durationMs: Date.now() - startedAt,
-            errorCode: 'FALLBACK_FAILED',
-            fallbackCount: 1,
-            fallbackProvider,
-            fallbackModel,
-            costBasis: 'unknown',
+            durationMs: Date.now() - fallbackStartAt,
+            errorCode: fallbackErr instanceof Error ? fallbackErr.name : 'FALLBACK_FAILED',
+            costBasis: fallbackLocality === 'local' ? 'local_zero' : 'unknown',
           });
           throw fallbackErr;
         }
       }
     }
 
-    completeAiModelCallGeneral(telemetryId, {
-      status: 'failed',
-      durationMs: Date.now() - startedAt,
-      errorCode: primaryErr instanceof Error ? primaryErr.name : 'PRIMARY_FAILED',
-      costBasis: 'unknown',
-    });
     throw primaryErr;
   }
 }

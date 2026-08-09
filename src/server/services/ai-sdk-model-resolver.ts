@@ -22,6 +22,10 @@ export function resolveAiSdkModel(input?: string | ResolveAiSdkModelOptions) {
     const profile = getModelProfile(input);
     if (profile) {
       providerName = profile.provider;
+    } else {
+      throw new Error(
+        `Model "${input}" is not registered in the model registry. Pass explicit { provider, model } object or register the model profile.`,
+      );
     }
   } else if (input) {
     providerName = input.provider;
