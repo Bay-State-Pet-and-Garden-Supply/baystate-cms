@@ -49,13 +49,16 @@ vi.mock('../../classification/cohort-page-coordinator', () => ({
 }));
 
 // Import after mocks
-import { processPageTarget } from '../../classification/curation-target-processor';
+import { processPageTarget, processProductFieldTarget } from '../../classification/curation-target-processor';
 import {
   buildPageHierarchy,
   extractProductContext,
   llmAssignCategoryPages,
 } from '../../classification/page-assignment-llm';
 import type { StageInput, StageContext } from '../../classification/types';
+import type { ClassificationEvidence } from '../../shared/types';
+import type { ResolvedTarget } from '../../classification/curation-target-resolver';
+import { llmRankOptions } from '../../classification/curation-target-ranker';
 
 // ─── Test Helpers ─────────────────────────────────────────────────────────────
 
@@ -279,5 +282,103 @@ describe('processPageTarget (LLM-first)', () => {
     expect(proposal.proposedValue).toHaveProperty('pageId', 'dog-food-dry');
     expect(proposal.proposedValue).toHaveProperty('pageName', 'Dog Food Dry');
     expect(proposal.confidence).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ─── Brand shortcut (issue #17 pass 5b) ───────────────────────────────────────
+
+const brandTarget = (): ResolvedTarget => ({
+  config: {
+    id: 'brand',
+    kind: 'product_field',
+    label: 'Brand',
+    enabled: true,
+    mandatory: false,
+    selectionMode: 'single',
+    attributeId: 'brand',
+    catalogField: 'ProductField16',
+    optionSource: 'configured',
+    required: false,
+    sortOrder: 0,
+  },
+  options: [
+    { value: 'Blue Buffalo', label: 'Blue Buffalo' },
+    { value: 'Dr. Marty', label: 'Dr. Marty' },
+  ],
+  attribute: {
+    id: 'brand',
+    name: 'Brand',
+    description: null,
+    valueMode: 'controlled',
+    canonicalUnit: null,
+    allowedValues: ['Blue Buffalo', 'Dr. Marty'],
+    valueAliases: [],
+    visualEvidenceEligibility: 'eligible',
+    isClaim: false,
+    isCompositionAttribute: false,
+    group: 'Identity',
+  },
+});
+
+const brandEvidence = (id: string, overrides: Partial<ClassificationEvidence>): ClassificationEvidence => ({
+  id,
+  runId: 'run-test',
+  stageName: 'evidence_extraction' as const,
+  productSku: 'test-sku',
+  attributeId: null,
+  source: 'official_product_page' as const,
+  reliability: 'high' as const,
+  sourceUrl: null,
+  sourceField: 'brand',
+  snippet: null,
+  value: 'Blue Buffalo',
+  metadata: {},
+  capturedAt: '2026-08-01T12:00:00.000Z',
+  ...overrides,
+});
+
+describe('brand shortcut (issue #17 pass 5b)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(llmRankOptions).mockResolvedValue({
+      values: ['Blue Buffalo'],
+      confidence: 0.9,
+      modelCallIds: [],
+    });
+  });
+
+  it('shortcuts only when EVERY reviewed brand assertion (incl. ordinary scalar brand records) agrees on the exact canonical identity', async () => {
+    const resolved = brandEvidence('ev-resolved', {
+      sourceField: 'resolved_brand',
+      value: { brandId: 'blue-buffalo', brandName: 'Blue Buffalo', confidence: 0.95, matchedBy: 'catalog' },
+    });
+    const scalar = brandEvidence('ev-scalar', { value: 'Blue Buffalo' });
+    const result = await processProductFieldTarget(brandTarget(), makeInput({ evidence: [resolved, scalar] }), makeContext());
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0].proposedValue).toBe('Blue Buffalo');
+    expect(result.proposals[0].supportingEvidenceIds?.sort()).toEqual(['ev-resolved', 'ev-scalar'].sort());
+    expect(llmRankOptions).not.toHaveBeenCalled();
+  });
+
+  it('does NOT shortcut when a scalar official-page brand disagrees with the resolved brand — conflict is visible, never first-wins', async () => {
+    const resolved = brandEvidence('ev-resolved', {
+      sourceField: 'resolved_brand',
+      value: { brandId: 'blue-buffalo', brandName: 'Blue Buffalo', confidence: 0.95, matchedBy: 'catalog' },
+    });
+    const official = brandEvidence('ev-official', { value: 'Dr. Marty' });
+    const result = await processProductFieldTarget(brandTarget(), makeInput({ evidence: [resolved, official] }), makeContext());
+    // Falls through to the normal matching path; the disagreeing assertions
+    // are visible contradicting evidence and the proposal is forced to review.
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0].isBulkAcceptable).toBe(false);
+    expect(result.proposals[0].contradictingEvidenceIds?.sort()).toEqual(['ev-official', 'ev-resolved'].sort());
+  });
+
+  it('treats case-different brand values as DISTINCT identities — no case folding shortcut', async () => {
+    const one = brandEvidence('ev-one', { value: 'Blue Buffalo' });
+    const two = brandEvidence('ev-two', { value: 'BLUE BUFFALO' });
+    const result = await processProductFieldTarget(brandTarget(), makeInput({ evidence: [one, two] }), makeContext());
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0].contradictingEvidenceIds?.sort()).toEqual(['ev-one', 'ev-two'].sort());
   });
 });

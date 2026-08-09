@@ -146,6 +146,7 @@ import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
 import {
   getEvidenceByRun,
+  getLiveDecisionsByRun,
   getProposalsByRun,
   getValidatedOnboardingRun,
 } from '../../db/repositories/classification-run-repo';
@@ -798,7 +799,7 @@ route.get('/onboarding/items/:id', async (c) => {
               classificationConfigSnapshot: item.curationData.classificationConfigSnapshot ?? null,
               classificationProposals: getProposalsByRun(activeRunId),
               classificationEvidence: getEvidenceByRun(activeRunId),
-              classificationDecisions: [],
+              classificationDecisions: getLiveDecisionsByRun(activeRunId),
               classificationHistory: [],
             }
           : sanitizedCuration,
@@ -878,7 +879,7 @@ route.put('/onboarding/items/:id', async (c) => {
         nextCurationData.classificationConfigSnapshot = item.curationData?.classificationConfigSnapshot ?? null;
         nextCurationData.classificationProposals = getProposalsByRun(activeRunId);
         nextCurationData.classificationEvidence = getEvidenceByRun(activeRunId);
-        nextCurationData.classificationDecisions = [];
+        nextCurationData.classificationDecisions = getLiveDecisionsByRun(activeRunId);
         nextCurationData.classificationHistory = [];
       }
 

@@ -77,21 +77,26 @@ function validateDirectEvidence(
 ): ProposalSafetyFinding | null {
   const isClaim = attribute.isClaim === true;
 
-  if (!proposal.evidenceIds || proposal.evidenceIds.length === 0) {
+  // Claims/composition REQUIRE at least one target-specific SUPPORTING
+  // evidence id with direct product-evidence provenance. Context/unrelated
+  // evidence (the backward-compatible evidenceIds union) never satisfies
+  // direct evidence (issue #17 pass 5b).
+  const supportingIds = proposal.supportingEvidenceIds ?? [];
+  if (supportingIds.length === 0) {
     return {
       proposalId: proposal.id,
       code: isClaim ? 'claim_missing_direct_evidence' : 'composition_missing_direct_evidence',
-      message: `${attribute.name} (${attribute.id}) requires linked direct evidence, but proposal has none. Absence and inference cannot support a claim or composition value.`,
+      message: `${attribute.name} (${attribute.id}) requires target-specific supporting direct evidence, but the proposal has none. Absence, inference, and context evidence cannot support a claim or composition value.`,
     };
   }
 
-  for (const evidenceId of proposal.evidenceIds) {
+  for (const evidenceId of supportingIds) {
     const evidence = findEvidence(context, evidenceId);
     if (!evidence) {
       return {
         proposalId: proposal.id,
         code: isClaim ? 'claim_missing_direct_evidence' : 'composition_missing_direct_evidence',
-        message: `${attribute.name} (${attribute.id}) links missing evidence "${evidenceId}".`,
+        message: `${attribute.name} (${attribute.id}) links missing supporting evidence "${evidenceId}".`,
       };
     }
     if (evidence.source === 'page_context') {

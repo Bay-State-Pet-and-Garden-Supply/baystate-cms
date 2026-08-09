@@ -282,6 +282,8 @@ export function submitCatalogDecisions(
     reviewerNote?: string | null;
     revisedValue?: unknown;
     revisedTargetId?: string | null;
+    /** Evidence citations for this correction (issue #17 I). */
+    evidenceIds?: string[];
     actionToken?: string;
     expectedRevisionId?: string | null;
   }>,

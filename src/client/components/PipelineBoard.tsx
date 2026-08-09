@@ -41,6 +41,7 @@ import {
   getEffectiveProposalValue,
   isCurrentReviewGeneration,
   isCurrentReviewVersion,
+  isReviewDecision,
   prepareDecisionAction,
   proposalDecisionSnapshot,
   withReviewedProductTypeId,
@@ -231,18 +232,47 @@ export function PipelineBoard({
     }
     setClassificationProposals(proposals);
     setClassificationEvidence(evidence);
-    setCitationSelections({});
+    // Initialize reviewer citation selections from the hydrated LIVE decision
+    // for each proposal (issue #17 pass 5b). Stored citations render and stay
+    // selected across canonical loads; they are never silently cleared.
+    setCitationSelections(citationsFromDecisions(item));
     return true;
   };
 
+  /**
+   * Reviewer citation selections derived from the hydrated LIVE decisions for
+   * each proposal (issue #17 pass 5b). Stored citations initialize the UI so
+   * persisted corrections render and stay selected across canonical loads.
+   */
+  const citationsFromDecisions = (
+    item: OnboardingItem | null | undefined,
+  ): Record<string, string[]> => {
+    const decisions = item?.curationData?.classificationDecisions ?? [];
+    const result: Record<string, string[]> = {};
+    for (const decision of decisions) {
+      if (decision.evidenceIds && decision.evidenceIds.length > 0) {
+        result[decision.proposalId] = [...new Set(decision.evidenceIds)].sort();
+      }
+    }
+    return result;
+  };
+
   const toggleCitation = (proposalId: string, evidenceId: string) => {
-    setCitationSelections(previous => {
-      const current = previous[proposalId] ?? [];
-      const next = current.includes(evidenceId)
-        ? current.filter(id => id !== evidenceId)
-        : [...current, evidenceId];
-      return { ...previous, [proposalId]: next };
-    });
+    const current = citationSelections[proposalId] ?? [];
+    const next = current.includes(evidenceId)
+      ? current.filter(id => id !== evidenceId)
+      : [...current, evidenceId];
+    setCitationSelections(previous => ({ ...previous, [proposalId]: next }));
+    // Citation changes PERSIST by creating a decision revision (issue #17
+    // pass 5b): when the proposal already has a live decision, enqueue a new
+    // decision action with the updated citations (same decision/revised
+    // values; the semantic key changes → a new revision is created). They
+    // never wait for an unrelated proposal edit.
+    const proposal = classificationProposals.find(p => p.id === proposalId);
+    const itemId = reviewItem?.id;
+    if (proposal && itemId && isReviewDecision(proposal.status)) {
+      enqueueProposalDecision(itemId, reviewGenerationRef.current, proposal, next);
+    }
   };
 
   const drainAllWrites = async (itemId: string | null | undefined) => {
@@ -702,6 +732,13 @@ export function PipelineBoard({
   const hasPrev = currentReviewIndex > 0;
   const hasNext = currentReviewIndex !== -1 && currentReviewIndex < itemsInStage.length - 1;
 
+  // Live decisions keyed by proposal id (issue #17 pass 5b): the matching
+  // decision renders stored citations on both review surfaces.
+  const decisionsByProposal: Record<string, ClassificationProposalDecision> = {};
+  for (const decision of reviewItem?.curationData?.classificationDecisions ?? []) {
+    decisionsByProposal[decision.proposalId] = decision;
+  }
+
   const handlePrevItem = () => {
     if (hasPrev) {
       void openReview(itemsInStage[currentReviewIndex - 1]);
@@ -924,6 +961,7 @@ export function PipelineBoard({
     itemId: string,
     generation: number,
     proposal: ClassificationProposal,
+    explicitCitations?: string[],
   ) => {
     const transport = getDecisionTransport(itemId);
     if (!canApplyProposalEdit(transport.decisionQueue.hasFailure(), reviewTransitionRef.current !== null)) {
@@ -939,7 +977,7 @@ export function PipelineBoard({
       priorSnapshot,
       expectedRevisionId: transport.revisionIds[proposal.id] ?? null,
       existingAction: transport.pendingActions[proposal.id],
-      evidenceIds: citationSelections[proposal.id],
+      evidenceIds: explicitCitations ?? citationSelections[proposal.id],
       createId: createDecisionActionToken,
       createActionToken: createDecisionActionToken,
     });
@@ -1830,6 +1868,7 @@ export function PipelineBoard({
                   classificationProposals={classificationProposals}
                   classificationEvidence={classificationEvidence}
                   citationSelections={citationSelections}
+                  decisionsByProposal={decisionsByProposal}
                   onToggleCitation={toggleCitation}
                   proposalControlsDisabled={proposalControlsDisabled}
                   storePages={storePages}

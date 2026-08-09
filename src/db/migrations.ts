@@ -1498,11 +1498,46 @@ export function runMigrations(): void {
       `);
 
       // Role-split hydration columns on proposals (mirror the union column).
-      addCol('classification_proposals', 'supporting_evidence_ids_json', "TEXT DEFAULT '[]'");
-      addCol('classification_proposals', 'contradicting_evidence_ids_json', "TEXT DEFAULT '[]'");
+      // NOT NULL DEFAULT '[]' so upgrade columns match the fresh schema; a
+      // backfill below covers any nullable column from an earlier migration.
+      addCol('classification_proposals', 'supporting_evidence_ids_json', "TEXT NOT NULL DEFAULT '[]'");
+      addCol('classification_proposals', 'contradicting_evidence_ids_json', "TEXT NOT NULL DEFAULT '[]'");
+
+      // Backfill any nullable role columns left by an earlier migration run.
+      db.exec("UPDATE classification_proposals SET supporting_evidence_ids_json = '[]' WHERE supporting_evidence_ids_json IS NULL;");
+      db.exec("UPDATE classification_proposals SET contradicting_evidence_ids_json = '[]' WHERE contradicting_evidence_ids_json IS NULL;");
 
       db.exec("INSERT INTO app_meta (key, value) VALUES ('evidence_citation_schema_version', '1');");
       console.log('[Migrations] Evidence relation/citation migration complete.');
+    }
+
+    // Upgrade parity (runs on EVERY migration invocation, even when the
+    // evidence-citation marker is already set): the join table must carry the
+    // same relation CHECK as the fresh schema. SQLite cannot add CHECK via
+    // ALTER, so rebuild the (small) join table when the CHECK is absent — for
+    // DBs that ran an earlier version of this migration with a CHECK-less
+    // ALTER-added relation column.
+    const proposalEvidenceSql = db.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposal_evidence'",
+    ).get() as { sql: string } | undefined;
+    if (proposalEvidenceSql && !/CHECK\s*\(/i.test(proposalEvidenceSql.sql)) {
+      db.exec(`
+        CREATE TABLE classification_proposal_evidence_new (
+          proposal_id TEXT NOT NULL REFERENCES classification_proposals(id) ON DELETE CASCADE,
+          evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
+          relation TEXT NOT NULL DEFAULT 'legacy' CHECK (relation IN ('supporting', 'contradicting', 'context', 'legacy')),
+          PRIMARY KEY (proposal_id, evidence_id)
+        )
+      `);
+      db.exec(`
+        INSERT INTO classification_proposal_evidence_new (proposal_id, evidence_id, relation)
+        SELECT proposal_id, evidence_id, COALESCE(relation, 'legacy')
+        FROM classification_proposal_evidence
+      `);
+      db.exec('DROP TABLE classification_proposal_evidence;');
+      db.exec('ALTER TABLE classification_proposal_evidence_new RENAME TO classification_proposal_evidence;');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_classification_proposal_evidence_relation ON classification_proposal_evidence(relation);');
+      console.log('[Migrations] Rebuilt classification_proposal_evidence with the relation CHECK constraint.');
     }
   } catch (e) {
     console.error('[Migrations] Evidence relation/citation migration failed:', e);

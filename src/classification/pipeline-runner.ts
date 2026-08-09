@@ -30,12 +30,18 @@ function persistProposals(runId: string, sku: string, proposals: ClassificationP
 }
 
 /**
- * Fail-closed evidence linkage (issue #17 H): every proposal evidence id must
- * exist, belong to the same run/SKU, and be persisted in the same stage
- * transaction. The previous behavior silently skipped nonexistent links;
- * that would let a proposal cite run-wide/unrelated evidence. Contradictions
- * are never resolved here — they are persisted as visible contradicting
- * relations and forced to individual review upstream.
+ * Fail-closed evidence linkage (issue #17 H + pass 5b): every proposal
+ * evidence id must exist, belong to the same run/SKU, and be persisted in the
+ * same stage transaction. The complete role union is validated:
+ *
+ * - `supportingEvidenceIds` and `contradictingEvidenceIds` must be pairwise
+ *   disjoint and subsets of the full `evidenceIds` union (roles can never
+ *   reference ids outside the union, and role-only ids can never bypass
+ *   validation when the union is empty).
+ * - Every union member is persisted with its authoritative relation
+ *   (supporting/contradicting/context).
+ * - Contradictions are never resolved here — they are persisted as visible
+ *   contradicting relations and forced to individual review upstream.
  */
 function linkProposalEvidence(
   proposalId: string,
@@ -45,12 +51,44 @@ function linkProposalEvidence(
   supportingEvidenceIds: string[],
   contradictingEvidenceIds: string[],
 ): void {
-  if (evidenceIds.length === 0) return;
+  const supporting = supportingEvidenceIds ?? [];
+  const contradicting = contradictingEvidenceIds ?? [];
+
+  // Role arrays must be subsets of the union and pairwise disjoint.
+  const union = new Set(evidenceIds ?? []);
+  for (const id of [...supporting, ...contradicting]) {
+    if (!union.has(id)) {
+      throw new Error(
+        `Evidence linkage failed: proposal "${proposalId}" references evidence "${id}" ` +
+          `in a role array that is not part of the proposal's evidence union.`,
+      );
+    }
+  }
+  const supportingSet = new Set(supporting);
+  const contradictingSet = new Set(contradicting);
+  for (const id of supportingSet) {
+    if (contradictingSet.has(id)) {
+      throw new Error(
+        `Evidence linkage failed: proposal "${proposalId}" lists evidence "${id}" ` +
+          `as BOTH supporting and contradicting.`, 
+      );
+    }
+  }
+  if (union.size === 0) {
+    if (supportingSet.size > 0 || contradictingSet.size > 0) {
+      throw new Error(
+        `Evidence linkage failed: proposal "${proposalId}" has role evidence ids ` +
+          `but an empty evidence union.`,
+      );
+    }
+    return;
+  }
+
   const db = getDb();
   const stmt = db.prepare(
     'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
   );
-  for (const evId of evidenceIds) {
+  for (const evId of union) {
     const row = db.query(
       'SELECT run_id, product_sku FROM classification_evidence WHERE id = ?',
     ).get(evId) as { run_id: string; product_sku: string } | undefined;
@@ -61,8 +99,8 @@ function linkProposalEvidence(
       );
     }
     let relation: 'supporting' | 'contradicting' | 'context' = 'context';
-    if (supportingEvidenceIds.includes(evId)) relation = 'supporting';
-    else if (contradictingEvidenceIds.includes(evId)) relation = 'contradicting';
+    if (supportingSet.has(evId)) relation = 'supporting';
+    else if (contradictingSet.has(evId)) relation = 'contradicting';
     stmt.run(proposalId, evId, relation);
   }
 }

@@ -20,6 +20,7 @@ import {
 import {
   buildEvidenceTargetPacket,
   buildPageEvidencePacket,
+  resolveCanonicalAssertion,
   tokenGroundingSupport,
   type EvidenceTargetPacket,
 } from './evidence-targeting';
@@ -53,17 +54,27 @@ const KEYWORD_MATCH_MIN_CONFIDENCE = 0.7;
 const PAGE_CONTEXT_SOURCE_FIELDS = [
   'name',
   'title',
+  'page_name',
+  'category',
   'species',
   'productForm',
   'productType',
 ];
 
-/** Reviewed species assertion for cross-species page-context detection. */
-function pageSpeciesValue(evidence: StageInput['evidence']): unknown {
-  const species = evidence.find(
-    e => e.attributeId === 'species' || e.sourceField === 'species',
-  );
-  return species?.value ?? undefined;
+/** Reviewed page-context attribute ids (records with explicit attributeId). */
+const PAGE_CONTEXT_ATTRIBUTE_IDS = ['species'];
+
+/**
+ * Reviewed species value for cross-species page-context detection. Uses a
+ * REVIEWED fact (accepted decision carried in the snapshot), never
+ * first-evidence order: reversing evidence order must not change which
+ * species is labeled contradictory. Without a reviewed fact, no species
+ * contradiction can be labeled.
+ */
+function reviewedSpeciesValue(context: StageContext): unknown {
+  const facts = context.snapshot?.reviewedFacts ?? [];
+  const speciesFact = facts.find(f => f.targetId === 'species');
+  return speciesFact?.value ?? undefined;
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -144,38 +155,52 @@ export async function processProductFieldTarget(
   const isBrandField = targetLabel.includes('brand') || targetId.includes('brand');
 
   if (isBrandField) {
-    // Evaluate EVERY relevant brand assertion, never `.find()` first: a
+    // Evaluate EVERY reviewed brand assertion, never `.find()` first: a
     // disagreement between brand statements is a visible conflict that must
-    // force individual review, not a silent first-wins shortcut.
+    // force individual review, not a silent first-wins shortcut. This covers
+    // resolved-brand evidence, ordinary `sourceField='brand'` scalar
+    // assertions, and any record with the brand attribute id. Agreement uses
+    // EXACT canonical/alias identity — never case folding ('Blue Buffalo'
+    // and 'BLUE BUFFALO' are distinct identities).
+    const brandAttributeId = targetConfig.attributeId ?? targetConfig.id;
     const brandEvidence = input.evidence.filter(
-      e => e.sourceField === 'resolved_brand' || e.attributeId === (targetConfig.attributeId ?? targetConfig.id),
+      e =>
+        e.sourceField === 'resolved_brand'
+        || e.sourceField === 'brand'
+        || e.attributeId === brandAttributeId
+        || e.attributeId === 'brand',
     );
     if (brandEvidence.length > 0) {
       const parsedBrands: Array<{ id: string; brandName: string }> = [];
       for (const record of brandEvidence) {
         const parsed = CanonicalBrandEvidenceValueSchema.safeParse(record.value);
-        const name = parsed.success
+        let name: unknown = parsed.success
           ? parsed.data.brandName
           : ((record.value as any)?.brandName ?? (record.value as any)?.name);
-        if (typeof name === 'string' && name.trim().length > 0) {
-          parsedBrands.push({ id: record.id, brandName: name.trim() });
+        // Scalar brand assertions: a plain string value IS the brand name.
+        if (typeof name !== 'string' && typeof record.value === 'string') {
+          name = record.value;
+        }
+        const canonicalName = resolveCanonicalAssertion(name, attribute?.valueAliases ?? []);
+        if (canonicalName !== null) {
+          parsedBrands.push({ id: record.id, brandName: canonicalName });
         }
       }
       if (parsedBrands.length > 0) {
-        const uniqueBrands = [...new Set(parsedBrands.map(p => p.brandName.toLocaleLowerCase()))];
+        const uniqueBrands = [...new Set(parsedBrands.map(p => p.brandName))];
         const allBrandIds = parsedBrands.map(p => p.id).filter(Boolean);
         if (uniqueBrands.length === 1) {
-          // All assertions agree: shortcut is safe, and every assertion is
-          // supporting (not just the first one found).
-          const brandName = parsedBrands[0].brandName;
+          // All assertions agree on the exact canonical identity: shortcut is
+          // safe, and every assertion is supporting (not just the first one).
+          const brandName = uniqueBrands[0];
           const matchedOption = options2.find(o =>
-            o.label.toLocaleLowerCase() === brandName.toLocaleLowerCase(),
+            resolveCanonicalAssertion(o.label, attribute?.valueAliases ?? []) === brandName,
           );
           const value = matchedOption?.label ?? brandName;
           const proposal = buildFieldAssignmentProposal({
             runId: context.runId,
             sku: input.sku,
-            attributeId: targetConfig.attributeId ?? targetConfig.id,
+            attributeId: brandAttributeId,
             value,
             confidence: 0.9,
             evidenceIds: allBrandIds,
@@ -199,11 +224,22 @@ export async function processProductFieldTarget(
   }
 
   // Bounded target-specific packet: the LLM prompt and proposal evidence are
-  // selected by attributeId/sourceField, never a run-wide union.
+  // selected by attributeId + the reviewed catalog-field mapping, never a
+  // run-wide union and never the attribute id used as a source field. Brand
+  // targets additionally accept the reviewed `brand`/`resolved_brand` source
+  // fields so ordinary brand assertions remain target-relevant.
   const attrId = targetConfig.attributeId ?? targetConfig.id;
+  const catalogField = targetConfig.catalogField ?? null;
+  const brandSourceFields = isBrandField ? ['brand', 'resolved_brand'] : [];
+  const packetSourceFields = catalogField
+    ? [...new Set([catalogField, ...brandSourceFields])]
+    : brandSourceFields.length
+      ? brandSourceFields
+      : null;
   const fieldPacket = buildEvidenceTargetPacket(input.evidence, {
     attributeId: attrId,
-    sourceField: attrId,
+    sourceField: catalogField,
+    sourceFields: packetSourceFields,
     selectionMode,
     aliases: attribute?.valueAliases ?? [],
     isGroundingSupport: tokenGroundingSupport,
@@ -290,7 +326,8 @@ export async function processProductFieldTarget(
   // assertion conflicts are detected (never resolved by source order).
   const rolePacket = buildEvidenceTargetPacket(input.evidence, {
     attributeId: attrId,
-    sourceField: attrId,
+    sourceField: catalogField,
+    sourceFields: packetSourceFields,
     selectionMode,
     proposedValue: selectionMode === 'multiple' ? values : values[0],
     aliases: attribute?.valueAliases ?? [],
@@ -362,6 +399,19 @@ export async function processPageTarget(
   // ── Extract product context from evidence and proposals ────────────────
   const productContext = extractProductContext(input.evidence, input.allProposals);
 
+  // Restricted page-evidence packet built ONCE before assignment: the full run
+  // evidence never leaks into page context. Only identity/species/type/
+  // category records (by source field OR explicit attribute id) enter; the
+  // reviewed species value (never first evidence) drives cross-species
+  // contradiction labeling.
+  const speciesValue = reviewedSpeciesValue(context);
+  const pagePacket = buildPageEvidencePacket(input.evidence, {
+    pageContextSourceFields: PAGE_CONTEXT_SOURCE_FIELDS,
+    pageContextAttributeIds: PAGE_CONTEXT_ATTRIBUTE_IDS,
+    sourceField: null,
+    speciesValue,
+  });
+
   const groupedSkus = context.productLineContext?.siblingSkus ?? [];
   const isMultiItemGroup = groupedSkus.length >= 2;
   let llmResult: PageAssignmentResult | null;
@@ -429,14 +479,9 @@ export async function processPageTarget(
   }
 
   if (!llmResult || llmResult.pages.length === 0) {
-    const packet = buildPageEvidencePacket(input.evidence, {
-      pageContextSourceFields: PAGE_CONTEXT_SOURCE_FIELDS,
-      sourceField: null,
-      speciesValue: pageSpeciesValue(input.evidence),
-    });
     return {
       proposals: [],
-      message: `No page assignment from ${assignmentSource}. Evidence length: ${input.evidence.length} records, ${packet.evidenceIds.length} linked.`,
+      message: `No page assignment from ${assignmentSource}. Evidence length: ${input.evidence.length} records, ${pagePacket.evidenceIds.length} linked.`,
     };
   }
 
@@ -448,11 +493,6 @@ export async function processPageTarget(
       ? context.snapshot.pages.records.map(r => r.pageId)
       : [],
   );
-  const pagePacket = buildPageEvidencePacket(input.evidence, {
-    pageContextSourceFields: PAGE_CONTEXT_SOURCE_FIELDS,
-    sourceField: null,
-    speciesValue: pageSpeciesValue(input.evidence),
-  });
   const proposals = llmResult.pages.map((p: any) =>
     buildCategoryPageProposal({
       runId: context.runId,

@@ -182,7 +182,7 @@ function sameStringSet(left: string[], right: string[]): boolean {
   return l === r;
 }
 
-function isReviewDecision(status: ClassificationProposal['status']): status is ReviewDecision {
+export function isReviewDecision(status: ClassificationProposal['status']): status is ReviewDecision {
   return status === 'accepted' || status === 'rejected' || status === 'deferred';
 }
 

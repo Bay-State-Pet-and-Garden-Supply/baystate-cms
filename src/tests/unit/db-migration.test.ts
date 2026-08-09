@@ -778,4 +778,44 @@ describe('SQLite Migration', () => {
 
     db.run('DELETE FROM extractor_profiles WHERE id IN (?, ?)', [profileId, profileId2]);
   });
+
+  it('fresh schema: role columns are NOT NULL and the relation join carries the CHECK (issue #17 pass 5b)', () => {
+    const db = getDb();
+    const proposalCols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string; notnull: number }>;
+    const supporting = proposalCols.find(c => c.name === 'supporting_evidence_ids_json');
+    const contradicting = proposalCols.find(c => c.name === 'contradicting_evidence_ids_json');
+    expect(supporting).toBeDefined();
+    expect(contradicting).toBeDefined();
+    expect(Number(supporting!.notnull)).toBe(1);
+    expect(Number(contradicting!.notnull)).toBe(1);
+
+    const joinSql = db.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposal_evidence'",
+    ).get() as { sql: string };
+    expect(/CHECK\s*\(/.test(joinSql.sql)).toBe(true);
+    expect(joinSql.sql).toContain("'supporting'");
+    expect(joinSql.sql).toContain("'legacy'");
+  });
+
+  it('re-running migrations is idempotent and keeps the relation CHECK + role columns (issue #17 pass 5b)', () => {
+    const db = getDb();
+    runMigrations();
+    const joinSql = db.query(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposal_evidence'",
+    ).get() as { sql: string };
+    expect(/CHECK\s*\(/.test(joinSql.sql)).toBe(true);
+    const proposalCols = db.query('PRAGMA table_info(classification_proposals)').all() as Array<{ name: string; notnull: number }>;
+    expect(Number(proposalCols.find(c => c.name === 'supporting_evidence_ids_json')!.notnull)).toBe(1);
+    expect(Number(proposalCols.find(c => c.name === 'contradicting_evidence_ids_json')!.notnull)).toBe(1);
+    const marker = db.query("SELECT value FROM app_meta WHERE key = 'evidence_citation_schema_version'").get() as { value: string } | undefined;
+    expect(marker?.value).toBe('1');
+  });
+
+  it('standalone classification-migration.sql declares the role columns for fresh DBs (issue #17 pass 5b)', () => {
+    const sql = fs.readFileSync(path.resolve(import.meta.dirname, '../../db/classification-migration.sql'), 'utf-8');
+    expect(sql).toContain("supporting_evidence_ids_json TEXT NOT NULL DEFAULT '[]'");
+    expect(sql).toContain("contradicting_evidence_ids_json TEXT NOT NULL DEFAULT '[]'");
+    expect(sql).toContain("relation TEXT NOT NULL DEFAULT 'legacy' CHECK");
+  });
+
 });

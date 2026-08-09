@@ -206,6 +206,9 @@ CREATE TABLE IF NOT EXISTS classification_proposals (
   is_stale INTEGER NOT NULL DEFAULT 0 CHECK (is_stale IN (0, 1)),
   staleness_reason TEXT,
   config_snapshot_hash TEXT,
+  evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+  supporting_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+  contradicting_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
   model_call_ids_json TEXT,
   created_at TEXT NOT NULL
 );

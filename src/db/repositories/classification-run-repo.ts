@@ -689,6 +689,12 @@ function mapEvidence(row: Record<string, any>): ClassificationEvidence {
 function mapProposal(row: Record<string, any>): ClassificationProposal {
   const hasRevisedValue = Number(row.has_revised_value) === 1;
   const hasRevisedTargetId = Number(row.has_revised_target_id) === 1;
+  // Authoritative evidence roles come from the relation join, never the
+  // denormalized JSON columns (which can drift). The union stays the
+  // backward-compatible evidenceIds for legacy rows without relation rows.
+  const relations = evidenceRelationsForProposal(String(row.id));
+  const supportingEvidenceIds = relations.filter(r => r.relation === 'supporting').map(r => r.evidenceId);
+  const contradictingEvidenceIds = relations.filter(r => r.relation === 'contradicting').map(r => r.evidenceId);
   return {
     id: String(row.id),
     runId: String(row.run_id),
@@ -698,12 +704,8 @@ function mapProposal(row: Record<string, any>): ClassificationProposal {
     proposedValue: row.proposed_value_json ? JSON.parse(String(row.proposed_value_json)) : null,
     confidence: Number(row.confidence),
     evidenceIds: row.evidence_ids_json ? JSON.parse(String(row.evidence_ids_json)) : [],
-    ...(row.supporting_evidence_ids_json
-      ? { supportingEvidenceIds: JSON.parse(String(row.supporting_evidence_ids_json)) as string[] }
-      : {}),
-    ...(row.contradicting_evidence_ids_json
-      ? { contradictingEvidenceIds: JSON.parse(String(row.contradicting_evidence_ids_json)) as string[] }
-      : {}),
+    ...(supportingEvidenceIds.length ? { supportingEvidenceIds } : {}),
+    ...(contradictingEvidenceIds.length ? { contradictingEvidenceIds } : {}),
     ...(row.model_call_ids_json
       ? { modelCallIds: JSON.parse(String(row.model_call_ids_json)) as string[] }
       : {}),
@@ -721,6 +723,26 @@ function mapProposal(row: Record<string, any>): ClassificationProposal {
     currentDecisionId: row.current_decision_id ? String(row.current_decision_id) : null,
     createdAt: String(row.created_at),
   };
+}
+
+interface ProposalEvidenceRelation {
+  evidenceId: string;
+  relation: 'supporting' | 'contradicting' | 'context' | 'legacy';
+}
+
+/**
+ * Authoritative evidence roles for a proposal, read from the relation join
+ * (issue #17 H / pass 5b). Roles are NEVER derived from the denormalized JSON
+ * columns on read; the join is the single source of truth.
+ */
+function evidenceRelationsForProposal(proposalId: string): ProposalEvidenceRelation[] {
+  const rows = getDb().query(
+    'SELECT evidence_id, relation FROM classification_proposal_evidence WHERE proposal_id = ? ORDER BY rowid',
+  ).all(proposalId) as Array<{ evidence_id: string; relation: string }>;
+  return rows.map(row => ({
+    evidenceId: String(row.evidence_id),
+    relation: String(row.relation) as ProposalEvidenceRelation['relation'],
+  }));
 }
 
 function mapDecision(row: Record<string, any>): ClassificationProposalDecision {

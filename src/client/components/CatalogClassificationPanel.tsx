@@ -242,9 +242,13 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
                   })()}
                 </div>
                 {(() => {
+                  const liveDecision = (detail?.decisions || []).find(
+                    d => d.proposalId === p.id,
+                  );
                   const view = deriveEvidenceView({
                     proposal: p as unknown as import('../../shared/schemas/classification').ClassificationProposal,
                     evidence: (detail?.evidence || []) as unknown as import('../../shared/schemas/classification').ClassificationEvidence[],
+                    decision: (liveDecision ?? null) as import('../../shared/schemas/classification').ClassificationProposalDecision | null,
                   });
                   return <EvidenceCitationList rows={view.rows} showUncited isUncited={view.citation.isUncited} />;
                 })()}

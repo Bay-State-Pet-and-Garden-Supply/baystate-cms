@@ -1549,6 +1549,64 @@ describe('Classification Pipeline Integration', () => {
     expect(links.c).toBe(0);
   });
 
+  it('rejects role-only evidence ids that bypass the union and roll back (issue #17 pass 5b)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'SKU-EV-ROLEONLY', snapId, snapHash);
+    const proposalId = randomUUID();
+    const now = new Date().toISOString();
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: proposalId,
+            runId: run.id,
+            productSku: 'SKU-EV-ROLEONLY',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            // Empty union with non-empty role arrays: ghost/foreign role ids
+            // must fail closed — a role can never reference an id outside the
+            // proposal's evidence union.
+            evidenceIds: [],
+            supportingEvidenceIds: ['ghost-evidence'],
+            contradictingEvidenceIds: ['foreign-evidence'],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            createdAt: now,
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-EV-ROLEONLY', evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Evidence linkage failed/);
+
+    const persisted = getDb().query(
+      'SELECT COUNT(*) AS c FROM classification_proposals WHERE run_id = ?',
+    ).get(run.id) as { c: number };
+    expect(persisted.c).toBe(0);
+    const links = getDb().query(
+      'SELECT COUNT(*) AS c FROM classification_proposal_evidence WHERE proposal_id = ?',
+    ).get(proposalId) as { c: number };
+    expect(links.c).toBe(0);
+  });
+
   it('persists proposal evidence roles in the join with the authoritative relation (issue #17 H)', async () => {
     const config = loadClassificationConfig(workspacePath);
     const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);

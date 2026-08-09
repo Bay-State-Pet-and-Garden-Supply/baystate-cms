@@ -54,11 +54,34 @@ export interface ValueAlias {
   mapsTo: string;
 }
 
+/**
+ * General title/description evidence source fields. These are the ONLY
+ * non-target records that may enter a target packet (as bounded context, or
+ * as supporting only through a deterministic grounding rule). All other
+ * non-target records (color/weight/etc.) are excluded entirely — never
+ * context, never citable (issue #17 pass 5b).
+ */
+export const GENERAL_TEXT_SOURCE_FIELDS = new Set(['name', 'title', 'description']);
+
+/** True when an evidence record is general title/description text. */
+export function isGeneralTextEvidence(evidence: ClassificationEvidence): boolean {
+  return evidence.sourceField !== null && evidence.sourceField !== undefined
+    && GENERAL_TEXT_SOURCE_FIELDS.has(evidence.sourceField);
+}
+
 export interface EvidenceTargetPacketOptions {
   /** Explicit attribute id (first-priority target selection). */
   attributeId?: string | null;
   /** Reviewed source-field mapping (second-priority selection). */
   sourceField?: string | null;
+  /**
+   * Additional reviewed source-field mappings (OR-ed with `sourceField`).
+   * Used where a target's evidence is emitted under multiple reviewed field
+   * names (e.g. the brand target's `brand`/`resolved_brand` source fields
+   * alongside its catalog field). Explicit attributeId still wins; a record
+   * with a disagreeing explicit attributeId is still denied.
+   */
+  sourceFields?: string[] | null;
   /** Single-cardinality comparable targets detect assertion conflicts. */
   selectionMode?: 'single' | 'multiple';
   /** The selected/proposed canonical value for grounding (optional). */
@@ -109,15 +132,33 @@ export function resolveCanonicalAssertion(
 /**
  * Deterministic target membership: explicit attributeId first, reviewed
  * source-field mapping second. Never infer membership from a human label.
+ *
+ * Fail closed on explicit attributeId disagreement: a record explicitly
+ * tagged with a DIFFERENT attribute id (e.g. attributeId=color for a flavor
+ * target) is denied even if its sourceField matches the target's mapping.
+ * A record with no attributeId falls back to the reviewed source-field
+ * mapping.
  */
 export function evidenceMatchesTarget(
   evidence: ClassificationEvidence,
-  options: Pick<EvidenceTargetPacketOptions, 'attributeId' | 'sourceField'>,
+  options: Pick<EvidenceTargetPacketOptions, 'attributeId' | 'sourceField' | 'sourceFields'>,
 ): boolean {
   const attributeId = options.attributeId ?? null;
-  const sourceField = options.sourceField ?? null;
+  const sourceFields = [
+    ...(options.sourceField ? [options.sourceField] : []),
+    ...(options.sourceFields ?? []),
+  ];
   if (attributeId && evidence.attributeId === attributeId) return true;
-  if (sourceField && evidence.sourceField === sourceField) return true;
+  if (evidence.attributeId) {
+    // An explicit attributeId that disagrees with the target denies the
+    // record — the source-field mapping never overrides an explicit
+    // attribute identity.
+    return false;
+  }
+  if (sourceFields.length > 0 && evidence.sourceField !== null && evidence.sourceField !== undefined
+    && sourceFields.includes(evidence.sourceField)) {
+    return true;
+  }
   return false;
 }
 
@@ -166,6 +207,7 @@ export function buildEvidenceTargetPacket(
   const {
     attributeId = null,
     sourceField = null,
+    sourceFields = null,
     selectionMode = 'single',
     proposedValue,
     aliases = [],
@@ -190,7 +232,7 @@ export function buildEvidenceTargetPacket(
   const targetMatching: ClassificationEvidence[] = [];
 
   for (const record of evidence) {
-    if (evidenceMatchesTarget(record, { attributeId, sourceField })) {
+    if (evidenceMatchesTarget(record, { attributeId, sourceField, sourceFields })) {
       targetMatching.push(record);
     }
   }
@@ -205,19 +247,24 @@ export function buildEvidenceTargetPacket(
   }
 
   // Unresolved conflict: two or more distinct asserted canonical values.
+  // values and evidenceIds stay ALIGNED (pairs sorted together so an id is
+  // never displayed against the wrong canonical value).
   const conflicts: AssertionConflict[] = [];
   if (isSingleComparable && assertionByValue.size >= 2) {
+    const pairs = [...assertionByValue.entries()].sort((a, b) =>
+      a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
+    );
     conflicts.push({
       attributeId,
       sourceField,
-      values: [...assertionByValue.keys()].sort(),
-      evidenceIds: [...assertionByValue.values()],
+      values: pairs.map(pair => pair[0]),
+      evidenceIds: pairs.map(pair => pair[1]),
     });
   }
 
   // Second pass: classify each record into supporting/contradicting/context.
   for (const record of evidence) {
-    const matchesTarget = evidenceMatchesTarget(record, { attributeId, sourceField });
+    const matchesTarget = evidenceMatchesTarget(record, { attributeId, sourceField, sourceFields });
     if (matchesTarget) {
       const assertion = evidenceAssertion(record, aliases);
       if (isSingleComparable && assertion !== null) {
@@ -249,8 +296,14 @@ export function buildEvidenceTargetPacket(
       }
       continue;
     }
-    // Non-matching evidence: context, unless a deterministic grounding rule
-    // links it to the selected canonical value (then supporting).
+    // Non-target records: ONLY general title/description evidence may enter
+    // the packet. When a deterministic grounding rule links it to the
+    // selected canonical value it is SUPPORTING; otherwise it is bounded
+    // context. Every other non-target record (color/weight/custom fields) is
+    // excluded entirely — never context, never citable.
+    if (!isGeneralTextEvidence(record)) {
+      continue;
+    }
     if (
       isSingleComparable
       && selectedCanonical !== null
@@ -303,21 +356,31 @@ export function buildPageEvidencePacket(
   options: Pick<EvidenceTargetPacketOptions, 'sourceField' | 'aliases' | 'promptTextCap' | 'valueCap'> & {
     /** Reviewed page-context source fields (identity/species/type/category). */
     pageContextSourceFields: string[];
+    /**
+     * Reviewed page-context attribute ids (e.g. ['species']) — records with an
+     * explicit attributeId are included even when they lack the source field.
+     */
+    pageContextAttributeIds?: string[];
     /** The product's reviewed species value for cross-species detection. */
     speciesValue?: unknown;
   },
 ): EvidenceTargetPacket {
-  const pageEvidence = evidence.filter(record =>
-    options.pageContextSourceFields.includes(record.sourceField ?? ''),
-  );
+  const pageAttributeIds = new Set(options.pageContextAttributeIds ?? []);
+  const pageEvidence = evidence.filter(record => {
+    if (record.attributeId && pageAttributeIds.has(record.attributeId)) return true;
+    return options.pageContextSourceFields.includes(record.sourceField ?? '');
+  });
   // Cross-species evidence is a contradiction/rejection signal when the
-  // asserted species differs from the reviewed product species.
+  // asserted species differs from the reviewed product species. Assertions
+  // use exact canonical/alias identity — never case folding.
   const contradicting: ClassificationEvidence[] = [];
   const context: ClassificationEvidence[] = [];
   for (const record of pageEvidence) {
+    const isSpeciesRecord =
+      record.attributeId === 'species' || record.sourceField === 'species';
     if (
-      options.speciesValue !== undefined
-      && record.sourceField === 'species'
+      isSpeciesRecord
+      && options.speciesValue !== undefined
       && record.value !== null
       && record.value !== undefined
     ) {
@@ -356,11 +419,16 @@ export function buildPageEvidencePacket(
  * Deterministic grounding rule for general title/description evidence: a
  * title/description record supports a selected canonical value when the value
  * appears as a whole token in the record's text (case- and diacritic-folded).
+ *
+ * Fail closed: only general title/description evidence can be grounded — a
+ * color/weight/other record is never grounded into supporting a different
+ * target's value.
  */
 export function tokenGroundingSupport(
   evidence: ClassificationEvidence,
   proposedValue: unknown,
 ): boolean {
+  if (!isGeneralTextEvidence(evidence)) return false;
   const target = canonicalAssertionValue(proposedValue);
   if (target === null) return false;
   const haystack = [

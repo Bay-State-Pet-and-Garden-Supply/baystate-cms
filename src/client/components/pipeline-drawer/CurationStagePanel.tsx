@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ClassificationProposal, ClassificationEvidence, CurationTargetConfig } from '../../../shared/schemas/classification';
+import type { ClassificationProposal, ClassificationEvidence, ClassificationProposalDecision, CurationTargetConfig } from '../../../shared/schemas/classification';
 import type { BrandSite } from '../../../shared/schemas/onboarding';
 import { pageNameFromPageValue } from '../../../shared/proposal-display';
 import { SearchableBrandSelector } from '../SearchableBrandSelector';
@@ -34,6 +34,10 @@ interface CurationStagePanelProps {
   classificationEvidence?: ClassificationEvidence[];
   /** Reviewer-selected citation ids per proposal (issue #17 I). */
   citationSelections?: Record<string, string[]>;
+  /** Live decisions keyed by proposal id (issue #17 pass 5b) — the matching
+   *  decision renders stored citations; uncited wording appears only for an
+   *  actual uncited correction. */
+  decisionsByProposal?: Record<string, ClassificationProposalDecision>;
   onToggleCitation?: (proposalId: string, evidenceId: string) => void;
   getEffectiveProductTypeId: (proposal: ClassificationProposal) => string | null;
   withReviewedProposalValue: (proposal: ClassificationProposal, reviewedValue: unknown) => ClassificationProposal;
@@ -67,6 +71,7 @@ export function CurationStagePanel({
   getEffectiveProposalValue,
   classificationEvidence = [],
   citationSelections = {},
+  decisionsByProposal = {},
   onToggleCitation,
   getEffectiveProductTypeId,
   withReviewedProposalValue,
@@ -293,6 +298,7 @@ export function CurationStagePanel({
                     const view = deriveEvidenceView({
                       proposal: p,
                       evidence: classificationEvidence,
+                      decision: decisionsByProposal[p.id] ?? null,
                     });
                     const selected = citationSelections[p.id] ?? [];
                     return (
@@ -304,7 +310,7 @@ export function CurationStagePanel({
                           onToggleCitation ? (evidenceId) => onToggleCitation(p.id, evidenceId) : undefined
                         }
                         showUncited={Boolean(onToggleCitation)}
-                        isUncited={selected.length === 0}
+                        isUncited={selected.length === 0 && Boolean(view.citation.isUncited)}
                       />
                     );
                   })()}

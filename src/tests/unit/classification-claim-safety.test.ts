@@ -48,7 +48,7 @@ function makeEvidence(overrides: Partial<ClassificationEvidence> = {}): Classifi
 }
 
 function makeProposal(overrides: Partial<ClassificationProposal> = {}): ClassificationProposal {
-  return {
+  const merged: ClassificationProposal = {
     id: 'prop-1',
     runId: 'run-1',
     productSku: 'SKU-1',
@@ -64,6 +64,14 @@ function makeProposal(overrides: Partial<ClassificationProposal> = {}): Classifi
     createdAt: '2026-08-01T00:00:00.000Z',
     ...overrides,
   };
+  // Claims/composition require target-specific SUPPORTING evidence (issue #17
+  // pass 5b). Default the role split to the union so fixtures exercise the
+  // direct-evidence provenance checks; tests may override with an explicit
+  // (empty or context-only) supporting list.
+  if (merged.supportingEvidenceIds === undefined) {
+    merged.supportingEvidenceIds = merged.evidenceIds ?? [];
+  }
+  return merged;
 }
 
 describe('validateProposalSafety — claims', () => {
@@ -133,6 +141,22 @@ describe('validateProposalSafety — claims', () => {
       );
       expect(report.ok).toBe(true);
     }
+  });
+
+  it('withholds a claim whose only evidence is unrelated context (no supporting ids) (issue #17 pass 5b)', () => {
+    const report = validateProposalSafety(
+      [makeProposal({
+        evidenceIds: ['ev-title'],
+        supportingEvidenceIds: [],
+        contradictingEvidenceIds: [],
+      })],
+      {
+        attributes: [claimAttribute],
+        evidence: [makeEvidence({ id: 'ev-title', source: 'official_product_page', sourceField: 'name' })],
+      },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.findings[0].code).toBe('claim_missing_direct_evidence');
   });
 
   it('never lets bulk acceptance bypass review for a claim', () => {

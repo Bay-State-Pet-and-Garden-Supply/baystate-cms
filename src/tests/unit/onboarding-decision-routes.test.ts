@@ -96,8 +96,28 @@ afterAll(() => {
 });
 
 describe('onboarding decision routes', () => {
-  it('hydrates canonical proposals and evidence from the active run', async () => {
+  it('hydrates canonical proposals, evidence, and LIVE decisions (with citations) from the active run (issue #17 pass 5b)', async () => {
     const seeded = seedReviewItem();
+    // Link the evidence to the proposal so the citation validation passes.
+    getDb().run(
+      'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
+      ['proposal-canonical', 'evidence-canonical', 'supporting'],
+    );
+    // Persist a live accepted decision with a citation so hydration must
+    // surface it.
+    const decisionResponse = await makeApp().request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions: [{
+        proposalId: 'proposal-canonical',
+        decision: 'accepted',
+        evidenceIds: ['evidence-canonical'],
+        actionToken: 'hydrate-cite-token',
+        expectedRevisionId: null,
+      }] }),
+    });
+    expect(decisionResponse.status).toBe(200);
+
     const response = await makeApp().request(`/api/onboarding/items/${seeded.itemId}`);
 
     expect(response.status).toBe(200);
@@ -106,12 +126,20 @@ describe('onboarding decision routes', () => {
     expect(body.item.curationData.classificationProposals[0]).toMatchObject({
       id: 'proposal-canonical',
       proposedValue: 'Chicken',
-      currentDecisionId: null,
+      currentDecisionId: expect.any(String),
     });
     expect(body.item.curationData.classificationEvidence).toHaveLength(1);
     expect(body.item.curationData.classificationEvidence[0]).toMatchObject({
       id: 'evidence-canonical',
       snippet: 'Canonical evidence',
+    });
+    // Persisted citations render: the hydrated LIVE decision pairs with the
+    // proposal and carries its evidenceIds.
+    expect(body.item.curationData.classificationDecisions).toHaveLength(1);
+    expect(body.item.curationData.classificationDecisions[0]).toMatchObject({
+      proposalId: 'proposal-canonical',
+      decision: 'accepted',
+      evidenceIds: ['evidence-canonical'],
     });
   });
 

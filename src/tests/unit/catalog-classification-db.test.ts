@@ -145,6 +145,19 @@ describe('proposal-review-service (catalog product)', () => {
       'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
       ['proposal-cite', 'ev-cite-1', 'supporting'],
     );
+    // Roles are authoritative from the relation join (issue #17 pass 5b): the
+    // union member is persisted with its contradicting relation. The evidence
+    // row must exist for the FK join.
+    db.run(
+      `INSERT OR IGNORE INTO classification_evidence
+       (id, run_id, product_sku, stage_name, source, reliability, attribute_id, source_field, snippet, value_json, metadata_json, created_at)
+       VALUES (?, ?, ?, 'evidence_extraction', 'official_product_page', 'high', 'flavor', 'flavor', NULL, '"Beef"', '{}', ?)`,
+      ['ev-cite-x', run.id, 'SKU-CITE', now],
+    );
+    db.run(
+      'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
+      ['proposal-cite', 'ev-cite-x', 'contradicting'],
+    );
     completeRun(run.id, 'completed');
 
     const result = submitProposalDecisions({

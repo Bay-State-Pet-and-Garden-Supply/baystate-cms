@@ -41,7 +41,79 @@ describe('evidence-targeting (issue #17 H)', () => {
     expect(evidenceMatchesTarget(labeled, { attributeId: 'flavor', sourceField: 'flavor' })).toBe(false);
   });
 
-  it('links only flavor evidence to a flavor proposal, not unrelated color/weight evidence', () => {
+  it('denies a record with an explicit DISAGREEING attributeId even when its sourceField matches (issue #17 pass 5b)', () => {
+    // attributeId=color + sourceField=flavor must NOT match a flavor target:
+    // the explicit attribute identity is authoritative and fail-closed.
+    const record = ev({ id: 'e1', attributeId: 'color', sourceField: 'flavor', value: 'Chicken' });
+    expect(evidenceMatchesTarget(record, { attributeId: 'flavor', sourceField: 'flavor' })).toBe(false);
+    // A record with NO attributeId falls back to the source-field mapping.
+    const noAttr = ev({ id: 'e2', attributeId: null, sourceField: 'flavor', value: 'Chicken' });
+    expect(evidenceMatchesTarget(noAttr, { attributeId: 'flavor', sourceField: 'flavor' })).toBe(true);
+  });
+
+  it('never grounds an unrelated (color) record into a flavor proposal (issue #17 pass 5b)', () => {
+    const colorChicken = ev({ id: 'c1', attributeId: 'color', value: 'Chicken' });
+    const packet = buildEvidenceTargetPacket([colorChicken], {
+      attributeId: 'flavor',
+      sourceField: 'flavor',
+      selectionMode: 'single',
+      proposedValue: 'Chicken',
+      isGroundingSupport: tokenGroundingSupport,
+    });
+    // The color record is excluded entirely — never supporting, never context.
+    expect(packet.supportingEvidenceIds).toEqual([]);
+    expect(packet.context.map(r => r.id)).toEqual([]);
+    expect(packet.evidenceIds).toEqual([]);
+  });
+
+  it('token grounding applies ONLY to general title/description evidence (issue #17 pass 5b)', () => {
+    const title = ev({ id: 't1', attributeId: null, sourceField: 'name', value: 'Chicken and rice formula' });
+    const weight = ev({ id: 'w1', attributeId: null, sourceField: 'weight', value: 'Chicken 5 lb' });
+    expect(tokenGroundingSupport(title, 'Chicken')).toBe(true);
+    expect(tokenGroundingSupport(weight, 'Chicken')).toBe(false);
+  });
+
+  it('page packet includes category page_name and explicit attributeId species records (issue #17 pass 5b)', () => {
+    const pageName = ev({ id: 'pn1', attributeId: null, sourceField: 'page_name', value: 'Dog Food' });
+    const speciesAttr = ev({ id: 'sp1', attributeId: 'species', value: 'Dog' });
+    const speciesField = ev({ id: 'sp2', attributeId: null, sourceField: 'species', value: 'Dog' });
+    const weight = ev({ id: 'w1', attributeId: null, sourceField: 'weight', value: '5 lb' });
+    const packet = buildPageEvidencePacket(
+      [pageName, speciesAttr, speciesField, weight],
+      {
+        pageContextSourceFields: ['name', 'title', 'page_name', 'category', 'species', 'productForm', 'productType'],
+        pageContextAttributeIds: ['species'],
+        sourceField: null,
+        speciesValue: 'Dog',
+      },
+    );
+    expect(packet.context.map(r => r.id).sort()).toEqual(['pn1', 'sp1', 'sp2'].sort());
+    expect(packet.contradictingEvidenceIds).toEqual([]);
+    expect(packet.evidenceIds.includes('w1')).toBe(false);
+  });
+
+  it('species contradiction direction is order-INDEPENDENT and driven by the reviewed species value (issue #17 pass 5b)', () => {
+    const dog = ev({ id: 'sp-dog', attributeId: 'species', value: 'Dog' });
+    const cat = ev({ id: 'sp-cat', attributeId: 'species', value: 'Cat' });
+    const opts = {
+      pageContextSourceFields: ['species'],
+      pageContextAttributeIds: ['species'],
+      sourceField: null,
+      speciesValue: 'Dog',
+    };
+    const forward = buildPageEvidencePacket([dog, cat], opts);
+    const reversed = buildPageEvidencePacket([cat, dog], opts);
+    expect(forward.contradictingEvidenceIds).toEqual(['sp-cat']);
+    expect(reversed.contradictingEvidenceIds).toEqual(['sp-cat']);
+    expect(forward.context.map(r => r.id)).toContain('sp-dog');
+    expect(reversed.context.map(r => r.id)).toContain('sp-dog');
+    // WITHOUT a reviewed species value, no contradiction can be labeled at all
+    // (order-independent — never first-evidence).
+    const noReviewed = buildPageEvidencePacket([dog, cat], { ...opts, speciesValue: undefined });
+    expect(noReviewed.contradictingEvidenceIds).toEqual([]);
+  });
+
+  it('links only flavor evidence to a flavor proposal and excludes unrelated color/weight entirely (issue #17 pass 5b)', () => {
     const evidence = [
       ev({ id: 'f1', attributeId: 'flavor', value: 'Chicken' }),
       ev({ id: 'f2', attributeId: 'flavor', value: 'Chicken' }),
@@ -56,7 +128,10 @@ describe('evidence-targeting (issue #17 H)', () => {
     });
     expect(packet.supportingEvidenceIds).toEqual(['f1', 'f2']);
     expect(packet.contradictingEvidenceIds).toEqual([]);
-    expect(packet.context.map(r => r.id)).toEqual(['c1', 'w1']);
+    // Unrelated color/weight records are excluded ENTIRELY — never context,
+    // never citable.
+    expect(packet.context.map(r => r.id)).toEqual([]);
+    expect(packet.evidenceIds.sort()).toEqual(['f1', 'f2'].sort());
   });
 
   it('detects a spreadsheet vs official-page disagreement as a visible conflict', () => {
