@@ -56,12 +56,14 @@ import { sha256Hex, canonicalJsonStringify } from '../shared/stable-id';
 
 export const BACKUP_MANIFEST_FORMAT = 'baystate-sqlite-backup';
 /**
- * v3: source identity is captured BEFORE the snapshot and bound to it
- * (`sourceIdentityHash` + `sourceIdentityHashAfter`), row digests use the
- * typed BLOB-safe encoding, verification opens immutably and rejects
- * sidecars, and artifact creation is atomic ('wx' manifest reservation).
+ * v4: the published snapshot's OWN content identity (`snapshotContentIdentity`)
+ * is bound to the recorded source identity and recorded in the manifest, so
+ * verification is self-consistent (artifact content must match the manifest
+ * even without the source), and artifact ownership inodes are captured from
+ * the private temps BEFORE publication (a foreign file replaced in the
+ * link->stat window is never treated as owned).
  */
-export const BACKUP_MANIFEST_VERSION = 3;
+export const BACKUP_MANIFEST_VERSION = 4;
 
 export interface BackupManifest {
   format: string;
@@ -94,6 +96,15 @@ export interface BackupManifest {
    * identity must be the SAME database moment).
    */
   sourceIdentityHashAfter: string;
+  /**
+   * Content identity (counts + typed row digests, EXCLUDING the version
+   * numbers, because VACUUM INTO rewrites the snapshot's own schema_version)
+   * of the PUBLISHED backup artifact, recorded at creation. Verification
+   * recomputes it on the artifact (immutably) and requires it to match — the
+   * backup is self-consistent even without the source. This is the binding
+   * that rejects a foreign snapshot swapped in during creation.
+   */
+  snapshotContentIdentity: string;
   createdAt: string;
 }
 
@@ -222,7 +233,21 @@ function tableRowDigests(db: Database): Record<string, string> {
   return digests;
 }
 
-/** Content-addressed identity of a database (user/schema version + counts + row digests). */
+/**
+ * Content identity of a database EXCLUDING the user/schema version numbers:
+ * critical counts + per-table typed row digests. Used to bind the VACUUM INTO
+ * snapshot to the source (the snapshot's own schema_version is rewritten by
+ * VACUUM, so only counts + row digests are comparable) and to give the
+ * published artifact a self-consistent identity in the manifest.
+ */
+export function computeContentIdentityHash(db: Database): string {
+  const payload = {
+    counts: readCriticalCounts(db),
+    tableDigests: tableRowDigests(db),
+  };
+  return sha256Hex(canonicalJsonStringify(payload));
+}
+
 export function computeSourceIdentityHash(db: Database): string {
   const payload = {
     userVersion: (db.query('PRAGMA user_version').get() as { user_version: number }).user_version,
@@ -240,6 +265,7 @@ export function buildBackupManifest(
   sourceDb: Database,
   sourceIdentityHash: string,
   sourceIdentityHashAfter: string,
+  snapshotContentIdentity: string,
   sha256: string,
   sizeBytes: number,
 ): BackupManifest {
@@ -257,6 +283,7 @@ export function buildBackupManifest(
     counts: readCriticalCounts(snapshotDb),
     sourceIdentityHash,
     sourceIdentityHashAfter,
+    snapshotContentIdentity,
     createdAt: new Date().toISOString(),
   };
 }
@@ -318,7 +345,17 @@ function escapeSingleQuotes(value: string): string {
 export function createSqliteBackup(
   sourceDbPath: string,
   backupPath: string,
-  testHooks?: { __afterSnapshot?: () => void; __beforeSnapshot?: () => void; __beforePostCheck?: () => void },
+  testHooks?: {
+    __afterSnapshot?: () => void;
+    __beforeSnapshot?: () => void;
+    __beforePostCheck?: () => void;
+    /** Fires after linkSync(vacuumTmp, backup) but BEFORE the destination inode verification. */
+    __beforeBackupLinkVerify?: () => void;
+    /** Fires after linkSync(tmpManifest, manifestPath) but BEFORE the destination inode verification. */
+    __beforeManifestLinkVerify?: () => void;
+    /** Fires just before the final published-artifact ownership re-check on success. */
+    __beforeReturn?: () => void;
+  },
 ): BackupManifest {
   const resolvedBackup = path.resolve(backupPath);
   const manifestPath = `${resolvedBackup}.manifest.json`;
@@ -378,12 +415,14 @@ export function createSqliteBackup(
     const sourceDb = new Database(sourceDbPath);
     let sourceIdentityHash: string;
     let sourceIdentityHashAfter: string;
+    let sourceContentIdentity: string;
     let preDataVersion: number;
     let postDataVersion: number;
     try {
       preDataVersion = (sourceDb.query('PRAGMA data_version').get() as { data_version: number })
         .data_version;
       sourceIdentityHash = computeSourceIdentityHash(sourceDb);
+      sourceContentIdentity = computeContentIdentityHash(sourceDb);
 
       // TEST-ONLY injection (never supplied by production callers): commits
       // an intervening write BEFORE the snapshot to deterministically prove
@@ -416,6 +455,20 @@ export function createSqliteBackup(
     // Publish the backup atomically (no-clobber): link fails with EEXIST if
     // any file — including a foreign file raced in at the destination —
     // occupies the final path, so a foreign file is never created-over.
+    //
+    // Ownership is captured from the PRIVATE TEMP (which this operation
+    // created by construction) BEFORE the hard link, and the destination is
+    // verified to still resolve to that exact inode AFTER the link: a foreign
+    // file replaced into the path in the link->verify window is detected and
+    // never recorded as owned (cleanup therefore never deletes it).
+    const vacTmpFd = fs.openSync(vacuumTmp, 'r');
+    let vacTmpStat: fs.Stats;
+    try {
+      vacTmpStat = fs.fstatSync(vacTmpFd);
+    } catch (err) {
+      fs.closeSync(vacTmpFd);
+      throw err;
+    }
     try {
       fs.linkSync(vacuumTmp, resolvedBackup);
     } catch (err) {
@@ -427,10 +480,22 @@ export function createSqliteBackup(
       }
       throw err;
     }
+    try {
+      // TEST-ONLY injection: a foreign file replaced at the destination after
+      // the link but before the ownership capture.
+      testHooks?.__beforeBackupLinkVerify?.();
+      const destStat = fs.statSync(resolvedBackup);
+      if (destStat.dev !== vacTmpStat.dev || destStat.ino !== vacTmpStat.ino) {
+        throw new Error(
+          'Backup destination was replaced by another process after publication; aborting.',
+        );
+      }
+      published.push({ path: resolvedBackup, dev: vacTmpStat.dev, ino: vacTmpStat.ino });
+    } finally {
+      fs.closeSync(vacTmpFd);
+    }
     fs.unlinkSync(vacuumTmp);
     tempPaths.splice(tempPaths.indexOf(vacuumTmp), 1);
-    const bkStat = fs.statSync(resolvedBackup);
-    published.push({ path: resolvedBackup, dev: bkStat.dev, ino: bkStat.ino });
 
     // TEST-ONLY injection point (never supplied by production callers): lets
     // a regression test deterministically race the manifest destination (a
@@ -445,6 +510,18 @@ export function createSqliteBackup(
     const manifestSourceDb = new Database(sourceDbPath, { readonly: true });
     let manifest: BackupManifest;
     try {
+      // Bind the PUBLISHED snapshot's content to the recorded source content:
+      // the pre/post checks above proved no source commit occurred during the
+      // VACUUM window, so the artifact's content identity MUST equal the
+      // source's content identity. A foreign same-schema/same-count snapshot
+      // swapped in after publication hashes differently and aborts creation
+      // with every artifact this operation created removed.
+      const snapshotContentIdentity = computeContentIdentityHash(snapshotDb);
+      if (snapshotContentIdentity !== sourceContentIdentity) {
+        throw new Error(
+          'Backup snapshot content does not match the recorded source content; aborting.',
+        );
+      }
       manifest = buildBackupManifest(
         sourceDbPath,
         resolvedBackup,
@@ -452,6 +529,7 @@ export function createSqliteBackup(
         manifestSourceDb,
         sourceIdentityHash,
         sourceIdentityHashAfter,
+        snapshotContentIdentity,
         sha256,
         sizeBytes,
       );
@@ -468,11 +546,21 @@ export function createSqliteBackup(
     const tmpManifest = `${manifestPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
     tempPaths.push(tmpManifest);
     const tmpFd = fs.openSync(tmpManifest, 'wx', 0o600);
+    let tmpStat: fs.Stats | null = null;
     try {
       fs.writeFileSync(tmpFd, JSON.stringify(manifest, null, 2));
       fs.fsyncSync(tmpFd);
-    } finally {
-      fs.closeSync(tmpFd);
+      // Ownership captured from the fd we hold BEFORE publication: the temp
+      // is this operation's file by construction, so the hard-linked
+      // destination must resolve to this exact inode afterwards.
+      tmpStat = fs.fstatSync(tmpFd);
+    } catch (err) {
+      try {
+        fs.closeSync(tmpFd);
+      } catch {
+        // already closed
+      }
+      throw err;
     }
     try {
       fs.linkSync(tmpManifest, manifestPath);
@@ -485,10 +573,22 @@ export function createSqliteBackup(
       }
       throw err;
     }
+    try {
+      // TEST-ONLY injection: a foreign file replaced at the manifest path
+      // after the link but before the ownership capture.
+      testHooks?.__beforeManifestLinkVerify?.();
+      const mDestStat = fs.statSync(manifestPath);
+      if (!tmpStat || mDestStat.dev !== tmpStat.dev || mDestStat.ino !== tmpStat.ino) {
+        throw new Error(
+          'Manifest destination was replaced by another process after publication; aborting.',
+        );
+      }
+      published.push({ path: manifestPath, dev: tmpStat.dev, ino: tmpStat.ino });
+    } finally {
+      fs.closeSync(tmpFd);
+    }
     fs.unlinkSync(tmpManifest);
     tempPaths.splice(tempPaths.indexOf(tmpManifest), 1);
-    const mStat = fs.statSync(manifestPath);
-    published.push({ path: manifestPath, dev: mStat.dev, ino: mStat.ino });
     fs.chmodSync(manifestPath, 0o600);
 
     // Success: remove our reservation marker (inode-checked — never another
@@ -509,6 +609,22 @@ export function createSqliteBackup(
     }
     reservationFd = null;
     reservationStat = null;
+
+    // TEST-ONLY injection: a foreign replacement at either published path
+    // before the final ownership re-check.
+    testHooks?.__beforeReturn?.();
+    // Final ownership re-check on the success path: both published artifacts
+    // must STILL resolve to the inodes this operation created. A foreign file
+    // replaced in at the path means the operation did not succeed — fail
+    // closed and never return a foreign manifest as our result (the catch
+    // cleanup leaves foreign files untouched).
+    for (const artifact of published) {
+      if (!isOwnedInode(artifact.path, artifact as unknown as fs.Stats)) {
+        throw new Error(
+          `Published artifact ${artifact.path} was replaced by another process; aborting.`,
+        );
+      }
+    }
 
     return manifest;
   } catch (err) {
@@ -624,10 +740,12 @@ export async function verifySqliteBackup(
     typeof manifest.sourceIdentityHash === 'string' &&
     manifest.sourceIdentityHash.length > 0 &&
     typeof manifest.sourceIdentityHashAfter === 'string' &&
-    manifest.sourceIdentityHashAfter.length > 0;
+    manifest.sourceIdentityHashAfter.length > 0 &&
+    typeof manifest.snapshotContentIdentity === 'string' &&
+    manifest.snapshotContentIdentity.length > 0;
   if (!hasRequiredIdentityFields) {
     errors.push(
-      `Manifest missing required source identity fields (sourceIdentityHash / sourceIdentityHashAfter).`,
+      `Manifest missing required source identity fields (sourceIdentityHash / sourceIdentityHashAfter / snapshotContentIdentity).`,
     );
   } else if (manifest.sourceIdentityHashAfter !== manifest.sourceIdentityHash) {
     errors.push(
@@ -689,6 +807,19 @@ export async function verifySqliteBackup(
         : 0;
       if (actual !== expected) {
         errors.push(`Backup count mismatch for ${table}: expected ${expected}, found ${actual}`);
+      }
+    }
+    // Self-consistent artifact identity: the artifact's OWN content identity
+    // (counts + typed row digests, versions excluded — the VACUUM snapshot's
+    // schema_version is its own) must match the manifest's recorded snapshot
+    // content identity. A foreign snapshot with identical schema/counts but
+    // different content cannot pass even WITHOUT the source present.
+    if (hasRequiredIdentityFields) {
+      const artifactContentIdentity = computeContentIdentityHash(db);
+      if (artifactContentIdentity !== manifest.snapshotContentIdentity) {
+        errors.push(
+          `Backup content identity does not match the manifest snapshot content identity.`,
+        );
       }
     }
   } catch (err) {

@@ -663,4 +663,145 @@ try {
     expect(verification.ok).toBe(true);
     expect(verification.errors).toEqual([]);
   });
+
+  // ── Issue #17 pass 6f regression tests ──────────────────────────────────
+
+  it('aborts when the published snapshot is swapped for a foreign same-schema/count DB (pass 6f)', async () => {
+    // Blocker 1: the published backup's content is bound to the recorded
+    // source identity. A foreign same-schema/same-count snapshot swapped in
+    // after publication must abort creation with zero artifacts left (and the
+    // foreign file preserved).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-foreign-snap-6f-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+
+    // A foreign database with the SAME schema and SAME row counts but
+    // different row content.
+    const foreign = makeSourceDb(dir, 'foreign-source.db');
+    {
+      const fdb = new Database(foreign);
+      fdb.exec("UPDATE onboarding_items SET name = 'FOREIGN-CONTENT' WHERE id = 'i1'");
+      fdb.close();
+    }
+    const foreignBytes = fs.readFileSync(foreign);
+
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __afterSnapshot: () => {
+          // Swap the published backup for the foreign artifact.
+          fs.rmSync(backup);
+          fs.copyFileSync(foreign, backup);
+        },
+      }),
+    ).toThrow(/snapshot content does not match/i);
+    // The foreign artifact is preserved (we do not delete files we did not
+    // create) and no manifest/reservation remains.
+    expect(fs.readFileSync(backup)).toEqual(foreignBytes);
+    expect(fs.existsSync(`${backup}.manifest.json`)).toBe(false);
+    expect(fs.existsSync(`${backup}.manifest.json.reservation`)).toBe(false);
+    fs.rmSync(backup);
+  });
+
+  it('binds the artifact content identity for self-consistent verification (pass 6f)', async () => {
+    // Blocker 1 verification half: the manifest records the snapshot's own
+    // content identity, so verification is self-consistent — a foreign
+    // artifact at the backup path fails even without the source, and a clean
+    // backup verifies.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-self-cons-6f-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifest = createSqliteBackup(source, backup);
+    expect(typeof manifest.snapshotContentIdentity).toBe('string');
+    expect(manifest.snapshotContentIdentity.length).toBeGreaterThan(0);
+
+    // Without the source: a clean artifact still verifies.
+    const noSource = await verifySqliteBackup(backup, manifest);
+    expect(noSource.ok).toBe(true);
+
+    // A foreign same-schema/count artifact at the path fails the content
+    // identity check even with a valid SHA replacement and no source.
+    const foreign = makeSourceDb(dir, 'foreign2.db');
+    {
+      const fdb = new Database(foreign);
+      fdb.exec("UPDATE onboarding_items SET name = 'OTHER-CONTENT' WHERE id = 'i2'");
+      fdb.close();
+    }
+    fs.rmSync(backup);
+    fs.copyFileSync(foreign, backup);
+    const tamperedSha = await (async () => {
+      const hash = crypto.createHash('sha256');
+      hash.update(fs.readFileSync(backup));
+      return hash.digest('hex');
+    })();
+    const verification = await verifySqliteBackup(backup, { ...manifest, sha256: tamperedSha });
+    expect(verification.ok).toBe(false);
+    expect(verification.errors.some(e => /content identity does not match/i.test(e))).toBe(true);
+  });
+
+  it('never deletes a foreign file replaced at the backup destination in the link->verify window (pass 6f)', async () => {
+    // Blocker 2: ownership inode is captured from the temp BEFORE the hard
+    // link, so a foreign file replaced at the destination between the link
+    // and the ownership verification is NOT treated as ours and cleanup
+    // leaves it byte-identical.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-own-6f-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __beforeBackupLinkVerify: () => {
+          fs.rmSync(backup);
+          fs.writeFileSync(backup, 'FOREIGN REPLACEMENT');
+        },
+      }),
+    ).toThrow(/replaced by another process/i);
+    expect(fs.readFileSync(backup, 'utf-8')).toBe('FOREIGN REPLACEMENT');
+    expect(fs.existsSync(`${backup}.manifest.json`)).toBe(false);
+    expect(fs.existsSync(`${backup}.manifest.json.reservation`)).toBe(false);
+    fs.rmSync(backup);
+  });
+
+  it('fails when the manifest is replaced after publication and never returns a foreign manifest (pass 6f)', async () => {
+    // Blocker 3: the manifest's ownership inode is captured from the temp
+    // before the link; a foreign file replaced at the manifest path after the
+    // link is detected and creation FAILS with the foreign content untouched
+    // (never returned as a successful manifest).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-manifest-own-6f-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifestPath = `${backup}.manifest.json`;
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __beforeManifestLinkVerify: () => {
+          fs.rmSync(manifestPath);
+          fs.writeFileSync(manifestPath, 'FOREIGN MANIFEST');
+        },
+      }),
+    ).toThrow(/replaced by another process/i);
+    expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('FOREIGN MANIFEST');
+    // The published backup is ours and is removed; the foreign manifest stays.
+    expect(fs.existsSync(backup)).toBe(false);
+    fs.rmSync(manifestPath);
+  });
+
+  it('fails on the success path when a published artifact is replaced before return (pass 6f)', async () => {
+    // Blocker 3 success re-check: even after all publication work completes, a
+    // foreign file replaced at the manifest path before return must fail
+    // creation (never return success with foreign content at the path).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-return-6f-'));
+    const source = makeSourceDb(dir);
+    const backup = path.join(dir, 'backup.db');
+    const manifestPath = `${backup}.manifest.json`;
+    expect(() =>
+      createSqliteBackup(source, backup, {
+        __beforeReturn: () => {
+          fs.rmSync(manifestPath);
+          fs.writeFileSync(manifestPath, 'RACE BEFORE RETURN');
+        },
+      }),
+    ).toThrow(/replaced by another process/i);
+    expect(fs.readFileSync(manifestPath, 'utf-8')).toBe('RACE BEFORE RETURN');
+    // Our artifacts are removed (the foreign replacement is left untouched).
+    expect(fs.existsSync(backup)).toBe(false);
+    fs.rmSync(manifestPath);
+  });
 });
