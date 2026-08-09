@@ -123,6 +123,7 @@ describe('Classification Integrity Audit & Repair extended (Issue #17 C1)', () =
       CREATE TABLE classification_evidence (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES classification_runs(id), source_kind TEXT NOT NULL);
       CREATE TABLE classification_proposal_decisions (id TEXT PRIMARY KEY, proposal_id TEXT NOT NULL REFERENCES classification_proposals(id), decision TEXT NOT NULL);
       CREATE TABLE classification_proposal_evidence (proposal_id TEXT NOT NULL REFERENCES classification_proposals(id), evidence_id TEXT NOT NULL REFERENCES classification_evidence(id), relation TEXT NOT NULL DEFAULT 'legacy', PRIMARY KEY (proposal_id, evidence_id));
+      CREATE TABLE classification_proposal_decision_evidence (decision_id TEXT NOT NULL REFERENCES classification_proposal_decisions(id), evidence_id TEXT NOT NULL REFERENCES classification_evidence(id), PRIMARY KEY (decision_id, evidence_id));
       CREATE TABLE classification_model_calls (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES classification_runs(id), status TEXT NOT NULL, created_at TEXT);
       CREATE TABLE onboarding_items (id TEXT PRIMARY KEY, upc TEXT, existing_sku TEXT, curation_data_json TEXT, status TEXT NOT NULL DEFAULT 'imported');
       CREATE TABLE onboarding_sources (id TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES onboarding_items(id), url TEXT NOT NULL);
@@ -196,6 +197,8 @@ describe('Classification Integrity Audit & Repair extended (Issue #17 C1)', () =
     db.run(`INSERT INTO classification_evidence VALUES ('ev-orphan', 'run-ghost', 'catalog_product')`);
     db.run(`INSERT INTO classification_proposal_decisions VALUES ('dec-orphan', 'prop-ghost', 'accepted')`);
     db.run(`INSERT INTO classification_proposal_evidence VALUES ('prop-ghost', 'ev-orphan', 'context')`);
+    db.run(`INSERT INTO classification_evidence VALUES ('ev-cite', 'run-1', 'catalog_product')`);
+    db.run(`INSERT INTO classification_proposal_decision_evidence VALUES ('dec-ghost', 'ev-cite')`);
     db.run(`INSERT INTO classification_model_calls VALUES ('call-orphan', 'run-ghost', 'success', 't')`);
 
     const pre = auditClassificationIntegrity(db);
@@ -204,6 +207,7 @@ describe('Classification Integrity Audit & Repair extended (Issue #17 C1)', () =
     expect(pre.orphanProposals).toBe(1);
     expect(pre.orphanProposalDecisions).toBe(1);
     expect(pre.orphanProposalEvidence).toBe(1);
+    expect(pre.orphanProposalDecisionEvidence).toBe(1);
     expect(pre.orphanModelCalls).toBe(1);
     expect(pre.orphanOnboardingSources).toBe(1);
     expect(pre.orphanOnboardingExtractions).toBe(1);
@@ -216,6 +220,7 @@ describe('Classification Integrity Audit & Repair extended (Issue #17 C1)', () =
     expect(repair.repairedProposals).toBe(1);
     expect(repair.repairedProposalDecisions).toBe(1);
     expect(repair.repairedProposalEvidence).toBe(1);
+    expect(repair.repairedProposalDecisionEvidence).toBe(1);
     expect(repair.repairedModelCalls).toBe(1);
     expect(repair.repairedOnboardingSources).toBe(1);
     expect(repair.repairedOnboardingExtractions).toBe(1);
@@ -345,5 +350,104 @@ describe('Classification Integrity Audit & Repair extended (Issue #17 C1)', () =
     expect(sourcesGroup?.count).toBe(2);
     expect(typeof sourcesGroup?.fkIndex).toBe('string');
     expect(audit.foreignKeyViolations).toBeGreaterThanOrEqual(3);
+  });
+
+  it('detects and repairs classification_proposal_decision_evidence orphans independently', () => {
+    // Blocker 3: the Issue #17 citation child must be audited and repaired.
+    db.run(`INSERT INTO classification_proposals VALUES ('prop-1', 'run-1', 'SKU-1', 'category_page')`);
+    db.run(`INSERT INTO classification_proposal_decisions VALUES ('dec-1', 'prop-1', 'accepted')`);
+    db.run(`INSERT INTO classification_evidence VALUES ('ev-1', 'run-1', 'catalog_product')`);
+    db.run(`INSERT INTO classification_proposal_decision_evidence VALUES ('dec-1', 'ev-1')`);
+    // Orphan: decision parent gone.
+    db.run(`INSERT INTO classification_evidence VALUES ('ev-2', 'run-1', 'catalog_product')`);
+    db.run(`INSERT INTO classification_proposal_decision_evidence VALUES ('dec-ghost', 'ev-2')`);
+
+    const audit = auditClassificationIntegrity(db);
+    expect(audit.orphanProposalDecisionEvidence).toBe(1);
+    expect(audit.isClean).toBe(false);
+    expect(
+      audit.fkViolationGroups.some(
+        g =>
+          g.childTable === 'classification_proposal_decision_evidence' &&
+          g.parentTable === 'classification_proposal_decisions',
+      ),
+    ).toBe(true);
+
+    const repair = repairClassificationIntegrity(db, { dryRun: false });
+    expect(repair.repairedProposalDecisionEvidence).toBe(1);
+    expect(repair.postAudit.isClean).toBe(true);
+    expect(
+      (db.query('SELECT COUNT(*) c FROM classification_proposal_decision_evidence WHERE decision_id = ?').get('dec-ghost') as { c: number }).c,
+    ).toBe(0);
+    expect(
+      (db.query('SELECT COUNT(*) c FROM classification_proposal_decision_evidence WHERE decision_id = ?').get('dec-1') as { c: number }).c,
+    ).toBe(1);
+  });
+
+  it('binds the manifest to the exact planned deletion identities (same-count swap changes the hash)', () => {
+    // Blocker 2: the reviewed manifest must identify the concrete SQL rows
+    // scheduled for deletion. A same-count replacement of a reviewed orphan
+    // must change the manifest hash.
+    function orphanDb(proposalId: string, runId: string): Database {
+      const d = new Database(':memory:');
+      d.exec(`
+        CREATE TABLE classification_runs (id TEXT PRIMARY KEY);
+        CREATE TABLE classification_proposals (id TEXT PRIMARY KEY, run_id TEXT NOT NULL);
+      `);
+      d.run(`INSERT INTO classification_runs VALUES ('run-ok')`);
+      d.run(`INSERT INTO classification_proposals VALUES ('prop-ok', 'run-ok')`);
+      d.run(`INSERT INTO classification_proposals VALUES (?, ?)`, [proposalId, runId]);
+      return d;
+    }
+
+    const dbA = orphanDb('reviewed-orphan-A', 'run-ghost');
+    const manifestA = buildIntegrityManifest(dbA, auditClassificationIntegrity(dbA));
+    dbA.close();
+
+    // Same class, same count — only the identity differs (the reviewer probe:
+    // reviewed-orphan-A replaced by unreviewed-orphan-B).
+    const dbB = orphanDb('unreviewed-orphan-B', 'run-ghost');
+    const manifestB = buildIntegrityManifest(dbB, auditClassificationIntegrity(dbB));
+    dbB.close();
+
+    expect(manifestA.manifest.plannedDeletions).toHaveLength(1);
+    expect(manifestA.manifest.plannedDeletions[0]!.key).toBe('reviewed-orphan-A');
+    expect(manifestB.manifest.plannedDeletions[0]!.key).toBe('unreviewed-orphan-B');
+    expect(manifestA.sha256).not.toBe(manifestB.sha256);
+  });
+
+  it('repairs an orphan SQL proposal referenced by embedded JSON in one transaction', () => {
+    // Blocker 6: an embedded proposal whose SQL row is itself an orphan must
+    // be removed from BOTH the SQL table and the curation JSON in the same
+    // transaction, leaving a clean post-audit.
+    const curation = JSON.stringify({
+      store: { name: 'Bay State' },
+      classificationProposals: [
+        { id: 'orphan-sql-1', proposal_type: 'primary_product_type', value: 'dog-food-dry' },
+        { id: 'keep-1', proposal_type: 'field_assignment', value: 'Salmon' },
+      ],
+    });
+    db.run(`INSERT INTO onboarding_items VALUES ('item-1', 'UPC1', NULL, ?, 'imported')`, [curation]);
+    db.run(`INSERT INTO classification_proposals VALUES ('orphan-sql-1', 'run-ghost', 'SKU-1', 'primary_product_type')`);
+    db.run(`INSERT INTO classification_proposals VALUES ('keep-1', 'run-1', 'SKU-1', 'field_assignment')`);
+
+    const pre = auditClassificationIntegrity(db);
+    expect(pre.orphanProposals).toBe(1);
+    // The embedded ref to the orphan SQL proposal counts as dangling too.
+    expect(pre.embeddedProposalsMissingFromSql).toBe(1);
+    expect(pre.danglingEmbeddedProposals.map(d => d.proposalId)).toEqual(['orphan-sql-1']);
+
+    const repair = repairClassificationIntegrity(db, { dryRun: false });
+    expect(repair.postAudit.isClean).toBe(true);
+    expect(repair.repairedProposals).toBe(1);
+    expect(repair.repairedEmbeddedProposals).toBe(1);
+    expect(
+      (db.query("SELECT COUNT(*) c FROM classification_proposals WHERE id = 'orphan-sql-1'").get() as { c: number }).c,
+    ).toBe(0);
+    const row = db.query(`SELECT curation_data_json FROM onboarding_items WHERE id = 'item-1'`).get() as {
+      curation_data_json: string;
+    };
+    expect(JSON.parse(row.curation_data_json).classificationProposals.map((p: any) => p.id)).toEqual(['keep-1']);
+    expect(JSON.parse(row.curation_data_json).store).toEqual({ name: 'Bay State' });
   });
 });

@@ -36,12 +36,27 @@ export interface DanglingEmbeddedProposal {
   hash: string;
 }
 
+/**
+ * A single SQL row the reviewed repair is authorized to delete. `rowid` is
+ * the SQLite row id; `key` is a deterministic non-sensitive identity (the
+ * table's `id` column value when present, else a canonical row-content
+ * hash). The audit manifest binds the exact planned deletion set so a
+ * same-count replacement of a reviewed orphan can never be deleted
+ * unreviewed.
+ */
+export interface PlannedDeletion {
+  table: string;
+  rowid: number;
+  key: string;
+}
+
 export interface IntegrityAuditResult {
   orphanStageResults: number;
   orphanEvidence: number;
   orphanProposals: number;
   orphanProposalDecisions: number;
   orphanProposalEvidence: number;
+  orphanProposalDecisionEvidence: number;
   orphanModelCalls: number;
   orphanOnboardingSources: number;
   orphanOnboardingExtractions: number;
@@ -63,6 +78,7 @@ export interface IntegrityRepairResult {
   wouldRepairProposals: number;
   wouldRepairProposalDecisions: number;
   wouldRepairProposalEvidence: number;
+  wouldRepairProposalDecisionEvidence: number;
   wouldRepairModelCalls: number;
   wouldRepairOnboardingSources: number;
   wouldRepairOnboardingExtractions: number;
@@ -73,6 +89,7 @@ export interface IntegrityRepairResult {
   repairedProposals: number;
   repairedProposalDecisions: number;
   repairedProposalEvidence: number;
+  repairedProposalDecisionEvidence: number;
   repairedModelCalls: number;
   repairedOnboardingSources: number;
   repairedOnboardingExtractions: number;
@@ -90,6 +107,8 @@ export interface IntegrityManifest {
   counts: Record<string, number>;
   orphanClasses: FkViolationGroup[];
   danglingEmbeddedProposals: DanglingEmbeddedProposal[];
+  /** Exact SQL rows the reviewed repair is authorized to delete. */
+  plannedDeletions: PlannedDeletion[];
 }
 
 export interface IntegrityManifestResult {
@@ -111,6 +130,8 @@ const ALLOWED_FK_CLASSES = new Set<string>([
   'classification_proposal_decisions->classification_proposals',
   'classification_proposal_evidence->classification_proposals',
   'classification_proposal_evidence->classification_evidence',
+  'classification_proposal_decision_evidence->classification_proposal_decisions',
+  'classification_proposal_decision_evidence->classification_evidence',
   'classification_model_calls->classification_runs',
   'onboarding_sources->onboarding_items',
   'onboarding_extractions->onboarding_items',
@@ -192,6 +213,18 @@ export function auditClassificationIntegrity(db: Database): IntegrityAuditResult
     orphanModelCalls = row.c;
   }
 
+  // classification_proposal_decision_evidence: orphaned when either the
+  // decision parent or the evidence parent dangles.
+  let orphanProposalDecisionEvidence = 0;
+  if (tableExists(db, 'classification_proposal_decision_evidence')) {
+    const row = db.query(
+      `SELECT COUNT(*) AS c FROM classification_proposal_decision_evidence l
+       WHERE NOT EXISTS (SELECT 1 FROM classification_proposal_decisions d WHERE d.id = l.decision_id)
+          OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = l.evidence_id)`,
+    ).get() as { c: number };
+    orphanProposalDecisionEvidence = row.c;
+  }
+
   // Invalid curation_data_json is counted separately. JSON/JSON1 failures
   // (e.g. missing functions) THROW — they never silently become zero.
   let invalidCurationJson = 0;
@@ -208,10 +241,27 @@ export function auditClassificationIntegrity(db: Database): IntegrityAuditResult
   const danglingEmbeddedProposals: DanglingEmbeddedProposal[] = [];
   let embeddedProposalsMissingFromSql = 0;
   if (tableHasColumn(db, 'onboarding_items', 'curation_data_json')) {
+    // A proposal referenced by embedded curation JSON counts as dangling
+    // when its SQL row is MISSING OR is itself scheduled for orphan deletion.
+    // This is what makes the combined embedded+SQL repair possible: an
+    // orphan SQL proposal referenced by embedded JSON is removed from BOTH
+    // places in the same transaction (blocker 6).
+    const orphanProposalIds = new Set<string>();
+    if (tableExists(db, 'classification_proposals') && tableExists(db, 'classification_runs')) {
+      for (const r of db.query(
+        `SELECT p.id FROM classification_proposals p
+         LEFT JOIN classification_runs r ON r.id = p.run_id
+         WHERE r.id IS NULL`,
+      ).all() as Array<{ id: string }>) {
+        orphanProposalIds.add(r.id);
+      }
+    }
     const knownProposalIds = new Set<string>();
     if (tableExists(db, 'classification_proposals')) {
       for (const r of db.query('SELECT id FROM classification_proposals').all() as Array<{ id: string }>) {
-        knownProposalIds.add(r.id);
+        if (!orphanProposalIds.has(r.id)) {
+          knownProposalIds.add(r.id);
+        }
       }
     }
     const rows = db.query(
@@ -287,6 +337,7 @@ export function auditClassificationIntegrity(db: Database): IntegrityAuditResult
     orphanProposals === 0 &&
     orphanProposalDecisions === 0 &&
     orphanProposalEvidence === 0 &&
+    orphanProposalDecisionEvidence === 0 &&
     orphanModelCalls === 0 &&
     orphanOnboardingSources === 0 &&
     orphanOnboardingExtractions === 0 &&
@@ -301,6 +352,7 @@ export function auditClassificationIntegrity(db: Database): IntegrityAuditResult
     orphanProposals,
     orphanProposalDecisions,
     orphanProposalEvidence,
+    orphanProposalDecisionEvidence,
     orphanModelCalls,
     orphanOnboardingSources,
     orphanOnboardingExtractions,
@@ -312,6 +364,130 @@ export function auditClassificationIntegrity(db: Database): IntegrityAuditResult
     fkViolationGroups,
     isClean,
   };
+}
+
+/**
+ * Enumerate the EXACT SQL rows the repair is authorized to delete, in
+ * dependency order matching `runRepair`. Each entry carries the SQLite
+ * rowid plus a deterministic non-sensitive identity key (the table's `id`
+ * column when present, else a canonical row-content hash) so the reviewed
+ * manifest binds the concrete deletion set. A same-count replacement of a
+ * reviewed orphan therefore changes the manifest hash and aborts repair.
+ */
+export function collectPlannedDeletions(db: Database): PlannedDeletion[] {
+  const out: PlannedDeletion[] = [];
+
+  function pushRows(
+    table: string,
+    hasId: boolean,
+    rows: Array<{ rowid: number; id?: string | null; values: unknown[] }>,
+  ): void {
+    for (const r of rows) {
+      const key =
+        hasId && typeof r.id === 'string' && r.id
+          ? r.id
+          : sha256Hex(canonicalJsonStringify([table, r.rowid, r.values]));
+      out.push({ table, rowid: r.rowid, key });
+    }
+  }
+
+  function collect(table: string, predicateSql: string, hasId: boolean): void {
+    if (!tableExists(db, table)) return;
+    const rows = db.query(
+      `SELECT rowid${hasId ? ', id' : ''}, * FROM ${table} WHERE ${predicateSql}`,
+    ).all() as Array<{ rowid: number; id?: string }>;
+    pushRows(
+      table,
+      hasId,
+      rows.map(r => {
+        const { rowid, id, ...rest } = r as { rowid: number; id?: string };
+        return { rowid, id, values: Object.values(rest) };
+      }),
+    );
+  }
+
+  if (tableExists(db, 'classification_proposal_decisions') && tableExists(db, 'classification_proposals')) {
+    collect(
+      'classification_proposal_decisions',
+      `id IN (SELECT d.id FROM classification_proposal_decisions d
+              LEFT JOIN classification_proposals p ON p.id = d.proposal_id WHERE p.id IS NULL)`,
+      true,
+    );
+  }
+  if (tableExists(db, 'classification_proposal_evidence')) {
+    collect(
+      'classification_proposal_evidence',
+      `NOT EXISTS (SELECT 1 FROM classification_proposals p WHERE p.id = classification_proposal_evidence.proposal_id)
+        OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = classification_proposal_evidence.evidence_id)`,
+      false,
+    );
+  }
+  if (tableExists(db, 'classification_proposal_decision_evidence')) {
+    collect(
+      'classification_proposal_decision_evidence',
+      `NOT EXISTS (SELECT 1 FROM classification_proposal_decisions d WHERE d.id = classification_proposal_decision_evidence.decision_id)
+        OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = classification_proposal_decision_evidence.evidence_id)`,
+      false,
+    );
+  }
+  if (tableExists(db, 'classification_proposals') && tableExists(db, 'classification_runs')) {
+    collect(
+      'classification_proposals',
+      `id IN (SELECT p.id FROM classification_proposals p
+              LEFT JOIN classification_runs r ON r.id = p.run_id WHERE r.id IS NULL)`,
+      true,
+    );
+  }
+  if (tableExists(db, 'classification_evidence') && tableExists(db, 'classification_runs')) {
+    collect(
+      'classification_evidence',
+      `id IN (SELECT e.id FROM classification_evidence e
+              LEFT JOIN classification_runs r ON r.id = e.run_id WHERE r.id IS NULL)`,
+      true,
+    );
+  }
+  if (tableExists(db, 'classification_stage_results') && tableExists(db, 'classification_runs')) {
+    collect(
+      'classification_stage_results',
+      `id IN (SELECT s.id FROM classification_stage_results s
+              LEFT JOIN classification_runs r ON r.id = s.run_id WHERE r.id IS NULL)`,
+      true,
+    );
+  }
+  if (tableExists(db, 'classification_model_calls')) {
+    collect(
+      'classification_model_calls',
+      `NOT EXISTS (SELECT 1 FROM classification_runs r WHERE r.id = classification_model_calls.run_id)`,
+      true,
+    );
+  }
+  if (tableExists(db, 'onboarding_sources') && tableExists(db, 'onboarding_items')) {
+    collect(
+      'onboarding_sources',
+      `item_id IN (SELECT s.item_id FROM onboarding_sources s
+                   LEFT JOIN onboarding_items i ON i.id = s.item_id WHERE i.id IS NULL)`,
+      true,
+    );
+  }
+  if (tableExists(db, 'onboarding_extractions') && tableExists(db, 'onboarding_items')) {
+    collect(
+      'onboarding_extractions',
+      `item_id IN (SELECT x.item_id FROM onboarding_extractions x
+                   LEFT JOIN onboarding_items i ON i.id = x.item_id WHERE i.id IS NULL)`,
+      true,
+    );
+  }
+  if (tableExists(db, 'profile_generation_revisions') && tableExists(db, 'profile_generations')) {
+    collect(
+      'profile_generation_revisions',
+      `generation_id IN (SELECT r.generation_id FROM profile_generation_revisions r
+                         LEFT JOIN profile_generations g ON g.id = r.generation_id WHERE g.id IS NULL)`,
+      true,
+    );
+  }
+
+  out.sort((a, b) => (a.table === b.table ? a.rowid - b.rowid : a.table.localeCompare(b.table)));
+  return out;
 }
 
 export function buildIntegrityManifest(db: Database, audit: IntegrityAuditResult): IntegrityManifestResult {
@@ -334,6 +510,7 @@ export function buildIntegrityManifest(db: Database, audit: IntegrityAuditResult
       orphanProposals: audit.orphanProposals,
       orphanProposalDecisions: audit.orphanProposalDecisions,
       orphanProposalEvidence: audit.orphanProposalEvidence,
+      orphanProposalDecisionEvidence: audit.orphanProposalDecisionEvidence,
       orphanModelCalls: audit.orphanModelCalls,
       orphanOnboardingSources: audit.orphanOnboardingSources,
       orphanOnboardingExtractions: audit.orphanOnboardingExtractions,
@@ -344,6 +521,7 @@ export function buildIntegrityManifest(db: Database, audit: IntegrityAuditResult
     },
     orphanClasses: audit.fkViolationGroups,
     danglingEmbeddedProposals: audit.danglingEmbeddedProposals,
+    plannedDeletions: collectPlannedDeletions(db),
   };
   const json = canonicalJsonStringify(manifest);
   return { manifest, json, sha256: sha256Hex(json) };
@@ -372,6 +550,15 @@ function runRepair(db: Database, dangling: DanglingEmbeddedProposal[]): void {
   // Each DELETE is guarded by table existence so the repair runs on any
   // schema shape (minimal fixtures and full databases alike).
 
+  // classification_proposal_decision_evidence is a child of BOTH decisions
+  // and evidence — remove its orphans before either parent class.
+  if (tableExists(db, 'classification_proposal_decision_evidence')) {
+    db.run(
+      `DELETE FROM classification_proposal_decision_evidence
+       WHERE NOT EXISTS (SELECT 1 FROM classification_proposal_decisions d WHERE d.id = classification_proposal_decision_evidence.decision_id)
+          OR NOT EXISTS (SELECT 1 FROM classification_evidence e WHERE e.id = classification_proposal_decision_evidence.evidence_id)`,
+    );
+  }
   if (tableExists(db, 'classification_proposal_decisions')) {
     db.run(
       `DELETE FROM classification_proposal_decisions
@@ -505,6 +692,7 @@ export function repairClassificationIntegrity(
     repairedProposals: 0,
     repairedProposalDecisions: 0,
     repairedProposalEvidence: 0,
+    repairedProposalDecisionEvidence: 0,
     repairedModelCalls: 0,
     repairedOnboardingSources: 0,
     repairedOnboardingExtractions: 0,
@@ -519,6 +707,7 @@ export function repairClassificationIntegrity(
     wouldRepairProposals: preAudit.orphanProposals,
     wouldRepairProposalDecisions: preAudit.orphanProposalDecisions,
     wouldRepairProposalEvidence: preAudit.orphanProposalEvidence,
+    wouldRepairProposalDecisionEvidence: preAudit.orphanProposalDecisionEvidence,
     wouldRepairModelCalls: preAudit.orphanModelCalls,
     wouldRepairOnboardingSources: preAudit.orphanOnboardingSources,
     wouldRepairOnboardingExtractions: preAudit.orphanOnboardingExtractions,
@@ -556,6 +745,7 @@ export function repairClassificationIntegrity(
       wouldRepairProposals: preAudit.orphanProposals,
       wouldRepairProposalDecisions: preAudit.orphanProposalDecisions,
       wouldRepairProposalEvidence: preAudit.orphanProposalEvidence,
+      wouldRepairProposalDecisionEvidence: preAudit.orphanProposalDecisionEvidence,
       wouldRepairModelCalls: preAudit.orphanModelCalls,
       wouldRepairOnboardingSources: preAudit.orphanOnboardingSources,
       wouldRepairOnboardingExtractions: preAudit.orphanOnboardingExtractions,
@@ -566,6 +756,8 @@ export function repairClassificationIntegrity(
       repairedProposals: preAudit.orphanProposals - postAudit.orphanProposals,
       repairedProposalDecisions: preAudit.orphanProposalDecisions - postAudit.orphanProposalDecisions,
       repairedProposalEvidence: preAudit.orphanProposalEvidence - postAudit.orphanProposalEvidence,
+      repairedProposalDecisionEvidence:
+        preAudit.orphanProposalDecisionEvidence - postAudit.orphanProposalDecisionEvidence,
       repairedModelCalls: preAudit.orphanModelCalls - postAudit.orphanModelCalls,
       repairedOnboardingSources: preAudit.orphanOnboardingSources - postAudit.orphanOnboardingSources,
       repairedOnboardingExtractions:

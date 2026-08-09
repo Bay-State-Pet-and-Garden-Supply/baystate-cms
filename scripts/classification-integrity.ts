@@ -10,14 +10,16 @@
  *   repair            — requires --execute, --backup-manifest <path>,
  *                       --expected-audit-hash <hash>. Verifies the backup,
  *                       re-audits, aborts unless the audit hash matches the
- *                       reviewed dry-run hash AND counts match the backup
- *                       manifest, then repairs in ONE transaction with a
- *                       clean post-audit requirement.
+ *                       reviewed dry-run hash (the hash binds the EXACT
+ *                       planned deletion identities + counts) AND counts match
+ *                       the backup manifest, then repairs in ONE transaction
+ *                       with a clean post-audit requirement.
  *
- * Fail-closed: unknown FK classes, invalid curation JSON, count drift,
- * active writers, insufficient disk, or audit-hash mismatch all abort
- * before any row changes. This tool NEVER writes to the live database
- * outside an explicit repair invocation, and it never runs as a migration.
+ * Fail-closed: unknown FK classes, invalid curation JSON, count drift, a
+ * deletion-set identity change, active writers, insufficient disk, or
+ * audit-hash mismatch all abort before any row changes. This tool NEVER
+ * writes to the live database outside an explicit repair invocation, and it
+ * never runs as a migration.
  *
  * No live-DB mutation is performed by C1: `audit` and `backup` are
  * read-only/file-copy operations. `repair` is the C2 maintenance gate.
@@ -63,10 +65,10 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
   return out;
 }
 
-function openDb(dbPath: string): Database {
+function openDb(dbPath: string, readonly = false): Database {
   if (!dbPath) fail('--db <path> is required.');
   if (!fs.existsSync(dbPath)) fail(`database does not exist: ${dbPath}`);
-  const db = new Database(dbPath);
+  const db = readonly ? new Database(dbPath, { readonly: true }) : new Database(dbPath);
   db.exec('PRAGMA busy_timeout = 5000;');
   return db;
 }
@@ -87,18 +89,30 @@ function assertNoActiveWriters(dbPath: string): void {
   }
 }
 
+/**
+ * Fail-closed disk check: an inability to measure free space (statfs
+ * unavailable or reporting zero) aborts rather than assuming infinity, and
+ * the required space includes the live DB, its WAL, the backup copy, and
+ * slack for the manifest + temporary work.
+ */
 function assertSufficientDisk(dbPath: string, minBytes: number): void {
+  let stats: fs.StatsFs;
   try {
-    const stats = fs.statfsSync(dbPath);
-    const free = (stats as { bavail?: number; bfree?: number }).bavail
-      ? (stats as { bavail: number; bfree: number }).bavail * (stats as { bsize: number }).bsize
-      : Number.POSITIVE_INFINITY;
-    if (Number.isFinite(free) && free < minBytes) {
-      fail(`insufficient disk space: ${free} bytes free, ${minBytes} required.`);
-    }
+    stats = fs.statfsSync(dbPath);
   } catch {
-    // statfsSync unavailable — the verifier still enforces count/schema
-    // parity; disk checks are best-effort on platforms without statfs.
+    fail(`cannot determine free disk space for ${dbPath}; aborting repair.`);
+  }
+  const bavail = (stats as unknown as { bavail?: number }).bavail;
+  const bsize = (stats as unknown as { bsize?: number }).bsize;
+  if (typeof bavail !== 'number' || typeof bsize !== 'number' || bsize <= 0) {
+    fail(`cannot determine free disk space for ${dbPath}; aborting repair.`);
+  }
+  if (bavail === 0) {
+    fail(`no free disk space reported for ${dbPath}; aborting repair.`);
+  }
+  const free = bavail * bsize;
+  if (free < minBytes) {
+    fail(`insufficient disk space: ${free} bytes free, ${minBytes} required.`);
   }
 }
 
@@ -107,7 +121,7 @@ function printReport(report: unknown): void {
 }
 
 function modeAudit(args: Record<string, string | boolean>): void {
-  const db = openDb(String(args.db ?? ''));
+  const db = openDb(String(args.db ?? ''), /* readonly */ true);
   try {
     const audit = auditClassificationIntegrity(db);
     const manifestResult = buildIntegrityManifest(db, audit);
@@ -139,7 +153,7 @@ async function modeBackup(args: Record<string, string | boolean>): Promise<void>
   if (!verification.ok) {
     fail(`backup verification failed: ${verification.errors.join('; ')}`);
   }
-  console.log(`backup created and verified: ${backupPath}`);
+  console.error(`backup created and verified: ${backupPath}`);
 }
 
 async function modeRepair(args: Record<string, string | boolean>): Promise<void> {
@@ -160,11 +174,25 @@ async function modeRepair(args: Record<string, string | boolean>): Promise<void>
   }
 
   // 2. No active writers; enough disk for the DB + WAL + backup + temp work.
+  //    The writer probe is point-in-time: STOP ALL API/WORKER PROCESSES first
+  //    — this tool cannot enforce cross-process shutdown.
   assertNoActiveWriters(dbPath);
   const sizeBytes = fs.statSync(dbPath).size;
-  assertSufficientDisk(dbPath, sizeBytes * 3 + 1024 * 1024);
+  const walSize = (() => {
+    try {
+      return fs.existsSync(`${dbPath}-wal`) ? fs.statSync(`${dbPath}-wal`).size : 0;
+    } catch {
+      return 0;
+    }
+  })();
+  assertSufficientDisk(dbPath, sizeBytes * 2 + walSize + 1024 * 1024);
+  console.error(
+    'classification-integrity: STOP all API/worker processes before repair; ' +
+      'a cross-process writer can still appear between these checks.',
+  );
 
-  // 3. Re-audit; the manifest hash must match the reviewed dry-run hash.
+  // 3. Re-audit; the manifest hash (which now includes the exact planned
+  //    deletion identities) must match the reviewed dry-run hash.
   const db = openDb(dbPath);
   try {
     const audit = auditClassificationIntegrity(db);
@@ -172,7 +200,8 @@ async function modeRepair(args: Record<string, string | boolean>): Promise<void>
     if (manifestResult.sha256 !== expectedAuditHash) {
       fail(
         `audit hash mismatch: expected ${expectedAuditHash}, found ${manifestResult.sha256}. ` +
-          `The reviewed dry-run no longer matches the database; no rows were changed.`,
+          `The reviewed dry-run no longer matches the database (row identities or counts changed); ` +
+          `no rows were changed.`,
       );
     }
     // 4. Count drift check against the backup manifest (taken at gate start):
@@ -188,7 +217,10 @@ async function modeRepair(args: Record<string, string | boolean>): Promise<void>
         fail(`count drift for ${table}: backup ${expected}, live ${current}. Aborting repair.`);
       }
     }
-    // 5. Execute the single-transaction repair with a clean post-audit gate.
+    // 5. Re-probe for active writers immediately before the repair
+    //    transaction (a writer can appear between steps 2 and 5).
+    assertNoActiveWriters(dbPath);
+    // 6. Execute the single-transaction repair with a clean post-audit gate.
     const result = repairClassificationIntegrity(db, { dryRun: false });
     const postAudit = result.postAudit;
     const report = { result, postAuditClean: postAudit.isClean };
@@ -196,9 +228,11 @@ async function modeRepair(args: Record<string, string | boolean>): Promise<void>
     if (!postAudit.isClean) {
       fail('post-repair audit is not clean; the transaction rolled back.');
     }
-    console.log(
+    console.error(
       `integrity repair complete: ${result.repairedStageResults} stage results, ` +
         `${result.repairedEvidence} evidence, ${result.repairedProposals} proposals, ` +
+        `${result.repairedProposalDecisions} proposal decisions, ` +
+        `${result.repairedProposalDecisionEvidence} decision-evidence links, ` +
         `${result.repairedOnboardingSources} onboarding sources, ` +
         `${result.repairedOnboardingExtractions} onboarding extractions, ` +
         `${result.repairedProfileGenerationRevisions} profile revisions, ` +
