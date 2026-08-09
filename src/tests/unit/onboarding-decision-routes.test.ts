@@ -407,4 +407,144 @@ describe('onboarding decision routes', () => {
     ).get('proposal-canonical') as { count: number };
     expect(count.count).toBe(0);
   });
+
+  it('persists and hydrates valid evidence citations on reviewer corrections (issue #17 I)', async () => {
+    const seeded = seedReviewItem();
+    const db = getDb();
+    // Link the seeded evidence to the proposal so the citation is valid.
+    db.run(
+      'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
+      ['proposal-canonical', 'evidence-canonical', 'supporting'],
+    );
+    const response = await makeApp().request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions: [{
+        id: 'decision-cited',
+        proposalId: 'proposal-canonical',
+        decision: 'accepted',
+        revisedValue: 'Beef',
+        evidenceIds: ['evidence-canonical'],
+        actionToken: 'token-cited',
+        expectedRevisionId: null,
+      }] }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json() as any;
+    expect(body.decisions[0].evidenceIds).toEqual(['evidence-canonical']);
+
+    // The citation join row is durable.
+    const citations = db.query(
+      'SELECT evidence_id FROM classification_proposal_decision_evidence WHERE decision_id = ?',
+    ).all('decision-cited') as Array<{ evidence_id: string }>;
+    expect(citations.map(r => r.evidence_id)).toEqual(['evidence-canonical']);
+  });
+
+  it('rejects a cross-run evidence citation before any decision row (issue #17 I)', async () => {
+    const seeded = seedReviewItem();
+    const db = getDb();
+    const foreignRun = createRun(workspaceId, 'SKU-ROUTE-1', null, 'snapshot-hash', {
+      sourceKind: 'onboarding',
+    });
+    db.run(
+      `INSERT INTO classification_evidence
+       (id, run_id, onboarding_item_id, product_sku, stage_name, source, reliability,
+        source_field, snippet, value_json, created_at)
+       VALUES (?, ?, NULL, ?, 'evidence_extraction', 'official_product_page', 'high', 'title', 'foreign', '"foreign"', ?)`,
+      ['evidence-foreign-run', foreignRun.id, 'SKU-ROUTE-1', new Date().toISOString()],
+    );
+    const response = await makeApp().request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions: [{
+        proposalId: 'proposal-canonical',
+        decision: 'accepted',
+        evidenceIds: ['evidence-foreign-run'],
+        actionToken: 'token-foreign',
+        expectedRevisionId: null,
+      }] }),
+    });
+    expect(response.status).toBe(400);
+    const body = await response.json() as any;
+    expect(body.code).toBe('invalid_decisions');
+    const count = db.query(
+      'SELECT COUNT(*) AS count FROM classification_proposal_decisions WHERE proposal_id = ?',
+    ).get('proposal-canonical') as { count: number };
+    expect(count.count).toBe(0);
+  });
+
+  it('rejects an evidence citation not linked to the proposal (issue #17 I)', async () => {
+    const seeded = seedReviewItem();
+    const db = getDb();
+    db.run(
+      `INSERT INTO classification_evidence
+       (id, run_id, onboarding_item_id, product_sku, stage_name, source, reliability,
+        source_field, snippet, value_json, created_at)
+       VALUES (?, ?, ?, ?, 'evidence_extraction', 'official_product_page', 'high', 'title', 'unlinked', '"unlinked"', ?)`,
+      ['evidence-unlinked', seeded.runId, seeded.itemId, seeded.sku, new Date().toISOString()],
+    );
+    const response = await makeApp().request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions: [{
+        proposalId: 'proposal-canonical',
+        decision: 'accepted',
+        evidenceIds: ['evidence-unlinked'],
+        actionToken: 'token-unlinked',
+        expectedRevisionId: null,
+      }] }),
+    });
+    expect(response.status).toBe(400);
+    const count = db.query(
+      'SELECT COUNT(*) AS count FROM classification_proposal_decisions WHERE proposal_id = ?',
+    ).get('proposal-canonical') as { count: number };
+    expect(count.count).toBe(0);
+  });
+
+  it('makes exact-token retries with identical citations idempotent and conflicts on altered citations (issue #17 I)', async () => {
+    const seeded = seedReviewItem();
+    const db = getDb();
+    db.run(
+      'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
+      ['proposal-canonical', 'evidence-canonical', 'supporting'],
+    );
+    const payload = { decisions: [{
+      id: 'decision-cited-token',
+      proposalId: 'proposal-canonical',
+      decision: 'accepted',
+      evidenceIds: ['evidence-canonical'],
+      actionToken: 'token-cited-exact',
+      expectedRevisionId: null,
+    }] };
+    const app = makeApp();
+    const first = await app.request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    expect(first.status).toBe(200);
+    // Exact retry (same citations) is idempotent and returns the same row.
+    const retry = await app.request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    expect(retry.status).toBe(200);
+    const retryBody = await retry.json() as any;
+    expect(retryBody.decisions[0].id).toBe('decision-cited-token');
+    // Same token with DIFFERENT citations conflicts (never silently alters the citations).
+    const altered = await app.request(`/api/onboarding/items/${seeded.itemId}/decisions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decisions: [{
+        id: 'decision-cited-token',
+        proposalId: 'proposal-canonical',
+        decision: 'accepted',
+        evidenceIds: [],
+        actionToken: 'token-cited-exact',
+        expectedRevisionId: null,
+      }] }),
+    });
+    expect(altered.status).toBe(409);
+    const rowCount = db.query(
+      'SELECT COUNT(*) AS count FROM classification_proposal_decisions WHERE proposal_id = ?',
+    ).get('proposal-canonical') as { count: number };
+    expect(rowCount.count).toBe(1);
+  });
 });

@@ -752,6 +752,15 @@ export const ClassificationProposalSchema = z.object({
   proposedValue: z.unknown(),
   confidence: z.number().min(0).max(1),
   evidenceIds: z.array(z.string()).default(() => []),
+  /**
+   * Target-specific evidence roles (issue #17 work item H). `supporting` and
+   * `contradicting` are authoritative subsets of `evidenceIds`; the join table
+   * (classification_proposal_evidence.relation) is authoritative at rest.
+   * Unresolved contradictions force individual review (never bulk-acceptable)
+   * and are never silently resolved by source order or confidence.
+   */
+  supportingEvidenceIds: z.array(z.string()).optional(),
+  contradictingEvidenceIds: z.array(z.string()).optional(),
   status: ProposalStatusEnum.default('pending'),
   isBulkAcceptable: z.boolean().default(false),
   isStale: z.boolean().default(false),
@@ -794,6 +803,15 @@ export const ClassificationProposalDecisionSchema = z.object({
   revisedFromId: z.string().nullable().default(null),
   reviewerId: z.string().nullable().default(null),
   reviewerNote: z.string().nullable().default(null),
+  /**
+   * Evidence citations for this reviewer correction (issue #17 work item I).
+   * Optional: corrections remain valid without citations, but the UI and
+   * telemetry must explicitly show "no citation supplied". Every cited id must
+   * belong to the same run/SKU and be linked to the proposal in one of H's
+   * relations; arbitrary/invented citations are rejected before any row is
+   * written. Citations are part of exact retry/idempotency equality.
+   */
+  evidenceIds: z.array(z.string()).max(50).optional(),
   revisedValue: z.unknown().optional(),
   hasRevisedValue: z.boolean().optional(),
   revisedTargetId: z.string().nullable().optional(),
@@ -855,6 +873,13 @@ export const ProposalDecisionInputSchema = z.object({
   reviewerNote: z.string().nullable().optional(),
   revisedValue: z.unknown().optional(),
   revisedTargetId: z.string().nullable().optional(),
+  /**
+   * Evidence citations for this correction (issue #17 work item I). Optional
+   * and bounded; each id must belong to the same run/SKU and be linked to the
+   * proposal in one of the evidence relations. Citations are part of exact
+   * retry/idempotency equality.
+   */
+  evidenceIds: z.array(z.string()).max(50).optional(),
   actionToken: z.string().min(1).max(200).optional(),
   expectedRevisionId: z.string().nullable().optional(),
   /** @deprecated Transitional aliases accepted while older clients drain. */

@@ -11,6 +11,8 @@ import {
   shouldBlockRun,
   type ReadinessView,
 } from '../classification-readiness-view';
+import { deriveEvidenceView } from '../classification-evidence-view';
+import { EvidenceCitationList } from './pipeline-drawer/EvidenceCitationList';
 
 const buttonBase: React.CSSProperties = {
   padding: '8px 16px',
@@ -239,6 +241,13 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
                     return typeof value === 'object' ? JSON.stringify(value) : String(value ?? '-');
                   })()}
                 </div>
+                {(() => {
+                  const view = deriveEvidenceView({
+                    proposal: p as unknown as import('../../shared/schemas/classification').ClassificationProposal,
+                    evidence: (detail?.evidence || []) as unknown as import('../../shared/schemas/classification').ClassificationEvidence[],
+                  });
+                  return <EvidenceCitationList rows={view.rows} showUncited isUncited={view.citation.isUncited} />;
+                })()}
               </div>
             ))}
           </div>

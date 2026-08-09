@@ -230,6 +230,26 @@ describe('validateProposalSafety — controlled membership and measured units', 
     expect(report.ok).toBe(true);
   });
 
+  it('withholds a claim proposal with contradicting evidence (issue #17 H)', () => {
+    const claim = makeAttribute({ id: 'health-benefits', isClaim: true });
+    const report = validateProposalSafety(
+      [makeProposal({ contradictingEvidenceIds: ['ev-2'] })],
+      { attributes: [claim], evidence: [makeEvidence(), makeEvidence({ id: 'ev-2' })] },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.findings[0].code).toBe('claim_contradicting_evidence');
+  });
+
+  it('withholds a composition proposal with contradicting evidence (issue #17 H)', () => {
+    const composition = makeAttribute({ isClaim: false, isCompositionAttribute: true });
+    const report = validateProposalSafety(
+      [makeProposal({ contradictingEvidenceIds: ['ev-2'] })],
+      { attributes: [composition], evidence: [makeEvidence(), makeEvidence({ id: 'ev-2' })] },
+    );
+    expect(report.ok).toBe(false);
+    expect(report.findings[0].code).toBe('composition_contradicting_evidence');
+  });
+
   it('ignores non-field proposals (primary type, pages, abstentions)', () => {
     const typeProposal = {
       id: 'p-type', runId: 'run-1', productSku: 'SKU-1', proposalType: 'primary_product_type' as const,

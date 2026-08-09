@@ -1,8 +1,10 @@
 import React from 'react';
-import type { ClassificationProposal, CurationTargetConfig } from '../../../shared/schemas/classification';
+import type { ClassificationProposal, ClassificationEvidence, CurationTargetConfig } from '../../../shared/schemas/classification';
 import type { BrandSite } from '../../../shared/schemas/onboarding';
 import { pageNameFromPageValue } from '../../../shared/proposal-display';
 import { SearchableBrandSelector } from '../SearchableBrandSelector';
+import { deriveEvidenceView } from '../../../client/classification-evidence-view';
+import { EvidenceCitationList } from './EvidenceCitationList';
 
 interface CurationStagePanelProps {
   curatedTitle: string;
@@ -28,6 +30,11 @@ interface CurationStagePanelProps {
   fieldTargetForProposal: (proposal: ClassificationProposal) => { target: CurationTargetConfig | null; values: string[]; label: string };
   productTypeOptions: () => { label: string; value: string }[];
   getEffectiveProposalValue: (proposal: ClassificationProposal) => any;
+  /** Canonical hydrated run evidence (issue #17 I). */
+  classificationEvidence?: ClassificationEvidence[];
+  /** Reviewer-selected citation ids per proposal (issue #17 I). */
+  citationSelections?: Record<string, string[]>;
+  onToggleCitation?: (proposalId: string, evidenceId: string) => void;
   getEffectiveProductTypeId: (proposal: ClassificationProposal) => string | null;
   withReviewedProposalValue: (proposal: ClassificationProposal, reviewedValue: unknown) => ClassificationProposal;
   withReviewedProductTypeId: (proposal: ClassificationProposal, reviewedProductTypeId: string | null) => ClassificationProposal;
@@ -58,6 +65,9 @@ export function CurationStagePanel({
   fieldTargetForProposal,
   productTypeOptions,
   getEffectiveProposalValue,
+  classificationEvidence = [],
+  citationSelections = {},
+  onToggleCitation,
   getEffectiveProductTypeId,
   withReviewedProposalValue,
   withReviewedProductTypeId,
@@ -277,6 +287,27 @@ export function CurationStagePanel({
                       style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, boxSizing: 'border-box', minHeight: 36 }}
                     />
                   )}
+
+                  {/* Issue #17 I: proposal-linked evidence with reviewer citation selection. */}
+                  {(() => {
+                    const view = deriveEvidenceView({
+                      proposal: p,
+                      evidence: classificationEvidence,
+                    });
+                    const selected = citationSelections[p.id] ?? [];
+                    return (
+                      <EvidenceCitationList
+                        rows={view.rows}
+                        selectable={Boolean(onToggleCitation) && !proposalControlsDisabled}
+                        selectedIds={selected}
+                        onToggleCitation={
+                          onToggleCitation ? (evidenceId) => onToggleCitation(p.id, evidenceId) : undefined
+                        }
+                        showUncited={Boolean(onToggleCitation)}
+                        isUncited={selected.length === 0}
+                      />
+                    );
+                  })()}
                 </div>
               );
             })}

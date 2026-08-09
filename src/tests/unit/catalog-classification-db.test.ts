@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import { initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { createRun, completeRun, getAcceptedProposals, getLiveDecisionsByRun, insertDecisionRow, supersedeDecisionsForProposals } from '../../db/repositories/classification-run-repo';
+import { createRun, completeRun, getAcceptedProposals, getLiveDecisionsByRun, getProposalsByRun, insertDecisionRow, supersedeDecisionsForProposals } from '../../db/repositories/classification-run-repo';
 import { getDb } from '../../db/connection';
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { validateCatalogReviewCompletionGate } from '../../classification/review-completion-gate';
@@ -116,6 +116,66 @@ describe('proposal-review-service (catalog product)', () => {
       expect(result.decisions[0].decision).toBe('accepted');
     }
   });
+
+  it('hydrates evidence citations on live decisions and role-split ids on proposals (issue #17 H/I)', () => {
+    const run = createRun(workspaceId, 'SKU-CITE', null, null, {
+      sourceKind: 'catalog_product',
+      sourceProductHash: 'cite-hash',
+    });
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO classification_evidence
+       (id, run_id, product_sku, stage_name, source, reliability, attribute_id, value_json, created_at)
+       VALUES (?, ?, ?, 'evidence_extraction', 'official_product_page', 'high', 'flavor', '"Chicken"', ?)`,
+      ['ev-cite-1', run.id, 'SKU-CITE', now],
+    );
+    db.run(
+      `INSERT INTO classification_proposals
+       (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status,
+        evidence_ids_json, supporting_evidence_ids_json, contradicting_evidence_ids_json, created_at)
+       VALUES (?, ?, ?, 'field_assignment', 'flavor', '"Chicken"', 0.9, 'pending', ?, ?, ?, ?)`,
+      ['proposal-cite', run.id, 'SKU-CITE',
+        JSON.stringify(['ev-cite-1', 'ev-cite-x']),
+        JSON.stringify(['ev-cite-1']),
+        JSON.stringify(['ev-cite-x']),
+        now],
+    );
+    db.run(
+      'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
+      ['proposal-cite', 'ev-cite-1', 'supporting'],
+    );
+    completeRun(run.id, 'completed');
+
+    const result = submitProposalDecisions({
+      workspaceId,
+      productSku: 'SKU-CITE',
+      runId: run.id,
+      sourceKind: 'catalog_product',
+      decisions: [{
+        proposalId: 'proposal-cite',
+        decision: 'accepted',
+        evidenceIds: ['ev-cite-1'],
+        actionToken: 'cite-token-1',
+        expectedRevisionId: null,
+      }],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.decisions[0].evidenceIds).toEqual(['ev-cite-1']);
+
+    // Live decisions hydrate citations from the join table.
+    const live = getLiveDecisionsByRun(run.id);
+    expect(live).toHaveLength(1);
+    expect(live[0].evidenceIds).toEqual(['ev-cite-1']);
+
+    // Proposals hydrate the authoritative role split.
+    const proposals = getProposalsByRun(run.id);
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].supportingEvidenceIds).toEqual(['ev-cite-1']);
+    expect(proposals[0].contradictingEvidenceIds).toEqual(['ev-cite-x']);
+  });
+
 
   it('rejects workspace mismatch', () => {
     const run = createRun(workspaceId, 'SKU001', null, null, {

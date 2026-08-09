@@ -1456,6 +1456,59 @@ export function runMigrations(): void {
     throw e;
   }
 
+  // Issue #17 work items H + I: target-specific evidence relations and
+  // reviewer-correction evidence citations.
+  // - classification_proposal_evidence gains the authoritative `relation`
+  //   column (supporting/contradicting/context; legacy rows default to
+  //   'legacy' — run-wide unions written before relations existed).
+  // - classification_proposal_decision_evidence stores append-only citations
+  //   per reviewer decision (FKs, PK (decision_id, evidence_id)).
+  // - classification_proposals gains supporting/contradicting JSON columns so
+  //   proposals hydrate with the authoritative role split.
+  // Idempotent; guarded by `evidence_citation_schema_version`.
+  try {
+    const evidenceCitationVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('evidence_citation_schema_version') as
+      | { value: string }
+      | undefined;
+    if (!evidenceCitationVersion) {
+      console.log('[Migrations] Running evidence relation/citation migration...');
+      const cols = (tbl: string) => db.query('PRAGMA table_info(' + tbl + ')').all() as Array<{ name: string }>;
+      const addCol = (tbl: string, col: string, def: string) => {
+        if (!cols(tbl).some((c: { name: string }) => c.name === col)) {
+          db.exec('ALTER TABLE ' + tbl + ' ADD COLUMN ' + col + ' ' + def);
+          console.log('[Migrations] Added ' + tbl + '.' + col);
+        }
+      };
+
+      // Authoritative evidence-role column on the proposal-evidence join.
+      if (!cols('classification_proposal_evidence').some(c => c.name === 'relation')) {
+        db.exec(`ALTER TABLE classification_proposal_evidence ADD COLUMN relation TEXT NOT NULL DEFAULT 'legacy'`);
+        console.log('[Migrations] Added classification_proposal_evidence.relation');
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_classification_proposal_evidence_relation ON classification_proposal_evidence(relation);");
+
+      // Append-only reviewer-correction citations.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS classification_proposal_decision_evidence (
+          decision_id TEXT NOT NULL REFERENCES classification_proposal_decisions(id) ON DELETE CASCADE,
+          evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
+          PRIMARY KEY (decision_id, evidence_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_classification_decision_evidence_decision ON classification_proposal_decision_evidence(decision_id);
+      `);
+
+      // Role-split hydration columns on proposals (mirror the union column).
+      addCol('classification_proposals', 'supporting_evidence_ids_json', "TEXT DEFAULT '[]'");
+      addCol('classification_proposals', 'contradicting_evidence_ids_json', "TEXT DEFAULT '[]'");
+
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('evidence_citation_schema_version', '1');");
+      console.log('[Migrations] Evidence relation/citation migration complete.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Evidence relation/citation migration failed:', e);
+    throw e;
+  }
+
   // ── Product Intelligence Migration (PI-2) ──────────────────────────────────
   //
   // Durable data model for Product Intelligence runs (epic #28, issue #19):

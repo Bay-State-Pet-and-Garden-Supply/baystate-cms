@@ -16,6 +16,13 @@ export interface ProposalReviewInput {
     reviewerNote?: string | null;
     revisedValue?: unknown;
     revisedTargetId?: string | null;
+    /**
+     * Evidence citations for this correction (issue #17 I). Each id must
+     * belong to the same run/SKU and be linked to the proposal in one of the
+     * evidence relations; arbitrary/invented citations are rejected before
+     * any decision or history row is written.
+     */
+    evidenceIds?: string[];
     actionToken?: string;
     expectedRevisionId?: string | null;
     /** @deprecated Transitional aliases accepted while older clients drain. */
@@ -202,6 +209,44 @@ export function submitProposalDecisions(input: ProposalReviewInput): ProposalRev
   }
 
   const proposalTypeById = new Map(proposalRows.map(row => [row.id, row.proposal_type]));
+
+  // Issue #17 I: validate evidence citations BEFORE any decision or history
+  // row is written. A cited evidence id must exist, belong to the same
+  // run/SKU, and be linked to the proposal in one of the evidence relations.
+  // Cross-run/SKU/proposal citation injection fails closed here.
+  for (const decision of input.decisions) {
+    const citationIds = decision.evidenceIds ?? [];
+    if (citationIds.length > 50) {
+      return {
+        ok: false,
+        code: 'invalid_decisions',
+        reason: `Decision ${decision.proposalId} cites more than 50 evidence records.`,
+      };
+    }
+    for (const evidenceId of citationIds) {
+      const evidence = db.query(
+        'SELECT run_id, product_sku FROM classification_evidence WHERE id = ?',
+      ).get(evidenceId) as { run_id: string; product_sku: string } | undefined;
+      if (!evidence || String(evidence.run_id) !== input.runId || String(evidence.product_sku) !== input.productSku) {
+        return {
+          ok: false,
+          code: 'invalid_decisions',
+          reason: `Decision ${decision.proposalId} cites evidence "${evidenceId}" that does not belong to this run/SKU.`,
+        };
+      }
+      const link = db.query(
+        'SELECT 1 FROM classification_proposal_evidence WHERE proposal_id = ? AND evidence_id = ?',
+      ).get(decision.proposalId, evidenceId);
+      if (!link) {
+        return {
+          ok: false,
+          code: 'invalid_decisions',
+          reason: `Decision ${decision.proposalId} cites evidence "${evidenceId}" that is not linked to this proposal.`,
+        };
+      }
+    }
+  }
+
   const corrections = new Map<string, ResolvedCorrection>();
   for (const decision of input.decisions) {
     const resolved = resolveCorrection(decision, proposalTypeById.get(decision.proposalId) ?? '');
@@ -240,6 +285,7 @@ export function submitProposalDecisions(input: ProposalReviewInput): ProposalRev
             : hasLegacyExpected
               ? { expectedRevisionId: d.revisedFromId ?? null }
               : {}),
+          ...(d.evidenceIds && d.evidenceIds.length > 0 ? { evidenceIds: d.evidenceIds } : {}),
         };
         const { decision, inserted, decisionId } = insertDecisionRow(db, rowInput);
         decisions.push(decision);

@@ -221,6 +221,9 @@ export interface CatalogClassificationDetail {
     sourceField: string | null;
     value: unknown;
     reliability: string;
+    attributeId?: string | null;
+    sourceUrl?: string | null;
+    snippet?: string | null;
   }>;
   proposals: Array<{
     id: string;
@@ -234,6 +237,9 @@ export interface CatalogClassificationDetail {
     currentDecisionId: string | null;
     confidence: number;
     status: string;
+    evidenceIds?: string[];
+    supportingEvidenceIds?: string[];
+    contradictingEvidenceIds?: string[];
   }>;
   decisions: Array<{
     id: string;
@@ -245,6 +251,7 @@ export interface CatalogClassificationDetail {
     revisedTargetId?: string | null;
     hasRevisedTargetId: boolean;
     actionToken: string | null;
+    evidenceIds?: string[];
   }>;
   stageResults: Array<Record<string, unknown>>;
 }

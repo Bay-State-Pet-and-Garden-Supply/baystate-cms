@@ -13,6 +13,11 @@ export interface ProposalDecisionSnapshot {
   revisedValue?: unknown;
   hasRevisedTargetId: boolean;
   revisedTargetId?: string | null;
+  /**
+   * Selected evidence citations for this correction (issue #17 I). Optional;
+   * part of the queued action snapshot and exact retry equality.
+   */
+  evidenceIds?: string[];
 }
 
 export interface PreparedDecisionInput {
@@ -23,6 +28,8 @@ export interface PreparedDecisionInput {
   expectedRevisionId: string | null;
   revisedValue?: unknown;
   revisedTargetId?: string | null;
+  /** Evidence citations for this correction (issue #17 I). */
+  evidenceIds?: string[];
 }
 
 export interface PreparedDecisionAction {
@@ -160,11 +167,19 @@ export function proposalDecisionSnapshotsEqual(
   left: ProposalDecisionSnapshot,
   right: ProposalDecisionSnapshot,
 ): boolean {
+  const sameCitations = sameStringSet(left.evidenceIds ?? [], right.evidenceIds ?? []);
   return left.decision === right.decision
     && left.hasRevisedValue === right.hasRevisedValue
     && (!left.hasRevisedValue || proposalValuesEqual(left.revisedValue, right.revisedValue))
     && left.hasRevisedTargetId === right.hasRevisedTargetId
-    && (!left.hasRevisedTargetId || (left.revisedTargetId ?? null) === (right.revisedTargetId ?? null));
+    && (!left.hasRevisedTargetId || (left.revisedTargetId ?? null) === (right.revisedTargetId ?? null))
+    && sameCitations;
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  const l = [...new Set(left)].sort().join('\u0000');
+  const r = [...new Set(right)].sort().join('\u0000');
+  return l === r;
 }
 
 function isReviewDecision(status: ClassificationProposal['status']): status is ReviewDecision {
@@ -185,10 +200,17 @@ export function prepareDecisionAction(args: {
   priorSnapshot: ProposalDecisionSnapshot;
   expectedRevisionId: string | null;
   existingAction?: PreparedDecisionAction;
+  /** Evidence citations selected for this correction (issue #17 I). */
+  evidenceIds?: string[];
   createId: () => string;
   createActionToken: () => string;
 }): PreparedDecisionAction | null {
-  const snapshot = cloneAndFreeze(proposalDecisionSnapshot(args.proposal));
+  const baseSnapshot = proposalDecisionSnapshot(args.proposal);
+  const snapshot = cloneAndFreeze<ProposalDecisionSnapshot>(
+    args.evidenceIds && args.evidenceIds.length > 0
+      ? { ...baseSnapshot, evidenceIds: [...new Set(args.evidenceIds)].sort() }
+      : baseSnapshot,
+  );
   if (!isReviewDecision(snapshot.decision)) return null;
   if (proposalDecisionSnapshotsEqual(snapshot, args.priorSnapshot)) return null;
 
@@ -198,6 +220,7 @@ export function prepareDecisionAction(args: {
     expectedRevisionId: args.expectedRevisionId,
     ...(snapshot.hasRevisedValue ? { revisedValue: snapshot.revisedValue } : {}),
     ...(snapshot.hasRevisedTargetId ? { revisedTargetId: snapshot.revisedTargetId ?? null } : {}),
+    ...(snapshot.evidenceIds?.length ? { evidenceIds: snapshot.evidenceIds } : {}),
   };
   const semanticKey = decisionSemanticKey(semanticInput);
 

@@ -25,21 +25,45 @@ function persistEvidence(runId: string, sku: string, evidence: ClassificationEvi
 function persistProposals(runId: string, sku: string, proposals: ClassificationProposal[], configSnapshotHash?: string): void {
   if (proposals.length === 0) return;
   const db = getDb();
-  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, model_call_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, JSON.stringify(p.evidenceIds ?? []), JSON.stringify(p.modelCallIds ?? []), now());
+  const stmt = db.prepare(`INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, is_bulk_acceptable, is_stale, staleness_reason, config_snapshot_hash, evidence_ids_json, supporting_evidence_ids_json, contradicting_evidence_ids_json, model_call_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  for (const p of proposals) stmt.run(p.id || randomUUID(), runId, sku, p.proposalType, p.targetId ?? null, JSON.stringify(p.proposedValue), p.confidence, p.status, p.isBulkAcceptable ? 1 : 0, p.isStale ? 1 : 0, p.stalenessReason ?? null, configSnapshotHash ?? null, JSON.stringify(p.evidenceIds ?? []), JSON.stringify(p.supportingEvidenceIds ?? []), JSON.stringify(p.contradictingEvidenceIds ?? []), JSON.stringify(p.modelCallIds ?? []), now());
 }
 
-function linkProposalEvidence(proposalId: string, evidenceIds: string[]): void {
+/**
+ * Fail-closed evidence linkage (issue #17 H): every proposal evidence id must
+ * exist, belong to the same run/SKU, and be persisted in the same stage
+ * transaction. The previous behavior silently skipped nonexistent links;
+ * that would let a proposal cite run-wide/unrelated evidence. Contradictions
+ * are never resolved here — they are persisted as visible contradicting
+ * relations and forced to individual review upstream.
+ */
+function linkProposalEvidence(
+  proposalId: string,
+  runId: string,
+  sku: string,
+  evidenceIds: string[],
+  supportingEvidenceIds: string[],
+  contradictingEvidenceIds: string[],
+): void {
   if (evidenceIds.length === 0) return;
   const db = getDb();
-  // Only link to evidence rows that already exist (FK safety).
-  // Evidence IDs may reference in-memory-only evidence that has not been,
-  // or will not be, persisted — silently skip those links rather than
-  // failing the transaction.
-  const stmt = db.prepare('INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id) VALUES (?, ?)');
+  const stmt = db.prepare(
+    'INSERT OR IGNORE INTO classification_proposal_evidence (proposal_id, evidence_id, relation) VALUES (?, ?, ?)',
+  );
   for (const evId of evidenceIds) {
-    const exists = db.query('SELECT 1 FROM classification_evidence WHERE id = ?').get(evId);
-    if (exists) stmt.run(proposalId, evId);
+    const row = db.query(
+      'SELECT run_id, product_sku FROM classification_evidence WHERE id = ?',
+    ).get(evId) as { run_id: string; product_sku: string } | undefined;
+    if (!row || String(row.run_id) !== runId || String(row.product_sku) !== sku) {
+      throw new Error(
+        `Evidence linkage failed: proposal "${proposalId}" references evidence "${evId}" ` +
+          `that does not exist in run "${runId}" / SKU "${sku}".`,
+      );
+    }
+    let relation: 'supporting' | 'contradicting' | 'context' = 'context';
+    if (supportingEvidenceIds.includes(evId)) relation = 'supporting';
+    else if (contradictingEvidenceIds.includes(evId)) relation = 'contradicting';
+    stmt.run(proposalId, evId, relation);
   }
 }
 
@@ -141,7 +165,14 @@ function persistStageCompletion(options: {
     persistEvidence(options.runId, options.sku, options.evidence, options.onboardingItemId);
     persistProposals(options.runId, options.sku, options.proposals, options.configSnapshotHash);
     for (const proposal of options.proposals) {
-      linkProposalEvidence(proposal.id, proposal.evidenceIds ?? []);
+      linkProposalEvidence(
+        proposal.id,
+        options.runId,
+        options.sku,
+        proposal.evidenceIds ?? [],
+        proposal.supportingEvidenceIds ?? [],
+        proposal.contradictingEvidenceIds ?? [],
+      );
     }
     recordStageResult(
       options.runId,

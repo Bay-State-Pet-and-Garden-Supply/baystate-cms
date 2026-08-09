@@ -248,6 +248,60 @@ describe('pipeline decision effective state', () => {
     expect(exactRetry).toBe(second);
   });
 
+  it('includes evidence citations in the action snapshot and exact retry equality', () => {
+    const initial = proposal();
+    const ids = idFactory('decision-c1', 'token-c1', 'decision-c2', 'token-c2');
+    const accepted = { ...initial, status: 'accepted' as const };
+    const first = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: proposalDecisionSnapshot(initial),
+      expectedRevisionId: null,
+      evidenceIds: ['e2', 'e1', 'e2'],
+      createId: ids,
+      createActionToken: ids,
+    })!;
+    expect(first.input.evidenceIds).toEqual(['e1', 'e2']);
+    expect(first.snapshot.evidenceIds).toEqual(['e1', 'e2']);
+
+    // Same citations + same semantic state → exact retry returns the same action.
+    const retry = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: proposalDecisionSnapshot(initial),
+      expectedRevisionId: null,
+      evidenceIds: ['e2', 'e1'],
+      existingAction: first,
+      createId: () => 'different',
+      createActionToken: () => 'different',
+    });
+    expect(retry).toBe(first);
+
+    // Different citations → a different semantic action (never reuses the token action).
+    const changed = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: proposalDecisionSnapshot(initial),
+      expectedRevisionId: null,
+      evidenceIds: ['e3'],
+      createId: ids,
+      createActionToken: ids,
+    })!;
+    expect(changed.input.evidenceIds).toEqual(['e3']);
+    expect(changed.semanticKey).not.toBe(first.semanticKey);
+  });
+
+  it('treats identical citations as a no-op relative to the prior snapshot', () => {
+    const accepted = { ...proposal(), status: 'accepted' as const };
+    const prior = { ...proposalDecisionSnapshot(accepted), evidenceIds: ['e1'] };
+    const action = prepareDecisionAction({
+      proposal: accepted,
+      priorSnapshot: prior,
+      expectedRevisionId: null,
+      evidenceIds: ['e1'],
+      createId: () => 'x',
+      createActionToken: () => 'y',
+    });
+    expect(action).toBeNull();
+  });
+
   it('strips run-owned classification arrays from ordinary item autosaves', () => {
     const editable = editableCurationData({
       curatedTitle: 'Reviewed title',

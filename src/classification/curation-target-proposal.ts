@@ -21,6 +21,10 @@ export interface ProductTypeProposalParams {
   productTypeId: string;
   confidence: number;
   evidenceIds: string[];
+  /** Target-specific supporting evidence ids (issue #17 H). */
+  supportingEvidenceIds?: string[];
+  /** Target-specific contradicting evidence ids (issue #17 H). */
+  contradictingEvidenceIds?: string[];
   matchedWords?: string[];
   /** Explicit override for bulk acceptance (Issue #10) */
   isBulkAcceptable?: boolean;
@@ -47,6 +51,12 @@ export function buildProductTypeProposal(params: ProductTypeProposalParams): Cla
     },
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
+    ...(params.supportingEvidenceIds?.length
+      ? { supportingEvidenceIds: params.supportingEvidenceIds }
+      : {}),
+    ...(params.contradictingEvidenceIds?.length
+      ? { contradictingEvidenceIds: params.contradictingEvidenceIds }
+      : {}),
     status: 'pending',
     isBulkAcceptable: params.isBulkAcceptable ?? false,
     isStale: false,
@@ -64,6 +74,10 @@ export interface FieldAssignmentProposalParams {
   value: unknown;
   confidence: number;
   evidenceIds: string[];
+  /** Target-specific supporting evidence ids (issue #17 H). */
+  supportingEvidenceIds?: string[];
+  /** Target-specific contradicting evidence ids (issue #17 H). */
+  contradictingEvidenceIds?: string[];
   /** Single value or array depending on selectionMode */
   isMultiple: boolean;
   /** Explicit override for bulk acceptance (Issue #10) */
@@ -94,6 +108,12 @@ export function buildFieldAssignmentProposal(params: FieldAssignmentProposalPara
     proposedValue,
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
+    ...(params.supportingEvidenceIds?.length
+      ? { supportingEvidenceIds: params.supportingEvidenceIds }
+      : {}),
+    ...(params.contradictingEvidenceIds?.length
+      ? { contradictingEvidenceIds: params.contradictingEvidenceIds }
+      : {}),
     status: 'pending',
     isBulkAcceptable: params.isBulkAcceptable ?? false,
     isStale: false,
@@ -114,6 +134,10 @@ export interface CategoryPageProposalParams {
   verifiedPageIdentity?: boolean;
   confidence: number;
   evidenceIds: string[];
+  /** Target-specific supporting evidence ids (issue #17 H). */
+  supportingEvidenceIds?: string[];
+  /** Target-specific contradicting evidence ids (issue #17 H). */
+  contradictingEvidenceIds?: string[];
   /** Explicit override for bulk acceptance */
   isBulkAcceptable?: boolean;
   /** Immutable runtime snapshot hash this proposal was built under. */
@@ -144,6 +168,12 @@ export function buildCategoryPageProposal(params: CategoryPageProposalParams): C
     },
     confidence: params.confidence,
     evidenceIds: params.evidenceIds,
+    ...(params.supportingEvidenceIds?.length
+      ? { supportingEvidenceIds: params.supportingEvidenceIds }
+      : {}),
+    ...(params.contradictingEvidenceIds?.length
+      ? { contradictingEvidenceIds: params.contradictingEvidenceIds }
+      : {}),
     status: 'pending',
     isBulkAcceptable: params.isBulkAcceptable ?? false,
     isStale: false,

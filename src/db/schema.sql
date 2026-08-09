@@ -361,9 +361,29 @@ CREATE TABLE IF NOT EXISTS classification_proposals (
   is_stale INTEGER NOT NULL DEFAULT 0 CHECK (is_stale IN (0, 1)),
   staleness_reason TEXT,
   config_snapshot_hash TEXT,
+  evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+  supporting_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+  contradicting_evidence_ids_json TEXT NOT NULL DEFAULT '[]',
   model_call_ids_json TEXT,
   created_at TEXT NOT NULL
 );
+
+-- Issue #17 work item H: authoritative evidence-role join.
+CREATE TABLE IF NOT EXISTS classification_proposal_evidence (
+  proposal_id TEXT NOT NULL REFERENCES classification_proposals(id) ON DELETE CASCADE,
+  evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
+  relation TEXT NOT NULL DEFAULT 'legacy' CHECK (relation IN ('supporting', 'contradicting', 'context', 'legacy')),
+  PRIMARY KEY (proposal_id, evidence_id)
+);
+CREATE INDEX IF NOT EXISTS idx_classification_proposal_evidence_relation ON classification_proposal_evidence(relation);
+
+-- Issue #17 work item I: append-only reviewer-correction citations.
+CREATE TABLE IF NOT EXISTS classification_proposal_decision_evidence (
+  decision_id TEXT NOT NULL REFERENCES classification_proposal_decisions(id) ON DELETE CASCADE,
+  evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
+  PRIMARY KEY (decision_id, evidence_id)
+);
+CREATE INDEX IF NOT EXISTS idx_classification_decision_evidence_decision ON classification_proposal_decision_evidence(decision_id);
 
 CREATE TABLE IF NOT EXISTS classification_model_calls (
   id TEXT PRIMARY KEY,

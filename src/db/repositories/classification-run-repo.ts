@@ -324,6 +324,12 @@ export interface DecisionRowInput {
   actionToken?: string | null;
   /** @deprecated Database/backward-compatible alias for actionToken. */
   decisionKey?: string | null;
+  /**
+   * Evidence citations for this correction (issue #17 I). Optional; part of
+   * exact retry/idempotency equality. Persisted append-only in
+   * classification_proposal_decision_evidence inside the same transaction.
+   */
+  evidenceIds?: string[];
 }
 
 function hasOwn(object: object, key: string): boolean {
@@ -353,6 +359,10 @@ function rowMatchesInput(row: Record<string, any>, input: DecisionRowInput): boo
   const rowHasRevision = row.revised_value_json !== null && row.revised_value_json !== undefined;
   const inputHasTarget = inputHasRevisedTarget(input);
   const rowHasTarget = rowHasRevisedTarget(row);
+  // Citations are part of exact retry/idempotency equality: a delayed retry
+  // cannot alter the cited evidence set or become live again (issue #17 I).
+  const inputCitations = [...new Set(input.evidenceIds ?? [])].sort().join('\u0000');
+  const storedCitations = getDecisionEvidenceIds(getDb(), String(row.id)).join('\u0000');
   return String(row.proposal_id) === input.proposalId
     && String(row.decision) === input.decision
     && (row.reviewer_id === null ? null : String(row.reviewer_id)) === (input.reviewerId ?? null)
@@ -360,7 +370,16 @@ function rowMatchesInput(row: Record<string, any>, input: DecisionRowInput): boo
     && rowHasRevision === inputHasRevision
     && (!inputHasRevision || String(row.revised_value_json) === correctionJson(input))
     && rowHasTarget === inputHasTarget
-    && (!inputHasTarget || (row.revised_target_id === null ? null : String(row.revised_target_id)) === (input.revisedTargetId ?? null));
+    && (!inputHasTarget || (row.revised_target_id === null ? null : String(row.revised_target_id)) === (input.revisedTargetId ?? null))
+    && storedCitations === inputCitations;
+}
+
+/** Sorted, deduplicated evidence ids cited by a decision (issue #17 I). */
+export function getDecisionEvidenceIds(db: Database, decisionId: string): string[] {
+  const rows = db.query(
+    'SELECT evidence_id FROM classification_proposal_decision_evidence WHERE decision_id = ? ORDER BY evidence_id',
+  ).all(decisionId) as Array<{ evidence_id: string }>;
+  return rows.map(r => String(r.evidence_id));
 }
 
 function getLiveDecisionRow(db: Database, proposalId: string): Record<string, any> | undefined {
@@ -475,6 +494,21 @@ export function insertDecisionRow(
      WHERE proposal_id = ? AND id != ? AND superseded_at IS NULL`,
     [createdAt, input.proposalId, decisionId],
   );
+
+  // Persist the decision's evidence citations append-only in the same
+  // transaction (issue #17 I). Citations are sorted + deduplicated for
+  // deterministic ordering. Validation that each id belongs to the same
+  // run/SKU and is linked to the proposal happened in the review service
+  // BEFORE this insert was invoked.
+  const citations = [...new Set(input.evidenceIds ?? [])].sort();
+  if (citations.length > 0) {
+    const citationStmt = db.prepare(
+      'INSERT OR IGNORE INTO classification_proposal_decision_evidence (decision_id, evidence_id) VALUES (?, ?)',
+    );
+    for (const evidenceId of citations) {
+      citationStmt.run(decisionId, evidenceId);
+    }
+  }
 
   const decision = mapDecision(db.query(
     'SELECT * FROM classification_proposal_decisions WHERE id = ?',
@@ -664,6 +698,12 @@ function mapProposal(row: Record<string, any>): ClassificationProposal {
     proposedValue: row.proposed_value_json ? JSON.parse(String(row.proposed_value_json)) : null,
     confidence: Number(row.confidence),
     evidenceIds: row.evidence_ids_json ? JSON.parse(String(row.evidence_ids_json)) : [],
+    ...(row.supporting_evidence_ids_json
+      ? { supportingEvidenceIds: JSON.parse(String(row.supporting_evidence_ids_json)) as string[] }
+      : {}),
+    ...(row.contradicting_evidence_ids_json
+      ? { contradictingEvidenceIds: JSON.parse(String(row.contradicting_evidence_ids_json)) as string[] }
+      : {}),
     ...(row.model_call_ids_json
       ? { modelCallIds: JSON.parse(String(row.model_call_ids_json)) as string[] }
       : {}),
@@ -704,5 +744,15 @@ function mapDecision(row: Record<string, any>): ClassificationProposalDecision {
     decisionKey: actionToken,
     supersededAt: row.superseded_at ? String(row.superseded_at) : null,
     createdAt: String(row.created_at),
+    ...(hydrateDecisionCitations(row.id) ? { evidenceIds: hydrateDecisionCitations(row.id) } : {}),
   };
+}
+
+/** Sorted evidence ids cited by a decision, hydrated via the join table. */
+function hydrateDecisionCitations(decisionId: unknown): string[] {
+  const id = String(decisionId);
+  const rows = getDb().query(
+    'SELECT evidence_id FROM classification_proposal_decision_evidence WHERE decision_id = ? ORDER BY evidence_id',
+  ).all(id) as Array<{ evidence_id: string }>;
+  return rows.map(r => String(r.evidence_id));
 }

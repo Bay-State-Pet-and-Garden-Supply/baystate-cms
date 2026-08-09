@@ -168,7 +168,10 @@ export function PipelineBoard({
   const [activeImageIdx, setActiveImageIdx] = useState(0);
   const [curationFields, setCurationFields] = useState<Partial<CurationData>>({});
   const [classificationProposals, setClassificationProposals] = useState<ClassificationProposal[]>([]);
-  const [_classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
+  const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
+  // Reviewer-selected evidence citations per proposal (issue #17 I). Keyed by
+  // proposal id; part of the queued decision action and exact retry equality.
+  const [citationSelections, setCitationSelections] = useState<Record<string, string[]>>({});
   const [consistencyWarnings, setConsistencyWarnings] = useState<ConsistencyWarning[]>([]);
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [manualUrlInput, setManualUrlInput] = useState('');
@@ -228,7 +231,18 @@ export function PipelineBoard({
     }
     setClassificationProposals(proposals);
     setClassificationEvidence(evidence);
+    setCitationSelections({});
     return true;
+  };
+
+  const toggleCitation = (proposalId: string, evidenceId: string) => {
+    setCitationSelections(previous => {
+      const current = previous[proposalId] ?? [];
+      const next = current.includes(evidenceId)
+        ? current.filter(id => id !== evidenceId)
+        : [...current, evidenceId];
+      return { ...previous, [proposalId]: next };
+    });
   };
 
   const drainAllWrites = async (itemId: string | null | undefined) => {
@@ -925,6 +939,7 @@ export function PipelineBoard({
       priorSnapshot,
       expectedRevisionId: transport.revisionIds[proposal.id] ?? null,
       existingAction: transport.pendingActions[proposal.id],
+      evidenceIds: citationSelections[proposal.id],
       createId: createDecisionActionToken,
       createActionToken: createDecisionActionToken,
     });
@@ -1813,6 +1828,9 @@ export function PipelineBoard({
                   catalogBrands={_catalogBrands || []}
                   suggestedProductType={curationFields.suggestedProductType}
                   classificationProposals={classificationProposals}
+                  classificationEvidence={classificationEvidence}
+                  citationSelections={citationSelections}
+                  onToggleCitation={toggleCitation}
                   proposalControlsDisabled={proposalControlsDisabled}
                   storePages={storePages}
                   suggestedPages={curationFields.suggestedPages || []}

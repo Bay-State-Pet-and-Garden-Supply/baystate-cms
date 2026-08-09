@@ -22,9 +22,11 @@ export type SafetyFindingCode =
   | 'claim_missing_direct_evidence'
   | 'claim_page_context'
   | 'claim_unapproved_source'
+  | 'claim_contradicting_evidence'
   | 'composition_missing_direct_evidence'
   | 'composition_page_context'
   | 'composition_unapproved_source'
+  | 'composition_contradicting_evidence'
   | 'bulk_accept_claim'
   | 'bulk_accept_composition'
   | 'controlled_membership'
@@ -137,6 +139,18 @@ export function validateProposalSafety(
     const isComposition = attribute.isCompositionAttribute === true;
 
     if (isClaim || isComposition) {
+      // Contradictory or insufficient direct evidence withholds the proposal:
+      // a claim/composition can never proceed through an unresolved conflict
+      // (issue #17 H). Contradictions are never resolved by source order or
+      // confidence.
+      if (proposal.contradictingEvidenceIds && proposal.contradictingEvidenceIds.length > 0) {
+        findings.push({
+          proposalId: proposal.id,
+          code: isClaim ? 'claim_contradicting_evidence' : 'composition_contradicting_evidence',
+          message: `${attribute.name} (${attribute.id}) has ${proposal.contradictingEvidenceIds.length} contradicting evidence record(s). ${isClaim ? 'Claims' : 'Composition'} cannot proceed through a conflict.`,
+        });
+        continue;
+      }
       const evidenceFinding = validateDirectEvidence(proposal, attribute, context);
       if (evidenceFinding) {
         findings.push(evidenceFinding);

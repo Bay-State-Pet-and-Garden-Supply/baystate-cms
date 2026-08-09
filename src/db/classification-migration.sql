@@ -214,6 +214,9 @@ CREATE TABLE IF NOT EXISTS classification_proposals (
 CREATE TABLE IF NOT EXISTS classification_proposal_evidence (
   proposal_id TEXT NOT NULL REFERENCES classification_proposals(id) ON DELETE CASCADE,
   evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
+  -- Issue #17 work item H: the join is authoritative for evidence roles.
+  -- 'legacy' marks rows written before relations existed (run-wide unions).
+  relation TEXT NOT NULL DEFAULT 'legacy' CHECK (relation IN ('supporting', 'contradicting', 'context', 'legacy')),
   PRIMARY KEY (proposal_id, evidence_id)
 );
 
@@ -231,6 +234,17 @@ CREATE TABLE IF NOT EXISTS classification_proposal_decisions (
   decision_key TEXT,
   superseded_at TEXT,
   created_at TEXT NOT NULL
+);
+
+-- Issue #17 work item I: append-only evidence citations per reviewer decision.
+-- FKs cascade with the decision/evidence rows; deterministic order is applied
+-- by the writer (sorted, deduplicated). A cited evidence id must belong to the
+-- same run/SKU and be linked to the decision's proposal in one of the H
+-- relations (validated by the review service before any row is written).
+CREATE TABLE IF NOT EXISTS classification_proposal_decision_evidence (
+  decision_id TEXT NOT NULL REFERENCES classification_proposal_decisions(id) ON DELETE CASCADE,
+  evidence_id TEXT NOT NULL REFERENCES classification_evidence(id) ON DELETE CASCADE,
+  PRIMARY KEY (decision_id, evidence_id)
 );
 
 -- Operational history / audit events.

@@ -27,6 +27,7 @@ import {
 import { createRun, completeRun, getProposalsByRun, getStageResults, getEvidenceByRun, recordDecision, getAcceptedProposals } from '../../db/repositories/classification-run-repo';
 import { runPipeline } from '../../classification/pipeline-runner';
 import type { ClassificationStageName } from '../../classification/types';
+import type { ClassificationEvidence } from '../../shared/types';
 import { evidenceExtractionStage, nameConsolidationStage, categoryPageProposalsStage, productAttributeProposalsStage, attributeApplicabilityStage, primaryProductTypeStage } from '../../classification';
 import { upsertPage } from '../../db/repositories/page-repo';
 import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
@@ -46,6 +47,26 @@ import { writeProductFile } from '../../git/workspace-files';
 describe('Classification Pipeline Integration', () => {
   let workspacePath: string;
   let workspaceId: string;
+
+  /** Persist fixture evidence as the run creators do, so stage proposals can
+   *  link to durable rows (issue #17 H fail-closed linkage). */
+  function persistFixtureEvidence(runId: string, evidence: ClassificationEvidence[]): void {
+    if (evidence.length === 0) return;
+    const db = getDb();
+    const sku = evidence[0].productSku;
+    const stmt = db.prepare(
+      `INSERT INTO classification_evidence
+       (id, run_id, product_sku, stage_name, source, reliability, attribute_id, source_url, source_field, snippet, value_json, metadata_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const e of evidence) {
+      stmt.run(
+        e.id, runId, sku, e.stageName, e.source, e.reliability, e.attributeId ?? null,
+        e.sourceUrl ?? null, e.sourceField ?? null, e.snippet ?? null,
+        JSON.stringify(e.value ?? null), JSON.stringify(e.metadata ?? {}), e.capturedAt,
+      );
+    }
+  }
   const BASELINE_CURATION_TARGETS = [
     { id: 'test-product-type', kind: 'product_type' as const, label: 'Test Product Type', enabled: true, selectionMode: 'single' as const, attributeId: null, catalogField: null, optionSource: 'configured' as const, required: false, mandatory: false, sortOrder: 0 },
     { id: 'test-pages', kind: 'page' as const, label: 'Test Pages', enabled: true, selectionMode: 'multiple' as const, attributeId: null, catalogField: null, optionSource: 'live_store' as const, required: false, mandatory: false, sortOrder: 1 },
@@ -166,6 +187,7 @@ describe('Classification Pipeline Integration', () => {
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-2', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Beef Recipe', value: 'Beef Recipe', metadata: {}, capturedAt: new Date().toISOString() },
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-2', attributeId: null, source: 'official_product_page' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'description', snippet: 'Made with Chicken and Lamb', value: 'Made with Chicken and Lamb', metadata: {}, capturedAt: new Date().toISOString() },
     ];
+    persistFixtureEvidence(run.id, evidence);
     const result = await runPipeline([evidenceExtractionStage, primaryProductTypeStage, attributeApplicabilityStage, productAttributeProposalsStage], { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } }, { sku: 'TEST-SKU-2', evidence, acceptedProposals: [acceptedType], allProposals: [] });
     const fieldProposals = result.proposals.filter(p => p.proposalType === 'field_assignment');
     expect(fieldProposals.length).toBeGreaterThan(0);
@@ -269,6 +291,7 @@ describe('Classification Pipeline Integration', () => {
     // Run pipeline WITHOUT any accepted proposals — a pending (provisional)
     // Product Type guess must NOT unlock decision-eligible type-gated
     // attribute proposals (fail-closed first pass).
+    persistFixtureEvidence(run.id, evidence);
     const result = await runPipeline(
       [
         evidenceExtractionStage,
@@ -320,6 +343,7 @@ describe('Classification Pipeline Integration', () => {
     // gating logic sees a reviewed type (facts alone are also honored).
     const acceptedType = { id: randomUUID(), runId: run.id, productSku: 'TEST-SKU-REVIEWED', proposalType: 'primary_product_type' as const, targetId: 'dry-dog-food', proposedValue: { productTypeId: 'dry-dog-food' }, confidence: 1, evidenceIds: [], status: 'accepted' as const, isBulkAcceptable: false, isStale: false, stalenessReason: null, snapshotHash: runtime.snapshotHash, createdAt: new Date().toISOString() };
 
+    persistFixtureEvidence(run.id, evidence);
     const result = await runPipeline(
       [primaryProductTypeStage, attributeApplicabilityStage, productAttributeProposalsStage],
       { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() }, snapshot: runtime },
@@ -389,6 +413,7 @@ describe('Classification Pipeline Integration', () => {
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-24', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Premium Cat Toys assortment', value: 'Premium Cat Toys assortment', metadata: {}, capturedAt: now },
     ];
+    persistFixtureEvidence(run.id, evidence);
 
     const result = await runPipeline(
       [productAttributeProposalsStage],
@@ -458,6 +483,7 @@ describe('Classification Pipeline Integration', () => {
     const evidence = [
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-NOPT', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Dry Dog Food Chicken Recipe', value: 'Dry Dog Food Chicken Recipe', metadata: {}, capturedAt: new Date().toISOString() },
     ];
+    persistFixtureEvidence(run.id, evidence);
     const result = await runPipeline(
       [evidenceExtractionStage, primaryProductTypeStage],
       { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
@@ -504,6 +530,7 @@ describe('Classification Pipeline Integration', () => {
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-FIELDONLY', attributeId: null, source: 'spreadsheet' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'name', snippet: 'Chicken Recipe Dry Dog Food', value: 'Chicken Recipe Dry Dog Food', metadata: {}, capturedAt: new Date().toISOString() },
       { id: randomUUID(), runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'TEST-SKU-FIELDONLY', attributeId: null, source: 'official_product_page' as const, reliability: 'medium' as const, sourceUrl: null, sourceField: 'description', snippet: 'Made with real Chicken', value: 'Made with real Chicken', metadata: {}, capturedAt: new Date().toISOString() },
     ];
+    persistFixtureEvidence(run.id, evidence);
     const result = await runPipeline(
       [productAttributeProposalsStage],
       { workspacePath, workspaceId, runId: run.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() } },
@@ -1176,10 +1203,12 @@ describe('Classification Pipeline Integration', () => {
 
     const runA = createRun(workspaceId, 'SNAP-SKU', null, runtime.snapshotHash, { sourceKind: 'catalog_product', sourceProductHash: 'src-hash-snap' });
     const contextA = { workspacePath, workspaceId, runId: runA.id, configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() }, snapshot: runtime };
+    const evidenceA = makeEvidence(runA.id);
+    persistFixtureEvidence(runA.id, evidenceA);
     const resultA = await runPipeline(
       [primaryProductTypeStage, productAttributeProposalsStage],
       contextA,
-      { sku: 'SNAP-SKU', evidence: makeEvidence(runA.id), acceptedProposals: [makeAcceptedType(runA.id)], allProposals: [] },
+      { sku: 'SNAP-SKU', evidence: evidenceA, acceptedProposals: [makeAcceptedType(runA.id)], allProposals: [] },
     );
     completeRun(runA.id, 'completed');
 
@@ -1198,10 +1227,12 @@ describe('Classification Pipeline Integration', () => {
 
     const runB = createRun(workspaceId, 'SNAP-SKU', null, runtime.snapshotHash, { sourceKind: 'catalog_product', sourceProductHash: 'src-hash-snap' });
     const contextB = { workspacePath, workspaceId, runId: runB.id, configSnapshotRef: contextA.configSnapshotRef, snapshot: runtime };
+    const evidenceB = makeEvidence(runB.id);
+    persistFixtureEvidence(runB.id, evidenceB);
     const resultB = await runPipeline(
       [primaryProductTypeStage, productAttributeProposalsStage],
       contextB,
-      { sku: 'SNAP-SKU', evidence: makeEvidence(runB.id), acceptedProposals: [makeAcceptedType(runB.id)], allProposals: [] },
+      { sku: 'SNAP-SKU', evidence: evidenceB, acceptedProposals: [makeAcceptedType(runB.id)], allProposals: [] },
     );
 
     const normalize = (p: any) => ({ proposalType: p.proposalType, targetId: p.targetId, proposedValue: p.proposedValue, status: p.status });
@@ -1450,5 +1481,145 @@ describe('Classification Pipeline Integration', () => {
       'SELECT COUNT(*) AS c FROM classification_proposals WHERE run_id = ?',
     ).get(run.id) as { c: number };
     expect(persisted.c).toBe(0);
+  });
+
+  it('fails closed when a proposal references nonexistent or foreign-run evidence (issue #17 H)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'SKU-EV-LINK', snapId, snapHash);
+    const foreignRun = createRun(workspaceId, 'SKU-EV-LINK', snapId, snapHash);
+    const proposalId = randomUUID();
+    const now = new Date().toISOString();
+    // Evidence that belongs to a DIFFERENT run (foreign-run evidence must never
+    // be linked to this run's proposal).
+    getDb().run(
+      `INSERT INTO classification_evidence
+       (id, run_id, product_sku, stage_name, source, reliability, value_json, created_at)
+       VALUES (?, ?, ?, 'evidence_extraction', 'official_product_page', 'high', '"Foreign"', ?)`,
+      ['evidence-foreign', foreignRun.id, 'SKU-EV-LINK', now],
+    );
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: proposalId,
+            runId: run.id,
+            productSku: 'SKU-EV-LINK',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: ['evidence-foreign', 'evidence-does-not-exist'],
+            supportingEvidenceIds: ['evidence-foreign'],
+            contradictingEvidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            createdAt: now,
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-EV-LINK', evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Evidence linkage failed/);
+
+    // The entire stage transaction rolled back: zero proposals, zero links
+    // for this proposal (never any foreign/nonexistent link).
+    const persisted = getDb().query(
+      'SELECT COUNT(*) AS c FROM classification_proposals WHERE run_id = ?',
+    ).get(run.id) as { c: number };
+    expect(persisted.c).toBe(0);
+    const links = getDb().query(
+      'SELECT COUNT(*) AS c FROM classification_proposal_evidence WHERE proposal_id = ?',
+    ).get(proposalId) as { c: number };
+    expect(links.c).toBe(0);
+  });
+
+  it('persists proposal evidence roles in the join with the authoritative relation (issue #17 H)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const run = createRun(workspaceId, 'SKU-EV-ROLES', snapId, snapHash);
+    const proposalId = randomUUID();
+    const now = new Date().toISOString();
+    const evidence: ClassificationEvidence[] = [
+      {
+        id: 'ev-support', runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'SKU-EV-ROLES',
+        attributeId: 'flavor', source: 'official_product_page' as const, reliability: 'high' as const,
+        sourceUrl: null, sourceField: null, snippet: null, metadata: null,
+        value: 'Chicken', capturedAt: now,
+      },
+      {
+        id: 'ev-contradict', runId: run.id, stageName: 'evidence_extraction' as const, productSku: 'SKU-EV-ROLES',
+        attributeId: 'flavor', source: 'spreadsheet' as const, reliability: 'medium' as const,
+        sourceUrl: null, sourceField: null, snippet: null, metadata: null,
+        value: 'Beef', capturedAt: now,
+      },
+    ];
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence,
+          proposals: [{
+            id: proposalId,
+            runId: run.id,
+            productSku: 'SKU-EV-ROLES',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: ['ev-support', 'ev-contradict'],
+            supportingEvidenceIds: ['ev-support'],
+            contradictingEvidenceIds: ['ev-contradict'],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            createdAt: now,
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    const result = await runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-EV-ROLES', evidence: [], acceptedProposals: [], allProposals: [] });
+    expect(result.proposals).toHaveLength(1);
+
+    const links = getDb().query(
+      'SELECT evidence_id, relation FROM classification_proposal_evidence WHERE proposal_id = ? ORDER BY evidence_id',
+    ).all(proposalId) as Array<{ evidence_id: string; relation: string }>;
+    expect(links).toEqual([
+      { evidence_id: 'ev-contradict', relation: 'contradicting' },
+      { evidence_id: 'ev-support', relation: 'supporting' },
+    ]);
+
+    const hydrated = getDb().query(
+      'SELECT supporting_evidence_ids_json, contradicting_evidence_ids_json FROM classification_proposals WHERE run_id = ?',
+    ).get(run.id) as { supporting_evidence_ids_json: string; contradicting_evidence_ids_json: string };
+    expect(JSON.parse(hydrated.supporting_evidence_ids_json)).toEqual(['ev-support']);
+    expect(JSON.parse(hydrated.contradicting_evidence_ids_json)).toEqual(['ev-contradict']);
   });
 });
