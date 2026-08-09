@@ -108,6 +108,10 @@ export default defineConfig({
       'src/tests/unit/classification-page-snapshot.test.ts',
       'src/tests/unit/classification-readiness-routes.test.ts',
       'src/tests/unit/sourcing-resolution.test.ts',
+      'src/tests/unit/general-task-fallback-telemetry.test.ts',
+      'src/tests/unit/pricing-and-telemetry.test.ts',
+      'src/tests/unit/provider-and-model-registry.test.ts',
+      'src/tests/unit/zero-deployment-rollback.test.ts',
     ],
   },
 });
