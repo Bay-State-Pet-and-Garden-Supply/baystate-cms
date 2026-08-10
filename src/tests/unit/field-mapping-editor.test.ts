@@ -213,7 +213,9 @@ describe('field mapping editor (active v2 bundle)', () => {
     try {
       applyFieldMappingEdits(root, workspaceId, [
         { catalogField: 'ProductField16', attributeId: 'brand' }, // already mapped to 16 — no-op
-        { catalogField: 'ProductField25', attributeId: 'brand' }, // second field for brand
+        // ProductField31 is unoccupied (no D3 collision), so the second field
+        // for brand triggers the one-attribute-one-field rule.
+        { catalogField: 'ProductField31', attributeId: 'brand' }, // second field for brand
       ], { gitEnabled: false });
     } catch (error) {
       expect((error as FieldMappingEditError).code).toBe('attribute_already_mapped');
@@ -280,5 +282,55 @@ describe('field mapping editor (active v2 bundle)', () => {
       .query('SELECT value FROM app_meta WHERE key = ?')
       .get(`active_classification_config_hash:${workspaceId}`) as { value: string } | undefined;
     expect(stored?.value).toBe(bundle.manifest.bundleHash);
+  });
+
+  it('D3: rejects a remap onto a field occupied by a different attribute that is not unmapped in the batch', () => {
+    // ProductField17 is held by species; brand is remapped onto it without
+    // unmapping species in the same batch — fail closed, nothing written.
+    const before = activeBundle();
+    expect(before.attributeMappings.find(m => m.attributeId === 'species')?.catalogField).toBe('ProductField17');
+    try {
+      applyFieldMappingEdits(root, workspaceId, [
+        { catalogField: 'ProductField17', attributeId: 'brand' },
+      ], { gitEnabled: false });
+    } catch (error) {
+      expect((error as FieldMappingEditError).code).toBe('collision');
+      expect((error as FieldMappingEditError).message).toContain('species');
+      expect((error as FieldMappingEditError).message).toContain('ProductField17');
+      return;
+    }
+    throw new Error('expected collision error');
+  });
+
+  it('D3: nothing is written when a collision is rejected', () => {
+    const before = activeBundle();
+    expect(before.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField16');
+    expect(before.attributeMappings.some(m => m.attributeId === 'species')).toBe(true);
+    // brand keeps ProductField16, species keeps ProductField17, and the
+    // manifest/bundle hash is untouched.
+    const after = activeBundle();
+    expect(after.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField16');
+    expect(after.attributeMappings.find(m => m.attributeId === 'species')?.catalogField).toBe('ProductField17');
+    expect(after.manifest.bundleHash).toBe(before.manifest.bundleHash);
+    expect(after.manifest.fileVersions['mappings.json']).toBe(before.manifest.fileVersions['mappings.json']);
+  });
+
+  it('D3: allows the move when the destination occupant IS unmapped in the same batch', () => {
+    // Move brand from ProductField16 onto ProductField17, explicitly unmapping
+    // the occupant (species) in the same batch — the existing move semantics.
+    applyFieldMappingEdits(root, workspaceId, [
+      { catalogField: 'ProductField16', attributeId: null },
+      { catalogField: 'ProductField17', attributeId: null },
+      { catalogField: 'ProductField17', attributeId: 'brand' },
+    ], { gitEnabled: false });
+
+    const after = activeBundle();
+    expect(after.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField17');
+    expect(after.attributeMappings.some(m => m.attributeId === 'species')).toBe(false);
+    expect(after.attributeMappings.some(m => m.catalogField === 'ProductField16')).toBe(false);
+    // The displaced attribute's curation target is removed with its mapping;
+    // the moved attribute's target follows the new field.
+    expect(after.curationTargets.some(t => t.kind === 'product_field' && t.attributeId === 'species')).toBe(false);
+    expect(after.curationTargets.find(t => t.kind === 'product_field' && t.attributeId === 'brand')?.catalogField).toBe('ProductField17');
   });
 });

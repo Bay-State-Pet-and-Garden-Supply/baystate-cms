@@ -524,6 +524,84 @@ describe('classification v2 structural and semantic validation', () => {
     expect(findingCodes(bundle)).toContain('bundle_hash_mismatch');
   });
 
+  it('I4: rejects two attributes mapped to the same Catalog Field (duplicate_catalog_field_mapping)', () => {
+    const bundle = structuredClone(migrated().bundle);
+    bundle.attributes.push({
+      ...structuredClone(bundle.attributes[0]),
+      id: 'flavor-2',
+      name: 'Flavor Two',
+      valueAliases: [],
+      oldIdAliases: [],
+    });
+    bundle.attributeMappings.push({
+      ...structuredClone(bundle.attributeMappings[0]),
+      id: 'flavor-2-mapping',
+      attributeId: 'flavor-2',
+      // Same catalogField as the flavor mapping → the field is claimed twice.
+    });
+    const codes = findingCodes(bundle);
+    expect(codes).toContain('duplicate_catalog_field_mapping');
+    expect(codes).not.toContain('duplicate_attribute_mapping');
+  });
+
+  it('I5: rejects one attribute mapped to two Catalog Fields (duplicate_attribute_mapping)', () => {
+    const bundle = structuredClone(migrated().bundle);
+    bundle.attributeMappings.push({
+      ...structuredClone(bundle.attributeMappings[0]),
+      id: 'flavor-mapping-2',
+      catalogField: 'ProductField24',
+    });
+    const codes = findingCodes(bundle);
+    expect(codes).toContain('duplicate_attribute_mapping');
+    expect(codes).not.toContain('duplicate_catalog_field_mapping');
+  });
+
+  it('I6: rejects an enabled product-field target whose catalogField mismatches its mapping', () => {
+    const bundle = structuredClone(migrated().bundle);
+    // flavor is mapped to ProductField23; the target names ProductField24.
+    bundle.curationTargets.push({
+      id: 'flavor-target',
+      kind: 'product_field',
+      label: 'Flavor',
+      enabled: true,
+      mandatory: false,
+      selectionMode: 'single',
+      attributeId: 'flavor',
+      catalogField: 'ProductField24',
+      optionSource: 'configured',
+      required: false,
+      sortOrder: 1,
+    });
+    const report = validateClassificationConfigBundle(bundle);
+    expect(report.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'target_mapping_mismatch', path: '$.curationTargets[1].catalogField' }),
+    ]));
+    expect(report.valid).toBe(false);
+
+    // A matching target stays clean.
+    const aligned = structuredClone(migrated().bundle);
+    aligned.curationTargets.push({
+      ...structuredClone(bundle.curationTargets[1]),
+      catalogField: 'ProductField23',
+    });
+    expect(validateClassificationConfigBundle(aligned).valid).toBe(true);
+  });
+
+  it('D6: identical bundles differing only in updatedAt produce the same bundleHash', () => {
+    const first = migrated();
+    const second = structuredClone(first.bundle);
+    second.manifest.updatedAt = '2026-12-01T12:00:00.000Z';
+    // The semantic hash excludes updatedAt entirely.
+    expect(computeClassificationBundleHash(second.manifest)).toBe(first.bundle.manifest.bundleHash);
+    second.manifest.bundleHash = computeClassificationBundleHash(second.manifest);
+    expect(second.manifest.bundleHash).toBe(first.bundle.manifest.bundleHash);
+    // validateClassificationConfigBundle recomputes with the same rule, so a
+    // bundle whose only difference is updatedAt never trips bundle_hash_mismatch.
+    const codes = validateClassificationConfigBundle(second).findings.map(finding => finding.code);
+    expect(codes).not.toContain('bundle_hash_mismatch');
+    expect(codes).not.toContain('missing_file_hash');
+  });
+
   it('binds migration findings into the manifest and rejects stripping or flag flips', () => {
     const result = migrated();
     expect(result.bundle.manifest.migrationProvenance).toEqual(expect.objectContaining({

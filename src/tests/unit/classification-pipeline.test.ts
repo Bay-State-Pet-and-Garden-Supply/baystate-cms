@@ -44,6 +44,16 @@ import { validateReviewCompletionGate } from '../../classification/review-comple
 import catalogClassificationRoutes from '../../server/routes/catalog-classification-routes';
 import { applyCatalogClassification } from '../../classification/catalog-product-application';
 import { writeProductFile } from '../../git/workspace-files';
+import { GitClient } from '../../git/git-client';
+import { previewCandidate, activateBundle } from '../../classification/config-store';
+import { generateCandidate } from '../../classification/config-generator';
+import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
+import { applyFieldMappingEdits } from '../../classification/field-mapping-editor';
+import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
+import { authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from '../../classification/runtime-snapshot';
+import { sha256Hex } from '../../shared/stable-id';
+import type { CatalogEvidence } from '../../classification/catalog-evidence';
+import type { RuntimeConfigAuthority } from '../../classification/config-loader';
 
 describe('Classification Pipeline Integration', () => {
   let workspacePath: string;
@@ -1799,5 +1809,128 @@ describe('Classification Pipeline Integration', () => {
       { evidence_id: 'brand-ev-one', relation: 'contradicting' },
       { evidence_id: 'brand-ev-two', relation: 'contradicting' },
     ]);
+  });
+
+  it('I7: a mapping move through the editor makes an earlier run config-drifted', async () => {
+    // The mapping editor operates only on an ACTIVE v2 bundle, but this
+    // suite's shared workspace is v1, so this test builds its own v2
+    // workspace (same shared DB; workspace-scoped reads keep it isolated).
+    // The drift signal is computed exactly as GET /api/classification/runs/:id
+    // computes it: authority-bundle-hash match OR persisted runtime-snapshot
+    // match; neither → configDrift (fail closed).
+    const I7_FIELDS = [
+      'ProductField4', 'ProductField8', 'ProductField16', 'ProductField17',
+      'ProductField18', 'ProductField19', 'ProductField20', 'ProductField21',
+      'ProductField22', 'ProductField23', 'ProductField24', 'ProductField25',
+      'ProductField26', 'ProductField27', 'ProductField28', 'ProductField29',
+      'ProductField30', 'ProductField32',
+    ];
+    const artifactContent = JSON.stringify({
+      schemaVersion: 1,
+      sourceTreeHash: 'i7'.repeat(32),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I7_FIELDS.length, xmlFields: [...I7_FIELDS].sort() },
+      fields: [],
+      pages: [],
+    });
+    const evidenceHash = sha256Hex(artifactContent);
+    const evidence: CatalogEvidence = {
+      schemaVersion: 1,
+      sourceTreeHash: '0'.repeat(64),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I7_FIELDS.length, xmlFields: [...I7_FIELDS].sort() },
+      fields: [...I7_FIELDS].sort().map(xmlField => ({
+        xmlField,
+        recordCount: 1,
+        nonEmptyCount: 1,
+        distinctValueCount: 1,
+        distinctValueHash: '0'.repeat(64),
+        delimiterEvidence: [],
+      })),
+      pages: [],
+    };
+
+    const v2WorkspaceId = randomUUID();
+    const v2Path = path.join(os.tmpdir(), `baystate-cms-class-v2-${v2WorkspaceId.slice(0, 8)}`);
+    fs.mkdirSync(path.join(v2Path, 'store', 'classification'), { recursive: true });
+    fs.mkdirSync(path.join(v2Path, 'products'), { recursive: true });
+    insertWorkspace({
+      id: v2WorkspaceId,
+      name: 'test-v2',
+      workspacePath: v2Path,
+      gitPath: path.join(v2Path, '.git'),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+
+    const git = new GitClient(v2Path);
+    git.init();
+    fs.writeFileSync(path.join(v2Path, 'store', 'manifest.json'), JSON.stringify({ schemaVersion: 1 }), 'utf-8');
+    fs.writeFileSync(
+      path.join(v2Path, 'store', 'field-registry.json'),
+      JSON.stringify({ entries: [...I7_FIELDS].sort().map(xmlField => ({ xmlField })) }),
+      'utf-8',
+    );
+    git.add(['store/manifest.json', 'store/field-registry.json']);
+    git.commit('seed catalog manifest');
+    const sourceCatalogCommit = git.getHeadHash();
+
+    const candidate = generateCandidate(BayStatePetGardenSeed, evidence);
+    const preview = previewCandidate(candidate.bundle, v2Path, { catalogEvidence: artifactContent });
+    if (!preview.hash) {
+      throw new Error(`preview failed: ${preview.report.findings.map(f => f.code).join(', ')}`);
+    }
+    await activateBundle(preview.hash, null, {
+      workspacePath: v2Path,
+      workspaceId: v2WorkspaceId,
+      activationContext: {
+        catalogFields: I7_FIELDS,
+        verifiedPageIds: ['page-i7-1'],
+        verifyCatalogEvidence: (input: { catalogEvidenceHash: string; sourceCatalogCommit: string }) => ({
+          verified: input.catalogEvidenceHash === evidenceHash && input.sourceCatalogCommit === sourceCatalogCommit,
+          reason: 'test verifier',
+        }),
+      } as never,
+      catalogEvidenceHash: evidenceHash,
+      gitEnabled: true,
+    });
+
+    // A run bound to the freshly activated v2 bundle.
+    const initialAuthority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(initialAuthority.kind).toBe('v2');
+    const run = createRun(v2WorkspaceId, 'I7-SKU', null, (initialAuthority as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle.manifest.bundleHash, { sourceKind: 'catalog_product' });
+
+    // Mirror of the run-detail route's config-drift computation.
+    const configDrift = (): boolean => {
+      try {
+        const authority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+        const matches = authorityConfigHashMatches(authority, run.configSnapshotHash!) ||
+          runtimeSnapshotHashMatchesConfig(
+            v2WorkspaceId,
+            run.configSnapshotHash!,
+            authority.kind === 'v2' ? authority.bundle : authority.config,
+          );
+        return !matches;
+      } catch {
+        return true;
+      }
+    };
+    expect(configDrift()).toBe(false);
+
+    // Apply a legal mapping move via the mapping editor (in-batch unmap + map;
+    // ProductField4 is free so no D3 collision).
+    applyFieldMappingEdits(v2Path, v2WorkspaceId, [
+      { catalogField: 'ProductField26', attributeId: null },
+      { catalogField: 'ProductField4', attributeId: 'product-feature' },
+    ], { gitEnabled: false });
+
+    // The prior run's config snapshot no longer matches the active authority.
+    expect(configDrift()).toBe(true);
   });
 });

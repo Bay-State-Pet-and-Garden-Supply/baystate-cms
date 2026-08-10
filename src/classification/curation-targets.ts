@@ -251,14 +251,6 @@ export function listCurationTargetCandidates(
   return { productTypes, productFields, pages };
 }
 
-function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
-  const index = items.findIndex(item => item.id === next.id);
-  if (index === -1) return [...items, next];
-  const copy = [...items];
-  copy[index] = next;
-  return copy;
-}
-
 export function applyCurationTargetsToConfig(
   config: ClassificationConfig,
   rawTargets: unknown[],
@@ -266,9 +258,6 @@ export function applyCurationTargetsToConfig(
 ): ClassificationConfig {
   const registry = listRegistry(workspaceId);
   const now = new Date().toISOString();
-
-  let attributes = [...config.attributes];
-  let attributeMappings = [...config.attributeMappings];
 
   const normalizedTargets = rawTargets.map((raw, index) => {
     const input = (raw && typeof raw === 'object' ? raw : {}) as Partial<CurationTargetConfig>;
@@ -313,43 +302,15 @@ export function applyCurationTargetsToConfig(
       throw new Error(`Product-field curation target "${parsed.label}" is missing catalogField.`);
     }
 
+    // Issue #31 D5: a Curation Target may REFERENCE an existing Attribute
+    // Mapping; it may never CREATE one. Targets are manager-facing
+    // enablement/option-source decisions, and mapping identity is owned by
+    // the mapping editor / preview-activate workflow. A target that names an
+    // attribute without a mapping (or a field with no mapping) fails closed
+    // instead of silently synthesizing attribute + mapping rows.
     const registryEntry = registry.find(entry => entry.xmlField === parsed.catalogField);
     const label = parsed.label || registryEntry?.label || parsed.catalogField;
-    const existingMapping = attributeMappings.find(mapping => mapping.catalogField === parsed.catalogField);
-    const attributeId = parsed.attributeId || existingMapping?.attributeId || toClassificationSlug(`field-${parsed.catalogField}`, 'field');
-    const existingAttribute = attributes.find(attribute => attribute.id === attributeId);
-    const liveOptions = parsed.optionSource === 'live_store' ? listCatalogFieldOptions(parsed.catalogField) : [];
-    const sampleOptions = parseSampleValues(registryEntry?.sampleValuesJson ?? null);
-    const allowedValues = uniqueSorted([
-      ...(existingAttribute?.allowedValues ?? []),
-      ...sampleOptions,
-      ...liveOptions,
-    ]);
-
-    const nextAttribute: ProductAttributeConfig = {
-      id: attributeId,
-      name: label,
-      description: existingAttribute?.description ?? `Curation target for ${parsed.catalogField}`,
-      valueMode: 'controlled',
-      canonicalUnit: existingAttribute?.canonicalUnit ?? null,
-      allowedValues,
-      valueAliases: existingAttribute?.valueAliases ?? [],
-      visualEvidenceEligibility: existingAttribute?.visualEvidenceEligibility ?? 'eligible',
-      isClaim: existingAttribute?.isClaim ?? false,
-      isCompositionAttribute: existingAttribute?.isCompositionAttribute ?? false,
-      group: existingAttribute?.group ?? 'Curation',
-    };
-    attributes = upsertById(attributes, nextAttribute);
-
-    const mappingId = existingMapping?.id ?? toClassificationSlug(`${attributeId}-mapping`, 'mapping');
-    const nextMapping: AttributeMappingConfig = {
-      id: mappingId,
-      attributeId,
-      catalogField: parsed.catalogField,
-      serialization: existingMapping?.serialization ?? { format: 'direct', separator: ', ', prefix: '', suffix: '' },
-      isStale: false,
-    };
-    attributeMappings = upsertById(attributeMappings, nextMapping);
+    const attributeId = resolveMappedAttributeId(config, parsed, label);
 
     return {
       ...parsed,
@@ -368,12 +329,46 @@ export function applyCurationTargetsToConfig(
       fileVersions: {
         ...(config.manifest.fileVersions ?? {}),
         'curation-targets.json': now,
-        'attributes.json': now,
-        'mappings.json': now,
       },
     },
-    attributes,
-    attributeMappings,
     curationTargets: normalizedTargets,
   };
+}
+
+/**
+ * Resolve the attribute a product-field curation target references, requiring
+ * an EXISTING attribute mapping (issue #31 D5). A target may reference a
+ * mapping by attributeId or by catalogField, but the two must agree: the
+ * attribute's mapping field must equal the target's catalogField. No mapping
+ * is ever created here.
+ */
+function resolveMappedAttributeId(
+  config: ClassificationConfig,
+  target: CurationTargetConfig,
+  label: string,
+): string {
+  const catalogField = target.catalogField as string;
+  if (target.attributeId) {
+    const mappingByAttribute = config.attributeMappings.find(mapping => mapping.attributeId === target.attributeId);
+    if (!mappingByAttribute) {
+      throw new Error(
+        `Product-field curation target "${label}" references attribute "${target.attributeId}", which has no existing attribute mapping. ` +
+          'Curation targets may reference existing mappings but may not create them; configure the mapping in the mapping editor first.',
+      );
+    }
+    if (mappingByAttribute.catalogField !== catalogField) {
+      throw new Error(
+        `Product-field curation target "${label}" names catalog field "${catalogField}" but attribute "${target.attributeId}" is mapped to "${mappingByAttribute.catalogField}".`,
+      );
+    }
+    return target.attributeId;
+  }
+  const mappingByField = config.attributeMappings.find(mapping => mapping.catalogField === catalogField);
+  if (!mappingByField) {
+    throw new Error(
+      `Product-field curation target "${label}" references catalog field "${catalogField}", which has no existing attribute mapping. ` +
+        'Curation targets may reference existing mappings but may not create them; configure the mapping in the mapping editor first.',
+    );
+  }
+  return mappingByField.attributeId;
 }

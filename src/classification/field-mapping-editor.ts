@@ -58,6 +58,7 @@ export class FieldMappingEditError extends Error {
       | 'invalid_edit'
       | 'unknown_attribute'
       | 'attribute_already_mapped'
+      | 'collision'
       | 'validation_failed'
       | 'write_error',
     message: string,
@@ -173,6 +174,32 @@ function applyEditsToBundle(
 
   const mappingByField = new Map(nextMappings.map(mapping => [mapping.catalogField, mapping]));
   const mappingByAttribute = new Map(nextMappings.map(mapping => [mapping.attributeId, mapping]));
+
+  // ── D3 collision pre-check (issue #31 D3) ────────────────────────────────
+  // Before any mutation, reject a map-edit whose destination Catalog Field is
+  // occupied by a DIFFERENT attribute that is NOT explicitly unmapped within
+  // THIS batch of edits. Silently re-pointing a field over a live occupant
+  // would destroy the displaced attribute's mapping AND its curation targets;
+  // the caller must explicitly unmap the occupant in the same batch (the
+  // existing in-batch move semantics) before a field can change owners.
+  const unmappedAttributesInBatch = new Set<string>();
+  for (const edit of edits) {
+    if (edit.attributeId === null || edit.attributeId === undefined) {
+      const occupant = mappingByField.get(edit.catalogField);
+      if (occupant) unmappedAttributesInBatch.add(occupant.attributeId);
+    }
+  }
+  for (const edit of edits) {
+    if (edit.attributeId === null || edit.attributeId === undefined) continue;
+    const occupant = mappingByField.get(edit.catalogField);
+    if (occupant && occupant.attributeId !== edit.attributeId && !unmappedAttributesInBatch.has(occupant.attributeId)) {
+      throw new FieldMappingEditError(
+        'collision',
+        `Cannot map ${edit.catalogField} to "${edit.attributeId}": the field is already mapped to attribute "${occupant.attributeId}". ` +
+          `Unmap "${occupant.attributeId}" in the same edit batch to move it off ${edit.catalogField}, or choose a different Catalog Field.`,
+      );
+    }
+  }
 
   for (const edit of edits) {
     const existing = mappingByField.get(edit.catalogField);

@@ -95,11 +95,17 @@ export function computeMigrationFindingsDigest(
 export function computeClassificationBundleHash(
   manifest: Omit<ClassificationManifestV2, 'bundleHash'> | ClassificationManifestV2,
 ): string {
+  // Issue #31 D6: the bundle hash covers only SEMANTIC authority fields.
+  // `updatedAt` is audit/timeline metadata, never drift content — an
+  // identical effective config written at different times must produce the
+  // SAME bundleHash so a no-op touch cannot masquerade as config drift.
+  // `bundleHash` itself is excluded too (the recompute in the validator feeds
+  // the full manifest, and a self-referential hash could never verify). The
+  // explicit field list is deterministic under the strict manifest schema.
   const {
     schemaVersion,
     compatibilityVersion,
     createdAt,
-    updatedAt,
     activeRevision,
     lifecycle,
     hasUnresolvedSafetyFindings,
@@ -112,7 +118,6 @@ export function computeClassificationBundleHash(
     schemaVersion,
     compatibilityVersion,
     createdAt,
-    updatedAt,
     activeRevision,
     lifecycle,
     hasUnresolvedSafetyFindings,

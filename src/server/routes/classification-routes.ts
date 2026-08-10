@@ -116,6 +116,27 @@ router.put('/classification/config', async (c) => {
       return c.json({ error: 'Missing configuration payload' }, 400);
     }
 
+    // Issue #31 D5: v2 workspaces have exactly one canonical mutation seam
+    // (the mapping editor + the preview/activate workflow). A full-config
+    // overwrite cannot bypass it — today this endpoint 500s on v2 workspaces
+    // (loadClassificationConfig throws unsupported_version); the gate turns
+    // that into an intentional 400. Unconfigured/legacy workspaces (no active
+    // authority) keep the transitional v1 save path.
+    try {
+      const authority = loadRuntimeConfigAuthority(
+        ws.workspacePath,
+        createRuntimeActivationContext(ws.workspacePath, ws.id),
+      );
+      if (authority.kind === 'v2') {
+        return c.json({
+          error: 'unsupported_in_v2',
+          message: 'Full config replacement is not supported in v2 workspaces. Use the mapping editor or the preview/activate workflow.',
+        }, 400);
+      }
+    } catch {
+      // No active classification config yet: fall through to the v1 path.
+    }
+
     saveClassificationConfig(ws.workspacePath, config);
     syncConfigToCache(ws.id, config);
 
@@ -219,6 +240,28 @@ router.put('/classification/curation-targets', async (c) => {
   try {
     const body = await c.req.json();
     const targets = Array.isArray(body?.targets) ? body.targets : [];
+
+    // Issue #31 D5: v2 workspaces gate this legacy endpoint. Targets may
+    // reference existing attribute mappings but may never create them, and
+    // the v2 mapping editor / preview-activate workflow owns every mapping
+    // mutation. Today this endpoint 500s on v2 workspaces (the legacy loader
+    // throws unsupported_version); the gate converts that into an intentional
+    // 400. Unconfigured/legacy workspaces keep the transitional v1 path.
+    try {
+      const authority = loadRuntimeConfigAuthority(
+        ws.workspacePath,
+        createRuntimeActivationContext(ws.workspacePath, ws.id),
+      );
+      if (authority.kind === 'v2') {
+        return c.json({
+          error: 'unsupported_in_v2',
+          message: 'Curation-target updates are not supported in v2 workspaces. Use the mapping editor or the preview/activate workflow.',
+        }, 400);
+      }
+    } catch {
+      // No active classification config yet: fall through to the v1 path.
+    }
+
     const currentConfig = loadClassificationConfig(ws.workspacePath);
     const nextConfig = applyCurationTargetsToConfig(currentConfig, targets, ws.id);
     saveClassificationConfig(ws.workspacePath, nextConfig);
