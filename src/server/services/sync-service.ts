@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { parseProductsXml, type ParsedProductList } from '../../shopsite/product-parser';
 import { normalizeProduct } from '../../shopsite/product-normalizer';
 import { sanitizeXml } from '../../shopsite/xml-sanitizer';
@@ -7,8 +6,8 @@ import { skuToProductFilePath } from '../../git/product-file-path';
 import { hashJson } from '../../git/deterministic-json';
 import { createSyncJob, completeSyncJob, addSyncJobEvent } from '../../db/repositories/sync-job-repo';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
-import { clearRegistry, listRegistry, upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { indexProductPageAssignments } from '../../db/repositories/page-repo';
+import { bootstrapSyncRegistry } from './field-metadata-service';
 import { updateBootstrapStatus } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
@@ -103,35 +102,19 @@ export function bootstrapFromXml(
       return true;
     });
 
-    // Preserve curated ShopSite-side field names (e.g. "Facet - Category")
-    // across a fresh pull: the exporter cannot carry the store's Extra Fields
-    // configuration, so ProductFieldN entries arrive with bare tag labels
-    // ("ProductField24"). A previously curated label wins over that default.
-    const existingLabels = new Map(
-      listRegistry(workspaceId).map(entry => [entry.xmlField, entry.label] as const),
-    );
-    const resolvedLabel = (entry: { xmlField: string; label: string }): string =>
-      entry.label === entry.xmlField
-        ? existingLabels.get(entry.xmlField) ?? entry.label
-        : entry.label;
-
     // Write product files
     for (const product of products) {
       writeProductFile(workspacePath, product);
     }
 
-    // Write store configs
-    writeStoreConfig(workspacePath, 'field-registry.json', {
-      schemaVersion: 1,
-      entries: uniqueRegistry.map(e => ({
-        ...e,
-        label: resolvedLabel(e),
-        id: randomUUID(),
-        createdAt: now,
-        updatedAt: now,
-      })),
-    });
+    // Field registry: D2 property-level merge through the canonical
+    // field-metadata service. Curated metadata (per curated_fields_json)
+    // survives the pull, sampleValuesJson is refreshed from the observation,
+    // fields absent from the pull are kept (no clearRegistry), and the R2
+    // attestation is rewritten from R1.
+    bootstrapSyncRegistry({ id: workspaceId, workspacePath }, uniqueRegistry);
 
+    // Write store configs
     writeStoreConfig(workspacePath, 'manifest.json', {
       workspaceName: workspace.name,
       workspaceId,
@@ -142,29 +125,9 @@ export function bootstrapFromXml(
       baselineCommit: null,
     });
 
-    // Seed product index, field registry, and product page assignments in SQLite
-    clearRegistry(workspaceId);
+    // Seed product index and product page assignments in SQLite
     getDb().run('DELETE FROM product_index');
     getDb().run('DELETE FROM product_pages');
-
-    for (const entry of uniqueRegistry) {
-      if (entry.workspaceId === workspaceId) {
-        upsertRegistryEntry({
-          id: randomUUID(),
-          workspaceId: entry.workspaceId,
-          xmlField: entry.xmlField,
-          label: resolvedLabel(entry),
-          kind: entry.kind,
-          dataType: entry.dataType,
-          editable: entry.editable,
-          required: entry.required,
-          uiGroup: entry.uiGroup,
-          sampleValuesJson: entry.sampleValuesJson,
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-    }
 
     for (const product of products) {
       const productHash = hashJson(product);

@@ -669,8 +669,6 @@ export interface FieldMappingEditPayload {
   catalogField: string;
   /** Configured attribute id, or null to unmap the field. */
   attributeId: string | null;
-  /** Optional ShopSite-side label, mirrored into the field registry. */
-  label?: string | null;
   serialization?: {
     kind: 'scalar' | 'delimited' | 'measured';
     prefix?: string;

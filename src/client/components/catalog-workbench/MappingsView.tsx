@@ -7,10 +7,11 @@ import type { AttributeMappingView, CatalogFieldSummary } from './types';
  * Editable mirror of ShopSite's Extra Fields configuration.
  *
  * Each row is a Catalog Field (ProductFieldN). The ShopSite-side label is
- * editable (synced to the field registry), and the field can be linked to a
- * configured Product Attribute or left unmapped. Saving applies the edits to
- * the active classification bundle (mappings.json), refreshes the promotion
- * cache, updates field_registry labels, and commits the scoped change.
+ * shown read-only from the catalog fields view (labels are owned exclusively
+ * by the Catalog Fields surface / field-metadata service), and the field can
+ * be linked to a configured Product Attribute or left unmapped. Saving applies
+ * the mapping edits to the active classification bundle (mappings.json),
+ * refreshes the promotion cache, and commits the scoped change.
  */
 
 interface AttributeOption {
@@ -86,7 +87,6 @@ function fieldNumber(catalogField: string): number {
 
 export function MappingsView() {
   const [rows, setRows] = useState<EditorRow[]>([]);
-  const [baselineLabels, setBaselineLabels] = useState<Map<string, string>>(new Map());
   const [attributes, setAttributes] = useState<AttributeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -144,7 +144,6 @@ export function MappingsView() {
         .sort((a, b) => fieldNumber(a.catalogField) - fieldNumber(b.catalogField));
 
       setRows(nextRows);
-      setBaselineLabels(new Map(nextRows.map(row => [row.catalogField, row.label.trim()])));
       setAttributes(attrs);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -169,12 +168,10 @@ export function MappingsView() {
       const serializationChanged = mapping
         ? JSON.stringify(serializationToEditor(mapping.serialization)) !== JSON.stringify(row.serialization)
         : false;
-      const labelChanged = baselineLabels.get(row.catalogField) !== row.label.trim();
-      if (!attributeChanged && !serializationChanged && !labelChanged) continue;
+      if (!attributeChanged && !serializationChanged) continue;
       edits.push({
         catalogField: row.catalogField,
         attributeId: row.attributeId === '' ? null : row.attributeId,
-        label: labelChanged ? row.label.trim() : undefined,
         serialization: attributeChanged || serializationChanged ? editorToSerialization(row.serialization) : undefined,
       });
     }
@@ -215,9 +212,9 @@ export function MappingsView() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
         <p style={{ fontSize: 12, color: '#64748b', margin: 0 }}>
-          Mirrors ShopSite's <strong>Extra Fields</strong> configuration. Edit the ShopSite-side field name and link each
-          Catalog Field to a Product Attribute (or leave it unmapped). Saving validates the bundle, updates the
-          field registry labels, and applies to future promotions.
+          Mirrors ShopSite's <strong>Extra Fields</strong> configuration. Link each Catalog Field to a Product Attribute
+          (or leave it unmapped) and set how its value is serialized. ShopSite-side field names are managed in{' '}
+          <strong>Catalog → Fields</strong>; saving here validates the bundle and applies to future promotions.
         </p>
         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
           <button type="button" style={styles.secondaryBtn} onClick={handleReset}>Reset</button>
@@ -254,12 +251,7 @@ export function MappingsView() {
                     <code style={{ fontSize: 11, color: '#059669' }}>{row.catalogField}</code>
                   </td>
                   <td style={td}>
-                    <input
-                      style={{ ...styles.input, minWidth: 180 }}
-                      value={row.label}
-                      onChange={(e) => updateRow(row.catalogField, { label: e.target.value })}
-                      placeholder="ShopSite field name"
-                    />
+                    <span style={{ fontSize: 13, color: '#1e293b' }}>{row.label || row.catalogField}</span>
                   </td>
                   <td style={td}>
                     <select

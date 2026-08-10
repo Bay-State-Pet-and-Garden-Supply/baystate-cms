@@ -470,7 +470,7 @@ route.post('/sync/full-reconcile', (c) => {
     addSyncJobEvent({ syncJobId: job.id, level: 'info', message: `Full reconcile complete: ${reindexedCount} products reindexed.` });
 
     // Sync field_registry with any newly discovered ProductField keys.
-    syncFieldRegistryFromProductIndex(workspace.id);
+    syncFieldRegistryFromProductIndex(workspace.id, workspace.workspacePath);
 
     return c.json({ success: true, jobId: job.id, reindexedCount, errors: errors.length > 0 ? errors : undefined });
   } catch (err) {

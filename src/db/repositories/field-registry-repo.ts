@@ -11,6 +11,10 @@ export interface FieldRegistryRow {
   required: boolean;
   uiGroup: string | null;
   sampleValuesJson: string | null;
+  /** JSON array of property names an operator curated through the canonical
+   * field-metadata path (e.g. ["label","uiGroup"]). NULL = never curated;
+   * sync merges per-property and never clobbers curated metadata (D2). */
+  curatedFieldsJson?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -24,8 +28,8 @@ export function listRegistry(workspaceId: string): FieldRegistryRow[] {
 export function upsertRegistryEntry(entry: FieldRegistryRow): void {
   const db = getDb();
   db.run(
-    `INSERT INTO field_registry (id, workspace_id, xml_field, label, kind, data_type, editable, required, ui_group, sample_values_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO field_registry (id, workspace_id, xml_field, label, kind, data_type, editable, required, ui_group, sample_values_json, curated_fields_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id, xml_field) DO UPDATE SET
        label = COALESCE(EXCLUDED.label, field_registry.label),
        kind = COALESCE(EXCLUDED.kind, field_registry.kind),
@@ -34,10 +38,12 @@ export function upsertRegistryEntry(entry: FieldRegistryRow): void {
        required = COALESCE(EXCLUDED.required, field_registry.required),
        ui_group = COALESCE(EXCLUDED.ui_group, field_registry.ui_group),
        sample_values_json = COALESCE(EXCLUDED.sample_values_json, field_registry.sample_values_json),
+       curated_fields_json = COALESCE(EXCLUDED.curated_fields_json, field_registry.curated_fields_json),
        updated_at = EXCLUDED.updated_at`,
     [
       entry.id, entry.workspaceId, entry.xmlField, entry.label, entry.kind, entry.dataType,
       entry.editable ? 1 : 0, entry.required ? 1 : 0, entry.uiGroup, entry.sampleValuesJson,
+      entry.curatedFieldsJson ?? null,
       entry.createdAt, entry.updatedAt,
     ],
   );
@@ -60,6 +66,7 @@ function mapRow(row: Record<string, unknown>): FieldRegistryRow {
     required: Number(row.required) === 1,
     uiGroup: row.ui_group ? String(row.ui_group) : null,
     sampleValuesJson: row.sample_values_json ? String(row.sample_values_json) : null,
+    curatedFieldsJson: row.curated_fields_json ? String(row.curated_fields_json) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };

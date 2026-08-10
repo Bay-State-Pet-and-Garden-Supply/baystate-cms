@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext, loadRuntimeConfigAuthority } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
-import { applyFieldMappingEdits, FieldMappingEditError } from '../../classification/field-mapping-editor';
+import { applyFieldMappingEdits, FieldMappingEditError, FieldMappingEditSchema } from '../../classification/field-mapping-editor';
 import { processRefreshQueue } from '../../classification/refresh-queue-processor';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import {
@@ -128,9 +129,10 @@ router.put('/classification/config', async (c) => {
 /**
  * PUT /api/classification/mappings
  * Applies ShopSite field mapping edits to the ACTIVE v2 bundle (the CMS
- * mirror of ShopSite's Extra Fields configuration). Also updates
- * field_registry labels for edited fields. Fails closed on invalid edits or
- * when the edited bundle fails active validation.
+ * mirror of ShopSite's Extra Fields configuration). Mapping/serialization
+ * only — field labels are owned exclusively by the field-metadata service
+ * (issue #31 I3), so an edit payload carrying `label` is rejected. Fails
+ * closed on invalid edits or when the edited bundle fails active validation.
  */
 router.put('/classification/mappings', async (c) => {
   const ws = getCurrentWorkspace();
@@ -140,12 +142,17 @@ router.put('/classification/mappings', async (c) => {
 
   try {
     const body = await c.req.json();
-    const edits = Array.isArray(body?.edits) ? body.edits : null;
-    if (!edits) {
-      return c.json({ error: 'Missing edits payload (expected { edits: [...] })' }, 400);
+    const parsed = z.array(FieldMappingEditSchema).safeParse(body?.edits);
+    if (!parsed.success) {
+      return c.json({
+        error: `Invalid edits payload: ${parsed.error.issues
+          .map(issue => `${issue.path.join('.')}: ${issue.message}`)
+          .join('; ')}`,
+        code: 'invalid_edit',
+      }, 400);
     }
 
-    const result = applyFieldMappingEdits(ws.workspacePath, ws.id, edits as never);
+    const result = applyFieldMappingEdits(ws.workspacePath, ws.id, parsed.data);
 
     // Rebuild the mappings view the same way /catalog/mappings does.
     const config = loadRuntimeConfig(ws.workspacePath, ws.id);

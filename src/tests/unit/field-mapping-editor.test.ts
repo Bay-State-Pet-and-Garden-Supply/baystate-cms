@@ -222,14 +222,29 @@ describe('field mapping editor (active v2 bundle)', () => {
     throw new Error('expected attribute_already_mapped error');
   });
 
-  it('updates the field registry label and persists it to the DB', () => {
+  it('I3.1: a mapping-only edit leaves the field registry unchanged', () => {
+    const registryBefore = listRegistry(workspaceId);
+
     applyFieldMappingEdits(root, workspaceId, [
-      { catalogField: 'ProductField24', attributeId: 'category', label: 'Facet - Category (renamed)' },
+      { catalogField: 'ProductField24', attributeId: 'category' },
     ], { gitEnabled: false });
 
-    const registry = listRegistry(workspaceId);
-    const row = registry.find(entry => entry.xmlField === 'ProductField24');
-    expect(row?.label).toBe('Facet - Category (renamed)');
+    // The mapping editor no longer writes field metadata — the registry
+    // (including curated labels) is owned exclusively by the canonical
+    // field-metadata service.
+    expect(listRegistry(workspaceId)).toEqual(registryBefore);
+  });
+
+  it('I3.2: a label in the edit payload is rejected (no alternate label authority)', () => {
+    try {
+      applyFieldMappingEdits(root, workspaceId, [
+        { catalogField: 'ProductField24', attributeId: 'category', label: 'Should not apply' },
+      ] as never, { gitEnabled: false });
+    } catch (error) {
+      expect((error as FieldMappingEditError).code).toBe('invalid_edit');
+      return;
+    }
+    throw new Error('expected invalid_edit error for a label-bearing edit payload');
   });
 
   it('fails closed when the edited bundle cannot pass active validation', () => {

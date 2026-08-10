@@ -39,6 +39,22 @@ export function runMigrations(): void {
     db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_schema_version', '1');");
   }
 
+  // Ensure field_registry has curated_fields_json column (issue #31 commit 1).
+  // Records which properties were curated by an operator through the canonical
+  // field-metadata service (e.g. ["label","uiGroup"]). Sync merges
+  // per-property and never clobbers curated metadata. NULL = never curated
+  // (sync defaults apply). Outside the version gate: new nullable column, safe
+  // for existing databases, PRAGMA table_info guarded for idempotency.
+  try {
+    const frCols = db.query('PRAGMA table_info(field_registry)').all() as Array<{ name: string }>;
+    if (frCols.length > 0 && !frCols.some(col => col.name === 'curated_fields_json')) {
+      db.exec('ALTER TABLE field_registry ADD COLUMN curated_fields_json TEXT;');
+      console.log('[Migrations] Added curated_fields_json column to field_registry.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add curated_fields_json column:', e);
+  }
+
   // Ensure product_index has parent_sku and search columns (migration support for existing databases)
   try {
     const columns = db.query('PRAGMA table_info(product_index)').all() as Array<{ name: string }>;
