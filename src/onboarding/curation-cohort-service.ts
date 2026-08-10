@@ -10,8 +10,9 @@
  * - `evaluateCohortReadiness(...)` — the "Extraction completeness contract":
  *   source finalized + extraction completed + OCR settled + PI import done +
  *   evidence hash computed.
- * - `getDerivedCohortStateForItem(item)` — derived "Waiting for N family
- *   members to finish Extraction" state for the Pipeline Board.
+ * - `getDerivedCohortStateForItem(item, items?)` — derived "Waiting for N
+ *   family members to finish Extraction" state for the Pipeline Board;
+ *   callers may pass the already-loaded batch items to avoid an extra load.
  * - `transitionCohortToReadyIfComplete(...)` — ready transition only; no
  *   claiming/execution yet (PR3).
  *
@@ -220,7 +221,7 @@ export function transitionCohortToReadyIfComplete(cohortId: string): boolean {
 
 // ─── Derived per-item / cohort state (API + UI) ───────────────────────────────
 
-export function getDerivedCohortStateForItem(item: OnboardingItem): DerivedCohortStateForItem {
+export function getDerivedCohortStateForItem(item: OnboardingItem, items?: OnboardingItem[]): DerivedCohortStateForItem {
   const cohort = getActiveCohortForItem(item.id);
   if (!cohort) {
     return {
@@ -234,9 +235,12 @@ export function getDerivedCohortStateForItem(item: OnboardingItem): DerivedCohor
       readyCount: 0,
     };
   }
-  const items = listItemsByBatch(item.batchId);
+  // Callers that already loaded the batch items pass them in (per-item callers
+  // should not re-load the whole batch for readiness alone); fall back to a
+  // full batch load otherwise so existing call sites keep working.
+  const batchItems = items ?? listItemsByBatch(item.batchId);
   const members = getCohortMembers(cohort.id);
-  const evaluation = evaluateCohortReadiness(cohort, members, items);
+  const evaluation = evaluateCohortReadiness(cohort, members, batchItems);
   return {
     cohortId: cohort.id,
     groupKey: cohort.groupKey,
@@ -260,7 +264,6 @@ export function buildCohortView(cohort: CurationCohort, items: OnboardingItem[])
   const members = getCohortMembers(cohort.id);
   const itemsById = new Map(items.map(item => [item.id, item]));
   const evaluation = evaluateCohortReadiness(cohort, members, items);
-  const notReadyIds = new Set(evaluation.waitingOn.map(entry => entry.itemId));
 
   const memberViews = members.map(member => {
     const item = itemsById.get(member.onboardingItemId);
@@ -279,7 +282,7 @@ export function buildCohortView(cohort: CurationCohort, items: OnboardingItem[])
       },
       ready: readiness.ready,
       blockedReason: readiness.ready ? null : readiness.blockedReason,
-      waitingOn: evaluation.waitingOn.filter(entry => entry.itemId !== member.onboardingItemId && notReadyIds.has(entry.itemId)),
+      waitingOn: evaluation.waitingOn.filter(entry => entry.itemId !== member.onboardingItemId),
     };
   });
 

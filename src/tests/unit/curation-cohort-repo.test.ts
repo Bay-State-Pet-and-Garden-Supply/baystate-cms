@@ -154,6 +154,46 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(active.filter(c => c.groupKey.includes('purina')).length).toBe(1);
   });
 
+  it('keeps one ACTIVE cohort per group across two consecutive membership changes', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    const firstPurina = getActiveCohortForItem(items[0].id)!;
+    const purinaKey = firstPurina.groupKey;
+
+    // First membership change: items[0] completes extraction → hash changes.
+    makeItemExtractionReady(items[0].id, makeExtractionData());
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+
+    const activeAfterFirst = listCohortsByBatch(batchId).filter(c => c.groupKey === purinaKey);
+    expect(activeAfterFirst.length).toBe(1); // exactly one ACTIVE per group
+    expect(activeAfterFirst[0].id).not.toBe(firstPurina.id);
+    const supersededFirst = getCohortById(firstPurina.id)!;
+    expect(supersededFirst.status).toBe('superseded');
+    expect(supersededFirst.supersededAt).not.toBeNull();
+
+    // Second membership change: items[1] completes extraction → hash changes again.
+    makeItemExtractionReady(items[1].id, makeExtractionData());
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+
+    const activeAfterSecond = listCohortsByBatch(batchId).filter(c => c.groupKey === purinaKey);
+    expect(activeAfterSecond.length).toBe(1); // still exactly one ACTIVE per group
+    const secondCohort = getCohortById(activeAfterFirst[0].id)!;
+    expect(secondCohort.status).toBe('superseded');
+    expect(secondCohort.supersededAt).not.toBeNull();
+
+    // Full history for the group: three rows, two superseded, one ACTIVE.
+    const purinaHistory = listCohortsByBatch(batchId, { includeSuperseded: true }).filter(c => c.groupKey === purinaKey);
+    expect(purinaHistory.length).toBe(3);
+    expect(purinaHistory.filter(c => c.status === 'superseded' && c.supersededAt != null).length).toBe(2);
+    expect(purinaHistory.filter(c => c.status !== 'superseded').length).toBe(1);
+
+    // The unchanged Acme singleton still has a single row that was never superseded.
+    const acmeHistory = listCohortsByBatch(batchId, { includeSuperseded: true }).filter(c => c.groupKey.includes('acme'));
+    expect(acmeHistory.length).toBe(1);
+    expect(acmeHistory[0].supersededAt).toBeNull();
+  });
+
   it('computes an order-insensitive membership hash', () => {
     const forward = computeMembershipHash([
       { itemId: 'item-b', extractionHash: 'h2' },

@@ -143,6 +143,48 @@ describe('curation cohort service (issue #30, PR2)', () => {
     expect(purina.status).toBe('waiting');
   });
 
+  it('counts extraction as complete when an item already advanced past extraction', () => {
+    const batchId = newBatch();
+    const [item] = insertFamilyItems(batchId);
+    // Extraction finished, then the item advanced into curation with its
+    // extraction evidence still present (advancement only happens from a
+    // completed extraction). The cohort refresh also runs during curation
+    // polling, so readiness must stay stable after items advance.
+    makeItemExtractionReady(item.id, makeExtractionData());
+    advanceItemsToNextStage([item.id]); // extraction (completed) → curation (pending)
+
+    const loaded = listItemsByBatch(batchId).find(i => i.id === item.id)!;
+    expect(loaded.stage).toBe('curation');
+    expect(loaded.extractionData).not.toBeNull();
+    const readiness = evaluateItemReadiness(loaded);
+    expect(readiness.extractionCompleted).toBe(true);
+    expect(readiness.ready).toBe(true);
+  });
+
+  it('requires complete PI import evidence (runId/resultHash/importRecordId) for readiness', () => {
+    const batchId = newBatch();
+    const [item] = insertFamilyItems(batchId);
+    // PI evidence attached but entries lack runId/resultHash/importRecordId.
+    makeItemExtractionReady(item.id, makeExtractionData({
+      productIntelligenceEvidence: [{ runId: 'run-1' }],
+    }));
+
+    const incomplete = listItemsByBatch(batchId).find(i => i.id === item.id)!;
+    const incompleteReadiness = evaluateItemReadiness(incomplete);
+    expect(incompleteReadiness.piImported).toBe(false);
+    expect(incompleteReadiness.ready).toBe(false);
+    expect(incompleteReadiness.blockedReason).toContain('Product Intelligence import not completed');
+
+    // Fully-populated entries → import complete → ready.
+    updateItemExtractionData(item.id, JSON.stringify(makeExtractionData({
+      productIntelligenceEvidence: [{ runId: 'run-1', resultHash: 'h1', importRecordId: 'imp-1' }],
+    })));
+    const complete = listItemsByBatch(batchId).find(i => i.id === item.id)!;
+    const completeReadiness = evaluateItemReadiness(complete);
+    expect(completeReadiness.piImported).toBe(true);
+    expect(completeReadiness.ready).toBe(true);
+  });
+
   it('derives per-item family state with cohort status and waiting members', () => {
     const batchId = newBatch();
     const items = insertFamilyItems(batchId);
