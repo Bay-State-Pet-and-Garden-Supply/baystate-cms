@@ -115,6 +115,8 @@ export default defineConfig({
       // Issue #30 cohort curation (bun:sqlite DB tests)
       'src/tests/unit/curation-cohort-repo.test.ts',
       'src/tests/unit/curation-cohort-service.test.ts',
+      // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
+      'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],
   },
 });

@@ -19,9 +19,54 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { canonicalJsonFileString, hashCanonicalJson, sha256Hex } from '../shared/stable-id';
 import type { CatalogEvidenceVerifier } from './config-validation';
+
+// F2 (issue #31 cleanup): the freshness gate needs the field-metadata service
+// (R1 compare + R2 repair), which transitively loads bun:sqlite. It is loaded
+// lazily (createRequire) so this module stays importable in vitest — the same
+// pattern as pi-executor / extraction-tools; the gate only runs with a
+// DB-backed workspace id.
+const lazyRequire = createRequire(import.meta.url);
+
+interface FieldMetadataServiceModule {
+  ensureAttestationFresh?: (workspace: { id: string; workspacePath: string }) => AttestationFreshness;
+}
+
+interface AttestationFreshness {
+  fresh: boolean;
+  repaired?: boolean;
+  added?: string[];
+  removed?: string[];
+  condition?: string;
+}
+
+/** Lazy-load the freshness gate; a load failure with a workspace id fails closed. */
+function loadFieldMetadataService(): FieldMetadataServiceModule {
+  try {
+    return lazyRequire('../server/services/field-metadata-service') as FieldMetadataServiceModule;
+  } catch (err) {
+    throw new Error(
+      `Unable to load the field-metadata service for the attestation freshness gate: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
+}
+
+/** Run the freshness gate before trusting R2; throws when repair fails. */
+function assertAttestationFresh(workspaceId: string, workspacePath: string): void {
+  const freshness = loadFieldMetadataService().ensureAttestationFresh?.({ id: workspaceId, workspacePath }) ?? { fresh: true };
+  if (!freshness.fresh) {
+    throw new Error(
+      `Field registry attestation is stale and could not be repaired (condition: ${freshness.condition}); refusing to consume a de-facto-authoritative R2.`,
+    );
+  }
+  if (freshness.repaired) {
+    console.log(`[CatalogEvidence] Repaired stale field-registry attestation (+${freshness.added?.length ?? 0}/-${freshness.removed?.length ?? 0} fields).`);
+  }
+}
 
 const FIELD_REGISTRY_FILE = 'store/field-registry.json';
 const PRODUCTS_DIR = 'products';
@@ -273,6 +318,25 @@ export async function scanCatalogEvidence(workspacePath: string, workspaceId?: s
 
   let fieldRegistry = { entryCount: 0, xmlFields: [] as string[] };
   const registryPath = path.join(workspacePath, FIELD_REGISTRY_FILE);
+
+  // F2 (issue #31 cleanup): R2 is only trustworthy when it matches R1 (the
+  // authoritative field_registry DB). Verify freshness before parsing R2 — a
+  // stale R2 is repaired here from R1; an unrecoverable staleness fails
+  // closed. The gate needs a DB-backed workspace id; without one (vitest has
+  // no bun:sqlite) the scan keeps its legacy behavior.
+  if (workspaceId) {
+    const { ensureAttestationFresh } = await import('../server/services/field-metadata-service');
+    const freshness = ensureAttestationFresh({ id: workspaceId, workspacePath });
+    if (!freshness.fresh) {
+      throw new Error(
+        `Field registry attestation is stale and could not be repaired (condition: ${freshness.condition}); refusing to scan a de-facto-authoritative R2.`,
+      );
+    }
+    if (freshness.repaired) {
+      console.log(`[CatalogEvidence] Repaired stale field-registry attestation before scan (+${freshness.added?.length ?? 0}/-${freshness.removed?.length ?? 0} fields).`);
+    }
+  }
+
   try {
     const buffer = await fs.promises.readFile(registryPath);
     const registry = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer)) as { entries?: Array<{ xmlField?: unknown }> };
@@ -327,9 +391,21 @@ export function renderCatalogEvidence(evidence: CatalogEvidence): string {
  * Read the live Catalog Field set from `store/field-registry.json` (the
  * attested field registry). Returns an empty list when the registry is absent
  * (unconfigured workspaces); other read errors fail closed by throwing.
+ *
+ * F2 (issue #31 cleanup): when a DB-backed `workspaceId` is provided, the R2
+ * file is verified against R1 (and repaired when stale) before it is trusted.
+ * An unrecoverable staleness fails closed with
+ * `field_registry_projection_stale` instead of consuming a de-facto-authoritative
+ * R2. Without a workspace id (vitest / path-only callers) the legacy read
+ * behavior is unchanged.
  */
-export function readLiveCatalogFields(workspacePath: string): string[] {
+export function readLiveCatalogFields(workspacePath: string, workspaceId?: string): string[] {
   const registryPath = path.join(workspacePath, FIELD_REGISTRY_FILE);
+
+  if (workspaceId) {
+    assertAttestationFresh(workspaceId, workspacePath);
+  }
+
   let buffer: Buffer;
   try {
     buffer = fs.readFileSync(registryPath);
@@ -379,14 +455,15 @@ export function gitCommitIsAncestor(workspacePath: string, commit: string): bool
  * (b) commit binding — `sourceCatalogCommit` is an ancestor of the nested
  *     catalog HEAD;
  * (c) field attestation — the supplied live Catalog Field set equals the
- *     current `store/field-registry.json` xmlFields.
+ *     current `store/field-registry.json` xmlFields (R2 freshness is verified
+ *     against R1 first when a workspace id is provided, F2).
  *
  * The full workspace re-scan comparison (tree integrity) is enforced by
  * {@link verifyCatalogEvidenceTreeIntegrity} at activation time so every
  * runtime load stays cheap while the authoritative artifact generation moment
  * re-verifies the actual catalog tree.
  */
-export function createCatalogEvidenceVerifier(workspacePath: string): CatalogEvidenceVerifier {
+export function createCatalogEvidenceVerifier(workspacePath: string, workspaceId?: string): CatalogEvidenceVerifier {
   return (input) => {
     // (a) committed artifact binding.
     const artifactPath = path.join(workspacePath, 'store', 'classification', 'catalog-evidence.json');
@@ -418,7 +495,7 @@ export function createCatalogEvidenceVerifier(workspacePath: string): CatalogEvi
     // (c) live field-registry attestation.
     let live: string[];
     try {
-      live = readLiveCatalogFields(workspacePath);
+      live = readLiveCatalogFields(workspacePath, workspaceId);
     } catch (error) {
       return {
         verified: false,

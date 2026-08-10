@@ -106,8 +106,9 @@ export const CurationCohortSchema = z.object({
   blockedReason: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
-  startedAt: z.string().nullable(),
-  completedAt: z.string().nullable(),
+  // Schema v4 (issue #31 cleanup F3): startedAt/completedAt were REMOVED —
+  // execution timestamps belong solely to `classification_cohort_runs`, never
+  // to the candidate cohort row.
   supersededAt: z.string().nullable(),
 });
 

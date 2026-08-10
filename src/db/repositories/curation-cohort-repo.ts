@@ -38,8 +38,6 @@ export interface CurationCohortRow {
   blocked_reason: string | null;
   created_at: string;
   updated_at: string;
-  started_at: string | null;
-  completed_at: string | null;
   superseded_at: string | null;
 }
 
@@ -70,8 +68,6 @@ export function mapCohortRow(row: Record<string, any>): CurationCohort {
     blockedReason: row.blocked_reason ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    startedAt: row.started_at ?? null,
-    completedAt: row.completed_at ?? null,
     supersededAt: row.superseded_at ?? null,
   };
 }
@@ -195,11 +191,13 @@ function insertCohortRow(
   const db = getDb();
   const id = randomUUID();
   const created = now();
+  // Schema v4 (issue #31 cleanup F3): no started_at/completed_at columns —
+  // execution timestamps belong solely to classification_cohort_runs.
   db.query(
     `INSERT INTO curation_cohorts
       (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
-       status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL)`,
+       status, blocked_reason, created_at, updated_at, superseded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)`,
   ).run(id, workspaceId, batchId, group.groupKey, group.groupLabel, GROUPING_VERSION, membershipHash, status, created, created);
   return mapCohortRow(db.query('SELECT * FROM curation_cohorts WHERE id = ?').get(id) as Record<string, any>);
 }
@@ -390,7 +388,7 @@ export function getCohortMembers(cohortId: string): CurationCohortMember[] {
 export function updateCohortStatus(
   id: string,
   status: string,
-  options: { blockedReason?: string | null; startedAt?: string | null; completedAt?: string | null } = {},
+  options: { blockedReason?: string | null } = {},
 ): void {
   const db = getDb();
   const sets: string[] = ['status = ?', 'updated_at = ?'];
@@ -398,14 +396,6 @@ export function updateCohortStatus(
   if (options.blockedReason !== undefined) {
     sets.push('blocked_reason = ?');
     params.push(options.blockedReason);
-  }
-  if (options.startedAt !== undefined) {
-    sets.push('started_at = ?');
-    params.push(options.startedAt);
-  }
-  if (options.completedAt !== undefined) {
-    sets.push('completed_at = ?');
-    params.push(options.completedAt);
   }
   params.push(id);
   db.query(`UPDATE curation_cohorts SET ${sets.join(', ')} WHERE id = ?`).run(...params);

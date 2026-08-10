@@ -3,10 +3,17 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getCurrentWorkspace } from '../services/workspace-service';
-import { listRegistry } from '../../db/repositories/field-registry-repo';
+import { listRegistry, isProjectionStale } from '../../db/repositories/field-registry-repo';
 import { repairFieldRegistryAttestation, updateFieldMetadata } from '../services/field-metadata-service';
 
 const route = new Hono();
+
+/** Include the stale-projection marker state when it is set (F2). */
+function projectionStalePayload(workspaceId: string): { projectionStale: true; condition: 'field_registry_projection_stale' } | { projectionStale: false } {
+  return isProjectionStale(workspaceId)
+    ? { projectionStale: true as const, condition: 'field_registry_projection_stale' as const }
+    : { projectionStale: false as const };
+}
 
 /**
  * GET /api/field-registry - List field registry entries.
@@ -32,7 +39,9 @@ route.get('/field-registry', (c) => {
   }
 
   const entries = listRegistry(workspace.id);
-  return c.json({ entries });
+  // F2: surface the stale-projection marker when a prior R2 rewrite failed, so
+  // clients can see that the attestation is (or is not) trustworthy.
+  return c.json({ entries, ...projectionStalePayload(workspace.id) });
 });
 
 /**
@@ -40,7 +49,8 @@ route.get('/field-registry', (c) => {
  * D1). Rebuilds `store/field-registry.json` from the authoritative R1
  * (`field_registry` DB) as the canonical attestation projection. Follows the
  * existing route patterns; auth is handled globally by the API-token
- * middleware for non-GET requests (src/server/app.ts).
+ * middleware for non-GET requests (src/server/app.ts). F2: a repair failure
+ * marks the projection stale and surfaces that state in the error response.
  */
 route.post('/field-registry/repair', (c) => {
   const workspace = getCurrentWorkspace();
@@ -49,10 +59,10 @@ route.post('/field-registry/repair', (c) => {
   }
   try {
     const entries = repairFieldRegistryAttestation({ id: workspace.id, workspacePath: workspace.workspacePath });
-    return c.json({ success: true, entryCount: entries.length });
+    return c.json({ success: true, entryCount: entries.length, ...projectionStalePayload(workspace.id) });
   } catch (err) {
     console.error('[FieldRegistryRoute] Repair failed:', err);
-    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    return c.json({ error: err instanceof Error ? err.message : String(err), ...projectionStalePayload(workspace.id) }, 500);
   }
 });
 

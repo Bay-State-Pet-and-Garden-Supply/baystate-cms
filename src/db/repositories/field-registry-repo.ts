@@ -27,18 +27,27 @@ export function listRegistry(workspaceId: string): FieldRegistryRow[] {
 
 export function upsertRegistryEntry(entry: FieldRegistryRow): void {
   const db = getDb();
+  // F1 (issue #31 cleanup): every column is assigned DIRECTLY from the merged
+  // row (`= EXCLUDED.<col>`, never COALESCE with the existing value). The
+  // canonical service (`updateFieldMetadata` / `bootstrapSyncRegistry`) is the
+  // only caller and ALWAYS passes a complete merged row, so COALESCE could
+  // only swallow a deliberately cleared value — e.g. a canonical PATCH of
+  // `uiGroup: null` or a fresh pull with null observed samples — making null
+  // inexpressible. Direct assignment keeps null clearable while curated
+  // metadata still wins through the service-layer merge (curated_fields_json
+  // decides which properties keep their DB value, not this upsert).
   db.run(
     `INSERT INTO field_registry (id, workspace_id, xml_field, label, kind, data_type, editable, required, ui_group, sample_values_json, curated_fields_json, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id, xml_field) DO UPDATE SET
-       label = COALESCE(EXCLUDED.label, field_registry.label),
-       kind = COALESCE(EXCLUDED.kind, field_registry.kind),
-       data_type = COALESCE(EXCLUDED.data_type, field_registry.data_type),
-       editable = COALESCE(EXCLUDED.editable, field_registry.editable),
-       required = COALESCE(EXCLUDED.required, field_registry.required),
-       ui_group = COALESCE(EXCLUDED.ui_group, field_registry.ui_group),
-       sample_values_json = COALESCE(EXCLUDED.sample_values_json, field_registry.sample_values_json),
-       curated_fields_json = COALESCE(EXCLUDED.curated_fields_json, field_registry.curated_fields_json),
+       label = EXCLUDED.label,
+       kind = EXCLUDED.kind,
+       data_type = EXCLUDED.data_type,
+       editable = EXCLUDED.editable,
+       required = EXCLUDED.required,
+       ui_group = EXCLUDED.ui_group,
+       sample_values_json = EXCLUDED.sample_values_json,
+       curated_fields_json = EXCLUDED.curated_fields_json,
        updated_at = EXCLUDED.updated_at`,
     [
       entry.id, entry.workspaceId, entry.xmlField, entry.label, entry.kind, entry.dataType,
@@ -65,4 +74,36 @@ function mapRow(row: Record<string, unknown>): FieldRegistryRow {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+// ─── Stale-projection marker (F2, issue #31 cleanup) ──────────────────────────
+//
+// R2 (`store/field-registry.json`) is a deterministic attestation projection of
+// R1 (`field_registry` DB). When an R2 rewrite fails the file can silently
+// drift from R1; this durable app_meta marker records that the projection is
+// stale so evidence scans and live-field reads fail closed instead of
+// consuming a de-facto-authoritative R2. The marker is cleared whenever R2 is
+// successfully rebuilt from R1.
+
+const PROJECTION_STALE_KEY = (workspaceId: string) => `field_registry_projection_stale:${workspaceId}`;
+
+/** Record that the R2 attestation for a workspace is stale (ISO timestamp). */
+export function markProjectionStale(workspaceId: string, at: string): void {
+  getDb().run(
+    `INSERT INTO app_meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`,
+    [PROJECTION_STALE_KEY(workspaceId), at],
+  );
+}
+
+/** Clear the stale-projection marker for a workspace. */
+export function clearProjectionStale(workspaceId: string): void {
+  getDb().run('DELETE FROM app_meta WHERE key = ?', [PROJECTION_STALE_KEY(workspaceId)]);
+}
+
+/** True when the R2 attestation for a workspace is marked stale. */
+export function isProjectionStale(workspaceId: string): boolean {
+  // bun:sqlite returns null (not undefined) when no row matches.
+  const row = getDb().query('SELECT value FROM app_meta WHERE key = ?').get(PROJECTION_STALE_KEY(workspaceId)) as { value: string } | null;
+  return row !== null && row !== undefined;
 }

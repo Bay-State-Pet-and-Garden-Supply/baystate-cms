@@ -649,8 +649,8 @@ export function loadRuntimeConfigAuthority(
  */
 export function createRuntimeActivationContext(workspacePath: string, workspaceId: string): VerifiedActivationContext {
   return {
-    catalogFields: readLiveCatalogFields(workspacePath),
-    verifyCatalogEvidence: createCatalogEvidenceVerifier(workspacePath),
+    catalogFields: readLiveCatalogFields(workspacePath, workspaceId),
+    verifyCatalogEvidence: createCatalogEvidenceVerifier(workspacePath, workspaceId),
     ...(workspaceId ? { verifiedPageIds: listVerifiedPageOptions(workspaceId).map(page => page.id) } : {}),
   };
 }

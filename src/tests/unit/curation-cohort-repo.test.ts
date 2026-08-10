@@ -369,8 +369,8 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
       db.query(
         `INSERT INTO curation_cohorts
           (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
-           status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', NULL, ?, ?, NULL, NULL, NULL)`,
+           status, blocked_reason, created_at, updated_at, superseded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', NULL, ?, ?, NULL)`,
       ).run(randomUUID(), workspaceId, batchId, purina.groupKey, purina.groupLabel, purina.groupingVersion, 'f'.repeat(64), now, now),
     ).toThrow(/UNIQUE/i);
   });

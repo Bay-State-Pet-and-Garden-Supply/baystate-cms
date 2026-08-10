@@ -694,22 +694,24 @@ export function runMigrations(): void {
     db.exec("INSERT INTO app_meta (key, value) VALUES ('stage_pipeline_schema_version', '1');");
   }
 
-  // Run cohort migration if not already applied (issue #30 PR1; schema v3 =
-  // FINAL, issue #31 commit 3 / D7). One-shot SQL file gated by an app_meta
-  // marker. cohort-migration.sql now carries the FINAL v3 shape (narrowed
+  // Run cohort migration if not already applied (issue #30 PR1; schema v4 =
+  // FINAL, issue #31 cleanup F3). One-shot SQL file gated by an app_meta
+  // marker. cohort-migration.sql now carries the FINAL v4 shape (narrowed
   // status CHECK `forming|waiting|ready|superseded` + ON DELETE CASCADE batch
-  // FK), so a FRESH install executes the SQL and writes marker '3' directly.
-  // Existing databases advance through the hops below: marker '1' runs the
-  // v1→v2 rebuild (CASCADE FK, v2-era wide CHECK) → writes '2', then the
-  // v2→v3 rebuild narrows the CHECK → writes '3'; marker '2' runs only the
-  // v2→v3 rebuild → writes '3'; marker '3' skips everything.
+  // FK, NO execution metadata columns), so a FRESH install executes the SQL
+  // and writes marker '4' directly. Existing databases advance through the
+  // hops below: marker '1' runs the v1→v2 rebuild (CASCADE FK, v2-era wide
+  // CHECK) → writes '2', then the v2→v3 rebuild narrows the CHECK → writes
+  // '3', then the v3→v4 rebuild drops the execution-metadata columns → writes
+  // '4'; marker '2' runs the v2→v3 and v3→v4 hops; marker '3' runs only the
+  // v3→v4 hop; marker '4' skips everything.
   const cohortVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;
   if (!cohortVersion) {
     const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
     db.exec(cohortSql);
-    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '3');");
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '4');");
   }
 
   // ── Curation cohorts v1 → v2: batch deletion must cascade ────────────────
@@ -723,7 +725,7 @@ export function runMigrations(): void {
   // `PRAGMA foreign_key_check` and restoring FK enforcement in `finally`.
   // This block runs ONLY for a marker-'1' database and writes marker '2',
   // which the v2→v3 hop below then consumes; fresh installs already carry
-  // marker '3'.
+  // marker '4'.
   const cohortV1 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;
@@ -782,8 +784,9 @@ export function runMigrations(): void {
   // execution statuses found in existing data are deterministically mapped to
   // `ready` (dropping the never-durable run state leaves the candidate family
   // a stable candidate); the four candidate/superseded statuses are preserved
-  // verbatim. Runs for marker-'2' databases (and marker-'1' databases that the
-  // hop above just advanced to '2'); marker '3' skips.
+  // verbatim. The v3 shape still carries `started_at`/`completed_at` (the
+  // v3→v4 hop drops them). Runs for marker-'2' databases (and marker-'1'
+  // databases that the hop above just advanced to '2'); marker '4' skips.
   const cohortV2 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;
@@ -839,6 +842,70 @@ export function runMigrations(): void {
     }
     db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '3') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
     console.log('[Migrations] curation_cohort_schema_version bumped to 3.');
+  }
+
+  // ── Curation cohorts v3 → v4: drop execution metadata (issue #31 F3) ───
+  //
+  // v3 still carries `started_at`/`completed_at`; once `classification_cohort_runs`
+  // owns execution state, candidate cohorts must not hold a second authority
+  // for execution timestamps. SQLite cannot drop columns in place, so the
+  // table is rebuilt — same swap precedent as v1→v2/v2→v3: PRAGMA foreign_keys
+  // OFF around the swap, create `_new` WITHOUT the two columns, copy, drop,
+  // rename, recreate the 3 indexes, then `PRAGMA foreign_key_check` and
+  // restoring FK enforcement in `finally`. Existing values are simply dropped
+  // (they were never consumed as authority). Runs for marker-'3' databases
+  // (and marker-'1'/'2' databases advanced by the hops above); marker '4'
+  // skips.
+  const cohortV3 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV3 && cohortV3.value === '3') {
+    console.log('[Migrations] Rebuilding curation_cohorts without execution metadata columns (v3 → v4)...');
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE curation_cohorts_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            superseded_at TEXT
+          )
+        `);
+        db.exec(`
+          INSERT INTO curation_cohorts_new
+            (id, workspace_id, batch_id, group_key, group_label, grouping_version,
+             membership_hash, status, blocked_reason, created_at, updated_at, superseded_at)
+          SELECT
+            id, workspace_id, batch_id, group_key, group_label, grouping_version,
+            membership_hash, status, blocked_reason, created_at, updated_at, superseded_at
+          FROM curation_cohorts
+        `);
+        db.exec('DROP TABLE curation_cohorts');
+        db.exec('ALTER TABLE curation_cohorts_new RENAME TO curation_cohorts');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohorts_batch ON curation_cohorts(batch_id, status)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohort_members_item ON curation_cohort_members(onboarding_item_id)');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_cohorts_active_group
+          ON curation_cohorts(batch_id, group_key, grouping_version) WHERE status != 'superseded'`);
+      })();
+    } finally {
+      // Always restore foreign key enforcement, even if the rebuild fails.
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+    const cohortFkViolations = db.query("PRAGMA foreign_key_check('curation_cohorts')").all();
+    if (cohortFkViolations.length > 0) {
+      console.warn(`[Migrations] ${cohortFkViolations.length} FK violations in curation_cohorts after v4 rebuild (pre-existing):`, cohortFkViolations.slice(0, 5));
+    }
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '4') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 4.');
   }
   // ── Clean up product_draft_projection noise proposals ───────────────────
   //
