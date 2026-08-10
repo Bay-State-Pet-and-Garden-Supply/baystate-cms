@@ -236,7 +236,10 @@ describe('curation cohort service (issue #30, PR2)', () => {
 
     const readyMember = view.members.find(m => m.onboardingItemId === items[0].id)!;
     expect(readyMember.state).toBe('ready');
-    expect(readyMember.waitingOn.map(w => w.itemId)).toEqual([items[1].id]);
+    // A failed sibling is not ordinary "waiting": the sibling card surfaces the
+    // family block via cohort state, and waitingOn lists only in-progress members.
+    expect(readyMember.waitingOn.length).toBe(0);
+    expect(view.state).toBe('blocked');
   });
 
   it('never transitions non-forming/waiting cohorts back to ready', () => {

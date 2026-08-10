@@ -271,7 +271,10 @@ export function evaluateCohortReadiness(
 
   const blockedMembers = members.filter(member => readinessByMember.get(member.onboardingItemId)?.state === 'blocked');
 
+  // Blocked members are surfaced via `blockedMembers`/state, never as ordinary
+  // "waiting" entries — a failed member is not in progress (round-3 R1 invariant).
   const waitingOn = notReady
+    .filter(member => readinessByMember.get(member.onboardingItemId)?.state !== 'blocked')
     .map(member => {
       const item = itemsById.get(member.onboardingItemId);
       return {
