@@ -32,6 +32,7 @@ import { evidenceExtractionStage, nameConsolidationStage, categoryPageProposalsS
 import { processProductFieldTarget } from '../../classification/curation-target-processor';
 import { upsertPage } from '../../db/repositories/page-repo';
 import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
+import { updateFieldMetadata } from '../../server/services/field-metadata-service';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
 import { buildRuntimeSnapshot, persistRuntimeSnapshot } from '../../classification/runtime-snapshot';
 import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../../classification/page-snapshot';
@@ -1932,5 +1933,175 @@ describe('Classification Pipeline Integration', () => {
 
     // The prior run's config snapshot no longer matches the active authority.
     expect(configDrift()).toBe(true);
+  });
+
+  it('I8: a registry-only label edit does not masquerade as a mapping change (configDrift stays false)', async () => {
+    // Same fresh-v2-workspace pattern as I7: the canonical field-metadata
+    // service mutates R1 (`field_registry` DB) + its R2 projection
+    // (`store/field-registry.json`) while this suite's shared workspace is
+    // v1, so this test builds its own v2 workspace (same shared DB;
+    // workspace-scoped reads keep it isolated). The drift signal is computed
+    // exactly as GET /api/classification/runs/:id computes it: authority-
+    // bundle-hash match OR persisted runtime-snapshot match; neither →
+    // configDrift (fail closed).
+    const I8_FIELDS = [
+      'ProductField4', 'ProductField8', 'ProductField16', 'ProductField17',
+      'ProductField18', 'ProductField19', 'ProductField20', 'ProductField21',
+      'ProductField22', 'ProductField23', 'ProductField24', 'ProductField25',
+      'ProductField26', 'ProductField27', 'ProductField28', 'ProductField29',
+      'ProductField30', 'ProductField32',
+    ];
+    const artifactContent = JSON.stringify({
+      schemaVersion: 1,
+      sourceTreeHash: 'i8'.repeat(32),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I8_FIELDS.length, xmlFields: [...I8_FIELDS].sort() },
+      fields: [],
+      pages: [],
+    });
+    const evidenceHash = sha256Hex(artifactContent);
+    const evidence: CatalogEvidence = {
+      schemaVersion: 1,
+      sourceTreeHash: '0'.repeat(64),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I8_FIELDS.length, xmlFields: [...I8_FIELDS].sort() },
+      fields: [...I8_FIELDS].sort().map(xmlField => ({
+        xmlField,
+        recordCount: 1,
+        nonEmptyCount: 1,
+        distinctValueCount: 1,
+        distinctValueHash: '0'.repeat(64),
+        delimiterEvidence: [],
+      })),
+      pages: [],
+    };
+
+    const v2WorkspaceId = randomUUID();
+    const v2Path = path.join(os.tmpdir(), `baystate-cms-class-v2-${v2WorkspaceId.slice(0, 8)}`);
+    fs.mkdirSync(path.join(v2Path, 'store', 'classification'), { recursive: true });
+    fs.mkdirSync(path.join(v2Path, 'products'), { recursive: true });
+    insertWorkspace({
+      id: v2WorkspaceId,
+      name: 'test-v2',
+      workspacePath: v2Path,
+      gitPath: path.join(v2Path, '.git'),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+
+    const git = new GitClient(v2Path);
+    git.init();
+    fs.writeFileSync(path.join(v2Path, 'store', 'manifest.json'), JSON.stringify({ schemaVersion: 1 }), 'utf-8');
+    fs.writeFileSync(
+      path.join(v2Path, 'store', 'field-registry.json'),
+      JSON.stringify({ entries: [...I8_FIELDS].sort().map(xmlField => ({ xmlField })) }),
+      'utf-8',
+    );
+    git.add(['store/manifest.json', 'store/field-registry.json']);
+    git.commit('seed catalog manifest');
+    const sourceCatalogCommit = git.getHeadHash();
+
+    const candidate = generateCandidate(BayStatePetGardenSeed, evidence);
+    const preview = previewCandidate(candidate.bundle, v2Path, { catalogEvidence: artifactContent });
+    if (!preview.hash) {
+      throw new Error(`preview failed: ${preview.report.findings.map(f => f.code).join(', ')}`);
+    }
+    await activateBundle(preview.hash, null, {
+      workspacePath: v2Path,
+      workspaceId: v2WorkspaceId,
+      activationContext: {
+        catalogFields: I8_FIELDS,
+        verifiedPageIds: ['page-i8-1'],
+        verifyCatalogEvidence: (input: { catalogEvidenceHash: string; sourceCatalogCommit: string }) => ({
+          verified: input.catalogEvidenceHash === evidenceHash && input.sourceCatalogCommit === sourceCatalogCommit,
+          reason: 'test verifier',
+        }),
+      } as never,
+      catalogEvidenceHash: evidenceHash,
+      gitEnabled: true,
+    });
+
+    // A run bound to the freshly activated v2 bundle.
+    const initialAuthority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(initialAuthority.kind).toBe('v2');
+    const run = createRun(v2WorkspaceId, 'I8-SKU', null, (initialAuthority as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle.manifest.bundleHash, { sourceKind: 'catalog_product' });
+
+    // Mirror of the run-detail route's config-drift computation (same as I7).
+    const configDrift = (): boolean => {
+      try {
+        const authority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+        const matches = authorityConfigHashMatches(authority, run.configSnapshotHash!) ||
+          runtimeSnapshotHashMatchesConfig(
+            v2WorkspaceId,
+            run.configSnapshotHash!,
+            authority.kind === 'v2' ? authority.bundle : authority.config,
+          );
+        return !matches;
+      } catch {
+        return true;
+      }
+    };
+    expect(configDrift()).toBe(false);
+
+    // Populate the canonical R1 field-registry rows for this workspace (the
+    // seeded store/field-registry.json is a projection of R1; the active
+    // loader re-attests mapped fields against this set), then snapshot the
+    // active bundle's mapping fingerprint + hash BEFORE the label edit.
+    for (const xmlField of [...I8_FIELDS].sort()) {
+      upsertRegistryEntry({
+        id: randomUUID(),
+        workspaceId: v2WorkspaceId,
+        xmlField,
+        label: xmlField,
+        kind: 'custom',
+        dataType: 'string',
+        editable: true,
+        required: false,
+        uiGroup: 'Custom Fields',
+        sampleValuesJson: null,
+        curatedFieldsJson: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    const authorityBeforeEdit = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(authorityBeforeEdit.kind).toBe('v2');
+    const bundleBeforeEdit = (authorityBeforeEdit as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle;
+    const beforeMappingsVersion = bundleBeforeEdit.manifest.fileVersions['mappings.json'];
+    const beforeBundleHash = bundleBeforeEdit.manifest.bundleHash;
+
+    // Registry-only LABEL edit through the canonical field-metadata service
+    // (the function behind PUT /api/field-registry/:id). It mutates R1 and
+    // rewrites store/field-registry.json — never store/classification/**.
+    const updatedRow = updateFieldMetadata(
+      { id: v2WorkspaceId, workspacePath: v2Path },
+      'ProductField4',
+      { label: 'Edited Field Label' },
+    );
+    expect(updatedRow.label).toBe('Edited Field Label');
+
+    // (a) The prior run's config snapshot still matches the active bundle
+    // hash — a display-only change must not masquerade as a config change.
+    expect(configDrift()).toBe(false);
+
+    // (b) The active bundle manifest's mappings.json fingerprint is untouched.
+    const authorityAfterEdit = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(authorityAfterEdit.kind).toBe('v2');
+    const bundleAfterEdit = (authorityAfterEdit as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle;
+    expect(bundleAfterEdit.manifest.fileVersions['mappings.json']).toBe(beforeMappingsVersion);
+
+    // (c) The bundle hash itself is unchanged.
+    expect(bundleAfterEdit.manifest.bundleHash).toBe(beforeBundleHash);
+
+    // Positive control (covered by I7 above, not duplicated here): a real
+    // MAPPING edit through applyFieldMappingEdits flips this same run's
+    // configDrift to true. A registry-only label edit must never masquerade
+    // as that mapping/classification change.
   });
 });

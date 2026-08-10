@@ -178,11 +178,10 @@ export function syncRegistryFromProductIndex(workspace: FieldMetadataWorkspace):
 
   const existingNames = new Set(listRegistry(workspace.id).map(entry => entry.xmlField));
 
-  // N-writes batching (commit-1 review SHOULD-FIX): collect all missing-key
-  // DB upserts first, then ONE R2 rewrite instead of one
-  // updateFieldMetadata/repairAttestation per key (each rewrite is a full
-  // canonical projection of R1). New rows are observed-only
-  // (`curated_fields_json` stays null).
+  // N-writes batching: collect all missing-key DB upserts first, then ONE
+  // R2 rewrite instead of one updateFieldMetadata/repairAttestation per key
+  // (each rewrite is a full canonical projection of R1). New rows are
+  // observed-only (`curated_fields_json` stays null).
   const now = new Date().toISOString();
   let added = 0;
   for (const key of allKeys) {

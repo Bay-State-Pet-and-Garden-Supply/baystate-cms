@@ -49,11 +49,6 @@ export function upsertRegistryEntry(entry: FieldRegistryRow): void {
   );
 }
 
-export function clearRegistry(workspaceId: string): void {
-  const db = getDb();
-  db.run('DELETE FROM field_registry WHERE workspace_id = ?', [workspaceId]);
-}
-
 function mapRow(row: Record<string, unknown>): FieldRegistryRow {
   return {
     id: String(row.id),

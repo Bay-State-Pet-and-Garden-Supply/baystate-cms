@@ -335,8 +335,8 @@ export function refreshCandidateCohorts(workspaceId: string, batchId: string): C
   const cohorts = repoRefreshCandidateCohorts(workspaceId, batchId, items);
   for (const cohort of cohorts) {
     // Candidate states (forming/waiting/ready) are re-aligned to the current
-    // evidence. Execution states (running/completed/failed/conflicted) and
-    // superseded rows are never rewritten here — PR3+ owns them.
+    // evidence. Superseded rows (schema v3) are never rewritten here — PR3+
+    // owns them; the guard below already skips them.
     if (!['forming', 'waiting', 'ready'].includes(cohort.status)) continue;
     const members = getCohortMembers(cohort.id);
     const evaluation = evaluateCohortReadiness(cohort, members, items);
@@ -353,9 +353,9 @@ export function refreshCandidateCohorts(workspaceId: string, batchId: string): C
  * Transition a cohort to `ready` when every member's extraction evidence is
  * complete. No claiming or execution happens here — that is PR3+.
  *
- * Guard: only `forming | waiting` cohorts may move to `ready`. Running,
- * completed, failed, conflicted, and superseded cohorts are never moved back
- * to `ready` (issue #30 round-2 F6).
+ * Guard: only `forming | waiting` cohorts may move to `ready`; every other
+ * schema-v3 status (superseded) is never moved back to `ready` (issue #30
+ * round-2 F6).
  *
  * @returns true when the cohort was transitioned to `ready`.
  */
