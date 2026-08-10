@@ -17,10 +17,12 @@ import {
   listItemsByBatch,
 } from '../../db/repositories/onboarding-item-repo';
 import { getCohortMembers, getCohortById, updateCohortStatus } from '../../db/repositories/curation-cohort-repo';
+import { insertExtraction } from '../../db/repositories/onboarding-extraction-repo';
 import {
   refreshCandidateCohorts,
   evaluateCohortReadiness,
   evaluateItemReadiness,
+  sourceProvenanceConsistent,
   transitionCohortToReadyIfComplete,
   getDerivedCohortStateForItem,
   listCandidateCohortViews,
@@ -391,5 +393,115 @@ describe('curation cohort service (issue #30, PR2)', () => {
     expect(empty.state).toBe('ready');
     expect(empty.memberCount).toBe(0);
     expect(empty.readyCount).toBe(0);
+  });
+
+  it('blocks pre-Curation barrier failures and never blocks on a Curation failure (round-3 R1)', () => {
+    const batchId = newBatch();
+    const items = insertItems(batchId, [
+      { upc: '200000000001', name: 'Sourcing Failed Product', brandHint: 'Alpha', rowNumber: 1, stage: 'sourcing' },
+      { upc: '200000000002', name: 'Discovery Failed Product', brandHint: 'Alpha', rowNumber: 2 },
+      { upc: '200000000003', name: 'Extraction Failed Product', brandHint: 'Alpha', rowNumber: 3 },
+      { upc: '200000000004', name: 'Curation Failed Product', brandHint: 'Alpha', rowNumber: 4 },
+    ]);
+    const [sourcingItem, discoveryItem, extractionItem, curationItem] = items;
+
+    // sourcing / failed — pre-Curation barrier.
+    updateItemStageStatus(sourcingItem.id, 'failed', 'simulated sourcing failure');
+
+    // discovery / failed — pre-Curation barrier.
+    updateItemStageStatus(discoveryItem.id, 'failed', 'simulated discovery failure');
+
+    // extraction / failed — evidence complete; the failure is the only blocker.
+    makeItemExtractionFailed(extractionItem.id);
+
+    // curation / failed — source + extraction data finalized, failed IN curation
+    // (past the barrier → NOT a readiness blocker).
+    makeItemExtractionReady(curationItem.id, makeExtractionData());
+    advanceItemsToNextStage([curationItem.id]); // extraction → curation
+    updateItemStageStatus(curationItem.id, 'failed', 'simulated curation failure');
+
+    const byUpc = new Map(listItemsByBatch(batchId).map(i => [i.upc, i]));
+
+    const sourcingReadiness = evaluateItemReadiness(byUpc.get('200000000001')!);
+    expect(sourcingReadiness.state).toBe('blocked');
+    expect(sourcingReadiness.ready).toBe(false);
+    expect(sourcingReadiness.blockedReason).toContain('Sourcing');
+    expect(sourcingReadiness.blockedReason).toContain('200000000001');
+
+    const discoveryReadiness = evaluateItemReadiness(byUpc.get('200000000002')!);
+    expect(discoveryReadiness.state).toBe('blocked');
+    expect(discoveryReadiness.ready).toBe(false);
+    expect(discoveryReadiness.blockedReason).toContain('Discovery');
+    expect(discoveryReadiness.blockedReason).toContain('200000000002');
+
+    const extractionReadiness = evaluateItemReadiness(byUpc.get('200000000003')!);
+    expect(extractionReadiness.state).toBe('blocked');
+    expect(extractionReadiness.ready).toBe(false);
+    expect(extractionReadiness.blockedReason).toContain('Extraction');
+    expect(extractionReadiness.blockedReason).toContain('200000000003');
+
+    // A downstream Curation failure is NOT reinterpreted as an Extraction-readiness failure.
+    const curationReadiness = evaluateItemReadiness(byUpc.get('200000000004')!);
+    expect(curationReadiness.state).toBe('ready');
+    expect(curationReadiness.ready).toBe(true);
+    expect(curationReadiness.blockedReason).toBeNull();
+
+    // Invariant regression: no constructed case yields ready === true && state === 'blocked'.
+    for (const r of [sourcingReadiness, discoveryReadiness, extractionReadiness, curationReadiness]) {
+      expect(r.ready === true && r.state === 'blocked').toBe(false);
+    }
+  });
+
+  it('binds the selected source to the extraction evidence (round-3 R4)', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    const [itemA, itemB] = items;
+    for (const item of items) makeItemExtractionReady(item.id, makeExtractionData());
+
+    // No extraction row → cannot prove a mismatch → consistent + ready.
+    const noRow = listItemsByBatch(batchId).find(i => i.id === itemA.id)!;
+    expect(noRow.sourceUrl).toBeNull();
+    expect(sourceProvenanceConsistent(noRow, undefined)).toBe(true);
+    const noRowReadiness = evaluateItemReadiness(noRow);
+    expect(noRowReadiness.sourceProvenanceConsistent).toBe(true);
+    expect(noRowReadiness.ready).toBe(true);
+    expect(noRowReadiness.state).toBe('ready');
+
+    // Extraction row source matches the item's selected source → consistent + ready.
+    // (Trailing '/' is normalized on both sides.)
+    setDiscoverySourceUrl(itemB.id, 'https://brand.example.com/products/beef');
+    insertExtraction({
+      itemId: itemB.id,
+      sourceUrl: 'https://brand.example.com/products/beef/',
+      extractionDataJson: JSON.stringify(makeExtractionData()),
+      extractionMethod: 'test',
+      confidence: 0.9,
+    });
+    const matching = listItemsByBatch(batchId).find(i => i.id === itemB.id)!;
+    expect(sourceProvenanceConsistent(matching, 'https://brand.example.com/products/beef/')).toBe(true);
+    expect(sourceProvenanceConsistent(matching, 'https://brand.example.com/products/beef')).toBe(true);
+    const matchingReadiness = evaluateItemReadiness(matching);
+    expect(matchingReadiness.sourceProvenanceConsistent).toBe(true);
+    expect(matchingReadiness.ready).toBe(true);
+    expect(matchingReadiness.state).toBe('ready');
+
+    // Extraction row source A + item source B (changed after extraction) →
+    // inconsistent → NOT ready, blocked, deterministic re-extraction reason.
+    insertExtraction({
+      itemId: itemA.id,
+      sourceUrl: 'https://brand.example.com/products/original',
+      extractionDataJson: JSON.stringify(makeExtractionData()),
+      extractionMethod: 'test',
+      confidence: 0.9,
+    });
+    setDiscoverySourceUrl(itemA.id, 'https://brand.example.com/products/changed');
+    const changed = listItemsByBatch(batchId).find(i => i.id === itemA.id)!;
+    expect(sourceProvenanceConsistent(changed, 'https://brand.example.com/products/original')).toBe(false);
+    const changedReadiness = evaluateItemReadiness(changed);
+    expect(changedReadiness.sourceProvenanceConsistent).toBe(false);
+    expect(changedReadiness.ready).toBe(false);
+    expect(changedReadiness.state).toBe('blocked');
+    expect(changedReadiness.blockedReason).toContain('Selected source changed since extraction');
+    expect(changedReadiness.blockedReason).toContain('re-extraction');
   });
 });

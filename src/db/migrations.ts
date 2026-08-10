@@ -658,14 +658,18 @@ export function runMigrations(): void {
   // Run cohort migration if not already applied (issue #30, PR1).
   // Follows the classification_schema_version precedent exactly: one-shot
   // SQL file gated by an app_meta marker. Additive/idempotent; legacy data
-  // simply has no cohort rows.
+  // simply has no cohort rows. Round-3 R3: cohort-migration.sql already
+  // carries the v2 shape (CASCADE batch FK), so a FRESH install writes the
+  // marker '2' directly — it never writes '1' and rebuilds on the next run.
+  // Only a database that genuinely carries marker '1' (from the round-2
+  // release) runs the v1 → v2 rebuild below.
   const cohortVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;
   if (!cohortVersion) {
     const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
     db.exec(cohortSql);
-    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '1');");
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '2');");
   }
 
   // ── Curation cohorts v1 → v2: batch deletion must cascade ────────────────
@@ -677,9 +681,8 @@ export function runMigrations(): void {
   // classification_evidence CHECK expansion: PRAGMA foreign_keys OFF around
   // the swap, create `_new`, copy, drop, rename, recreate indexes, then a
   // `PRAGMA foreign_key_check` and restoring FK enforcement in `finally`.
-  // Fresh databases already carry the v2 shape from cohort-migration.sql; the
-  // marker still advances through v2 so every database converges on one
-  // schema version.
+  // This block runs ONLY for a marker-'1' database; fresh installs already
+  // carry marker '2' from the cohort migration gate above (round-3 R3).
   const cohortV2 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;

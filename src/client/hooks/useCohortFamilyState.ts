@@ -17,6 +17,8 @@ export interface CohortFamilyStateByItem {
     cohortStatus: string;
     /** The member's own derived readiness state (ready | waiting | blocked). */
     state: ReadinessState;
+    /** Cohort-level derived state (`view.state`) — a sibling failure renders as family-blocked. */
+    cohortState: ReadinessState;
     memberCount: number;
     readyCount: number;
     /** Siblings this member is waiting on (server excludes self). */
@@ -53,6 +55,7 @@ export function useCohortFamilyState(batchId: string): CohortFamilyState {
             groupLabel: view.cohort.groupLabel,
             cohortStatus: view.status,
             state: member.state,
+            cohortState: view.state,
             memberCount: view.memberCount,
             readyCount: view.readyCount,
             waitingOnCount: member.waitingOn.length,

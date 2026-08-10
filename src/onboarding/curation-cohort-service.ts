@@ -9,9 +9,14 @@
  *   completeness contract.
  * - `evaluateCohortReadiness(...)` — the "Extraction completeness contract":
  *   source finalized + extraction completed + PI import done + evidence hash
- *   computed (packaging OCR is informational and non-blocking in this round;
- *   it finalizes lazily inside per-SKU curation and gates at PR3). Failed
- *   members produce a deterministic `blocked` state instead of a wait.
+ *   computed + selected-source provenance consistent (packaging OCR is
+ *   informational and non-blocking in this round; it finalizes lazily inside
+ *   per-SKU curation and gates at PR3). Failed members produce a deterministic
+ *   `blocked` state instead of a wait; `ready` and `blocked` are mutually
+ *   exclusive by construction (round-3 R1).
+ * - `sourceProvenanceConsistent(item, latestExtractionSourceUrl)` — binds the
+ *   item's selected source to the source recorded on its latest extraction
+ *   row (round-3 R4); a mismatch blocks the member until re-extraction.
  * - `getDerivedCohortStateForItem(item, items?)` — derived "Waiting for N
  *   family members to finish Extraction" state for the Pipeline Board;
  *   callers may pass the already-loaded batch items to avoid an extra load.
@@ -22,6 +27,10 @@
  * never used for sibling waiting (issue #30, "Curation readiness barrier").
  */
 import { listItemsByBatch } from '../db/repositories/onboarding-item-repo';
+import {
+  getLatestExtractionSourcesByItemIds,
+  getLatestExtraction,
+} from '../db/repositories/onboarding-extraction-repo';
 import {
   refreshCandidateCohorts as repoRefreshCandidateCohorts,
   listCohortsByBatch,
@@ -58,6 +67,8 @@ export interface ItemExtractionReadiness {
   ocrSettled: boolean;
   piImported: boolean;
   extractionHashComputed: boolean;
+  /** True when the item's selected source still matches the source bound to its latest extraction row. */
+  sourceProvenanceConsistent: boolean;
 }
 
 /**
@@ -74,27 +85,46 @@ export interface ItemExtractionReadiness {
  * Packaging OCR is informational, not blocking, in this round: OCR finalizes
  * lazily during per-SKU curation and must not gate candidate readiness until
  * PR3 pulls OCR forward (`ocrSettled` is reported for visibility only). A
- * member that failed in Discovery/Extraction/Curation is deterministically
- * `blocked` (never a wait).
+ * member that failed in a pre-Curation barrier stage (sourcing | discovery |
+ * extraction) is deterministically `blocked` (never a wait); a Curation-stage
+ * failure is NOT a readiness blocker — the item is past the barrier.
  */
-export function evaluateItemReadiness(item: OnboardingItem): ItemExtractionReadiness {
+export function evaluateItemReadiness(item: OnboardingItem, extractionSourcesByItemId?: Map<string, string>): ItemExtractionReadiness {
   const extractionCompleted = hasCompletedExtraction(item);
   const ocrSettled = isOcrSettled(item);
   const piImported = isPiImportComplete(item);
   const sourceFinalized = isSourceFinalized(item);
   const extractionHashComputed = computeExtractionHash(item) != null;
   const blocked = isFailedMember(item);
-  const ready = sourceFinalized && extractionCompleted && piImported && extractionHashComputed;
-  const state: ReadinessState = blocked ? 'blocked' : ready ? 'ready' : 'waiting';
+  // Round-3 R4 source binding: batch evaluation paths pass the batched
+  // extraction-source map once; direct per-item callers fall back to a single
+  // lookup so they never run a per-item batch query just for provenance.
+  const latestExtractionSourceUrl = extractionSourcesByItemId
+    ? extractionSourcesByItemId.get(item.id)
+    : getLatestExtraction(item.id)?.source_url;
+  const provenanceConsistent = sourceProvenanceConsistent(item, latestExtractionSourceUrl);
+  // Invariant (round-3 R1): ready = !blocked && every completeness condition
+  // holds — `ready` and `state === 'blocked'` are mutually exclusive by
+  // construction. Provenance inconsistency is a blocking condition (a change
+  // requiring re-extraction), not ordinary waiting.
+  const ready = !blocked && sourceFinalized && extractionCompleted && piImported && extractionHashComputed && provenanceConsistent;
+  const state: ReadinessState = blocked || !provenanceConsistent ? 'blocked' : ready ? 'ready' : 'waiting';
   return {
     ready,
     state,
-    blockedReason: ready ? null : blocked ? buildMemberFailedReason(item) : buildBlockedReason({ sourceFinalized, extractionCompleted, piImported, extractionHashComputed }),
+    blockedReason: !provenanceConsistent
+      ? SOURCE_CHANGED_BLOCKED_REASON
+      : blocked
+        ? buildMemberFailedReason(item)
+        : ready
+          ? null
+          : buildBlockedReason({ sourceFinalized, extractionCompleted, piImported, extractionHashComputed }),
     sourceFinalized,
     extractionCompleted,
     ocrSettled,
     piImported,
     extractionHashComputed,
+    sourceProvenanceConsistent: provenanceConsistent,
   };
 }
 
@@ -110,14 +140,39 @@ function isSourceFinalized(item: OnboardingItem): boolean {
   return (Boolean(item.sourceUrl) && discoveryFinalized) || item.sourcingDecision != null;
 }
 
-/** A member that failed inside Discovery/Extraction/Curation is deterministically
- *  blocked, not waiting (issue #30 round-2 F5). */
+/** A member that failed inside a pre-Curation barrier stage is deterministically
+ *  blocked, not waiting (issue #30 round-3 R1). Readiness blockers are
+ *  sourcing | discovery | extraction failures (pre-Curation barrier); a
+ *  Curation-stage failure is NOT a readiness blocker — the item is past the
+ *  barrier and its evidence is complete. */
 function isFailedMember(item: OnboardingItem): boolean {
-  return ['discovery', 'extraction', 'curation'].includes(item.stage) && item.stageStatus === 'failed';
+  return ['sourcing', 'discovery', 'extraction'].includes(item.stage) && item.stageStatus === 'failed';
 }
 
+function capitalizeStage(stage: string): string {
+  return stage.charAt(0).toUpperCase() + stage.slice(1);
+}
+
+/** Deterministic blocked text: stage from the item, capitalized (round-3 R1). */
 function buildMemberFailedReason(item: OnboardingItem): string {
-  return `Member failed (SKU: ${item.upc ?? ''})`;
+  return `Member failed in ${capitalizeStage(item.stage)} (SKU: ${item.upc ?? ''})`;
+}
+
+const SOURCE_CHANGED_BLOCKED_REASON = 'Selected source changed since extraction — re-extraction required';
+
+/**
+ * Bind the item's currently selected source to the source recorded when its
+ * extraction evidence was frozen (round-3 R4). An extraction row missing →
+ * true (the ordinary worker path always inserts one; absence cannot prove a
+ * mismatch). Both URLs are normalized (trailing '/' trimmed) before comparing.
+ *
+ * PR3's frozen evidence snapshot will rely on this binding; the run-level
+ * `evidence_snapshot_hash` will include the extraction-source identity.
+ */
+export function sourceProvenanceConsistent(item: OnboardingItem, latestExtractionSourceUrl: string | undefined): boolean {
+  if (latestExtractionSourceUrl == null) return true;
+  const normalize = (url: string | null | undefined) => (url ?? '').replace(/\/+$/, '');
+  return normalize(latestExtractionSourceUrl) === normalize(item.sourceUrl);
 }
 
 /** Extraction is complete when the item finished the extraction stage — i.e. it
@@ -186,13 +241,18 @@ export function evaluateCohortReadiness(
   _cohort: CurationCohort,
   members: CurationCohortMember[],
   items: OnboardingItem[],
+  extractionSourcesByItemId?: Map<string, string>,
 ): CohortReadinessEvaluation {
   const itemsById = new Map(items.map(item => [item.id, item]));
+  // Single batched load of the latest extraction source per item (round-3 R4)
+  // — one query per evaluation, passed through to every member so no per-item
+  // provenance lookup runs.
+  const extractionSources = extractionSourcesByItemId ?? getLatestExtractionSourcesByItemIds(items.map(item => item.id));
   const readinessByMember = new Map<string, ItemExtractionReadiness>();
   const notReady = members.filter(member => {
     const item = itemsById.get(member.onboardingItemId);
     const readiness: ItemExtractionReadiness = item
-      ? evaluateItemReadiness(item)
+      ? evaluateItemReadiness(item, extractionSources)
       : {
           ready: false,
           state: 'waiting',
@@ -202,6 +262,8 @@ export function evaluateCohortReadiness(
           ocrSettled: false,
           piImported: false,
           extractionHashComputed: false,
+          // No item → nothing to compare; cannot prove a provenance mismatch.
+          sourceProvenanceConsistent: true,
         };
     readinessByMember.set(member.onboardingItemId, readiness);
     return !readiness.ready;
@@ -221,7 +283,7 @@ export function evaluateCohortReadiness(
 
   const state: ReadinessState = blockedMembers.length > 0 ? 'blocked' : notReady.length === 0 ? 'ready' : 'waiting';
   const blockedReason = state === 'blocked'
-    ? buildBlockedMembersReason(blockedMembers, itemsById)
+    ? buildBlockedMembersReason(blockedMembers, itemsById, readinessByMember)
     : notReady.length === 0
       ? null
       : `Waiting for ${notReady.length} family member${notReady.length === 1 ? '' : 's'} to finish Extraction`;
@@ -236,13 +298,23 @@ export function evaluateCohortReadiness(
   };
 }
 
-/** Deterministic blocked text for one or more failed members. */
-function buildBlockedMembersReason(blockedMembers: CurationCohortMember[], itemsById: Map<string, OnboardingItem>): string {
+/** Deterministic blocked text for one or more blocked members (round-3 R1/R4):
+ *  each member surfaces its own deterministic reason — a failed member's
+ *  `Member failed in <Stage> (SKU: …)`, or the source-change re-extraction
+ *  reason when provenance is inconsistent. */
+function buildBlockedMembersReason(
+  blockedMembers: CurationCohortMember[],
+  itemsById: Map<string, OnboardingItem>,
+  readinessByMember: Map<string, ItemExtractionReadiness>,
+): string {
   return blockedMembers
     .map(member => {
+      const readiness = readinessByMember.get(member.onboardingItemId);
+      if (readiness?.blockedReason) return readiness.blockedReason;
       const item = itemsById.get(member.onboardingItemId);
       const sku = item?.upc ?? member.productSku ?? member.onboardingItemId;
-      return `Member failed (SKU: ${sku})`;
+      const stage = item?.stage ?? '';
+      return `Member failed in ${capitalizeStage(stage)} (SKU: ${sku})`;
     })
     .join('; ');
 }
@@ -317,10 +389,14 @@ export function getDerivedCohortStateForItem(item: OnboardingItem, items?: Onboa
   }
   // Callers that already loaded the batch items pass them in (per-item callers
   // should not re-load the whole batch for readiness alone); fall back to a
-  // full batch load otherwise so existing call sites keep working.
+  // full batch load otherwise so existing call sites keep working. The latest
+  // extraction-source map is loaded once per evaluation and passed through;
+  // the per-item direct path falls back to a single lookup when no batch map
+  // is passed (round-3 R4).
   const batchItems = items ?? listItemsByBatch(item.batchId);
+  const extractionSources = getLatestExtractionSourcesByItemIds(batchItems.map(i => i.id));
   const members = getCohortMembers(cohort.id);
-  const evaluation = evaluateCohortReadiness(cohort, members, batchItems);
+  const evaluation = evaluateCohortReadiness(cohort, members, batchItems, extractionSources);
   return {
     cohortId: cohort.id,
     groupKey: cohort.groupKey,
@@ -344,12 +420,14 @@ export function getDerivedCohortStateForItem(item: OnboardingItem, items?: Onboa
 export function buildCohortView(cohort: CurationCohort, items: OnboardingItem[]): CurationCohortView {
   const members = getCohortMembers(cohort.id);
   const itemsById = new Map(items.map(item => [item.id, item]));
-  const evaluation = evaluateCohortReadiness(cohort, members, items);
+  // Single batched extraction-source load shared by cohort + member readiness.
+  const extractionSources = getLatestExtractionSourcesByItemIds(items.map(item => item.id));
+  const evaluation = evaluateCohortReadiness(cohort, members, items, extractionSources);
 
   const memberViews = members.map(member => {
     const item = itemsById.get(member.onboardingItemId);
     const readiness = item
-      ? evaluateItemReadiness(item)
+      ? evaluateItemReadiness(item, extractionSources)
       : { ready: false, state: 'waiting' as const, blockedReason: 'member item not found' };
     return {
       onboardingItemId: member.onboardingItemId,

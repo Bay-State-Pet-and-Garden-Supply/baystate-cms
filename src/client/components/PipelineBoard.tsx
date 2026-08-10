@@ -95,14 +95,19 @@ function createDecisionActionToken(): string {
 
 /**
  * Per-member family badge text/colors for the curation column (issue #30,
- * PR2 + round-2 F7). Wording is per-member: a ready member waits on its
- * siblings, a member whose own extraction is still completing is itself the
- * blocker, and a failed member shows deterministic blocked text.
+ * PR2 + round-2 F7 + round-3 R2). Wording is stage-neutral and follows a
+ * fixed precedence: (1) this member itself failed → deterministic blocked
+ * text; (2) the family is blocked by a sibling failure → family-blocked;
+ * (3) this member's own extraction is still completing (it IS the blocker);
+ * (4) the member is waiting on N siblings; (5) the family is ready.
  */
 function familyBadgeFor(familyState: CohortFamilyStateByItem[string]): { text: string; background: string; color: string } {
-  const { state, waitingOnCount, readyCount, memberCount } = familyState;
+  const { state, cohortState, waitingOnCount, readyCount, memberCount } = familyState;
   if (state === 'blocked') {
-    return { text: '⚠ Extraction failed — retry required', background: '#fee2e2', color: '#991b1b' };
+    return { text: 'This item failed — retry required', background: '#fee2e2', color: '#991b1b' };
+  }
+  if (cohortState === 'blocked') {
+    return { text: 'Family blocked — sibling retry required', background: '#fee2e2', color: '#991b1b' };
   }
   if (state === 'waiting' && waitingOnCount === 0) {
     return { text: 'Your extraction is still completing', background: '#ffedd5', color: '#c2410c' };

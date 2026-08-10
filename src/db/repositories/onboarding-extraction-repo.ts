@@ -75,6 +75,32 @@ export function getLatestExtraction(itemId: string): OnboardingExtractionRow | u
   ).get(itemId) as OnboardingExtractionRow | undefined;
 }
 
+/**
+ * Latest extraction `source_url` per onboarding item, in ONE batched query.
+ * Returns a Map keyed by item id; items without any extraction row are
+ * absent from the map. Used by cohort readiness to bind each member's
+ * selected source to the source recorded when its extraction evidence was
+ * frozen (issue #30 round-3 R4).
+ */
+export function getLatestExtractionSourcesByItemIds(itemIds: string[]): Map<string, string> {
+  const db = getDb();
+  const sources = new Map<string, string>();
+  if (itemIds.length === 0) return sources;
+  const placeholders = itemIds.map(() => '?').join(', ');
+  const rows = db.query(
+    `SELECT e.item_id, e.source_url
+     FROM onboarding_extractions e
+     JOIN (
+       SELECT item_id, MAX(created_at) AS max_created_at
+       FROM onboarding_extractions
+       WHERE item_id IN (${placeholders})
+       GROUP BY item_id
+     ) latest ON latest.item_id = e.item_id AND latest.max_created_at = e.created_at`,
+  ).all(...itemIds) as Array<{ item_id: string; source_url: string }>;
+  for (const row of rows) sources.set(row.item_id, row.source_url);
+  return sources;
+}
+
 function listExtractionsByItem(itemId: string): OnboardingExtractionRow[] {
   const db = getDb();
   return db.query(

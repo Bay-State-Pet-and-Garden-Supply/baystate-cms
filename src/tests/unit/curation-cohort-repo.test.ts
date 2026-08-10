@@ -13,6 +13,7 @@ import {
   updateItemStageStatus,
   advanceItemsToNextStage,
   updateSourcingDecision,
+  setDiscoverySourceUrl,
   skipItems,
   listItemsByBatch,
 } from '../../db/repositories/onboarding-item-repo';
@@ -254,27 +255,34 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(cohortRows.length).toBeGreaterThan(0);
     expect(cohortRows.every(c => c.batchId === batchId)).toBe(true);
 
-    const memberRowsBefore = cohortRows.reduce((acc, c) => acc + getCohortMembers(c.id).length, 0);
-    expect(memberRowsBefore).toBeGreaterThan(0);
+    const db = getDb();
+    // Capture cohort + member identities BEFORE deletion so the post-delete
+    // checks query the captured IDs directly — never through already-deleted
+    // parent rows (which would mask orphaned children).
+    const cohortIds = cohortRows.map(c => c.id);
+    const memberKeys = cohortRows.flatMap(c =>
+      getCohortMembers(c.id).map(m => ({ cohortId: m.cohortId, itemId: m.onboardingItemId })),
+    );
+    expect(memberKeys.length).toBeGreaterThan(0);
 
     // Real deleteBatch: onboarding_batches → CASCADE → onboarding_items (items
     // CASCADE → members) and curation_cohorts (batch_id CASCADE → members).
     expect(deleteBatch(batchId)).toBe(true);
 
-    const db = getDb();
-    const cohortCount = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
+    // Direct ID queries, no parent subqueries.
+    const cohortPlaceholders = cohortIds.map(() => '?').join(', ');
+    const cohortCount = db.query(
+      `SELECT COUNT(*) as c FROM curation_cohorts WHERE id IN (${cohortPlaceholders})`,
+    ).get(...cohortIds) as { c: number };
     expect(cohortCount.c).toBe(0);
-    const memberCount = db.query(
-      `SELECT COUNT(*) as c FROM curation_cohort_members
-       WHERE cohort_id IN (SELECT id FROM curation_cohorts WHERE batch_id = ?)`,
-    ).get(batchId) as { c: number };
-    expect(memberCount.c).toBe(0);
-    // Members are also reachable via the items cascade path — nothing left.
-    const itemPathMembers = db.query(
-      `SELECT COUNT(*) as c FROM curation_cohort_members
-       WHERE onboarding_item_id IN (SELECT id FROM onboarding_items WHERE batch_id = ?)`,
-    ).get(batchId) as { c: number };
-    expect(itemPathMembers.c).toBe(0);
+
+    for (const key of memberKeys) {
+      const memberCount = db.query(
+        'SELECT COUNT(*) as c FROM curation_cohort_members WHERE cohort_id = ? AND onboarding_item_id = ?',
+      ).get(key.cohortId, key.itemId) as { c: number };
+      expect(memberCount.c).toBe(0);
+    }
+
     // And the batch itself is gone.
     const batchCount = db.query('SELECT COUNT(*) as c FROM onboarding_batches WHERE id = ?').get(batchId) as { c: number };
     expect(batchCount.c).toBe(0);
@@ -313,6 +321,24 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
 
     // No extraction data → NULL.
     expect(computeExtractionHash(items[2])).toBeNull();
+  });
+
+  it('binds the selected source into the extraction hash (round-3 R4)', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    makeItemExtractionReady(items[0].id, makeExtractionData());
+    makeItemExtractionReady(items[1].id, makeExtractionData());
+    // Identical evidence (same sourcing decision + extraction data) but the
+    // second item's selected source differs → hashes must differ.
+    setDiscoverySourceUrl(items[1].id, 'https://brand.example.com/products/beef');
+    const loaded = listItemsByBatch(batchId);
+    const loadedA = loaded.find(i => i.id === items[0].id)!;
+    const loadedB = loaded.find(i => i.id === items[1].id)!;
+    expect(loadedA.sourceUrl).not.toBe(loadedB.sourceUrl);
+    expect(computeExtractionHash(loadedA)).not.toBe(computeExtractionHash(loadedB));
+    // Deterministic: same item rehashes to the same value.
+    expect(computeExtractionHash(loadedA)).toBe(computeExtractionHash(loadedA));
+    expect(computeExtractionHash(loadedA)).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('fails closed when a member item does not exist (FK integrity)', () => {

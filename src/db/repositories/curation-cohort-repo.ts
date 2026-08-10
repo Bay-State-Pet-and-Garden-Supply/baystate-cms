@@ -102,7 +102,8 @@ export function mapCohortMemberRow(row: Record<string, any>): CurationCohortMemb
 
 /**
  * Canonical hash of an item's frozen extraction evidence: the full
- * `extractionData` object, the `sourcingDecision`, and the sorted
+ * `extractionData` object, the `sourcingDecision`, the selected `sourceUrl`
+ * (round-3 R4 — a source change rebinds the hash), and the sorted
  * `productIntelligenceEvidence[].resultHash` list (PI imports participate in
  * evidence stability per issue #30's extraction completeness contract).
  * Returns NULL when the item has no extraction data yet.
@@ -117,6 +118,7 @@ export function computeExtractionHash(item: OnboardingItem): string | null {
   return hashCanonicalJson({
     extractionData,
     sourcingDecision: item.sourcingDecision ?? null,
+    sourceUrl: item.sourceUrl ?? null,
     productIntelligenceResultHashes: piResultHashes,
   });
 }

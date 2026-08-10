@@ -37,7 +37,8 @@ import {
 } from '../../db/repositories/onboarding-source-repo';
 import {
   insertExtraction,
-  getLatestExtraction
+  getLatestExtraction,
+  getLatestExtractionSourcesByItemIds,
 } from '../../db/repositories/onboarding-extraction-repo';
 import {
   upsertApiKey,
@@ -171,6 +172,37 @@ describe('Onboarding Repositories CRUD', () => {
     expect(latest).toBeDefined();
     expect(latest?.source_url).toBe('https://testsite.com/product4');
     expect(JSON.parse(latest!.extraction_data_json).title).toBe('Scraped Product 4');
+  });
+
+  it('returns the latest extraction source per item in one batched query (round-3 R4)', () => {
+    const batch = createBatch({ workspaceId: wsId, name: 'Batch Sources', fileName: 'sources.xlsx', totalItems: 2 });
+    const items = insertItems(batch.id, [
+      { upc: '777000000001', name: 'Source Item 1', rowNumber: 1 },
+      { upc: '777000000002', name: 'Source Item 2', rowNumber: 2 },
+    ]);
+    const [itemA, itemB] = items;
+    const db = getDb();
+
+    // Item A: two extraction rows — the LATEST source wins (deterministic via
+    // explicit created_at, since insertExtraction timestamps at ms precision).
+    insertExtraction({ itemId: itemA.id, sourceUrl: 'https://a.example.com/first', extractionDataJson: '{"title":"A1"}', extractionMethod: 'test', confidence: 0.5 });
+    db.run("UPDATE onboarding_extractions SET created_at = '2024-01-01T00:00:00.000Z' WHERE item_id = ?", [itemA.id]);
+    insertExtraction({ itemId: itemA.id, sourceUrl: 'https://a.example.com/latest', extractionDataJson: '{"title":"A2"}', extractionMethod: 'test', confidence: 0.9 });
+    db.run("UPDATE onboarding_extractions SET created_at = '2024-01-02T00:00:00.000Z' WHERE item_id = ?", [itemA.id]);
+    // Item B: one row.
+    insertExtraction({ itemId: itemB.id, sourceUrl: 'https://b.example.com/product', extractionDataJson: '{"title":"B"}', extractionMethod: 'test', confidence: 0.8 });
+
+    const sources = getLatestExtractionSourcesByItemIds([itemA.id, itemB.id]);
+    expect(sources.get(itemA.id)).toBe('https://a.example.com/latest');
+    expect(sources.get(itemB.id)).toBe('https://b.example.com/product');
+    expect(sources.size).toBe(2);
+
+    // Items without extraction rows are absent from the map; empty input is empty.
+    const ghostId = randomUUID();
+    const partial = getLatestExtractionSourcesByItemIds([itemA.id, ghostId]);
+    expect(partial.has(ghostId)).toBe(false);
+    expect(partial.get(itemA.id)).toBe('https://a.example.com/latest');
+    expect(getLatestExtractionSourcesByItemIds([]).size).toBe(0);
   });
 
   it('should implement stage-based listing (listItemsByBatchStaged)', () => {

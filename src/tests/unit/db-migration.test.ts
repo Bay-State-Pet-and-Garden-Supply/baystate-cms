@@ -15,6 +15,7 @@ import {
   clearProductPages,
 } from '../../db/repositories/page-repo';
 import { createBatch, deleteBatch } from '../../db/repositories/onboarding-batch-repo';
+import { insertItems } from '../../db/repositories/onboarding-item-repo';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 
 describe('SQLite Migration', () => {
@@ -921,7 +922,8 @@ describe('SQLite Migration', () => {
     const db = getDb();
     const now = new Date().toISOString();
 
-    // Create a workspace + batch to hold a v1 cohort row that must survive the rebuild.
+    // Create a workspace + batch + REAL onboarding item to hold a v1 cohort row
+    // (and a real member child row) that must survive the rebuild (round-3 R3).
     const wsId = randomUUID();
     insertWorkspace({
       id: wsId,
@@ -934,11 +936,13 @@ describe('SQLite Migration', () => {
       baselineCommit: null,
     });
     const batchId = createBatch({ workspaceId: wsId, name: 'Cohort Mig Batch', fileName: 'cohort.xlsx', totalItems: 1 }).id;
+    const itemId = insertItems(batchId, [{ upc: 'MIG-FAM-1', name: 'Mig Family Product 1', rowNumber: 1 }])[0].id;
 
     // Simulate a v1 database: v1-shaped tables (batch_id without CASCADE) and
     // the v1 marker. FK enforcement is off during the table swap.
     const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
     const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    const cohortId = randomUUID();
     if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
     try {
       db.transaction(() => {
@@ -982,7 +986,15 @@ describe('SQLite Migration', () => {
              (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
               status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
            VALUES (?, ?, ?, 'mig-key', 'Mig Family', 'product-family-v1', ?, 'waiting', 'Waiting for 1 family member', ?, ?, NULL, NULL, NULL)`,
-          [randomUUID(), wsId, batchId, 'f'.repeat(64), now, now],
+          [cohortId, wsId, batchId, 'f'.repeat(64), now, now],
+        );
+        // A REAL child member row referencing the real onboarding item + the v1 cohort.
+        db.exec(
+          `INSERT INTO curation_cohort_members
+             (cohort_id, onboarding_item_id, product_sku, normalized_brand, normalized_name_stem,
+              membership_reason_json, extraction_hash, ordinal, created_at)
+           VALUES (?, ?, 'MIG-FAM-1', 'mig-brand', 'mig family product', NULL, NULL, 0, ?)`,
+          [cohortId, itemId, now],
         );
       })();
     } finally {
@@ -1005,15 +1017,30 @@ describe('SQLite Migration', () => {
     const rows = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
     expect(rows.c).toBe(1);
 
+    // The REAL member row survived — direct keyed query on the members table
+    // (no subquery through parent rows).
+    const memberCount = db.query(
+      'SELECT COUNT(*) as c FROM curation_cohort_members WHERE cohort_id = ? AND onboarding_item_id = ?',
+    ).get(cohortId, itemId) as { c: number };
+    expect(memberCount.c).toBe(1);
+
+    // Both tables are FK-clean after the rebuild.
+    expect(db.query("PRAGMA foreign_key_check('curation_cohorts')").all()).toHaveLength(0);
+    expect(db.query("PRAGMA foreign_key_check('curation_cohort_members')").all()).toHaveLength(0);
+
     // Idempotent: a second run keeps the marker and the CASCADE FK.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
     expect(version2.value).toBe('2');
 
-    // End-to-end: the real deleteBatch now cascades to the cohort row.
+    // End-to-end: the real deleteBatch now cascades to the cohort AND member rows.
     expect(deleteBatch(batchId)).toBe(true);
     const afterDelete = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
     expect(afterDelete.c).toBe(0);
+    const afterDeleteMembers = db.query(
+      'SELECT COUNT(*) as c FROM curation_cohort_members WHERE cohort_id = ? AND onboarding_item_id = ?',
+    ).get(cohortId, itemId) as { c: number };
+    expect(afterDeleteMembers.c).toBe(0);
 
     db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
   });
