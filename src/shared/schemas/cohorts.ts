@@ -44,6 +44,22 @@ export const CohortStatusEnum = z.enum([
 
 export type CohortStatus = z.infer<typeof CohortStatusEnum>;
 
+// ─── Readiness State ───────────────────────────────────────────────────────────
+
+/**
+ * Derived extraction-readiness state for a cohort member and its cohort
+ * (issue #30 round-2 F5):
+ *
+ * - `ready`: every extraction-completeness condition is met;
+ * - `waiting`: still processing — evidence is not yet complete;
+ * - `blocked`: a member failed in Discovery/Extraction/Curation. This is a
+ *   deterministic stop (never a wait) and carries a deterministic
+ *   `Member failed (SKU: …)` reason.
+ */
+export const ReadinessStateSchema = z.enum(['ready', 'waiting', 'blocked']);
+
+export type ReadinessState = z.infer<typeof ReadinessStateSchema>;
+
 // ─── Curation Target Scopes ────────────────────────────────────────────────────
 
 /**
@@ -86,7 +102,7 @@ export const CurationCohortSchema = z.object({
   groupKey: z.string(),
   groupLabel: z.string(),
   groupingVersion: z.string(),
-  /** Order-insensitive canonical hash over member (item id + extraction hash). */
+  /** Order-insensitive canonical hash over member IDENTITY (sorted onboarding item ids). */
   membershipHash: z.string(),
   status: CohortStatusEnum,
   blockedReason: z.string().nullable(),
@@ -150,6 +166,7 @@ export const CohortMemberReadinessSchema = z.object({
     name: z.string(),
   }),
   ready: z.boolean(),
+  state: ReadinessStateSchema,
   blockedReason: z.string().nullable(),
   /** Sibling members this member is waiting on (excludes self). */
   waitingOn: z.array(CohortWaitingOnItemSchema).default(() => []),
@@ -165,6 +182,8 @@ export const CurationCohortViewSchema = z.object({
   cohort: CurationCohortSchema,
   members: z.array(CohortMemberReadinessSchema),
   status: CohortStatusEnum,
+  /** Derived readiness state: `blocked` when any member failed. */
+  state: ReadinessStateSchema,
   blockedReason: z.string().nullable(),
   memberCount: z.number().int(),
   readyCount: z.number().int(),
@@ -187,6 +206,8 @@ export const DerivedCohortStateForItemSchema = z.object({
   groupKey: z.string().nullable(),
   groupLabel: z.string().nullable(),
   status: CohortStatusEnum.nullable(),
+  /** Derived readiness state; null when the item has no active cohort. */
+  state: ReadinessStateSchema.nullable(),
   blockedReason: z.string().nullable(),
   waitingOn: z.array(CohortWaitingOnItemSchema).default(() => []),
   memberCount: z.number().int(),

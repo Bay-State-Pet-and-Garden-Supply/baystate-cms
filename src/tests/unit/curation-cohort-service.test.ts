@@ -13,9 +13,10 @@ import {
   updateItemStageStatus,
   advanceItemsToNextStage,
   updateSourcingDecision,
+  setDiscoverySourceUrl,
   listItemsByBatch,
 } from '../../db/repositories/onboarding-item-repo';
-import { getCohortMembers } from '../../db/repositories/curation-cohort-repo';
+import { getCohortMembers, getCohortById, updateCohortStatus } from '../../db/repositories/curation-cohort-repo';
 import {
   refreshCandidateCohorts,
   evaluateCohortReadiness,
@@ -57,6 +58,20 @@ function makeItemExtractionReady(itemId: string, extractionData: unknown): void 
   updateItemStageStatus(itemId, 'completed');
 }
 
+/** Move an item to `extraction / failed` (deterministic blocked member state). */
+function makeItemExtractionFailed(itemId: string): void {
+  updateItemStageStatus(itemId, 'completed');
+  advanceItemsToNextStage([itemId]);
+  updateItemExtractionData(itemId, JSON.stringify(makeExtractionData()));
+  updateItemStageStatus(itemId, 'failed', 'simulated extraction failure');
+}
+
+/** Simulate Discovery completion the way the worker/routes do it: persist the
+ *  source URL and mark `discovery/completed` — no sourcingDecision is written. */
+function completeDiscoveryRealPath(itemId: string): void {
+  setDiscoverySourceUrl(itemId, `https://brand.example.com/products/${itemId}`);
+}
+
 describe('curation cohort service (issue #30, PR2)', () => {
   beforeAll(() => {
     workspaceId = randomUUID();
@@ -88,6 +103,43 @@ describe('curation cohort service (issue #30, PR2)', () => {
     ]);
   }
 
+  it('readies a cohort through the ordinary onboarding path (no sourcingDecision/OCR fabricated)', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+
+    // Spreadsheet imports land in Discovery with sourcingDecision: null.
+    expect(listItemsByBatch(batchId).every(i => i.sourcingDecision == null)).toBe(true);
+
+    // 1. Discovery completion the way the worker does it: persist source_url
+    //    and mark discovery/completed (setDiscoverySourceUrl does both), then
+    //    advance to extraction.
+    for (const item of items) completeDiscoveryRealPath(item.id);
+    advanceItemsToNextStage(items.map(i => i.id));
+
+    // 2. Extraction completion: extraction data + extraction/completed. No
+    //    OCR outcome is written — OCR is lazy/informational in this round.
+    for (const item of items) {
+      updateItemExtractionData(item.id, JSON.stringify({ title: `Product ${item.upc}`, brand: 'Purina' }));
+      updateItemStageStatus(item.id, 'completed');
+    }
+
+    const readyItems = listItemsByBatch(batchId);
+    const readiness = evaluateItemReadiness(readyItems[0]);
+    expect(readiness.sourceFinalized).toBe(true);
+    expect(readiness.extractionCompleted).toBe(true);
+    expect(readiness.ocrSettled).toBe(false); // informational only — nothing written
+    expect(readiness.ready).toBe(true);
+    expect(readiness.state).toBe('ready');
+    expect(readiness.blockedReason).toBeNull();
+
+    const cohorts = refreshCandidateCohorts(workspaceId, batchId);
+    const purina = cohorts.find(c => c.groupKey.includes('purina'))!;
+    expect(purina.status).toBe('ready');
+    expect(purina.blockedReason).toBeNull();
+    const acme = cohorts.find(c => c.groupKey.includes('acme'))!;
+    expect(acme.status).toBe('ready'); // singletons are one-member cohorts
+  });
+
   it('marks a cohort ready when every member satisfies the extraction completeness contract', () => {
     const batchId = newBatch();
     const items = insertFamilyItems(batchId);
@@ -107,6 +159,7 @@ describe('curation cohort service (issue #30, PR2)', () => {
     for (const member of members) {
       const readiness = evaluateItemReadiness(itemsById.get(member.onboardingItemId)!);
       expect(readiness.ready).toBe(true);
+      expect(readiness.state).toBe('ready');
       expect(readiness.sourceFinalized).toBe(true);
       expect(readiness.extractionCompleted).toBe(true);
       expect(readiness.ocrSettled).toBe(true);
@@ -125,22 +178,79 @@ describe('curation cohort service (issue #30, PR2)', () => {
     expect(purina.status).toBe('waiting');
     expect(purina.blockedReason).toContain('Waiting for 1 family member');
     expect(purina.membershipHash).toMatch(/^[a-f0-9]{64}$/);
+
+    // The still-processing member derives `waiting` (not blocked).
+    const view = listCandidateCohortViews(batchId).find(v => v.cohort.groupKey.includes('purina'))!;
+    expect(view.state).toBe('waiting');
+    const waitingMember = view.members.find(m => m.onboardingItemId === items[1].id)!;
+    expect(waitingMember.state).toBe('waiting');
+    expect(waitingMember.ready).toBe(false);
+    expect(waitingMember.waitingOn.length).toBe(0); // self excluded — this member IS the blocker
   });
 
-  it('treats failed OCR as settled but unresolved OCR as blocking', () => {
+  it('treats no_image as a settled OCR outcome and keeps OCR informational (non-blocking)', () => {
     const batchId = newBatch();
     const items = insertFamilyItems(batchId);
-    makeItemExtractionReady(items[0].id, makeExtractionData({ ocrOutcome: { status: 'failed' } }));
+    makeItemExtractionReady(items[0].id, makeExtractionData({ ocrOutcome: { status: 'no_image' } }));
     makeItemExtractionReady(items[1].id, makeExtractionData({ ocrOutcome: null, packagingOcrData: null }));
     makeItemExtractionReady(items[2].id, makeExtractionData({ ocrOutcome: null, packagingOcrData: null }));
 
     const itemsByUpc = new Map(listItemsByBatch(batchId).map(i => [i.upc, i]));
-    expect(evaluateItemReadiness(itemsByUpc.get('100000000001')!).ready).toBe(true); // failed OCR → settled
-    expect(evaluateItemReadiness(itemsByUpc.get('100000000002')!).ready).toBe(false); // no OCR outcome → unresolved
+    const noImage = evaluateItemReadiness(itemsByUpc.get('100000000001')!);
+    expect(noImage.ocrSettled).toBe(true); // no_image is a terminal OCR outcome
+    expect(noImage.ready).toBe(true);
+
+    // Null OCR is informational only — it no longer blocks readiness.
+    const nullOcr = evaluateItemReadiness(itemsByUpc.get('100000000002')!);
+    expect(nullOcr.ocrSettled).toBe(false);
+    expect(nullOcr.ready).toBe(true);
 
     const cohorts = refreshCandidateCohorts(workspaceId, batchId);
     const purina = cohorts.find(c => c.groupKey.includes('purina'))!;
-    expect(purina.status).toBe('waiting');
+    expect(purina.status).toBe('ready'); // unresolved OCR no longer waits
+  });
+
+  it('marks a cohort blocked when a member failed in a pipeline stage', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    makeItemExtractionReady(items[0].id, makeExtractionData());
+    makeItemExtractionFailed(items[1].id);
+
+    const cohorts = refreshCandidateCohorts(workspaceId, batchId);
+    const purina = cohorts.find(c => c.groupKey.includes('purina'))!;
+    expect(purina.status).toBe('waiting'); // persisted status stays waiting
+    expect(purina.blockedReason).toContain('Member failed');
+
+    const view = listCandidateCohortViews(batchId).find(v => v.cohort.groupKey.includes('purina'))!;
+    expect(view.state).toBe('blocked');
+    expect(view.blockedReason).toContain('Member failed');
+    expect(view.blockedReason).toContain('100000000002');
+
+    const failedMember = view.members.find(m => m.onboardingItemId === items[1].id)!;
+    expect(failedMember.state).toBe('blocked');
+    expect(failedMember.ready).toBe(false);
+    expect(failedMember.blockedReason).toContain('Member failed');
+    expect(failedMember.waitingOn.length).toBe(0); // self excluded
+
+    const readyMember = view.members.find(m => m.onboardingItemId === items[0].id)!;
+    expect(readyMember.state).toBe('ready');
+    expect(readyMember.waitingOn.map(w => w.itemId)).toEqual([items[1].id]);
+  });
+
+  it('never transitions non-forming/waiting cohorts back to ready', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    for (const item of items) makeItemExtractionReady(item.id, makeExtractionData());
+    const cohorts = refreshCandidateCohorts(workspaceId, batchId);
+    const purina = cohorts.find(c => c.groupKey.includes('purina'))!;
+    expect(purina.status).toBe('ready');
+
+    // Execution/lifecycle states are never moved back to `ready`.
+    for (const status of ['running', 'completed', 'failed', 'conflicted', 'superseded'] as const) {
+      updateCohortStatus(purina.id, status);
+      expect(transitionCohortToReadyIfComplete(purina.id)).toBe(false);
+      expect(getCohortById(purina.id)!.status).toBe(status);
+    }
   });
 
   it('counts extraction as complete when an item already advanced past extraction', () => {
@@ -201,6 +311,7 @@ describe('curation cohort service (issue #30, PR2)', () => {
     expect(state.waitingOn.length).toBe(1);
     expect(state.waitingOn[0].itemId).toBe(items[1].id); // own extraction is part of the family wait
     expect(state.blockedReason).toContain('Waiting for');
+    expect(state.state).toBe('waiting');
 
     // A ready sibling's derived state points at the same cohort with a ready status.
     const itemA = listItemsByBatch(batchId).find(i => i.id === items[0].id)!;
@@ -251,7 +362,8 @@ describe('curation cohort service (issue #30, PR2)', () => {
 
     const waitingMember = purina.members.find(m => m.onboardingItemId === items[1].id)!;
     expect(waitingMember.ready).toBe(false);
-    expect(waitingMember.blockedReason).toContain('sourcing decision not finalized');
+    expect(waitingMember.state).toBe('waiting');
+    expect(waitingMember.blockedReason).toContain('selected source not finalized');
   });
 
   it('evaluates readiness from explicit cohort/member/items inputs', () => {
@@ -266,6 +378,7 @@ describe('curation cohort service (issue #30, PR2)', () => {
 
     const evaluation = evaluateCohortReadiness(purina, members, loadedItems);
     expect(evaluation.status).toBe('waiting');
+    expect(evaluation.state).toBe('waiting');
     expect(evaluation.memberCount).toBe(2);
     expect(evaluation.readyCount).toBe(1);
     expect(evaluation.waitingOn.map(w => w.itemId)).toEqual([items[1].id]);
@@ -275,6 +388,7 @@ describe('curation cohort service (issue #30, PR2)', () => {
     const fabricatedCohort = { ...purina } as CurationCohort;
     const empty = evaluateCohortReadiness(fabricatedCohort, [], loadedItems);
     expect(empty.status).toBe('ready');
+    expect(empty.state).toBe('ready');
     expect(empty.memberCount).toBe(0);
     expect(empty.readyCount).toBe(0);
   });

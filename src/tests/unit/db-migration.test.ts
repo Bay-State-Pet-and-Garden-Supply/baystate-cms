@@ -14,6 +14,8 @@ import {
   getProductPageAssignments,
   clearProductPages,
 } from '../../db/repositories/page-repo';
+import { createBatch, deleteBatch } from '../../db/repositories/onboarding-batch-repo';
+import { insertWorkspace } from '../../db/repositories/workspace-repo';
 
 describe('SQLite Migration', () => {
   const testDbPath = '/tmp/baystate-cms-test.db';
@@ -913,6 +915,107 @@ describe('SQLite Migration', () => {
 
     const row = db.query("SELECT relation FROM classification_proposal_evidence WHERE proposal_id = 'p1'").get() as { relation: string };
     expect(row.relation).toBe('legacy');
+  });
+
+  it('rebuilds v1 curation_cohorts with an ON DELETE CASCADE batch FK (v1 → v2)', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Create a workspace + batch to hold a v1 cohort row that must survive the rebuild.
+    const wsId = randomUUID();
+    insertWorkspace({
+      id: wsId,
+      name: 'Cohort Mig WS',
+      workspacePath: '/tmp/cohort-mig',
+      gitPath: '',
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const batchId = createBatch({ workspaceId: wsId, name: 'Cohort Mig Batch', fileName: 'cohort.xlsx', totalItems: 1 }).id;
+
+    // Simulate a v1 database: v1-shaped tables (batch_id without CASCADE) and
+    // the v1 marker. FK enforcement is off during the table swap.
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec('DROP TABLE IF EXISTS curation_cohort_members');
+        db.exec('DROP TABLE IF EXISTS curation_cohorts');
+        db.exec(`
+          CREATE TABLE curation_cohorts (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id),
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','running','completed','failed','conflicted','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+          )
+        `);
+        db.exec(`
+          CREATE TABLE curation_cohort_members (
+            cohort_id TEXT NOT NULL REFERENCES curation_cohorts(id) ON DELETE CASCADE,
+            onboarding_item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+            product_sku TEXT,
+            normalized_brand TEXT NOT NULL,
+            normalized_name_stem TEXT NOT NULL,
+            membership_reason_json TEXT,
+            extraction_hash TEXT,
+            ordinal INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (cohort_id, onboarding_item_id)
+          )
+        `);
+        db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '1')");
+        db.exec(
+          `INSERT INTO curation_cohorts
+             (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+              status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
+           VALUES (?, ?, ?, 'mig-key', 'Mig Family', 'product-family-v1', ?, 'waiting', 'Waiting for 1 family member', ?, ?, NULL, NULL, NULL)`,
+          [randomUUID(), wsId, batchId, 'f'.repeat(64), now, now],
+        );
+      })();
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+
+    expect(() => runMigrations()).not.toThrow();
+
+    // Marker advanced to v2 and the batch FK now cascades.
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('2');
+
+    const fks = db.query("PRAGMA foreign_key_list('curation_cohorts')").all() as Array<{ from: string; table: string; on_delete: string }>;
+    const batchFk = fks.find(f => f.from === 'batch_id');
+    expect(batchFk).toBeTruthy();
+    expect(batchFk!.table).toBe('onboarding_batches');
+    expect(batchFk!.on_delete).toBe('CASCADE');
+
+    // Data survived the rebuild.
+    const rows = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
+    expect(rows.c).toBe(1);
+
+    // Idempotent: a second run keeps the marker and the CASCADE FK.
+    expect(() => runMigrations()).not.toThrow();
+    const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version2.value).toBe('2');
+
+    // End-to-end: the real deleteBatch now cascades to the cohort row.
+    expect(deleteBatch(batchId)).toBe(true);
+    const afterDelete = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
+    expect(afterDelete.c).toBe(0);
+
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
   });
 
 });

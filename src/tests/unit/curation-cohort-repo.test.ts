@@ -6,13 +6,14 @@ import { randomUUID } from 'node:crypto';
 import { initDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
-import { createBatch } from '../../db/repositories/onboarding-batch-repo';
+import { createBatch, deleteBatch } from '../../db/repositories/onboarding-batch-repo';
 import {
   insertItems,
   updateItemExtractionData,
   updateItemStageStatus,
   advanceItemsToNextStage,
   updateSourcingDecision,
+  skipItems,
   listItemsByBatch,
 } from '../../db/repositories/onboarding-item-repo';
 import {
@@ -137,8 +138,9 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     const firstPurina = getActiveCohortForItem(items[0].id)!;
     expect(firstPurina).not.toBeNull();
 
-    // New extraction evidence changes the extraction hash → membership hash.
-    makeItemExtractionReady(items[0].id, makeExtractionData());
+    // Membership change: a new Purina-family sibling joins the batch. Evidence
+    // progress alone is NOT a membership change (round-2 F4).
+    insertItems(batchId, [{ upc: '100000000004', name: 'Purina Pro Plan Dog Food Lamb 15 lb', brandHint: 'Purina', rowNumber: 4 }]);
     refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
 
     const oldRow = getCohortById(firstPurina.id)!;
@@ -150,8 +152,32 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(newPurina.id).not.toBe(firstPurina.id);
     expect(newPurina.status).toBe('forming');
     expect(newPurina.membershipHash).not.toBe(firstPurina.membershipHash);
+    expect(getCohortMembers(newPurina.id).length).toBe(3);
     // exactly one ACTIVE cohort per group
     expect(active.filter(c => c.groupKey.includes('purina')).length).toBe(1);
+  });
+
+  it('updates member rows in place when membership is unchanged but evidence changes', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    const firstPurina = getActiveCohortForItem(items[0].id)!;
+    expect(getCohortMembers(firstPurina.id).every(m => m.extractionHash === null)).toBe(true);
+
+    // Same member IDENTITY set; only evidence changed (extraction completes).
+    makeItemExtractionReady(items[0].id, makeExtractionData());
+    makeItemExtractionReady(items[1].id, makeExtractionData());
+    const refreshed = refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    const purina = refreshed.find(c => c.groupKey.includes('purina'))!;
+
+    expect(purina.id).toBe(firstPurina.id); // same row — no supersession, no new row
+    const allRows = listCohortsByBatch(batchId, { includeSuperseded: true });
+    expect(allRows.filter(c => c.groupKey.includes('purina')).length).toBe(1);
+
+    const members = getCohortMembers(purina.id);
+    expect(members.map(m => m.onboardingItemId).sort()).toEqual([items[0].id, items[1].id].sort());
+    expect(members.every(m => m.extractionHash != null)).toBe(true); // refreshed in place
+    expect(members.every(m => m.normalizedBrand === 'purina')).toBe(true);
   });
 
   it('keeps one ACTIVE cohort per group across two consecutive membership changes', () => {
@@ -161,8 +187,8 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     const firstPurina = getActiveCohortForItem(items[0].id)!;
     const purinaKey = firstPurina.groupKey;
 
-    // First membership change: items[0] completes extraction → hash changes.
-    makeItemExtractionReady(items[0].id, makeExtractionData());
+    // First membership change: a new Purina-family sibling joins the batch.
+    const joined = insertItems(batchId, [{ upc: '100000000004', name: 'Purina Pro Plan Dog Food Lamb 15 lb', brandHint: 'Purina', rowNumber: 4 }])[0];
     refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
 
     const activeAfterFirst = listCohortsByBatch(batchId).filter(c => c.groupKey === purinaKey);
@@ -172,8 +198,9 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(supersededFirst.status).toBe('superseded');
     expect(supersededFirst.supersededAt).not.toBeNull();
 
-    // Second membership change: items[1] completes extraction → hash changes again.
-    makeItemExtractionReady(items[1].id, makeExtractionData());
+    // Second membership change: a member leaves the batch (FK cascades the
+    // stale member row away; refresh supersedes again).
+    getDb().run('DELETE FROM onboarding_items WHERE id = ?', [joined.id]);
     refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
 
     const activeAfterSecond = listCohortsByBatch(batchId).filter(c => c.groupKey === purinaKey);
@@ -194,22 +221,76 @@ describe('curation cohort repo (issue #30, PR1+PR2)', () => {
     expect(acmeHistory[0].supersededAt).toBeNull();
   });
 
-  it('computes an order-insensitive membership hash', () => {
-    const forward = computeMembershipHash([
-      { itemId: 'item-b', extractionHash: 'h2' },
-      { itemId: 'item-a', extractionHash: 'h1' },
-    ]);
-    const reverse = computeMembershipHash([
-      { itemId: 'item-a', extractionHash: 'h1' },
-      { itemId: 'item-b', extractionHash: 'h2' },
-    ]);
+  it('excludes skipped items from candidate membership', () => {
+    const batchId = newBatch();
+    const items = insertFamilyItems(batchId);
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    const firstPurina = getActiveCohortForItem(items[0].id)!;
+    expect(getCohortMembers(firstPurina.id).length).toBe(2);
+
+    // Skipping a sibling is a membership revision: the next refresh supersedes
+    // the old cohort and forms a new one WITHOUT the skipped member.
+    skipItems([items[1].id]);
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+
+    const oldRow = getCohortById(firstPurina.id)!;
+    expect(oldRow.status).toBe('superseded');
+    expect(oldRow.supersededAt).not.toBeNull();
+
+    const active = listCohortsByBatch(batchId);
+    const newPurina = active.find(c => c.groupKey.includes('purina'))!;
+    expect(newPurina.id).not.toBe(firstPurina.id);
+    const members = getCohortMembers(newPurina.id);
+    expect(members.map(m => m.onboardingItemId)).not.toContain(items[1].id);
+    expect(members.length).toBe(1);
+  });
+
+  it('deletes cohort and member rows when the batch is deleted (CASCADE)', () => {
+    const batchId = newBatch();
+    insertFamilyItems(batchId);
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId));
+    refreshCandidateCohorts(workspaceId, batchId, listItemsByBatch(batchId)); // same membership → in-place, no extra rows
+    const cohortRows = listCohortsByBatch(batchId, { includeSuperseded: true });
+    expect(cohortRows.length).toBeGreaterThan(0);
+    expect(cohortRows.every(c => c.batchId === batchId)).toBe(true);
+
+    const memberRowsBefore = cohortRows.reduce((acc, c) => acc + getCohortMembers(c.id).length, 0);
+    expect(memberRowsBefore).toBeGreaterThan(0);
+
+    // Real deleteBatch: onboarding_batches → CASCADE → onboarding_items (items
+    // CASCADE → members) and curation_cohorts (batch_id CASCADE → members).
+    expect(deleteBatch(batchId)).toBe(true);
+
+    const db = getDb();
+    const cohortCount = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
+    expect(cohortCount.c).toBe(0);
+    const memberCount = db.query(
+      `SELECT COUNT(*) as c FROM curation_cohort_members
+       WHERE cohort_id IN (SELECT id FROM curation_cohorts WHERE batch_id = ?)`,
+    ).get(batchId) as { c: number };
+    expect(memberCount.c).toBe(0);
+    // Members are also reachable via the items cascade path — nothing left.
+    const itemPathMembers = db.query(
+      `SELECT COUNT(*) as c FROM curation_cohort_members
+       WHERE onboarding_item_id IN (SELECT id FROM onboarding_items WHERE batch_id = ?)`,
+    ).get(batchId) as { c: number };
+    expect(itemPathMembers.c).toBe(0);
+    // And the batch itself is gone.
+    const batchCount = db.query('SELECT COUNT(*) as c FROM onboarding_batches WHERE id = ?').get(batchId) as { c: number };
+    expect(batchCount.c).toBe(0);
+  });
+
+  it('computes an order-insensitive membership hash over member identity', () => {
+    const forward = computeMembershipHash(['item-b', 'item-a']);
+    const reverse = computeMembershipHash(['item-a', 'item-b']);
     expect(forward).toBe(reverse);
 
-    const changed = computeMembershipHash([
-      { itemId: 'item-a', extractionHash: 'h1' },
-      { itemId: 'item-b', extractionHash: null },
-    ]);
+    const changed = computeMembershipHash(['item-a', 'item-b', 'item-c']);
     expect(changed).not.toBe(forward);
+
+    // Evidence progress is NOT part of membership identity.
+    const sameSet = computeMembershipHash(['item-a', 'item-b']);
+    expect(sameSet).toBe(forward);
   });
 
   it('computes stable extraction hashes over the frozen evidence payload', () => {

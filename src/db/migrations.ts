@@ -667,6 +667,64 @@ export function runMigrations(): void {
     db.exec(cohortSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '1');");
   }
+
+  // ── Curation cohorts v1 → v2: batch deletion must cascade ────────────────
+  //
+  // v1 created `curation_cohorts.batch_id` with a plain REFERENCES clause, so
+  // deleting an onboarding batch would leave orphaned cohort rows. SQLite
+  // cannot alter a foreign key in place, so existing v1 databases are rebuilt
+  // with the ON DELETE CASCADE FK — the same table-rebuild precedent as the
+  // classification_evidence CHECK expansion: PRAGMA foreign_keys OFF around
+  // the swap, create `_new`, copy, drop, rename, recreate indexes, then a
+  // `PRAGMA foreign_key_check` and restoring FK enforcement in `finally`.
+  // Fresh databases already carry the v2 shape from cohort-migration.sql; the
+  // marker still advances through v2 so every database converges on one
+  // schema version.
+  const cohortV2 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV2 && cohortV2.value === '1') {
+    console.log('[Migrations] Rebuilding curation_cohorts with ON DELETE CASCADE on batch_id (v1 → v2)...');
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE curation_cohorts_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','running','completed','failed','conflicted','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+          )
+        `);
+        db.exec('INSERT INTO curation_cohorts_new SELECT * FROM curation_cohorts');
+        db.exec('DROP TABLE curation_cohorts');
+        db.exec('ALTER TABLE curation_cohorts_new RENAME TO curation_cohorts');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohorts_batch ON curation_cohorts(batch_id, status)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohort_members_item ON curation_cohort_members(onboarding_item_id)');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_cohorts_active_group
+          ON curation_cohorts(batch_id, group_key, grouping_version) WHERE status != 'superseded'`);
+      })();
+    } finally {
+      // Always restore foreign key enforcement, even if the rebuild fails.
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+    const cohortFkViolations = db.query("PRAGMA foreign_key_check('curation_cohorts')").all();
+    if (cohortFkViolations.length > 0) {
+      console.warn(`[Migrations] ${cohortFkViolations.length} FK violations in curation_cohorts after v2 rebuild (pre-existing):`, cohortFkViolations.slice(0, 5));
+    }
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 2.');
+  }
   // ── Clean up product_draft_projection noise proposals ───────────────────
   //
   // The product_draft_projection stage previously emitted a fake

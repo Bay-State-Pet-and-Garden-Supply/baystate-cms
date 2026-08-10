@@ -9,15 +9,20 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { getBatchCohorts } from '../onboarding-api';
-import type { CurationCohortView } from '../../shared/schemas/cohorts';
+import type { CurationCohortView, ReadinessState } from '../../shared/schemas/cohorts';
 
 export interface CohortFamilyStateByItem {
   [itemId: string]: {
     groupLabel: string;
     cohortStatus: string;
+    /** The member's own derived readiness state (ready | waiting | blocked). */
+    state: ReadinessState;
     memberCount: number;
     readyCount: number;
+    /** Siblings this member is waiting on (server excludes self). */
     waitingOnCount: number;
+    /** True when this member itself failed (deterministic blocked text applies). */
+    selfBlocked: boolean;
     blockedReason: string | null;
   };
 }
@@ -41,12 +46,17 @@ export function useCohortFamilyState(batchId: string): CohortFamilyState {
       const map: CohortFamilyStateByItem = {};
       for (const view of views) {
         for (const member of view.members) {
+          // Per-member wording: each member uses its OWN readiness state and
+          // its own waitingOn list (the server already excludes self) instead
+          // of the cohort-level waiting list (issue #30 round-2 F7).
           map[member.onboardingItemId] = {
             groupLabel: view.cohort.groupLabel,
             cohortStatus: view.status,
+            state: member.state,
             memberCount: view.memberCount,
             readyCount: view.readyCount,
-            waitingOnCount: view.waitingOn.length,
+            waitingOnCount: member.waitingOn.length,
+            selfBlocked: member.state === 'blocked',
             blockedReason: view.blockedReason,
           };
         }

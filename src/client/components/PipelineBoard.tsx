@@ -58,7 +58,7 @@ import { CurationStagePanel } from './pipeline-drawer/CurationStagePanel';
 import { SourcingStagePanel } from './pipeline-drawer/SourcingStagePanel';
 import { SourcingIdentitySummary } from './pipeline-drawer/SourcingIdentitySummary';
 import { readinessViewFromReport } from '../classification-readiness-view';
-import { useCohortFamilyState } from '../hooks/useCohortFamilyState';
+import { useCohortFamilyState, type CohortFamilyStateByItem } from '../hooks/useCohortFamilyState';
 
 const STAGES: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
@@ -91,6 +91,26 @@ const STAGE_STATUS_STYLE: Record<StageStatus, { bg: string; text: string; icon: 
 
 function createDecisionActionToken(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Per-member family badge text/colors for the curation column (issue #30,
+ * PR2 + round-2 F7). Wording is per-member: a ready member waits on its
+ * siblings, a member whose own extraction is still completing is itself the
+ * blocker, and a failed member shows deterministic blocked text.
+ */
+function familyBadgeFor(familyState: CohortFamilyStateByItem[string]): { text: string; background: string; color: string } {
+  const { state, waitingOnCount, readyCount, memberCount } = familyState;
+  if (state === 'blocked') {
+    return { text: '⚠ Extraction failed — retry required', background: '#fee2e2', color: '#991b1b' };
+  }
+  if (state === 'waiting' && waitingOnCount === 0) {
+    return { text: 'Your extraction is still completing', background: '#ffedd5', color: '#c2410c' };
+  }
+  if (waitingOnCount > 0) {
+    return { text: `Waiting for ${waitingOnCount} sibling${waitingOnCount === 1 ? '' : 's'}`, background: '#ffedd5', color: '#c2410c' };
+  }
+  return { text: `Family: Ready ${readyCount}/${memberCount}`, background: '#ecfdf5', color: '#047857' };
 }
 
 interface ItemSaveAction {
@@ -1226,6 +1246,8 @@ export function PipelineBoard({
     const isReviewStage = item.stage === 'review';
     // Family indicator state for the curation column (issue #30, PR2).
     const familyState = item.stage === 'curation' ? cohortFamilyByItem[item.id] : undefined;
+    // Per-member badge wording (round-2 F7); hidden for singletons.
+    const familyBadge = familyState && familyState.memberCount >= 2 ? familyBadgeFor(familyState) : null;
 
     return (
       <div
@@ -1372,7 +1394,7 @@ export function PipelineBoard({
                 })()}
               </div>
             )}
-            {item.stage === 'curation' && familyState && familyState.memberCount >= 2 && (
+            {item.stage === 'curation' && familyBadge && (
               <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{
                   display: 'inline-block',
@@ -1380,15 +1402,13 @@ export function PipelineBoard({
                   fontWeight: 600,
                   padding: '1px 6px',
                   borderRadius: 8,
-                  background: familyState.waitingOnCount > 0 ? '#ffedd5' : '#ecfdf5',
-                  color: familyState.waitingOnCount > 0 ? '#c2410c' : '#047857',
+                  background: familyBadge.background,
+                  color: familyBadge.color,
                 }}>
-                  {familyState.waitingOnCount > 0
-                    ? `Waiting for ${familyState.waitingOnCount} sibling${familyState.waitingOnCount === 1 ? '' : 's'}`
-                    : `Family: Ready ${familyState.readyCount}/${familyState.memberCount}`}
+                  {familyBadge.text}
                 </span>
                 <span style={{ fontSize: 10, color: '#6b7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
-                  {familyState.groupLabel}
+                  {familyState!.groupLabel}
                 </span>
               </div>
             )}

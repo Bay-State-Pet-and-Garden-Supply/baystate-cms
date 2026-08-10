@@ -4,6 +4,11 @@
 -- runMigrations() (src/db/migrations.ts). Uses CREATE TABLE IF NOT EXISTS and
 -- CREATE INDEX IF NOT EXISTS for idempotence. Historical cohort rows are
 -- superseded, never mutated; a superseded row is no longer the active cohort.
+--
+-- v2 (round-2 F3): curation_cohorts.batch_id references onboarding_batches(id)
+-- ON DELETE CASCADE so deleting a batch cleans up its cohort rows. Existing
+-- v1 databases are rebuilt by runMigrations() (SQLite cannot alter an FK);
+-- fresh databases get the v2 shape directly from this file.
 
 -- Candidate curation cohort: a versioned candidate family of onboarding items
 -- grouped by a deterministic grouping algorithm (grouping_version
@@ -11,7 +16,7 @@
 CREATE TABLE IF NOT EXISTS curation_cohorts (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspace(id),
-  batch_id TEXT NOT NULL REFERENCES onboarding_batches(id),
+  batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
   group_key TEXT NOT NULL,          -- deterministic brand + normalized name stem key
   group_label TEXT NOT NULL,
   grouping_version TEXT NOT NULL,   -- 'product-family-v1'

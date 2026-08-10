@@ -6,11 +6,13 @@
  * `db.transaction(() => {})()` for multi-table writes — following the
  * classification-run-repo / onboarding-item-repo conventions.
  *
- * Supersession semantics: an active cohort whose membership hash changed is
- * never mutated in place — the old row is marked `superseded` and a NEW cohort
- * row is inserted with fresh members. The unique partial index
- * `idx_curation_cohorts_active_group` enforces at most one active cohort per
- * (batch, group_key, grouping_version).
+ * Supersession semantics: a cohort revision is created ONLY when the member
+ * IDENTITY set changes (member added/removed) or the group is orphaned. The
+ * old row is marked `superseded` and a NEW cohort row is inserted with fresh
+ * members. Evidence progress (an updated `extraction_hash`) is candidate
+ * readiness state and refreshes member rows in place — it never supersedes a
+ * cohort. The unique partial index `idx_curation_cohorts_active_group`
+ * enforces at most one active cohort per (batch, group_key, grouping_version).
  */
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
@@ -119,20 +121,15 @@ export function computeExtractionHash(item: OnboardingItem): string | null {
   });
 }
 
-export interface MembershipHashMember {
-  itemId: string;
-  extractionHash: string | null;
-}
-
 /**
- * Order-insensitive canonical membership hash: sorts member keys
- * (item id + extraction hash) and hashes the canonical JSON. Equal membership
- * (regardless of member ordering) always produces an equal hash.
+ * Order-insensitive canonical membership hash: hashes the sorted member
+ * IDENTITIES (onboarding item ids). Membership identity is the item set only —
+ * `extraction_hash` is candidate readiness state and must never change
+ * membership (issue #30 round-2 F4). Evidence/config drift supersedes the
+ * cohort RUN at PR3 via an independent `evidence_snapshot_hash`.
  */
-export function computeMembershipHash(members: MembershipHashMember[]): string {
-  const sorted = members
-    .map(m => ({ itemId: m.itemId, extractionHash: m.extractionHash ?? null }))
-    .sort((a, b) => a.itemId.localeCompare(b.itemId));
+export function computeMembershipHash(memberItemIds: string[]): string {
+  const sorted = [...memberItemIds].sort((a, b) => a.localeCompare(b));
   return hashCanonicalJson(sorted);
 }
 
@@ -155,12 +152,15 @@ interface FamilyGroup {
  * Deterministic candidate grouping reusing the product-line-grouper kernel
  * (`normalizeBrand` + `extractNameStem`). Every item with a non-empty name
  * stem forms or joins a family group — singletons are one-member cohorts
- * (issue #30, "Singleton behavior").
+ * (issue #30, "Singleton behavior"). Items whose current stage is `skipped`
+ * are excluded from candidate membership: skipping a member is itself a
+ * membership revision (issue #30 round-2 F5).
  */
 export function groupItemsByFamily(items: OnboardingItem[]): FamilyGroup[] {
   const byKey = new Map<string, FamilyGroup>();
   const sorted = [...items].sort((a, b) => a.rowNumber - b.rowNumber);
   for (const item of sorted) {
+    if (item.stageStatus === 'skipped') continue; // skipped → not a candidate member
     const normalizedBrand = normalizeBrand(item.brandHint);
     const normalizedNameStem = extractNameStem(item.name || '');
     if (!normalizedNameStem) continue; // no stable name stem → not groupable
@@ -227,9 +227,38 @@ function insertCohortMembers(cohortId: string, group: FamilyGroup): void {
 }
 
 /**
+ * Refresh an existing cohort's member rows in place when the member IDENTITY
+ * set is unchanged: re-sync `product_sku`, `normalized_*`, `extraction_hash`
+ * (candidate readiness state) and `ordinal` to the current items. No new row,
+ * no supersession (issue #30 round-2 F4).
+ */
+function refreshCohortMembersInPlace(cohortId: string, group: FamilyGroup): void {
+  const db = getDb();
+  const stmt = db.query(
+    `UPDATE curation_cohort_members
+     SET product_sku = ?, normalized_brand = ?, normalized_name_stem = ?,
+         extraction_hash = ?, ordinal = ?
+     WHERE cohort_id = ? AND onboarding_item_id = ?`,
+  );
+  group.members.forEach((member, ordinal) => {
+    stmt.run(
+      member.item.upc || null,
+      group.normalizedBrand,
+      group.normalizedNameStem,
+      member.extractionHash,
+      ordinal,
+      cohortId,
+      member.item.id,
+    );
+  });
+}
+
+/**
  * Upsert the ACTIVE candidate cohort for every current family group in the
  * batch:
- * - membership unchanged → touch `updated_at` only;
+ * - membership unchanged → refresh member rows in place (`extraction_hash`,
+ *   `normalized_*`, ordinal — evidence progress is candidate readiness state,
+ *   not a membership revision) and touch `updated_at` only;
  * - membership changed    → mark the old active cohort `superseded`, insert a
  *   NEW cohort row with fresh members;
  * - no active cohort      → insert one.
@@ -271,9 +300,7 @@ export function refreshCandidateCohorts(
       }
 
       for (const group of groups) {
-        const membershipHash = computeMembershipHash(
-          group.members.map(m => ({ itemId: m.item.id, extractionHash: m.extractionHash })),
-        );
+        const membershipHash = computeMembershipHash(group.members.map(m => m.item.id));
         const existing = db.query(
           `SELECT * FROM curation_cohorts
            WHERE batch_id = ? AND group_key = ? AND grouping_version = ? AND status != 'superseded'
@@ -282,8 +309,9 @@ export function refreshCandidateCohorts(
 
         if (existing) {
           if (existing.membership_hash === membershipHash) {
+            refreshCohortMembersInPlace(existing.id, group);
             db.query('UPDATE curation_cohorts SET updated_at = ? WHERE id = ?').run(now(), existing.id);
-            touched.push(mapCohortRow(existing));
+            touched.push(mapCohortRow(db.query('SELECT * FROM curation_cohorts WHERE id = ?').get(existing.id) as Record<string, any>));
           } else {
             db.query(
               `UPDATE curation_cohorts SET status = 'superseded', superseded_at = ?, updated_at = ? WHERE id = ?`,
