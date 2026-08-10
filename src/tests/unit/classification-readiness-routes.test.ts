@@ -27,7 +27,8 @@ const REVIEWED_FIELDS = [
   'ProductField4', 'ProductField8', 'ProductField16', 'ProductField17',
   'ProductField18', 'ProductField19', 'ProductField20', 'ProductField21',
   'ProductField22', 'ProductField23', 'ProductField24', 'ProductField25',
-  'ProductField28', 'ProductField29', 'ProductField30',
+  'ProductField26', 'ProductField27', 'ProductField28', 'ProductField29',
+  'ProductField30', 'ProductField32',
 ];
 const ARTIFACT_CONTENT = JSON.stringify({
   schemaVersion: 1,

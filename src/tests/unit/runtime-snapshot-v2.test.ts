@@ -79,9 +79,9 @@ describe('runtime snapshot with ACTIVE v2 config authority (Milestone 7)', () =>
     const snapshot = buildRuntimeSnapshot(buildV2Input());
     expect(snapshot.configAuthorityKind).toBe('v2');
     expect(snapshot.productTypes).toHaveLength(21);
-    expect(snapshot.attributes).toHaveLength(15);
+    expect(snapshot.attributes).toHaveLength(17);
     expect(snapshot.attributeProfiles).toHaveLength(21);
-    expect(snapshot.attributeMappings).toHaveLength(15);
+    expect(snapshot.attributeMappings).toHaveLength(17);
     expect(snapshot.curationTargets.some(target => target.id === 'primary-product-type')).toBe(true);
     expect(snapshot.catalogEvidenceHash).toBeNull();
     // Universal brand attribute survives into the frozen snapshot.

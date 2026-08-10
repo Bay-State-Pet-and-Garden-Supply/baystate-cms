@@ -7,7 +7,7 @@ import { skuToProductFilePath } from '../../git/product-file-path';
 import { hashJson } from '../../git/deterministic-json';
 import { createSyncJob, completeSyncJob, addSyncJobEvent } from '../../db/repositories/sync-job-repo';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
-import { clearRegistry, upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
+import { clearRegistry, listRegistry, upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { indexProductPageAssignments } from '../../db/repositories/page-repo';
 import { updateBootstrapStatus } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
@@ -103,6 +103,18 @@ export function bootstrapFromXml(
       return true;
     });
 
+    // Preserve curated ShopSite-side field names (e.g. "Facet - Category")
+    // across a fresh pull: the exporter cannot carry the store's Extra Fields
+    // configuration, so ProductFieldN entries arrive with bare tag labels
+    // ("ProductField24"). A previously curated label wins over that default.
+    const existingLabels = new Map(
+      listRegistry(workspaceId).map(entry => [entry.xmlField, entry.label] as const),
+    );
+    const resolvedLabel = (entry: { xmlField: string; label: string }): string =>
+      entry.label === entry.xmlField
+        ? existingLabels.get(entry.xmlField) ?? entry.label
+        : entry.label;
+
     // Write product files
     for (const product of products) {
       writeProductFile(workspacePath, product);
@@ -113,6 +125,7 @@ export function bootstrapFromXml(
       schemaVersion: 1,
       entries: uniqueRegistry.map(e => ({
         ...e,
+        label: resolvedLabel(e),
         id: randomUUID(),
         createdAt: now,
         updatedAt: now,
@@ -140,7 +153,7 @@ export function bootstrapFromXml(
           id: randomUUID(),
           workspaceId: entry.workspaceId,
           xmlField: entry.xmlField,
-          label: entry.label,
+          label: resolvedLabel(entry),
           kind: entry.kind,
           dataType: entry.dataType,
           editable: entry.editable,

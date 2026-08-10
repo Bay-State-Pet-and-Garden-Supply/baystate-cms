@@ -664,6 +664,32 @@ export function listAttributeMappings() {
   return request<{ mappings: AttributeMappingView[] }>('/catalog/mappings');
 }
 
+/** One row edit for the ShopSite Extra Fields mirror (Mappings tab). */
+export interface FieldMappingEditPayload {
+  catalogField: string;
+  /** Configured attribute id, or null to unmap the field. */
+  attributeId: string | null;
+  /** Optional ShopSite-side label, mirrored into the field registry. */
+  label?: string | null;
+  serialization?: {
+    kind: 'scalar' | 'delimited' | 'measured';
+    prefix?: string;
+    suffix?: string;
+    delimiter?: string;
+    escapePolicy?: 'reject' | 'backslash';
+    unit?: string;
+    valueUnitSeparator?: string;
+  } | null;
+}
+
+/** Saves ShopSite field mapping edits to the active classification config. */
+export function updateFieldMappings(edits: FieldMappingEditPayload[]) {
+  return request<{ success: boolean; bundleHash: string; mappings: AttributeMappingView[] }>(
+    '/classification/mappings',
+    { method: 'PUT', body: JSON.stringify({ edits }) },
+  );
+}
+
 export function getCatalogSchemaHealth() {
   return request<CatalogSchemaHealthReport>('/catalog/schema-health');
 }

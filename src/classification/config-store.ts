@@ -40,6 +40,7 @@ import {
 import {
   captureConfigCacheState,
   restoreConfigCacheState,
+  syncConfigToCache,
   upsertConfigSnapshot,
   type ConfigCacheState,
 } from '../db/repositories/classification-config-repo';
@@ -366,7 +367,12 @@ function assertNoPreStagedPaths(workspacePath: string): void {
   }
 }
 
-function commitClassificationScope(workspacePath: string, message: string): string {
+/**
+ * Scoped Git commit of `store/classification/**` in the nested catalog
+ * repository. Exported so the field-mapping editor can commit its scoped
+ * writes through the same narrow path (never anything outside that scope).
+ */
+export function commitClassificationScope(workspacePath: string, message: string): string {
   const gitDir = path.join(workspacePath, '.git');
   if (!fs.existsSync(gitDir)) {
     throw new ConfigStoreError('Nested catalog Git repository is missing; cannot commit an activation.', 'git_missing');
@@ -528,6 +534,14 @@ async function performActivation(stagingHash: string, expectedActiveHash: string
 
       // Transactional derived-cache update.
       cacheState = captureConfigCacheState(workspaceId);
+      // The v1-shaped mirror tables (classification_attribute_mappings etc.)
+      // feed promotion and curation reads (getCachedAttributeMappings,
+      // getCachedProductTypes); without this sync they retain stale pre-v2
+      // rows and v2 activations silently mis-write fields at promotion.
+      syncConfigToCache(workspaceId, activeBundle as unknown as Parameters<typeof syncConfigToCache>[1]);
+      // Snapshot last so classification_config_files content hashes match the
+      // committed canonical file bytes (syncConfigToCache stores compact-JSON
+      // hashes; the snapshot upsert stores file-byte hashes).
       const snapshot = upsertConfigSnapshot(workspaceId, activeBundle, activeManifest.sourceCatalogCommit);
       cacheUpdated = true;
 

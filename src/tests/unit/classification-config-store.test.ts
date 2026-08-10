@@ -29,8 +29,9 @@ import type { VerifiedActivationContext } from '../../classification/config-load
 const REVIEWED_FIELDS = [
   'ProductField16', 'ProductField17', 'ProductField18', 'ProductField19',
   'ProductField20', 'ProductField21', 'ProductField22', 'ProductField23',
-  'ProductField24', 'ProductField25', 'ProductField28', 'ProductField29',
-  'ProductField30', 'ProductField4', 'ProductField8',
+  'ProductField24', 'ProductField25', 'ProductField26', 'ProductField27',
+  'ProductField28', 'ProductField29', 'ProductField30', 'ProductField32',
+  'ProductField4', 'ProductField8',
 ];
 /** Fixed artifact content staged by previewSeed; its digest is EVIDENCE_HASH. */
 const ARTIFACT_CONTENT = JSON.stringify({

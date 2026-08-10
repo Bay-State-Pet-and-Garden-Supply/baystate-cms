@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext, loadRuntimeConfigAuthority } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
+import { applyFieldMappingEdits, FieldMappingEditError } from '../../classification/field-mapping-editor';
 import { processRefreshQueue } from '../../classification/refresh-queue-processor';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
 import {
@@ -120,6 +121,61 @@ router.put('/classification/config', async (c) => {
     return c.json({ success: true, config });
   } catch (err) {
     console.error('[ClassificationRoutes] Save configuration failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * PUT /api/classification/mappings
+ * Applies ShopSite field mapping edits to the ACTIVE v2 bundle (the CMS
+ * mirror of ShopSite's Extra Fields configuration). Also updates
+ * field_registry labels for edited fields. Fails closed on invalid edits or
+ * when the edited bundle fails active validation.
+ */
+router.put('/classification/mappings', async (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  try {
+    const body = await c.req.json();
+    const edits = Array.isArray(body?.edits) ? body.edits : null;
+    if (!edits) {
+      return c.json({ error: 'Missing edits payload (expected { edits: [...] })' }, 400);
+    }
+
+    const result = applyFieldMappingEdits(ws.workspacePath, ws.id, edits as never);
+
+    // Rebuild the mappings view the same way /catalog/mappings does.
+    const config = loadRuntimeConfig(ws.workspacePath, ws.id);
+    const attrNames = new Map(config.attributes.map(a => [a.id, a.name]));
+    const attrToTypes = new Map<string, string[]>();
+    for (const pt of config.productTypes) {
+      const profile = config.attributeProfiles.find(ap => ap.id === pt.attributeProfileId);
+      if (profile) {
+        for (const pa of profile.attributes) {
+          if (!attrToTypes.has(pa.attributeId)) attrToTypes.set(pa.attributeId, []);
+          attrToTypes.get(pa.attributeId)!.push(pt.name);
+        }
+      }
+    }
+    const mappings = config.attributeMappings.map(m => ({
+      id: m.id,
+      attributeId: m.attributeId,
+      attributeName: attrNames.get(m.attributeId) ?? m.attributeId,
+      catalogField: m.catalogField,
+      serialization: m.serialization,
+      isStale: m.isStale,
+      usedByProductTypes: attrToTypes.get(m.attributeId) ?? [],
+    }));
+
+    return c.json({ success: true, bundleHash: result.bundleHash, mappings });
+  } catch (err) {
+    if (err instanceof FieldMappingEditError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    console.error('[ClassificationRoutes] Save field mappings failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });

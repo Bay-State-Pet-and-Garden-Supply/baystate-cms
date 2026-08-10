@@ -7,8 +7,9 @@ import type { CatalogEvidence } from '../../classification/catalog-evidence';
 const REVIEWED_FIELDS = [
   'ProductField16', 'ProductField17', 'ProductField18', 'ProductField19',
   'ProductField20', 'ProductField21', 'ProductField22', 'ProductField23',
-  'ProductField24', 'ProductField25', 'ProductField28', 'ProductField29',
-  'ProductField30', 'ProductField4', 'ProductField8',
+  'ProductField24', 'ProductField25', 'ProductField26', 'ProductField27',
+  'ProductField28', 'ProductField29', 'ProductField30', 'ProductField32',
+  'ProductField4', 'ProductField8',
 ];
 
 function evidenceWithFields(fields: string[]): CatalogEvidence {
@@ -92,7 +93,7 @@ describe('classification config generator', () => {
     }
   });
 
-  it('preserves the reviewed ShopSite field mappings', () => {
+  it('preserves the reviewed ShopSite field mappings (verified Extra Fields config)', () => {
     const candidate = generateCandidate(BayStatePetGardenSeed, evidenceWithFields(REVIEWED_FIELDS));
     const mappingByAttribute = new Map(
       candidate.bundle.attributeMappings.map(mapping => [mapping.attributeId, mapping.catalogField]),
@@ -105,10 +106,23 @@ describe('classification config generator', () => {
     expect(mappingByAttribute.get('health-benefits')).toBe('ProductField21');
     expect(mappingByAttribute.get('food-form')).toBe('ProductField22');
     expect(mappingByAttribute.get('flavor')).toBe('ProductField23');
-    expect(mappingByAttribute.get('department')).toBe('ProductField24');
-    expect(mappingByAttribute.get('category')).toBe('ProductField25');
+    expect(mappingByAttribute.get('category')).toBe('ProductField24');
+    expect(mappingByAttribute.get('product-type')).toBe('ProductField25');
+    expect(mappingByAttribute.get('product-feature')).toBe('ProductField26');
+    expect(mappingByAttribute.get('size')).toBe('ProductField27');
+    expect(mappingByAttribute.get('material')).toBe('ProductField28');
+    expect(mappingByAttribute.get('color')).toBe('ProductField29');
+    expect(mappingByAttribute.get('packaging-type')).toBe('ProductField30');
+    expect(mappingByAttribute.get('product-cross-sell')).toBe('ProductField32');
+    expect(mappingByAttribute.get('nutrition')).toBe('ProductField8');
+    // Retired: Department is not a ShopSite Extra Field; ProductField31
+    // (Product Category) is intentionally unmapped (the store does not use it).
+    expect(mappingByAttribute.has('department')).toBe(false);
+    expect(candidate.bundle.attributeMappings.some(mapping => mapping.catalogField === 'ProductField31')).toBe(false);
 
-    // Product Type is never mapped directly to a Catalog Field.
+    // Product Type is mapped through the product-type attribute (the Facet -
+    // Product Type field), while the primary-product-type target stays
+    // attribute/catalog-field free (single-cardinality configured gate).
     const productTypeTarget = candidate.bundle.curationTargets.find(target => target.kind === 'product_type')!;
     expect(productTypeTarget).toBeDefined();
     expect(productTypeTarget.catalogField).toBeNull();

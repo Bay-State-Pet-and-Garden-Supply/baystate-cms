@@ -153,7 +153,7 @@ function checkedChildDirectory(parent: CheckedDirectory, name: string): CheckedD
   }
 }
 
-function checkedClassificationDirectory(workspacePath: string): CheckedDirectory {
+export function checkedClassificationDirectory(workspacePath: string): CheckedDirectory {
   const workspace = checkedWorkspaceRoot(workspacePath);
   const store = checkedChildDirectory(workspace, 'store');
   if (!store) throw new ClassificationConfigNotConfiguredError(workspacePath);
@@ -188,7 +188,7 @@ function createCheckedChildDirectory(parent: CheckedDirectory, name: string): Ch
   return created;
 }
 
-function checkedClassificationDirectoryForWrite(workspacePath: string): CheckedDirectory {
+export function checkedClassificationDirectoryForWrite(workspacePath: string): CheckedDirectory {
   const workspace = checkedWorkspaceRoot(workspacePath);
   const store = createCheckedChildDirectory(workspace, 'store');
   return createCheckedChildDirectory(store, CLASSIFICATION_DIR);
