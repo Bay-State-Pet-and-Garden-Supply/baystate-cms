@@ -58,6 +58,7 @@ import { CurationStagePanel } from './pipeline-drawer/CurationStagePanel';
 import { SourcingStagePanel } from './pipeline-drawer/SourcingStagePanel';
 import { SourcingIdentitySummary } from './pipeline-drawer/SourcingIdentitySummary';
 import { readinessViewFromReport } from '../classification-readiness-view';
+import { useCohortFamilyState } from '../hooks/useCohortFamilyState';
 
 const STAGES: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
@@ -158,6 +159,10 @@ export function PipelineBoard({
     review: [],
     promotion: [],
   });
+
+  // Candidate family state for the curation-stage family indicator (issue #30, PR2).
+  const { byItem: cohortFamilyByItem, refresh: refreshCohortFamilyState } = useCohortFamilyState(batchId);
+
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -370,6 +375,7 @@ export function PipelineBoard({
 
     sse.addEventListener('item:status', async (e: MessageEvent) => {
       fetchStaged();
+      refreshCohortFamilyState();
       try {
         const event = JSON.parse(e.data);
         const itemId = typeof event?.itemId === 'string' ? event.itemId : null;
@@ -409,12 +415,13 @@ export function PipelineBoard({
 
     sse.addEventListener('batch:progress', () => {
       fetchStaged();
+      refreshCohortFamilyState();
     });
 
     return () => {
       sse.close();
     };
-  }, [batchId, fetchStaged, loadStorePages, loadCurationTargets]);
+  }, [batchId, fetchStaged, loadStorePages, loadCurationTargets, refreshCohortFamilyState]);
 
 
 
@@ -1217,6 +1224,8 @@ export function PipelineBoard({
     const isSelected = selectedIds.has(item.id);
     const isAutomatedStage = ['discovery', 'extraction', 'curation'].includes(item.stage);
     const isReviewStage = item.stage === 'review';
+    // Family indicator state for the curation column (issue #30, PR2).
+    const familyState = item.stage === 'curation' ? cohortFamilyByItem[item.id] : undefined;
 
     return (
       <div
@@ -1361,6 +1370,26 @@ export function PipelineBoard({
                     </span>
                   );
                 })()}
+              </div>
+            )}
+            {item.stage === 'curation' && familyState && familyState.memberCount >= 2 && (
+              <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{
+                  display: 'inline-block',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  padding: '1px 6px',
+                  borderRadius: 8,
+                  background: familyState.waitingOnCount > 0 ? '#ffedd5' : '#ecfdf5',
+                  color: familyState.waitingOnCount > 0 ? '#c2410c' : '#047857',
+                }}>
+                  {familyState.waitingOnCount > 0
+                    ? `Waiting for ${familyState.waitingOnCount} sibling${familyState.waitingOnCount === 1 ? '' : 's'}`
+                    : `Family: Ready ${familyState.readyCount}/${familyState.memberCount}`}
+                </span>
+                <span style={{ fontSize: 10, color: '#6b7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
+                  {familyState.groupLabel}
+                </span>
               </div>
             )}
             {isReviewStage && (

@@ -1,0 +1,41 @@
+# Adopt cohort-centric, type-first Curation with durable product families
+
+Onboarding acquires products item-centrically (Sourcing → Discovery → Extraction), but Curation today executes primarily per SKU: family context is discovered transiently at runtime, and siblings can be curated in separate executions against different evidence states. This ADR adopts the cohort-centric, type-first Curation architecture (issue #30): durable candidate families form deterministically after Extraction, Product Type becomes the first semantic decision, and coordinated title/Page work becomes cohort-owned while review and promotion remain item-centric.
+
+**Status**: accepted
+
+**Context**: the current pipeline computes sibling context with in-memory caches (`cohort-name-coordinator.ts`, `cohort-page-coordinator.ts`), recomputes family membership on every run instead of persisting it, and can curate one sibling while another is still producing Extraction/OCR evidence. Product Type is known to be the root semantic discriminator, but a newly inferred type cannot drive a full first-pass Curation until a human accepts it. Issue #30 targets: "Determine what a product is before determining which properties it should have."
+
+**Decision drivers**:
+
+- Siblings in the same product family must never be curated against different evidence states or model calls; family coordination must be durable, not process-memory cache.
+- Candidate grouping is structural (deterministic Brand + normalized name stem) and must be versioned so grouping rules can evolve without silently reinterpreting historical cohorts.
+- Product Type is resolved from frozen evidence before type-specific attributes; the provisional Execution Product Type may drive Curation, while the Reviewed Product Type remains the authority for Promotion.
+- Human review stays the authority for catalog publication; Review and Promotion remain item-centric.
+- Cohort rows are durable history: an authority-relevant input change supersedes a cohort revision rather than mutating it.
+
+**Decisions**:
+
+- **Durable families.** New tables `curation_cohorts` + `curation_cohort_members` (PR1, `src/db/cohort-migration.sql`, version-gated by `curation_cohort_schema_version`) persist candidate family identity, membership hashes, per-member evidence hashes, and lifecycle status. This is the normalized replacement for the transient sibling context and the dormant `curation_runs.cohort_snapshot_json`; the dormant `curation_runs`/`curation_run_groups` tables are left untouched.
+- **Candidate grouping v1.** Candidate families are formed by `normalizeBrand` + `extractNameStem` (`product-line-grouper.ts`) with grouping version `product-family-v1`. Grouping produces candidate families, not authoritative semantic identity; Product Type coherence validation (PR4) decides whether a candidate family is semantically valid. Singletons are one-member cohorts.
+- **Target scopes.** Every curation target carries an explicit semantic scope: `family_invariant` (must resolve identically across members — Brand, Primary Product Type; disagreement is a conflict), `coordinated_variant` (computed once per cohort revision, members may differ — title, Category Pages), `member_local` (computed from the member's own evidence — flavor, size, weight, color, life stage, description, keywords).
+- **Execution vs reviewed truth.** An Execution Product Type inferred from frozen evidence may drive Curation proposals (attribute applicability, family coherence, title/Page context) without becoming catalog truth. A Reviewed Product Type (accepted/revised by a human) remains required for Promotion. Dependent proposals must retain their dependency on the type so a type change invalidates/recomputes them deterministically.
+- **Cohort-owned vs item-owned responsibilities.** Cohort-owned: family formation/finalization, Product Type resolution, family invariants, coordinated title generation, coordinated Category Page assignment, semantic consistency validation. Item-owned: Sourcing, Discovery, Extraction, Review, Promotion, and member-local attribute values, descriptions, search keywords, final draft projection.
+- **Extraction completeness contract.** A member counts as Curation-ready only when selected source state is finalized, Extraction completed, packaging OCR outcome settled, an attached Product Intelligence import completed, and a current evidence hash computed. A finalized cohort is never built from structurally present but semantically incomplete sibling snapshots.
+- **Supersession semantics.** Cohort rows are append-only history. A changed membership hash (member added/removed, extraction hash changed) marks the old active cohort `superseded` and inserts a new row; a unique partial index enforces one active cohort per (batch, group_key, grouping_version). Historical rows are never mutated into new truth.
+- **No execution behavior yet.** PR1+PR2 (this ADR's first milestone) persist candidate cohorts and derive waiting/ready state; there is no parent cohort run, no claiming, and no change to per-SKU `curateItemWithPipeline` execution. Those arrive with `classification_cohort_runs`/`classification_cohort_outputs`/`classification_proposal_dependencies` in PR3+.
+
+**Consequences**:
+
+- Incomplete families wait: items remain `curation / pending` while the API exposes derived "Waiting for N family members to finish Extraction" state (never `needs_input` for sibling waiting).
+- `curation_cohorts`/`curation_cohort_members` are created only through the version-gated migration; fresh installs and existing databases converge idempotently.
+- Candidate cohort refresh is additive and must never fail Extraction/Curation: worker refreshes are wrapped and swallow cohort errors.
+- PR3+ builds on these tables: parent cohort runs freeze candidate evidence, configuration, Page catalog identity, and model policy; child per-SKU `classification_runs` link via `cohort_run_id`.
+
+**Sequencing note**: PR1–PR2 may proceed in parallel with issue #31; PR3+ waits on #31 where practical. Cohort tables are additive and leave runtime behavior unchanged until execution is enabled.
+
+**Considered options**:
+
+- Durable cohort tables + deterministic candidate grouping (chosen) — persisted, versioned family identity; transient in-memory sibling discovery is the pre-cursor and is retained until the new path is enabled.
+- Activate the dormant `curation_runs`/`curation_run_groups` orchestration tables — rejected: they are batch-orchestration scaffolding from an earlier design and do not model family invariants, scoped targets, or evidence hashes.
+- Keep runtime sibling discovery only — rejected: family membership would remain recomputed, unversioned, and unable to gate curation or drive cohort review/promotion.

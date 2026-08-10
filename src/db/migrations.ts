@@ -8,6 +8,7 @@ const SCHEMA_PATH = path.resolve(import.meta.dirname, 'schema.sql');
 const ONBOARDING_MIGRATION_PATH = path.resolve(import.meta.dirname, 'onboarding-migration.sql');
 const CLASSIFICATION_MIGRATION_PATH = path.resolve(import.meta.dirname, 'classification-migration.sql');
 const STAGE_PIPELINE_MIGRATION_PATH = path.resolve(import.meta.dirname, 'stage-pipeline-migration.sql');
+const COHORT_MIGRATION_PATH = path.resolve(import.meta.dirname, 'cohort-migration.sql');
 
 export function runMigrations(): void {
   const db = getDb();
@@ -652,6 +653,19 @@ export function runMigrations(): void {
     const stagePipelineSql = fs.readFileSync(STAGE_PIPELINE_MIGRATION_PATH, 'utf-8');
     db.exec(stagePipelineSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('stage_pipeline_schema_version', '1');");
+  }
+
+  // Run cohort migration if not already applied (issue #30, PR1).
+  // Follows the classification_schema_version precedent exactly: one-shot
+  // SQL file gated by an app_meta marker. Additive/idempotent; legacy data
+  // simply has no cohort rows.
+  const cohortVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (!cohortVersion) {
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '1');");
   }
   // ── Clean up product_draft_projection noise proposals ───────────────────
   //

@@ -37,6 +37,7 @@ import type {
   ProposalDecisionInput,
 } from '../shared/schemas/classification';
 import type { GenerateSelectorsResponse, GenerateSelectorsRequest } from '../shared/schemas/selector-generation';
+import type { CohortListResponse } from '../shared/schemas/cohorts';
 
 const API_BASE = '/api/onboarding';
 
@@ -133,6 +134,14 @@ export async function getBatchStagedItems(
   batchId: string,
 ): Promise<{ staged: Record<PipelineStage, OnboardingItem[]> }> {
   return request<{ staged: Record<PipelineStage, OnboardingItem[]> }>(`/batches/${batchId}/staged`);
+}
+
+/**
+ * Active candidate curation cohorts for a batch with per-member extraction
+ * readiness and derived waiting state (issue #30, PR2).
+ */
+export async function getBatchCohorts(batchId: string): Promise<CohortListResponse> {
+  return request<CohortListResponse>(`/batches/${batchId}/cohorts`);
 }
 
 export async function advanceItems(itemIds: string[]): Promise<{ advanced: number; skipped: number }> {

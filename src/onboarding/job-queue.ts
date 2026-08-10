@@ -23,6 +23,7 @@ import { findBrandSites } from '../db/repositories/brand-site-repo';
 import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItemWithPipeline } from './product-curator';
+import { refreshCandidateCohorts } from './curation-cohort-service';
 import { determineProductGroup } from './product-line-grouper';
 import { validateSiblingConsistency } from '../classification/consistency-validator';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
@@ -113,6 +114,9 @@ export class OnboardingWorker {
     this.isProcessing = true;
 
     try {
+      // Batches with in-flight (claimed) items — refreshed once per poll.
+      const inFlightBatches = new Set<string>();
+
       // Process stages in priority order: discovery first, then extraction, then curation
       for (const stage of AUTO_STAGES) {
         if (this.running.size >= this.maxConcurrency) break;
@@ -131,11 +135,24 @@ export class OnboardingWorker {
             break;
           }
 
+          inFlightBatches.add(item.batchId);
+
           const promise = this.processItem(item, stage);
           this.running.set(item.id, promise);
           promise.finally(() => this.running.delete(item.id));
 
           if (this.running.size >= this.maxConcurrency) break;
+        }
+      }
+
+      // Issue #30 PR2: refresh candidate cohorts for every batch with in-flight
+      // items (cheap, idempotent). Family readiness must stay current while
+      // items are being processed; failures never block the worker loop.
+      for (const batchId of inFlightBatches) {
+        try {
+          await refreshCandidateCohorts(this.workspaceId, batchId);
+        } catch (err) {
+          console.warn(`[OnboardingWorker] Candidate cohort refresh failed for batch ${batchId} (non-blocking):`, err);
         }
       }
     } catch (err) {
@@ -496,6 +513,15 @@ export class OnboardingWorker {
           `price="${extractedData.price || 'N/A'}", confidence=${(extractedData.confidence * 100).toFixed(0)}%, ` +
           `images=${extractedData.additionalImages ? extractedData.additionalImages.length : 0}`
         );
+
+        // Issue #30 PR2: after extraction completes, refresh the batch's
+        // candidate cohorts so family readiness reflects the new evidence.
+        // Refresh failure must never fail extraction.
+        try {
+          await refreshCandidateCohorts(this.workspaceId, item.batchId);
+        } catch (err) {
+          console.warn(`[OnboardingWorker] Candidate cohort refresh failed for batch ${item.batchId} (non-blocking):`, err);
+        }
       } catch (err) {
         console.error(`[OnboardingWorker] Extraction error for ${item.id}:`, err);
         const retry = incrementRetryCount(item.id);

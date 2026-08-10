@@ -153,6 +153,8 @@ import { fetchAndParseSitemap } from '../../onboarding/sitemap-fetcher';
 import { listAllSitemapCaches, insertSitemapCache } from '../../db/repositories/sitemap-cache-repo';
 import { HTTP_EXTRACTION_HEADERS } from '../../onboarding/page-extractor';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { listCandidateCohortViews } from '../../onboarding/curation-cohort-service';
+import { CohortListResponseSchema } from '../../shared/schemas/cohorts';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
@@ -514,6 +516,22 @@ route.get('/onboarding/batches/:id/staged', (c) => {
   const batchId = c.req.param('id');
   const staged = listItemsByBatchStaged(batchId);
   return c.json({ staged });
+});
+
+/**
+ * GET /api/onboarding/batches/:id/cohorts
+ * Returns the batch's ACTIVE candidate curation cohorts (issue #30, PR2) with
+ * per-member extraction readiness and derived waiting state. Derived state
+ * only — no cohort execution exists yet (PR3+).
+ */
+route.get('/onboarding/batches/:id/cohorts', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const payload = CohortListResponseSchema.parse({ cohorts: listCandidateCohortViews(batchId) });
+  return c.json(payload);
 });
 
 /**
