@@ -284,11 +284,15 @@ describe('field mapping editor (active v2 bundle)', () => {
     expect(stored?.value).toBe(bundle.manifest.bundleHash);
   });
 
-  it('D3: rejects a remap onto a field occupied by a different attribute that is not unmapped in the batch', () => {
+  it('D3: rejects a remap onto a field occupied by a different attribute that is not unmapped in the batch, and writes nothing', () => {
     // ProductField17 is held by species; brand is remapped onto it without
-    // unmapping species in the same batch — fail closed, nothing written.
+    // unmapping species in the same batch — fail closed. This test performs
+    // its own caught throw and then asserts the bundle state is unchanged
+    // directly (bundleHash + mappings), so it never depends on the ordering
+    // or the throw of any other test.
     const before = activeBundle();
     expect(before.attributeMappings.find(m => m.attributeId === 'species')?.catalogField).toBe('ProductField17');
+    expect(before.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField16');
     try {
       applyFieldMappingEdits(root, workspaceId, [
         { catalogField: 'ProductField17', attributeId: 'brand' },
@@ -297,20 +301,14 @@ describe('field mapping editor (active v2 bundle)', () => {
       expect((error as FieldMappingEditError).code).toBe('collision');
       expect((error as FieldMappingEditError).message).toContain('species');
       expect((error as FieldMappingEditError).message).toContain('ProductField17');
-      return;
     }
-    throw new Error('expected collision error');
-  });
 
-  it('D3: nothing is written when a collision is rejected', () => {
-    const before = activeBundle();
-    expect(before.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField16');
-    expect(before.attributeMappings.some(m => m.attributeId === 'species')).toBe(true);
-    // brand keeps ProductField16, species keeps ProductField17, and the
-    // manifest/bundle hash is untouched.
+    // Nothing was written: mappings, bundleHash, and mappings.json are all
+    // byte-identical to the pre-edit state.
     const after = activeBundle();
     expect(after.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField16');
     expect(after.attributeMappings.find(m => m.attributeId === 'species')?.catalogField).toBe('ProductField17');
+    expect(after.attributeMappings.some(m => m.attributeId === 'species')).toBe(true);
     expect(after.manifest.bundleHash).toBe(before.manifest.bundleHash);
     expect(after.manifest.fileVersions['mappings.json']).toBe(before.manifest.fileVersions['mappings.json']);
   });

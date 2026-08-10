@@ -16,7 +16,7 @@ import { z } from 'zod';
 // ─── Cohort Status ─────────────────────────────────────────────────────────────
 
 /**
- * Lifecycle status of a curation cohort.
+ * Lifecycle status of a curation cohort (schema v3, issue #31 commit 3 / D7).
  *
  * - `forming`: candidate family created by the grouping algorithm; members are
  *   still being evaluated for extraction completeness.
@@ -24,21 +24,19 @@ import { z } from 'zod';
  *   "Waiting for N family members to finish Extraction" state).
  * - `ready`: every member's extraction evidence is complete and frozen into an
  *   extraction hash; the cohort is a stable candidate (PR3+ will execute it).
- * - `running` / `completed` / `failed`: cohort execution states owned by the
- *   cohort run (PR3+). PR2 never writes these.
- * - `conflicted`: reserved for family-coherence conflicts (PR4); PR2 never
- *   writes it.
  * - `superseded`: a newer cohort revision replaced this row. Historical rows
  *   are superseded, never mutated in place.
+ *
+ * The cohort row is a candidate-family record ONLY: execution/lifecycle
+ * states (`running`/`completed`/`failed`/`conflicted`) never belong on it —
+ * cohort RUN state is owned by the cohort run (PR3+). The v3 migration narrows
+ * the DB CHECK to these four values and deterministically maps any legacy
+ * execution status to `ready`.
  */
 export const CohortStatusEnum = z.enum([
   'forming',
   'waiting',
   'ready',
-  'running',
-  'completed',
-  'failed',
-  'conflicted',
   'superseded',
 ]);
 

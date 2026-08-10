@@ -8,6 +8,12 @@ import { createSyncJob, completeSyncJob, addSyncJobEvent } from '../../db/reposi
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import { indexProductPageAssignments } from '../../db/repositories/page-repo';
 import { bootstrapSyncRegistry } from './field-metadata-service';
+import { upsertMappingValidityFinding } from '../../db/repositories/mapping-validity-repo';
+import {
+  loadRuntimeConfigAuthority,
+  createRuntimeActivationContext,
+  type RuntimeConfigAuthority,
+} from '../../classification/config-loader';
 import { updateBootstrapStatus } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
@@ -22,6 +28,42 @@ interface BootstrapResult {
   commitHash?: string;
   errors: string[];
   warnings: string[];
+}
+
+/**
+ * D4 (issue #31 commit 3): mapping-validity findings.
+ *
+ * After the registry merge, compare the incoming xmlField set against the
+ * active bundle's attributeMappings and record one finding per mapped field:
+ * `field_present = 1` when the Catalog Field appeared in the pull, `0` when it
+ * did not. Sync writes findings ONLY — it never writes `isStale` on
+ * attributeMappings (isStale is mapping-authority state). A future canonical
+ * classification-config reconciliation operation reads these findings and
+ * writes isStale through the mapping-editor/activation path.
+ */
+function emitMappingValidityFindings(workspace: Workspace, entries: Array<Omit<FieldRegistryEntry, 'id'>>): void {
+  let authority: RuntimeConfigAuthority;
+  try {
+    authority = loadRuntimeConfigAuthority(
+      workspace.workspacePath,
+      createRuntimeActivationContext(workspace.workspacePath, workspace.id),
+    );
+  } catch {
+    // No active classification configuration yet — there are no mappings to
+    // attest, so there is nothing to compare against.
+    return;
+  }
+  const mappings = authority.kind === 'v2' ? authority.bundle.attributeMappings : authority.config.attributeMappings;
+  const incomingFields = new Set(entries.map(entry => entry.xmlField));
+  const detectedAt = new Date().toISOString();
+  for (const mapping of mappings) {
+    upsertMappingValidityFinding({
+      workspaceId: workspace.id,
+      catalogField: mapping.catalogField,
+      fieldPresent: incomingFields.has(mapping.catalogField) ? 1 : 0,
+      detectedAt,
+    });
+  }
 }
 
 /**
@@ -113,6 +155,14 @@ export function bootstrapFromXml(
     // fields absent from the pull are kept (no clearRegistry), and the R2
     // attestation is rewritten from R1.
     bootstrapSyncRegistry({ id: workspaceId, workspacePath }, uniqueRegistry);
+
+    // D4: mapping-validity findings (findings only — never isStale). Best
+    // effort: a failure here must not fail the bootstrap.
+    try {
+      emitMappingValidityFindings(workspace, uniqueRegistry);
+    } catch (err) {
+      console.warn('[SyncService] mapping-validity findings emission failed (non-fatal):', err);
+    }
 
     // Write store configs
     writeStoreConfig(workspacePath, 'manifest.json', {

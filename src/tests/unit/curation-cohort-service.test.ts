@@ -250,8 +250,11 @@ describe('curation cohort service (issue #30, PR2)', () => {
     const purina = cohorts.find(c => c.groupKey.includes('purina'))!;
     expect(purina.status).toBe('ready');
 
-    // Execution/lifecycle states are never moved back to `ready`.
-    for (const status of ['running', 'completed', 'failed', 'conflicted', 'superseded'] as const) {
+    // Cohort schema v3 (D7) narrowed the lifecycle to
+    // forming|waiting|ready|superseded — execution states (running/completed/
+    // failed/conflicted) are no longer writable. The remaining non-forming/
+    // waiting states are never moved back to `ready`.
+    for (const status of ['superseded', 'ready'] as const) {
       updateCohortStatus(purina.id, status);
       expect(transitionCohortToReadyIfComplete(purina.id)).toBe(false);
       expect(getCohortById(purina.id)!.status).toBe(status);

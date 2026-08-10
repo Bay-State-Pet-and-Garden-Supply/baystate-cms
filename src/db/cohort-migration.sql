@@ -1,10 +1,16 @@
--- Cohort Migration (issue #30, PR1)
+-- Cohort Migration (issue #30, PR1; schema v3 = FINAL, issue #31 commit 3 / D7)
 -- Adds durable candidate product-family tables for cohort-centric Curation.
 -- Version-gated by app_meta key 'curation_cohort_schema_version' in
 -- runMigrations() (src/db/migrations.ts). Uses CREATE TABLE IF NOT EXISTS and
 -- CREATE INDEX IF NOT EXISTS for idempotence. Historical cohort rows are
 -- superseded, never mutated; a superseded row is no longer the active cohort.
 --
+-- v3 (D7): curation_cohorts.status CHECK is NARROWED to the candidate-family
+-- lifecycle `forming | waiting | ready | superseded`. Execution/lifecycle
+-- states (`running`/`completed`/`failed`/`conflicted`) never belong on the
+-- cohort row — cohort RUN state is owned by the cohort run (PR3+). Fresh
+-- installs read the FINAL v3 shape directly from this file (marker '3');
+-- existing databases are rebuilt hop-by-hop in runMigrations().
 -- v2 (round-2 F3): curation_cohorts.batch_id references onboarding_batches(id)
 -- ON DELETE CASCADE so deleting a batch cleans up its cohort rows. Existing
 -- v1 databases are rebuilt by runMigrations() (SQLite cannot alter an FK);
@@ -21,7 +27,7 @@ CREATE TABLE IF NOT EXISTS curation_cohorts (
   group_label TEXT NOT NULL,
   grouping_version TEXT NOT NULL,   -- 'product-family-v1'
   membership_hash TEXT NOT NULL,    -- order-insensitive canonical hash
-  status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','running','completed','failed','conflicted','superseded')),
+  status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','superseded')),
   blocked_reason TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,

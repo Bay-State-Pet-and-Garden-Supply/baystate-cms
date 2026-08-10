@@ -1,13 +1,20 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { listRegistry } from '../../db/repositories/field-registry-repo';
-import { updateFieldMetadata } from '../services/field-metadata-service';
+import { repairFieldRegistryAttestation, updateFieldMetadata } from '../services/field-metadata-service';
 
 const route = new Hono();
 
 /**
  * GET /api/field-registry - List field registry entries.
+ *
+ * Lazy repair fallback (issue #31 commit 3, D1): when the R2 attestation file
+ * (`store/field-registry.json`) is missing, rebuild it from R1 (the
+ * authoritative DB) so evidence scans and activation verification never see an
+ * absent projection. Cheap existence check; repair failures are non-fatal here.
  */
 route.get('/field-registry', (c) => {
   const workspace = getCurrentWorkspace();
@@ -15,8 +22,38 @@ route.get('/field-registry', (c) => {
     return c.json({ error: 'No workspace loaded.' }, 400);
   }
 
+  const attestationPath = path.join(workspace.workspacePath, 'store', 'field-registry.json');
+  if (!fs.existsSync(attestationPath)) {
+    try {
+      repairFieldRegistryAttestation({ id: workspace.id, workspacePath: workspace.workspacePath });
+    } catch (err) {
+      console.error('[FieldRegistryRoute] GET lazy attestation repair failed (non-fatal):', err);
+    }
+  }
+
   const entries = listRegistry(workspace.id);
   return c.json({ entries });
+});
+
+/**
+ * POST /api/field-registry/repair - Explicit repair path (issue #31 commit 3,
+ * D1). Rebuilds `store/field-registry.json` from the authoritative R1
+ * (`field_registry` DB) as the canonical attestation projection. Follows the
+ * existing route patterns; auth is handled globally by the API-token
+ * middleware for non-GET requests (src/server/app.ts).
+ */
+route.post('/field-registry/repair', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No workspace loaded.' }, 400);
+  }
+  try {
+    const entries = repairFieldRegistryAttestation({ id: workspace.id, workspacePath: workspace.workspacePath });
+    return c.json({ success: true, entryCount: entries.length });
+  } catch (err) {
+    console.error('[FieldRegistryRoute] Repair failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
 });
 
 /**

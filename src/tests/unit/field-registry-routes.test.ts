@@ -155,4 +155,39 @@ describe('field registry routes (canonical field-metadata authority)', () => {
     expect(res.status).toBe(404);
     expect(listRegistry(workspaceId).some(entry => entry.label === 'No Such Row')).toBe(false);
   });
+
+  it('repair: POST /api/field-registry/repair rebuilds the R2 attestation from R1 after the JSON file is deleted', async () => {
+    const app = makeApp();
+
+    // Simulate a stale/missing attestation: R1 is authoritative, R2 is gone.
+    fs.rmSync(path.join(root, 'store', 'field-registry.json'), { force: true });
+    expect(fs.existsSync(path.join(root, 'store', 'field-registry.json'))).toBe(false);
+
+    const res = await app.request('/api/field-registry/repair', { method: 'POST' });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { success: boolean; entryCount?: number };
+    expect(body.success).toBe(true);
+    expect(body.entryCount).toBeGreaterThanOrEqual(3);
+
+    // The rebuilt projection is byte-identical to repairAttestation's: every
+    // R1 row round-trips under { schemaVersion: 1, entries }.
+    const raw = fs.readFileSync(path.join(root, 'store', 'field-registry.json'), 'utf-8');
+    const parsed = JSON.parse(raw) as { schemaVersion: number; entries: unknown[] };
+    const registry = listRegistry(workspaceId);
+    expect(parsed.schemaVersion).toBe(1);
+    expect(parsed.entries).toEqual(JSON.parse(JSON.stringify(registry)));
+  });
+
+  it('repair fallback: GET /api/field-registry lazily rebuilds R2 when the JSON file is missing', async () => {
+    const app = makeApp();
+    fs.rmSync(path.join(root, 'store', 'field-registry.json'), { force: true });
+
+    const res = await app.request('/api/field-registry');
+    expect(res.status).toBe(200);
+    const body = await res.json() as { entries: Array<{ xmlField: string }> };
+    expect(body.entries.length).toBeGreaterThanOrEqual(3);
+    // The GET call repaired the attestation file as a side effect.
+    const attested = readAttestationEntries();
+    expect(attested.length).toBe(body.entries.length);
+  });
 });

@@ -3,12 +3,18 @@
 /**
  * Deterministic catalog evidence scan.
  *
- * Scans canonical product JSON files plus store/field-registry.json and
+ * Scans canonical product JSON files plus the field-registry attestation and
  * produces a byte-identical content-addressed evidence artifact. The scan
  * records field presence, distinct-value hashes, delimiter-character
  * frequencies on ProductField1–25, name-only Page observations from preserved
  * ProductOnPages fragments, and a source tree hash. It never infers field
  * semantics from value frequency.
+ *
+ * C8 (issue #31 commit 3): the registry contributes its CANONICAL xmlField
+ * projection hash (`{ xmlFields: [...] }`) to the source tree hash — exactly
+ * the facts `readLiveCatalogFields`/the verifier consume — never the raw
+ * `field-registry.json` bytes. Cosmetic label/formatting changes therefore
+ * cannot invalidate activation; only Catalog Field set membership can.
  */
 
 import fs from 'node:fs';
@@ -65,6 +71,23 @@ interface ProductScanResult {
   sku: string | null;
   customFields: Record<string, string>;
   pageNames: string[];
+}
+
+/**
+ * C8: the CANONICAL attestation projection of the field registry — exactly the
+ * registry facts activation verification depends on. Activation consumes only
+ * the xmlField set (`readLiveCatalogFields` + the verifier's field-attestation
+ * check), so the evidence hash is computed over `{ xmlFields: [...] }` (sorted,
+ * deduplicated), NOT the raw `field-registry.json` bytes. Incidental JSON
+ * formatting, display labels, kinds/dataTypes, and curatedFieldsJson never
+ * enter the evidence hash; only Catalog Field set membership does.
+ */
+function registryProjectionHash(xmlFields: string[]): string {
+  return sha256Hex(canonicalJsonFileString({ xmlFields }));
+}
+
+function uniqueSortedXmlFields(xmlFields: string[]): string[] {
+  return [...new Set(xmlFields.filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
 function xmlDecode(value: string): string {
@@ -164,7 +187,7 @@ async function mapWithConcurrency<T, R>(
  * Deterministic catalog evidence scan. Two scans over identical inputs produce
  * byte-identical JSON (the artifact contains no timestamps or absolute paths).
  */
-export async function scanCatalogEvidence(workspacePath: string): Promise<CatalogEvidence> {
+export async function scanCatalogEvidence(workspacePath: string, workspaceId?: string): Promise<CatalogEvidence> {
   const productsDir = path.join(workspacePath, PRODUCTS_DIR);
   const relativeFiles = await listJsonFiles(workspacePath, productsDir, '');
 
@@ -253,12 +276,25 @@ export async function scanCatalogEvidence(workspacePath: string): Promise<Catalo
   try {
     const buffer = await fs.promises.readFile(registryPath);
     const registry = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer)) as { entries?: Array<{ xmlField?: unknown }> };
-    const xmlFields = (registry.entries ?? []).map(entry => String(entry.xmlField ?? '')).sort();
+    const xmlFields = uniqueSortedXmlFields((registry.entries ?? []).map(entry => String(entry.xmlField ?? '')));
     fieldRegistry = { entryCount: xmlFields.length, xmlFields };
-    fileHashes.push({ path: FIELD_REGISTRY_FILE, hash: sha256Hex(buffer) });
+    // C8: hash the canonical xmlField projection, never the raw file bytes.
+    fileHashes.push({ path: FIELD_REGISTRY_FILE, hash: registryProjectionHash(xmlFields) });
   } catch (error) {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
-      // No registry yet; evidence simply reports zero entries.
+      // R2 is missing/stale. Fall back to R1 (the authoritative SQLite
+      // field_registry) when a workspace id is available so the evidence hash
+      // still reflects exactly what activation verification consumes. Without
+      // a workspace id the registry simply reports zero entries (unchanged).
+      // The repo is imported lazily so vitest (which cannot load bun:sqlite)
+      // keeps scanning without a DB; the fallback only fires with a DB-backed
+      // workspace id.
+      if (workspaceId) {
+        const { listRegistry } = await import('../db/repositories/field-registry-repo');
+        const xmlFields = uniqueSortedXmlFields(listRegistry(workspaceId).map(entry => entry.xmlField));
+        fieldRegistry = { entryCount: xmlFields.length, xmlFields };
+        fileHashes.push({ path: FIELD_REGISTRY_FILE, hash: registryProjectionHash(xmlFields) });
+      }
     } else {
       throw new Error(`Unable to read ${FIELD_REGISTRY_FILE}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
@@ -410,9 +446,10 @@ export function createCatalogEvidenceVerifier(workspacePath: string): CatalogEvi
 export async function verifyCatalogEvidenceTreeIntegrity(
   workspacePath: string,
   expectedArtifactHash: string,
+  workspaceId?: string,
 ): Promise<{ verified: boolean; reason?: string }> {
   try {
-    const rescanned = await scanCatalogEvidence(workspacePath);
+    const rescanned = await scanCatalogEvidence(workspacePath, workspaceId);
     const artifact = renderCatalogEvidence(rescanned);
     const hash = sha256Hex(artifact);
     if (hash !== expectedArtifactHash) {

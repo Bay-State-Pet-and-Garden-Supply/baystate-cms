@@ -80,6 +80,18 @@ export function repairAttestation(workspace: FieldMetadataWorkspace): FieldRegis
 }
 
 /**
+ * Explicit repair surface for a stale or missing R2 attestation
+ * (`store/field-registry.json`): rebuilds it from R1 (the authoritative
+ * `field_registry` DB) as the canonical projection. Wired to
+ * `POST /api/field-registry/repair` and used as a lazy fallback in the
+ * registry GET handler when the attestation file is missing (D1, issue #31
+ * commit 3). Returns the entries written.
+ */
+export function repairFieldRegistryAttestation(workspace: FieldMetadataWorkspace): FieldRegistryRow[] {
+  return repairAttestation(workspace);
+}
+
+/**
  * Apply a zod-validated metadata patch to the R1 row identified by `xmlField`,
  * then rewrite R2 from R1. Patched property names are merged into
  * `curated_fields_json` (deduped, sorted) so sync knows the operator curated
@@ -166,19 +178,40 @@ export function syncRegistryFromProductIndex(workspace: FieldMetadataWorkspace):
 
   const existingNames = new Set(listRegistry(workspace.id).map(entry => entry.xmlField));
 
+  // N-writes batching (commit-1 review SHOULD-FIX): collect all missing-key
+  // DB upserts first, then ONE R2 rewrite instead of one
+  // updateFieldMetadata/repairAttestation per key (each rewrite is a full
+  // canonical projection of R1). New rows are observed-only
+  // (`curated_fields_json` stays null).
+  const now = new Date().toISOString();
   let added = 0;
   for (const key of allKeys) {
     if (existingNames.has(key)) continue;
-    updateFieldMetadata(workspace, key, {
+    upsertRegistryEntry({
+      id: randomUUID(),
+      workspaceId: workspace.id,
+      xmlField: key,
       label: key,
       kind: 'custom',
       dataType: 'string',
       editable: true,
       required: false,
       uiGroup: 'Custom Fields',
+      sampleValuesJson: null,
+      curatedFieldsJson: null, // observed-only — sync discovery is not curation
+      createdAt: now,
+      updatedAt: now,
     });
     existingNames.add(key);
     added += 1;
+  }
+  if (added > 0) {
+    try {
+      repairAttestation(workspace);
+    } catch (err) {
+      // D1: R1 is authority; a failed R2 rewrite is logged, never fatal here.
+      console.error('[FieldMetadataService] syncRegistryFromProductIndex: R2 rewrite failed (R1 remains authoritative):', err);
+    }
   }
   return added;
 }
