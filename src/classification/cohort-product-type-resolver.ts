@@ -360,6 +360,22 @@ export interface CohortMemberInput {
   memberSnapshot: RuntimeClassificationSnapshot;
 }
 
+/**
+ * A run-bound LLM ranker result for ONE member (PR4 C4a freeze integration,
+ * DECISION-A: the model call is attached to the member child run via
+ * `buildModelCallContext(memberSnapshot, childRunId, 'product_type_ranking', 1)`
+ * — provenance identical to the member SKU stage). The LLM is a FALLBACK: it
+ * is applied only when the deterministic keyword match is absent or below the
+ * caller's confidence floor, and a failing/unavailable LLM path abstains
+ * (fail-closed — no silent type from a failed model path).
+ */
+export interface MemberLlmRankResult {
+  /** The LLM-chosen product type id (one of the member's resolved options). */
+  productTypeId: string;
+  /** The LLM ranker confidence (0..1). */
+  confidence: number;
+}
+
 export interface ResolveCohortProductTypeInput {
   /** One entry per finalized cohort member, any order. */
   members: CohortMemberInput[];
@@ -369,6 +385,18 @@ export interface ResolveCohortProductTypeInput {
    * own `KEYWORD_MATCH_MIN_CONFIDENCE` gate still applies per member.
    */
   confidenceFloor: number;
+  /**
+   * Optional per-member LLM ranker results (PR4 C4a freeze integration): the
+   * freeze runs the run-bound `product_type_ranking` fallback for members
+   * whose deterministic keyword match is absent or below the floor, then
+   * passes the results here. Aligned with `members` (same length + order;
+   * null entry = no LLM result for that member). The aggregation applies an
+   * LLM result ONLY when the member's deterministic match is absent or below
+   * the floor — a confident keyword match always wins (deterministic-first,
+   * exactly like the per-SKU `processTargetInternal`). Pure input: the caller
+   * already made the run-bound model call; this module never invokes a model.
+   */
+  memberLlmResults?: Array<MemberLlmRankResult | null>;
 }
 
 /**
@@ -383,7 +411,9 @@ export interface PerMemberProductTypeResult {
   productSku: string | null;
   productTypeId: string | null;
   confidence: number | null;
-  source: 'keyword' | null;
+  /** 'keyword' when the deterministic matcher produced the match, 'llm' when
+   *  the freeze-time run-bound ranker did, else null. */
+  source: 'keyword' | 'llm' | null;
   /** True when the member contributes no confident match (no match, or confidence < floor). */
   isAbstention: boolean;
   /**
@@ -400,7 +430,7 @@ export interface PerMemberProductTypeResult {
 export type ConfidentMemberProductTypeResult = PerMemberProductTypeResult & {
   productTypeId: string;
   confidence: number;
-  source: 'keyword';
+  source: 'keyword' | 'llm';
 };
 
 /** Member support for the resolved type: confident members vs total members. */
@@ -453,8 +483,10 @@ export type CohortProductTypeResolution =
  * or no options abstain. An empty members array resolves to `abstained`.
  */
 export function resolveCohortProductType(input: ResolveCohortProductTypeInput): CohortProductTypeResolution {
-  const { members, confidenceFloor } = input;
-  const perMember = members.map(member => resolveMemberResult(member, confidenceFloor));
+  const { members, confidenceFloor, memberLlmResults } = input;
+  const perMember = members.map((member, index) =>
+    resolveMemberResult(member, confidenceFloor, memberLlmResults?.[index] ?? null),
+  );
   const memberCount = perMember.length;
 
   const confident = perMember.filter(
@@ -506,17 +538,31 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
   };
 }
 
-function resolveMemberResult(member: CohortMemberInput, confidenceFloor: number): PerMemberProductTypeResult {
+function resolveMemberResult(
+  member: CohortMemberInput,
+  confidenceFloor: number,
+  llmResult?: MemberLlmRankResult | null,
+): PerMemberProductTypeResult {
   const evidence = evidenceFromProjection(member.projection);
   const { match, packet } = scoreTypeMatch(evidence, resolveProductTypeOptions(member.memberSnapshot));
-  const isAbstention = match.productTypeId === null || match.confidence === null || match.confidence < confidenceFloor;
+  // LLM ranker fallback (PR4 C4a freeze integration, DECISION-A): applied ONLY
+  // when the deterministic keyword match is absent or below the caller's
+  // confidence floor — a confident deterministic match always wins, exactly
+  // like the per-SKU stage (`processTargetInternal`: deterministic first, LLM
+  // fallback). The LLM result's own confidence still passes through the floor
+  // gate below (a sub-floor LLM match counts as an abstention).
+  const belowFloor = match.productTypeId === null || match.confidence === null || match.confidence < confidenceFloor;
+  const effective = belowFloor && llmResult
+    ? { productTypeId: llmResult.productTypeId, confidence: llmResult.confidence, source: 'llm' as const }
+    : match;
+  const isAbstention = effective.productTypeId === null || effective.confidence === null || effective.confidence < confidenceFloor;
 
   return {
     onboardingItemId: member.projection.onboardingItemId,
     productSku: member.projection.productSku,
-    productTypeId: match.productTypeId,
-    confidence: match.confidence,
-    source: match.source,
+    productTypeId: effective.productTypeId,
+    confidence: effective.confidence,
+    source: effective.source,
     isAbstention,
     supportingEvidenceIds: isAbstention ? [] : packet.evidenceIds,
     contradictingEvidenceIds: [],

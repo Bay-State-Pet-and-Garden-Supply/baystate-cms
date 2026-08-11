@@ -49,6 +49,9 @@ import {
   heartbeatCohortRun,
   cancelFreezingRun,
   getCohortSnapshotByHash,
+  writeExecutionProductType,
+  writeFinalMembershipHash,
+  writeProductTypeOutcomeOnly,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
 import {
@@ -79,6 +82,7 @@ import {
   getModelExecutionPlanEntry,
   getRuntimeSnapshotByHash,
   computeOcrExecutionDigest,
+  buildModelCallContext,
 } from '../classification/runtime-snapshot';
 import type {
   PageSnapshotState,
@@ -89,6 +93,20 @@ import type { ModelPolicyView } from '../classification/model-policy-gateway';
 import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../classification/model-operation-registry';
 import type { ModelCallContext, ModelExecutionPlan, RuntimeRuleVersions } from '../classification/model-operation-registry';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
+import { getCohortCurationFlags } from '../classification/flags';
+import {
+  evidenceFromProjection,
+  matchMemberDeterministically,
+  resolveCohortProductType,
+} from '../classification/cohort-product-type-resolver';
+import type {
+  CohortProductTypeResolution,
+  ConfidentMemberProductTypeResult,
+  MemberLlmRankResult,
+} from '../classification/cohort-product-type-resolver';
+import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
+import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
+import { llmRankOptions } from '../classification/curation-target-ranker';
 import { onboardingEvents } from './sse-emitter';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import type { ProductLineItemSnapshot } from '../classification/types';
@@ -117,6 +135,17 @@ import type { ClassificationConfigSnapshotRef } from '../shared/schemas/classifi
 import type { ResolvedTargetOption } from '../classification/curation-target-resolver';
 
 const now = () => new Date().toISOString();
+
+/**
+ * Cohort-level Product Type confidence floor (PR4 architecture-report §7). A
+ * member's resolved type contribution must clear this floor to count as a
+ * confident cohort contribution (the per-member matcher's own
+ * `KEYWORD_MATCH_MIN_CONFIDENCE` gate still applies first). Default 0.7 —
+ * matches the per-SKU keyword floor. The env-tunable override
+ * (`BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR`) is documented in C5;
+ * C4a keeps the constant.
+ */
+const COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR = 0.7;
 
 // Re-exported so tests keep importing the OCR execution-authority digest from
 // the cohort module; the implementation lives with the runtime snapshot it
@@ -216,70 +245,8 @@ export function buildExecutionEvidenceProjection(
     if (!item) {
       throw new Error(`Execution-evidence projection: member item ${member.onboardingItemId} not found.`);
     }
-    const ext: Record<string, any> = item.extractionData ?? {};
     const extractionSourceUrl = extractionSources.get(item.id) ?? null;
-
-    const piEvidence = ((ext as { productIntelligenceEvidence?: Array<{ runId?: string; resultHash?: string; importRecordId?: string }> }).productIntelligenceEvidence ?? [])
-      .map(entry => ({
-        runId: String(entry.runId ?? ''),
-        resultHash: String(entry.resultHash ?? ''),
-        importRecordId: String(entry.importRecordId ?? ''),
-      }))
-      .filter(entry => entry.runId && entry.resultHash && entry.importRecordId)
-      .sort((a, b) => a.runId.localeCompare(b.runId));
-    const piImportComplete =
-      ((ext as { productIntelligenceEvidence?: unknown[] }).productIntelligenceEvidence ?? []).length === 0 ||
-      piEvidence.length === ((ext as { productIntelligenceEvidence?: unknown[] }).productIntelligenceEvidence ?? []).length;
-
-    const evidenceHash = computeExtractionHash(item);
-    if (!evidenceHash) {
-      throw new Error(`Execution-evidence projection: member ${member.onboardingItemId} has no extraction hash (extraction evidence incomplete).`);
-    }
-    if (!piImportComplete) {
-      throw new Error(`Execution-evidence projection: member ${member.onboardingItemId} has an incomplete Product Intelligence import (piImportComplete cannot be asserted).`);
-    }
-
-    return ExecutionEvidenceProjectionV1Schema.shape.members.element.parse({
-      onboardingItemId: item.id,
-      ordinal: member.ordinal,
-      productSku: item.upc ?? null,
-      extractionComplete: true,
-      sourceUrl: item.sourceUrl ?? null,
-      extractionSourceUrl: extractionSourceUrl,
-      sourcingDecision: item.sourcingDecision ?? null,
-      spreadsheetIdentity: {
-        name: item.name,
-        expectedName: item.expectedName ?? null,
-        brandHint: item.brandHint ?? null,
-        departmentHint: item.departmentHint ?? null,
-        price: item.price ?? null,
-        quantity: item.quantity ?? null,
-        rowNumber: item.rowNumber,
-        upc: item.upc ?? null,
-      },
-      extraction: {
-        title: ext.title ?? null,
-        description: ext.description ?? null,
-        brand: ext.brand ?? null,
-        weight: ext.weight ?? null,
-        bulletPoints: Array.isArray(ext.bulletPoints) ? ext.bulletPoints : [],
-        searchKeywords: ext.searchKeywords ?? null,
-        primaryImage: ext.primaryImage ?? null,
-        additionalImages: Array.isArray(ext.additionalImages) ? ext.additionalImages : [],
-        customFields: ext.customFields ?? {},
-        fieldProvenance: ext.fieldProvenance ?? {},
-        packagingTitle: ext.packagingTitle ?? null,
-        ocr: {
-          outcome: ext.ocrOutcome ?? null,
-          packagingOcrData: ext.packagingOcrData ?? null,
-          ocrInputHash: computeOcrInputHash(item, extractionSourceUrl),
-          ocrExecutionDigest: storedOcrExecutionDigest(item),
-        },
-        piEvidence,
-        piImportComplete,
-      },
-      evidenceHash,
-    });
+    return buildExecutionEvidenceProjectionMember(member, item, extractionSourceUrl);
   });
 
   const projection: ExecutionEvidenceProjectionV1 = {
@@ -294,6 +261,85 @@ export function buildExecutionEvidenceProjection(
     throw new Error(`Execution-evidence projection failed schema validation: ${JSON.stringify(parsed.error.issues)}`);
   }
   return parsed.data;
+}
+
+/**
+ * Build ONE member's `execution-evidence-v1` entry from its live item — the
+ * per-member core of `buildExecutionEvidenceProjection` (same fail-closed
+ * extraction-completeness + PI-import-integrity gates). The freeze's per-member
+ * loop uses this to build the member projection for the PR4 per-member
+ * Product Type evidence directly from the post-OCR `frozenItem`; the final
+ * CAS re-derives the identical entry from the reloaded item (verified against
+ * the frozen hashes inside the transaction).
+ */
+function buildExecutionEvidenceProjectionMember(
+  member: CurationCohortMember,
+  item: OnboardingItem,
+  extractionSourceUrl: string | null,
+): ExecutionEvidenceProjectionMemberV1 {
+  const ext: Record<string, any> = item.extractionData ?? {};
+
+  const piEvidence = ((ext as { productIntelligenceEvidence?: Array<{ runId?: string; resultHash?: string; importRecordId?: string }> }).productIntelligenceEvidence ?? [])
+    .map(entry => ({
+      runId: String(entry.runId ?? ''),
+      resultHash: String(entry.resultHash ?? ''),
+      importRecordId: String(entry.importRecordId ?? ''),
+    }))
+    .filter(entry => entry.runId && entry.resultHash && entry.importRecordId)
+    .sort((a, b) => a.runId.localeCompare(b.runId));
+  const piImportComplete =
+    ((ext as { productIntelligenceEvidence?: unknown[] }).productIntelligenceEvidence ?? []).length === 0 ||
+    piEvidence.length === ((ext as { productIntelligenceEvidence?: unknown[] }).productIntelligenceEvidence ?? []).length;
+
+  const evidenceHash = computeExtractionHash(item);
+  if (!evidenceHash) {
+    throw new Error(`Execution-evidence projection: member ${member.onboardingItemId} has no extraction hash (extraction evidence incomplete).`);
+  }
+  if (!piImportComplete) {
+    throw new Error(`Execution-evidence projection: member ${member.onboardingItemId} has an incomplete Product Intelligence import (piImportComplete cannot be asserted).`);
+  }
+
+  return ExecutionEvidenceProjectionV1Schema.shape.members.element.parse({
+    onboardingItemId: item.id,
+    ordinal: member.ordinal,
+    productSku: item.upc ?? null,
+    extractionComplete: true,
+    sourceUrl: item.sourceUrl ?? null,
+    extractionSourceUrl: extractionSourceUrl,
+    sourcingDecision: item.sourcingDecision ?? null,
+    spreadsheetIdentity: {
+      name: item.name,
+      expectedName: item.expectedName ?? null,
+      brandHint: item.brandHint ?? null,
+      departmentHint: item.departmentHint ?? null,
+      price: item.price ?? null,
+      quantity: item.quantity ?? null,
+      rowNumber: item.rowNumber,
+      upc: item.upc ?? null,
+    },
+    extraction: {
+      title: ext.title ?? null,
+      description: ext.description ?? null,
+      brand: ext.brand ?? null,
+      weight: ext.weight ?? null,
+      bulletPoints: Array.isArray(ext.bulletPoints) ? ext.bulletPoints : [],
+      searchKeywords: ext.searchKeywords ?? null,
+      primaryImage: ext.primaryImage ?? null,
+      additionalImages: Array.isArray(ext.additionalImages) ? ext.additionalImages : [],
+      customFields: ext.customFields ?? {},
+      fieldProvenance: ext.fieldProvenance ?? {},
+      packagingTitle: ext.packagingTitle ?? null,
+      ocr: {
+        outcome: ext.ocrOutcome ?? null,
+        packagingOcrData: ext.packagingOcrData ?? null,
+        ocrInputHash: computeOcrInputHash(item, extractionSourceUrl),
+        ocrExecutionDigest: storedOcrExecutionDigest(item),
+      },
+      piEvidence,
+      piImportComplete,
+    },
+    evidenceHash,
+  });
 }
 
 // ─── Shared authority capture (contract D step 2, once per freeze) ────────────
@@ -619,6 +665,28 @@ export interface FreezeMemberResult {
 }
 
 /**
+ * Deterministic structured conflict reason for a conflicted cohort Product
+ * Type resolution (PR4 architecture-report §4 / DECISION-D): per-member ids +
+ * SKUs + the distinct confident ids, written into the run's `error_message`
+ * when the run completes `failed`. Members are sorted by onboardingItemId so
+ * the message is stable across retries. Never majority-forced; no type is
+ * written on conflict.
+ */
+function buildCohortProductTypeConflictReason(
+  resolution: Extract<CohortProductTypeResolution, { outcome: 'conflicted' }>,
+): string {
+  const confident = resolution.perMember.filter(
+    (m): m is ConfidentMemberProductTypeResult => !m.isAbstention,
+  );
+  const distinctIds = [...new Set(confident.map(m => m.productTypeId))].sort((a, b) => a.localeCompare(b));
+  const detail = [...resolution.perMember]
+    .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId))
+    .map(m => `${m.onboardingItemId}${m.productSku ? ` (${m.productSku})` : ''} -> ${m.productTypeId ?? 'abstained'}@${(m.confidence ?? 0).toFixed(3)}`)
+    .join('; ');
+  return `cohort_product_type_conflict: ${distinctIds.length} distinct confident Product Types (${distinctIds.join(', ')}); members: ${detail}; no execution type written (family conflict, never majority-forced).`;
+}
+
+/**
  * Freeze a claimed cohort for execution (the ONLY path to `freezing →
  * running`). Returns the run in its final state:
  * - `running` on success (authorities + snapshot persisted, transitioned);
@@ -648,6 +716,14 @@ export async function freezeCohortForExecution(
     // reject up front so callers cannot mistake a no-op for progress.
     throw new Error(`Freeze aborted: run ${run.id} is not in 'freezing' state (status=${run.status}).`);
   }
+
+  // PR4 C4a gate: the Execution Product Type resolver + LLM ranker fallback
+  // run ONLY in active mode (`cohortCurationV2Enabled && !cohortShadowOnly`).
+  // Flag OFF / shadow: freeze is byte-identical to PR3 — zero resolver
+  // invocations, zero model calls, zero writes to the PR4 columns.
+  const cohortCurationFlags = getCohortCurationFlags();
+  const cohortTypeResolutionActive = cohortCurationFlags.cohortCurationV2Enabled
+    && !cohortCurationFlags.cohortShadowOnly;
 
   // 1. Load the candidate cohort + members + items + extraction sources.
   const cohort = getCohortById(run.cohortId);
@@ -680,6 +756,11 @@ export async function freezeCohortForExecution(
   //      long OCR calls stays inside the TTL; a rejected heartbeat aborts the
   //      freeze (a sibling owns the run now — no further side effects).
   const frozenMembers: FreezeMemberResult[] = [];
+  // PR4 C4a: per-member run-bound LLM ranker results (DECISION-A), aligned
+  // with `frozenMembers` — null when the member's deterministic keyword match
+  // was confident, or the LLM fallback was skipped / unavailable (fail-closed
+  // abstention). Empty (never populated) when the resolver is inactive.
+  const memberTypeLlmResults: Array<MemberLlmRankResult | null> = [];
   let lastHeartbeatAt = 0;
   for (const member of members) {
     if (Date.now() - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3) {
@@ -815,6 +896,60 @@ export async function freezeCohortForExecution(
       throw new Error(`Freeze aborted: member ${item.id} has no extraction hash after OCR pull-forward.`);
     }
 
+    // PR4 C4a per-member Execution Product Type resolution (active flags
+    // only — flag OFF / shadow skips this block entirely): frozen evidence →
+    // deterministic keyword match → run-bound LLM ranker fallback (DECISION-A:
+    // `product_type_ranking` on the member child run, exactly like the member
+    // SKU stage's `processTargetInternal`) when the deterministic match is
+    // below the cohort confidence floor. A failing/unavailable LLM path
+    // abstains (fail-closed — no silent type from a failed model path). NO
+    // writes here; the per-member results feed the final CAS aggregation.
+    let memberTypeLlmResult: MemberLlmRankResult | null = null;
+    if (cohortTypeResolutionActive) {
+      const memberProjection = buildExecutionEvidenceProjectionMember(member, frozenItem, extractionSourceUrl);
+      const typeEvidence = evidenceFromProjection(memberProjection);
+      const resolvedTypeTarget = resolveTargetsFromSnapshot(snapshot).productTypes[0] ?? null;
+      const typeOptions = resolvedTypeTarget?.options ?? [];
+      const deterministicTypeMatch = matchMemberDeterministically(typeEvidence, typeOptions);
+      const belowFloor =
+        deterministicTypeMatch.productTypeId === null ||
+        deterministicTypeMatch.confidence === null ||
+        deterministicTypeMatch.confidence < COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR;
+      if (belowFloor && resolvedTypeTarget !== null && typeOptions.length > 0) {
+        const typePacket = buildEvidenceTargetPacket(typeEvidence, {
+          attributeId: null,
+          sourceField: null,
+          selectionMode: 'single',
+        });
+        if (typePacket.promptText.trim().length >= 8) {
+          try {
+            const ranked = await llmRankOptions({
+              targetLabel: resolvedTypeTarget.config.label,
+              options: typeOptions,
+              selectionMode: 'single',
+              evidenceText: typePacket.promptText,
+              task: 'product_type_classification',
+              modelPolicy: snapshot.modelPolicy
+                ? modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash)
+                : null,
+              protectedOperation: 'product_type_ranking',
+              modelCall: buildModelCallContext(snapshot, memberRun.id, 'product_type_ranking', 1),
+              snapshot,
+            });
+            if (ranked && ranked.values.length > 0) {
+              memberTypeLlmResult = { productTypeId: ranked.values[0], confidence: ranked.confidence };
+            }
+            // No valid LLM values / no LLM config / no frozen policy → the
+            // member abstains (fail-closed).
+          } catch {
+            // Policy denial / transport failure → abstain, never a silent type.
+            memberTypeLlmResult = null;
+          }
+        }
+      }
+    }
+    memberTypeLlmResults.push(memberTypeLlmResult);
+
     frozenMembers.push({
       member,
       item: frozenItem,
@@ -909,9 +1044,60 @@ export async function freezeCohortForExecution(
       if (!frozen) {
         throw new CohortFreezeOwnershipError(`Freeze CAS lost ownership of run ${run.id} (not freezing / claimed by ${workerId}).`);
       }
+
+      // PR4 C4a: freeze-time Execution Product Type resolution + write-once
+      // final-membership hash — the shared semantic commit (DECISION-B, inside
+      // the final CAS transaction). Only in active mode; flag OFF / shadow
+      // never invokes the resolver (zero new writes, byte-identical PR3).
+      let typeResolution: CohortProductTypeResolution | null = null;
+      if (cohortTypeResolutionActive) {
+        const memberProjectionByItemId = new Map(projection.members.map(m => [m.onboardingItemId, m]));
+        typeResolution = resolveCohortProductType({
+          confidenceFloor: COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR,
+          members: frozenMembers.map(fm => {
+            const memberProjection = memberProjectionByItemId.get(fm.member.onboardingItemId);
+            if (!memberProjection) {
+              throw new CohortFreezeCasError(`member ${fm.member.onboardingItemId} missing from the frozen execution-evidence projection.`);
+            }
+            return { projection: memberProjection, memberSnapshot: fm.snapshot };
+          }),
+          memberLlmResults: memberTypeLlmResults,
+        });
+        if (typeResolution.outcome === 'coherent' || typeResolution.outcome === 'coherent_with_abstentions') {
+          // Write-once CAS: a second write (re-entrant freeze / pre-written
+          // run) is a no-op — an existing execution type is never overwritten.
+          writeExecutionProductType(run.id, workerId, {
+            executionProductTypeId: typeResolution.productTypeId,
+            productTypeConfidence: typeResolution.confidence,
+            productTypeOutcome: typeResolution.outcome,
+          });
+          writeFinalMembershipHash(run.id, workerId, run.candidateMembershipHash);
+        } else if (typeResolution.outcome === 'abstained') {
+          writeProductTypeOutcomeOnly(run.id, workerId, 'abstained');
+          // Abstention still finalizes membership (no family invariant to
+          // violate) — final membership = candidate membership.
+          writeFinalMembershipHash(run.id, workerId, run.candidateMembershipHash);
+        } else {
+          // Conflicted: record the outcome ONLY. The execution type id stays
+          // NULL (never majority-forced) and final_membership_hash is NOT
+          // written (nothing is finalized); the run completes `failed` below.
+          writeProductTypeOutcomeOnly(run.id, workerId, 'conflicted');
+        }
+      }
+
       if (!transitionCohortRunToRunning(run.id, workerId)) {
         throw new CohortFreezeOwnershipError(`Freeze CAS could not transition run ${run.id} to running (ownership lost).`);
       }
+
+      // PR4 DECISION-D: a conflicted family NEVER executes — the run completes
+      // `failed` with the deterministic structured conflict reason (per-member
+      // ids + SKUs) via the owner-guarded, write-once terminal helper. The run
+      // stays the current historical decision, the cohort stays ready, and the
+      // operator resolves the family later (no UI in PR4).
+      if (typeResolution?.outcome === 'conflicted') {
+        completeCohortRun(run.id, 'failed', buildCohortProductTypeConflictReason(typeResolution), { ownerGuard: { workerId } });
+      }
+
       const finalized = getCohortRunById(run.id);
       if (!finalized) {
         throw new CohortFreezeOwnershipError(`Freeze CAS run ${run.id} disappeared after transition.`);
