@@ -115,12 +115,14 @@ import { buildEvidenceTargetPacket } from '../classification/evidence-targeting'
 import { llmRankOptions } from '../classification/curation-target-ranker';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
 export { HeartbeatLostError };
+import { CohortLeaseKeeper } from './cohort-lease-keeper';
 import { onboardingEvents } from './sse-emitter';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import type { ProductLineItemSnapshot } from '../classification/types';
 import { getVlmConfig } from './vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
 import { curateItemWithPipeline } from './product-curator';
+import { ensureCohortTitlesCoordinated } from './cohort-title-coordinator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
 import {
   PROJECTION_VERSION,
@@ -1572,6 +1574,15 @@ export interface PreparedCohortContext {
   };
   /** Frozen per-SKU sibling snapshots (projection-derived) for cohort page coordination. */
   productLineItems?: ProductLineItemSnapshot[];
+  /**
+   * PR6: the parent-run durable title outputs (persisted into
+   * `classification_cohort_outputs` BEFORE the member loop by
+   * `ensureCohortTitlesCoordinated`). Map productSku → {title, source}.
+   * Present ONLY in active cohort mode after the parent title op; absent for
+   * legacy/shadow (which keep the coordinator + cache path). Only multi-item
+   * group members have entries (singletons are never coordinated — DECISION-O).
+   */
+  coordinatedTitles?: Map<string, { title: string; source: 'llm_cohort' | 'cohort_fallback' }>;
   /** Frozen member `OnboardingItem` views (projection-derived) for title coordination. */
   frozenBatchItems?: OnboardingItem[];
   /**
@@ -1869,92 +1880,6 @@ export class MemberCommitCrashSimulationError extends Error {
 }
 
 /**
- * Scoped ownership-guarded lease keeper (PR3 hardening, Commit A2).
- *
- * Wraps ONE long-awaited operation (a freeze member's OCR pull-forward, a
- * cohort member's execution pipeline). While the operation is in flight the
- * keeper renews the parent cohort run's lease via `heartbeatCohortRun` on a
- * TTL/3 cadence, so a live-but-slow owner can no longer silently outlive the
- * lease and be legitimately reclaimed mid-call. A renewal that returns false
- * means the run is no longer ours (a sibling worker reclaimed it, or it went
- * terminal/superseded): the keeper marks `lost`, and the operation's
- * continuation calls `assertHeld()` before EVERY subsequent write —
- * `assertHeld()` performs an immediate ownership re-assertion (so a loss
- * between renewal ticks is still caught) and throws `HeartbeatLostError` when
- * the claim is gone, aborting with NO further side effects. `stop()` (called
- * in `finally`) clears the renewal timer.
- */
-class CohortLeaseKeeper {
-  private readonly runId: string;
-  private readonly workerId: string;
-  private readonly leaseTtlMs: number;
-  private readonly intervalMs: number;
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private stopped = false;
-  private lost = false;
-
-  constructor(runId: string, workerId: string, leaseTtlMs: number) {
-    this.runId = runId;
-    this.workerId = workerId;
-    this.leaseTtlMs = leaseTtlMs;
-    this.intervalMs = Math.max(1, Math.floor(leaseTtlMs / 3));
-  }
-
-  /** Start the periodic renewal; the wrapped operation always begins with a
-   *  freshly asserted lease. Idempotent. PR3 hardening C: the INITIAL renewal
-   *  runs BEFORE the timer is installed and a rejected renewal throws
-   *  `HeartbeatLostError` IMMEDIATELY — callers must never begin OCR/pipeline
-   *  side effects after ownership is already known lost. */
-  start(): this {
-    if (this.timer) return this;
-    // Renew BEFORE installing the timer: if the run is no longer claimed by
-    // us (a sibling reclaimed it, or it went terminal/superseded), ownership
-    // is already lost — throw before any side effect begins.
-    if (!this.renew()) {
-      this.lost = true;
-      throw new HeartbeatLostError(
-        `Claim ownership already lost at operation start (run ${this.runId} is no longer claimed by ${this.workerId}).`,
-      );
-    }
-    this.timer = setInterval(() => {
-      this.renew();
-    }, this.intervalMs);
-    return this;
-  }
-
-  /** Attempt one lease renewal. Marks `lost` on rejection. */
-  renew(): boolean {
-    if (this.stopped || this.lost) return false;
-    const held = heartbeatCohortRun(this.runId, this.workerId, this.leaseTtlMs);
-    if (!held) this.lost = true;
-    return held;
-  }
-
-  /**
-   * Ownership assertion for a continuation write. Throws `HeartbeatLostError`
-   * when the lease was lost — including a loss that happened between renewal
-   * ticks (this is an immediate ownership re-assertion, never a flag-only
-   * check), so NO write can occur after the claim moved to another worker.
-   */
-  assertHeld(): void {
-    if (this.lost || !this.renew()) {
-      throw new HeartbeatLostError(
-        `Claim ownership lost during a long-running operation (run ${this.runId} is no longer claimed by ${this.workerId}).`,
-      );
-    }
-  }
-
-  /** Clear the renewal timer (always called from the operation's `finally`). */
-  stop(): void {
-    this.stopped = true;
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-  }
-}
-
-/**
  * Rebuild the prepared-cohort context for one member from the freeze-persisted
  * child run: the child run's `config_snapshot_*` refs point at the member's
  * frozen runtime snapshot (persisted by `freezeCohortForExecution`); the
@@ -2171,6 +2096,27 @@ export async function processCohort(
   // visible to title/page coordination.
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
 
+  // PR6 (issue #30): the durable parent title op — exactly-once per cohort
+  // run. Computes the canonical title input hash from frozen title authority
+  // only; reuses the persisted `classification_cohort_outputs` when the
+  // complete set + hash match (ZERO LLM calls), otherwise coordinates ONCE
+  // under a scoped lease keeper (audited `cohort_title_consolidation` call
+  // bound to the ordinal-0 member child run) and persists every group
+  // member's title all-or-nothing. Prepared members then consume these
+  // outputs at the `preComputedTitle` seam (PR6 C5); the coordinator +
+  // `cohortCache` are never consulted in active cohort mode. A lost claim
+  // (`HeartbeatLostError`) propagates with NO output rows — the reclaiming
+  // worker re-enters processCohort and reuses-or-coordinates.
+  const coordinatedTitles = await ensureCohortTitlesCoordinated({
+    run,
+    workspaceId,
+    workspacePath,
+    projection,
+    cohort,
+    members,
+    frozenLineContext,
+  });
+
   // Scoped periodic heartbeat (PR3 hardening, Commit A): the lease is renewed
   // when `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3`, so a long
   // OCR/model/pipeline call can no longer silently outlive the TTL. `lastHeartbeatAt`
@@ -2256,6 +2202,9 @@ export async function processCohort(
       prepared.productLineContext = frozenLineContext.productLineContext;
       prepared.productLineItems = frozenLineContext.productLineItems;
       prepared.frozenBatchItems = frozenLineContext.frozenBatchItems;
+      // PR6: the durable parent-run title outputs (attached for every member;
+      // only multi-item group members have entries).
+      prepared.coordinatedTitles = coordinatedTitles;
 
       // Scoped ownership-guarded lease keeper around the long-awaited member
       // pipeline (PR3 hardening A2): the parent lease is renewed on a TTL/3
