@@ -30,6 +30,15 @@
  * cohort execution type, so stage gating, dependency rows, and
  * `curation_data_json` stay byte-identical to PR4/legacy.
  *
+ * PR6 note (issue #30): the durable parent title op
+ * (`ensureCohortTitlesCoordinated`) runs ONLY inside `processCohort`, which
+ * is active-mode-only by construction — no new flag is added. Prepared
+ * members consume the persisted `classification_cohort_outputs`
+ * (`curated_title`) at the `preComputedTitle` seam and NEVER call the
+ * coordinator; `cohortCache` remains the legacy/flag-OFF/shadow authority
+ * (byte-identical there). Flag OFF and shadow runs never create cohort
+ * output rows and never run the parent op.
+ *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/30
  */
 
