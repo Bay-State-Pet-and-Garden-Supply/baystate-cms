@@ -28,6 +28,11 @@ import {
   getCurrentCohortRun,
   getCohortRunById,
   listCohortRunsByCohort,
+  writeExecutionProductType,
+  writeFinalMembershipHash,
+  writeProductTypeOutcomeOnly,
+  insertProposalDependency,
+  listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { getRun } from '../../db/repositories/classification-run-repo';
@@ -598,5 +603,217 @@ describe('cohort curation flags (issue #30, PR3 M1)', () => {
 
     resetCohortCurationFlagsOverride();
     expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
+  });
+});
+
+describe('PR4 write-once execution product type + proposal dependencies (issue #30, PR4 C2)', () => {
+  beforeAll(() => {
+    workspacePath = path.join(os.tmpdir(), `baystate-cms-cohort-runs-pr4c2-${randomUUID().slice(0, 8)}`);
+    fs.mkdirSync(path.join(workspacePath, '.baystate-cms'), { recursive: true });
+    initDb(path.join(workspacePath, '.baystate-cms', 'app.db'));
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { fs.rmSync(workspacePath, { recursive: true, force: true }); } catch { /* ok */ }
+  });
+
+  it('writeExecutionProductType is ownership-guarded and write-once, and the mapper exposes productTypeOutcome', () => {
+    const wsId = newWorkspace();
+    setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+    // Wrong worker: no-op, nothing written.
+    expect(writeExecutionProductType(run.id, 'worker-b', {
+      executionProductTypeId: 'type-1',
+      productTypeConfidence: 0.9,
+      productTypeOutcome: 'coherent',
+    })).toBe(false);
+    expect(getCohortRunById(run.id)!.executionProductTypeId).toBeNull();
+    expect(getCohortRunById(run.id)!.productTypeOutcome).toBeNull();
+
+    // Owner writes id + confidence + outcome once.
+    expect(writeExecutionProductType(run.id, 'worker-a', {
+      executionProductTypeId: 'type-1',
+      productTypeConfidence: 0.9,
+      productTypeOutcome: 'coherent',
+    })).toBe(true);
+    const written = getCohortRunById(run.id)!;
+    expect(written.executionProductTypeId).toBe('type-1');
+    expect(written.productTypeConfidence).toBe(0.9);
+    expect(written.productTypeOutcome).toBe('coherent');
+    expect(written.finalMembershipHash).toBeNull();
+
+    // Write-once: a second write (even by the owner, even a different id) no-ops.
+    expect(writeExecutionProductType(run.id, 'worker-a', {
+      executionProductTypeId: 'type-2',
+      productTypeConfidence: 0.95,
+      productTypeOutcome: 'coherent',
+    })).toBe(false);
+    const after = getCohortRunById(run.id)!;
+    expect(after.executionProductTypeId).toBe('type-1');
+    expect(after.productTypeConfidence).toBe(0.9);
+    expect(after.productTypeOutcome).toBe('coherent');
+  });
+
+  it('writeExecutionProductType is status-guarded: only `freezing` runs accept the write', () => {
+    const wsId = newWorkspace();
+    setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
+
+    // The run already left `freezing` — the freeze CAS must write the type
+    // BEFORE freezing → running, so this is a no-op.
+    expect(writeExecutionProductType(run.id, 'worker-a', {
+      executionProductTypeId: 'type-1',
+      productTypeConfidence: 0.9,
+      productTypeOutcome: 'coherent',
+    })).toBe(false);
+    expect(getCohortRunById(run.id)!.executionProductTypeId).toBeNull();
+    expect(getCohortRunById(run.id)!.productTypeOutcome).toBeNull();
+  });
+
+  it('writeFinalMembershipHash is write-once, ownership-guarded, and status-guarded', () => {
+    const wsId = newWorkspace();
+    setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+    // Wrong worker: no-op.
+    expect(writeFinalMembershipHash(run.id, 'worker-b', 'm'.repeat(64))).toBe(false);
+    expect(getCohortRunById(run.id)!.finalMembershipHash).toBeNull();
+
+    // Owner writes once.
+    expect(writeFinalMembershipHash(run.id, 'worker-a', 'm'.repeat(64))).toBe(true);
+    expect(getCohortRunById(run.id)!.finalMembershipHash).toBe('m'.repeat(64));
+
+    // Write-once: a different hash is never accepted.
+    expect(writeFinalMembershipHash(run.id, 'worker-a', 'n'.repeat(64))).toBe(false);
+    expect(getCohortRunById(run.id)!.finalMembershipHash).toBe('m'.repeat(64));
+
+    // Status guard: no write after leaving `freezing`.
+    const wsId2 = newWorkspace();
+    setupFamilyBatch(wsId2);
+    const [run2] = claimReadyCurationCohorts(wsId2, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run2.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run2.id, 'worker-a')).toBe(true);
+    expect(writeFinalMembershipHash(run2.id, 'worker-a', 'm'.repeat(64))).toBe(false);
+    expect(getCohortRunById(run2.id)!.finalMembershipHash).toBeNull();
+  });
+
+  it('writeProductTypeOutcomeOnly records abstain/conflict with the id/confidence staying NULL', () => {
+    const wsId = newWorkspace();
+    setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+    // Wrong worker: no-op.
+    expect(writeProductTypeOutcomeOnly(run.id, 'worker-b', 'abstained')).toBe(false);
+    expect(getCohortRunById(run.id)!.productTypeOutcome).toBeNull();
+
+    // Owner writes the outcome; the execution id/confidence stay NULL (an
+    // abstained run executes with no execution-type context).
+    expect(writeProductTypeOutcomeOnly(run.id, 'worker-a', 'abstained')).toBe(true);
+    const abstained = getCohortRunById(run.id)!;
+    expect(abstained.productTypeOutcome).toBe('abstained');
+    expect(abstained.executionProductTypeId).toBeNull();
+    expect(abstained.productTypeConfidence).toBeNull();
+
+    // Write-once: a second outcome (even a conflict upgrade) is a no-op.
+    expect(writeProductTypeOutcomeOnly(run.id, 'worker-a', 'conflicted')).toBe(false);
+    expect(getCohortRunById(run.id)!.productTypeOutcome).toBe('abstained');
+
+    // Conflicted path on a fresh run (never majority-forced; nothing finalized).
+    const wsId2 = newWorkspace();
+    setupFamilyBatch(wsId2);
+    const [run2] = claimReadyCurationCohorts(wsId2, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(writeProductTypeOutcomeOnly(run2.id, 'worker-a', 'conflicted')).toBe(true);
+    const conflicted = getCohortRunById(run2.id)!;
+    expect(conflicted.productTypeOutcome).toBe('conflicted');
+    expect(conflicted.executionProductTypeId).toBeNull();
+    expect(conflicted.productTypeConfidence).toBeNull();
+    expect(conflicted.finalMembershipHash).toBeNull();
+
+    // Status guard: only `freezing` runs accept the outcome write.
+    const wsId3 = newWorkspace();
+    setupFamilyBatch(wsId3);
+    const [run3] = claimReadyCurationCohorts(wsId3, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run3.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run3.id, 'worker-a')).toBe(true);
+    expect(writeProductTypeOutcomeOnly(run3.id, 'worker-a', 'abstained')).toBe(false);
+    expect(getCohortRunById(run3.id)!.productTypeOutcome).toBeNull();
+  });
+
+  it('insertProposalDependency is workspace-scoped and FK fail-closed; listDependenciesForProposal round-trips', () => {
+    const wsId = newWorkspace();
+    const { items } = setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
+
+    // A real proposal row to key the dependency off (member SKU proposal).
+    const proposalId = randomUUID();
+    getDb().run(
+      `INSERT INTO classification_proposals
+         (id, run_id, product_sku, proposal_type, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, ?, 'primary_product_type', '"type-1"', 0.9, 'pending', ?)`,
+      [proposalId, child.id, child.productSku, new Date().toISOString()],
+    );
+
+    const dependencyId = insertProposalDependency({
+      workspaceId: wsId,
+      proposalId,
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'h'.repeat(64),
+    });
+    expect(dependencyId).toBeTruthy();
+
+    const deps = listDependenciesForProposal(proposalId);
+    expect(deps.length).toBe(1);
+    expect(deps[0]).toMatchObject({
+      id: dependencyId,
+      workspaceId: wsId,
+      proposalId,
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'h'.repeat(64),
+    });
+    expect(deps[0].createdAt).not.toBeNull();
+
+    // A second row lists in insertion order.
+    const dependencyId2 = insertProposalDependency({
+      workspaceId: wsId,
+      proposalId,
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'g'.repeat(64),
+    });
+    expect(listDependenciesForProposal(proposalId).length).toBe(2);
+    expect(listDependenciesForProposal(proposalId)[1].id).toBe(dependencyId2);
+
+    // Unknown proposal: FK fail-closed.
+    expect(() => insertProposalDependency({
+      workspaceId: wsId,
+      proposalId: 'no-such-proposal',
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'h'.repeat(64),
+    })).toThrow(/FOREIGN KEY constraint failed/);
+
+    // Unknown workspace: FK fail-closed.
+    expect(() => insertProposalDependency({
+      workspaceId: 'no-such-workspace',
+      proposalId,
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'h'.repeat(64),
+    })).toThrow(/FOREIGN KEY constraint failed/);
+
+    // No dependencies for an unrelated proposal.
+    expect(listDependenciesForProposal('unrelated-proposal')).toEqual([]);
+
+    // ON DELETE CASCADE: deleting the proposal removes its dependency rows.
+    getDb().run('DELETE FROM classification_proposals WHERE id = ?', [proposalId]);
+    expect(listDependenciesForProposal(proposalId)).toEqual([]);
   });
 });

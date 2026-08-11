@@ -35,7 +35,7 @@ import { getDb } from '../connection';
 import { createRun, getRun } from './classification-run-repo';
 import { randomUUID } from 'node:crypto';
 import type { ClassificationRunRow } from './classification-run-repo';
-import type { CohortRun } from '../../shared/schemas/cohorts';
+import type { CohortRun, ProposalDependency, ExecutionProductTypeOutcome } from '../../shared/schemas/cohorts';
 
 const now = () => new Date().toISOString();
 
@@ -262,6 +262,135 @@ export function freezeCohortRunAuthorities(
     ],
   );
   return result.changes > 0;
+}
+
+// ─── PR4 write-once primitives (issue #30 PR4 C2) ────────────────────────────
+
+/**
+ * Fields written when a cohort's family coherence RESOLVES to a Product Type
+ * (PR4 architecture-report §2.3, DECISION-B: freeze-time write inside the
+ * final CAS transaction). `coherent` and `coherent_with_abstentions` write
+ * the id + confidence + outcome together; abstain/conflict use
+ * `writeProductTypeOutcomeOnly` (id/confidence stay NULL by design).
+ */
+export interface ExecutionProductTypeFields {
+  executionProductTypeId: string;
+  productTypeConfidence: number;
+  productTypeOutcome: 'coherent' | 'coherent_with_abstentions';
+}
+
+/**
+ * Write the cohort-level Execution Product Type onto a `freezing` run.
+ * Write-once CAS: the UPDATE matches ONLY when the run is still `freezing`
+ * AND claimed by `workerId` AND `execution_product_type_id` is still NULL —
+ * a second write (id already set), a stale owner, or a run that already left
+ * `freezing` is a no-op (false). Modeled on `freezeCohortRunAuthorities`.
+ * No FK on `execution_product_type_id` (product types are config/bundle-
+ * derived; `target_id` precedent is FK-free).
+ */
+export function writeExecutionProductType(
+  runId: string,
+  workerId: string,
+  fields: ExecutionProductTypeFields,
+): boolean {
+  const result = getDb().run(
+    `UPDATE classification_cohort_runs
+     SET execution_product_type_id = ?, product_type_confidence = ?, product_type_outcome = ?
+     WHERE id = ? AND claimed_by = ? AND status = 'freezing' AND execution_product_type_id IS NULL`,
+    [fields.executionProductTypeId, fields.productTypeConfidence, fields.productTypeOutcome, runId, workerId],
+  );
+  return result.changes > 0;
+}
+
+/**
+ * Write the final membership hash onto a `freezing` run (PR4 §3). Written
+ * ONCE in the same shared semantic commit as the Execution Type when family
+ * coherence passes (coherent / coherent_with_abstentions / abstained — final
+ * membership = candidate membership; a conflicted run writes nothing and
+ * fails instead). Write-once CAS: only while `freezing`, claimed by
+ * `workerId`, and `final_membership_hash` still NULL.
+ */
+export function writeFinalMembershipHash(runId: string, workerId: string, hash: string): boolean {
+  const result = getDb().run(
+    `UPDATE classification_cohort_runs
+     SET final_membership_hash = ?
+     WHERE id = ? AND claimed_by = ? AND status = 'freezing' AND final_membership_hash IS NULL`,
+    [hash, runId, workerId],
+  );
+  return result.changes > 0;
+}
+
+/**
+ * Write ONLY the `product_type_outcome` marker for abstain/conflict, where
+ * `execution_product_type_id`/`product_type_confidence` stay NULL by design
+ * (PR4 §2.4). Same write-once + ownership + status CAS guards as
+ * `writeExecutionProductType`, with `product_type_outcome IS NULL` as the CAS
+ * slot — an outcome is written exactly once and never overwritten.
+ */
+export function writeProductTypeOutcomeOnly(
+  runId: string,
+  workerId: string,
+  outcome: Extract<ExecutionProductTypeOutcome, 'abstained' | 'conflicted'>,
+): boolean {
+  const result = getDb().run(
+    `UPDATE classification_cohort_runs
+     SET product_type_outcome = ?
+     WHERE id = ? AND claimed_by = ? AND status = 'freezing' AND product_type_outcome IS NULL`,
+    [outcome, runId, workerId],
+  );
+  return result.changes > 0;
+}
+
+// ─── Proposal dependency metadata (issue #30 PR4 C2) ─────────────────────────
+
+/**
+ * Insert ONE classification-proposal dependency row (schema v6). PR4 records
+ * dependency METADATA only: when a member SKU run executes under a coherent
+ * cohort Execution Product Type, every proposal the member pipeline creates
+ * is stamped with one row (`dependency_kind='execution_product_type'`,
+ * `dependency_target_id` = the run's execution_product_type_id at proposal
+ * creation, `dependency_value_hash` = hashCanonicalJson({executionProductTypeId,
+ * productTypeConfidence}) — the future invalidation key, PR5+).
+ * Workspace-scoped and FK fail-closed: an unknown `proposalId`/`workspaceId`
+ * throws a FOREIGN KEY constraint error. Returns the new row id.
+ */
+export function insertProposalDependency(input: {
+  workspaceId: string;
+  proposalId: string;
+  dependencyKind: string;
+  dependencyTargetId: string;
+  dependencyValueHash: string;
+}): string {
+  const id = randomUUID();
+  getDb().run(
+    `INSERT INTO classification_proposal_dependencies
+       (id, workspace_id, proposal_id, dependency_kind, dependency_target_id, dependency_value_hash, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [id, input.workspaceId, input.proposalId, input.dependencyKind, input.dependencyTargetId, input.dependencyValueHash, now()],
+  );
+  return id;
+}
+
+/**
+ * List dependency rows for a proposal (camelCase row shape), ordered by
+ * created_at for stable presentation. Returns [] when the proposal has none.
+ */
+export function listDependenciesForProposal(proposalId: string): ProposalDependency[] {
+  const rows = getDb().query(
+    `SELECT id, workspace_id, proposal_id, dependency_kind, dependency_target_id, dependency_value_hash, created_at
+     FROM classification_proposal_dependencies
+     WHERE proposal_id = ?
+     ORDER BY created_at ASC`,
+  ).all(proposalId) as Record<string, any>[];
+  return rows.map(row => ({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    proposalId: row.proposal_id,
+    dependencyKind: row.dependency_kind,
+    dependencyTargetId: row.dependency_target_id,
+    dependencyValueHash: row.dependency_value_hash,
+    createdAt: row.created_at,
+  }));
 }
 
 // ─── Lifecycle transitions ────────────────────────────────────────────────────
