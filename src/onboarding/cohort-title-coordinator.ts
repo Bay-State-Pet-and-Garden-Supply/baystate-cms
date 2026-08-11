@@ -37,8 +37,14 @@
  *
  * Never consults `cohortCache` / `coordinateCohortItemsOnce` — active cohort
  * mode treats the DB outputs as the sole "already coordinated" authority.
+ *
+ * PR6 review round 1 hardening: the op performs ZERO writes before the lease
+ * is asserted (the ordinal-0 child run + its immutable snapshot refs are PURE
+ * READ; the reuse path is read-only), the T-hash uses the frozen UNBOUND H5
+ * policy digest (H3/H4/evidence changes never re-coordinate titles), and a
+ * missing frozen snapshot / plan entry / model-call context FAILS CLOSED
+ * before any transport — a non-audited live title call is never made.
  */
-import { getDb } from '../db/connection';
 import {
   getCohortTitleOutputsByRun,
   replaceCohortTitleOutputs,
@@ -46,17 +52,15 @@ import {
 import type { CohortTitleOutputRow } from '../db/repositories/classification-cohort-output-repo';
 import {
   getRuntimeSnapshotByHash,
-  buildModelCallContext,
+  requireModelCallContext,
   getModelExecutionPlanEntry,
 } from '../classification/runtime-snapshot';
+import { getCohortMemberRunForTitleAudit } from '../db/repositories/classification-cohort-run-repo';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { computeCohortTitleInputHash } from './cohort-title-hash';
 import { coordinateCohortItems, groupByProductLine } from './cohort-name-coordinator';
 import { CohortLeaseKeeper } from './cohort-lease-keeper';
-import {
-  ensureMemberRun,
-  COHORT_LEASE_TTL_MS,
-} from '../db/repositories/classification-cohort-run-repo';
+import { COHORT_LEASE_TTL_MS } from '../db/repositories/classification-cohort-run-repo';
 import { CohortTitleOutputSchema } from '../shared/schemas/cohorts';
 import type { CohortTitleOutput } from '../shared/schemas/cohorts';
 import type { FrozenProductLineContext } from './cohort-curator';
@@ -121,66 +125,50 @@ export async function ensureCohortTitlesCoordinated(
   }
 
   // Step 1 — T-hash from FROZEN title authority. The ordinal-0 member child
-  // run (DECISION-N audit binding) exists from freeze via `ensureMemberRun`
-  // (idempotent lookup). Crash-recovery resume may find that child TERMINAL
-  // (committed by a prior processCohort entry): ensureMemberRun then creates
-  // a fresh running child, which inherits the freeze-persisted member
-  // snapshot refs from the prior child EXACTLY like the member loop does
-  // (the member runtime snapshot is immutable, so the refs are identical).
+  // run (DECISION-N audit binding) was created at freeze with the immutable
+  // member runtime snapshot refs. PURE READ ONLY (PR6 review BLOCKER 2): the
+  // parent op never creates a child and never updates refs before the lease is
+  // asserted — a stale pre-reclaim worker can therefore never write. The
+  // latest refs-bearing child (running OR terminal — crash-recovery resume may
+  // find the ordinal-0 child committed by a prior processCohort entry) is the
+  // frozen audit authority; the reuse path performs ZERO writes.
   const orderedMembers = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const member0 = orderedMembers[0];
-  const childRun0 = ensureMemberRun(
-    run.id,
-    member0.onboardingItemId,
-    workspaceId,
-    member0.productSku ?? '',
-    null,
-    null,
-  );
-  if (!childRun0.configSnapshotId || !childRun0.configSnapshotHash) {
-    const prior = getDb().query(
-      `SELECT config_snapshot_id, config_snapshot_hash FROM classification_runs
-       WHERE cohort_run_id = ? AND onboarding_item_id = ?
-         AND config_snapshot_id IS NOT NULL AND config_snapshot_hash IS NOT NULL
-       ORDER BY started_at DESC LIMIT 1`,
-    ).get(run.id, member0.onboardingItemId) as
-      | { config_snapshot_id: string; config_snapshot_hash: string }
-      | undefined;
-    if (prior) {
-      getDb().run(
-        'UPDATE classification_runs SET config_snapshot_id = ?, config_snapshot_hash = ? WHERE id = ?',
-        [prior.config_snapshot_id, prior.config_snapshot_hash, childRun0.id],
-      );
-      childRun0.configSnapshotId = prior.config_snapshot_id;
-      childRun0.configSnapshotHash = prior.config_snapshot_hash;
-    }
-  }
-  // The ordinal-0 member runtime snapshot. When it is genuinely unavailable
-  // (corrupt ref / missing row), the parent op DEGRADES to a non-audited
-  // coordinate call (registry-const authority) instead of aborting the whole
-  // cohort — mirroring the established member-level semantic (a broken member
-  // snapshot fails that member, never the cohort). The affected member's own
-  // pipeline fails closed as today; survivors still get durable titles.
-  const memberSnapshot0 = childRun0.configSnapshotHash
-    ? getRuntimeSnapshotByHash(workspaceId, childRun0.configSnapshotHash)
-    : null;
-  if (!memberSnapshot0) {
-    console.warn(
-      `[CohortTitleCoordinator] Frozen member runtime snapshot unavailable for ordinal-0 member ` +
-        `${member0.onboardingItemId} (run ${run.id}) — coordinating titles WITHOUT the audited call ` +
-        `(model_call_id stays NULL); the member pipeline fails closed per-member as before.`,
+  const childRun0 = getCohortMemberRunForTitleAudit(run.id, member0.onboardingItemId);
+  if (!childRun0 || !childRun0.configSnapshotId || !childRun0.configSnapshotHash) {
+    throw new Error(
+      `[CohortTitleCoordinator] Ordinal-0 member ${member0.onboardingItemId} (run ${run.id}) has no child run ` +
+        'with freeze-persisted snapshot refs — refusing to coordinate titles without the frozen audit authority.',
     );
   }
-  const modelPolicyView = memberSnapshot0?.modelPolicy
-    ? modelPolicyViewFromConfig(memberSnapshot0.modelPolicy as never, memberSnapshot0.snapshotHash)
-    : null;
+  // PR6 review BLOCKER 3: the frozen ordinal-0 runtime snapshot is REQUIRED —
+  // a missing/corrupt ref fails the parent op closed BEFORE any transport. The
+  // title call is ALWAYS audited (`cohort_title_consolidation` bound to the
+  // ordinal-0 child run); a non-audited live call is never made.
+  const memberSnapshot0 = getRuntimeSnapshotByHash(workspaceId, childRun0.configSnapshotHash);
+  if (!memberSnapshot0) {
+    throw new Error(
+      `[CohortTitleCoordinator] Frozen member runtime snapshot ${childRun0.configSnapshotHash} not found for ` +
+        `ordinal-0 member ${member0.onboardingItemId} (run ${run.id}) — refusing to coordinate titles without ` +
+        'the frozen audit authority.',
+    );
+  }
+  // PR6 review BLOCKER 1: the T-hash must use the frozen UNBOUND H5 policy
+  // digest (routing authority only — NO snapshotHash binding, so H3 config /
+  // H4 Pages / evidence changes never change the title hash). The snapshot-
+  // bound view is retained ONLY for transport enforcement
+  // (`assertModelPolicyIntact` inside the audited call).
+  const unboundPolicyView = modelPolicyViewFromConfig(memberSnapshot0.modelPolicy as never);
+  const boundPolicyView = modelPolicyViewFromConfig(
+    memberSnapshot0.modelPolicy as never,
+    memberSnapshot0.snapshotHash,
+  );
+  const titlePlanEntry = getModelExecutionPlanEntry(memberSnapshot0, 'cohort_title_consolidation');
   const inputHash = computeCohortTitleInputHash({
     run,
     projection,
-    modelPolicyDigest: modelPolicyView?.policyDigest ?? null,
-    titlePlanEntry: memberSnapshot0
-      ? (getModelExecutionPlanEntry(memberSnapshot0, 'cohort_title_consolidation') ?? undefined)
-      : undefined,
+    modelPolicyDigest: unboundPolicyView?.policyDigest ?? null,
+    titlePlanEntry: titlePlanEntry ?? undefined,
   });
 
   // Step 2 — REUSE when the persisted set is complete AND every row's hash
@@ -214,27 +202,48 @@ export async function ensureCohortTitlesCoordinated(
   }
   const keeper = new CohortLeaseKeeper(run.id, workerId, COHORT_LEASE_TTL_MS).start();
   try {
-    let coordinatedCallId: string | null = null;
+    // PR6 review BLOCKER 3: REQUIRE the frozen plan + model-call context
+    // before any transport — a schema-v1 snapshot (no frozen plan), a missing
+    // `cohort_title_consolidation` plan entry, or plan/registry version drift
+    // fails the op closed here (never a non-audited live call). A configured
+    // route that is policy-denied/unavailable still flows through the AUDITED
+    // terminal path (`policy_denied`/`unavailable` classification_model_calls
+    // rows) and then deterministically falls back to persisted
+    // `cohort_fallback` outputs — the audit binding is never dropped.
+    const modelCallContext = requireModelCallContext(
+      memberSnapshot0,
+      childRun0.id,
+      'cohort_title_consolidation',
+      1,
+    );
+    if (!modelCallContext) {
+      throw new Error(
+        `[CohortTitleCoordinator] No audited model-call context for ${member0.onboardingItemId} (run ${run.id}) ` +
+          '— refusing to make a non-audited title call.',
+      );
+    }
+    // PR6 review SHOULD-FIX 1: per-group model-call provenance — each group's
+    // producing call id is captured for ITS member SKUs, so every persisted
+    // `llm_cohort` row carries the call that actually produced it.
+    const coordinatedCallIdBySku = new Map<string, string>();
     const coordinated = await coordinateCohortItems(
       frozenItems,
-      modelPolicyView,
-      memberSnapshot0
-        ? {
-            // DECISION-N: the audited title call binds to the ordinal-0 member
-            // child run + its persisted runtime snapshot (mirrors PR4
-            // DECISION-A); the returned callId becomes the durable output-row
-            // `model_call_id`. When the ordinal-0 snapshot is unavailable the
-            // call degrades to the legacy non-audited path (see step 1).
-            modelCall:
-              buildModelCallContext(memberSnapshot0, childRun0.id, 'cohort_title_consolidation', 1) ??
-              undefined,
-            snapshot: memberSnapshot0,
-            assertHeld: () => keeper.assertHeld(),
-            onCoordinatedCallId: (callId: string) => {
-              coordinatedCallId = callId;
-            },
+      boundPolicyView,
+      {
+        // DECISION-N: the audited title call binds to the ordinal-0 member
+        // child run + its persisted runtime snapshot (mirrors PR4
+        // DECISION-A); the returned callId becomes the durable output-row
+        // `model_call_id`. The call is ALWAYS audited — the snapshot, plan
+        // entry, and model-call context are all required above.
+        modelCall: modelCallContext,
+        snapshot: memberSnapshot0,
+        assertHeld: () => keeper.assertHeld(),
+        onCoordinatedCallId: (callId: string, skus: string[]) => {
+          for (const sku of skus) {
+            coordinatedCallIdBySku.set(sku, callId);
           }
-        : undefined,
+        },
+      },
     );
     // Post-await ownership guard BEFORE ANY write.
     keeper.assertHeld();
@@ -243,9 +252,10 @@ export async function ensureCohortTitlesCoordinated(
       productSku,
       title: ct.title,
       source: ct.source,
-      // Durable provenance: only LLM-coordinated titles carry the audited
-      // call id; deterministic fallback rows keep NULL.
-      modelCallId: ct.source === 'llm_cohort' ? coordinatedCallId : null,
+      // Durable provenance: only LLM-coordinated titles carry the call id of
+      // the group that produced them; deterministic fallback rows keep NULL.
+      modelCallId:
+        ct.source === 'llm_cohort' ? (coordinatedCallIdBySku.get(productSku) ?? null) : null,
     }));
     // ONE transaction — all members persist or NONE (architecture-report §5).
     replaceCohortTitleOutputs({

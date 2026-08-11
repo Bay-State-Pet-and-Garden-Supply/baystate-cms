@@ -54,6 +54,7 @@ import {
   updateCohortStatus,
   getCohortById,
   getCohortMembers,
+  computeMembershipHash,
 } from '../../db/repositories/curation-cohort-repo';
 import {
   claimReadyCurationCohorts,
@@ -647,11 +648,11 @@ describe('PR6 acceptance — durable exactly-once parent title coordination (iss
     const resumed = getCohortRunById(finalized.id)!;
 
     // processCohort #2: ZERO title calls (the durable set is complete + hash
-    // matched). The ordinal-1 member — committed in #1 and NOT the ordinal-0
-    // audit-binding child — is SKIPPED by the resume guard (its child is never
-    // re-created). The ordinal-0 member is re-executed (PR6 C4 semantics: the
-    // parent op binds the audited call to a fresh running ordinal-0 child when
-    // the prior one is terminal), and member 3 re-executes.
+    // matched). PR6 review BLOCKER 2 fix: the parent op is PURE READ — it
+    // never creates a replacement ordinal-0 child — so the resume guard finds
+    // the SAME committed child for members 1 & 2 and SKIPS both (no
+    // re-execution, no new child runs). Only member 3 (whose pipeline crashed
+    // before its atomic commit) re-executes.
     const auditRowsBefore = countTitleAuditRowsForRun(finalized.id);
     expect(auditRowsBefore).toBe(2); // exactly one started+success pair so far
     const summary = await processCohort(resumed, wsPath, workspaceId);
@@ -661,11 +662,17 @@ describe('PR6 acceptance — durable exactly-once parent title coordination (iss
     expect(countTitleAuditRowsForRun(finalized.id)).toBe(2); // no new audited rows
 
     // The ordinal-1 member was SKIPPED: exactly one child run (the freeze-
-    // created child committed in #1), never re-created, title untouched.
+    // created child committed in #1), never re-created, title untouched. The
+    // committed ordinal-0 member was skipped the same way (same child, no
+    // replacement — the persisted title is consumed WITHOUT re-execution).
     const memberTwoChildren = getDb().query(
       'SELECT COUNT(*) AS cnt FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
     ).get(finalized.id, items[1].id) as { cnt: number };
     expect(Number(memberTwoChildren.cnt)).toBe(1);
+    const memberOneChildren = getDb().query(
+      'SELECT COUNT(*) AS cnt FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(finalized.id, items[0].id) as { cnt: number };
+    expect(Number(memberOneChildren.cnt)).toBe(1); // ordinal-0 child never replaced
 
     // All three members carry the pre-kill persisted titles byte-for-byte.
     for (const item of items) {
@@ -784,5 +791,75 @@ describe('PR6 acceptance — durable exactly-once parent title coordination (iss
       const stored = findItemById(item.id)!;
       expect(stored.curationData!.curatedTitle).toBe(cannedTitleForUpc(item.upc));
     }
+  });
+
+  it('8: SHOULD-FIX 2 — a singleton inside a mixed cohort keeps the per-item path (no fallback, no warning); grouped members consume persisted outputs', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const extByUpc = {
+      // Two members form one `groupByProductLine` group (same brand + stem).
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Purina' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Purina' }),
+      // A TRUE singleton: same brand but a DIFFERENT stem (its own group of 1)
+      // — merged into the same cohort below so the cohort has >=2 SKUs but the
+      // member's ACTUAL frozen group size is 1.
+      '100000000003': settledExtraction({ _name: 'Purina Pro Plan Adult Dog Food Salmon 5 lb', _brandHint: 'Purina' }),
+    };
+    const { bundle } = writeActiveV2Bundle(wsPath);
+    upsertConfigSnapshot(workspaceId, bundle);
+    const { items, cohorts } = createReadyCohort(workspaceId, extByUpc);
+    expect(cohorts.length).toBeGreaterThan(1);
+    // Merge every formed cohort into the FIRST one and refresh the membership
+    // hash so the claim/freeze membership check passes (donors superseded).
+    const target = cohorts[0];
+    for (const donor of cohorts.slice(1)) {
+      getDb().run('UPDATE curation_cohort_members SET cohort_id = ? WHERE cohort_id = ?', [target.id, donor.id]);
+      getDb().run(
+        "UPDATE curation_cohorts SET status = 'superseded', superseded_at = ? WHERE id = ?",
+        [new Date().toISOString(), donor.id],
+      );
+    }
+    getDb().run(
+      'UPDATE curation_cohorts SET membership_hash = ? WHERE id = ?',
+      [computeMembershipHash(items.map(i => i.id)), target.id],
+    );
+
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    const warns: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: any[]) => {
+      warns.push(args.map(String).join(' '));
+    });
+    try {
+      const summary = await processCohort(finalized, wsPath, workspaceId);
+      expect(summary.parentStatus).not.toBe('failed');
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    // ONLY the two-member group was coordinated: 2 output rows, ONE title call.
+    expect(titleCallCount).toBe(1);
+    const rows = getCohortTitleOutputsByRun(finalized.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.inputHash === rows[0].inputHash)).toBe(true);
+
+    // Grouped members consumed the persisted titles (llm_cohort).
+    for (let i = 0; i < 2; i++) {
+      const stored = findItemById(items[i].id)!;
+      expect(stored.stageStatus).toBe('completed');
+      expect(stored.curationData!.curatedTitle).toBe(cannedTitleForUpc(items[i].upc));
+      expect(stored.curationData!.titleSource).toBe('llm_cohort');
+    }
+
+    // The singleton completed via the UNCHANGED per-item name_consolidation
+    // path — NOT the deterministic cohort fallback and NO missing-output
+    // warning (SHOULD-FIX 2).
+    const singleton = findItemById(items[2].id)!;
+    expect(singleton.stageStatus).toBe('completed');
+    expect(singleton.curationData!.curatedTitle).toBeTruthy();
+    expect(singleton.curationData!.titleSource).not.toBe('cohort_fallback');
+    expect(warns.some(line => line.includes('missing a persisted cohort title output'))).toBe(false);
   });
 });

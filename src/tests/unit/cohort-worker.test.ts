@@ -94,6 +94,41 @@ afterAll(() => {
 
 afterEach(() => resetCohortCurationFlagsOverride());
 
+// ─── PR6 review round 1: v1-cohort title-output seeding helper ────────────────
+//
+// BLOCKER 3 fix: active-cohort runs over schema-v1 member snapshots (no
+// frozen model-execution plan) can no longer coordinate titles at the parent
+// op — the op FAILS CLOSED before any transport rather than making a
+// non-audited live call. v1-harness tests that run `processCohort` on a
+// multi-member cohort therefore seed the durable `curated_title` outputs
+// FIRST (with the canonical v1 T-hash), so the parent op REUSES them with
+// ZERO transport. Seeded titles mirror the deterministic cohort fallback
+// (frozen spreadsheet identity) the v1 legacy coordinator produced.
+
+function loadFrozenProjectionForRun(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
+  const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
+  return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+}
+
+function seedV1TitleOutputs(workspaceId: string, run: CohortRun): void {
+  const projection = loadFrozenProjectionForRun(workspaceId, run);
+  // v1 member snapshots carry no model policy and no frozen plan → the parent
+  // op hashes with `modelPolicyDigest: null` + registry-const versions.
+  const inputHash = computeCohortTitleInputHash({ run, projection, modelPolicyDigest: null });
+  const outputs = projection.members
+    .map(member => ({
+      productSku: member.productSku ?? '',
+      title: cohortNameCoordinator.formatDeterministicTitle(
+        member.spreadsheetIdentity.name,
+        member.spreadsheetIdentity.brandHint,
+      ),
+      source: 'cohort_fallback' as const,
+    }))
+    .filter(o => o.productSku.length > 0);
+  if (outputs.length === 0) return;
+  replaceCohortTitleOutputs({ workspaceId, runId: run.id, inputHash, outputs });
+}
+
 /**
  * Minimal legacy v1 classification config with EVERY curation target disabled.
  * With no enabled targets the modular pipeline emits no `reviewable_abstention`
@@ -525,9 +560,24 @@ describe('OnboardingWorker Curation cohort integration (issue #30, PR3 M3)', () 
     });
     overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
 
-    const worker = new OnboardingWorker(workspaceId, wsPath);
-    await worker.poll();
-    await drainWorker(worker);
+    // PR6 review BLOCKER 3: this v1 harness has no frozen model-execution
+    // plan, so the parent title op fails closed instead of making a
+    // non-audited call. Seed the durable `curated_title` outputs when the
+    // worker dispatches the run — the parent op then REUSES them (zero
+    // transport) and the worker-driven claim/freeze/execute flow is unchanged.
+    const cohortCuratorModule = await import('../../onboarding/cohort-curator');
+    const originalProcessCohort = cohortCuratorModule.processCohort;
+    const processSpy = vi.spyOn(cohortCuratorModule, 'processCohort').mockImplementation(async (run: any, wp: string, wsId: string, hooks?: any) => {
+      seedV1TitleOutputs(wsId, run);
+      return originalProcessCohort(run, wp, wsId, hooks);
+    });
+    try {
+      const worker = new OnboardingWorker(workspaceId, wsPath);
+      await worker.poll();
+      await drainWorker(worker);
+    } finally {
+      processSpy.mockRestore();
+    }
 
     // Exactly one cohort run row, terminal with a valid completion status.
     const runs = getDb().query(
@@ -720,6 +770,7 @@ describe('processCohort completion semantics (issue #30, PR3 M3)', () => {
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('running');
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     expect(summary.completedMembers).toBe(2);
@@ -748,14 +799,17 @@ describe('processCohort completion semantics (issue #30, PR3 M3)', () => {
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('running');
 
-    // Sabotage ONE member's frozen child snapshot ref so its prepared-cohort
-    // context cannot be rebuilt — a deterministic member-level failure.
-    const sabotaged = items[0].id;
+    // Sabotage ONE NON-ordinal-0 member's frozen child snapshot ref so its
+    // prepared-cohort context cannot be rebuilt — a deterministic member-level
+    // failure. (The ordinal-0 member's snapshot is the parent title op's
+    // frozen audit authority — BLOCKER 3 — so it is never sabotaged.)
+    const sabotaged = items[1].id;
     getDb().run(
       'UPDATE classification_runs SET config_snapshot_hash = ? WHERE cohort_run_id = ? AND onboarding_item_id = ?',
       ['deadbeef'.repeat(8), finalized.id, sabotaged],
     );
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed_with_member_failures');
     expect(summary.completedMembers).toBe(1);
@@ -770,7 +824,7 @@ describe('processCohort completion semantics (issue #30, PR3 M3)', () => {
     // The failed member is deterministic-failed in Curation (user reset to
     // retry); the surviving member committed fully.
     expect(findItemById(sabotaged)!.stageStatus).toBe('failed');
-    const survivor = findItemById(items[1].id)!;
+    const survivor = findItemById(items[0].id)!;
     expect(survivor.stageStatus).toBe('completed');
     expect(survivor.curationData).not.toBeNull();
   });
@@ -943,6 +997,7 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity, end-to-end)', 
       }), attemptId],
     );
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
 
@@ -1109,6 +1164,7 @@ describe('PR3 hardening — Commit B (R3 member-projection atomic commit)', () =
     // Execute member 1 fully, then crash before member 2's commit (simulated
     // via the member-crash seam firing on the SECOND member's pipeline
     // completion — member 1's atomic commit already landed).
+    seedV1TitleOutputs(workspaceId, finalized);
     let memberPipelines = 0;
     await expect(processCohort(finalized, wsPath, workspaceId, {
       afterMemberPipeline: () => {
@@ -1166,6 +1222,7 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     expect(finalized.executionProductTypeId).toBe('dry-dog-food');
     expect(finalized.productTypeConfidence).toBeCloseTo(0.8, 4);
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     expect(summary.completedMembers).toBe(2);
@@ -1378,6 +1435,7 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     expect(finalized.productTypeOutcome).toBeNull();
     expect(finalized.finalMembershipHash).toBeNull();
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     // The enabled type target still produced member proposals — with no
@@ -1410,6 +1468,7 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     expect(finalized.executionProductTypeId).toBeNull();
     expect(finalized.productTypeConfidence).toBeNull();
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
     for (const item of items) {
@@ -1480,6 +1539,7 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     expect(finalized.productTypeConfidence).toBe(0.8);
 
     const expectedHash = hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.8 });
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     for (const item of items) {
@@ -1526,6 +1586,7 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
     expect(finalized.productTypeOutcome).toBe('coherent');
     expect(finalized.executionProductTypeId).toBe('dry-dog-food');
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     expect(summary.completedMembers).toBe(2);
@@ -1598,6 +1659,7 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
       productTypeConfidence: finalized.productTypeConfidence!,
     });
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
 
@@ -1668,6 +1730,7 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
     expect(finalized.executionProductTypeId).toBeNull();
     expect(finalized.productTypeOutcome).toBeNull();
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     for (const item of items) {
@@ -1701,6 +1764,7 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
     expect(finalized.executionProductTypeId).toBeNull();
     expect(finalized.productTypeConfidence).toBeNull();
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
     for (const item of items) {
@@ -1907,6 +1971,7 @@ describe('PR5 C4 — acceptance integration: execution-driven first pass, review
     expect(finalized.executionProductTypeId).toBe('dry-dog-food');
     expect(finalized.productTypeConfidence).toBeCloseTo(0.8, 4);
 
+    seedV1TitleOutputs(workspaceId, finalized);
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     expect(summary.completedMembers).toBe(2);
@@ -2300,13 +2365,12 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
       expect(reclaim.resumed.length).toBe(1);
       expect(reclaim.resumed[0].id).toBe(run.id);
 
-      // Resume: the parent op REUSES the durable set (zero calls). Note the
-      // ordinal-0 member is re-executed: the parent op's `ensureMemberRun`
-      // creates a fresh running child when the ordinal-0 child is terminal
-      // (PR6 C4 crash-recovery contract — the audit binding always has a
-      // running child), so the resume guard re-executes member 1 via that
-      // fresh child. Member 2 re-executes via its still-running child. Both
-      // re-executed members consume the SAME persisted titles byte-for-byte.
+      // Resume: the parent op REUSES the durable set (zero calls). PR6 review
+      // BLOCKER 2 fix: the parent op is PURE READ — it never creates a
+      // replacement ordinal-0 child — so the resume guard finds the SAME
+      // committed child for member 1 and SKIPS it (no re-execution, no new
+      // child run). Member 2 re-executes via its still-running child. Both
+      // members consume the SAME persisted titles byte-for-byte.
       const resumed = getCohortRunById(run.id)!;
       const summary = await processCohort(resumed, wsPath, workspaceId);
       expect(summary.parentStatus).toBe('completed');
@@ -2396,7 +2460,17 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: any[]) => {
       capturedWarns.push(args.map(String).join(' '));
     });
-    const titleCallSpy = vi.spyOn(llmClient, 'callLlmForTask');
+    // Invocation-based title-call counter: in a combined `bun test` run the
+    // `cohort-name-coordinator` suite's llm-client mock can leak into this
+    // file's module graph, so `spy.mock.calls` may inherit prior history.
+    // Counting inside the implementation only tallies calls made during THIS
+    // member materialization.
+    let titleCallsDuringTest = 0;
+    const titleCallSpy = vi.spyOn(llmClient, 'callLlmForTask').mockImplementation(((...args: any[]) => {
+      const options = args[3] as Record<string, any> | undefined;
+      if (options?.protectedOperation === 'cohort_title_consolidation') titleCallsDuringTest++;
+      return null;
+    }) as any);
     try {
       const curationData = await curateItemWithPipeline(findItemById(items[0].id)!, wsPath, workspaceId, prepared);
       // Deterministic fallback + member pipeline completes (no throw, no
@@ -2406,7 +2480,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
       const expectedFallback = cohortNameCoordinator.formatDeterministicTitle(live.name ?? live.upc, live.brandHint);
       expect(curationData.curatedTitle).toBe(expectedFallback);
       expect(curationData.titleSource).toBe('cohort_fallback');
-      expect(titleCallInvocationCount(titleCallSpy)).toBe(0);
+      expect(titleCallsDuringTest).toBe(0);
     } finally {
       warnSpy.mockRestore();
       titleCallSpy.mockRestore();

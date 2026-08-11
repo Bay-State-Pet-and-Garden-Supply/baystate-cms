@@ -337,7 +337,16 @@ export async function curateItemWithPipeline(
 
     if (cohortMode) {
       const frozenCtx = preparedCohort!;
-      if (frozenCtx.productLineContext && frozenCtx.productLineContext.siblingSkus.length >= 2) {
+      // PR6 review fix (SHOULD-FIX 2): gate on the member's ACTUAL frozen
+      // `groupByProductLine` group size (the exact grouping the parent title
+      // op's coordinator uses) — never the all-cohort sibling count. A true
+      // singleton (size 1) has no durable output row and keeps the unchanged
+      // per-item `name_consolidation` path (no deterministic fallback, no
+      // warning). Hand-built test contexts that omit `memberGroupSizes` fall
+      // back to the all-cohort sibling count (uniform cohorts only).
+      const memberGroupSize =
+        frozenCtx.memberGroupSizes?.get(item.upc) ?? (frozenCtx.productLineContext?.siblingSkus.length ?? 0);
+      if (frozenCtx.productLineContext && memberGroupSize >= 2) {
         productLineGroup = {
           groupId: frozenCtx.productLineContext.groupId,
           groupLabel: frozenCtx.productLineContext.groupLabel,

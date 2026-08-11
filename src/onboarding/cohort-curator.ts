@@ -123,6 +123,7 @@ import { getVlmConfig } from './vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
 import { curateItemWithPipeline } from './product-curator';
 import { ensureCohortTitlesCoordinated } from './cohort-title-coordinator';
+import { groupByProductLine } from './cohort-name-coordinator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
 import {
   PROJECTION_VERSION,
@@ -1583,6 +1584,18 @@ export interface PreparedCohortContext {
    * group members have entries (singletons are never coordinated — DECISION-O).
    */
   coordinatedTitles?: Map<string, { title: string; source: 'llm_cohort' | 'cohort_fallback' }>;
+  /**
+   * PR6 review fix (SHOULD-FIX 2): per-SKU ACTUAL frozen `groupByProductLine`
+   * group sizes (the exact grouping the parent title op's coordinator uses),
+   * attached from `FrozenProductLineContext`. The member materialization gates
+   * its title branch and its missing-output fallback on THIS member's group
+   * size — never the all-cohort sibling count. A true singleton (size 1) is
+   * never coordinated, has no output row, and keeps the unchanged per-item
+   * `name_consolidation` path (no deterministic-cohort fallback, no warning).
+   * Absent in legacy/shadow mode and in hand-built test contexts (callers fall
+   * back to the all-cohort sibling count).
+   */
+  memberGroupSizes?: Map<string, number>;
   /** Frozen member `OnboardingItem` views (projection-derived) for title coordination. */
   frozenBatchItems?: OnboardingItem[];
   /**
@@ -1786,6 +1799,13 @@ export interface FrozenProductLineContext {
   };
   productLineItems: ProductLineItemSnapshot[];
   frozenBatchItems: OnboardingItem[];
+  /**
+   * PR6 review fix (SHOULD-FIX 2): per-SKU ACTUAL frozen `groupByProductLine`
+   * group sizes — the exact grouping the parent title op's coordinator uses.
+   * A member whose group has <2 members is a TRUE singleton: never
+   * coordinated, no output row, keeps the per-item materialization path.
+   */
+  memberGroupSizes: Map<string, number>;
 }
 
 export function buildFrozenProductLineContext(
@@ -1828,6 +1848,17 @@ export function buildFrozenProductLineContext(
     frozenBatchItems.push(frozenItemFromProjection(projection, cohort.batchId));
   }
 
+  // PR6 review fix (SHOULD-FIX 2): the member's ACTUAL frozen group size from
+  // `groupByProductLine` over the frozen sibling views — the SAME grouping the
+  // parent title op's coordinator uses for its completeness check. A mixed
+  // cohort (>=2 SKUs) never forces a true singleton into the grouped path.
+  const memberGroupSizes = new Map<string, number>();
+  for (const groupItems of groupByProductLine(frozenBatchItems).values()) {
+    for (const item of groupItems) {
+      if (item.upc) memberGroupSizes.set(item.upc, groupItems.length);
+    }
+  }
+
   return {
     productLineContext: {
       groupId: cohort.groupKey,
@@ -1839,6 +1870,7 @@ export function buildFrozenProductLineContext(
     },
     productLineItems,
     frozenBatchItems,
+    memberGroupSizes,
   };
 }
 
@@ -2202,6 +2234,7 @@ export async function processCohort(
       prepared.productLineContext = frozenLineContext.productLineContext;
       prepared.productLineItems = frozenLineContext.productLineItems;
       prepared.frozenBatchItems = frozenLineContext.frozenBatchItems;
+      prepared.memberGroupSizes = frozenLineContext.memberGroupSizes;
       // PR6: the durable parent-run title outputs (attached for every member;
       // only multi-item group members have entries).
       prepared.coordinatedTitles = coordinatedTitles;

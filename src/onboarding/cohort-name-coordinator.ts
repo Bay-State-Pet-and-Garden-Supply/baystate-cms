@@ -58,10 +58,13 @@ export interface CohortCoordinationOptions {
    */
   assertHeld?: () => void;
   /**
-   * PR6: invoked with the audited model-call id when the group call returned
-   * one — the durable `model_call_id` provenance for persisted output rows.
+   * PR6: invoked with the audited model-call id and the member SKUs of the
+   * group that produced it — the durable `model_call_id` provenance for
+   * persisted output rows. Called once per GROUP call that returned a result
+   * (multi-item groups only), so a two-group cohort surfaces two distinct
+   * call ids and each output row can be persisted with ITS producing call.
    */
-  onCoordinatedCallId?: (callId: string) => void;
+  onCoordinatedCallId?: (callId: string, skus: string[]) => void;
 }
 
 /** Stable fingerprint inputs for cache. Excludes volatile fields. */
@@ -472,7 +475,9 @@ async function coordinateGroup(
     );
     response = result?.content ?? null;
     if (result) {
-      opts.onCoordinatedCallId?.(result.callId);
+      // PR6 review SHOULD-FIX 1: surface the producing call id WITH the group
+      // member SKUs so the parent op can persist each row with its own call.
+      opts.onCoordinatedCallId?.(result.callId, items.map(i => i.upc));
     }
   } else {
     // Legacy / shadow byte-identical path: non-audited transport.

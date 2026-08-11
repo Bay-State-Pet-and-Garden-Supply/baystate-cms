@@ -467,18 +467,18 @@ describe('Cohort Name Coordinator', () => {
     expect(result.get('U1')!.source).toBe('llm_cohort');
   });
 
-  it('onCoordinatedCallId fires with the audited call id', async () => {
+  it('onCoordinatedCallId fires with the audited call id and its group SKUs', async () => {
     const items = [
       makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
       makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
     ] as OnboardingItem[];
-    const callIds: string[] = [];
+    const calls: Array<{ callId: string; skus: string[] }> = [];
     const result = await coordinateCohortItems(items, undefined, {
       modelCall: AUDIT_OPTS.modelCall,
       snapshot: AUDIT_OPTS.snapshot,
-      onCoordinatedCallId: (callId: string) => callIds.push(callId),
+      onCoordinatedCallId: (callId: string, skus: string[]) => calls.push({ callId, skus }),
     });
-    expect(callIds).toEqual(['mock-call-1']);
+    expect(calls).toEqual([{ callId: 'mock-call-1', skus: ['U1', 'U2'] }]);
     expect(result.size).toBe(2);
   });
 

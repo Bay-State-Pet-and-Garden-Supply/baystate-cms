@@ -48,6 +48,7 @@ import {
   updateCohortStatus,
   getCohortById,
   getCohortMembers,
+  computeMembershipHash,
 } from '../../db/repositories/curation-cohort-repo';
 import {
   claimReadyCurationCohorts,
@@ -66,6 +67,7 @@ import { computeClassificationBundleHash } from '../../classification/config-val
 import {
   getRuntimeSnapshotByHash,
   getModelExecutionPlanEntry,
+  snapshotHash,
 } from '../../classification/runtime-snapshot';
 import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
 import { computeCohortTitleInputHash } from '../../onboarding/cohort-title-hash';
@@ -103,6 +105,11 @@ let failNextTitleCall = false;
 let reclaimAfterTitleCall = false;
 let reclaimRunId: string | null = null;
 let reclaimWorkspaceId: string | null = null;
+/** PR6 review SHOULD-FIX 1: per-group producing calls recorded by the mock
+ *  (call id + the group's UPC set from the prompt) — the per-row provenance
+ *  assertions tie rows to THEIR producing call without depending on the
+ *  absolute (cross-test cumulative) call-id sequence. */
+let lastGroupCalls: Array<{ callId: string; upcs: string[] }> = [];
 
 function mockGetLlmConfigForTask(): Record<string, any> {
   return {
@@ -118,6 +125,28 @@ function mockCallLlmForTask(): string {
     '100000000001': 'Purina Pro Plan Dog Food Chicken 5 lb',
     '100000000002': 'Purina Pro Plan Dog Food Beef 10 lb',
   });
+}
+
+/** Canned titles keyed by UPC (extend when a test adds more members). */
+const CANNED_TITLES: Record<string, string> = {
+  '100000000001': 'Purina Pro Plan Dog Food Chicken 5 lb',
+  '100000000002': 'Purina Pro Plan Dog Food Beef 10 lb',
+  '100000000003': 'Purina Pro Plan Dog Food Salmon 5 lb',
+  '100000000004': 'Purina Pro Plan Dog Food Lamb 10 lb',
+};
+
+function cannedTitleForUpc(upc: string): string {
+  return CANNED_TITLES[upc] ?? `Purina Pro Plan Dog Food ${upc}`;
+}
+
+/** Extract the exact UPC set from the cohort prompt and return a matching JSON
+ *  (multi-group cohorts make one call per group — each prompt carries only
+ *  that group's UPCs). */
+function cannedResponseForPrompt(prompt: string): string {
+  const upcs = [...prompt.matchAll(/\[(\d{10,})\]/g)].map(match => match[1]);
+  const payload: Record<string, string> = {};
+  for (const upc of upcs) payload[upc] = cannedTitleForUpc(upc);
+  return JSON.stringify(payload);
 }
 
 /** Simulate the audited transport's durable started + success rows. */
@@ -143,7 +172,7 @@ function writeAuditPair(runId: string, snapshotHash: string | null, callId: stri
 
 function mockCallLlmForTaskWithProvenance(
   _task: string,
-  _prompt: string,
+  prompt: string,
   _systemPrompt: string,
   options: Record<string, any>,
 ): { content: string; callId: string; provider: string; model: string; usage: Record<string, number | null> } | null {
@@ -153,6 +182,10 @@ function mockCallLlmForTaskWithProvenance(
     throw new Error('transport down');
   }
   const callId = `title-call-${++auditCallSeq}`;
+  lastGroupCalls.push({
+    callId,
+    upcs: [...prompt.matchAll(/\[(\d{10,})\]/g)].map(match => match[1]),
+  });
   if (options.modelCall) {
     writeAuditPair(options.modelCall.runId, options.modelCall.snapshotHash ?? null, callId);
   }
@@ -170,10 +203,7 @@ function mockCallLlmForTaskWithProvenance(
     );
   }
   return {
-    content: JSON.stringify({
-      '100000000001': 'Purina Pro Plan Dog Food Chicken 5 lb',
-      '100000000002': 'Purina Pro Plan Dog Food Beef 10 lb',
-    }),
+    content: cannedResponseForPrompt(prompt),
     callId,
     provider: 'ollama',
     model: 'qwen2.5vl:latest',
@@ -214,6 +244,7 @@ afterEach(() => {
   reclaimAfterTitleCall = false;
   reclaimRunId = null;
   reclaimWorkspaceId = null;
+  lastGroupCalls = [];
   clearCohortCoordinationCache();
 });
 
@@ -422,7 +453,51 @@ async function freezeCohortFixture(extByUpc: Record<string, Record<string, any>>
   return { workspaceId, workspacePath: wsPath, run: finalized, projection, cohort, members, frozenLineContext, items };
 }
 
-/** Recompute the T-hash the parent op uses (mirrors its step 1). */
+/**
+ * PR6 review round 1: a MIXED-family cohort — every cohort the batch formed
+ * is merged into the FIRST one, so ONE run carries MULTIPLE
+ * `groupByProductLine` groups (per-group provenance / singleton-in-mixed
+ * cohort scenarios). The cohort's `membership_hash` is refreshed so the
+ * claim/freeze membership check passes. `createReadyCohort` set every formed
+ * cohort ready; the donors are superseded so only the target is claimable.
+ */
+async function freezeMixedCohortFixture(
+  extByUpc: Record<string, Record<string, any>>,
+): Promise<FrozenCohortFixture> {
+  const { workspaceId, workspacePath: wsPath } = newWorkspace();
+  const { bundle } = writeActiveV2Bundle(wsPath);
+  upsertConfigSnapshot(workspaceId, bundle);
+  const { items, cohorts } = createReadyCohort(workspaceId, extByUpc);
+  expect(cohorts.length).toBeGreaterThan(1);
+  const target = cohorts[0];
+  for (const donor of cohorts.slice(1)) {
+    getDb().run(
+      'UPDATE curation_cohort_members SET cohort_id = ? WHERE cohort_id = ?',
+      [target.id, donor.id],
+    );
+    getDb().run(
+      "UPDATE curation_cohorts SET status = 'superseded', superseded_at = ? WHERE id = ?",
+      [new Date().toISOString(), donor.id],
+    );
+  }
+  getDb().run(
+    'UPDATE curation_cohorts SET membership_hash = ? WHERE id = ?',
+    [computeMembershipHash(items.map(i => i.id)), target.id],
+  );
+  const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+  const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+  expect(finalized.status).toBe('running');
+  const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
+  const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  const cohort = getCohortById(finalized.cohortId)!;
+  const members = getCohortMembers(cohort.id);
+  const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+  return { workspaceId, workspacePath: wsPath, run: finalized, projection, cohort, members, frozenLineContext, items };
+}
+
+/** Recompute the T-hash the parent op uses (mirrors its step 1). PR6 review
+ *  BLOCKER 1 fix: the parent op hashes the frozen UNBOUND H5 policy digest
+ *  (no snapshotHash binding) — the seeded/persisted rows must match it. */
 function expectedInputHash(fixture: FrozenCohortFixture): string {
   const ordered = [...fixture.projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const child = getDb().query(
@@ -431,8 +506,10 @@ function expectedInputHash(fixture: FrozenCohortFixture): string {
   const snapshot = child?.config_snapshot_hash
     ? getRuntimeSnapshotByHash(fixture.workspaceId, child.config_snapshot_hash)
     : null;
+  // UNBOUND view: `modelPolicyViewFromConfig(policy)` without snapshotHash —
+  // H3/H4/evidence changes never enter the title hash (DECISION-P).
   const view = snapshot?.modelPolicy
-    ? modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash)
+    ? modelPolicyViewFromConfig(snapshot.modelPolicy as never)
     : null;
   return computeCohortTitleInputHash({
     run: fixture.run,
@@ -601,19 +678,32 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(getCohortTitleOutputsByRun(fixture.run.id).every(r => r.inputHash === expectedInputHash(fixture))).toBe(true);
   });
 
-  it('all-or-nothing: a forced insert failure (nonexistent workspace FK) → throws, zero rows remain', async () => {
+  it('all-or-nothing: a persistence failure throws and leaves ZERO output rows (no partial set)', async () => {
     const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
-    await expect(
-      ensureCohortTitlesCoordinated({
-        run: fixture.run,
-        workspaceId: 'no-such-workspace',
-        workspacePath: fixture.workspacePath,
-        projection: fixture.projection,
-        cohort: fixture.cohort,
-        members: fixture.members,
-        frozenLineContext: fixture.frozenLineContext,
-      }),
-    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+    // Force `replaceCohortTitleOutputs` to throw (the real transaction
+    // rollback is proven at the repo level in cohort-output-repo.test.ts —
+    // the coordinator must propagate the failure and never leave a partial
+    // set). The bogus-workspace FK route is now intercepted earlier by the
+    // fail-closed frozen-audit-authority guard (BLOCKER 2/3).
+    const outputRepo = await import('../../db/repositories/classification-cohort-output-repo');
+    const spy = vi.spyOn(outputRepo, 'replaceCohortTitleOutputs').mockImplementation(() => {
+      throw new Error('simulated persistence failure');
+    });
+    try {
+      await expect(
+        ensureCohortTitlesCoordinated({
+          run: fixture.run,
+          workspaceId: fixture.workspaceId,
+          workspacePath: fixture.workspacePath,
+          projection: fixture.projection,
+          cohort: fixture.cohort,
+          members: fixture.members,
+          frozenLineContext: fixture.frozenLineContext,
+        }),
+      ).rejects.toThrow('simulated persistence failure');
+    } finally {
+      spy.mockRestore();
+    }
     expect(countCohortTitleOutputs(fixture.run.id)).toBe(0);
   });
 
@@ -682,5 +772,250 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(map.size).toBe(0);
     expect(titleCallCount).toBe(0);
     expect(countCohortTitleOutputs(fixture.run.id)).toBe(0);
+  });
+
+  it('BLOCKER 1: the T-hash uses the frozen UNBOUND H5 policy digest — H3/H4/non-title snapshot changes never re-coordinate; title-route changes do', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    // Coordinate + persist ONCE, then inspect the persisted input_hash.
+    const first = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(first.size).toBe(2);
+    const rows = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rows).toHaveLength(2);
+    const persistedHash = rows[0].inputHash;
+    expect(rows[1].inputHash).toBe(persistedHash);
+
+    const ordered = [...fixture.projection.members].sort((a, b) => a.ordinal - b.ordinal);
+    const child = getDb().query(
+      'SELECT config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+    ).get(fixture.run.id, ordered[0].onboardingItemId) as { config_snapshot_hash: string };
+    const snapshot = getRuntimeSnapshotByHash(fixture.workspaceId, child.config_snapshot_hash)!;
+    const planEntry = getModelExecutionPlanEntry(snapshot, 'cohort_title_consolidation') ?? undefined;
+
+    // (a) The BOUND digest (with snapshotHash) differs from the UNBOUND digest
+    //     (routing fields only) — the old snapshot-bound view smuggled H3/H4/
+    //     evidence into the title hash.
+    const unboundView = modelPolicyViewFromConfig(snapshot.modelPolicy as never);
+    const boundView = modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash);
+    expect(unboundView).not.toBeNull();
+    expect(boundView).not.toBeNull();
+    expect(unboundView!.policyDigest).not.toBe(boundView!.policyDigest);
+
+    // (b) The persisted rows use the UNBOUND digest (not the bound one).
+    const hashWithUnbound = computeCohortTitleInputHash({
+      run: fixture.run,
+      projection: fixture.projection,
+      modelPolicyDigest: unboundView!.policyDigest,
+      titlePlanEntry: planEntry,
+    });
+    const hashWithBound = computeCohortTitleInputHash({
+      run: fixture.run,
+      projection: fixture.projection,
+      modelPolicyDigest: boundView!.policyDigest,
+      titlePlanEntry: planEntry,
+    });
+    expect(persistedHash).toBe(hashWithUnbound);
+    expect(persistedHash).not.toBe(hashWithBound);
+
+    // (c) A NON-TITLE snapshot field change (H3/H4/evidence authority) changes
+    //     the snapshot hash → the BOUND digest changes — but the unbound
+    //     digest (and therefore the T-hash) is UNCHANGED.
+    const mutated = JSON.parse(JSON.stringify(snapshot));
+    mutated.catalogEvidenceHash = 'c'.repeat(64);
+    expect(snapshotHash(mutated)).not.toBe(snapshot.snapshotHash);
+    const mutatedUnbound = modelPolicyViewFromConfig(mutated.modelPolicy as never);
+    const mutatedBound = modelPolicyViewFromConfig(mutated.modelPolicy as never, snapshotHash(mutated));
+    expect(mutatedUnbound!.policyDigest).toBe(unboundView!.policyDigest);
+    expect(mutatedBound!.policyDigest).not.toBe(boundView!.policyDigest);
+    expect(computeCohortTitleInputHash({
+      run: fixture.run,
+      projection: fixture.projection,
+      modelPolicyDigest: mutatedUnbound!.policyDigest,
+      titlePlanEntry: planEntry,
+    })).toBe(persistedHash);
+
+    // (d) A TITLE-ROUTE change (name_consolidation stage override) changes the
+    //     unbound digest → the T-hash CHANGES (re-coordination is correct).
+    const routeMutated = JSON.parse(JSON.stringify(snapshot));
+    routeMutated.modelPolicy.stageOverrides = {
+      ...routeMutated.modelPolicy.stageOverrides,
+      name_consolidation: {
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        fallbackProvider: null,
+        fallbackModel: null,
+      },
+    };
+    const routeUnbound = modelPolicyViewFromConfig(routeMutated.modelPolicy as never);
+    expect(routeUnbound!.policyDigest).not.toBe(unboundView!.policyDigest);
+    expect(computeCohortTitleInputHash({
+      run: fixture.run,
+      projection: fixture.projection,
+      modelPolicyDigest: routeUnbound!.policyDigest,
+      titlePlanEntry: planEntry,
+    })).not.toBe(persistedHash);
+  });
+
+  it('BLOCKER 2: the reuse path is PURE READ — a terminal ordinal-0 child is never replaced (no child creation, no ref updates)', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const ordered = [...fixture.projection.members].sort((a, b) => a.ordinal - b.ordinal);
+    const childId = ordinal0ChildRunId(fixture);
+    const childCount = (): number => {
+      const row = getDb().query(
+        'SELECT COUNT(*) AS c FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      ).get(fixture.run.id, ordered[0].onboardingItemId) as { c: number };
+      return Number(row.c);
+    };
+    const first = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(first.size).toBe(2);
+    expect(childCount()).toBe(1); // freeze-created ordinal-0 child, untouched
+
+    // Simulate the ordinal-0 member committing (child now TERMINAL), then a
+    // crash-recovery resume: the parent op must find the SAME child and reuse
+    // — never create a replacement running child (the old `ensureMemberRun`
+    // created one, defeating the member-loop resume guard).
+    getDb().run(
+      "UPDATE classification_runs SET status = 'completed', completed_at = ? WHERE id = ?",
+      [new Date().toISOString(), childId],
+    );
+    clearCohortCoordinationCache();
+    const second = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(second.size).toBe(2);
+    expect(titleCallCount).toBe(1); // reuse: zero new calls
+    expect(childCount()).toBe(1); // NO replacement child created
+    const statusRow = getDb().query('SELECT status FROM classification_runs WHERE id = ?').get(childId) as { status: string };
+    expect(statusRow.status).toBe('completed'); // the committed child is untouched
+  });
+
+  it('BLOCKER 2/3: missing frozen audit authority (no refs-bearing ordinal-0 child) FAILS CLOSED before any transport', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const ordered = [...fixture.projection.members].sort((a, b) => a.ordinal - b.ordinal);
+    getDb().run(
+      'UPDATE classification_runs SET config_snapshot_id = NULL, config_snapshot_hash = NULL WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      [fixture.run.id, ordered[0].onboardingItemId],
+    );
+    await expect(
+      ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      }),
+    ).rejects.toThrow(/no child run with freeze-persisted snapshot refs/);
+    expect(titleCallCount).toBe(0);
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(0);
+  });
+
+  it('BLOCKER 3: a frozen snapshot without a compatible title plan FAILS CLOSED (never a non-audited live call)', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const ordered = [...fixture.projection.members].sort((a, b) => a.ordinal - b.ordinal);
+    const child = getDb().query(
+      'SELECT config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+    ).get(fixture.run.id, ordered[0].onboardingItemId) as { config_snapshot_hash: string };
+    // Drop the frozen title plan entry from the persisted snapshot → the plan
+    // digest no longer matches its entries → the audited context cannot be
+    // built → the parent op must abort BEFORE any transport.
+    const stored = getDb().query(
+      'SELECT config_json FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?',
+    ).get(fixture.workspaceId, child.config_snapshot_hash) as { config_json: string };
+    const snapshot = JSON.parse(stored.config_json);
+    snapshot.modelExecutionPlan.entries = snapshot.modelExecutionPlan.entries.filter(
+      (entry: any) => entry.operation !== 'cohort_title_consolidation',
+    );
+    getDb().run(
+      'UPDATE classification_config_snapshots SET config_json = ? WHERE workspace_id = ? AND snapshot_hash = ?',
+      [JSON.stringify(snapshot), fixture.workspaceId, child.config_snapshot_hash],
+    );
+    await expect(
+      ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      }),
+    ).rejects.toThrow(/Model plan incompatible|digest does not match/);
+    expect(titleCallCount).toBe(0);
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(0);
+  });
+
+  it('SHOULD-FIX 1: two successful multi-item groups persist each row with ITS producing call id (per-group provenance)', async () => {
+    const fixture = await freezeMixedCohortFixture({
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Purina' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Purina' }),
+      '100000000003': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Salmon 5 lb', _brandHint: 'ProPet' }),
+      '100000000004': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Lamb 10 lb', _brandHint: 'ProPet' }),
+    });
+    expect(fixture.members.length).toBe(4);
+
+    const map = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+
+    // ONE call per multi-item group (two groups → two audited calls).
+    expect(titleCallCount).toBe(2);
+    expect(map.size).toBe(4);
+    const rows = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rows).toHaveLength(4);
+    // The mock recorded exactly TWO producing calls — one per multi-item group.
+    expect(lastGroupCalls).toHaveLength(2);
+    // Map each UPC to its producing group call id (order-agnostic — the group
+    // iteration order depends on member rowid tie-breaks).
+    const recordedCallIdBySku = new Map<string, string>();
+    for (const group of lastGroupCalls) {
+      for (const upc of group.upcs) recordedCallIdBySku.set(upc, group.callId);
+    }
+    expect(recordedCallIdBySku.get('100000000001')).toBe(recordedCallIdBySku.get('100000000002'));
+    expect(recordedCallIdBySku.get('100000000003')).toBe(recordedCallIdBySku.get('100000000004'));
+    expect(recordedCallIdBySku.get('100000000001')).not.toBe(recordedCallIdBySku.get('100000000003'));
+    // Every persisted row carries ITS producing group's call id — the first
+    // group's rows never point at the second group's call (and vice versa).
+    for (const row of rows) {
+      expect(row.modelCallId).toBe(recordedCallIdBySku.get(row.productSku) ?? null);
+    }
+    expect(rows.every(r => r.modelCallId !== null)).toBe(true);
+    // The producing call ids exist as REAL audited model-call rows.
+    for (const group of lastGroupCalls) {
+      const started = getDb().query(
+        'SELECT COUNT(*) AS c FROM classification_model_calls WHERE id = ?',
+      ).get(`${group.callId}-started`) as { c: number };
+      expect(Number(started.c)).toBe(1);
+    }
+    // Every llm_cohort row parses and carries llm_cohort source.
+    expect(rows.every(r => (JSON.parse(r.outputValueJson) as { source: string }).source === 'llm_cohort')).toBe(true);
   });
 });

@@ -216,6 +216,32 @@ function createRunLookup(runId: string): ClassificationRunRow {
   return row;
 }
 
+/**
+ * PURE READ (PR6 review BLOCKER 2 fix): the member child run the parent title
+ * op's audited `cohort_title_consolidation` call binds to (DECISION-N).
+ *
+ * NEVER creates and NEVER updates anything — the parent op performs ZERO
+ * writes before the lease is asserted, so the reuse path is entirely
+ * read-only. Returns the LATEST child for the member (running or terminal;
+ * a crash mid-ref-inheritance can leave the newest child with NULL snapshot
+ * refs, in which case the most recent refs-bearing child is the frozen audit
+ * authority). null when the member has no child carrying the immutable
+ * freeze-persisted snapshot refs — the caller must fail closed.
+ */
+export function getCohortMemberRunForTitleAudit(
+  parentRunId: string,
+  itemId: string,
+): ClassificationRunRow | null {
+  const withRefs = getDb().query(
+    `SELECT id FROM classification_runs
+     WHERE cohort_run_id = ? AND onboarding_item_id = ?
+       AND config_snapshot_id IS NOT NULL AND config_snapshot_hash IS NOT NULL
+     ORDER BY started_at DESC LIMIT 1`,
+  ).get(parentRunId, itemId) as { id: string } | undefined;
+  if (!withRefs) return null;
+  return createRunLookup(withRefs.id);
+}
+
 // ─── Freeze authorities (ownership-guarded) ───────────────────────────────────
 
 export interface FreezeAuthorityFields {

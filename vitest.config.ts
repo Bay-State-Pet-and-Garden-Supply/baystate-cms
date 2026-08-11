@@ -119,6 +119,12 @@ export default defineConfig({
       'src/tests/unit/cohort-worker.test.ts',
       'src/tests/unit/classification-cohort-run-repo.test.ts',
       'src/tests/unit/cohort-v6-migration.test.ts',
+      // PR6 C1/C2/C4/C6 Bun-only suites (bun:test imports — vitest cannot collect them)
+      'src/tests/unit/cohort-output-repo.test.ts',
+      'src/tests/unit/cohort-title-hash.test.ts',
+      'src/tests/unit/cohort-v7-migration.test.ts',
+      'src/tests/unit/cohort-title-coordinator.test.ts',
+      'src/tests/unit/pr6-acceptance.test.ts',
       // PR4 C3 pure resolver (bun:test imports — vitest cannot collect it)
       'src/tests/unit/cohort-product-type-resolver.test.ts',
       // PR5 effective-curation-type suites (bun:test imports — vitest cannot collect them)
