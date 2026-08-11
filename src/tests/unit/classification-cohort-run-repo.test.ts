@@ -578,6 +578,7 @@ describe('cohort curation flags (issue #30, PR3 M1)', () => {
     expect(DEFAULT_COHORT_CURATION_FLAGS).toEqual({
       cohortCurationV2Enabled: false,
       cohortShadowOnly: true,
+      cohortProductTypeConfidenceFloor: 0.7,
     });
     expect(loadCohortCurationFlags({})).toEqual(DEFAULT_COHORT_CURATION_FLAGS);
     expect(getCohortCurationFlags()).toEqual(DEFAULT_COHORT_CURATION_FLAGS);
@@ -594,6 +595,19 @@ describe('cohort curation flags (issue #30, PR3 M1)', () => {
       BAYSTATE_CMS_COHORT_CURATION_V2: 'garbage',
       BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY: 'garbage',
     })).toEqual(DEFAULT_COHORT_CURATION_FLAGS);
+  });
+
+  it('PR4 C5: parses the env confidence floor with a 0.7 default, fail-closed on garbage, clamped to 0..1', () => {
+    // Explicit override.
+    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR: '0.55' }).cohortProductTypeConfidenceFloor).toBe(0.55);
+    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR: '0.9' }).cohortProductTypeConfidenceFloor).toBe(0.9);
+    // Absent / empty / unparseable fall back to the default (fail closed).
+    expect(loadCohortCurationFlags({}).cohortProductTypeConfidenceFloor).toBe(0.7);
+    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR: '' }).cohortProductTypeConfidenceFloor).toBe(0.7);
+    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR: 'banana' }).cohortProductTypeConfidenceFloor).toBe(0.7);
+    // Out-of-range parseable values clamp to the unit interval.
+    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR: '1.7' }).cohortProductTypeConfidenceFloor).toBe(1);
+    expect(loadCohortCurationFlags({ BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR: '-0.2' }).cohortProductTypeConfidenceFloor).toBe(0);
   });
 
   it('runtime override round-trips', () => {

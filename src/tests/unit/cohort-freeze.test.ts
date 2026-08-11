@@ -1612,6 +1612,36 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
   });
 
+  it('env floor override: a member match below the raised cohort floor abstains (coherent -> abstained), membership still finalizes', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1Config(workspaceId, wsPath);
+    createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    // The env override is wired through `cohortProductTypeConfidenceFloor`
+    // (BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR): both members match
+    // at 0.8 — above the matcher floor (0.7) but below the raised 0.85 floor.
+    overrideCohortCurationFlags({
+      cohortCurationV2Enabled: true,
+      cohortShadowOnly: false,
+      cohortProductTypeConfidenceFloor: 0.85,
+    });
+    expect(getCohortCurationFlags().cohortProductTypeConfidenceFloor).toBe(0.85);
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    // Every member's deterministic match falls below the raised floor and the
+    // run-bound LLM fallback is unavailable in this env (fail-closed abstain)
+    // — the cohort resolves `abstained` (id/confidence stay NULL), and the
+    // run still finalizes membership (no family invariant to violate).
+    expect(finalized.status).toBe('running');
+    expect(finalized.productTypeOutcome).toBe('abstained');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeConfidence).toBeNull();
+    expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
+  });
+
   it('flag OFF: freeze is byte-identical — all PR4 columns NULL and zero model calls', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveV1Config(workspaceId, wsPath);

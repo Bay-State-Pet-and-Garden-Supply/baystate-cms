@@ -35,6 +35,7 @@ import { getDb } from '../db/connection';
 import {
   getCohortById,
   getCohortMembers,
+  listCohortsByWorkspace,
   computeExtractionHash,
   computeMembershipHash,
 } from '../db/repositories/curation-cohort-repo';
@@ -104,6 +105,7 @@ import type {
   CohortProductTypeResolution,
   ConfidentMemberProductTypeResult,
   MemberLlmRankResult,
+  CohortMemberInput,
 } from '../classification/cohort-product-type-resolver';
 import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
@@ -125,6 +127,7 @@ import type {
   CurationCohortMember,
   ExecutionEvidenceProjectionMemberV1,
   ExecutionEvidenceProjectionV1,
+  ExecutionProductTypeOutcome,
 } from '../shared/schemas/cohorts';
 import type {
   OnboardingItem,
@@ -138,15 +141,19 @@ import type { ResolvedTargetOption } from '../classification/curation-target-res
 const now = () => new Date().toISOString();
 
 /**
- * Cohort-level Product Type confidence floor (PR4 architecture-report §7). A
- * member's resolved type contribution must clear this floor to count as a
+ * Effective cohort Product Type confidence floor (PR4 architecture-report §7).
+ * A member's resolved type contribution must clear this floor to count as a
  * confident cohort contribution (the per-member matcher's own
- * `KEYWORD_MATCH_MIN_CONFIDENCE` gate still applies first). Default 0.7 —
- * matches the per-SKU keyword floor. The env-tunable override
- * (`BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR`) is documented in C5;
- * C4a keeps the constant.
+ * `KEYWORD_MATCH_MIN_CONFIDENCE` gate still applies first). Read per call
+ * from the runtime flags so the env override
+ * (`BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR`, default 0.7 — see
+ * `src/classification/flags.ts` → `cohortProductTypeConfidenceFloor`) applies
+ * without a redeploy; the freeze integration AND the shadow observer both use
+ * this effective value.
  */
-const COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR = 0.7;
+function cohortProductTypeConfidenceFloor(): number {
+  return getCohortCurationFlags().cohortProductTypeConfidenceFloor;
+}
 
 // Re-exported so tests keep importing the OCR execution-authority digest from
 // the cohort module; the implementation lives with the runtime snapshot it
@@ -915,7 +922,7 @@ export async function freezeCohortForExecution(
       const belowFloor =
         deterministicTypeMatch.productTypeId === null ||
         deterministicTypeMatch.confidence === null ||
-        deterministicTypeMatch.confidence < COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR;
+        deterministicTypeMatch.confidence < cohortProductTypeConfidenceFloor();
       if (belowFloor && resolvedTypeTarget !== null && typeOptions.length > 0) {
         const typePacket = buildEvidenceTargetPacket(typeEvidence, {
           attributeId: null,
@@ -1054,7 +1061,7 @@ export async function freezeCohortForExecution(
       if (cohortTypeResolutionActive) {
         const memberProjectionByItemId = new Map(projection.members.map(m => [m.onboardingItemId, m]));
         typeResolution = resolveCohortProductType({
-          confidenceFloor: COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR,
+          confidenceFloor: cohortProductTypeConfidenceFloor(),
           members: frozenMembers.map(fm => {
             const memberProjection = memberProjectionByItemId.get(fm.member.onboardingItemId);
             if (!memberProjection) {
@@ -1173,6 +1180,121 @@ export function verifyCohortRunFrozen(
     // against an unverifiable freeze.
     return false;
   }
+}
+
+// ─── PR4 C5: shadow-mode deterministic-only resolution (DECISION-E) ───────────
+
+/** One member's contribution to a shadow observation (PR4 C5). */
+export interface CohortShadowObservationMember {
+  onboardingItemId: string;
+  productSku: string | null;
+  productTypeId: string | null;
+  /** 'keyword' when the deterministic matcher produced the match, else null
+   *  (shadow never invokes the LLM ranker — DECISION-E). */
+  source: 'keyword' | 'llm' | null;
+}
+
+/** One ready cohort's deterministic-only Execution Product Type observation. */
+export interface CohortShadowObservation {
+  cohortId: string;
+  outcome: ExecutionProductTypeOutcome;
+  perMember: CohortShadowObservationMember[];
+}
+
+/**
+ * PR4 C5 shadow-mode observation (architecture-report §7, DECISION-E).
+ *
+ * Runs the DETERMINISTIC-ONLY cohort Execution Product Type resolver
+ * (`evidenceFromProjection` + `matchMemberDeterministically` +
+ * `resolveCohortProductType`, the C3 pure module) over every READY,
+ * non-superseded cohort in the workspace, from the CURRENT world (members →
+ * items → extraction sources → frozen evidence projections). Member runtime
+ * snapshots are built IN-MEMORY (never persisted) purely to resolve the
+ * product type options from the current config authority — the same evidence
+ * the freeze-time active-mode resolution consumes, minus any model calls.
+ *
+ * Write NOTHING and invoke NO model calls:
+ * - no `execution_product_type_id` / `product_type_confidence` /
+ *   `product_type_outcome` / `final_membership_hash` writes — run rows are
+ *   never created or mutated;
+ * - no `classification_proposal_dependencies` rows;
+ * - the LLM ranker is never invoked (`memberLlmResults` stays empty — shadow
+ *   measures the deterministic outcome only; LLM-vs-deterministic divergence
+ *   is exactly the metric shadow should surface).
+ *
+ * The caller (worker poll leg) invokes this ONLY under
+ * `cohortCurationV2Enabled && cohortShadowOnly`; flag OFF / active mode stay
+ * byte-identical (this function is simply not called). Returns the
+ * observations so tests can assert the computed outcome without parsing
+ * logs; the caller logs the `cohort_product_type_shadow` line.
+ */
+export function observeCohortShadowTypeResolution(
+  workspaceId: string,
+  workspacePath: string,
+): CohortShadowObservation[] {
+  const observations: CohortShadowObservation[] = [];
+  const readyCohorts = listCohortsByWorkspace(workspaceId).filter(
+    cohort => cohort.status === 'ready' && cohort.supersededAt === null,
+  );
+  if (readyCohorts.length === 0) return observations;
+
+  // The CURRENT config authority (read-only): member snapshots resolve the
+  // same product type options a freeze would freeze.
+  const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
+  const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+  const confidenceFloor = cohortProductTypeConfidenceFloor();
+
+  for (const cohort of readyCohorts) {
+    try {
+      const members = getCohortMembers(cohort.id);
+      if (members.length === 0) continue;
+      const items = listItemsByBatch(cohort.batchId);
+      const itemsById = new Map(items.map(item => [item.id, item]));
+      const extractionSources = getLatestExtractionSourcesByItemIds(members.map(member => member.onboardingItemId));
+
+      const memberInputs: CohortMemberInput[] = [];
+      for (const member of members) {
+        const item = itemsById.get(member.onboardingItemId);
+        if (!item) continue;
+        const memberProjection = buildExecutionEvidenceProjectionMember(
+          member,
+          item,
+          extractionSources.get(item.id) ?? null,
+        );
+        // In-memory snapshot — never persisted; only the product-type option
+        // resolution path is consumed by the resolver.
+        const snapshot = buildRuntimeSnapshot({
+          workspaceId,
+          workspacePath,
+          productSku: item.upc ?? '',
+          authority,
+          configSnapshotRef: { id: '', hash: '', sourceCommit: null, createdAt: '' },
+          sourceProductHash: '',
+        });
+        memberInputs.push({ projection: memberProjection, memberSnapshot: snapshot });
+      }
+      if (memberInputs.length === 0) continue;
+
+      // DECISION-E: deterministic-only — no `memberLlmResults`, so the
+      // run-bound LLM ranker is never invoked in shadow mode.
+      const resolution = resolveCohortProductType({ confidenceFloor, members: memberInputs });
+      observations.push({
+        cohortId: cohort.id,
+        outcome: resolution.outcome,
+        perMember: resolution.perMember.map(member => ({
+          onboardingItemId: member.onboardingItemId,
+          productSku: member.productSku,
+          productTypeId: member.productTypeId,
+          source: member.source,
+        })),
+      });
+    } catch (err) {
+      // Shadow observation is best-effort: a cohort that cannot be projected
+      // (e.g. mid-refresh membership) is skipped, never fatal.
+      console.warn(`[CohortCurator] Shadow type resolution failed for cohort ${cohort.id} (non-blocking):`, err);
+    }
+  }
+  return observations;
 }
 
 // ─── Prepared-cohort execution contract (amendment 6) ─────────────────────────

@@ -27,16 +27,30 @@ export interface CohortCurationFlags {
   /** Shadow mode: observe cohort claiming/readiness without installing the
    *  per-item claim barrier. Only meaningful while the master switch is ON. */
   cohortShadowOnly: boolean;
+  /**
+   * PR4 C5: cohort Execution Product Type confidence floor (0..1). A member's
+   * resolved type contribution must clear this floor to count as a confident
+   * cohort contribution (the per-member matcher's own
+   * `KEYWORD_MATCH_MIN_CONFIDENCE` gate still applies first). Default 0.7 —
+   * matches the per-SKU keyword floor. Env-overridable via
+   * `BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR`; parsed per call, so
+   * a restart/env change applies without a redeploy. The resolver invocation
+   * sites (`src/onboarding/cohort-curator.ts` freeze + shadow observer) read
+   * the effective value here instead of a hardcoded constant.
+   */
+  cohortProductTypeConfidenceFloor: number;
 }
 
 export const DEFAULT_COHORT_CURATION_FLAGS: CohortCurationFlags = {
   cohortCurationV2Enabled: false,
   cohortShadowOnly: true,
+  cohortProductTypeConfidenceFloor: 0.7,
 };
 
 const COHORT_CURATION_FLAG_ENV: Record<keyof CohortCurationFlags, string> = {
   cohortCurationV2Enabled: 'BAYSTATE_CMS_COHORT_CURATION_V2',
   cohortShadowOnly: 'BAYSTATE_CMS_COHORT_CURATION_V2_SHADOW_ONLY',
+  cohortProductTypeConfidenceFloor: 'BAYSTATE_CMS_COHORT_PRODUCT_TYPE_CONFIDENCE_FLOOR',
 };
 
 function parseBooleanEnv(raw: string | undefined, fallback: boolean): boolean {
@@ -46,6 +60,19 @@ function parseBooleanEnv(raw: string | undefined, fallback: boolean): boolean {
   if (normalized === 'false' || normalized === '0' || normalized === 'no') return false;
   // Fail closed on unparseable values rather than guessing.
   return fallback;
+}
+
+/**
+ * Parse the env-derived numeric flags (PR4 C5 `cohortProductTypeConfidenceFloor`).
+ * Unparseable values fall back to the default (fail closed); parseable values
+ * are clamped to [0,1] — a confidence floor outside the unit interval is
+ * meaningless and would silently distort aggregation.
+ */
+function parseNumberEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw.trim());
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(1, Math.max(0, value));
 }
 
 export function loadCohortCurationFlags(
@@ -59,6 +86,10 @@ export function loadCohortCurationFlags(
     cohortShadowOnly: parseBooleanEnv(
       env[COHORT_CURATION_FLAG_ENV.cohortShadowOnly],
       DEFAULT_COHORT_CURATION_FLAGS.cohortShadowOnly,
+    ),
+    cohortProductTypeConfidenceFloor: parseNumberEnv(
+      env[COHORT_CURATION_FLAG_ENV.cohortProductTypeConfidenceFloor],
+      DEFAULT_COHORT_CURATION_FLAGS.cohortProductTypeConfidenceFloor,
     ),
   };
 }

@@ -28,7 +28,9 @@ import {
   freezeCohortForExecution,
   processCohort,
   verifyCohortRunFrozen,
+  observeCohortShadowTypeResolution,
 } from './cohort-curator';
+import type { CohortShadowObservation } from './cohort-curator';
 import { getCohortCurationFlags } from '../classification/flags';
 import type { CohortCurationFlags } from '../classification/flags';
 import {
@@ -118,6 +120,11 @@ export class OnboardingWorker {
   private workspacePath: string;
   private workspaceId: string;
   private workerId: string;
+  // PR4 C5: cohortId → last logged shadow observation line. The shadow
+  // observer recomputes on every poll (ready cohorts are cheap and few); the
+  // log line is emitted only when the outcome detail CHANGES so shadow mode
+  // never floods the worker log.
+  private shadowObservedOutcomes = new Map<string, string>();
 
   constructor(workspaceId: string, workspacePath: string, maxConcurrency = 10, maxExtractionConcurrency = 3) {
     this.workspaceId = workspaceId;
@@ -210,6 +217,22 @@ export class OnboardingWorker {
         if (stage === 'curation' && isCohortCurationActive(getCohortCurationFlags())) {
           this.claimAndDispatchCohortRuns(inFlightBatches);
           continue;
+        }
+        // PR4 C5 (DECISION-E): shadow mode (`cohortCurationV2Enabled` ON +
+        // `cohortShadowOnly`) — run the DETERMINISTIC-ONLY cohort Execution
+        // Product Type resolution over ready cohorts, log the outcome, write
+        // NOTHING (no runs claimed, no PR4 columns, no dependency rows, no
+        // model calls). The legacy per-item Curation path below then runs
+        // unchanged — byte-identical PR3 shadow semantics.
+        if (stage === 'curation') {
+          const curationFlags = getCohortCurationFlags();
+          if (curationFlags.cohortCurationV2Enabled && curationFlags.cohortShadowOnly) {
+            try {
+              this.observeCohortTypeShadow();
+            } catch (err) {
+              console.error('[OnboardingWorker] Shadow cohort type observation failed (non-blocking):', err);
+            }
+          }
         }
 
         const available = this.maxConcurrency - this.running.size;
@@ -330,6 +353,35 @@ export class OnboardingWorker {
       }
       supersedeCohortRun(current.id, 'Authority drift during pre-claim reconciliation');
       console.warn(`[OnboardingWorker] Superseded drifted terminal run ${current.id} for ready cohort ${cohort.id}.`);
+    }
+  }
+
+  /**
+   * PR4 C5 shadow-mode observation (DECISION-E): compute the deterministic-only
+   * cohort Execution Product Type resolution over every ready cohort and log a
+   * structured `cohort_product_type_shadow` line (cohort id, outcome,
+   * per-member ids/sources) on change. The observer writes NOTHING — no run
+   * rows, no PR4 columns, no dependency rows, no model calls — and the log
+   * line is the only artifact (byte-identical PR3 shadow behavior otherwise).
+   */
+  private observeCohortTypeShadow(): void {
+    let observations: CohortShadowObservation[];
+    try {
+      observations = observeCohortShadowTypeResolution(this.workspaceId, this.workspacePath);
+    } catch (err) {
+      console.warn(`[OnboardingWorker] Shadow cohort type resolution failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    for (const observation of observations) {
+      const detail = observation.perMember
+        .map(member =>
+          `${member.onboardingItemId}${member.productSku ? `(${member.productSku})` : ''}:${member.productTypeId ?? 'abstained'}@${member.source ?? 'none'}`,
+        )
+        .join('; ');
+      const line = `cohort_product_type_shadow: cohort=${observation.cohortId} outcome=${observation.outcome} members=[${detail}]`;
+      if (this.shadowObservedOutcomes.get(observation.cohortId) === line) continue;
+      this.shadowObservedOutcomes.set(observation.cohortId, line);
+      console.log(line);
     }
   }
 

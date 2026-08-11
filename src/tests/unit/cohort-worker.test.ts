@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'bun:test';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -39,7 +39,9 @@ import {
   verifyCohortRunFrozen,
   HeartbeatLostError,
   MemberCommitCrashSimulationError,
+  observeCohortShadowTypeResolution,
 } from '../../onboarding/cohort-curator';
+import { listCandidateCohortViews } from '../../onboarding/curation-cohort-service';
 import { getRun, completeRun } from '../../db/repositories/classification-run-repo';
 import {
   overrideCohortCurationFlags,
@@ -52,6 +54,7 @@ import type { InsertItemData } from '../../db/repositories/onboarding-item-repo'
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
 import type { CurationCohort } from '../../shared/schemas/cohorts';
+import { CurationCohortViewSchema } from '../../shared/schemas/cohorts';
 
 let workspacePath: string;
 
@@ -1171,6 +1174,156 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     // 64-hex digest — the future invalidation key is stable.
     expect(hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.75 })).toBe(expectedHash);
     expect(expectedHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+});
+
+// PR4 C5 (issue #30): shadow-mode deterministic-only resolution (DECISION-E),
+// additive read-only Execution Product Type view fields, and the env-tunable
+// confidence floor.
+describe('PR4 C5 — shadow mode + additive view fields (issue #30)', () => {
+  it('shadow: resolver computes + logs the outcome; run row, PR4 columns, deps and model calls stay untouched (no writes)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
+
+    // A run already exists (claimed + frozen under shadow flags — the C4a
+    // gate skips the resolver in shadow): the observer must leave it untouched.
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const frozen = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(frozen.status).toBe('running');
+    expect(frozen.executionProductTypeId).toBeNull();
+    expect(frozen.productTypeConfidence).toBeNull();
+    expect(frozen.productTypeOutcome).toBeNull();
+    expect(frozen.finalMembershipHash).toBeNull();
+
+    // Deterministic-only: the observer computes the SAME outcome the active
+    // freeze would (coherent, keyword source) — but writes nothing.
+    const observations = observeCohortShadowTypeResolution(workspaceId, wsPath);
+    expect(observations).toHaveLength(1);
+    const observation = observations[0];
+    expect(observation.cohortId).toBe(frozen.cohortId);
+    expect(observation.outcome).toBe('coherent');
+    expect(observation.perMember).toHaveLength(2);
+    expect(observation.perMember.map(m => m.onboardingItemId).sort())
+      .toEqual(items.map(i => i.id).sort());
+    for (const member of observation.perMember) {
+      expect(member.productTypeId).toBe('dry-dog-food');
+      expect(member.source).toBe('keyword');
+    }
+
+    // Write NOTHING: the run row is untouched (all PR4 columns NULL), zero
+    // dependency rows, zero model calls.
+    const after = getCohortRunById(run.id)!;
+    expect(after.executionProductTypeId).toBeNull();
+    expect(after.productTypeConfidence).toBeNull();
+    expect(after.productTypeOutcome).toBeNull();
+    expect(after.finalMembershipHash).toBeNull();
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+    const modelCalls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
+    expect(Number(modelCalls.cnt)).toBe(0);
+  });
+
+  it('shadow: worker poll runs the deterministic-only observer and logs one cohort_product_type_shadow line (no runs, no deps, no model calls)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const capturedLogs: string[] = [];
+    try {
+      const worker = new OnboardingWorker(workspaceId, wsPath);
+      await worker.poll();
+      await drainWorker(worker);
+      // Read the mock call history BEFORE mockRestore() clears it.
+      for (const args of logSpy.mock.calls) capturedLogs.push(String(args[0]));
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+
+    // Exactly one structured shadow line: cohort id + outcome + per-member
+    // ids/sources. (Deduped per cohort — a second poll emits nothing new.)
+    const shadowLines = capturedLogs.filter(line => line.includes('cohort_product_type_shadow:'));
+    expect(shadowLines).toHaveLength(1);
+    expect(shadowLines[0]).toContain('cohort=');
+    expect(shadowLines[0]).toContain('outcome=coherent');
+    expect(shadowLines[0]).toContain('members=[');
+    expect(shadowLines[0]).toContain('dry-dog-food@keyword');
+
+    // Shadow still writes NOTHING and PR3 semantics hold: no cohort run rows
+    // are created, the legacy per-item path stays in place (deps only ever
+    // come from cohort execution with a written type — none here), and the
+    // deterministic pipeline made zero model calls.
+    expect(cohortRunCount(workspaceId)).toBe(0);
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+    const modelCalls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
+    expect(Number(modelCalls.cnt)).toBe(0);
+  });
+
+  it('cohort views carry additive Execution Product Type fields: null-safe without a run, populated from the current run (schema backward compatible)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+    });
+    const cohort = cohorts[0];
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    // No run yet → the additive fields are present-but-null (absent-safe).
+    const viewBefore = listCandidateCohortViews(cohort.batchId).find(v => v.cohort.id === cohort.id)!;
+    expect(viewBefore.executionProductTypeId).toBeNull();
+    expect(viewBefore.productTypeConfidence).toBeNull();
+    expect(viewBefore.productTypeOutcome).toBeNull();
+    expect(viewBefore.finalMembershipHash).toBeNull();
+
+    // Freeze in active mode → the current run carries the Execution Type.
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    expect(finalized.productTypeOutcome).toBe('coherent');
+
+    // The cohort view reflects the current run's additive fields.
+    const viewAfter = listCandidateCohortViews(cohort.batchId).find(v => v.cohort.id === cohort.id)!;
+    expect(viewAfter.executionProductTypeId).toBe('dry-dog-food');
+    expect(viewAfter.productTypeOutcome).toBe('coherent');
+    expect(viewAfter.finalMembershipHash).toBe(run.candidateMembershipHash);
+    expect(viewAfter.productTypeConfidence).toBeCloseTo(0.8, 4);
+
+    // Schema-level backward compatibility: the additive fields are optional —
+    // a legacy-shaped view (fields absent) still parses to undefined, and
+    // present-but-null values parse to null.
+    const legacyShaped = CurationCohortViewSchema.parse({
+      cohort,
+      members: [],
+      status: 'ready',
+      state: 'ready',
+      blockedReason: null,
+      memberCount: 1,
+      readyCount: 1,
+      waitingOn: [],
+    });
+    expect(legacyShaped.executionProductTypeId).toBeUndefined();
+    expect(legacyShaped.productTypeOutcome).toBeUndefined();
+    expect(legacyShaped.finalMembershipHash).toBeUndefined();
+    const parsedWithNulls = CurationCohortViewSchema.parse({
+      ...viewAfter,
+      executionProductTypeId: null,
+      productTypeOutcome: null,
+      productTypeConfidence: null,
+      finalMembershipHash: null,
+    });
+    expect(parsedWithNulls.executionProductTypeId).toBeNull();
+    expect(parsedWithNulls.productTypeOutcome).toBeNull();
   });
 });
 

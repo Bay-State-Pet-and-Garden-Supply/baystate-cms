@@ -40,6 +40,7 @@ import {
   updateCohortStatus,
   computeExtractionHash,
 } from '../db/repositories/curation-cohort-repo';
+import { getCurrentCohortRun } from '../db/repositories/classification-cohort-run-repo';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 import {
   GROUPING_VERSION,
@@ -451,6 +452,11 @@ export function buildCohortView(cohort: CurationCohort, items: OnboardingItem[])
     };
   });
 
+  // PR4 C5: additive read-only Execution Product Type exposure — the cohort's
+  // CURRENT run's type state (null when no run exists or the type was never
+  // resolved). The run row stays the authority; the view never mutates it.
+  const currentRun = getCurrentCohortRun(cohort.id);
+
   return {
     cohort,
     members: memberViews,
@@ -460,6 +466,10 @@ export function buildCohortView(cohort: CurationCohort, items: OnboardingItem[])
     memberCount: evaluation.memberCount,
     readyCount: evaluation.readyCount,
     waitingOn: evaluation.waitingOn,
+    executionProductTypeId: currentRun?.executionProductTypeId ?? null,
+    productTypeConfidence: currentRun?.productTypeConfidence ?? null,
+    productTypeOutcome: currentRun?.productTypeOutcome ?? null,
+    finalMembershipHash: currentRun?.finalMembershipHash ?? null,
   };
 }
 

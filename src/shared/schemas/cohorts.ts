@@ -461,6 +461,21 @@ export const CurationCohortViewSchema = z.object({
   memberCount: z.number().int(),
   readyCount: z.number().int(),
   waitingOn: z.array(CohortWaitingOnItemSchema).default(() => []),
+  /**
+   * PR4 C5 additive read-only Execution Product Type exposure (architecture
+   * report §9): the cohort's CURRENT run's Execution Type state, surfaced for
+   * the review/family panels. The cohort run row stays the sole authority —
+   * these fields are derived views and never feed a decision flow. Nullable
+   * (no run yet, or run not resolved) and optional (backward compatible:
+   * older responses without the fields still parse).
+   */
+  executionProductTypeId: z.string().nullable().optional(),
+  /** The current run's cohort-level Execution Product Type confidence (0..1). */
+  productTypeConfidence: z.number().nullable().optional(),
+  /** The current run's Execution Product Type resolution outcome marker. */
+  productTypeOutcome: ExecutionProductTypeOutcomeEnum.nullable().optional(),
+  /** The current run's write-once final membership hash (NULL until finalized). */
+  finalMembershipHash: z.string().nullable().optional(),
 });
 
 export type CurationCohortView = z.infer<typeof CurationCohortViewSchema>;
