@@ -947,6 +947,35 @@ export function runMigrations(): void {
   // Supporting FK lookup index, outside the version gate (precedent
   // idx_classification_runs_one_running_item, migrations.ts:1049-1056).
   db.exec('CREATE INDEX IF NOT EXISTS idx_classification_runs_cohort_run_id ON classification_runs(cohort_run_id);');
+
+  // ── classification_cohort_snapshots + evidence_snapshot_id (issue #30 PR3 M2) ─
+  //
+  // M2 adds the content-addressed execution-evidence snapshot table and links
+  // each cohort run row to its persisted snapshot. Both are additive and run
+  // OUTSIDE the version gate: a marker-'5' database created before M2 (which
+  // already has classification_cohort_runs from the M1 file) still needs the
+  // snapshots table, and the fresh-install/version-gated path (cohort SQL
+  // file) already creates both — so this block is a no-op there. The table
+  // creation is idempotent (the cohort SQL file uses CREATE TABLE IF NOT
+  // EXISTS); the ALTER is PRAGMA-guarded. The run row must reference the
+  // persisted snapshot, so the snapshots table is guaranteed to exist first.
+  try {
+    const hasSnapshotsTable = db.query(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'classification_cohort_snapshots'",
+    ).get();
+    if (!hasSnapshotsTable) {
+      const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+      db.exec(cohortSql);
+      console.log('[Migrations] Added classification_cohort_snapshots (PR3 M2).');
+    }
+    const cohortRunCols = db.query('PRAGMA table_info(classification_cohort_runs)').all() as Array<{ name: string }>;
+    if (cohortRunCols.length > 0 && !cohortRunCols.some(col => col.name === 'evidence_snapshot_id')) {
+      db.exec('ALTER TABLE classification_cohort_runs ADD COLUMN evidence_snapshot_id TEXT REFERENCES classification_cohort_snapshots(id);');
+      console.log('[Migrations] Added classification_cohort_runs.evidence_snapshot_id.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add classification_cohort_snapshots / evidence_snapshot_id:', e);
+  }
   // ── Clean up product_draft_projection noise proposals ───────────────────
   //
   // The product_draft_projection stage previously emitted a fake

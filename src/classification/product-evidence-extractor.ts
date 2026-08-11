@@ -98,8 +98,11 @@ interface OcrToEvidenceParams {
  * Convert a stored PackagingOcrData object into ClassificationEvidence entries.
  * Each visible field produces one or more evidence records with appropriate
  * sourceField, attributeId, and reliability derived from per-field confidence.
+ * Exported so the cohort frozen-mode evidence stage can materialize evidence
+ * from a FROZEN packagingOcrData snapshot without a new model call (issue #30
+ * PR3 M2 amendment 4).
  */
-function packagingOcrDataToEvidence(
+export function packagingOcrDataToEvidence(
   ocrData: PackagingOcrData,
   params: OcrToEvidenceParams,
 ): ClassificationEvidence[] {

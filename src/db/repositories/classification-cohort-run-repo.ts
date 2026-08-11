@@ -28,6 +28,7 @@
  */
 import { getDb } from '../connection';
 import { createRun, getRun } from './classification-run-repo';
+import { randomUUID } from 'node:crypto';
 import type { ClassificationRunRow } from './classification-run-repo';
 import type { CohortRun } from '../../shared/schemas/cohorts';
 
@@ -42,6 +43,7 @@ export interface CohortRunRow {
   candidate_membership_hash: string;
   final_membership_hash: string | null;
   evidence_snapshot_hash: string | null;
+  evidence_snapshot_id: string | null;
   config_snapshot_id: string | null;
   config_snapshot_hash: string | null;
   page_import_id: string | null;
@@ -70,6 +72,7 @@ export function mapCohortRunRow(row: Record<string, any>): CohortRun {
     candidateMembershipHash: row.candidate_membership_hash,
     finalMembershipHash: row.final_membership_hash ?? null,
     evidenceSnapshotHash: row.evidence_snapshot_hash ?? null,
+    evidenceSnapshotId: row.evidence_snapshot_id ?? null,
     configSnapshotId: row.config_snapshot_id ?? null,
     configSnapshotHash: row.config_snapshot_hash ?? null,
     pageImportId: row.page_import_id ?? null,
@@ -211,6 +214,8 @@ function createRunLookup(runId: string): ClassificationRunRow {
 export interface FreezeAuthorityFields {
   /** H2 — canonical hash over the frozen member evidence (mandatory). */
   evidenceSnapshotHash: string | null;
+  /** Reference to the persisted classification_cohort_snapshots row (PR3 M2). */
+  evidenceSnapshotId?: string | null;
   /** H3 — pure bundleHash authority (nullable mirror). */
   configSnapshotId?: string | null;
   configSnapshotHash?: string | null;
@@ -234,11 +239,12 @@ export function freezeCohortRunAuthorities(
 ): boolean {
   const result = getDb().run(
     `UPDATE classification_cohort_runs
-     SET evidence_snapshot_hash = ?, config_snapshot_id = ?, config_snapshot_hash = ?,
+     SET evidence_snapshot_hash = ?, evidence_snapshot_id = ?, config_snapshot_id = ?, config_snapshot_hash = ?,
          page_import_id = ?, page_import_hash = ?, model_policy_digest = ?
      WHERE id = ? AND claimed_by = ? AND status = 'freezing'`,
     [
       fields.evidenceSnapshotHash,
+      fields.evidenceSnapshotId ?? null,
       fields.configSnapshotId ?? null,
       fields.configSnapshotHash ?? null,
       fields.pageImportId ?? null,
@@ -435,4 +441,56 @@ export function listCohortRunsByCohort(cohortId: string): CohortRun[] {
      WHERE cohort_id = ? ORDER BY created_at ASC`,
   ).all(cohortId) as Record<string, any>[];
   return rows.map(mapCohortRunRow);
+}
+
+// ─── Execution-evidence snapshots (PR3 M2) ────────────────────────────────────
+
+/**
+ * Persist a content-addressed execution-evidence snapshot. `UNIQUE
+ * (workspace_id, snapshot_hash)` dedupes identical payloads to the same row
+ * (an INSERT race loser retries the lookup). Returns the row id + hash.
+ */
+export function persistCohortSnapshot(input: {
+  workspaceId: string;
+  /** H2 digest over the payload (content-addressed identity). */
+  snapshotHash: string;
+  projectionVersion: string;
+  payloadJson: string;
+}): { id: string; hash: string } {
+  const db = getDb();
+  const existing = db.query(
+    'SELECT id FROM classification_cohort_snapshots WHERE workspace_id = ? AND snapshot_hash = ?',
+  ).get(input.workspaceId, input.snapshotHash) as { id: string } | undefined;
+  if (existing) return { id: existing.id, hash: input.snapshotHash };
+
+  const id = randomUUID();
+  try {
+    db.run(
+      `INSERT INTO classification_cohort_snapshots
+       (id, workspace_id, snapshot_hash, snapshot_kind, projection_version, payload_json, created_at)
+       VALUES (?, ?, ?, 'evidence', ?, ?, ?)`,
+      [id, input.workspaceId, input.snapshotHash, input.projectionVersion, input.payloadJson, now()],
+    );
+  } catch (err) {
+    // UNIQUE race loser against (workspace_id, snapshot_hash): the row exists.
+    const isUniqueRace = err instanceof Error && err.message.includes('UNIQUE constraint failed');
+    if (!isUniqueRace) throw err;
+  }
+  const stored = getCohortSnapshotByHash(input.workspaceId, input.snapshotHash);
+  if (!stored) {
+    throw new Error('Execution-evidence snapshot persistence failed: no stored row.');
+  }
+  return { id: stored.id, hash: stored.snapshotHash };
+}
+
+/** Look up a persisted execution-evidence snapshot by its content hash. */
+export function getCohortSnapshotByHash(
+  workspaceId: string,
+  snapshotHash: string,
+): { id: string; snapshotHash: string; payloadJson: string } | null {
+  const row = getDb().query(
+    'SELECT id, snapshot_hash, payload_json FROM classification_cohort_snapshots WHERE workspace_id = ? AND snapshot_hash = ?',
+  ).get(workspaceId, snapshotHash) as { id: string; snapshot_hash: string; payload_json: string } | undefined;
+  if (!row) return null;
+  return { id: row.id, snapshotHash: row.snapshot_hash, payloadJson: row.payload_json };
 }

@@ -1,6 +1,7 @@
--- Cohort Migration (issue #30; schema v5 = FINAL, PR3 M1)
+-- Cohort Migration (issue #30; schema v5 = FINAL, PR3 M1 + M2)
 -- Adds durable candidate product-family tables for cohort-centric Curation
--- (v1–v4) plus the parent cohort RUN table (v5, PR3 M1).
+-- (v1–v4) plus the parent cohort RUN table (v5, PR3 M1) and the
+-- content-addressed execution-evidence snapshot table (v5, PR3 M2).
 -- Version-gated by app_meta key 'curation_cohort_schema_version' in
 -- runMigrations() (src/db/migrations.ts). Uses CREATE TABLE IF NOT EXISTS and
 -- CREATE INDEX IF NOT EXISTS for idempotence. Historical cohort rows are
@@ -12,10 +13,15 @@
 -- `classification_cohort_runs`. Fresh installs read the FINAL v4 shape
 -- directly from this file; existing databases are rebuilt hop-by-hop in
 -- runMigrations() (v3 → v4 drops the two columns).
--- v5 (issue #30 PR3 M1): adds `classification_cohort_runs` — the parent cohort
--- run that owns the execution lifecycle AND the claim lease. Fresh installs
--- write marker '5'; marker-'4' databases run db.exec(cohortSql) (idempotent)
--- and bump to '5'. The candidate cohort row stays candidate-only.
+-- v5 (issue #30 PR3 M1 + M2): adds `classification_cohort_runs` — the parent
+-- cohort run that owns the execution lifecycle AND the claim lease — plus the
+-- content-addressed `classification_cohort_snapshots` table (M2) holding the
+-- frozen execution-evidence projection. `classification_cohort_runs`
+-- references its snapshot via `evidence_snapshot_id` (nullable while
+-- `freezing`). Fresh installs write marker '5'; marker-'4' databases run
+-- db.exec(cohortSql) (idempotent) and bump to '5'. Pre-M2 marker-'5'
+-- databases receive the snapshots table via the idempotent OUTSIDE-the-gate
+-- block in runMigrations(). The candidate cohort row stays candidate-only.
 -- v3 (D7): curation_cohorts.status CHECK is NARROWED to the candidate-family
 -- lifecycle `forming | waiting | ready | superseded`. Execution/lifecycle
 -- states (`running`/`completed`/`failed`/`conflicted`) never belong on the
@@ -66,6 +72,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_cohorts_active_group
   ON curation_cohorts(batch_id, group_key, grouping_version) WHERE status != 'superseded';
 
 -- ════════════════════════════════════════════════════════════════════════════
+-- classification_cohort_snapshots (issue #30, PR3 M2; cohort schema v5)
+--
+-- Content-addressed store of the frozen execution-evidence projection. One
+-- row per distinct projection payload: `snapshot_hash` is the canonical
+-- digest (H2) over the versioned payload_json, so identical payloads dedupe
+-- to the same row (UNIQUE(workspace_id, snapshot_hash)). The projection
+-- version ('execution-evidence-v1') lets the projection schema evolve without
+-- silently reinterpreting historical snapshots. A cohort run row references
+-- the persisted snapshot via evidence_snapshot_id (nullable while freezing).
+CREATE TABLE IF NOT EXISTS classification_cohort_snapshots (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  snapshot_hash TEXT NOT NULL,          -- H2 digest over payload_json (content-addressed)
+  snapshot_kind TEXT NOT NULL DEFAULT 'evidence' CHECK (snapshot_kind IN ('evidence')),
+  projection_version TEXT NOT NULL,     -- 'execution-evidence-v1'
+  payload_json TEXT NOT NULL,           -- versioned execution-evidence projection
+  created_at TEXT NOT NULL,
+  UNIQUE (workspace_id, snapshot_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_classification_cohort_snapshots_ws
+  ON classification_cohort_snapshots(workspace_id, created_at DESC);
+
+-- ════════════════════════════════════════════════════════════════════════════
 -- classification_cohort_runs (issue #30, PR3 M1; cohort schema v5)
 --
 -- Parent cohort classification run: ONE execution identity per cohort
@@ -89,9 +119,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_cohorts_active_group
 -- Authority columns: candidate_membership_hash is frozen at claim (the
 -- cohort's membership_hash — H1 identity). final_membership_hash and
 -- execution_product_type_id/product_type_confidence are PR4 placeholders
--- (NULL until PR4 writes them once). config_snapshot_id/hash,
--- page_import_id/hash and model_policy_digest are nullable mirrors of the
--- per-SKU classification_runs authority columns (frozen by the freeze
+-- (NULL until PR4 writes them once). evidence_snapshot_id references the
+-- persisted classification_cohort_snapshots row (M2) whose payload produced
+-- evidence_snapshot_hash; both are NULL while freezing. config_snapshot_id/
+-- hash, page_import_id/hash and model_policy_digest are nullable mirrors of
+-- the per-SKU classification_runs authority columns (frozen by the freeze
 -- service). The hash-required CHECK only requires the two mandatory evidence
 -- hashes before a run may LEAVE `freezing`.
 CREATE TABLE IF NOT EXISTS classification_cohort_runs (
@@ -101,6 +133,7 @@ CREATE TABLE IF NOT EXISTS classification_cohort_runs (
   candidate_membership_hash TEXT NOT NULL,  -- frozen cohort.membership_hash at claim (H1)
   final_membership_hash TEXT,               -- PR4 (write-once); NULL until then
   evidence_snapshot_hash TEXT,              -- H2 digest; NULL while freezing
+  evidence_snapshot_id TEXT REFERENCES classification_cohort_snapshots(id),  -- M2: persisted snapshot ref (NULL while freezing)
   config_snapshot_id TEXT REFERENCES classification_config_snapshots(id),  -- H3 authority ref (nullable mirror)
   config_snapshot_hash TEXT,
   page_import_id TEXT REFERENCES page_imports(id),  -- H4 authority ref (nullable mirror)

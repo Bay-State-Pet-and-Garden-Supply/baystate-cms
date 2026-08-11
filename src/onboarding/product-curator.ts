@@ -8,7 +8,9 @@ import { getEvidenceAttemptsByIdsForItem } from '../db/repositories/onboarding-e
 import { getDb } from '../db/connection';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../classification/config-loader';
 import { createConfigSnapshot, syncConfigToCache, getPersistedConfigSnapshotId } from '../db/repositories/classification-config-repo';
-import { buildRuntimeSnapshot, persistRuntimeSnapshot } from '../classification/runtime-snapshot';
+import { buildRuntimeSnapshot, persistRuntimeSnapshot, getRuntimeSnapshotByHash, deepFreeze } from '../classification/runtime-snapshot';
+import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
+import { ensureMemberRun } from '../db/repositories/classification-cohort-run-repo';
 import {
   createRun,
   completeRun,
@@ -35,6 +37,8 @@ import type { ProductLineItemSnapshot, StageDefinition } from '../classification
 import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
+import { applyFrozenProjectionToItem } from './cohort-curator';
+import type { PreparedCohortContext } from './cohort-curator';
 
 // ─── Page Assignment Validation ───────────────────────────────────────────────
 
@@ -98,11 +102,22 @@ export async function curateItemWithPipeline(
   item: OnboardingItem,
   workspacePath: string,
   workspaceId: string,
+  preparedCohort?: PreparedCohortContext,
 ): Promise<CurationData> {
+  // Prepared-cohort mode (issue #30 PR3 M2, amendment 6): the member executes
+  // against the FROZEN execution-evidence projection + freeze-persisted
+  // runtime snapshot. The item's live `extractionData`/`sourceUrl` (which may
+  // have mutated after the freeze) is overlaid with the frozen projection so
+  // the executed member never reads post-freeze mutations. Absent the
+  // prepared context, this function is byte-identical to today's behavior.
+  const cohortMode = preparedCohort !== undefined;
+  if (cohortMode) {
+    item = applyFrozenProjectionToItem(item, preparedCohort!.memberProjection);
+  }
   const ext = item.extractionData || ({} as any);
 
   const acceptedAttemptIds = item.sourcingDecision?.acceptedEvidenceAttemptIds || item.acceptedEvidenceAttemptIds || [];
-  if (acceptedAttemptIds.length > 0 && !ext.primaryImage) {
+  if (!cohortMode && acceptedAttemptIds.length > 0 && !ext.primaryImage) {
     try {
       const attempts = getEvidenceAttemptsByIdsForItem(item.id, item.upc, acceptedAttemptIds)
         .filter(att => att.itemId === item.id || att.lookupUpc === item.upc);
@@ -131,117 +146,168 @@ export async function curateItemWithPipeline(
 
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
 
-  // Load the authoritative runtime config (ACTIVE v2 bundle when present,
-  // transitional v1 otherwise). The modular pipeline works even without
-  // full product types/attributes — name_consolidation always runs.
-  const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
-  const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
-  // Capture the verified Page catalog ONCE, coherently (validates import/row
-  // correspondence and throws on drift) BEFORE the readiness gate so the gate
-  // is bound to the exact snapshot the run will freeze — an enabled Page
-  // target can never start with pages.state='no_verified_page_catalog'.
-  const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
-  // Run-start readiness gate (issue #17 L): the ACTIVE v2 config must be
-  // ready before any snapshot/run/model side effect. Not-ready throws
-  // ClassificationNotReadyError, which the onboarding worker records as a
-  // curation-stage failure with the stable reason (no transient retry).
-  assertClassificationReady(authority, {
-    catalogFields: activationContext.catalogFields,
-    verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
-    verifiedPageIds: pageSnapshot.pageImportId ? pageSnapshot.verifiedPageIds : [],
-  });
   let configSnapshotRef: {
     id: string;
     hash: string;
     sourceCommit: string | null;
     createdAt: string;
   };
-  let focusedFileHashes: Record<string, string>;
-  let catalogEvidenceHash: string | null;
-  if (authority.kind === 'v2') {
-    const bundle = authority.bundle;
-    const persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
-    configSnapshotRef = {
-      id: persistedId ?? bundle.manifest.bundleHash,
-      hash: bundle.manifest.bundleHash,
-      sourceCommit: bundle.manifest.sourceCatalogCommit,
-      createdAt: new Date().toISOString(),
-    };
-    focusedFileHashes = bundle.manifest.fileVersions;
-    catalogEvidenceHash = bundle.manifest.catalogEvidenceHash;
-    // The derived cache was written transactionally at activation.
-  } else {
-    try {
-      syncConfigToCache(workspaceId, authority.config);
-    } catch (err: any) {
-      console.warn(`[ProductCurator] Failed to sync config to cache: ${err.message}`);
-    }
-    const { id: snapshotId, hash: snapshotHash } = createConfigSnapshot(workspaceId, authority.config);
-    configSnapshotRef = {
-      id: snapshotId,
-      hash: snapshotHash,
-      sourceCommit: null,
-      createdAt: new Date().toISOString(),
-    };
-    focusedFileHashes = authority.config.manifest.fileVersions ?? {};
-    catalogEvidenceHash = null;
-  }
+  let runtimeSnapshot: RuntimeClassificationSnapshot;
+  let runtimeSnapId: string;
+  let runtimeSnapHash: string;
+  let runModelPolicyView: ModelPolicyView | null;
+  // Legacy-only verified-Page capture result (null in prepared-cohort mode).
+  let legacyPageSnapshot: { pageImportId: string | null; verifiedPageIds: string[] } | null = null;
 
-  // Build + freeze + persist ONE immutable runtime snapshot before run
-  // creation so every stage reads the same frozen config, options, and facts.
-  // The verified Page catalog (captured above, before readiness) is frozen in.
-  const runtimeSnapshot = buildRuntimeSnapshot({
-    workspaceId,
-    workspacePath,
-    productSku: item.upc,
-    authority,
-    configSnapshotRef,
-    focusedFileHashes,
-    catalogEvidenceHash,
-    sourceProductHash: '',
-    searchKeywords: ext.searchKeywords ? String(ext.searchKeywords) : null,
-    productPageNames: [],
-    pages: toPageSnapshotState(pageSnapshot),
-    pageImportId: pageSnapshot.pageImportId,
-    pageImportHash: pageSnapshot.pageImportHash,
-  });
-  const { id: runtimeSnapId, hash: runtimeSnapHash } = persistRuntimeSnapshot(runtimeSnapshot);
-
-  // Frozen model-policy view for every protected helper invocation in this
-  // curation run (issue #17 pass 1b). V2 active bundles carry locality
-  // attestation; v1/absent policies produce an explicit disabled view so
-  // protected calls use deterministic fallbacks and never legacy routing.
-  const runModelPolicyView: ModelPolicyView | null =
-    authority.kind === 'v2' && runtimeSnapshot.modelPolicy
-      ? modelPolicyViewFromConfig(
-          runtimeSnapshot.modelPolicy as unknown as ModelPolicyConfigV2,
-          runtimeSnapshot.snapshotHash,
-        )
-      : null;
-
-  // Fail any existing running classification runs for this onboarding item to ensure
-  // we do not violate the UNIQUE constraint from a stale run.
-  if (item.id) {
-    try {
-      getDb().run(
-        `UPDATE classification_runs
-         SET status = 'failed', completed_at = ?, error_message = 'Superseded by new run'
-         WHERE onboarding_item_id = ? AND status = 'running'`,
-        [new Date().toISOString(), item.id]
+  if (cohortMode) {
+    // ── Prepared-cohort mode (amendment 6) ─────────────────────────────────
+    // SKIP authority capture, per-SKU snapshot build and stale-run cleanup:
+    // the member runs against the freeze-persisted runtime snapshot (shared
+    // authorities captured ONCE at freeze) and the freeze-created child run.
+    const ctx = preparedCohort!;
+    const loadedSnapshot = getRuntimeSnapshotByHash(workspaceId, ctx.memberSnapshotHash);
+    if (!loadedSnapshot) {
+      throw new Error(
+        `Prepared-cohort mode: frozen member runtime snapshot ${ctx.memberSnapshotHash} not found; the freeze may not have persisted it.`,
       );
-    } catch (err: any) {
-      console.warn(`[ProductCurator] Failed to clean up existing running runs: ${err.message}`);
     }
+    runtimeSnapshot = deepFreeze(loadedSnapshot);
+    runtimeSnapId = ctx.memberSnapshotId;
+    runtimeSnapHash = ctx.memberSnapshotHash;
+    configSnapshotRef = runtimeSnapshot.configSnapshotRef;
+    runModelPolicyView = ctx.sharedAuthorities.modelPolicyView;
+  } else {
+    // ── Legacy per-SKU mode (byte-identical to today) ─────────────────────
+    // Load the authoritative runtime config (ACTIVE v2 bundle when present,
+    // transitional v1 otherwise). The modular pipeline works even without
+    // full product types/attributes — name_consolidation always runs.
+    const activationContext = createRuntimeActivationContext(workspacePath, workspaceId);
+    const authority = loadRuntimeConfigAuthority(workspacePath, activationContext);
+    // Capture the verified Page catalog ONCE, coherently (validates import/row
+    // correspondence and throws on drift) BEFORE the readiness gate so the gate
+    // is bound to the exact snapshot the run will freeze — an enabled Page
+    // target can never start with pages.state='no_verified_page_catalog'.
+    const pageSnapshot = captureVerifiedPageSnapshot(workspaceId);
+    // Run-start readiness gate (issue #17 L): the ACTIVE v2 config must be
+    // ready before any snapshot/run/model side effect. Not-ready throws
+    // ClassificationNotReadyError, which the onboarding worker records as a
+    // curation-stage failure with the stable reason (no transient retry).
+    assertClassificationReady(authority, {
+      catalogFields: activationContext.catalogFields,
+      verifyCatalogEvidence: activationContext.verifyCatalogEvidence,
+      verifiedPageIds: pageSnapshot.pageImportId ? pageSnapshot.verifiedPageIds : [],
+    });
+    let focusedFileHashes: Record<string, string>;
+    let catalogEvidenceHash: string | null;
+    if (authority.kind === 'v2') {
+      const bundle = authority.bundle;
+      const persistedId = getPersistedConfigSnapshotId(workspaceId, bundle.manifest.bundleHash);
+      configSnapshotRef = {
+        id: persistedId ?? bundle.manifest.bundleHash,
+        hash: bundle.manifest.bundleHash,
+        sourceCommit: bundle.manifest.sourceCatalogCommit,
+        createdAt: new Date().toISOString(),
+      };
+      focusedFileHashes = bundle.manifest.fileVersions;
+      catalogEvidenceHash = bundle.manifest.catalogEvidenceHash;
+      // The derived cache was written transactionally at activation.
+    } else {
+      try {
+        syncConfigToCache(workspaceId, authority.config);
+      } catch (err: any) {
+        console.warn(`[ProductCurator] Failed to sync config to cache: ${err.message}`);
+      }
+      const { id: snapshotId, hash: snapshotHash } = createConfigSnapshot(workspaceId, authority.config);
+      configSnapshotRef = {
+        id: snapshotId,
+        hash: snapshotHash,
+        sourceCommit: null,
+        createdAt: new Date().toISOString(),
+      };
+      focusedFileHashes = authority.config.manifest.fileVersions ?? {};
+      catalogEvidenceHash = null;
+    }
+
+    // Build + freeze + persist ONE immutable runtime snapshot before run
+    // creation so every stage reads the same frozen config, options, and facts.
+    // The verified Page catalog (captured above, before readiness) is frozen in.
+    runtimeSnapshot = buildRuntimeSnapshot({
+      workspaceId,
+      workspacePath,
+      productSku: item.upc,
+      authority,
+      configSnapshotRef,
+      focusedFileHashes,
+      catalogEvidenceHash,
+      sourceProductHash: '',
+      searchKeywords: ext.searchKeywords ? String(ext.searchKeywords) : null,
+      productPageNames: [],
+      pages: toPageSnapshotState(pageSnapshot),
+      pageImportId: pageSnapshot.pageImportId,
+      pageImportHash: pageSnapshot.pageImportHash,
+    });
+    const persisted = persistRuntimeSnapshot(runtimeSnapshot);
+    runtimeSnapId = persisted.id;
+    runtimeSnapHash = persisted.hash;
+
+    // Frozen model-policy view for every protected helper invocation in this
+    // curation run (issue #17 pass 1b). V2 active bundles carry locality
+    // attestation; v1/absent policies produce an explicit disabled view so
+    // protected calls use deterministic fallbacks and never legacy routing.
+    runModelPolicyView =
+      authority.kind === 'v2' && runtimeSnapshot.modelPolicy
+        ? modelPolicyViewFromConfig(
+            runtimeSnapshot.modelPolicy as unknown as ModelPolicyConfigV2,
+            runtimeSnapshot.snapshotHash,
+          )
+        : null;
+    legacyPageSnapshot = {
+      pageImportId: pageSnapshot.pageImportId,
+      verifiedPageIds: pageSnapshot.verifiedPageIds,
+    };
   }
 
-  // Create a classification run bound to the immutable runtime snapshot.
-  // The onboarding source hash is null (no product source identity), matching
-  // the snapshot's normalized representation so reviewed facts carry forward.
-  const run = createRun(workspaceId, item.upc, runtimeSnapId, runtimeSnapHash, {
-    onboardingItemId: item.id,
-    sourceKind: 'onboarding',
-    sourceProductHash: runtimeSnapshot.sourceProductHash ?? null,
-  });
+  let run: import('../db/repositories/classification-run-repo').ClassificationRunRow;
+  if (cohortMode) {
+    // ── Prepared-cohort mode ───────────────────────────────────────────────
+    // Reuse the freeze-created child run (idempotent ensureMemberRun) and link
+    // its config refs from the persisted member snapshot. No stale-run cleanup
+    // and no new createRun — the child already exists and is running.
+    const ctx = preparedCohort!;
+    run = ensureMemberRun(ctx.parentRunId, item.id, workspaceId, item.upc, ctx.memberSnapshotId, ctx.memberSnapshotHash);
+    if (run.configSnapshotId !== ctx.memberSnapshotId || run.configSnapshotHash !== ctx.memberSnapshotHash) {
+      // Crash-recovery re-creation (or a prior partial freeze) may have left
+      // stale refs — re-link from the freeze-persisted member snapshot.
+      getDb().run(
+        'UPDATE classification_runs SET config_snapshot_id = ?, config_snapshot_hash = ? WHERE id = ?',
+        [ctx.memberSnapshotId, ctx.memberSnapshotHash, run.id],
+      );
+    }
+  } else {
+    // Fail any existing running classification runs for this onboarding item to ensure
+    // we do not violate the UNIQUE constraint from a stale run.
+    if (item.id) {
+      try {
+        getDb().run(
+          `UPDATE classification_runs
+           SET status = 'failed', completed_at = ?, error_message = 'Superseded by new run'
+           WHERE onboarding_item_id = ? AND status = 'running'`,
+          [new Date().toISOString(), item.id]
+        );
+      } catch (err: any) {
+        console.warn(`[ProductCurator] Failed to clean up existing running runs: ${err.message}`);
+      }
+    }
+
+    // Create a classification run bound to the immutable runtime snapshot.
+    // The onboarding source hash is null (no product source identity), matching
+    // the snapshot's normalized representation so reviewed facts carry forward.
+    run = createRun(workspaceId, item.upc, runtimeSnapId, runtimeSnapHash, {
+      onboardingItemId: item.id,
+      sourceKind: 'onboarding',
+      sourceProductHash: runtimeSnapshot.sourceProductHash ?? null,
+    });
+  }
 
   try {
     // ── Product-line grouping for family-aware curation ───────────────────
@@ -369,6 +435,9 @@ export async function curateItemWithPipeline(
       runId: run.id,
       configSnapshotRef,
       snapshot: runtimeSnapshot,
+      // Prepared-cohort mode: the evidence stage consumes the frozen member
+      // projection instead of reading onboarding_items (amendment 4).
+      cohortFrozenEvidence: cohortMode ? preparedCohort!.memberProjection : undefined,
       productLineContext: productLineGroup
         ? {
             groupId: productLineGroup.groupId,
@@ -437,7 +506,16 @@ export async function curateItemWithPipeline(
     // Only identities verified in the FROZEN snapshot are suggestions. The
     // mutable page_index is never re-read after capture (issue #17 D1);
     // name-only/out-of-import proposals are review context and never surface.
-    const verifiedPageIdSet = new Set(pageSnapshot.pageImportId ? pageSnapshot.verifiedPageIds : []);
+    // In prepared-cohort mode the verified Page identity comes from the
+    // freeze-persisted shared authorities (never a live re-capture).
+    const verifiedPageIdSet = cohortMode
+      ? new Set(
+          preparedCohort!.sharedAuthorities.pageImportId &&
+            preparedCohort!.sharedAuthorities.pages.state === 'verified'
+            ? preparedCohort!.sharedAuthorities.pages.records.filter(r => r.verified).map(r => r.pageId)
+            : [],
+        )
+      : new Set(legacyPageSnapshot?.pageImportId ? legacyPageSnapshot.verifiedPageIds : []);
     const seenPageIds = new Set<string>();
     const rawSuggestedPages: string[] = [];
     for (const p of pageProposals) {
@@ -462,27 +540,33 @@ export async function curateItemWithPipeline(
     // The evidence_extraction stage may have updated the DB with fresh VLM OCR
     // results during pipeline execution. Re-read the extraction data so that
     // curatedWeight and other downstream fields use the most recent OCR data.
-    try {
-      const freshRow = getDb().query(
-        'SELECT extraction_data_json FROM onboarding_items WHERE id = ?',
-      ).get(item.id) as { extraction_data_json: string | null } | undefined;
-      if (freshRow?.extraction_data_json) {
-        const freshExt = JSON.parse(freshRow.extraction_data_json);
-        if (freshExt && typeof freshExt === 'object') {
-          // Merge fresh VLM/OCR data into the ext reference
-          if (freshExt.packagingOcrData) {
-            ext.packagingOcrData = freshExt.packagingOcrData;
-          }
-          if (freshExt.packagingTitle) {
-            ext.packagingTitle = freshExt.packagingTitle;
-          }
-          if (freshExt.weight !== undefined) {
-            ext.weight = freshExt.weight;
+    // Prepared-cohort mode SKIPS this refresh: frozen-means-frozen — the
+    // executed member never re-reads live extraction data (the frozen-mode
+    // evidence stage materializes from the projection, and OCR already ran
+    // once at freeze).
+    if (!cohortMode) {
+      try {
+        const freshRow = getDb().query(
+          'SELECT extraction_data_json FROM onboarding_items WHERE id = ?',
+        ).get(item.id) as { extraction_data_json: string | null } | undefined;
+        if (freshRow?.extraction_data_json) {
+          const freshExt = JSON.parse(freshRow.extraction_data_json);
+          if (freshExt && typeof freshExt === 'object') {
+            // Merge fresh VLM/OCR data into the ext reference
+            if (freshExt.packagingOcrData) {
+              ext.packagingOcrData = freshExt.packagingOcrData;
+            }
+            if (freshExt.packagingTitle) {
+              ext.packagingTitle = freshExt.packagingTitle;
+            }
+            if (freshExt.weight !== undefined) {
+              ext.weight = freshExt.weight;
+            }
           }
         }
+      } catch (refreshErr: any) {
+        console.warn(`[ProductCurator] Failed to refresh extraction data: ${refreshErr.message}`);
       }
-    } catch (refreshErr: any) {
-      console.warn(`[ProductCurator] Failed to refresh extraction data: ${refreshErr.message}`);
     }
 
     // Suggested product type from the best available proposal

@@ -12,6 +12,11 @@
  */
 
 import { z } from 'zod';
+import {
+  SourcingDecisionSchema,
+  OcrAttemptOutcomeSchema,
+  PackagingOcrDataSchema,
+} from './onboarding';
 
 // ─── Cohort Status ─────────────────────────────────────────────────────────────
 
@@ -80,6 +85,120 @@ export const CurationTargetScopeEnum = z.enum([
 
 export type CurationTargetScope = z.infer<typeof CurationTargetScopeEnum>;
 
+/**
+ * Row shape of a persisted content-addressed execution-evidence snapshot
+ * (`classification_cohort_snapshots`, issue #30 PR3 M2). `snapshotHash` is the
+ * canonical digest (H2) over `payloadJson`; `UNIQUE(workspace_id,
+ * snapshot_hash)` dedupes identical payloads to the same row. The run row
+ * references the snapshot via `evidence_snapshot_id`.
+ */
+export const CohortSnapshotSchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  /** H2 digest over the projection payload (content-addressed). */
+  snapshotHash: z.string(),
+  /** 'evidence' only (schema CHECK). */
+  snapshotKind: z.literal('evidence'),
+  /** 'execution-evidence-v1' — the versioned projection schema. */
+  projectionVersion: z.string(),
+  /** The versioned execution-evidence projection (canonical JSON). */
+  payloadJson: z.string(),
+  createdAt: z.string(),
+});
+
+export type CohortSnapshot = z.infer<typeof CohortSnapshotSchema>;
+
+// ─── Frozen Execution-Evidence Projection (PR3 M2, contract C) ─────────────────
+
+/**
+ * Version of the frozen per-member execution-evidence projection. The
+ * projection is what a cohort member's classification run is executed
+ * against: the member evidence hash (`evidenceHash`), the input identity the
+ * packaging OCR attempt was started against (`ocrInputHash`), and the
+ * spreadsheet + normalized extraction fields the frozen-mode evidence stage
+ * consumes — WITHOUT any live `onboarding_items` reads.
+ */
+export const PROJECTION_VERSION = 'execution-evidence-v1';
+
+/**
+ * Per-member projection entry (`execution-evidence-v1`). Every member of a
+ * frozen cohort contributes exactly one entry, sorted by `onboardingItemId`.
+ * `extractionComplete` is the semantic assertion that extraction evidence is
+ * complete — deliberately NOT raw stage/status (stage transitions are
+ * irrelevant to the frozen evidence). `evidenceHash` is the member-local H2
+ * input (`computeExtractionHash`); the cohort-level snapshot hash is the
+ * digest over the whole projection.
+ */
+export const ExecutionEvidenceProjectionMemberSchema = z.object({
+  onboardingItemId: z.string(),
+  ordinal: z.number().int(),
+  productSku: z.string().nullable(),
+  /** Semantic assertion: extraction evidence is complete (never raw stage/status). */
+  extractionComplete: z.literal(true),
+  sourceUrl: z.string().nullable(),
+  /** Latest onboarding_extractions.source_url (round-3 R4 provenance binding). */
+  extractionSourceUrl: z.string().nullable(),
+  sourcingDecision: SourcingDecisionSchema.nullable(),
+  spreadsheetIdentity: z.object({
+    name: z.string(),
+    expectedName: z.string().nullable(),
+    brandHint: z.string().nullable(),
+    departmentHint: z.string().nullable(),
+    price: z.string().nullable(),
+    quantity: z.number().int().nullable(),
+    rowNumber: z.number().int(),
+    upc: z.string().nullable(),
+  }),
+  extraction: z.object({
+    title: z.string().nullable(),
+    description: z.string().nullable(),
+    brand: z.string().nullable(),
+    weight: z.string().nullable(),
+    bulletPoints: z.array(z.string()),
+    searchKeywords: z.string().nullable(),
+    primaryImage: z.string().nullable(),
+    additionalImages: z.array(z.string()),
+    customFields: z.record(z.string(), z.string()),
+    fieldProvenance: z.record(z.string(), z.string()),
+    packagingTitle: z.string().nullable(),
+    ocr: z.object({
+      /** Terminal OCR outcome used by the frozen evidence (may be null when no attempt settled). */
+      outcome: OcrAttemptOutcomeSchema.nullable(),
+      packagingOcrData: PackagingOcrDataSchema.nullable(),
+      /** SHA-256 over the canonical {sourceUrl, extractionSourceUrl, primaryImage, additionalImages} set the OCR was started against. */
+      ocrInputHash: z.string(),
+    }),
+    /** Product Intelligence imports attached to the member (identity triple, sorted by runId). */
+    piEvidence: z.array(z.object({
+      runId: z.string(),
+      resultHash: z.string(),
+      importRecordId: z.string(),
+    })),
+    /** Semantic assertion: every attached PI import carries a run id + result hash + import record id. */
+    piImportComplete: z.literal(true),
+  }),
+  /** Member-local evidence identity (H2 input): computeExtractionHash(item). */
+  evidenceHash: z.string(),
+});
+
+export type ExecutionEvidenceProjectionMemberV1 = z.infer<typeof ExecutionEvidenceProjectionMemberSchema>;
+
+/**
+ * The full `execution-evidence-v1` projection payload persisted in
+ * `classification_cohort_snapshots.payload_json`. The snapshot hash is the
+ * canonical digest over this object. Members are sorted by onboardingItemId
+ * for deterministic hashing.
+ */
+export const ExecutionEvidenceProjectionV1Schema = z.object({
+  version: z.literal('execution-evidence-v1'),
+  cohortId: z.string(),
+  batchId: z.string(),
+  groupingVersion: z.string(),
+  members: z.array(ExecutionEvidenceProjectionMemberSchema),
+});
+
+export type ExecutionEvidenceProjectionV1 = z.infer<typeof ExecutionEvidenceProjectionV1Schema>;
+
 // ─── Cohort Run Status ─────────────────────────────────────────────────────────
 
 /**
@@ -140,6 +259,8 @@ export const CohortRunSchema = z.object({
   finalMembershipHash: z.string().nullable(),
   /** H2 canonical hash over the frozen member evidence; NULL while freezing. */
   evidenceSnapshotHash: z.string().nullable(),
+  /** Reference to the persisted classification_cohort_snapshots row (PR3 M2); NULL while freezing. */
+  evidenceSnapshotId: z.string().nullable(),
   /** H3 config authority (nullable mirror). */
   configSnapshotId: z.string().nullable(),
   configSnapshotHash: z.string().nullable(),

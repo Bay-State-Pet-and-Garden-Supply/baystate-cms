@@ -102,6 +102,14 @@ export interface RuntimeSnapshotInput {
   productPageNames?: string[];
   pageImportId?: string | null;
   pageImportHash?: string | null;
+  /**
+   * Pre-resolved product-field option lists, frozen ONCE at cohort freeze
+   * (issue #30 PR3 M2, D7) and injected into every member's runtime snapshot
+   * so the per-member snapshots share the exact same field options. When
+   * absent (legacy path) the options are computed from the config at build
+   * time.
+   */
+  fieldOptions?: Record<string, ResolvedTargetOption[]>;
   createdAt?: string;
 }
 
@@ -174,8 +182,10 @@ function listEffectiveCurationTargets(config: ClassificationConfig): CurationTar
 /**
  * Pre-resolve product-field option lists at snapshot build time. This is the
  * only point where live-store values are read; stages consume the frozen lists.
+ * Exported so the cohort freeze engine can resolve the options ONCE and inject
+ * them into every member's runtime snapshot (PR3 M2 D7).
  */
-function computeSnapshotFieldOptions(config: ClassificationConfig): Record<string, ResolvedTargetOption[]> {
+export function computeSnapshotFieldOptions(config: ClassificationConfig): Record<string, ResolvedTargetOption[]> {
   const result: Record<string, ResolvedTargetOption[]> = {};
   for (const target of listEffectiveCurationTargets(config)) {
     if (target.kind !== 'product_field') continue;
@@ -245,9 +255,11 @@ function resolveAuthorityFields(authority: RuntimeConfigAuthority): {
  * Returns null when the VLM is unconfigured/disabled so the plan entry
  * carries no frozen route and run-bound local VLM calls fail closed. The
  * captured base URL/model are the ONLY endpoint a run-bound local VLM call
- * may use — never mutable settings read mid-run.
+ * may use — never mutable settings read mid-run. Exported so the cohort
+ * freeze engine can compute the shared model-execution digest (H5) from the
+ * same frozen inputs.
  */
-function captureLocalVlmConfig(): { baseUrl: string; model: string } | null {
+export function captureLocalVlmConfig(): { baseUrl: string; model: string } | null {
   try {
     const config = getVlmConfig();
     if (!config || !config.enabled) return null;
@@ -291,7 +303,7 @@ export function buildRuntimeSnapshot(input: RuntimeSnapshotInput): RuntimeClassi
     modelPolicy: fields.modelPolicy,
     dataSharing: fields.dataSharing,
     curationTargets: fields.curationTargets,
-    fieldOptions: computeSnapshotFieldOptions(config),
+    fieldOptions: input.fieldOptions ?? computeSnapshotFieldOptions(config),
     reviewedFacts: collectCompatibleReviewedFacts({
       workspaceId: input.workspaceId,
       productSku: input.productSku,

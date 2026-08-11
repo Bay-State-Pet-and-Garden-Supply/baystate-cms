@@ -104,6 +104,14 @@ export interface StageContext {
   preComputedTitle?: string;
   /** Source of the pre-computed title, required when preComputedTitle is set. */
   preComputedTitleSource?: 'llm_cohort' | 'cohort_fallback';
+  /**
+   * Frozen member execution-evidence projection (issue #30 PR3 M2, cohort
+   * mode). When present, the evidence-extraction stage builds its evidence
+   * from the projection's spreadsheetIdentity + extraction fields and MUST
+   * NOT read onboarding_items for semantic evidence — a cohort member runs
+   * against the frozen snapshot only (frozen-means-frozen).
+   */
+  cohortFrozenEvidence?: import('../shared/schemas/cohorts').ExecutionEvidenceProjectionMemberV1;
   /** Catalog product classification context. Present only for catalog_product runs. */
   catalogContext?: {
     sourceProductHash: string;
