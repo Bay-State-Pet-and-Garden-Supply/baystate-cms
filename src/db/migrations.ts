@@ -697,11 +697,12 @@ export function runMigrations(): void {
   // Run cohort migration if not already applied (issue #30 PR1; candidate
   // schema v4 = FINAL from issue #31 cleanup F3, plus PR3 M1 v5 run table and
   // PR4 C1 v6 outcome/dependency columns). One-shot SQL file gated by an
-  // app_meta marker. cohort-migration.sql now carries the FINAL v6 shape (v4
+  // app_meta marker. cohort-migration.sql now carries the FINAL v7 shape (v4
   // candidate tables + the v5 `classification_cohort_runs` parent run table
   // with the PR4 C1 `product_type_outcome` column + the v6
-  // `classification_proposal_dependencies` table), so a FRESH install
-  // executes the SQL and writes marker '6' directly. Existing databases
+  // `classification_proposal_dependencies` table + the PR6 C1 v7
+  // `classification_cohort_outputs` table), so a FRESH install
+  // executes the SQL and writes marker '7' directly. Existing databases
   // advance through the hops below: marker '1' runs the v1→v2 rebuild (CASCADE
   // FK, v2-era wide CHECK) → writes '2', then the v2→v3 rebuild narrows the
   // CHECK → writes '3', then the v3→v4 rebuild drops the execution-metadata
@@ -709,10 +710,13 @@ export function runMigrations(): void {
   // (creating classification_cohort_runs + indexes) → writes '5', then the
   // v5→v6 hop execs the idempotent cohort SQL (creating
   // classification_proposal_dependencies + indexes; the run table already
-  // exists so its CREATE TABLE is a no-op) → writes '6'; marker '2' runs the
-  // v2→v3, v3→v4, v4→v5 and v5→v6 hops; marker '3' runs the v3→v4, v4→v5 and
-  // v5→v6 hops; marker '4' runs the v4→v5 and v5→v6 hops; marker '5' runs the
-  // v5→v6 hop; marker '6' skips everything. The PRAGMA-guarded
+  // exists so its CREATE TABLE is a no-op) → writes '6', then the v6→v7 hop
+  // execs the idempotent cohort SQL (creating classification_cohort_outputs +
+  // its index) → writes '7'; marker '2' runs the v2→v3, v3→v4, v4→v5, v5→v6
+  // and v6→v7 hops; marker '3' runs the v3→v4, v4→v5, v5→v6 and v6→v7 hops;
+  // marker '4' runs the v4→v5, v5→v6 and v6→v7 hops; marker '5' runs the
+  // v5→v6 and v6→v7 hops; marker '6' runs the v6→v7 hop; marker '7' skips
+  // everything. The PRAGMA-guarded
   // `product_type_outcome` ALTER (pre-C1 '5' databases) lives OUTSIDE the
   // gate below.
   const cohortVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
@@ -721,7 +725,7 @@ export function runMigrations(): void {
   if (!cohortVersion) {
     const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
     db.exec(cohortSql);
-    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '6');");
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '7');");
   }
 
   // ── Curation cohorts v1 → v2: batch deletion must cascade ────────────────
@@ -959,6 +963,25 @@ export function runMigrations(): void {
     db.exec(cohortSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '6') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
     console.log('[Migrations] curation_cohort_schema_version bumped to 6.');
+  }
+
+  // ── Curation cohorts v6 → v7: classification_cohort_outputs (issue #30 PR6 C1) ─
+  //
+  // v7 adds the durable cohort-output table `classification_cohort_outputs`
+  // (+ supporting index) to cohort-migration.sql. Purely additive — the file
+  // is the FINAL v7 shape, so the hop is `db.exec(cohortSql)` (idempotent via
+  // CREATE TABLE/INDEX IF NOT EXISTS) plus the marker bump, mirroring the
+  // fresh-install path. Runs for marker-'6' databases (and marker-'1'/'2'/
+  // '3'/'4'/'5' databases advanced by the hops above); marker '7' skips.
+  const cohortV6 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV6 && cohortV6.value === '6') {
+    console.log('[Migrations] Adding classification_cohort_outputs (cohort schema v6 → v7)...');
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '7') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 7.');
   }
 
   // classification_runs.cohort_run_id (issue #30, PR3 M1) — child per-SKU runs

@@ -1,4 +1,4 @@
--- Cohort Migration (issue #30; schema v6 = FINAL, PR3 M1 + M2, PR4 C1)
+-- Cohort Migration (issue #30; schema v7 = FINAL, PR3 M1 + M2, PR4 C1, PR6 C1)
 -- Adds durable candidate product-family tables for cohort-centric Curation
 -- (v1–v4) plus the parent cohort RUN table (v5, PR3 M1) and the
 -- content-addressed execution-evidence snapshot table (v5, PR3 M2).
@@ -7,6 +7,19 @@
 -- CREATE INDEX IF NOT EXISTS for idempotence. Historical cohort rows are
 -- superseded, never mutated; a superseded row is no longer the active cohort.
 --
+-- v7 (issue #30 PR6 C1): adds the durable cohort-output table
+-- `classification_cohort_outputs` (PR6 — durable cohort outputs). ONE row per
+-- (cohort_run_id, output_kind, product_sku); 'curated_title' is the first
+-- kind (the parent-cohort title-coordination output), PR7 adds
+-- 'coordinated_page'. output_kind is a free-form string mirroring the
+-- `dependency_kind` precedent (no CHECK — SQLite cannot alter a CHECK without
+-- a table rebuild, and PR7 extends the kind set). Historical outputs are
+-- IMMUTABLE: there is no UPDATE path — a new cohort revision is a NEW run id,
+-- so superseding the parent run (which leaves its outputs in place)
+-- automatically produces NEW output rows under the new run. Fresh installs
+-- read the FINAL v7 shape directly from this file; existing databases are
+-- converged in runMigrations(): marker-'6' databases run db.exec(cohortSql)
+-- (idempotent — creates the outputs table + indexes) and bump to '7'.
 -- v6 (issue #30 PR4 C1): adds the nullable `product_type_outcome` column to
 -- `classification_cohort_runs` (the PR4 Execution Product Type outcome marker:
 -- 'coherent' | 'coherent_with_abstentions' | 'conflicted' | 'abstained'; NULL
@@ -18,7 +31,7 @@
 -- to proposal-accurate separate kinds (`execution_product_type` vs
 -- `reviewed_product_type`); no recompute/invalidation machinery yet, that
 -- is PR6+).
--- Fresh installs read the FINAL v6 shape directly from this file; existing
+-- Fresh installs read the FINAL v7 shape directly from this file; existing
 -- databases are converged in runMigrations(): marker-'5' databases run
 -- db.exec(cohortSql) (idempotent — creates the dependency table + indexes)
 -- and bump to '6', and the PRAGMA-guarded `product_type_outcome` ALTER lives
@@ -251,3 +264,41 @@ CREATE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_target
 -- a re-stamp a no-op.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_unique
   ON classification_proposal_dependencies(proposal_id, dependency_kind);
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- classification_cohort_outputs (issue #30, PR6 C1; cohort schema v7)
+--
+-- Durable cohort-run outputs (architecture-report §2.1). ONE row per
+-- (cohort_run_id, output_kind, product_sku). The kind set starts with
+-- 'curated_title' (PR6); PR7 adds 'coordinated_page'. Historical outputs are
+-- IMMUTABLE: there is no UPDATE path — a new cohort revision is a NEW run id,
+-- so superseding the parent run (which leaves its outputs in place)
+-- automatically produces NEW output rows under the new run. output_kind is a
+-- free-form string mirroring the classification_proposal_dependencies.
+-- dependency_kind precedent (no CHECK — SQLite cannot alter a CHECK without a
+-- table rebuild, and PR7 must extend the kind set). Validated by the zod
+-- schema + repo enum. input_hash is the canonical title input hash
+-- (workstream 2) — redundant across members of one run but keeps every row
+-- independently auditable and makes the completeness+hash check a single
+-- query. model_call_id is a nullable soft ref to the audited
+-- classification_model_calls id when the title came from the LLM (null for
+-- deterministic fallback). No FK on product_sku (member SKUs are onboarding
+-- keys, mirroring the FK-free dependency_target_id precedent). No
+-- superseded_at: outputs belong to the run; run supersession is the lifecycle
+-- (supersedeCohortRun sets status='superseded' on the run) — old output rows
+-- are never mutated and never deleted by supersession.
+CREATE TABLE IF NOT EXISTS classification_cohort_outputs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  cohort_run_id TEXT NOT NULL REFERENCES classification_cohort_runs(id) ON DELETE CASCADE,
+  output_kind TEXT NOT NULL,                  -- 'curated_title' (PR6); 'coordinated_page' (PR7)
+  product_sku TEXT NOT NULL,                  -- member onboarding key (onboarding_items.upc is NOT NULL)
+  input_hash TEXT NOT NULL,                   -- canonical title input hash (workstream 2) — per-row audit
+  output_value_json TEXT NOT NULL,            -- {"title": "...", "source": "llm_cohort"|"cohort_fallback"}
+  model_call_id TEXT,                         -- audited callId when source='llm_cohort' (soft ref; null for fallback)
+  created_at TEXT NOT NULL,
+  UNIQUE (cohort_run_id, output_kind, product_sku)
+);
+
+CREATE INDEX IF NOT EXISTS idx_classification_cohort_outputs_run
+  ON classification_cohort_outputs(cohort_run_id, output_kind, created_at);

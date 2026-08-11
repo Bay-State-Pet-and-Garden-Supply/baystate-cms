@@ -360,6 +360,66 @@ export const ProposalDependencySchema = z.object({
 
 export type ProposalDependency = z.infer<typeof ProposalDependencySchema>;
 
+// ─── Cohort Outputs (PR6 C1, schema v7) ──────────────────────────────────────
+
+/**
+ * The output-kind set of the durable cohort-run outputs table
+ * (`classification_cohort_outputs`, cohort schema v7). `output_kind` is a
+ * free-form DB string mirroring the `dependency_kind` precedent (no CHECK —
+ * SQLite cannot alter a CHECK without a table rebuild, and PR7 extends the
+ * kind set with 'coordinated_page'); this zod literal is the schema-level
+ * validator for the kind PR6 writes.
+ */
+export const CohortOutputKind = z.literal('curated_title');
+
+export type CohortOutputKind = z.infer<typeof CohortOutputKind>;
+
+/**
+ * How a persisted curated title was produced:
+ *
+ * - `llm_cohort`: the cohort title LLM call produced the title.
+ * - `cohort_fallback`: the deterministic title formatter after a group-wide
+ *   failure (all-or-nothing per multi-item group).
+ */
+export const CohortTitleSource = z.enum(['llm_cohort', 'cohort_fallback']);
+
+export type CohortTitleSource = z.infer<typeof CohortTitleSource>;
+
+/**
+ * The `output_value_json` payload of a `curated_title` output row.
+ */
+export const CohortTitleOutputSchema = z.object({
+  title: z.string(),
+  source: CohortTitleSource,
+});
+
+export type CohortTitleOutput = z.infer<typeof CohortTitleOutputSchema>;
+
+/**
+ * Row shape of a persisted cohort output (`classification_cohort_outputs`,
+ * cohort schema v7), camelCase. See the SQL file header for the immutable
+ * contract: there is no UPDATE path — a new cohort revision is a NEW run id,
+ * so superseding the parent run (which leaves its outputs in place)
+ * automatically produces NEW output rows under the new run.
+ */
+export const CohortOutputSchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  cohortRunId: z.string(),
+  outputKind: CohortOutputKind,
+  /** Member onboarding key (onboarding_items.upc). */
+  productSku: z.string(),
+  /** Canonical title input hash (PR6 workstream 2) — per-row audit. */
+  inputHash: z.string(),
+  /** JSON payload; for 'curated_title' rows this is CohortTitleOutputSchema. */
+  outputValueJson: z.string(),
+  /** Audited classification_model_calls id when source='llm_cohort' (soft ref; null for fallback). */
+  modelCallId: z.string().nullable(),
+  createdAt: z.string(),
+});
+
+export type CohortOutput = z.infer<typeof CohortOutputSchema>;
+
 // ─── Grouping Version ──────────────────────────────────────────────────────────
 
 /**

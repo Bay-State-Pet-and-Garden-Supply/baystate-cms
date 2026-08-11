@@ -14,7 +14,7 @@ import { createBatch, deleteBatch } from '../../db/repositories/onboarding-batch
  * v6 is additive: the nullable `product_type_outcome` CHECK column on
  * `classification_cohort_runs` + the `classification_proposal_dependencies`
  * table (+ 2 indexes). Fresh installs read the FINAL v6 shape directly from
- * cohort-migration.sql (marker '6'); pre-C1 marker-'5' databases converge via
+ * cohort-migration.sql (marker '7'); pre-C1 marker-'5' databases converge via
  * the v5→v6 hop (db.exec(cohortSql) — creates the dependency table) plus the
  * PRAGMA-guarded `product_type_outcome` ALTER OUTSIDE the version gate.
  *
@@ -96,10 +96,10 @@ describe('cohort schema v6 migration — fresh install (issue #30 PR4 C1)', () =
     try { fs.rmSync(workspacePath, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  it('fresh install lands on marker 6 with the dependency table, indexes, and product_type_outcome column', () => {
+  it('fresh install lands on marker 7 with the dependency table, indexes, and product_type_outcome column', () => {
     const db = getDb();
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('6');
+    expect(version.value).toBe('7');
 
     // The v6 dependency table + both supporting indexes exist.
     expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='classification_proposal_dependencies'").get()).toBeTruthy();
@@ -184,10 +184,10 @@ describe('cohort schema v6 migration — fresh install (issue #30 PR4 C1)', () =
       );
     }).toThrow(/UNIQUE constraint failed: classification_proposal_dependencies.proposal_id, classification_proposal_dependencies.dependency_kind/);
 
-    // Idempotent: a second migration run keeps marker '6' and the v6 shape.
+    // Idempotent: a second migration run keeps marker '7' and the v7 shape.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version2.value).toBe('6');
+    expect(version2.value).toBe('7');
   });
 });
 
@@ -204,7 +204,7 @@ describe('cohort schema v6 migration — pre-C1 marker-5 convergence (issue #30 
     try { fs.rmSync(workspacePath, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
-  it('a pre-C1 marker-5 database converges to 6 without losing run rows, and existing rows keep NULL outcome', () => {
+  it('a pre-C1 marker-5 database converges to 7 without losing run rows, and existing rows keep NULL outcome', () => {
     const db = getDb();
 
     // 1. Real rows that must survive the convergence (freezing + completed runs,
@@ -286,9 +286,10 @@ describe('cohort schema v6 migration — pre-C1 marker-5 convergence (issue #30 
     // 3. Converge.
     expect(() => runMigrations()).not.toThrow();
 
-    // Marker advanced to '6'.
+    // Marker advanced to '7' (the v5→v6 hop writes '6', then the v6→v7 hop
+    // writes '7').
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('6');
+    expect(version.value).toBe('7');
 
     // Dependency table + indexes restored by the idempotent hop.
     expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='classification_proposal_dependencies'").get()).toBeTruthy();
@@ -325,10 +326,10 @@ describe('cohort schema v6 migration — pre-C1 marker-5 convergence (issue #30 
     expect(() => db.run("UPDATE classification_cohort_runs SET product_type_outcome = 'abstained' WHERE id = ?", [freezingId])).not.toThrow();
     expect(() => db.run("UPDATE classification_cohort_runs SET product_type_outcome = 'bogus' WHERE id = ?", [freezingId])).toThrow(/CHECK constraint failed/);
 
-    // Idempotent: a second run keeps marker '6' and the v6 shape.
+    // Idempotent: a second run keeps marker '7' and the v7 shape.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version2.value).toBe('6');
+    expect(version2.value).toBe('7');
 
     // Cleanup: batch deletion cascades cohort + run rows; workspace deletion
     // then succeeds (each fixture creates its own batch).
