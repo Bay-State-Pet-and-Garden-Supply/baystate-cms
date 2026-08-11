@@ -80,6 +80,93 @@ export const CurationTargetScopeEnum = z.enum([
 
 export type CurationTargetScope = z.infer<typeof CurationTargetScopeEnum>;
 
+// ─── Cohort Run Status ─────────────────────────────────────────────────────────
+
+/**
+ * Lifecycle status of a parent cohort run (`classification_cohort_runs`, issue
+ * #30 PR3 M1; cohort schema v5).
+ *
+ * - `freezing`: the run was atomically CLAIMED (lease held). Frozen authority
+ *   hashes are still being captured; `freezing → running` happens only after
+ *   the final freeze CAS transaction commits.
+ * - `running`: execution started (`started_at` set); per-member child runs are
+ *   being executed against the frozen cohort context.
+ * - `completed`: every member completed; the cohort-level semantic work
+ *   committed.
+ * - `completed_with_abstentions`: every member completed but at least one
+ *   stage abstained (no proposal emitted) without failing the run.
+ * - `completed_with_member_failures`: members individually failed but the
+ *   cohort-level semantic work still committed.
+ * - `failed`: the run failed and must be retried to make progress.
+ * - `cancelled`: the run was cancelled before completion (e.g. a freezing run
+ *   that can never finalize).
+ * - `superseded`: a newer run/cohort revision replaced this row. Settable from
+ *   ANY state including terminal ones; no transition out of it. Superseded
+ *   runs keep their frozen values — they are history, never mutated into a
+ *   new truth.
+ *
+ * The DB enforces at most one CURRENT (non-superseded) run per cohort via the
+ * unique partial index `idx_classification_cohort_runs_current`, and the
+ * hash-required CHECK (`status = 'freezing' OR (candidate_membership_hash IS
+ * NOT NULL AND evidence_snapshot_hash IS NOT NULL)`) forces the two mandatory
+ * evidence hashes before a run may leave `freezing`.
+ */
+export const ClassificationCohortRunStatusEnum = z.enum([
+  'freezing',
+  'running',
+  'completed',
+  'completed_with_abstentions',
+  'completed_with_member_failures',
+  'failed',
+  'cancelled',
+  'superseded',
+]);
+
+export type ClassificationCohortRunStatus = z.infer<typeof ClassificationCohortRunStatusEnum>;
+
+/**
+ * Row shape of a parent cohort run (`classification_cohort_runs`), camelCase.
+ * Mirrors the DB columns 1:1 (snake_case rows map via the repo's
+ * `mapCohortRunRow`). See the SQL file header for the immutable/mutable field
+ * contract.
+ */
+export const CohortRunSchema = z.object({
+  id: z.string(),
+  workspaceId: z.string(),
+  cohortId: z.string(),
+  /** Frozen cohort.membership_hash at claim (H1 — member identity only). */
+  candidateMembershipHash: z.string(),
+  /** PR4 (write-once after family coherence); NULL until then. */
+  finalMembershipHash: z.string().nullable(),
+  /** H2 canonical hash over the frozen member evidence; NULL while freezing. */
+  evidenceSnapshotHash: z.string().nullable(),
+  /** H3 config authority (nullable mirror). */
+  configSnapshotId: z.string().nullable(),
+  configSnapshotHash: z.string().nullable(),
+  /** H4 Page catalog identity (nullable mirror). */
+  pageImportId: z.string().nullable(),
+  pageImportHash: z.string().nullable(),
+  /** H5 unbound model-execution digest (nullable mirror). */
+  modelPolicyDigest: z.string().nullable(),
+  /** PR4 placeholder. */
+  executionProductTypeId: z.string().nullable(),
+  /** PR4 placeholder. */
+  productTypeConfidence: z.number().nullable(),
+  status: ClassificationCohortRunStatusEnum,
+  /** Worker id that owns the claim lease. */
+  claimedBy: z.string().nullable(),
+  claimedAt: z.string().nullable(),
+  leaseExpiresAt: z.string().nullable(),
+  /** Execution start; set on `freezing → running` (NULL until then). */
+  startedAt: z.string().nullable(),
+  completedAt: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  supersededAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+
+export type CohortRun = z.infer<typeof CohortRunSchema>;
+
 // ─── Grouping Version ──────────────────────────────────────────────────────────
 
 /**

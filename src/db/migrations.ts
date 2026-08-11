@@ -694,24 +694,26 @@ export function runMigrations(): void {
     db.exec("INSERT INTO app_meta (key, value) VALUES ('stage_pipeline_schema_version', '1');");
   }
 
-  // Run cohort migration if not already applied (issue #30 PR1; schema v4 =
-  // FINAL, issue #31 cleanup F3). One-shot SQL file gated by an app_meta
-  // marker. cohort-migration.sql now carries the FINAL v4 shape (narrowed
-  // status CHECK `forming|waiting|ready|superseded` + ON DELETE CASCADE batch
-  // FK, NO execution metadata columns), so a FRESH install executes the SQL
-  // and writes marker '4' directly. Existing databases advance through the
-  // hops below: marker '1' runs the v1→v2 rebuild (CASCADE FK, v2-era wide
-  // CHECK) → writes '2', then the v2→v3 rebuild narrows the CHECK → writes
-  // '3', then the v3→v4 rebuild drops the execution-metadata columns → writes
-  // '4'; marker '2' runs the v2→v3 and v3→v4 hops; marker '3' runs only the
-  // v3→v4 hop; marker '4' skips everything.
+  // Run cohort migration if not already applied (issue #30 PR1; candidate
+  // schema v4 = FINAL from issue #31 cleanup F3, plus PR3 M1 v5 run table).
+  // One-shot SQL file gated by an app_meta marker. cohort-migration.sql now
+  // carries the FINAL v5 shape (v4 candidate tables + the v5
+  // `classification_cohort_runs` parent run table), so a FRESH install
+  // executes the SQL and writes marker '5' directly. Existing databases
+  // advance through the hops below: marker '1' runs the v1→v2 rebuild (CASCADE
+  // FK, v2-era wide CHECK) → writes '2', then the v2→v3 rebuild narrows the
+  // CHECK → writes '3', then the v3→v4 rebuild drops the execution-metadata
+  // columns → writes '4', then the v4→v5 hop execs the idempotent cohort SQL
+  // (creating classification_cohort_runs + indexes) → writes '5'; marker '2'
+  // runs the v2→v3, v3→v4 and v4→v5 hops; marker '3' runs the v3→v4 and v4→v5
+  // hops; marker '4' runs only the v4→v5 hop; marker '5' skips everything.
   const cohortVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;
   if (!cohortVersion) {
     const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
     db.exec(cohortSql);
-    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '4');");
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '5');");
   }
 
   // ── Curation cohorts v1 → v2: batch deletion must cascade ────────────────
@@ -725,7 +727,7 @@ export function runMigrations(): void {
   // `PRAGMA foreign_key_check` and restoring FK enforcement in `finally`.
   // This block runs ONLY for a marker-'1' database and writes marker '2',
   // which the v2→v3 hop below then consumes; fresh installs already carry
-  // marker '4'.
+  // marker '5'.
   const cohortV1 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;
@@ -907,6 +909,44 @@ export function runMigrations(): void {
     db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '4') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
     console.log('[Migrations] curation_cohort_schema_version bumped to 4.');
   }
+
+  // ── Curation cohorts v4 → v5: classification_cohort_runs (issue #30 PR3 M1) ─
+  //
+  // v5 adds the parent cohort-run table `classification_cohort_runs` (execution
+  // lifecycle + claim lease) and its indexes to cohort-migration.sql. Purely
+  // additive — the file is the FINAL v5 shape, so the hop is `db.exec(cohortSql)`
+  // (idempotent via CREATE TABLE/INDEX IF NOT EXISTS) plus the marker bump,
+  // mirroring the fresh-install path. Runs for marker-'4' databases (and
+  // marker-'1'/'2'/'3' databases advanced by the hops above); marker '5' skips.
+  const cohortV4 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV4 && cohortV4.value === '4') {
+    console.log('[Migrations] Adding classification_cohort_runs (cohort schema v4 → v5)...');
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '5') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 5.');
+  }
+
+  // classification_runs.cohort_run_id (issue #30, PR3 M1) — child per-SKU runs
+  // link to their parent cohort run. ON DELETE SET NULL per the epic; plain FK
+  // (mirrors classification_runs.onboarding_item_id). PRAGMA-guarded and
+  // OUTSIDE the version gate so databases already at marker '5' still receive
+  // the column; placed after the cohort block so the FK target table
+  // (classification_cohort_runs) always exists first. Legacy rows keep NULL.
+  try {
+    const runCols = db.query('PRAGMA table_info(classification_runs)').all() as Array<{ name: string }>;
+    if (runCols.length > 0 && !runCols.some(col => col.name === 'cohort_run_id')) {
+      db.exec('ALTER TABLE classification_runs ADD COLUMN cohort_run_id TEXT REFERENCES classification_cohort_runs(id) ON DELETE SET NULL;');
+      console.log('[Migrations] Added classification_runs.cohort_run_id.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add cohort_run_id to classification_runs:', e);
+  }
+  // Supporting FK lookup index, outside the version gate (precedent
+  // idx_classification_runs_one_running_item, migrations.ts:1049-1056).
+  db.exec('CREATE INDEX IF NOT EXISTS idx_classification_runs_cohort_run_id ON classification_runs(cohort_run_id);');
   // ── Clean up product_draft_projection noise proposals ───────────────────
   //
   // The product_draft_projection stage previously emitted a fake

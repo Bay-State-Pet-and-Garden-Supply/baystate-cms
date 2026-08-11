@@ -918,7 +918,7 @@ describe('SQLite Migration', () => {
     expect(row.relation).toBe('legacy');
   });
 
-  it('rebuilds v1 curation_cohorts with an ON DELETE CASCADE batch FK (v1 → v2 → v3 → v4)', () => {
+  it('rebuilds v1 curation_cohorts with an ON DELETE CASCADE batch FK (v1 → v2 → v3 → v4 → v5)', () => {
     const db = getDb();
     const now = new Date().toISOString();
 
@@ -1003,10 +1003,11 @@ describe('SQLite Migration', () => {
 
     expect(() => runMigrations()).not.toThrow();
 
-    // Marker advanced all the way to v4 (the v1→v2 hop feeds the v2→v3 hop,
-    // which feeds the v3→v4 hop that drops the execution-metadata columns).
+    // Marker advanced all the way to v5 (the v1→v2 hop feeds the v2→v3 hop,
+    // which feeds the v3→v4 hop that drops the execution-metadata columns,
+    // which feeds the v4→v5 hop that adds classification_cohort_runs).
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('4');
+    expect(version.value).toBe('5');
 
     const fks = db.query("PRAGMA foreign_key_list('curation_cohorts')").all() as Array<{ from: string; table: string; on_delete: string }>;
     const batchFk = fks.find(f => f.from === 'batch_id');
@@ -1036,10 +1037,10 @@ describe('SQLite Migration', () => {
     expect(db.query("PRAGMA foreign_key_check('curation_cohorts')").all()).toHaveLength(0);
     expect(db.query("PRAGMA foreign_key_check('curation_cohort_members')").all()).toHaveLength(0);
 
-    // Idempotent: a second run keeps the marker and the v4 shape.
+    // Idempotent: a second run keeps the marker and the v5 shape.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version2.value).toBe('4');
+    expect(version2.value).toBe('5');
 
     // End-to-end: the real deleteBatch now cascades to the cohort AND member rows.
     expect(deleteBatch(batchId)).toBe(true);
@@ -1069,13 +1070,14 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
     try { unlinkSync(dbPath); } catch { /* ok */ }
   });
 
-  it('fresh install: marker absent -> v4 directly with the narrowed status CHECK, CASCADE FK, and no execution-metadata columns', () => {
+  it('fresh install: marker absent -> v5 directly with the narrowed status CHECK, CASCADE FK, and no execution-metadata columns', () => {
     const db = getDb();
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('4');
+    expect(version.value).toBe('5');
 
     // cohort-migration.sql is the FINAL schema: narrowed CHECK + CASCADE FK +
-    // NO started_at/completed_at (execution metadata belongs to cohort runs).
+    // NO started_at/completed_at (execution metadata belongs to cohort runs),
+    // plus the v5 classification_cohort_runs table.
     const tableSql = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='curation_cohorts'").get() as { sql: string };
     expect(tableSql.sql).toContain("status IN ('forming','waiting','ready','superseded')");
     expect(tableSql.sql).toContain('ON DELETE CASCADE');
@@ -1084,13 +1086,13 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
     expect(tableSql.sql).not.toContain('started_at');
     expect(tableSql.sql).not.toContain('completed_at');
 
-    // Idempotent: a second run keeps marker '4'.
+    // Idempotent: a second run keeps marker '5'.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version2.value).toBe('4');
+    expect(version2.value).toBe('5');
   });
 
-  it('marker-2 DB: v2 -> v3 -> v4 rebuild preserves data, maps legacy execution statuses, narrows the CHECK, drops execution columns, and keeps cascade', () => {
+  it('marker-2 DB: v2 -> v3 -> v4 -> v5 rebuild preserves data, maps legacy execution statuses, narrows the CHECK, drops execution columns, and keeps cascade', () => {
     const db = getDb();
     const now = new Date().toISOString();
 
@@ -1173,9 +1175,9 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
 
     expect(() => runMigrations()).not.toThrow();
 
-    // Marker advanced to v4 (v2 → v3 → v4 hops).
+    // Marker advanced to v5 (v2 → v3 → v4 → v5 hops).
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('4');
+    expect(version.value).toBe('5');
 
     // Data preserved: the 'running' row survived and was deterministically
     // mapped to 'ready' (dropping the never-durable execution state leaves a
@@ -1221,7 +1223,7 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
     db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
   });
 
-  it('marker-3 DB: v3 -> v4 rebuild drops started_at/completed_at, preserves data, and keeps cascade', () => {
+  it('marker-3 DB: v3 -> v4 -> v5 rebuild drops started_at/completed_at, preserves data, and keeps cascade', () => {
     const db = getDb();
     const now = new Date().toISOString();
 
@@ -1304,9 +1306,9 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
 
     expect(() => runMigrations()).not.toThrow();
 
-    // Marker advanced to v4.
+    // Marker advanced to v5 (v3 → v4 → v5 hops).
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('4');
+    expect(version.value).toBe('5');
 
     // The execution-metadata columns are GONE.
     const cols = db.query('PRAGMA table_info(curation_cohorts)').all() as Array<{ name: string }>;
@@ -1355,5 +1357,196 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
     expect(db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number }).toEqual({ c: 0 });
 
     db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+});
+
+describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
+  const dbPath = `/tmp/baystate-cms-cohort-v5-${randomUUID()}.db`;
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(dbPath);
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(dbPath); } catch { /* ok */ }
+  });
+
+  it('fresh install: marker absent -> v5 directly with classification_cohort_runs, cohort_run_id, and the current-run index', () => {
+    const db = getDb();
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('5');
+
+    // The v5 parent run table exists with the PR3 M1 lifecycle CHECKs.
+    const runTable = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='classification_cohort_runs'").get() as { sql: string } | undefined;
+    expect(runTable).toBeTruthy();
+    const sql = runTable!.sql;
+    expect(sql).toContain("'freezing'");
+    expect(sql).toContain("'completed_with_member_failures'");
+    expect(sql).not.toContain("'queued'"); // queued was DROPPED in PR3
+    expect(sql).toContain("CHECK (status IN ('freezing','superseded','cancelled') OR (candidate_membership_hash IS NOT NULL AND evidence_snapshot_hash IS NOT NULL))");
+    expect(sql).toContain('lease_expires_at');
+    expect(sql).toContain('superseded_at');
+
+    // classification_runs.cohort_run_id was added OUTSIDE the version gate.
+    const runCols = db.query('PRAGMA table_info(classification_runs)').all() as Array<{ name: string }>;
+    expect(runCols.map(c => c.name)).toContain('cohort_run_id');
+
+    // Unique current-run index is present (the claim race backstop).
+    const idxSql = db.query("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_current'").get() as { sql: string } | undefined;
+    expect(idxSql?.sql ?? '').toContain('UNIQUE');
+    expect(idxSql?.sql ?? '').toContain("status != 'superseded'");
+
+    // Lease sweep + cohort/status/workspace indexes present.
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_lease'").get()).toBeTruthy();
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_workspace'").get()).toBeTruthy();
+
+    // Real CHECK behavior on a real row: 'freezing' is accepted, 'queued' is
+    // rejected, and leaving 'freezing' without the mandatory evidence hashes
+    // fails closed.
+    const now = new Date().toISOString();
+    const wsId = randomUUID();
+    insertWorkspace({
+      id: wsId,
+      name: 'Cohort V5 WS',
+      workspacePath: '/tmp/cohort-v5',
+      gitPath: '',
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const batchId = createBatch({ workspaceId: wsId, name: 'Cohort V5 Batch', fileName: 'cohort-v5.xlsx', totalItems: 1 }).id;
+    const cohortId = randomUUID();
+    db.run(
+      `INSERT INTO curation_cohorts
+         (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+          status, blocked_reason, created_at, updated_at, superseded_at)
+       VALUES (?, ?, ?, 'v5-key', 'V5 Family', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL)`,
+      [cohortId, wsId, batchId, 'f'.repeat(64), now, now],
+    );
+
+    const freezingId = randomUUID();
+    expect(() => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, created_at)
+         VALUES (?, ?, ?, ?, 'freezing', 'worker-a', ?, ?, ?)`,
+        [freezingId, wsId, cohortId, 'f'.repeat(64), now, now, now],
+      );
+    }).not.toThrow();
+
+    // 'queued' was DROPPED from the enum in PR3 — the status CHECK rejects it.
+    expect(() => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, created_at)
+         VALUES (?, ?, ?, ?, 'queued', 'worker-a', ?, ?, ?)`,
+        [randomUUID(), wsId, cohortId, 'f'.repeat(64), now, now, now],
+      );
+    }).toThrow(/CHECK constraint failed/);
+
+    // Superseded/cancelled are terminal lifecycle states exempt from the hash
+    // gate: a NULL-hash freezing run (abandoned unfinalized freeze) may still
+    // be superseded or cancelled (PR3 decision, Option A). Each scenario needs
+    // its OWN cohort (the unique current-run index allows only one
+    // non-superseded run per cohort).
+    const mkCohort = (groupKey: string): string => {
+      const id = randomUUID();
+      db.run(
+        `INSERT INTO curation_cohorts
+           (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+            status, blocked_reason, created_at, updated_at, superseded_at)
+         VALUES (?, ?, ?, ?, 'V5 Family', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL)`,
+        [id, wsId, batchId, groupKey, 'g'.repeat(64), now, now],
+      );
+      return id;
+    };
+    const insertFreezing = (id: string, cohort: string): void => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, created_at)
+         VALUES (?, ?, ?, ?, 'freezing', 'worker-a', ?, ?, ?)`,
+        [id, wsId, cohort, 'f'.repeat(64), now, now, now],
+      );
+    };
+    const supersedeId = randomUUID();
+    const supersedeCohortId = mkCohort('v5-key-supersede');
+    const cancelId = randomUUID();
+    const cancelCohortId = mkCohort('v5-key-cancel');
+    insertFreezing(supersedeId, supersedeCohortId);
+    insertFreezing(cancelId, cancelCohortId);
+    expect(() => db.run("UPDATE classification_cohort_runs SET status = 'superseded', superseded_at = ? WHERE id = ?", [now, supersedeId])).not.toThrow();
+    expect(() => db.run("UPDATE classification_cohort_runs SET status = 'cancelled', completed_at = ? WHERE id = ?", [now, cancelId])).not.toThrow();
+
+    // Hash-required CHECK: leaving 'freezing' for an EXECUTION state without
+    // evidence_snapshot_hash fails closed.
+    expect(() => {
+      db.run("UPDATE classification_cohort_runs SET status = 'running' WHERE id = ?", [freezingId]);
+    }).toThrow(/CHECK constraint failed/);
+    // With the mandatory hashes the transition is accepted.
+    expect(() => {
+      db.run(
+        `UPDATE classification_cohort_runs
+         SET status = 'running', started_at = ?, evidence_snapshot_hash = ?
+         WHERE id = ?`,
+        [now, 'e'.repeat(64), freezingId],
+      );
+    }).not.toThrow();
+
+    // The unique current-run index rejects a second non-superseded run for the
+    // same cohort.
+    expect(() => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, evidence_snapshot_hash, created_at)
+         VALUES (?, ?, ?, ?, 'running', 'worker-b', ?, ?, ?, ?)`,
+        [randomUUID(), wsId, cohortId, 'f'.repeat(64), now, now, 'g'.repeat(64), now],
+      );
+    }).toThrow(/UNIQUE/i);
+
+    // Cleanup: batch deletion cascades the cohort + runs; workspace deletion
+    // then succeeds.
+    expect(deleteBatch(batchId)).toBe(true);
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+
+  it('marker-4 DB: v4 -> v5 hop execs the cohort SQL and bumps the marker (idempotent)', () => {
+    const db = getDb();
+    // Simulate a pre-PR3 v4 database: rewind the marker and drop the v5 table.
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec('DROP TABLE IF EXISTS classification_cohort_runs;');
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+    db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '4')");
+
+    expect(() => runMigrations()).not.toThrow();
+
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('5');
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='classification_cohort_runs'").get()).toBeTruthy();
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_current'").get()).toBeTruthy();
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_lease'").get()).toBeTruthy();
+
+    // cohort_run_id survives for databases that were already migrated
+    // (the ALTER and supporting index live OUTSIDE the version gate).
+    const runCols = db.query('PRAGMA table_info(classification_runs)').all() as Array<{ name: string }>;
+    expect(runCols.map(c => c.name)).toContain('cohort_run_id');
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_runs_cohort_run_id'").get()).toBeTruthy();
+
+    // Idempotent: a second run keeps the marker and the v5 shape.
+    expect(() => runMigrations()).not.toThrow();
+    const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version2.value).toBe('5');
   });
 });
