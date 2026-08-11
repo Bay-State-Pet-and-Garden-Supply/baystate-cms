@@ -122,7 +122,7 @@ import type { ProductLineItemSnapshot } from '../classification/types';
 import { getVlmConfig } from './vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
 import { curateItemWithPipeline } from './product-curator';
-import { ensureCohortTitlesCoordinated } from './cohort-title-coordinator';
+import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError } from './cohort-title-coordinator';
 import { groupByProductLine } from './cohort-name-coordinator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
 import {
@@ -136,6 +136,7 @@ import type {
   ExecutionEvidenceProjectionMemberV1,
   ExecutionEvidenceProjectionV1,
   ExecutionProductTypeOutcome,
+  CohortTitleOutput,
 } from '../shared/schemas/cohorts';
 import type {
   OnboardingItem,
@@ -2132,22 +2133,44 @@ export async function processCohort(
   // run. Computes the canonical title input hash from frozen title authority
   // only; reuses the persisted `classification_cohort_outputs` when the
   // complete set + hash match (ZERO LLM calls), otherwise coordinates ONCE
-  // under a scoped lease keeper (audited `cohort_title_consolidation` call
-  // bound to the ordinal-0 member child run) and persists every group
-  // member's title all-or-nothing. Prepared members then consume these
-  // outputs at the `preComputedTitle` seam (PR6 C5); the coordinator +
-  // `cohortCache` are never consulted in active cohort mode. A lost claim
-  // (`HeartbeatLostError`) propagates with NO output rows — the reclaiming
-  // worker re-enters processCohort and reuses-or-coordinates.
-  const coordinatedTitles = await ensureCohortTitlesCoordinated({
-    run,
-    workspaceId,
-    workspacePath,
-    projection,
-    cohort,
-    members,
-    frozenLineContext,
-  });
+  // (only when the set is empty) under a scoped lease keeper (audited
+  // `cohort_title_consolidation` call bound to the ordinal-0 member child
+  // run) and persists every group member's title all-or-nothing and
+  // WRITE-ONCE. Prepared members then consume these outputs at the
+  // `preComputedTitle` seam (PR6 C5); the coordinator + `cohortCache` are
+  // never consulted in active cohort mode. A lost claim (`HeartbeatLostError`)
+  // propagates with NO output rows — the reclaiming worker re-enters
+  // processCohort and reuses-or-coordinates.
+  //
+  // PR6 hardening A: a committed output set that no longer matches the frozen
+  // title authority (or a commit-race) is `CohortTitleAuthorityDriftError` —
+  // the set is WRITE-ONCE and can never be replaced, so the parent op
+  // terminates the run DETERMINISTICALLY (owner-guarded `failed` terminal via
+  // the existing `completeCohortRun` path) instead of re-entering coordination
+  // and retrying forever. Children not yet run stay pending — no member
+  // writes, no further coordination.
+  let coordinatedTitles: Map<string, CohortTitleOutput>;
+  try {
+    coordinatedTitles = await ensureCohortTitlesCoordinated({
+      run,
+      workspaceId,
+      workspacePath,
+      projection,
+      cohort,
+      members,
+      frozenLineContext,
+    });
+  } catch (err) {
+    if (err instanceof CohortTitleAuthorityDriftError) {
+      const reason = `processCohort aborted: ${err.message}`;
+      // Owner-guarded terminal write: a run another worker reclaimed is never
+      // failed by this (stale) caller. The run is now terminal, so a reclaim
+      // can never re-enter coordination for it.
+      completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
+      throw new Error(reason, { cause: err });
+    }
+    throw err;
+  }
 
   // Scoped periodic heartbeat (PR3 hardening, Commit A): the lease is renewed
   // when `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3`, so a long

@@ -6,15 +6,19 @@
  * `db.transaction(() => {})()` for multi-table writes — following the
  * classification-cohort-run-repo / curation-cohort-repo conventions.
  *
- * IMMUTABILITY (architecture-report §2.1, DECISION-T): `classification_cohort_outputs`
- * rows are historical truth — there is NO update path anywhere in this repo
- * (and no UPDATE SQL anywhere in the codebase for this table). A new cohort
- * revision is a NEW run id, so superseding the parent run (which leaves its
- * outputs in place) automatically produces NEW output rows under the new run.
- * The only write primitive is `replaceCohortTitleOutputs`: DELETE the prior
- * `curated_title` rows for the run + INSERT every row INSIDE ONE transaction
- * (all-or-nothing — any throw rolls back the whole set). Outputs cover
- * multi-item group members only (DECISION-O); singletons are never written.
+ * WRITE-ONCE (PR6 hardening A; architecture-report §2.1, DECISION-T):
+ * `classification_cohort_outputs` rows are historical truth — there is NO
+ * update path anywhere in this repo (no UPDATE SQL), and the DELETE/replace
+ * path has been REMOVED entirely. Once ANY shared output set is committed for
+ * (cohort_run_id, output_kind), that set is write-once: the ONLY write
+ * primitive is `insertCohortTitleOutputsOnce`, which inserts a fresh set ONLY
+ * when ZERO rows exist for the (run, kind) and THROWS
+ * `CohortOutputAlreadyCommittedError` when any rows already exist — INSIDE
+ * ONE transaction (all-or-nothing — any throw rolls back the whole set). A
+ * new cohort revision is a NEW run id, so superseding the parent run (which
+ * leaves its outputs in place) automatically produces NEW output rows under
+ * the new run. Outputs cover multi-item group members only (DECISION-O);
+ * singletons are never written.
  */
 import { getDb } from '../connection';
 import { randomUUID } from 'node:crypto';
@@ -71,20 +75,46 @@ export interface CohortTitleOutputInput {
 }
 
 /**
- * Replace a cohort run's `curated_title` outputs — the ONLY write path for
- * the outputs table (immutability: no UPDATE anywhere; the unique
- * (cohort_run_id, output_kind, product_sku) index makes an insert-after-
- * delete inside one transaction the canonical replacement).
- *
- * ALL-OR-NOTHING (architecture-report §5.1): the DELETE of the prior
- * `curated_title` rows for the run and every INSERT run inside ONE
- * `db.transaction`. Any throw (FK failure, UNIQUE collision) rolls back the
- * whole set — the old rows are never partially deleted and new rows are never
- * partially inserted. Every row shares the same `inputHash` (the canonical
- * title input hash computed at the parent op) so the reuse check is a single
- * per-row comparison.
+ * Deterministic write-once guard (PR6 hardening A). Thrown when a commit is
+ * attempted for a (cohort_run_id, output_kind) that ALREADY has persisted
+ * rows — the committed set is immutable and can never be replaced (the
+ * DELETE/replace path no longer exists). Carries the run id, output kind, and
+ * the existing set's input hash for deterministic diagnostics.
  */
-export function replaceCohortTitleOutputs(input: {
+export class CohortOutputAlreadyCommittedError extends Error {
+  readonly runId: string;
+  readonly outputKind: string;
+  readonly existingInputHash: string;
+
+  constructor(runId: string, outputKind: string, existingInputHash: string) {
+    super(
+      `[CohortOutputAlreadyCommitted] Durable cohort output set for run ${runId} / kind ${outputKind} is write-once: ` +
+        `a set is already committed (input_hash=${existingInputHash}) — refusing to insert again. ` +
+        'A committed set can never be replaced or extended; a new cohort revision must use a NEW run id.',
+    );
+    this.name = 'CohortOutputAlreadyCommittedError';
+    this.runId = runId;
+    this.outputKind = outputKind;
+    this.existingInputHash = existingInputHash;
+  }
+}
+
+/**
+ * Insert a cohort run's `curated_title` outputs ONCE — the ONLY write path
+ * for the outputs table (immutability: no UPDATE anywhere; the DELETE/replace
+ * path is GONE).
+ *
+ * THREE-WAY SEMANTICS inside ONE `db.transaction` (PR6 hardening A):
+ * - ZERO existing rows for (run, 'curated_title') → insert every row
+ *   (all-or-nothing — any throw rolls back the whole set);
+ * - ANY existing row → throw `CohortOutputAlreadyCommittedError` (with the
+ *   run id + kind + the existing set's input hash) and NEVER delete;
+ * - the reuse check stays a pure read (`getCohortTitleOutputsByRun`).
+ *
+ * The UNIQUE (cohort_run_id, output_kind, product_sku) index is the DB-level
+ * backstop for a duplicate-sku batch inside a single insert.
+ */
+export function insertCohortTitleOutputsOnce(input: {
   workspaceId: string;
   runId: string;
   inputHash: string;
@@ -92,11 +122,14 @@ export function replaceCohortTitleOutputs(input: {
 }): void {
   const db = getDb();
   db.transaction(() => {
-    db.run(
-      `DELETE FROM classification_cohort_outputs
-       WHERE cohort_run_id = ? AND output_kind = 'curated_title'`,
-      [input.runId],
-    );
+    const existing = db.query(
+      `SELECT input_hash FROM classification_cohort_outputs
+       WHERE cohort_run_id = ? AND output_kind = 'curated_title'
+       LIMIT 1`,
+    ).get(input.runId) as { input_hash: string } | undefined;
+    if (existing) {
+      throw new CohortOutputAlreadyCommittedError(input.runId, 'curated_title', existing.input_hash);
+    }
     for (const output of input.outputs) {
       db.run(
         `INSERT INTO classification_cohort_outputs

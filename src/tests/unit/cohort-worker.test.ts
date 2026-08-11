@@ -71,7 +71,7 @@ import { computeCohortTitleInputHash } from '../../onboarding/cohort-title-hash'
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
 import {
   getCohortTitleOutputsByRun,
-  replaceCohortTitleOutputs,
+  insertCohortTitleOutputsOnce,
   countCohortTitleOutputs,
 } from '../../db/repositories/classification-cohort-output-repo';
 import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
@@ -126,7 +126,7 @@ function seedV1TitleOutputs(workspaceId: string, run: CohortRun): void {
     }))
     .filter(o => o.productSku.length > 0);
   if (outputs.length === 0) return;
-  replaceCohortTitleOutputs({ workspaceId, runId: run.id, inputHash, outputs });
+  insertCohortTitleOutputsOnce({ workspaceId, runId: run.id, inputHash, outputs });
 }
 
 /**
@@ -2187,9 +2187,11 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
   ] as const;
 
   /** Seed `curated_title` outputs exactly as a prior processCohort entry
-   *  would have persisted them (llm_cohort + the canonical T-hash). */
+   *  would have persisted them (llm_cohort + the canonical T-hash). The
+   *  freshly frozen run has zero output rows, so the write-once insert
+   *  succeeds (PR6 hardening A). */
   function seedCohortTitleOutputs(workspaceId: string, run: CohortRun, inputHash: string): void {
-    replaceCohortTitleOutputs({
+    insertCohortTitleOutputsOnce({
       workspaceId,
       runId: run.id,
       inputHash,
@@ -2399,6 +2401,44 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     } finally {
       titleCallSpy.mockRestore();
     }
+  });
+
+  it('PR6 hardening A: a committed title set under a mismatched authority fails the parent run closed (drift → failed, children stay pending, no re-coordination)', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items } = await freezeTwoMemberCohort();
+    const projection = loadFrozenProjection(workspaceId, run);
+    const inputHash = expectedTitleInputHash(run, projection);
+
+    // A NONEMPTY committed set whose rows do NOT match the freshly computed
+    // T-hash simulates the dangerous split: members would have completed under
+    // outputs A while the authority changed. WRITE-ONCE means the set can never
+    // be replaced — the parent op must terminate the run deterministically.
+    insertCohortTitleOutputsOnce({
+      workspaceId,
+      runId: run.id,
+      inputHash: 'a'.repeat(64), // stale authority hash
+      outputs: SEEDED_TITLES.map(([productSku, title]) => ({ productSku, title, source: 'cohort_fallback' as const })),
+    });
+    expect(countCohortTitleOutputs(run.id)).toBe(2);
+    const seededBefore = getCohortTitleOutputsByRun(run.id);
+
+    await expect(processCohort(run, wsPath, workspaceId)).rejects.toThrow(/CohortTitleAuthorityDrift/);
+
+    // The parent run is TERMINAL (failed) with the deterministic drift
+    // message — a reclaim can never re-enter coordination for it.
+    const terminal = getCohortRunById(run.id)!;
+    expect(terminal.status).toBe('failed');
+    expect(terminal.errorMessage).toContain('write-once');
+    expect(terminal.errorMessage).toContain(inputHash);
+    expect(terminal.errorMessage).toContain(run.id);
+
+    // Children not yet run stay pending — no member writes happened.
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('pending');
+      expect(stored.curationData).toBeNull();
+    }
+    // The committed set is untouched (never replaced, never extended).
+    expect(getCohortTitleOutputsByRun(run.id)).toEqual(seededBefore);
   });
 
   it('legacy flag-OFF: coordinateCohortItemsOnce is still invoked and the cohortCache dedups the batch (spy assertions)', async () => {

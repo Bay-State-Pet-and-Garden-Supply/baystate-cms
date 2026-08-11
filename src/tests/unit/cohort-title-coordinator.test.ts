@@ -16,9 +16,12 @@
  *   success pair bound to the ordinal-0 child run;
  * - reuse: second call on the same run (after clearCohortCoordinationCache)
  *   → zero calls, identical map (DB authority, not process memory);
- * - hash mismatch: outputs written under an old input_hash → re-coordinate +
- *   replace;
- * - incomplete set: 1 of 2 rows present → re-coordinate + complete;
+ * - hash mismatch (PR6 hardening A): a nonempty committed set under a stale
+ *   input_hash → CohortTitleAuthorityDriftError, existing set untouched, ZERO
+ *   new model calls (write-once — never re-coordinates, never replaces);
+ * - incomplete nonempty set (PR6 hardening A): → CohortTitleAuthorityDriftError
+ *   (can only be corruption — the all-or-nothing insert never leaves partial
+ *   rows);
  * - all-or-nothing: forced insert failure (nonexistent workspace FK) → throws,
  *   zero rows remain;
  * - HeartbeatLostError after the LLM returns (sibling reclaim) → no rows,
@@ -71,7 +74,7 @@ import {
 } from '../../classification/runtime-snapshot';
 import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
 import { computeCohortTitleInputHash } from '../../onboarding/cohort-title-hash';
-import { ensureCohortTitlesCoordinated } from '../../onboarding/cohort-title-coordinator';
+import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError } from '../../onboarding/cohort-title-coordinator';
 import {
   freezeCohortForExecution,
   buildFrozenProductLineContext,
@@ -648,13 +651,14 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(countCohortTitleOutputs(fixture.run.id)).toBe(2);
   });
 
-  it('hash mismatch: outputs written under an old input_hash → re-coordinates and replaces the set', async () => {
+  it('hash mismatch: a nonempty committed set under a stale input_hash FAILS CLOSED — CohortTitleAuthorityDriftError, existing set untouched, zero new model calls', async () => {
     const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
     const inputHash = expectedInputHash(fixture);
 
-    // Simulate a prior write under a different title authority (stale hash).
-    const { replaceCohortTitleOutputs } = await import('../../db/repositories/classification-cohort-output-repo');
-    replaceCohortTitleOutputs({
+    // Simulate a prior commit under a different title authority (stale hash).
+    // The run has zero rows yet, so the FIRST write-once insert succeeds.
+    const { insertCohortTitleOutputsOnce } = await import('../../db/repositories/classification-cohort-output-repo');
+    insertCohortTitleOutputsOnce({
       workspaceId: fixture.workspaceId,
       runId: fixture.run.id,
       inputHash: 'a'.repeat(64),
@@ -663,27 +667,47 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
         { productSku: '100000000002', title: 'Old Beef Title', source: 'cohort_fallback' },
       ],
     });
+    const rowsBefore = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rowsBefore).toHaveLength(2);
 
-    const map = await ensureCohortTitlesCoordinated({
-      run: fixture.run,
-      workspaceId: fixture.workspaceId,
-      workspacePath: fixture.workspacePath,
-      projection: fixture.projection,
-      cohort: fixture.cohort,
-      members: fixture.members,
-      frozenLineContext: fixture.frozenLineContext,
-    });
+    // WRITE-ONCE (PR6 hardening A): a nonempty set whose rows do not match the
+    // freshly computed T-hash is authority drift — the op NEVER re-coordinates
+    // and NEVER replaces; it fails closed with the deterministic error.
+    let thrown: unknown;
+    try {
+      await ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      });
+      expect.unreachable('expected CohortTitleAuthorityDriftError');
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CohortTitleAuthorityDriftError);
+    const drift = thrown as CohortTitleAuthorityDriftError;
+    expect(drift.runId).toBe(fixture.run.id);
+    expect(drift.expectedHash).toBe(inputHash);
+    expect(drift.storedHashes).toEqual(['a'.repeat(64)]);
+    expect(drift.rowCount).toBe(2);
+    expect(drift.message).toContain(fixture.run.id);
+    expect(drift.message).toContain(inputHash);
+    expect(drift.message).toContain('a'.repeat(64));
 
-    // Re-coordinated: one more title call, old rows replaced with the fresh T-hash.
-    expect(titleCallCount).toBe(1);
-    expect(map.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb', source: 'llm_cohort' });
-    const rows = getCohortTitleOutputsByRun(fixture.run.id);
-    expect(rows).toHaveLength(2);
-    expect(rows.every(r => r.inputHash === inputHash)).toBe(true);
-    expect(rows.some(r => r.productSku === '100000000001' && r.outputValueJson.includes('Old Chicken Title'))).toBe(false);
+    // ZERO new model calls — the drift path aborts BEFORE any transport.
+    expect(titleCallCount).toBe(0);
+    // The existing set is untouched — byte-identical, never replaced.
+    const rowsAfter = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rowsAfter).toEqual(rowsBefore);
+    expect(rowsAfter.every(r => r.inputHash === 'a'.repeat(64))).toBe(true);
+    expect(rowsAfter.some(r => r.outputValueJson.includes('Old Chicken Title'))).toBe(true);
   });
 
-  it('incomplete set: only 1 of 2 rows present → re-coordinates and completes the set', async () => {
+  it('incomplete nonempty set: only 1 of 2 rows present → CohortTitleAuthorityDriftError (all-or-nothing never leaves partial rows)', async () => {
     const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
     const first = await ensureCohortTitlesCoordinated({
       run: fixture.run,
@@ -697,37 +721,43 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(first.size).toBe(2);
     expect(titleCallCount).toBe(1);
 
-    // Remove one member's row → the set is incomplete → re-coordinate.
+    // Simulate corruption: a partial set can only exist via an illegal direct
+    // DELETE — the write-once all-or-nothing insert never leaves partial rows.
     getDb().run(
       "DELETE FROM classification_cohort_outputs WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000002'",
       [fixture.run.id],
     );
     expect(countCohortTitleOutputs(fixture.run.id)).toBe(1);
+    const remainingBefore = getCohortTitleOutputsByRun(fixture.run.id);
 
-    const second = await ensureCohortTitlesCoordinated({
-      run: fixture.run,
-      workspaceId: fixture.workspaceId,
-      workspacePath: fixture.workspacePath,
-      projection: fixture.projection,
-      cohort: fixture.cohort,
-      members: fixture.members,
-      frozenLineContext: fixture.frozenLineContext,
-    });
-    expect(titleCallCount).toBe(2);
-    expect(second.size).toBe(2);
-    expect(countCohortTitleOutputs(fixture.run.id)).toBe(2);
-    expect(getCohortTitleOutputsByRun(fixture.run.id).every(r => r.inputHash === expectedInputHash(fixture))).toBe(true);
+    await expect(
+      ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      }),
+    ).rejects.toBeInstanceOf(CohortTitleAuthorityDriftError);
+
+    // ZERO NEW model calls (the first coordinate was the only transport) and
+    // the surviving row is untouched — never re-coordinates, never completes.
+    expect(titleCallCount).toBe(1);
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(1);
+    expect(getCohortTitleOutputsByRun(fixture.run.id)).toEqual(remainingBefore);
   });
 
   it('all-or-nothing: a persistence failure throws and leaves ZERO output rows (no partial set)', async () => {
     const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
-    // Force `replaceCohortTitleOutputs` to throw (the real transaction
+    // Force `insertCohortTitleOutputsOnce` to throw (the real transaction
     // rollback is proven at the repo level in cohort-output-repo.test.ts —
     // the coordinator must propagate the failure and never leave a partial
     // set). The bogus-workspace FK route is now intercepted earlier by the
     // fail-closed frozen-audit-authority guard (BLOCKER 2/3).
     const outputRepo = await import('../../db/repositories/classification-cohort-output-repo');
-    const spy = vi.spyOn(outputRepo, 'replaceCohortTitleOutputs').mockImplementation(() => {
+    const spy = vi.spyOn(outputRepo, 'insertCohortTitleOutputsOnce').mockImplementation(() => {
       throw new Error('simulated persistence failure');
     });
     try {

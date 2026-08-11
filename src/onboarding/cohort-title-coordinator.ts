@@ -20,20 +20,29 @@
  *    every row's `input_hash` equals the freshly computed T-hash, the op
  *    returns the parsed map with ZERO LLM calls.
  *
- * 3. **Coordinate ONCE under a scoped `CohortLeaseKeeper`** — groups the
- *    frozen sibling views, calls the coordinator's UNCACHED
- *    `coordinateCohortItems` with the audited `cohort_title_consolidation`
- *    call bound to the ORDINAL-0 MEMBER CHILD RUN (DECISION-N, mirroring PR4
- *    DECISION-A) and the keeper's `assertHeld` as the ownership assertion;
- *    then re-asserts ownership (`keeper.assertHeld()`); then persists every
- *    group member's `{title, source}` (+ the audited `model_call_id` when the
- *    call returned one) via `replaceCohortTitleOutputs` — ONE transaction,
- *    all-or-nothing. `HeartbeatLostError` propagates unchanged (never
+ * 3. **Drift fails closed (PR6 hardening A)** — when a NONEMPTY committed set
+ *    does NOT match the freshly computed T-hash (or is incomplete), the set
+ *    is WRITE-ONCE and can never be replaced: the op throws
+ *    `CohortTitleAuthorityDriftError` (run id + expected hash + stored
+ *    hash(es) + row count) — it NEVER re-coordinates and NEVER replaces.
+ *
+ * 4. **Coordinate ONCE — only when the set is EMPTY** — under a scoped
+ *    `CohortLeaseKeeper`: groups the frozen sibling views, calls the
+ *    coordinator's UNCACHED `coordinateCohortItems` with the audited
+ *    `cohort_title_consolidation` call bound to the ORDINAL-0 MEMBER CHILD
+ *    RUN (DECISION-N, mirroring PR4 DECISION-A) and the keeper's
+ *    `assertHeld` as the ownership assertion; then re-asserts ownership
+ *    (`keeper.assertHeld()`); then persists every group member's
+ *    `{title, source}` (+ the audited `model_call_id` when the call returned
+ *    one) via `insertCohortTitleOutputsOnce` — ONE transaction, all-or-
+ *    nothing, and any `CohortOutputAlreadyCommittedError` from a commit race
+ *    is converted to `CohortTitleAuthorityDriftError` (a race can never
+ *    silently split the set). `HeartbeatLostError` propagates unchanged (never
  *    converted into an 'LLM unavailable → fallback' outcome): a stale owner
  *    aborts with NO output rows and the run is left to the reclaiming
  *    sibling, which re-enters and reuses-or-coordinates.
  *
- * 4. Returns the freshly persisted map.
+ * 5. Returns the freshly persisted map.
  *
  * Never consults `cohortCache` / `coordinateCohortItemsOnce` — active cohort
  * mode treats the DB outputs as the sole "already coordinated" authority.
@@ -47,7 +56,8 @@
  */
 import {
   getCohortTitleOutputsByRun,
-  replaceCohortTitleOutputs,
+  insertCohortTitleOutputsOnce,
+  CohortOutputAlreadyCommittedError,
 } from '../db/repositories/classification-cohort-output-repo';
 import type { CohortTitleOutputRow } from '../db/repositories/classification-cohort-output-repo';
 import {
@@ -77,6 +87,36 @@ import type {
  *  (fail-closed on corrupt stored JSON — a corrupt row never yields a title). */
 function parseTitleRow(row: CohortTitleOutputRow): CohortTitleOutput {
   return CohortTitleOutputSchema.parse(JSON.parse(row.outputValueJson));
+}
+
+/**
+ * Deterministic authority-drift signal (PR6 hardening A). Thrown when a
+ * NONEMPTY committed `curated_title` set for a run does not match the freshly
+ * computed canonical title input hash (or is incomplete). The set is
+ * WRITE-ONCE — it can never be replaced, so the op FAILS CLOSED instead of
+ * re-coordinating. Carries the run id, the expected (current) hash, the
+ * stored hash(es), and the persisted row count. Also thrown when an
+ * `insertCohortTitleOutputsOnce` commit-race reports an already-committed set.
+ */
+export class CohortTitleAuthorityDriftError extends Error {
+  readonly runId: string;
+  readonly expectedHash: string;
+  readonly storedHashes: string[];
+  readonly rowCount: number;
+
+  constructor(runId: string, expectedHash: string, storedHashes: string[], rowCount: number) {
+    super(
+      `[CohortTitleAuthorityDrift] Durable title outputs for run ${runId} are write-once but no longer match the ` +
+        `frozen title authority: expected input_hash ${expectedHash}, stored hash(es) [${storedHashes.join(', ')}], ` +
+        `${rowCount} row(s). A committed output set can never be replaced — this is corruption or an illegal ` +
+        'mutation; failing the run closed without re-coordination.',
+    );
+    this.name = 'CohortTitleAuthorityDriftError';
+    this.runId = runId;
+    this.expectedHash = expectedHash;
+    this.storedHashes = storedHashes;
+    this.rowCount = rowCount;
+  }
 }
 
 // ─── Parent op ────────────────────────────────────────────────────────────────
@@ -190,12 +230,24 @@ export async function ensureCohortTitlesCoordinated(
     return map;
   }
 
-  // Step 3 — coordinate ONCE under a scoped lease keeper + persist
+  // Step 3 (PR6 hardening A) — WRITE-ONCE: any NONEMPTY committed set that is
+  // incomplete or whose rows do not match the freshly computed T-hash is
+  // authority drift. The set can never be replaced (the DELETE/replace path
+  // is gone), so the op FAILS CLOSED — it NEVER re-coordinates and NEVER
+  // deletes. An incomplete nonempty set can only be corruption: the insert is
+  // all-or-nothing, so a partial set is never produced by any writer.
+  if (existingRows.length > 0) {
+    const storedHashes = [...new Set(existingRows.map(row => row.inputHash))];
+    throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, existingRows.length);
+  }
+
+  // Step 4 — coordinate ONCE under a scoped lease keeper + persist
   // all-or-nothing. The keeper renews the parent lease on a TTL/3 cadence
   // while the audited call is in flight; `assertHeld` (forwarded into the
   // transport AND re-asserted after the await) aborts with `HeartbeatLostError`
   // the moment the claim is lost — no output rows are ever written by a stale
-  // owner.
+  // owner. The coordinate path is reached ONLY when the set is EMPTY (zero
+  // rows — see the drift guard above).
   const workerId = run.claimedBy;
   if (!workerId) {
     throw new Error(`ensureCohortTitlesCoordinated: run ${run.id} has no claim owner.`);
@@ -258,12 +310,27 @@ export async function ensureCohortTitlesCoordinated(
         ct.source === 'llm_cohort' ? (coordinatedCallIdBySku.get(productSku) ?? null) : null,
     }));
     // ONE transaction — all members persist or NONE (architecture-report §5).
-    replaceCohortTitleOutputs({
-      workspaceId,
-      runId: run.id,
-      inputHash,
-      outputs,
-    });
+    // WRITE-ONCE (PR6 hardening A): the insert is guarded by
+    // `insertCohortTitleOutputsOnce`'s three-way semantics — zero rows ⇒
+    // insert; any rows ⇒ `CohortOutputAlreadyCommittedError` (never delete).
+    // A commit race (a sibling committed between our pure-read reuse check and
+    // this insert) is converted to `CohortTitleAuthorityDriftError` so the
+    // set can never be silently split.
+    try {
+      insertCohortTitleOutputsOnce({
+        workspaceId,
+        runId: run.id,
+        inputHash,
+        outputs,
+      });
+    } catch (err) {
+      if (err instanceof CohortOutputAlreadyCommittedError) {
+        const committed = getCohortTitleOutputsByRun(run.id);
+        const storedHashes = [...new Set(committed.map(row => row.inputHash))];
+        throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, committed.length);
+      }
+      throw err;
+    }
 
     const map = new Map<string, CohortTitleOutput>();
     for (const output of outputs) {

@@ -9,8 +9,9 @@ import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { createBatch, deleteBatch } from '../../db/repositories/onboarding-batch-repo';
 import {
   getCohortTitleOutputsByRun,
-  replaceCohortTitleOutputs,
+  insertCohortTitleOutputsOnce,
   countCohortTitleOutputs,
+  CohortOutputAlreadyCommittedError,
 } from '../../db/repositories/classification-cohort-output-repo';
 import * as cohortOutputRepo from '../../db/repositories/classification-cohort-output-repo';
 import { CohortTitleOutputSchema } from '../../shared/schemas/cohorts';
@@ -20,9 +21,11 @@ import { CohortTitleOutputSchema } from '../../shared/schemas/cohorts';
  * (cohort schema v7).
  *
  * - `getCohortTitleOutputsByRun`: reads the run's `curated_title` rows.
- * - `replaceCohortTitleOutputs`: ONE transaction — DELETE prior `curated_title`
- *   rows for the run then INSERT every row. All-or-nothing: any throw rolls
- *   back the whole set. NO update path anywhere (immutability).
+ * - `insertCohortTitleOutputsOnce` (PR6 hardening A): the ONLY write path —
+ *   ONE transaction inserting a fresh set ONLY when ZERO rows exist for the
+ *   (run, kind); ANY existing row throws `CohortOutputAlreadyCommittedError`
+ *   (write-once — the DELETE/replace path is gone). All-or-nothing: any throw
+ *   rolls back the whole set. NO update path anywhere (immutability).
  * - `countCohortTitleOutputs`: observability convenience.
  *
  * The outputs table FKs to `classification_cohort_runs` (ON DELETE CASCADE)
@@ -82,7 +85,7 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
   it('insert + read round-trips curated_title rows and output_value_json through CohortTitleOutputSchema', () => {
     const { wsId, runId } = seedChain('output-key-a');
 
-    replaceCohortTitleOutputs({
+    insertCohortTitleOutputsOnce({
       workspaceId: wsId,
       runId,
       inputHash: 'a'.repeat(64),
@@ -117,10 +120,10 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
     expect(getCohortTitleOutputsByRun('no-such-run')).toEqual([]);
   });
 
-  it('replace under a new hash atomically removes the prior set and inserts the new one', () => {
+  it('write-once: a second insert (any rows) throws CohortOutputAlreadyCommittedError and the committed set is untouched', () => {
     const { wsId, runId } = seedChain('output-key-b');
 
-    replaceCohortTitleOutputs({
+    insertCohortTitleOutputsOnce({
       workspaceId: wsId,
       runId,
       inputHash: 'h1'.repeat(8),
@@ -131,29 +134,66 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
     });
     expect(countCohortTitleOutputs(runId)).toBe(2);
 
-    // A changed title authority (new input hash) replaces the whole set —
-    // old rows are gone, every new row carries the new hash.
-    replaceCohortTitleOutputs({
-      workspaceId: wsId,
-      runId,
-      inputHash: 'h2'.repeat(8),
-      outputs: [{ productSku: 'SKU-3', title: 'New Three', source: 'cohort_fallback' }],
-    });
+    // A changed title authority (new input hash) can NEVER replace the
+    // committed set — even with a different SKU set, the second insert throws
+    // the deterministic write-once guard (with the run id + kind + existing
+    // input hash) and the DELETE/replace path no longer exists.
+    let thrown: unknown;
+    try {
+      insertCohortTitleOutputsOnce({
+        workspaceId: wsId,
+        runId,
+        inputHash: 'h2'.repeat(8),
+        outputs: [{ productSku: 'SKU-3', title: 'New Three', source: 'cohort_fallback' }],
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CohortOutputAlreadyCommittedError);
+    const err = thrown as CohortOutputAlreadyCommittedError;
+    expect(err.runId).toBe(runId);
+    expect(err.outputKind).toBe('curated_title');
+    expect(err.existingInputHash).toBe('h1'.repeat(8));
+    expect(err.message).toContain(runId);
+    expect(err.message).toContain('h1'.repeat(8));
 
+    // The committed set is byte-identical — nothing was deleted or rewritten.
     const rows = getCohortTitleOutputsByRun(runId);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].productSku).toBe('SKU-3');
-    expect(rows[0].inputHash).toBe('h2'.repeat(8));
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.inputHash === 'h1'.repeat(8))).toBe(true);
+    expect(rows.map(r => r.productSku).sort()).toEqual(['SKU-1', 'SKU-2']);
   });
 
-  it('a UNIQUE failure inside the transaction rolls the whole set back (all-or-nothing, zero rows remain)', () => {
+  it('inserting an empty output list commits nothing and does not throw', () => {
+    const { wsId, runId } = seedChain('output-key-g');
+    // Zero rows before; the write-once guard only fires on an EXISTING set.
+    expect(() =>
+      insertCohortTitleOutputsOnce({
+        workspaceId: wsId,
+        runId,
+        inputHash: 'e'.repeat(64),
+        outputs: [],
+      }),
+    ).not.toThrow();
+    expect(countCohortTitleOutputs(runId)).toBe(0);
+    // A later real insert still succeeds (no sentinel row was written).
+    insertCohortTitleOutputsOnce({
+      workspaceId: wsId,
+      runId,
+      inputHash: 'e'.repeat(64),
+      outputs: [{ productSku: 'SKU-EMPTY-AFTER', title: 'Later Title', source: 'cohort_fallback' }],
+    });
+    expect(countCohortTitleOutputs(runId)).toBe(1);
+  });
+
+  it('a UNIQUE failure inside the transaction rolls the whole insert back (all-or-nothing, zero rows remain)', () => {
     const { wsId, runId } = seedChain('output-key-c');
 
     // Outputs batch containing the SAME (run, kind, sku) twice: the second
     // INSERT violates UNIQUE (cohort_run_id, output_kind, product_sku) MID-
-    // transaction, after the DELETE of the prior set already ran.
+    // transaction (the fresh-insert path has no prior set to delete).
     expect(() =>
-      replaceCohortTitleOutputs({
+      insertCohortTitleOutputsOnce({
         workspaceId: wsId,
         runId,
         inputHash: 'h3'.repeat(8),
@@ -164,30 +204,18 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
       }),
     ).toThrow(/UNIQUE constraint failed/);
 
-    // Zero rows remain: the DELETE rolled back AND no partial insert survived.
+    // Zero rows remain: no partial insert survived the rollback.
     expect(getCohortTitleOutputsByRun(runId)).toEqual([]);
     expect(countCohortTitleOutputs(runId)).toBe(0);
   });
 
-  it('a workspace FK failure inside the transaction rolls back the DELETE too (prior set intact)', () => {
+  it('a workspace FK failure inside the transaction rolls the whole fresh insert back (zero rows remain)', () => {
     const { wsId, runId } = seedChain('output-key-d');
 
-    // A prior complete set under hash h1.
-    replaceCohortTitleOutputs({
-      workspaceId: wsId,
-      runId,
-      inputHash: 'h1'.repeat(8),
-      outputs: [
-        { productSku: 'SKU-FK-1', title: 'Keep One', source: 'llm_cohort' },
-        { productSku: 'SKU-FK-2', title: 'Keep Two', source: 'cohort_fallback' },
-      ],
-    });
-
-    // Replace with a workspace that does not exist: the first INSERT throws a
-    // FOREIGN KEY failure mid-transaction — the DELETE already ran, so the
-    // whole set must roll back to the prior state.
+    // Insert with a workspace that does not exist: the first INSERT throws a
+    // FOREIGN KEY failure mid-transaction — the whole fresh set rolls back.
     expect(() =>
-      replaceCohortTitleOutputs({
+      insertCohortTitleOutputsOnce({
         workspaceId: 'no-such-workspace',
         runId,
         inputHash: 'h9'.repeat(8),
@@ -195,27 +223,23 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
       }),
     ).toThrow(/FOREIGN KEY constraint failed/);
 
-    // The prior set is byte-identical — no partial delete, no partial insert.
-    expect(getCohortTitleOutputsByRun(runId)).toEqual([
-      {
-        productSku: 'SKU-FK-1',
-        inputHash: 'h1'.repeat(8),
-        outputValueJson: JSON.stringify({ title: 'Keep One', source: 'llm_cohort' }),
-        modelCallId: null,
-      },
-      {
-        productSku: 'SKU-FK-2',
-        inputHash: 'h1'.repeat(8),
-        outputValueJson: JSON.stringify({ title: 'Keep Two', source: 'cohort_fallback' }),
-        modelCallId: null,
-      },
-    ]);
+    // Zero rows remain — no partial insert survived the rollback, and the run
+    // is still free for a legitimate later commit.
+    expect(getCohortTitleOutputsByRun(runId)).toEqual([]);
+    expect(countCohortTitleOutputs(runId)).toBe(0);
+    insertCohortTitleOutputsOnce({
+      workspaceId: wsId,
+      runId,
+      inputHash: 'h9'.repeat(8),
+      outputs: [{ productSku: 'SKU-FK-4', title: 'Later Committed', source: 'cohort_fallback' }],
+    });
+    expect(countCohortTitleOutputs(runId)).toBe(1);
   });
 
   it('FK CASCADE: deleting the cohort run removes its output rows; the workspace cleanup chain removes them too', () => {
     const { runId } = seedChain('output-key-e');
     const runWs = getDb().query('SELECT workspace_id FROM classification_cohort_runs WHERE id = ?').get(runId) as { workspace_id: string };
-    replaceCohortTitleOutputs({
+    insertCohortTitleOutputsOnce({
       workspaceId: runWs.workspace_id,
       runId,
       inputHash: 'e'.repeat(64),
@@ -232,7 +256,7 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
     // service; the batch-delete cascade is the workspace cleanup mechanism —
     // a direct `DELETE FROM workspace` is FK-blocked while its batches exist).
     const { wsId, batchId, runId: run2 } = seedChain('output-key-f');
-    replaceCohortTitleOutputs({
+    insertCohortTitleOutputsOnce({
       workspaceId: wsId,
       runId: run2,
       inputHash: 'f'.repeat(64),
@@ -244,9 +268,12 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
     expect(() => getDb().run('DELETE FROM workspace WHERE id = ?', [wsId])).not.toThrow();
   });
 
-  it('immutability: the repo exposes no update function', () => {
+  it('immutability: the repo exposes no update function and no replace/delete write path', () => {
     // @ts-expect-error — immutability: the repo exposes NO update function;
-    // outputs are replaced wholesale via the transaction, never updated.
+    // outputs are committed once via the transaction, never updated.
     void cohortOutputRepo.updateCohortOutput;
+    // PR6 hardening A: the replace/delete write path is GONE from the repo.
+    // @ts-expect-error — write-once: `replaceCohortTitleOutputs` no longer exists.
+    void cohortOutputRepo.replaceCohortTitleOutputs;
   });
 });
