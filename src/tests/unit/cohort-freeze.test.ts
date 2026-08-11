@@ -44,6 +44,7 @@ import {
   verifyCohortRunFrozen,
   runFrozenOcrPullForward,
   computeOcrExecutionDigest,
+  HeartbeatLostError,
 } from '../../onboarding/cohort-curator';
 import type { PreparedCohortContext } from '../../onboarding/cohort-curator';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
@@ -666,21 +667,44 @@ describe('two-phase freeze service (PR3 M2)', () => {
 });
 
 describe('OCR pull-forward exactly-once (PR3 M2)', () => {
-  it('freeze runs ZERO model calls for a member with terminal OCR + matching ocrInputHash', async () => {
+  it('A2 fail-closed OCR authority: stored OCR with NO execution digest is NEVER reused — the freeze re-runs under the v1 legacy authority and persists the digest', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveV1Config(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, { '100000000001': settledExtraction() });
     const before = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
+
+    // The stored OCR is terminal + input-hash matched but predates the
+    // execution-authority binding (no ocrExecutionDigest). Under Commit A's
+    // null==null acceptance this legacy OCR was reusable; under the A2
+    // fail-closed semantics reuse requires BOTH digests non-null AND equal,
+    // so the freeze re-runs OCR under the CURRENT v1 legacy authority.
+    const pre = JSON.parse(
+      String((getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string }).extraction_data_json),
+    ) as Record<string, any>;
+    expect(pre.ocrOutcome.status).toBe('succeeded');
+    expect(pre.ocrExecutionDigest).toBeUndefined();
 
     const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('running');
 
     const after = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
+    // VLM disabled in the test env → the re-run settles as `disabled` WITHOUT
+    // a transport (zero model calls, exactly-once by guard).
     expect(Number(after.cnt)).toBe(Number(before.cnt));
-    // extraction_data_json was not rewritten (the stored OCR already matched).
-    const stored = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
-    expect(JSON.parse(stored.extraction_data_json).ocrOutcome.status).toBe('succeeded');
+    const storedRow = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
+    const stored = JSON.parse(storedRow.extraction_data_json) as Record<string, any>;
+    // The old unbound OCR was NOT accepted: the re-run overwrote the outcome
+    // and bound the result to the current v1 legacy authority digest.
+    expect(stored.ocrOutcome.status).toBe('disabled');
+    expect(stored.ocrExecutionDigest).toMatch(/^[a-f0-9]{64}$/);
+    // The persisted digest is the deterministic v1 legacy authority digest of
+    // the member's frozen runtime snapshot.
+    const child = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(run.id, items[0].id) as Record<string, any>;
+    const memberSnapshot = getRuntimeSnapshotByHash(workspaceId, String(child.config_snapshot_hash))!;
+    expect(stored.ocrExecutionDigest).toBe(computeOcrExecutionDigest(memberSnapshot));
   });
 
   it('freeze runs ONE attempt for an unresolved member, writes the terminal outcome + ocrInputHash back, and the frozen stage materializes OCR without a call', async () => {
@@ -969,5 +993,102 @@ describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
       serverB.stop(true);
     }
   });
-});
 
+  it('A2 heartbeat: a sibling reclaim during an in-flight freeze OCR aborts the freeze with NO post-loss writes; the new owner keeps the run', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { bundle } = writeActiveV2Bundle(wsPath);
+    upsertConfigSnapshot(workspaceId, bundle);
+
+    // Loopback VLM + image source: the member's freeze OCR transport is
+    // genuinely in flight while the test seam fires.
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          return Response.json({ message: { content: JSON.stringify({ productName: 'Frozen Pkg Title', brand: 'FrozenBrand' }) } });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    try {
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${server.port}`, 'vlm-model-a');
+
+      // Unresolved OCR extraction (no outcome, no input hash, no digest): the
+      // freeze MUST run a transport under authority A.
+      const unresolved = settledExtraction({
+        _name: 'Purina Pro Plan Dog Food Chicken 5 lb',
+        primaryImage: `http://127.0.0.1:${server.port}/img.png`,
+        additionalImages: [],
+      });
+      delete unresolved.ocrOutcome;
+      delete unresolved.packagingOcrData;
+      delete unresolved.packagingTitle;
+      delete unresolved.ocrInputHash;
+      const { items } = createReadyCohort(workspaceId, { '100000000001': unresolved });
+
+      // Snapshot the extraction JSON BEFORE the freeze: the aborted freeze
+      // must leave it byte-identical (no write-back at all).
+      const extractionBefore = String(
+        (getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string }).extraction_data_json,
+      );
+
+      const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+      // The seam fires while the member's OCR transport is IN FLIGHT (inside
+      // the awaited op): the lease is expired and a sibling worker reclaims
+      // the run. The transport completes, the keeper's post-await ownership
+      // assertion fails, and the freeze aborts with NO extraction_data_json
+      // write-back and NO terminal write.
+      let reclaimed = false;
+      await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+        onOcrInFlight: () => {
+          if (reclaimed) return;
+          reclaimed = true;
+          getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+          const reclaim = reclaimExpiredCohortRuns(
+            workspaceId,
+            new Date().toISOString(),
+            () => 'match',
+            'worker-b',
+            COHORT_LEASE_TTL_MS,
+          );
+          expect(reclaim.resumed.length).toBe(1);
+          expect(reclaim.resumed[0].id).toBe(run.id);
+        },
+      })).rejects.toBeInstanceOf(HeartbeatLostError);
+      expect(reclaimed).toBe(true);
+
+      // The new owner's run is INTACT: still `freezing` (no supersede, no
+      // terminal write), claimed by worker-b, nothing finalized.
+      const after = getCohortRunById(run.id)!;
+      expect(after.status).toBe('freezing');
+      expect(after.claimedBy).toBe('worker-b');
+      expect(after.evidenceSnapshotHash).toBeNull();
+      expect(after.supersededAt).toBeNull();
+
+      // No post-loss write-back: extraction_data_json is byte-identical to
+      // the pre-freeze state (the OCR outcome/digest never landed).
+      const extractionAfter = String(
+        (getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string }).extraction_data_json,
+      );
+      expect(extractionAfter).toBe(extractionBefore);
+      const stored = JSON.parse(extractionAfter) as Record<string, any>;
+      expect(stored.ocrOutcome).toBeUndefined();
+      expect(stored.ocrExecutionDigest).toBeUndefined();
+
+      // The freeze-created child run is untouched — the abort path failed or
+      // retired nothing.
+      const child = getDb().query(
+        'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status = ?',
+      ).get(run.id, items[0].id, 'running') as Record<string, any> | undefined;
+      expect(child).toBeTruthy();
+    } finally {
+      server.stop(true);
+    }
+  });
+});

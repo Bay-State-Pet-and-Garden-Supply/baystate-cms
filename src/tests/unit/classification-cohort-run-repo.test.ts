@@ -466,6 +466,44 @@ describe('classification cohort run repo (issue #30, PR3 M1)', () => {
     expect(after.supersededAt).toBeNull();
   });
 
+  it('R1 reclaim CAS race (c): the resume CAS compares the OBSERVED status — a freezing→running transition between SELECT and UPDATE is never handed out', () => {
+    const wsId = newWorkspace();
+    const { cohorts } = setupFamilyBatch(wsId);
+    const runs = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const run = runs.find(r => r.cohortId === cohorts[0].id)!;
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+
+    // B selects the expired null-hash `freezing` row (crash mid-freeze → its
+    // vacuous-match verdict is stale). Between B's SELECT and B's resume CAS,
+    // the ORIGINAL owner finalizes the freeze: writes the frozen authorities
+    // and transitions `freezing → running` with owner/lease untouched
+    // (`transitionCohortRunToRunning` requires claimed_by = worker-a). B's
+    // resume must then fail its STATUS CAS — the now-running row is NOT
+    // handed out and stays under worker-a.
+    let aRan = false;
+    const resultB = reclaimExpiredCohortRuns(wsId, new Date().toISOString(), selected => {
+      if (!aRan && selected.id === run.id) {
+        aRan = true;
+        expect(selected.status).toBe('freezing');
+        expect(selected.evidenceSnapshotHash).toBeNull();
+        expect(freezeAuthorities(run.id, 'worker-a', 'e'.repeat(64))).toBe(true);
+        expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
+      }
+      return 'match'; // stale vacuous-match verdict against the pre-transition state
+    }, 'worker-b2', COHORT_LEASE_TTL_MS);
+    expect(aRan).toBe(true);
+
+    // B's resume CAS failed (status changed since selection): the run is NOT
+    // in B's result, nothing was superseded, and the running row keeps its
+    // original owner.
+    expect(resultB.resumed.length).toBe(0);
+    expect(resultB.superseded.length).toBe(0);
+    const after = getCohortRunById(run.id)!;
+    expect(after.status).toBe('running');
+    expect(after.claimedBy).toBe('worker-a');
+    expect(after.startedAt).not.toBeNull();
+  });
+
   it('supersedeCohortRunIfUnchanged is a CAS: matching observed state supersedes + fails children; stale state is a no-op', () => {
     const wsId = newWorkspace();
     const { items } = setupFamilyBatch(wsId);

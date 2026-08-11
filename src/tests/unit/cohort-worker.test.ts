@@ -24,6 +24,7 @@ import {
   getCurrentCohortRun,
   listCohortRunsByCohort,
   cancelFreezingRun,
+  reclaimExpiredCohortRuns,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
@@ -536,7 +537,7 @@ describe('processCohort completion semantics (issue #30, PR3 M3)', () => {
 });
 
 describe('processCohort heartbeat hardening (issue #30, PR3 hardening Commit A)', () => {
-  it('heartbeat lost mid-execution aborts the member deterministically with NO further side effects', async () => {
+  it('A2: ownership lost MID-FLIGHT (sibling reclaim while the member pipeline is in flight) aborts with HeartbeatLostError, NO post-loss writes, and the new owner\'s run stays active', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const { items } = createReadyCohort(workspaceId, {
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
@@ -545,32 +546,46 @@ describe('processCohort heartbeat hardening (issue #30, PR3 hardening Commit A)'
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('running');
 
-    const evidenceBefore = getDb().query('SELECT COUNT(*) AS cnt FROM classification_evidence').get() as { cnt: number };
-    const stageBefore = getDb().query('SELECT COUNT(*) AS cnt FROM classification_stage_results').get() as { cnt: number };
+    // Ownership changes MID-FLIGHT: the member pipeline is a long-awaited op
+    // and the seam fires INSIDE it (the pipeline is actually in flight) — the
+    // lease is expired and a sibling worker reclaims the run, exactly like a
+    // real slow-call concurrent reclaim.
+    let reclaimed = false;
+    await expect(processCohort(finalized, wsPath, workspaceId, {
+      onPipelineInFlight: () => {
+        if (reclaimed) return;
+        reclaimed = true;
+        getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', finalized.id]);
+        const reclaim = reclaimExpiredCohortRuns(
+          workspaceId,
+          new Date().toISOString(),
+          () => 'match',
+          'sibling-worker',
+          COHORT_LEASE_TTL_MS,
+        );
+        expect(reclaim.resumed.length).toBe(1);
+        expect(reclaim.resumed[0].id).toBe(finalized.id);
+      },
+    })).rejects.toBeInstanceOf(HeartbeatLostError);
+    expect(reclaimed).toBe(true);
 
-    // A sibling worker reclaims the lease while this owner is "busy" — the
-    // run is no longer claimed by worker-a, so the next heartbeat fails.
-    getDb().run(
-      'UPDATE classification_cohort_runs SET claimed_by = ?, lease_expires_at = ? WHERE id = ?',
-      ['sibling-worker', new Date(Date.now() + COHORT_LEASE_TTL_MS).toISOString(), finalized.id],
-    );
-
-    // The member aborts: HeartbeatLostError propagates, the parent is failed
-    // deterministically, and NO member side effects were produced after the
-    // ownership loss (no curation data, item not completed, no evidence/stage
-    // rows, no SSE member completion).
-    await expect(processCohort(finalized, wsPath, workspaceId)).rejects.toBeInstanceOf(HeartbeatLostError);
-
+    // The new owner's run remains ACTIVE (status running, claimed_by the
+    // sibling): the stale abort path wrote NO terminal state onto it.
     const parent = getCohortRunById(finalized.id)!;
-    expect(parent.status).toBe('failed');
-    expect(parent.errorMessage).toContain('Claim ownership lost');
+    expect(parent.status).toBe('running');
+    expect(parent.claimedBy).toBe('sibling-worker');
+    expect(parent.completedAt).toBeNull();
+
+    // No post-loss writes by the stale owner: the item was not completed and
+    // carries no curation data; the child run was left untouched (still
+    // running — never failed/completed by the stale owner).
     const item = findItemById(items[0].id)!;
     expect(item.stageStatus).not.toBe('completed');
     expect(item.curationData).toBeNull();
-    const evidenceAfter = getDb().query('SELECT COUNT(*) AS cnt FROM classification_evidence').get() as { cnt: number };
-    const stageAfter = getDb().query('SELECT COUNT(*) AS cnt FROM classification_stage_results').get() as { cnt: number };
-    expect(Number(evidenceAfter.cnt)).toBe(Number(evidenceBefore.cnt));
-    expect(Number(stageAfter.cnt)).toBe(Number(stageBefore.cnt));
+    const child = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status = ?',
+    ).get(finalized.id, items[0].id, 'running') as Record<string, any> | undefined;
+    expect(child).toBeTruthy();
   });
 });
 

@@ -108,6 +108,7 @@ import type {
   OnboardingItem,
   PackagingOcrData,
   OcrAttemptOutcome,
+  CurationData,
 } from '../shared/schemas/onboarding';
 import type { ClassificationConfigSnapshotRef } from '../shared/schemas/classification';
 import type { ResolvedTargetOption } from '../classification/curation-target-resolver';
@@ -144,7 +145,8 @@ function storedOcrInputHash(item: OnboardingItem): string | null {
 /** The ocrExecutionDigest recorded with the item's stored OCR (top-level
  *  marker in extraction_data_json, alongside ocrInputHash), or null when the
  *  stored OCR predates the execution-authority binding (unknown authority ⇒
- *  the reuse guard fails closed under a v2 snapshot). */
+ *  the reuse guard fails closed — Commit A2: reuse requires BOTH the stored
+ *  and the current digest to be non-null and equal). */
 function storedOcrExecutionDigest(item: OnboardingItem): string | null {
   const ext = item.extractionData as { ocrExecutionDigest?: unknown } | null | undefined;
   return ext && typeof ext.ocrExecutionDigest === 'string' ? ext.ocrExecutionDigest : null;
@@ -166,16 +168,26 @@ function sanitizeUrlForDigest(url: string | null | undefined): string | null {
 }
 
 /**
- * OCR execution-authority digest (PR3 hardening, Commit A / R4):
- * `hashCanonicalJson({planDigest, ruleVersionsDigest})` over the member
- * snapshot's `evidence_extraction` model-execution-plan entry (provider,
- * model, locality, prompt/rule versions, frozen local-VLM route WITHOUT
- * credentials) plus `runtimeRuleVersions.digest`. The stored OCR is only
- * reusable when this digest matches the CURRENT snapshot's authority — a
- * model-policy / local-VLM-route change re-runs OCR under the new authority.
- * Returns null for legacy v1 snapshots (no frozen plan).
+ * OCR execution-authority digest (PR3 hardening, Commit A / R4 + A2):
+ * - v2 snapshots: `hashCanonicalJson({planDigest, ruleVersionsDigest})` over
+ *   the member snapshot's `evidence_extraction` model-execution-plan entry
+ *   (provider, model, locality, prompt/rule versions, frozen local-VLM route
+ *   WITHOUT credentials) plus `runtimeRuleVersions.digest`. The stored OCR is
+ *   only reusable when this digest matches the CURRENT snapshot's authority —
+ *   a model-policy / local-VLM-route change re-runs OCR under the new
+ *   authority.
+ * - v1 (legacy) snapshots: a deterministic legacy-authority digest,
+ *   `hashCanonicalJson({authorityKind:'v1', snapshotHash})`, bound to the
+ *   snapshot's content identity. A changed v1 config/evidence set changes the
+ *   snapshot hash and therefore the digest — legacy OCR is NEVER "unbound":
+ *   it is always executed under SOME authority digest (Commit A2 fail-closed).
+ * Returns null only for an impossible v2 snapshot with a missing plan/rules
+ * (the freeze fails closed on that); callers treat null as "never reuse".
  */
 export function computeOcrExecutionDigest(snapshot: RuntimeClassificationSnapshot): string | null {
+  if (snapshot.schemaVersion !== 2) {
+    return hashCanonicalJson({ authorityKind: 'v1', snapshotHash: snapshot.snapshotHash });
+  }
   const plan = snapshot.modelExecutionPlan;
   const rules = snapshot.runtimeRuleVersions;
   if (!plan || !rules) return null;
@@ -650,13 +662,16 @@ export interface FreezeMemberResult {
  *
  * `hooks.beforeFinalCas` (test seam) runs immediately before the final CAS
  * transaction so tests can deterministically simulate a freeze-window
- * mutation; production callers never pass it.
+ * mutation; `hooks.onOcrInFlight` (test seam, PR3 hardening A2) fires while a
+ * member's OCR pull-forward transport is actually in flight so tests can
+ * deterministically simulate a sibling reclaim mid-call. Production callers
+ * never pass either.
  */
 export async function freezeCohortForExecution(
   run: CohortRun,
   workspacePath: string,
   workspaceId: string,
-  hooks?: { beforeFinalCas?: () => void },
+  hooks?: { beforeFinalCas?: () => void; onOcrInFlight?: () => void | Promise<void> },
 ): Promise<CohortRun> {
   const workerId = run.claimedBy ?? '';
   if (!workerId) {
@@ -773,27 +788,52 @@ export async function freezeCohortForExecution(
     // OR its execution-authority digest no longer matches the CURRENT
     // snapshot's plan/rule digest (R4: old OCR under a changed model policy /
     // local-VLM route is NEVER accepted — it re-runs under the new authority).
+    // Fail-closed (Commit A2): reuse requires BOTH digests non-null AND equal
+    // — a stored OCR with a missing/uncomputable authority (pre-hardening
+    // v1/v2 data) is never accepted, it re-runs under the current authority.
     const currentOcrExecutionDigest = computeOcrExecutionDigest(snapshot);
-    const ocrNeedsRun = !isOcrSettled(item) || storedOcrInputHash(item) !== currentOcrInputHash || storedOcrExecutionDigest(item) !== currentOcrExecutionDigest;
+    const storedExecutionDigest = storedOcrExecutionDigest(item);
+    const ocrNeedsRun =
+      !isOcrSettled(item) ||
+      storedOcrInputHash(item) !== currentOcrInputHash ||
+      currentOcrExecutionDigest === null ||
+      storedExecutionDigest === null ||
+      storedExecutionDigest !== currentOcrExecutionDigest;
     let frozenItem = item;
     if (ocrNeedsRun) {
-      const ocr = await runFrozenOcrPullForward({
-        snapshot,
-        childRunId: memberRun.id,
-        item,
-        workspacePath,
-      });
-      const updatedExt = {
-        ...item.extractionData,
-        ...(ocr.packagingOcrData
-          ? { packagingOcrData: ocr.packagingOcrData, packagingTitle: ocr.packagingOcrData.productName }
-          : {}),
-        ...(ocr.ocrOutcome ? { ocrOutcome: ocr.ocrOutcome } : {}),
-        ocrInputHash: currentOcrInputHash,
-        ocrExecutionDigest: currentOcrExecutionDigest,
-      };
-      updateItemExtractionData(item.id, JSON.stringify(updatedExt));
-      frozenItem = { ...item, extractionData: updatedExt as OnboardingItem['extractionData'] };
+      // Scoped ownership-guarded lease keeper around the long-awaited OCR
+      // call (PR3 hardening A2): the parent lease is renewed on a TTL/3
+      // cadence WHILE the transport is in flight (a live-but-slow owner can
+      // no longer silently outlive the lease), and the continuation asserts
+      // ownership BEFORE the extraction_data_json write-back — a sibling
+      // reclaim mid-call aborts the freeze with NO post-loss write. The
+      // keeper is always cleared in `finally`.
+      const ocrKeeper = new CohortLeaseKeeper(run.id, workerId, COHORT_LEASE_TTL_MS).start();
+      try {
+        const ocrPromise = runFrozenOcrPullForward({
+          snapshot,
+          childRunId: memberRun.id,
+          item,
+          workspacePath,
+        });
+        await hooks?.onOcrInFlight?.();
+        const ocr = await ocrPromise;
+        // No write after ownership loss: the post-await assertion IS the guard.
+        ocrKeeper.assertHeld();
+        const updatedExt = {
+          ...item.extractionData,
+          ...(ocr.packagingOcrData
+            ? { packagingOcrData: ocr.packagingOcrData, packagingTitle: ocr.packagingOcrData.productName }
+            : {}),
+          ...(ocr.ocrOutcome ? { ocrOutcome: ocr.ocrOutcome } : {}),
+          ocrInputHash: currentOcrInputHash,
+          ocrExecutionDigest: currentOcrExecutionDigest,
+        };
+        updateItemExtractionData(item.id, JSON.stringify(updatedExt));
+        frozenItem = { ...item, extractionData: updatedExt as OnboardingItem['extractionData'] };
+      } finally {
+        ocrKeeper.stop();
+      }
     }
 
     const frozenEvidenceHash = computeExtractionHash(frozenItem);
@@ -1002,6 +1042,15 @@ export interface PreparedCohortContext {
     catalogEvidenceHash: string | null;
     modelPolicyView: ModelPolicyView | null;
   };
+  /**
+   * Ownership assertion injected by `processCohort` (PR3 hardening A2). The
+   * member pipeline calls it before its terminal child write (`completeRun`)
+   * so the in-flight member work is completed only while the parent claim is
+   * still held — it throws `HeartbeatLostError` once a reclaiming sibling owns
+   * the run. Absent in legacy (non-cohort) invocations and when no keeper is
+   * installed.
+   */
+  assertOwnershipHeld?: () => void;
 }
 
 /**
@@ -1072,6 +1121,81 @@ export class HeartbeatLostError extends Error {
 }
 
 /**
+ * Scoped ownership-guarded lease keeper (PR3 hardening, Commit A2).
+ *
+ * Wraps ONE long-awaited operation (a freeze member's OCR pull-forward, a
+ * cohort member's execution pipeline). While the operation is in flight the
+ * keeper renews the parent cohort run's lease via `heartbeatCohortRun` on a
+ * TTL/3 cadence, so a live-but-slow owner can no longer silently outlive the
+ * lease and be legitimately reclaimed mid-call. A renewal that returns false
+ * means the run is no longer ours (a sibling worker reclaimed it, or it went
+ * terminal/superseded): the keeper marks `lost`, and the operation's
+ * continuation calls `assertHeld()` before EVERY subsequent write —
+ * `assertHeld()` performs an immediate ownership re-assertion (so a loss
+ * between renewal ticks is still caught) and throws `HeartbeatLostError` when
+ * the claim is gone, aborting with NO further side effects. `stop()` (called
+ * in `finally`) clears the renewal timer.
+ */
+class CohortLeaseKeeper {
+  private readonly runId: string;
+  private readonly workerId: string;
+  private readonly leaseTtlMs: number;
+  private readonly intervalMs: number;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
+  private lost = false;
+
+  constructor(runId: string, workerId: string, leaseTtlMs: number) {
+    this.runId = runId;
+    this.workerId = workerId;
+    this.leaseTtlMs = leaseTtlMs;
+    this.intervalMs = Math.max(1, Math.floor(leaseTtlMs / 3));
+  }
+
+  /** Start the periodic renewal; the wrapped operation always begins with a
+   *  freshly asserted lease. Idempotent. */
+  start(): this {
+    if (this.timer) return this;
+    this.timer = setInterval(() => {
+      this.renew();
+    }, this.intervalMs);
+    this.renew();
+    return this;
+  }
+
+  /** Attempt one lease renewal. Marks `lost` on rejection. */
+  renew(): boolean {
+    if (this.stopped || this.lost) return false;
+    const held = heartbeatCohortRun(this.runId, this.workerId, this.leaseTtlMs);
+    if (!held) this.lost = true;
+    return held;
+  }
+
+  /**
+   * Ownership assertion for a continuation write. Throws `HeartbeatLostError`
+   * when the lease was lost — including a loss that happened between renewal
+   * ticks (this is an immediate ownership re-assertion, never a flag-only
+   * check), so NO write can occur after the claim moved to another worker.
+   */
+  assertHeld(): void {
+    if (this.lost || !this.renew()) {
+      throw new HeartbeatLostError(
+        `Claim ownership lost during a long-running operation (run ${this.runId} is no longer claimed by ${this.workerId}).`,
+      );
+    }
+  }
+
+  /** Clear the renewal timer (always called from the operation's `finally`). */
+  stop(): void {
+    this.stopped = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+}
+
+/**
  * Rebuild the prepared-cohort context for one member from the freeze-persisted
  * child run: the child run's `config_snapshot_*` refs point at the member's
  * frozen runtime snapshot (persisted by `freezeCohortForExecution`); the
@@ -1134,19 +1258,26 @@ function buildPreparedCohortContextForMember(
  * - `failed` — the cohort-level semantic state is unreachable (missing frozen
  *   snapshot / members / items / ownership) — thrown after completing the run.
  *
- * Heartbeat hardening (PR3 hardening, Commit A): the lease is renewed when
- * `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3` (so a long OCR/model/
- * pipeline call can no longer silently outlive the TTL). A heartbeat attempt
- * that returns false throws `HeartbeatLostError`; the caller aborts the
- * member/cohort deterministically (fails the in-flight child run + the parent)
- * with NO new side effects after ownership loss. Crash-recovery resume (same
- * run id, reclaim-on-match) never re-executes a member whose child run already
+ * Heartbeat hardening (PR3 hardening, Commit A + A2): the lease is renewed
+ * when `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3` (so a long
+ * OCR/model/pipeline call can no longer silently outlive the TTL), and a
+ * scoped `CohortLeaseKeeper` renews the lease on the same cadence WHILE each
+ * long-awaited member pipeline is in flight. Every post-await write
+ * (curation_data_json, item stage update) re-asserts ownership first; the
+ * member pipeline's own terminal child write is ownership-guarded via
+ * `PreparedCohortContext.assertOwnershipHeld`. A heartbeat/renewal that
+ * returns false throws `HeartbeatLostError`; the caller aborts the
+ * member/cohort deterministically with NO terminal write at all (the run now
+ * belongs to the reclaiming worker — the stale owner never fails the child,
+ * completes the parent, or writes the item). Crash-recovery resume (same run
+ * id, reclaim-on-match) never re-executes a member whose child run already
  * completed under this parent.
  */
 export async function processCohort(
   run: CohortRun,
   workspacePath: string,
   workspaceId: string,
+  hooks?: { onPipelineInFlight?: () => void | Promise<void> },
 ): Promise<CohortExecutionSummary> {
   if (run.status !== 'running') {
     const reason = `processCohort aborted: run ${run.id} is not 'running' (status=${run.status}); only a frozen run may be executed.`;
@@ -1172,7 +1303,9 @@ export async function processCohort(
   const snapshot = run.evidenceSnapshotHash ? getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash) : null;
   if (!snapshot) {
     const reason = `processCohort aborted: run ${run.id} has no persisted execution-evidence snapshot (evidence_snapshot_hash=${run.evidenceSnapshotHash ?? 'null'}).`;
-    completeCohortRun(run.id, 'failed', reason);
+    // Owner-guarded terminal write: a run another worker reclaimed is never
+    // failed by this (stale) caller.
+    completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
     throw new Error(reason);
   }
   let projection: ExecutionEvidenceProjectionV1;
@@ -1180,20 +1313,20 @@ export async function processCohort(
     projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snapshot.payloadJson));
   } catch (err) {
     const reason = `processCohort aborted: run ${run.id} snapshot payload is corrupt: ${err instanceof Error ? err.message : String(err)}`;
-    completeCohortRun(run.id, 'failed', reason);
+    completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
     throw new Error(reason, { cause: err });
   }
 
   const cohort = getCohortById(run.cohortId);
   if (!cohort) {
     const reason = `processCohort aborted: cohort ${run.cohortId} not found.`;
-    completeCohortRun(run.id, 'failed', reason);
+    completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
     throw new Error(reason);
   }
   const members = getCohortMembers(cohort.id);
   if (members.length === 0) {
     const reason = `processCohort aborted: cohort ${cohort.id} has no members.`;
-    completeCohortRun(run.id, 'failed', reason);
+    completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
     throw new Error(reason);
   }
   const items = listItemsByBatch(cohort.batchId);
@@ -1201,7 +1334,7 @@ export async function processCohort(
   for (const memberProjection of projection.members) {
     if (!itemsById.has(memberProjection.onboardingItemId)) {
       const reason = `processCohort aborted: member item ${memberProjection.onboardingItemId} not found in batch ${cohort.batchId}.`;
-      completeCohortRun(run.id, 'failed', reason);
+      completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
       throw new Error(reason);
     }
   }
@@ -1230,14 +1363,11 @@ export async function processCohort(
     lastHeartbeatAt = Date.now();
   };
 
-  // Deterministic abort on ownership loss: fail the in-flight member child run
-  // + the parent and rethrow. Records NOTHING further (no member failure, no
-  // SSE event) — no new side effects after the loss.
-  const abortOnHeartbeatLost = (err: HeartbeatLostError, activeChildRunId: string | null): never => {
-    if (activeChildRunId) {
-      completeRun(activeChildRunId, 'failed', 'ownership lost during execution');
-    }
-    completeCohortRun(run.id, 'failed', `Claim ownership lost during execution: ${redactTransportText(err.message)}`);
+  // Deterministic abort on ownership loss: NO terminal write at all (PR3
+  // hardening A2). The run now belongs to the reclaiming worker — never
+  // completeCohortRun, never fail the child, never write the item. Every
+  // post-await write was already guarded by the lease keeper's `assertHeld`.
+  const abortOnHeartbeatLost = (err: HeartbeatLostError): never => {
     throw err;
   };
 
@@ -1259,12 +1389,11 @@ export async function processCohort(
       continue;
     }
 
-    let activeChildRunId: string | null = null;
+    let curationData: CurationData;
     try {
       // Ownership assertion BEFORE the first member side effect (child create).
       renewHeartbeat();
       const childRun = ensureMemberRun(run.id, item.id, workspaceId, item.upc ?? '', null, null);
-      activeChildRunId = childRun.id;
       const prepared = buildPreparedCohortContextForMember(run.id, memberProjection, childRun, workspaceId);
 
       // Sibling context for family-aware curation (read-only hints) — the same
@@ -1276,11 +1405,25 @@ export async function processCohort(
         console.warn(`[CohortCurator] Sibling context for ${item.upc ?? item.id} failed (non-blocking): ${redactTransportText(err instanceof Error ? err.message : String(err))}`);
       }
 
-      const curationData = await curateItemWithPipeline(item, workspacePath, workspaceId, prepared);
-
-      // Ownership assertion before the member's DB writes (pipeline done — the
-      // lease may have expired mid-pipeline).
-      renewHeartbeat();
+      // Scoped ownership-guarded lease keeper around the long-awaited member
+      // pipeline (PR3 hardening A2): the parent lease is renewed on a TTL/3
+      // cadence WHILE the pipeline is in flight, the member pipeline's own
+      // terminal child write is ownership-guarded via
+      // `prepared.assertOwnershipHeld`, and the continuation re-asserts
+      // ownership before EVERY processCohort write (curation_data_json, item
+      // stage) — a sibling reclaim mid-pipeline aborts with NO post-loss
+      // writes. The keeper is always cleared in `finally`.
+      const pipelineKeeper = new CohortLeaseKeeper(run.id, workerId, COHORT_LEASE_TTL_MS).start();
+      try {
+        prepared.assertOwnershipHeld = () => pipelineKeeper.assertHeld();
+        const pipelinePromise = curateItemWithPipeline(item, workspacePath, workspaceId, prepared);
+        await hooks?.onPipelineInFlight?.();
+        curationData = await pipelinePromise;
+        // No write after ownership loss: the post-await assertion IS the guard.
+        pipelineKeeper.assertHeld();
+      } finally {
+        pipelineKeeper.stop();
+      }
 
       // Persist curation_data_json exactly as the legacy worker does.
       getDb().query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
@@ -1304,10 +1447,14 @@ export async function processCohort(
       );
     } catch (err) {
       if (err instanceof HeartbeatLostError) {
-        abortOnHeartbeatLost(err, activeChildRunId);
+        abortOnHeartbeatLost(err);
       }
       const errorText = redactTransportText(err instanceof Error ? err.message : String(err));
       console.error(`[CohortCurator] Member ${item.upc ?? item.id} failed under run ${run.id}: ${errorText}`);
+      // Ownership assertion before the item-failure write: even a general
+      // (non-heartbeat) pipeline error must not write the item once the claim
+      // was lost to a reclaiming worker.
+      renewHeartbeat(true);
       // Record and continue — a member failure never aborts the cohort unless
       // the shared semantic state is unreachable (handled above).
       updateItemStageStatus(item.id, 'failed', errorText);
@@ -1322,16 +1469,9 @@ export async function processCohort(
 
   // Post-execution ownership assertion (forced): if the claim was lost while
   // processing the last member (a sibling reclaimed the lease), the parent
-  // completion must not proceed under a lost claim — abort deterministically.
-  try {
-    renewHeartbeat(true);
-  } catch (err) {
-    if (err instanceof HeartbeatLostError) {
-      completeCohortRun(run.id, 'failed', `Claim ownership lost after executing all members: ${redactTransportText(err.message)}`);
-      throw err;
-    }
-    throw err;
-  }
+  // completion must not proceed — and a lost claim gets NO terminal write at
+  // all (the run now belongs to the reclaiming worker).
+  renewHeartbeat(true);
 
   const parentStatus = memberFailures.length > 0
     ? 'completed_with_member_failures'
@@ -1344,7 +1484,9 @@ export async function processCohort(
         .join('; ')
         .slice(0, 2000)}`
     : undefined;
-  completeCohortRun(run.id, parentStatus, errorMessage);
+  // Owner-guarded terminal write: only the current claim owner may complete
+  // the run (a stale owner's completion is a no-op).
+  completeCohortRun(run.id, parentStatus, errorMessage, { ownerGuard: { workerId } });
   console.log(
     `[CohortCurator] ✓ Cohort run ${run.id} completed with status ${parentStatus} ` +
     `(${completedMembers}/${orderedMembers.length} members)`,

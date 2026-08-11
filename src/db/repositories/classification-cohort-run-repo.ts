@@ -24,11 +24,12 @@
  * Reclaim (PR3 hardening, Commit A): `reclaimExpiredCohortRuns` compares
  * `lease_expires_at < :nowIso` (expiry timestamps compare to NOW — callers pass
  * `new Date().toISOString()`, never `now - TTL`). RESUME is a CAS on the
- * observed `{claimed_by, lease_expires_at}` (plus `status IN ('freezing',
- * 'running')`): `changes === 0` means the row changed since selection and the
- * run is NEVER handed out. The drift branch supersedes via
- * `supersedeCohortRunIfUnchanged` — a stale drift verdict can never supersede
- * a run another worker already resumed.
+ * observed `{claimed_by, lease_expires_at, status}` (the EXACT observed status
+ * — Commit A2): `changes === 0` means the row changed since selection
+ * (another worker resumed it, it left the observed status, or it was
+ * finalized/transitioned in place) and the run is NEVER handed out. The drift
+ * branch supersedes via `supersedeCohortRunIfUnchanged` — a stale drift
+ * verdict can never supersede a run another worker already resumed.
  */
 import { getDb } from '../connection';
 import { createRun, getRun } from './classification-run-repo';
@@ -291,18 +292,33 @@ const COHORT_RUN_TERMINAL = [
  * Terminal write-once completion. A run already in a terminal state (or
  * superseded) is never overwritten. Sets `completed_at` and the optional
  * `error_message`.
+ *
+ * Owner-guard option (PR3 hardening, Commit A2): when `options.ownerGuard` is
+ * provided the UPDATE is additionally CAS'd on `claimed_by = workerId` while
+ * the run is still actively held (`status IN ('freezing','running')`) — a
+ * stale worker can never write a terminal state onto a run another worker
+ * reclaimed. The heartbeat-lost abort path never even attempts a terminal
+ * write (the run already belongs to the reclaiming worker); this guard is the
+ * defense-in-depth for every other terminal completion.
  */
 export function completeCohortRun(
   runId: string,
   status: 'completed' | 'completed_with_abstentions' | 'completed_with_member_failures' | 'failed' | 'cancelled',
   errorMessage?: string,
+  options?: { ownerGuard?: { workerId: string } },
 ): boolean {
   const placeholders = COHORT_RUN_TERMINAL.map(() => '?').join(', ');
+  const where: string[] = ['id = ?', `status NOT IN (${placeholders})`];
+  const params: (string | number | null)[] = [status, now(), errorMessage ?? null, runId, ...COHORT_RUN_TERMINAL];
+  if (options?.ownerGuard) {
+    where.push('claimed_by = ?', "status IN ('freezing','running')");
+    params.push(options.ownerGuard.workerId);
+  }
   const result = getDb().run(
     `UPDATE classification_cohort_runs
      SET status = ?, completed_at = ?, error_message = ?
-     WHERE id = ? AND status NOT IN (${placeholders})`,
-    [status, now(), errorMessage ?? null, runId, ...COHORT_RUN_TERMINAL],
+     WHERE ${where.join(' AND ')}`,
+    params,
   );
   return result.changes > 0;
 }
@@ -423,14 +439,16 @@ export function reclaimExpiredCohortRuns(
     if (verifyFrozen(run) === 'match') {
       // RESUME is a CAS on the state observed at SELECT time: reassign the
       // worker and refresh the lease ONLY when the row is unchanged since
-      // selection. changes === 0 ⇒ a sibling worker already resumed (or the
-      // run left freezing/running) ⇒ this run is NEVER handed out twice.
+      // selection — including its EXACT observed status (Commit A2). changes
+      // === 0 ⇒ a sibling worker already resumed (or the run left the
+      // observed state, e.g. it was finalized freezing → running in place)
+      // ⇒ this run is NEVER handed out twice.
       const updated = db.run(
         `UPDATE classification_cohort_runs
          SET claimed_by = ?, claimed_at = ?, lease_expires_at = ?
-         WHERE id = ? AND status IN ('freezing','running')
+         WHERE id = ? AND status = ?
            AND claimed_by IS ? AND lease_expires_at IS ?`,
-        [workerId, nowIso, leaseExpiresAt, run.id, run.claimedBy, run.leaseExpiresAt],
+        [workerId, nowIso, leaseExpiresAt, run.id, run.status, run.claimedBy, run.leaseExpiresAt],
       );
       if (updated.changes > 0) {
         const resumedRow = getCohortRunById(run.id);

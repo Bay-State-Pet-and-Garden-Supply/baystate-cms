@@ -133,7 +133,9 @@ export async function curateItemWithPipeline(
                 }
               }
             }
-          } catch (e) {}
+          } catch {
+            /* identityJson may be malformed — image backfill is best-effort */
+          }
         }
       }
       if (images.length > 0) {
@@ -141,7 +143,9 @@ export async function curateItemWithPipeline(
         ext.additionalImages = images.slice(1);
         ext.images = images;
       }
-    } catch (e) {}
+    } catch {
+      /* evidence-attempt backfill must never block curation */
+    }
   }
 
   console.log(`[ProductCurator] Starting classification pipeline for: "${item.name}"`);
@@ -479,6 +483,11 @@ export async function curateItemWithPipeline(
     // Determine final status
     const hasAbstentions = result.proposals.some(p => p.proposalType === 'reviewable_abstention');
     const finalStatus = hasAbstentions ? 'completed_with_abstentions' : 'completed';
+    // Ownership-guarded terminal child write (PR3 hardening A2): in
+    // prepared-cohort mode the member's terminal write only proceeds while
+    // the parent claim is still held — a sibling reclaim during the pipeline
+    // leaves the child untouched (the new owner re-executes the member).
+    preparedCohort?.assertOwnershipHeld?.();
     completeRun(run.id, finalStatus);
 
     // Collect persisted evidence and proposals
@@ -595,7 +604,9 @@ export async function curateItemWithPipeline(
           if (allStorePages.includes('Cat Food Shop All')) suggestedPages.push('Cat Food Shop All');
         }
         suggestedPages.splice(5);
-      } catch (e) {}
+      } catch {
+        /* page-name suggestion fallback is best-effort */
+      }
     }
     // Synthesize search keywords from richer pipeline data
     const attributeProposals = allProposals.filter(p => p.proposalType === 'field_assignment' && p.status === 'accepted');
@@ -686,6 +697,11 @@ export async function curateItemWithPipeline(
     };
   } catch (err) {
     console.error(`[ProductCurator] Classification pipeline failed:`, redactTransportText(err instanceof Error ? err.message : String(err)));
+    // Ownership-guarded terminal child write (PR3 hardening A2): a pipeline
+    // error that coincides with a lost claim never gets a terminal child
+    // write from the stale owner — `assertOwnershipHeld` throws
+    // `HeartbeatLostError` first and the child stays untouched.
+    preparedCohort?.assertOwnershipHeld?.();
     completeRun(run.id, 'failed', redactTransportText(err instanceof Error ? err.message : String(err)));
     throw err;
   }
