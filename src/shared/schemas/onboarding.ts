@@ -234,7 +234,7 @@ export const ExtractionDataSchema = z.object({
    * every entry's originating run + result hash.
    */
   productIntelligenceEvidence: z.array(ProductIntelligenceImportEvidenceSchema).default(() => []),
-});
+}).passthrough();
 
 
 
