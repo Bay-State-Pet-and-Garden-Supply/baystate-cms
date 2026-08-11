@@ -45,9 +45,20 @@ import {
   supersedeCohortRun,
   persistCohortSnapshot,
   getCohortRunById,
+  completeCohortRun,
+  heartbeatCohortRun,
+  cancelFreezingRun,
+  getCohortSnapshotByHash,
+  COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
-import { listItemsByBatch, updateItemExtractionData } from '../db/repositories/onboarding-item-repo';
+import {
+  listItemsByBatch,
+  updateItemExtractionData,
+  updateItemStageStatus,
+} from '../db/repositories/onboarding-item-repo';
 import { getLatestExtractionSourcesByItemIds } from '../db/repositories/onboarding-extraction-repo';
+import { getRun } from '../db/repositories/classification-run-repo';
+import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
 import {
   syncConfigToCache,
   createConfigSnapshot,
@@ -64,6 +75,7 @@ import {
   captureLocalVlmConfig,
   requireModelCallContext,
   getModelExecutionPlanEntry,
+  getRuntimeSnapshotByHash,
 } from '../classification/runtime-snapshot';
 import type {
   PageSnapshotState,
@@ -74,8 +86,12 @@ import type { ModelPolicyView } from '../classification/model-policy-gateway';
 import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../classification/model-operation-registry';
 import type { ModelCallContext, ModelExecutionPlan, RuntimeRuleVersions } from '../classification/model-operation-registry';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
+import { onboardingEvents } from './sse-emitter';
+import { determineProductGroup } from './product-line-grouper';
+import { redactTransportText } from '../classification/model-policy-gateway';
 import { getVlmConfig } from './vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
+import { curateItemWithPipeline } from './product-curator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
 import {
   PROJECTION_VERSION,
@@ -914,4 +930,278 @@ export function applyFrozenProjectionToItem(
       ocrOutcome: frozen.ocr.outcome ?? null,
     }) as OnboardingItem['extractionData'],
   };
+}
+
+// ─── Cohort execution (PR3 M3, contract D step 6) ─────────────────────────────
+
+/** One member's execution outcome (recorded, never silently dropped). */
+export interface CohortMemberExecutionResult {
+  itemId: string;
+  productSku: string | null;
+  ok: boolean;
+  error: string | null;
+}
+
+/** Parent completion summary returned by `processCohort`. */
+export interface CohortExecutionSummary {
+  parentStatus: 'completed' | 'completed_with_abstentions' | 'completed_with_member_failures';
+  completedMembers: number;
+  memberCount: number;
+  memberFailures: CohortMemberExecutionResult[];
+}
+
+/**
+ * A cohort-level execution abort (claim ownership lost). Never recorded as a
+ * member failure and never completes the parent — a sibling worker now owns
+ * the run (reclaimed lease) and will finish it. `processCohort` only throws
+ * this after all cohort-level validation has passed.
+ */
+class CohortRunOwnershipAbortError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CohortRunOwnershipAbortError';
+  }
+}
+
+/**
+ * Rebuild the prepared-cohort context for one member from the freeze-persisted
+ * child run: the child run's `config_snapshot_*` refs point at the member's
+ * frozen runtime snapshot (persisted by `freezeCohortForExecution`); the
+ * shared authorities (config ref, verified Page catalog, frozen fieldOptions,
+ * model-policy view) are read back from that immutable snapshot — never
+ * re-captured live.
+ */
+function buildPreparedCohortContextForMember(
+  parentRunId: string,
+  memberProjection: ExecutionEvidenceProjectionMemberV1,
+  childRun: ClassificationRunRow,
+  workspaceId: string,
+): PreparedCohortContext {
+  if (!childRun.configSnapshotId || !childRun.configSnapshotHash) {
+    throw new Error(
+      `processCohort: member ${memberProjection.onboardingItemId} child run ${childRun.id} has no frozen snapshot refs.`,
+    );
+  }
+  const memberSnapshot = getRuntimeSnapshotByHash(workspaceId, childRun.configSnapshotHash);
+  if (!memberSnapshot) {
+    throw new Error(
+      `processCohort: frozen member runtime snapshot ${childRun.configSnapshotHash} not found for item ${memberProjection.onboardingItemId}.`,
+    );
+  }
+  return {
+    memberProjection,
+    parentRunId,
+    memberSnapshotId: childRun.configSnapshotId,
+    memberSnapshotHash: childRun.configSnapshotHash,
+    sharedAuthorities: {
+      configSnapshotRef: memberSnapshot.configSnapshotRef,
+      pages: memberSnapshot.pages,
+      pageImportId: memberSnapshot.pageImportId,
+      pageImportHash: memberSnapshot.pageImportHash,
+      fieldOptions: memberSnapshot.fieldOptions,
+      focusedFileHashes: memberSnapshot.focusedFileHashes,
+      catalogEvidenceHash: memberSnapshot.catalogEvidenceHash,
+      modelPolicyView: memberSnapshot.modelPolicy
+        ? modelPolicyViewFromConfig(memberSnapshot.modelPolicy as never, memberSnapshot.snapshotHash)
+        : null,
+    },
+  };
+}
+
+/**
+ * Execute a frozen (`running`) cohort run (PR3 M3, contract D step 6). Per
+ * member in ordinal order: heartbeat the parent lease (renew, ownership-
+ * guarded), run `curateItemWithPipeline` in prepared-cohort mode against the
+ * freeze-persisted member projection + runtime snapshot, persist
+ * `curation_data_json`, mark the item's Curation stage completed, and record
+ * failures WITHOUT aborting the cohort — a member failure never stops the
+ * remaining members.
+ *
+ * Parent completion (write-once via `completeCohortRun`):
+ * - `completed` — every member completed;
+ * - `completed_with_abstentions` — every member completed and at least one
+ *   child run completed with reviewable abstentions;
+ * - `completed_with_member_failures` — some members individually failed but
+ *   the cohort-level semantic work committed (D1);
+ * - `failed` — the cohort-level semantic state is unreachable (missing frozen
+ *   snapshot / members / items / ownership) — thrown after completing the run.
+ *
+ * Ownership loss mid-execution throws `CohortRunOwnershipAbortError` WITHOUT
+ * completing the parent (a reclaimed sibling owns the run now). Crash-recovery
+ * resume (same run id, reclaim-on-match) never re-executes a member whose
+ * child run already completed under this parent.
+ */
+export async function processCohort(
+  run: CohortRun,
+  workspacePath: string,
+  workspaceId: string,
+): Promise<CohortExecutionSummary> {
+  if (run.status !== 'running') {
+    const reason = `processCohort aborted: run ${run.id} is not 'running' (status=${run.status}); only a frozen run may be executed.`;
+    // Terminal write respecting the hash-required CHECK: a run that carried
+    // frozen evidence hashes may complete `failed`; an unfinalized `freezing`
+    // run (NULL hashes) can only leave `freezing` via a CHECK-exempt terminal
+    // — `cancelled` (supersede is reserved for the reclaim/drift path).
+    if (run.evidenceSnapshotHash !== null) {
+      completeCohortRun(run.id, 'failed', reason);
+    } else {
+      cancelFreezingRun(run.id, reason);
+    }
+    throw new Error(reason);
+  }
+  const workerId = run.claimedBy;
+  if (!workerId) {
+    const reason = `processCohort aborted: run ${run.id} has no claim owner.`;
+    completeCohortRun(run.id, 'failed', reason);
+    throw new Error(reason);
+  }
+
+  // The frozen execution-evidence projection is the member execution contract.
+  const snapshot = run.evidenceSnapshotHash ? getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash) : null;
+  if (!snapshot) {
+    const reason = `processCohort aborted: run ${run.id} has no persisted execution-evidence snapshot (evidence_snapshot_hash=${run.evidenceSnapshotHash ?? 'null'}).`;
+    completeCohortRun(run.id, 'failed', reason);
+    throw new Error(reason);
+  }
+  let projection: ExecutionEvidenceProjectionV1;
+  try {
+    projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snapshot.payloadJson));
+  } catch (err) {
+    const reason = `processCohort aborted: run ${run.id} snapshot payload is corrupt: ${err instanceof Error ? err.message : String(err)}`;
+    completeCohortRun(run.id, 'failed', reason);
+    throw new Error(reason, { cause: err });
+  }
+
+  const cohort = getCohortById(run.cohortId);
+  if (!cohort) {
+    const reason = `processCohort aborted: cohort ${run.cohortId} not found.`;
+    completeCohortRun(run.id, 'failed', reason);
+    throw new Error(reason);
+  }
+  const members = getCohortMembers(cohort.id);
+  if (members.length === 0) {
+    const reason = `processCohort aborted: cohort ${cohort.id} has no members.`;
+    completeCohortRun(run.id, 'failed', reason);
+    throw new Error(reason);
+  }
+  const items = listItemsByBatch(cohort.batchId);
+  const itemsById = new Map(items.map(item => [item.id, item]));
+  for (const memberProjection of projection.members) {
+    if (!itemsById.has(memberProjection.onboardingItemId)) {
+      const reason = `processCohort aborted: member item ${memberProjection.onboardingItemId} not found in batch ${cohort.batchId}.`;
+      completeCohortRun(run.id, 'failed', reason);
+      throw new Error(reason);
+    }
+  }
+
+  // The frozen projection is the authority for member ordering (ordinal).
+  const orderedMembers = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
+  const memberFailures: CohortMemberExecutionResult[] = [];
+  let hasAbstentions = false;
+  let completedMembers = 0;
+  const nowIso = new Date().toISOString();
+
+  for (const memberProjection of orderedMembers) {
+    const item = itemsById.get(memberProjection.onboardingItemId)!;
+
+    // Resume guard (crash-recovery reclaim-on-match keeps the SAME run id): a
+    // member whose child run already completed under THIS parent is never
+    // re-executed.
+    const completedChild = getDb().query(
+      `SELECT status FROM classification_runs
+       WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status IN ('completed','completed_with_abstentions')
+       ORDER BY started_at DESC LIMIT 1`,
+    ).get(run.id, item.id) as { status: string } | undefined;
+    if (completedChild) {
+      completedMembers++;
+      if (completedChild.status === 'completed_with_abstentions') hasAbstentions = true;
+      console.log(`[CohortCurator] Member ${item.upc ?? item.id} already completed under run ${run.id} — resume guard skips re-execution.`);
+      continue;
+    }
+
+    if (!heartbeatCohortRun(run.id, workerId, COHORT_LEASE_TTL_MS)) {
+      throw new CohortRunOwnershipAbortError(
+        `processCohort lost claim ownership of run ${run.id} before executing member ${memberProjection.onboardingItemId}.`,
+      );
+    }
+
+    try {
+      const childRun = ensureMemberRun(run.id, item.id, workspaceId, item.upc ?? '', null, null);
+      const prepared = buildPreparedCohortContextForMember(run.id, memberProjection, childRun, workspaceId);
+
+      // Sibling context for family-aware curation (read-only hints) — the same
+      // handoff the legacy per-SKU worker uses (item.siblingGroup).
+      const batchItems = listItemsByBatch(cohort.batchId);
+      try {
+        (item as any).siblingGroup = determineProductGroup(item as any, batchItems as any) ?? null;
+      } catch (err) {
+        console.warn(`[CohortCurator] Sibling context for ${item.upc ?? item.id} failed (non-blocking): ${redactTransportText(err instanceof Error ? err.message : String(err))}`);
+      }
+
+      const curationData = await curateItemWithPipeline(item, workspacePath, workspaceId, prepared);
+
+      // Persist curation_data_json exactly as the legacy worker does.
+      getDb().query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
+        JSON.stringify(curationData),
+        nowIso,
+        item.id,
+      );
+      updateItemStageStatus(item.id, 'completed');
+      completedMembers++;
+      const childStatus = getRun(childRun.id)?.status;
+      if (childStatus === 'completed_with_abstentions') hasAbstentions = true;
+
+      onboardingEvents.emitItemStatus(cohort.batchId, item.id, 'completed', {
+        stage: 'curation',
+        cohortRunId: run.id,
+        curationData,
+      });
+      console.log(
+        `[CohortCurator] ✓ Member ${item.upc ?? item.id} curated under run ${run.id}: ` +
+        `title="${curationData.curatedTitle || 'N/A'}", suggestedPages=[${(curationData.suggestedPages || []).join(', ') || 'none'}]`,
+      );
+    } catch (err) {
+      if (err instanceof CohortRunOwnershipAbortError) throw err;
+      const errorText = redactTransportText(err instanceof Error ? err.message : String(err));
+      console.error(`[CohortCurator] Member ${item.upc ?? item.id} failed under run ${run.id}: ${errorText}`);
+      // Record and continue — a member failure never aborts the cohort unless
+      // the shared semantic state is unreachable (handled above).
+      updateItemStageStatus(item.id, 'failed', errorText);
+      onboardingEvents.emitItemStatus(cohort.batchId, item.id, 'failed', {
+        stage: 'curation',
+        cohortRunId: run.id,
+        error: errorText,
+      });
+      memberFailures.push({ itemId: item.id, productSku: item.upc ?? null, ok: false, error: errorText });
+    }
+  }
+
+  // Post-execution heartbeat: if the claim was lost while processing the last
+  // member (a sibling reclaimed the lease), the parent completion belongs to
+  // the sibling — never complete a run we no longer own. (Member boundaries
+  // renew the lease, so the next member's heartbeat-before is the previous
+  // member's heartbeat-after.)
+  if (!heartbeatCohortRun(run.id, workerId, COHORT_LEASE_TTL_MS)) {
+    throw new CohortRunOwnershipAbortError(
+      `processCohort lost claim ownership of run ${run.id} after executing all members.`,
+    );
+  }
+
+  const parentStatus = memberFailures.length > 0
+    ? 'completed_with_member_failures'
+    : hasAbstentions
+      ? 'completed_with_abstentions'
+      : 'completed';
+  const errorMessage = memberFailures.length > 0
+    ? `${memberFailures.length} member(s) failed: ${memberFailures
+        .map(f => `${f.productSku ?? f.itemId}: ${f.error}`)
+        .join('; ')
+        .slice(0, 2000)}`
+    : undefined;
+  completeCohortRun(run.id, parentStatus, errorMessage);
+  console.log(
+    `[CohortCurator] ✓ Cohort run ${run.id} completed with status ${parentStatus} ` +
+    `(${completedMembers}/${orderedMembers.length} members)`,
+  );
+  return { parentStatus, completedMembers, memberCount: orderedMembers.length, memberFailures };
 }

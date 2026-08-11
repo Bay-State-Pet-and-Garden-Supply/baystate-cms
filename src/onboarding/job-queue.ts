@@ -24,6 +24,22 @@ import { extractProductData } from './page-extractor';
 import { findProfileByDomain } from '../db/repositories/extractor-profile-repo';
 import { curateItemWithPipeline } from './product-curator';
 import { refreshCandidateCohorts } from './curation-cohort-service';
+import {
+  freezeCohortForExecution,
+  processCohort,
+  verifyCohortRunFrozen,
+} from './cohort-curator';
+import { getCohortCurationFlags } from '../classification/flags';
+import type { CohortCurationFlags } from '../classification/flags';
+import {
+  claimReadyCurationCohorts,
+  reclaimExpiredCohortRuns,
+  getCurrentCohortRun,
+  supersedeCohortRun,
+  COHORT_LEASE_TTL_MS,
+} from '../db/repositories/classification-cohort-run-repo';
+import { getCohortById, listCohortsByWorkspace } from '../db/repositories/curation-cohort-repo';
+import type { CohortRun } from '../shared/schemas/cohorts';
 import { determineProductGroup } from './product-line-grouper';
 import { validateSiblingConsistency } from '../classification/consistency-validator';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
@@ -32,6 +48,32 @@ import { getDb } from '../db/connection';
 import type { OnboardingSource, PipelineStage } from '../shared/schemas/onboarding';
 
 const AUTO_STAGES: PipelineStage[] = ['curation', 'extraction', 'discovery'];
+
+// ─── Cohort-centric Curation V2 (issue #30, PR3 M3) ───────────────────────────
+
+/**
+ * Flag OFF (default): Curation is per-item, byte-identical to today.
+ * Flag ON + shadowOnly: observe-only — the legacy per-item path stays in
+ * place and NOTHING claims cohorts (PI shadow precedent: runs may execute,
+ * results are never promoted — here: no claiming in shadow).
+ * Flag ON + !shadowOnly: Curation is cohort-claimed EXCLUSIVELY — `poll()`
+ * never calls `claimItemsForProcessing('curation', ...)`; ownership flows
+ * reclaim → reconcile-drift-before-claimable → claimReadyCurationCohorts →
+ * freeze → processCohort (implementation-plan section A, D8/D9).
+ */
+function isCohortCurationActive(flags: CohortCurationFlags): boolean {
+  return flags.cohortCurationV2Enabled && !flags.cohortShadowOnly;
+}
+
+/** Terminal parent-run states that remain the current historical decision
+ *  until drift supersedes them (D9 — never re-claimed while they match). */
+const COHORT_RUN_TERMINAL = new Set([
+  'completed',
+  'completed_with_abstentions',
+  'completed_with_member_failures',
+  'failed',
+  'cancelled',
+]);
 
 // ─── Auto-selection policy helpers ──────────────────────────────────────────────
 
@@ -97,6 +139,34 @@ export class OnboardingWorker {
       console.error('[OnboardingWorker] Failed to requeue stale in_progress items:', err);
     }
 
+    // PR3 M3 (issue #30): startup recovery for crashed cohort workers — reclaim
+    // expired cohort-run leases (resume-on-match / supersede-on-drift) right
+    // next to the item stale sweep. Flag-gated: OFF/shadow mode never touches
+    // cohort runs. Resumed runs are dispatched to the freeze/execute path so a
+    // crash never strands a claimed cohort.
+    const flags = getCohortCurationFlags();
+    if (isCohortCurationActive(flags)) {
+      try {
+        const staleBefore = new Date(Date.now() - COHORT_LEASE_TTL_MS).toISOString();
+        const reclaim = reclaimExpiredCohortRuns(
+          this.workspaceId,
+          staleBefore,
+          run => verifyCohortRunFrozen(run, this.workspacePath, this.workspaceId) ? 'match' : 'drift',
+          this.workerId,
+          COHORT_LEASE_TTL_MS,
+        );
+        if (reclaim.resumed.length > 0) {
+          console.log(`[OnboardingWorker] Startup reclaim: resumed ${reclaim.resumed.length} expired cohort run(s): ${reclaim.resumed.map(r => r.id).join(', ')}`);
+        }
+        if (reclaim.superseded.length > 0) {
+          console.warn(`[OnboardingWorker] Startup reclaim: superseded ${reclaim.superseded.length} drifted cohort run(s).`);
+        }
+        for (const run of reclaim.resumed) this.dispatchCohortRun(run);
+      } catch (err) {
+        console.error('[OnboardingWorker] Failed to reclaim expired cohort runs on startup:', err);
+      }
+    }
+
     this.interval = setInterval(() => this.poll(), 2000);
     console.log('[OnboardingWorker] Started stage-based worker loop');
   }
@@ -107,6 +177,11 @@ export class OnboardingWorker {
       this.interval = null;
     }
     console.log('[OnboardingWorker] Stopped worker loop');
+  }
+
+  /** Await all in-flight processing promises (tests, graceful shutdown). */
+  async drain(): Promise<void> {
+    await Promise.allSettled([...this.running.values()]);
   }
 
   async poll(): Promise<void> {
@@ -123,6 +198,16 @@ export class OnboardingWorker {
 
         // Extraction has a separate concurrency limit to avoid bot detection
         if (stage === 'extraction' && this.extractionRunning >= this.maxExtractionConcurrency) continue;
+
+        // PR3 M3 (issue #30): with the cohort flag active, Curation is
+        // cohort-claimed EXCLUSIVELY — reclaim expired leases, reconcile
+        // drift-before-claimable, claim ready cohorts and dispatch them to
+        // the freeze/execute path. `claimItemsForProcessing('curation', ...)`
+        // is NEVER called in this mode; Discovery/Extraction stay per-item.
+        if (stage === 'curation' && isCohortCurationActive(getCohortCurationFlags())) {
+          this.claimAndDispatchCohortRuns(inFlightBatches);
+          continue;
+        }
 
         const available = this.maxConcurrency - this.running.size;
         const claimedItems = claimItemsForProcessing(stage, available, this.workspaceId, this.workerId);
@@ -159,6 +244,114 @@ export class OnboardingWorker {
       console.error('[OnboardingWorker] Error in poll loop:', err);
     } finally {
       this.isProcessing = false;
+    }
+  }
+
+  // ─── Cohort-centric Curation V2 (issue #30, PR3 M3) ─────────────────────────
+
+  /**
+   * The cohort curation leg of `poll()` (flag ON + !shadowOnly only):
+   * 1. reclaim expired cohort-run leases (live sibling recovery; reconcile
+   *    drift BEFORE deciding claimability — D9);
+   * 2. reconcile ready cohorts whose CURRENT terminal run no longer matches
+   *    the frozen world (supersede opens the claim slot); a matching terminal
+   *    run stays the current historical decision (no new run);
+   * 3. claim ready curation cohorts and dispatch each to the freeze/execute
+   *    path.
+   *
+   * Everything is best-effort — a failure here never breaks the poll loop,
+   * and ordinary GET/read endpoints never mutate runs (D9: this runs ONLY in
+   * the worker poll path).
+   */
+  private claimAndDispatchCohortRuns(inFlightBatches: Set<string>): void {
+    try {
+      const staleBefore = new Date(Date.now() - COHORT_LEASE_TTL_MS).toISOString();
+      const reclaim = reclaimExpiredCohortRuns(
+        this.workspaceId,
+        staleBefore,
+        run => verifyCohortRunFrozen(run, this.workspacePath, this.workspaceId) ? 'match' : 'drift',
+        this.workerId,
+        COHORT_LEASE_TTL_MS,
+      );
+      if (reclaim.resumed.length > 0) {
+        console.log(`[OnboardingWorker] Reclaimed ${reclaim.resumed.length} expired cohort run(s): ${reclaim.resumed.map(r => r.id).join(', ')}`);
+        for (const run of reclaim.resumed) this.dispatchCohortRun(run, inFlightBatches);
+      }
+      if (reclaim.superseded.length > 0) {
+        console.warn(`[OnboardingWorker] Superseded ${reclaim.superseded.length} drifted cohort run(s) during reclaim.`);
+      }
+
+      this.reconcileDriftedTerminalRuns();
+
+      const available = this.maxConcurrency - this.running.size;
+      if (available <= 0) return;
+      const claimed = claimReadyCurationCohorts(this.workspaceId, available, this.workerId, COHORT_LEASE_TTL_MS);
+      for (const run of claimed) this.dispatchCohortRun(run, inFlightBatches);
+    } catch (err) {
+      console.error('[OnboardingWorker] Cohort curation leg failed (non-blocking):', err);
+    }
+  }
+
+  /**
+   * D9 reconcile-before-claimable: for every READY cohort whose current
+   * (non-superseded) run is in a terminal state, verify the frozen world
+   * still matches (`verifyCohortRunFrozen`). Drift → supersede the old run
+   * (opens the slot so the claim can create a fresh run); match → leave the
+   * terminal run as the current historical decision (never re-claimed until
+   * drift supersedes it). Never runs from read endpoints.
+   */
+  private reconcileDriftedTerminalRuns(): void {
+    const readyCohorts = listCohortsByWorkspace(this.workspaceId).filter(c => c.status === 'ready');
+    for (const cohort of readyCohorts) {
+      const current = getCurrentCohortRun(cohort.id);
+      if (!current || !COHORT_RUN_TERMINAL.has(current.status)) continue;
+      if (verifyCohortRunFrozen(current, this.workspacePath, this.workspaceId)) {
+        // Frozen world still matches — the terminal run is the current
+        // historical decision; a new run is NOT created.
+        continue;
+      }
+      supersedeCohortRun(current.id, 'Authority drift during pre-claim reconciliation');
+      console.warn(`[OnboardingWorker] Superseded drifted terminal run ${current.id} for ready cohort ${cohort.id}.`);
+    }
+  }
+
+  /** Dispatch a claimed/resumed cohort run to the freeze + execute path. */
+  private dispatchCohortRun(run: CohortRun, inFlightBatches?: Set<string>): void {
+    if (this.running.has(run.id)) return;
+    if (inFlightBatches) {
+      try {
+        const cohort = getCohortById(run.cohortId);
+        if (cohort) inFlightBatches.add(cohort.batchId);
+      } catch { /* best-effort refresh set */ }
+    }
+    const promise = this.processCohortRun(run);
+    this.running.set(run.id, promise);
+    promise.finally(() => this.running.delete(run.id));
+  }
+
+  /**
+   * Execute one cohort run: `freezing` → freeze (CAS; superseded-on-drift is
+   * a normal outcome) → `running` → `processCohort`. Errors are logged and
+   * never break the poll loop; a run that fails to freeze stays claimed and
+   * is recovered by a later reclaim once its lease expires.
+   */
+  private async processCohortRun(run: CohortRun): Promise<void> {
+    console.log(`[OnboardingWorker] Processing cohort run ${run.id} (cohort ${run.cohortId}, status=${run.status})`);
+    try {
+      let current = run;
+      if (current.status === 'freezing') {
+        const finalized = await freezeCohortForExecution(current, this.workspacePath, this.workspaceId);
+        if (finalized.status !== 'running') {
+          console.warn(`[OnboardingWorker] Cohort run ${run.id} freeze did not finalize (${finalized.status}): ${finalized.errorMessage ?? 'no reason'}`);
+          return;
+        }
+        current = finalized;
+      }
+      if (current.status === 'running') {
+        await processCohort(current, this.workspacePath, this.workspaceId);
+      }
+    } catch (err) {
+      console.error(`[OnboardingWorker] Cohort run ${run.id} failed:`, err);
     }
   }
 

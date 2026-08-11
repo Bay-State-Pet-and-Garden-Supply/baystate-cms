@@ -347,6 +347,28 @@ export function cancelFreezingRun(runId: string, reason?: string): boolean {
   return result.changes > 0;
 }
 
+// ─── Heartbeat (lease renewal) ──────────────────────────────────────────────────
+
+/**
+ * Renew a cohort run's claim lease. Ownership-guarded: only the run's current
+ * `claimed_by` worker may heartbeat, and only while the run is still
+ * `freezing` or `running` — a terminal run is never heartbeated. PR3 M3
+ * `processCohort` piggybacks the heartbeat on member boundaries (before/after
+ * each member, contract A), so a multi-SKU execution stays inside its TTL.
+ * Returns false when the run is no longer ours to renew (a sibling worker
+ * reclaimed it, or it went terminal/superseded).
+ */
+export function heartbeatCohortRun(runId: string, workerId: string, leaseTtlMs: number): boolean {
+  const leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
+  const result = getDb().run(
+    `UPDATE classification_cohort_runs
+     SET lease_expires_at = ?
+     WHERE id = ? AND claimed_by = ? AND status IN ('freezing','running')`,
+    [leaseExpiresAt, runId, workerId],
+  );
+  return result.changes > 0;
+}
+
 // ─── Reclaim (lease expiry) ───────────────────────────────────────────────────
 
 export interface CohortRunReclaimResult {
