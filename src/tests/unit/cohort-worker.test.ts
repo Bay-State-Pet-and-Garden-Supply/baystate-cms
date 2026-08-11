@@ -1134,7 +1134,7 @@ describe('PR3 hardening — Commit B (R3 member-projection atomic commit)', () =
 });
 
 describe('PR4 C4b — proposal dependency metadata on cohort execution type (issue #30)', () => {
-  it('coherent cohort: every member proposal gets ONE execution_product_type dependency row with the run type + stable value hash', async () => {
+  it('coherent cohort, type target only: primary_product_type proposals carry ZERO type dependency rows (only field_assignment is downstream of the effective type)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveTypeEnabledConfig(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, {
@@ -1155,13 +1155,6 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     expect(summary.parentStatus).toBe('completed');
     expect(summary.completedMembers).toBe(2);
 
-    // dependency_value_hash = hashCanonicalJson({executionProductTypeId,
-    // productTypeConfidence}) — computed from the run row's own values, so
-    // the assertion never depends on float formatting.
-    const expectedHash = hashCanonicalJson({
-      executionProductTypeId: finalized.executionProductTypeId!,
-      productTypeConfidence: finalized.productTypeConfidence!,
-    });
     let totalProposals = 0;
     for (const item of items) {
       const stored = findItemById(item.id)!;
@@ -1169,24 +1162,26 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
       const proposals = stored.curationData!.classificationProposals;
       expect(proposals.length).toBeGreaterThan(0);
       totalProposals += proposals.length;
+      // Only the type curation target is enabled — every proposal is a
+      // primary_product_type proposal.
+      expect(proposals.every(p => p.proposalType === 'primary_product_type')).toBe(true);
       for (const proposal of proposals) {
         const deps = listDependenciesForProposal(proposal.id);
-        // Exactly ONE dependency row per created proposal.
-        expect(deps).toHaveLength(1);
-        expect(deps[0].dependencyKind).toBe('execution_product_type');
-        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
-        expect(deps[0].dependencyValueHash).toBe(expectedHash);
-        expect(deps[0].workspaceId).toBe(workspaceId);
-        expect(deps[0].proposalId).toBe(proposal.id);
+        // PR5 hardening: primary_product_type proposals are NEVER type-stamped
+        // (the type proposal is proposed from member evidence and is not
+        // downstream of the effective type) — even under a coherent Execution
+        // Product Type with a stable execution tuple available.
+        expect(deps).toHaveLength(0);
       }
     }
-    // No proposal created under the cohort type is left without a dependency.
-    expect(dependencyRowCount(workspaceId)).toBe(totalProposals);
+    // No proposal created under the cohort type is left with a dependency.
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+    expect(totalProposals).toBeGreaterThan(0);
   });
 
   it('atomicity: a crash before the member-projection commit leaves ZERO dependency rows; the resume commits rows with the projection', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
-    saveTypeEnabledConfig(workspaceId, wsPath);
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, {
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
     });
@@ -1232,32 +1227,40 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     expect(proposals.length).toBeGreaterThan(0);
     for (const proposal of proposals) {
       const deps = listDependenciesForProposal(proposal.id);
-      expect(deps).toHaveLength(1);
-      expect(deps[0].dependencyKind).toBe('execution_product_type');
-      expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+      if (proposal.proposalType === 'field_assignment') {
+        // field_assignment proposals (the ones downstream of the effective
+        // type) get exactly ONE execution_product_type row.
+        expect(deps).toHaveLength(1);
+        expect(deps[0].dependencyKind).toBe('execution_product_type');
+        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+      } else {
+        // primary_product_type proposals are never type-stamped.
+        expect(deps).toHaveLength(0);
+      }
     }
-    // PR4 review fix (SHOULD-FIX 3): EVERY persisted proposal row of the
-    // child run — including any row left over from the pre-crash attempt — is
-    // stamped. Left-join every child-run proposal against its dependency rows
-    // and assert zero orphans.
+    // PR4 review fix (SHOULD-FIX 3) preserved: EVERY persisted
+    // field_assignment proposal row of the child run — including any row left
+    // over from the pre-crash attempt — is stamped. Left-join every child-run
+    // field_assignment proposal against its dependency rows and assert zero
+    // orphans.
     const childRunId = stored.curationData!.classificationRunId!;
-    const allChildProposals = getDb().query(
-      'SELECT id FROM classification_proposals WHERE run_id = ?',
+    const allChildFieldAssignments = getDb().query(
+      "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'field_assignment'",
     ).all(childRunId) as Array<{ id: string }>;
-    expect(allChildProposals.length).toBeGreaterThan(0);
+    expect(allChildFieldAssignments.length).toBeGreaterThan(0);
     const unstamped = getDb().query(
       `SELECT p.id FROM classification_proposals p
        LEFT JOIN classification_proposal_dependencies d
          ON d.proposal_id = p.id AND d.dependency_kind = 'execution_product_type'
-       WHERE p.run_id = ? AND d.id IS NULL`,
+       WHERE p.run_id = ? AND p.proposal_type = 'field_assignment' AND d.id IS NULL`,
     ).all(childRunId);
     expect(unstamped).toHaveLength(0);
-    expect(dependencyRowCount(workspaceId)).toBe(allChildProposals.length);
+    expect(dependencyRowCount(workspaceId)).toBe(allChildFieldAssignments.length);
   });
 
   it('in-transaction seam: dependency rows + item projection + child terminal status are all VISIBLE inside the member commit (before it commits)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
-    saveTypeEnabledConfig(workspaceId, wsPath);
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, {
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
     });
@@ -1309,7 +1312,7 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
 
   it('in-transaction seam throw rolls EVERYTHING back: zero dependency rows, item not completed, child still running', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
-    saveTypeEnabledConfig(workspaceId, wsPath);
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, {
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
     });
@@ -1437,7 +1440,7 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
 
   it('dependencyValueHash is stable for the same {executionProductTypeId, productTypeConfidence}', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
-    saveTypeEnabledConfig(workspaceId, wsPath);
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, {
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
       '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
@@ -1470,9 +1473,16 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
       expect(proposals.length).toBeGreaterThan(0);
       for (const proposal of proposals) {
         const deps = listDependenciesForProposal(proposal.id);
-        expect(deps).toHaveLength(1);
-        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
-        expect(deps[0].dependencyValueHash).toBe(expectedHash);
+        if (proposal.proposalType === 'field_assignment') {
+          // The stable execution tuple lands on the downstream field_assignment
+          // proposals.
+          expect(deps).toHaveLength(1);
+          expect(deps[0].dependencyKind).toBe('execution_product_type');
+          expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+          expect(deps[0].dependencyValueHash).toBe(expectedHash);
+        } else {
+          expect(deps).toHaveLength(0);
+        }
       }
     }
     // Deterministic: recomputing the same {id, confidence} yields the same
@@ -1509,33 +1519,47 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
       executionProductTypeId: finalized.executionProductTypeId!,
       productTypeConfidence: finalized.productTypeConfidence!,
     });
-    let totalProposals = 0;
+    let totalFieldAssignmentProposals = 0;
     for (const item of items) {
       const stored = findItemById(item.id)!;
       expect(stored.stageStatus).toBe('completed');
       const proposals = stored.curationData!.classificationProposals;
       expect(proposals.length).toBeGreaterThan(0);
-      totalProposals += proposals.length;
       // PR5 delta: the first-pass member emits a pending flavor field_assignment.
       const flavor = proposals.find(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor');
       expect(flavor).toBeDefined();
       expect(flavor!.status).toBe('pending');
+      const fieldAssignments = proposals.filter(p => p.proposalType === 'field_assignment');
+      expect(fieldAssignments.length).toBeGreaterThan(0);
+      totalFieldAssignmentProposals += fieldAssignments.length;
       for (const proposal of proposals) {
         const deps = listDependenciesForProposal(proposal.id);
-        expect(deps).toHaveLength(1);
-        expect(deps[0].dependencyKind).toBe('execution_product_type');
-        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
-        expect(deps[0].dependencyValueHash).toBe(expectedHash);
-        expect(deps[0].workspaceId).toBe(workspaceId);
-        expect(deps[0].proposalId).toBe(proposal.id);
+        if (proposal.proposalType === 'field_assignment') {
+          // PR5 hardening (P2): ONLY the field_assignment proposals (the ones
+          // the effective type actually drives) carry ONE
+          // execution_product_type row each.
+          expect(deps).toHaveLength(1);
+          expect(deps[0].dependencyKind).toBe('execution_product_type');
+          expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+          expect(deps[0].dependencyValueHash).toBe(expectedHash);
+          expect(deps[0].workspaceId).toBe(workspaceId);
+          expect(deps[0].proposalId).toBe(proposal.id);
+        } else {
+          // primary_product_type (and any other) proposals are never stamped.
+          expect(deps).toHaveLength(0);
+        }
       }
       // DECISION-J: the member's curation data exposes the effective type.
       expect(stored.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
     }
-    expect(dependencyRowCount(workspaceId)).toBe(totalProposals);
+    // Dependency rows exist ONLY for the field_assignment proposals — the
+    // count is the field_assignment proposal count, never the all-proposals
+    // count.
+    expect(dependencyRowCount(workspaceId)).toBe(totalFieldAssignmentProposals);
+    expect(totalFieldAssignmentProposals).toBeGreaterThan(0);
   });
 
-  it('reviewed-override member: proposals carry ZERO execution_product_type rows while the sibling\'s do (DECISION-H)', async () => {
+  it('reviewed-override member: field_assignment proposals carry reviewed_product_type rows; the sibling execution-driven member carries execution_product_type rows (separate kinds)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, {
@@ -1552,6 +1576,13 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
     expect(finalized.status).toBe('running');
     expect(finalized.executionProductTypeId).toBe('dry-dog-food');
 
+    // The sibling's execution tuple is derived from the run row's OWN values
+    // (never a hardcoded float), matching what the executor stamped.
+    const executionHash = hashCanonicalJson({
+      executionProductTypeId: finalized.executionProductTypeId!,
+      productTypeConfidence: finalized.productTypeConfidence!,
+    });
+
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
 
@@ -1560,10 +1591,27 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
     expect(reviewedMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'reviewed' });
     const reviewedProposals = reviewedMember.curationData!.classificationProposals;
     expect(reviewedProposals.length).toBeGreaterThan(0);
+    const reviewedFieldAssignments = reviewedProposals.filter(p => p.proposalType === 'field_assignment');
+    expect(reviewedFieldAssignments.length).toBeGreaterThan(0);
+    // PR5 hardening (P2): the reviewed-driven member's field_assignment
+    // proposals carry a reviewed_product_type row — target = the reviewed id
+    // (reviewed-first resolution, so the effective id IS the reviewed id),
+    // value hash = hashCanonicalJson({reviewedProductTypeId}) — and NEVER an
+    // execution_product_type row; primary_product_type proposals stay
+    // unstamped in both cases.
+    const reviewedHash = hashCanonicalJson({ reviewedProductTypeId: 'dry-dog-food' });
     for (const proposal of reviewedProposals) {
-      const executionDeps = listDependenciesForProposal(proposal.id)
-        .filter(d => d.dependencyKind === 'execution_product_type');
+      const deps = listDependenciesForProposal(proposal.id);
+      const executionDeps = deps.filter(d => d.dependencyKind === 'execution_product_type');
       expect(executionDeps).toHaveLength(0);
+      if (proposal.proposalType === 'field_assignment') {
+        expect(deps).toHaveLength(1);
+        expect(deps[0].dependencyKind).toBe('reviewed_product_type');
+        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+        expect(deps[0].dependencyValueHash).toBe(reviewedHash);
+      } else {
+        expect(deps).toHaveLength(0);
+      }
     }
 
     const executionMember = findItemById(items[1].id)!;
@@ -1571,13 +1619,23 @@ describe('PR5 C3 — executor-side effective type + dependency-stamping refineme
     expect(executionMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
     const executionProposals = executionMember.curationData!.classificationProposals;
     expect(executionProposals.length).toBeGreaterThan(0);
+    const executionFieldAssignments = executionProposals.filter(p => p.proposalType === 'field_assignment');
+    expect(executionFieldAssignments.length).toBeGreaterThan(0);
     for (const proposal of executionProposals) {
-      const executionDeps = listDependenciesForProposal(proposal.id)
-        .filter(d => d.dependencyKind === 'execution_product_type');
-      expect(executionDeps).toHaveLength(1);
-      expect(executionDeps[0].dependencyTargetId).toBe('dry-dog-food');
+      const deps = listDependenciesForProposal(proposal.id);
+      const executionDeps = deps.filter(d => d.dependencyKind === 'execution_product_type');
+      if (proposal.proposalType === 'field_assignment') {
+        expect(executionDeps).toHaveLength(1);
+        expect(executionDeps[0].dependencyTargetId).toBe('dry-dog-food');
+        expect(executionDeps[0].dependencyValueHash).toBe(executionHash);
+      } else {
+        expect(deps).toHaveLength(0);
+      }
     }
-    expect(dependencyRowCount(workspaceId)).toBe(executionProposals.length);
+    // Rows exist for BOTH members' field_assignment proposals — one per
+    // field_assignment proposal, never per all-proposal, and the reviewed
+    // member contributes reviewed_product_type rows only.
+    expect(dependencyRowCount(workspaceId)).toBe(reviewedFieldAssignments.length + executionFieldAssignments.length);
   });
 
   it('flag OFF: no cohortExecutionType, no execution dependency rows, flavor unknown, effective source none', async () => {

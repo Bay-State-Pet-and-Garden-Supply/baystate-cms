@@ -331,23 +331,29 @@ export type CohortRun = z.infer<typeof CohortRunSchema>;
  * Row shape of a classification proposal dependency
  * (`classification_proposal_dependencies`, cohort schema v6), camelCase.
  * PR4 records dependency METADATA only: when a member SKU run executes under
- * a coherent cohort Execution Product Type, every proposal the member
- * pipeline creates is stamped with ONE dependency row
+ * a coherent cohort Execution Product Type, the member's `field_assignment`
+ * proposals are stamped with ONE dependency row
  * (`dependency_kind='execution_product_type'`, `dependency_target_id` = the
  * run's execution_product_type_id at proposal creation,
  * `dependency_value_hash` = hashCanonicalJson({executionProductTypeId,
- * productTypeConfidence})). The hash is the future invalidation key (PR5+);
- * no recompute/invalidation machinery exists in PR4.
+ * productTypeConfidence})). PR5 hardening (issue #30 P2) adds the
+ * reviewed-source kind (`dependency_kind='reviewed_product_type'`, target =
+ * the reviewed Primary Product Type id, value hash =
+ * hashCanonicalJson({reviewedProductTypeId})) for members whose effective
+ * Curation Product Type came from a reviewed type. ONLY `field_assignment`
+ * proposals are stamped — `primary_product_type` / `category_page` proposals
+ * are not downstream of the effective type. The hash is the future
+ * invalidation key (PR5+); no recompute/invalidation machinery exists.
  */
 export const ProposalDependencySchema = z.object({
   id: z.string(),
   workspaceId: z.string(),
   proposalId: z.string(),
-  /** 'execution_product_type' in PR4. */
+  /** 'execution_product_type' | 'reviewed_product_type' (PR4 + PR5 hardening P2). */
   dependencyKind: z.string(),
-  /** The execution_product_type_id at proposal creation. */
+  /** The effective Product Type id at proposal creation (execution or reviewed). */
   dependencyTargetId: z.string(),
-  /** hashCanonicalJson({executionProductTypeId, productTypeConfidence}) — future invalidation key. */
+  /** hashCanonicalJson({executionProductTypeId, productTypeConfidence}) or hashCanonicalJson({reviewedProductTypeId}) — future invalidation key. */
   dependencyValueHash: z.string(),
   createdAt: z.string(),
 });

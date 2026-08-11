@@ -353,12 +353,21 @@ export function writeProductTypeOutcomeOnly(
 
 /**
  * Insert ONE classification-proposal dependency row (schema v6). PR4 records
- * dependency METADATA only: when a member SKU run executes under a coherent
- * cohort Execution Product Type, every proposal the member pipeline creates
- * is stamped with one row (`dependency_kind='execution_product_type'`,
+ * dependency METADATA only: when a member SKU run executes under a
+ * coherent cohort Execution Product Type, the member's `field_assignment`
+ * proposals are stamped with one row (`dependency_kind='execution_product_type'`,
  * `dependency_target_id` = the run's execution_product_type_id at proposal
  * creation, `dependency_value_hash` = hashCanonicalJson({executionProductTypeId,
- * productTypeConfidence}) — the future invalidation key, PR5+).
+ * productTypeConfidence}) — the future invalidation key, PR5+). PR5 hardening
+ * (issue #30 P2) adds the reviewed-source kind: a member whose effective
+ * Curation Product Type came from a reviewed Primary Product Type stamps its
+ * `field_assignment` proposals with `dependency_kind='reviewed_product_type'`,
+ * `dependency_target_id` = the reviewed type id, `dependency_value_hash` =
+ * hashCanonicalJson({reviewedProductTypeId}). ONLY `field_assignment` proposals
+ * are stamped — `primary_product_type` / `category_page` proposals are not
+ * downstream of the effective type. The kind is a free-form string here; the
+ * unique (proposal_id, dependency_kind) index allows both kinds to coexist
+ * on one proposal.
  *
  * IDEMPOTENT (PR4 review fix): `(proposal_id, dependency_kind)` is unique
  * (`idx_classification_proposal_dependencies_unique`, schema v6), and the

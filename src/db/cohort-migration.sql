@@ -203,17 +203,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_cohort_runs_current
 -- classification_proposal_dependencies (issue #30, PR4 C1; cohort schema v6)
 --
 -- PR4 dependency metadata (architecture-report §6): when a member SKU run
--- executes under a coherent cohort Execution Product Type, every
--- primary_product_type / field_assignment / category_page proposal the member
--- pipeline creates is stamped with ONE dependency row:
+-- executes under a coherent cohort Execution Product Type, the member's
+-- `field_assignment` proposals are stamped with ONE dependency row:
 --   dependency_kind       = 'execution_product_type'
 --   dependency_target_id  = the run's execution_product_type_id at proposal creation
 --   dependency_value_hash = hashCanonicalJson({executionProductTypeId, productTypeConfidence})
--- The hash is the future invalidation key (PR5/PR9/PR11): if the Execution
--- Product Type changes, affected downstream proposals become stale and are
--- recomputed or invalidated. PR4 RECORDS metadata only — no staleness
--- recompute, no invalidation sweep, no promotion consumption. Written in the
--- same member-projection atomic commit as the proposals they reference.
+-- PR5 hardening (issue #30 P2) adds the reviewed-source kind for members whose
+-- effective Curation Product Type came from a reviewed Primary Product Type:
+--   dependency_kind       = 'reviewed_product_type'
+--   dependency_target_id  = the reviewed (accepted) Primary Product Type id
+--   dependency_value_hash = hashCanonicalJson({reviewedProductTypeId})
+-- ONLY `field_assignment` proposals are stamped — `primary_product_type` /
+-- `category_page` proposals are not downstream of the effective type (the
+-- type proposal is proposed from member evidence; Category Page authority is
+-- review-only until PR7). The hash is the future invalidation key
+-- (PR5/PR9/PR11): if the effective Product Type changes, affected downstream
+-- proposals become stale and are recomputed or invalidated. PR4 RECORDS
+-- metadata only — no staleness recompute, no invalidation sweep, no promotion
+-- consumption. Written in the same member-projection atomic commit as the
+-- proposals they reference.
 --
 -- proposal_id has a real FK (ON DELETE CASCADE): deleting a proposal removes
 -- its dependency metadata. dependency_target_id has NO FK (product types are
@@ -222,9 +230,9 @@ CREATE TABLE IF NOT EXISTS classification_proposal_dependencies (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspace(id),
   proposal_id TEXT NOT NULL REFERENCES classification_proposals(id) ON DELETE CASCADE,
-  dependency_kind TEXT NOT NULL,            -- 'execution_product_type' (PR4)
-  dependency_target_id TEXT NOT NULL,       -- execution_product_type_id at proposal creation
-  dependency_value_hash TEXT NOT NULL,      -- hashCanonicalJson({executionProductTypeId, productTypeConfidence})
+  dependency_kind TEXT NOT NULL,            -- 'execution_product_type' | 'reviewed_product_type' (PR4 + PR5 hardening P2)
+  dependency_target_id TEXT NOT NULL,       -- effective (execution or reviewed) Product Type id at proposal creation
+  dependency_value_hash TEXT NOT NULL,      -- hashCanonicalJson({executionProductTypeId, productTypeConfidence}) | hashCanonicalJson({reviewedProductTypeId})
   created_at TEXT NOT NULL
 );
 

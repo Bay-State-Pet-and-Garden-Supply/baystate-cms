@@ -23,8 +23,10 @@
  * (`cohortCurationV2Enabled && !cohortShadowOnly`) freeze a cohort Execution
  * Product Type; the two attribute-applicability stages then fall back to it
  * behind the reviewed Primary Product Type (reviewed-first / execution
- * fallback), and the executor stamps `execution_product_type` dependency rows
- * only for execution-driven members. Flag OFF and shadow runs never carry a
+ * fallback), and the executor stamps type dependency rows with separate kinds
+ * on `field_assignment` proposals only — `execution_product_type` for
+ * execution-driven members, `reviewed_product_type` for reviewed-driven ones
+ * (PR5 hardening, issue #30 P2). Flag OFF and shadow runs never carry a
  * cohort execution type, so stage gating, dependency rows, and
  * `curation_data_json` stay byte-identical to PR4/legacy.
  *

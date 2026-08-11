@@ -1586,12 +1586,14 @@ export interface PreparedCohortContext {
    * fallback, else none. Resolved ONCE in
    * `buildPreparedCohortContextForMember` via `getEffectiveCurationTypeForSnapshot`,
    * so the stages (via `StageContext.cohortExecutionType`) and the
-   * member-projection dependency stamping agree by construction. Only
-   * `source === 'execution'` with a non-null id triggers
-   * `execution_product_type` dependency rows (reviewed-override and `none`
-   * members stamp nothing), and the value is exposed read-only on the
-   * member's `curation_data_json` as `effectiveProductType` (cohort mode
-   * only). Absent for legacy (non-cohort) invocations.
+   * member-projection dependency stamping agree by construction. A
+   * non-null id with `source === 'execution'` triggers `execution_product_type`
+   * dependency rows on the child run's `field_assignment` proposals (PR5
+   * DECISION-H); `source === 'reviewed'` (id = the reviewed type id) triggers
+   * `reviewed_product_type` rows on those same proposals (PR5 hardening —
+   * separate kinds); `source === 'none'` stamps nothing. The value is exposed
+   * read-only on the member's `curation_data_json` as `effectiveProductType`
+   * (cohort mode only). Absent for legacy (non-cohort) invocations.
    */
   effectiveType?: { id: string | null; source: 'reviewed' | 'execution' | 'none' };
 }
@@ -2271,23 +2273,31 @@ export async function processCohort(
       // (derived from the pipeline result) are written in ONE transaction — a
       // crash never leaves a completed child without its projection, and the
       // recovery skip rule requires all three together. PR4 C4b dependency
-      // metadata rows are stamped INSIDE this same transaction: every proposal
-      // of the child run gets ONE `execution_product_type` dependency row
-      // when the member's effective Curation Product Type actually came from
-      // the cohort Execution Product Type (PR5 DECISION-H — execution-source
-      // only). A reviewed-override member (effective source `reviewed`) or a
-      // `none` member is never execution-driven and stamps NOTHING, so a
-      // future execution-type change can never falsely stale reviewed-driven
-      // proposals. Written here (and only here) means the rows exist IFF the
+      // metadata rows are stamped INSIDE this same transaction, proposal-
+      // accurate with SEPARATE KINDS (PR5 hardening): only the child run's
+      // `field_assignment` proposals — the ones the effective Curation
+      // Product Type actually drives — get ONE type dependency row each,
+      // `execution_product_type` when the effective type came from the cohort
+      // Execution Product Type (PR5 DECISION-H, execution-source only) and
+      // `reviewed_product_type` when it came from a reviewed Primary Product
+      // Type. `primary_product_type` / `category_page` proposals are NEVER
+      // type-stamped (the type proposal is proposed from member evidence and
+      // is not downstream of the effective type; Category Page authority is
+      // review-only until PR7), and a `none` member stamps nothing — so a
+      // future type change can never falsely stale proposals the type did not
+      // drive. Written here (and only here) means the rows exist IFF the
       // member projection commit exists — a crash before this transaction
       // leaves zero rows, and a committed projection is never missing its
       // dependencies.
-      // PR4 review fix (SHOULD-FIX 3): the stamping targets EVERY proposal row
-      // belonging to the child run — including rows persisted by a pre-crash
-      // attempt (a crash seam can leave earlier-attempt proposals on the same
-      // child run) — not just the current attempt's curation-data list. The
-      // insert is idempotent ((proposal_id, dependency_kind) unique + a
-      // check-then-insert), so re-stamping is a no-op.
+      // PR4 review fix (SHOULD-FIX 3) preserved: the stamping targets EVERY
+      // `field_assignment` proposal row belonging to the child run —
+      // including rows persisted by a pre-crash attempt (a crash seam can
+      // leave earlier-attempt proposals on the same child run) — not just the
+      // current attempt's curation-data list. The insert is idempotent
+      // ((proposal_id, dependency_kind) unique + a check-then-insert), so
+      // re-stamping is a no-op, and the unique index lets an
+      // `execution_product_type` and a `reviewed_product_type` row coexist on
+      // the same proposal (different kinds).
       const childTerminalStatus: 'completed' | 'completed_with_abstentions' =
         curationData.classificationProposals.some(p => p.proposalType === 'reviewable_abstention')
           ? 'completed_with_abstentions'
@@ -2297,30 +2307,55 @@ export async function processCohort(
         updateItemStageStatus(item.id, 'completed');
         completeRun(childRun.id, childTerminalStatus);
         const execType = prepared.cohortExecutionType;
-        // PR5 (DECISION-H): stamp `execution_product_type` dependency rows
-        // ONLY when the member's effective Curation Product Type came from the
-        // cohort Execution Product Type. `source === 'execution'` implies the
-        // execution id was non-null (the resolver never emits `execution` for
-        // an absent id), so `execType` is defined here; the dependency value
-        // hash tuple is unchanged from PR4.
-        if (
-          prepared.effectiveType?.source === 'execution' &&
-          prepared.effectiveType.id !== null &&
-          execType !== undefined
-        ) {
-          const dependencyValueHash = hashCanonicalJson({
-            executionProductTypeId: prepared.effectiveType.id,
-            productTypeConfidence: execType.confidence,
-          });
-          const childProposalRows = getDb().query(
-            'SELECT id FROM classification_proposals WHERE run_id = ?',
+        const effectiveType = prepared.effectiveType;
+        // PR5 hardening (P2): proposal-accurate type dependency stamping with
+        // SEPARATE KINDS. ONLY `field_assignment` proposals are downstream of
+        // the effective Curation Product Type (PR5's effective type drives
+        // ONLY the `attribute_applicability` / `product_attribute_proposals`
+        // stages):
+        //   - source `execution` -> one `execution_product_type` row per
+        //     field_assignment proposal, target = the execution type id,
+        //     value hash = hashCanonicalJson({executionProductTypeId,
+        //     productTypeConfidence}) (unchanged PR4 tuple);
+        //   - source `reviewed` -> one `reviewed_product_type` row per
+        //     field_assignment proposal, target = the reviewed type id (= the
+        //     effective id — reviewed-first resolution, so the reviewed id
+        //     wins over the execution id), value hash =
+        //     hashCanonicalJson({reviewedProductTypeId});
+        //   - source `none` -> no rows.
+        // `primary_product_type` / `category_page` / `configuration_gap` /
+        // `reviewable_abstention` proposals get NO type dependency rows: the
+        // primary-product-type proposal is proposed from member evidence and
+        // is NOT downstream of the cohort Execution Type (a type change must
+        // never stale the type proposal itself), and Category Page proposals
+        // are review-authority-only until PR7. `source === 'execution'`
+        // implies the execution id was non-null and `execType` is defined
+        // (the resolver never emits `execution` for an absent id, and
+        // `cohortExecutionType` is filled exactly when the parent run carries
+        // a non-null execution type id); `source === 'reviewed'` implies
+        // `effectiveType.id` IS the reviewed type id.
+        const executionDriven =
+          effectiveType?.source === 'execution' && effectiveType.id !== null && execType !== undefined;
+        const reviewedDriven = effectiveType?.source === 'reviewed' && effectiveType.id !== null;
+        if (executionDriven || reviewedDriven) {
+          const dependencyKind: 'execution_product_type' | 'reviewed_product_type' =
+            executionDriven ? 'execution_product_type' : 'reviewed_product_type';
+          const dependencyTargetId = effectiveType!.id!;
+          const dependencyValueHash = executionDriven
+            ? hashCanonicalJson({
+                executionProductTypeId: dependencyTargetId,
+                productTypeConfidence: execType!.confidence,
+              })
+            : hashCanonicalJson({ reviewedProductTypeId: dependencyTargetId });
+          const childFieldAssignmentRows = getDb().query(
+            "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'field_assignment'",
           ).all(childRun.id) as Array<{ id: string }>;
-          for (const proposalRow of childProposalRows) {
+          for (const proposalRow of childFieldAssignmentRows) {
             insertProposalDependency({
               workspaceId,
               proposalId: proposalRow.id,
-              dependencyKind: 'execution_product_type',
-              dependencyTargetId: prepared.effectiveType.id,
+              dependencyKind,
+              dependencyTargetId,
               dependencyValueHash,
             });
           }
