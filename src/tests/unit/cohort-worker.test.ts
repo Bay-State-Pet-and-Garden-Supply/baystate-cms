@@ -26,6 +26,8 @@ import {
   cancelFreezingRun,
   reclaimExpiredCohortRuns,
   getCohortSnapshotByHash,
+  writeExecutionProductType,
+  listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
@@ -243,6 +245,34 @@ function tableCounts(): Record<string, number> {
     counts[table] = Number(row.cnt);
   }
   return counts;
+}
+
+/** Total `classification_proposal_dependencies` rows for one workspace. */
+function dependencyRowCount(wsId: string): number {
+  const row = getDb().query(
+    'SELECT COUNT(*) AS cnt FROM classification_proposal_dependencies WHERE workspace_id = ?',
+  ).get(wsId) as { cnt: number };
+  return Number(row.cnt);
+}
+
+/**
+ * V1_CONFIG with the product_type curation target ENABLED (PR4 C4b fixtures):
+ * the member pipeline then creates `primary_product_type` proposals AND the
+ * freeze can resolve a coherent Execution Product Type from 'Dry Dog Food'
+ * member evidence. Page/field targets stay disabled so the member pipeline
+ * deterministically completes `completed` (no reviewable abstentions).
+ */
+const V1_CONFIG_TYPE_ENABLED: ClassificationConfig = {
+  ...V1_CONFIG,
+  curationTargets: V1_CONFIG.curationTargets.map(target =>
+    target.id === 'test-product-type' ? { ...target, enabled: true } : target,
+  ),
+};
+
+/** Save + cache the type-target-enabled config for one workspace. */
+function saveTypeEnabledConfig(wsId: string, wsPath: string): void {
+  saveClassificationConfig(wsPath, V1_CONFIG_TYPE_ENABLED);
+  syncConfigToCache(wsId, loadClassificationConfig(wsPath));
 }
 
 describe('OnboardingWorker Curation cohort integration (issue #30, PR3 M3)', () => {
@@ -898,6 +928,249 @@ describe('PR3 hardening — Commit B (R3 member-projection atomic commit)', () =
     // The child run for member 2 was never completed before its commit.
     const secondChild = getRun(secondAfter.curationData!.classificationRunId!)!;
     expect(['completed', 'completed_with_abstentions']).toContain(secondChild.status);
+  });
+});
+
+describe('PR4 C4b — proposal dependency metadata on cohort execution type (issue #30)', () => {
+  it('coherent cohort: every member proposal gets ONE execution_product_type dependency row with the run type + stable value hash', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    // Freeze-time shared semantic commit (C4a): the run row carries the type.
+    expect(finalized.productTypeOutcome).toBe('coherent');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    expect(finalized.productTypeConfidence).toBeCloseTo(0.8, 4);
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(2);
+
+    // dependency_value_hash = hashCanonicalJson({executionProductTypeId,
+    // productTypeConfidence}) — computed from the run row's own values, so
+    // the assertion never depends on float formatting.
+    const expectedHash = hashCanonicalJson({
+      executionProductTypeId: finalized.executionProductTypeId!,
+      productTypeConfidence: finalized.productTypeConfidence!,
+    });
+    let totalProposals = 0;
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const proposals = stored.curationData!.classificationProposals;
+      expect(proposals.length).toBeGreaterThan(0);
+      totalProposals += proposals.length;
+      for (const proposal of proposals) {
+        const deps = listDependenciesForProposal(proposal.id);
+        // Exactly ONE dependency row per created proposal.
+        expect(deps).toHaveLength(1);
+        expect(deps[0].dependencyKind).toBe('execution_product_type');
+        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+        expect(deps[0].dependencyValueHash).toBe(expectedHash);
+        expect(deps[0].workspaceId).toBe(workspaceId);
+        expect(deps[0].proposalId).toBe(proposal.id);
+      }
+    }
+    // No proposal created under the cohort type is left without a dependency.
+    expect(dependencyRowCount(workspaceId)).toBe(totalProposals);
+  });
+
+  it('atomicity: a crash before the member-projection commit leaves ZERO dependency rows; the resume commits rows with the projection', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    // Crash EXACTLY between pipeline completion and the atomic member commit:
+    // the pipeline created proposals, but the dependency rows live INSIDE that
+    // transaction — none may exist before it commits.
+    await expect(processCohort(finalized, wsPath, workspaceId, {
+      afterMemberPipeline: () => {
+        throw new MemberCommitCrashSimulationError('simulated crash between pipeline completion and member commit');
+      },
+    })).rejects.toThrow('simulated crash between pipeline completion and member commit');
+
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+    const item = findItemById(items[0].id)!;
+    expect(item.stageStatus).toBe('pending');
+    expect(item.curationData).toBeNull();
+
+    // Reclaim + resume the same run: the re-executed member commits its
+    // projection and the dependency rows land in the SAME transaction.
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', finalized.id]);
+    const reclaim = reclaimExpiredCohortRuns(
+      workspaceId,
+      new Date().toISOString(),
+      () => verifyCohortRunFrozen(getCohortRunById(finalized.id)!, wsPath, workspaceId) ? 'match' : 'drift',
+      'worker-b',
+      COHORT_LEASE_TTL_MS,
+    );
+    expect(reclaim.resumed.length).toBe(1);
+    const resumed = getCohortRunById(finalized.id)!;
+    const summary = await processCohort(resumed, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+
+    const stored = findItemById(items[0].id)!;
+    expect(stored.stageStatus).toBe('completed');
+    const proposals = stored.curationData!.classificationProposals;
+    expect(proposals.length).toBeGreaterThan(0);
+    for (const proposal of proposals) {
+      const deps = listDependenciesForProposal(proposal.id);
+      expect(deps).toHaveLength(1);
+      expect(deps[0].dependencyKind).toBe('execution_product_type');
+      expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+    }
+    expect(dependencyRowCount(workspaceId)).toBe(proposals.length);
+  });
+
+  it('flag OFF: member runs record ZERO dependency rows even though proposals are created (byte-identical)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    // Flags default OFF — the freeze writes no PR4 columns (byte-identical).
+    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeConfidence).toBeNull();
+    expect(finalized.productTypeOutcome).toBeNull();
+    expect(finalized.finalMembershipHash).toBeNull();
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    // The enabled type target still produced member proposals — with no
+    // execution type on the run row, none of them record dependency rows.
+    const proposalCount = items.reduce(
+      (sum, item) => sum + (findItemById(item.id)!.curationData!.classificationProposals.length),
+      0,
+    );
+    expect(proposalCount).toBeGreaterThan(0);
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+  });
+
+  it('abstained cohort: execution type id NULL -> ZERO dependency rows', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    // No confident member match ('dry' absent from the evidence) -> abstained;
+    // the id/confidence stay NULL by design. The member's own type stage
+    // abstains too (reviewable_abstention) so the parent completes with
+    // abstentions — the point of the assertion is the ZERO dependency rows.
+    expect(finalized.status).toBe('running');
+    expect(finalized.productTypeOutcome).toBe('abstained');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeConfidence).toBeNull();
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
+    for (const item of items) {
+      expect(findItemById(item.id)!.stageStatus).toBe('completed');
+    }
+    // Members executed with NO execution-type context -> zero dependency rows.
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+  });
+
+  it('conflicted cohort: the run fails at freeze, never executes -> ZERO dependency rows (id NULL)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // Two confident DISTINCT type ids from the member evidence -> conflicted
+    // (never majority-forced). Mirrors the C4a conflicted fixture.
+    const conflictConfig: ClassificationConfig = {
+      ...V1_CONFIG,
+      productTypes: [
+        { id: 'dry-dog-food', name: 'Dry Dog Food', description: null, attributeProfileId: 'dry-dog-food-profile', oldIdAliases: [] },
+        { id: 'dry-cat-food', name: 'Dry Cat Food', description: null, attributeProfileId: 'dry-dog-food-profile', oldIdAliases: [] },
+      ],
+      curationTargets: V1_CONFIG.curationTargets.map(target =>
+        target.id === 'test-product-type' ? { ...target, enabled: true } : target,
+      ),
+    };
+    saveClassificationConfig(wsPath, conflictConfig);
+    syncConfigToCache(workspaceId, loadClassificationConfig(wsPath));
+    createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Food Chicken 5 lb', title: 'Purina Pro Plan Dry Dog Food 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Food Beef 10 lb', title: 'Purina Pro Plan Dry Cat Food 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('failed');
+    expect(finalized.productTypeOutcome).toBe('conflicted');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeConfidence).toBeNull();
+    expect(finalized.finalMembershipHash).toBeNull();
+    // The run never transitioned to running -> no member executed -> the
+    // member pipeline never created proposals -> zero dependency rows.
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+  });
+
+  it('dependencyValueHash is stable for the same {executionProductTypeId, productTypeConfidence}', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    // Write the type columns DIRECTLY via the C2 primitive with an EXACT
+    // confidence — the freeze's own write-once CAS no-ops, so the stamped hash
+    // is derived from these exact values (no float-formatting ambiguity).
+    expect(writeExecutionProductType(run.id, 'worker-a', {
+      executionProductTypeId: 'dry-dog-food',
+      productTypeConfidence: 0.75,
+      productTypeOutcome: 'coherent',
+    })).toBe(true);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    expect(finalized.productTypeConfidence).toBe(0.75);
+
+    const expectedHash = hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.75 });
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      const proposals = stored.curationData!.classificationProposals;
+      expect(proposals.length).toBeGreaterThan(0);
+      for (const proposal of proposals) {
+        const deps = listDependenciesForProposal(proposal.id);
+        expect(deps).toHaveLength(1);
+        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+        expect(deps[0].dependencyValueHash).toBe(expectedHash);
+      }
+    }
+    // Deterministic: recomputing the same {id, confidence} yields the same
+    // 64-hex digest — the future invalidation key is stable.
+    expect(hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.75 })).toBe(expectedHash);
+    expect(expectedHash).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 

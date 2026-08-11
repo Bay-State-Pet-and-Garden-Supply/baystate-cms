@@ -123,6 +123,22 @@ export interface StageContext {
    * against the frozen snapshot only (frozen-means-frozen).
    */
   cohortFrozenEvidence?: import('../shared/schemas/cohorts').ExecutionEvidenceProjectionMemberV1;
+  /**
+   * Cohort-level Execution Product Type resolved at freeze (issue #30 PR4
+   * C4b). Present ONLY in prepared-cohort mode when the parent run row carries
+   * a non-null `execution_product_type_id` (coherent /
+   * coherent_with_abstentions). METADATA ONLY in PR4 — the cohort type is
+   * recorded as proposal dependency metadata by the cohort executor; NO gate
+   * logic reads this field (review authority stays on the member's own
+   * reviewed proposals; `getReviewedPrimaryProductTypeId` and every
+   * applicability/attribute/page/promotion gate are unchanged). Flag OFF,
+   * abstained/conflicted cohorts, and legacy non-cohort runs leave it absent.
+   */
+  cohortExecutionType?: {
+    id: string | null;
+    confidence: number | null;
+    outcome: 'coherent' | 'coherent_with_abstentions' | 'conflicted' | 'abstained' | null;
+  };
   /** Catalog product classification context. Present only for catalog_product runs. */
   catalogContext?: {
     sourceProductHash: string;

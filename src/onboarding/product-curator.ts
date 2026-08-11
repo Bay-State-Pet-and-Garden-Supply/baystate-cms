@@ -484,6 +484,14 @@ export async function curateItemWithPipeline(
       // Prepared-cohort mode: the evidence stage consumes the frozen member
       // projection instead of reading onboarding_items (amendment 4).
       cohortFrozenEvidence: cohortMode ? preparedCohort!.memberProjection : undefined,
+      // PR4 C4b: cohort-level Execution Product Type resolved at freeze.
+      // METADATA ONLY — no gate logic reads it in PR4 (review authority stays
+      // on the member's own reviewed proposals). Present only in
+      // prepared-cohort mode when the parent run carries an execution type;
+      // flag OFF / abstained / conflicted / legacy runs leave it absent. The
+      // cohort executor consumes it AFTER runPipeline to stamp dependency
+      // metadata rows inside the member-projection atomic commit.
+      cohortExecutionType: preparedCohort?.cohortExecutionType,
       productLineContext: productLineGroup
         ? {
             groupId: productLineGroup.groupId,

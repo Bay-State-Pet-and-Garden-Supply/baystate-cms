@@ -52,6 +52,7 @@ import {
   writeExecutionProductType,
   writeFinalMembershipHash,
   writeProductTypeOutcomeOnly,
+  insertProposalDependency,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
 import {
@@ -1231,6 +1232,22 @@ export interface PreparedCohortContext {
   productLineItems?: ProductLineItemSnapshot[];
   /** Frozen member `OnboardingItem` views (projection-derived) for title coordination. */
   frozenBatchItems?: OnboardingItem[];
+  /**
+   * Cohort-level Execution Product Type resolved at freeze (issue #30 PR4
+   * C4b). Filled by `buildPreparedCohortContextForMember` from the parent run
+   * row's `execution_product_type_id` / `product_type_confidence` /
+   * `product_type_outcome` — ONLY when the id is non-null (coherent /
+   * coherent_with_abstentions). Absent when the flag was OFF, the cohort
+   * abstained/conflicted (id stays NULL by design), or the run predates PR4.
+   * Metadata only: PR4 consumes it to stamp ONE `execution_product_type`
+   * dependency row per proposal inside the member-projection atomic commit;
+   * no gate logic reads it (review authority is unchanged).
+   */
+  cohortExecutionType?: {
+    id: string | null;
+    confidence: number | null;
+    outcome: 'coherent' | 'coherent_with_abstentions' | 'conflicted' | 'abstained' | null;
+  };
 }
 
 /**
@@ -1597,7 +1614,7 @@ class CohortLeaseKeeper {
  * re-captured live.
  */
 function buildPreparedCohortContextForMember(
-  parentRunId: string,
+  parentRun: CohortRun,
   memberProjection: ExecutionEvidenceProjectionMemberV1,
   childRun: ClassificationRunRow,
   workspaceId: string,
@@ -1613,9 +1630,20 @@ function buildPreparedCohortContextForMember(
       `processCohort: frozen member runtime snapshot ${childRun.configSnapshotHash} not found for item ${memberProjection.onboardingItemId}.`,
     );
   }
+  // PR4 C4b: the cohort Execution Product Type is read from the parent run row
+  // (written once at freeze inside the final CAS). Filled ONLY when the id is
+  // non-null — flag OFF / abstained / conflicted runs leave it absent, so the
+  // member pipeline never sees (or records) an execution-type context.
+  const cohortExecutionType = parentRun.executionProductTypeId !== null
+    ? {
+        id: parentRun.executionProductTypeId,
+        confidence: parentRun.productTypeConfidence,
+        outcome: parentRun.productTypeOutcome,
+      }
+    : undefined;
   return {
     memberProjection,
-    parentRunId,
+    parentRunId: parentRun.id,
     memberSnapshotId: childRun.configSnapshotId,
     memberSnapshotHash: childRun.configSnapshotHash,
     sharedAuthorities: {
@@ -1630,6 +1658,7 @@ function buildPreparedCohortContextForMember(
         ? modelPolicyViewFromConfig(memberSnapshot.modelPolicy as never, memberSnapshot.snapshotHash)
         : null,
     },
+    cohortExecutionType,
   };
 }
 
@@ -1850,7 +1879,7 @@ export async function processCohort(
           childRun.configSnapshotHash = prior.config_snapshot_hash;
         }
       }
-      const prepared = buildPreparedCohortContextForMember(run.id, memberProjection, childRun, workspaceId);
+      const prepared = buildPreparedCohortContextForMember(run, memberProjection, childRun, workspaceId);
 
       // Frozen sibling context (Commit B / R2) — attached from the
       // projection-derived line context, never from a live batch query.
@@ -1887,7 +1916,14 @@ export async function processCohort(
       // curation_data_json + item stage completion + the child terminal status
       // (derived from the pipeline result) are written in ONE transaction — a
       // crash never leaves a completed child without its projection, and the
-      // recovery skip rule requires all three together.
+      // recovery skip rule requires all three together. PR4 C4b dependency
+      // metadata rows are stamped INSIDE this same transaction: when the
+      // member executed under a coherent cohort Execution Product Type, every
+      // proposal the member pipeline created gets ONE
+      // `execution_product_type` dependency row. Written here (and only here)
+      // means the rows exist IFF the member projection commit exists — a crash
+      // before this transaction leaves zero rows, and a committed projection
+      // is never missing its dependencies.
       const childTerminalStatus: 'completed' | 'completed_with_abstentions' =
         curationData.classificationProposals.some(p => p.proposalType === 'reviewable_abstention')
           ? 'completed_with_abstentions'
@@ -1896,6 +1932,22 @@ export async function processCohort(
         updateItemCurationData(item.id, JSON.stringify(curationData));
         updateItemStageStatus(item.id, 'completed');
         completeRun(childRun.id, childTerminalStatus);
+        const execType = prepared.cohortExecutionType;
+        if (execType && execType.id !== null) {
+          const dependencyValueHash = hashCanonicalJson({
+            executionProductTypeId: execType.id,
+            productTypeConfidence: execType.confidence,
+          });
+          for (const proposal of curationData.classificationProposals) {
+            insertProposalDependency({
+              workspaceId,
+              proposalId: proposal.id,
+              dependencyKind: 'execution_product_type',
+              dependencyTargetId: execType.id,
+              dependencyValueHash,
+            });
+          }
+        }
       })();
       completedMembers++;
       if (childTerminalStatus === 'completed_with_abstentions') hasAbstentions = true;
