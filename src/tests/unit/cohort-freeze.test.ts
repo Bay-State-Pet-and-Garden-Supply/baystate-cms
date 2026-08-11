@@ -1607,6 +1607,10 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('failed');
     expect(finalized.completedAt).not.toBeNull();
+    // P1-2 (PR4 re-review): the conflicted family NEVER passes through
+    // `running` — the parent is failed DIRECTLY from `freezing`, so
+    // started_at stays NULL (no transition to running ever happened).
+    expect(finalized.startedAt).toBeNull();
     // Never majority-forced: no execution type, no confidence, nothing finalized.
     expect(finalized.productTypeOutcome).toBe('conflicted');
     expect(finalized.executionProductTypeId).toBeNull();
@@ -1625,6 +1629,240 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     // the cohort stays ready for the operator to resolve the family later.
     expect(getCohortRunById(run.id)!.supersededAt).toBeNull();
     expect(getCohortById(finalized.cohortId)!.status).toBe('ready');
+    // P1-2 (PR4 re-review): every freeze-created child run of this parent is
+    // terminal with the deterministic conflict reason — a conflicted family
+    // never executes, and no child is left stranded `running`.
+    for (const item of items) {
+      const child = getDb().query(
+        'SELECT status, error_message, completed_at FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      ).get(finalized.id, item.id) as { status: string; error_message: string | null; completed_at: string | null } | undefined;
+      expect(child).toBeTruthy();
+      expect(child!.status).not.toBe('running');
+      expect(child!.error_message).toBe('Cohort Product Type conflict prevented member execution');
+      expect(child!.completed_at).not.toBeNull();
+    }
+  });
+
+  it('P1-1 re-review: a sibling reclaim while product_type_ranking is GENUINELY in-flight aborts with HeartbeatLostError, the stale owner adds/terminalizes NOTHING (model-call row count for the in-flight child unchanged), and the new owner keeps the run', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { bundle } = writeActiveV2Bundle(wsPath, llmTypeFallbackSeed());
+    upsertConfigSnapshot(workspaceId, bundle);
+
+    // Member whose deterministic type match is below the cohort confidence
+    // floor ('purina pro plan dog food' lacks the 'dry' discriminator → 2/3
+    // token match) → the run-bound `product_type_ranking` LLM fallback fires.
+    // The transport is stubbed to HANG until the test seam releases it, so
+    // the reclaim happens while the ranking call is genuinely in flight.
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    // Test hygiene (BLOCKER-test precedent): drop the shared 'ollama_vlm' row
+    // so the freeze's OCR pull-forward settles `disabled` (no VLM transport)
+    // and the ONLY in-flight transport is the ranker call. Prior keys are
+    // restored in finally.
+    const priorVlmKey = getDb().query('SELECT id, service, api_key, base_url, model, created_at, updated_at FROM api_keys WHERE service = ?').get('ollama_vlm') as Record<string, any> | undefined;
+    const priorOllamaKey = getDb().query('SELECT id, service, api_key, base_url, model, created_at, updated_at FROM api_keys WHERE service = ?').get('ollama') as Record<string, any> | undefined;
+    deleteApiKey('ollama_vlm');
+    upsertApiKey('ollama', 'test-key', 'http://127.0.0.1:11434', 'qwen2.5vl:latest');
+    const originalFetch = globalThis.fetch;
+    let releaseRankerTransport!: () => void;
+    const rankerGate = new Promise<void>((resolve) => { releaseRankerTransport = resolve; });
+    let rankerTransports = 0;
+    globalThis.fetch = (async () => {
+      rankerTransports++;
+      // The transport genuinely hangs (the model call is in flight) until the
+      // test seam releases it AFTER the reclaim + snapshot.
+      await rankerGate;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ values: ['Dry Dog Food'], confidence: 0.8 }) } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+      let reclaimed = false;
+      // Run-scoped shared-state snapshot AT the reclaim instant: after the
+      // abort the stale owner's guard surface must not have added/updated a
+      // single row in these tables, and the in-flight ranking call's row
+      // count on the child run must be unchanged.
+      let tablesAtReclaim: Record<string, number> = {};
+      let modelCallsAtReclaim: Array<{ id: string; status: string }> = [];
+      const childRunIdForCalls = (): string | null => {
+        const row = getDb().query(
+          'SELECT id FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+        ).get(run.id, items[0].id) as { id: string } | undefined;
+        return row ? String(row.id) : null;
+      };
+      await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+        onTypeRankerInFlight: () => {
+          if (reclaimed) return;
+          reclaimed = true;
+          getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+          const reclaim = reclaimExpiredCohortRuns(
+            workspaceId,
+            new Date().toISOString(),
+            () => 'match',
+            'worker-b',
+            COHORT_LEASE_TTL_MS,
+          );
+          expect(reclaim.resumed.length).toBe(1);
+          expect(reclaim.resumed[0].id).toBe(run.id);
+          // Snapshot run-scoped tables + the in-flight model-call row state at
+          // the moment ownership moved — the stale owner must add/terminalize
+          // NOTHING afterwards.
+          tablesAtReclaim = tableCounts();
+          const childId = childRunIdForCalls();
+          modelCallsAtReclaim = childId
+            ? (getDb().query('SELECT id, status FROM classification_model_calls WHERE run_id = ?').all(childId) as Array<{ id: string; status: string }>)
+              .map(r => ({ id: String(r.id), status: String(r.status) }))
+            : [];
+          // Release the hanging transport AFTER the reclaim + snapshot: the
+          // ranker's post-await ownership assertion must reject the stale
+          // continuation and abort the freeze with no further side effects.
+          releaseRankerTransport();
+        },
+      })).rejects.toBeInstanceOf(HeartbeatLostError);
+      expect(reclaimed).toBe(true);
+      // Exactly one transport attempt (the ranker's primary call; the retry
+      // never fires — no OCR transport at all in this scenario).
+      expect(rankerTransports).toBe(1);
+
+      // Fix P1-1: the stale owner's guard surface added/terminalized NOTHING
+      // after ownership moved — model calls / stage results / evidence /
+      // proposals are row-count-identical to the reclaim instant. (The
+      // FORBIDDEN transport itself terminalizes its in-flight row after the
+      // fetch resolves — that write lives in llm-client.ts, deliberately
+      // outside the guard surface; the RANKER's own post-loss writes are
+      // zero.)
+      expect(tableCounts()).toEqual(tablesAtReclaim);
+      const childIdAfter = childRunIdForCalls();
+      const modelCallsAfter = childIdAfter
+        ? (getDb().query('SELECT id, status FROM classification_model_calls WHERE run_id = ?').all(childIdAfter) as Array<{ id: string; status: string }>)
+          .map(r => ({ id: String(r.id), status: String(r.status) }))
+        : [];
+      // Model-call row count for the in-flight child run is UNCHANGED: the
+      // stale owner never added a row, and the ranker seam never wrote a
+      // terminal preflight/abort row after the loss.
+      expect(modelCallsAfter).toHaveLength(modelCallsAtReclaim.length);
+      expect(modelCallsAfter.length).toBe(1);
+
+      // The new owner's run is INTACT: still `freezing`, claimed by worker-b,
+      // nothing finalized, no supersede, all PR4 columns NULL.
+      const after = getCohortRunById(run.id)!;
+      expect(after.status).toBe('freezing');
+      expect(after.claimedBy).toBe('worker-b');
+      expect(after.evidenceSnapshotHash).toBeNull();
+      expect(after.supersededAt).toBeNull();
+      expect(after.executionProductTypeId).toBeNull();
+      expect(after.productTypeOutcome).toBeNull();
+      expect(after.errorMessage).toBeNull();
+
+      // The freeze-created child run is untouched — the abort path failed or
+      // retired nothing.
+      const child = getDb().query(
+        'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status = ?',
+      ).get(run.id, items[0].id, 'running') as Record<string, any> | undefined;
+      expect(child).toBeTruthy();
+    } finally {
+      globalThis.fetch = originalFetch;
+      // Restore the PRIOR api_keys rows for both services this test touched
+      // (byte-identical: original ids/timestamps), so later tests observe the
+      // same key state as before this test ran.
+      getDb().run('DELETE FROM api_keys WHERE service IN (?, ?)', ['ollama_vlm', 'ollama']);
+      for (const prior of [priorVlmKey, priorOllamaKey]) {
+        if (!prior) continue;
+        getDb().run(
+          'INSERT INTO api_keys (id, service, api_key, base_url, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [prior.id, prior.service, prior.api_key, prior.base_url, prior.model, prior.created_at, prior.updated_at],
+        );
+      }
+    }
+  });
+
+  it('P1-2 re-review: ownership lost between conflict detection and the conflict terminal helper -> the helper no-ops (the whole CAS rolls back), and the fresh owner\'s run is untouched', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1ConfigWithProductTypes(workspaceId, wsPath, [
+      { id: 'dry-dog-food', name: 'Dry Dog Food' },
+      { id: 'dry-cat-food', name: 'Dry Cat Food' },
+    ]);
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Food Chicken 5 lb', title: 'Purina Pro Plan Dry Dog Food 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Food Beef 10 lb', title: 'Purina Pro Plan Dry Cat Food 10 lb' }),
+    });
+    expect(cohorts).toHaveLength(1);
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    let reclaimed = false;
+    await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+      beforeConflictTerminal: () => {
+        if (reclaimed) return;
+        reclaimed = true;
+        // Simulate a sibling reclaim INSIDE the stale owner's final CAS
+        // (between conflict detection and the owner-guarded helper): the
+        // helper's CAS on {claimed_by, status} must fail (no-op), and the
+        // whole final CAS transaction must roll back.
+        getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+        const reclaim = reclaimExpiredCohortRuns(
+          workspaceId,
+          new Date().toISOString(),
+          () => 'match',
+          'worker-b',
+          COHORT_LEASE_TTL_MS,
+        );
+        expect(reclaim.resumed.length).toBe(1);
+      },
+    })).rejects.toThrow(/lost ownership|not freezing|claimed/i);
+    expect(reclaimed).toBe(true);
+
+    // The stale owner's final CAS rolled back ENTIRELY: the run is STILL
+    // worker-a's `freezing` claim with NOTHING written (no conflicted outcome,
+    // no terminal state, started_at NULL).
+    const after = getCohortRunById(run.id)!;
+    expect(after.status).toBe('freezing');
+    expect(after.claimedBy).toBe('worker-a');
+    expect(after.productTypeOutcome).toBeNull();
+    expect(after.executionProductTypeId).toBeNull();
+    expect(after.productTypeConfidence).toBeNull();
+    expect(after.finalMembershipHash).toBeNull();
+    expect(after.startedAt).toBeNull();
+    expect(after.completedAt).toBeNull();
+    expect(after.errorMessage).toBeNull();
+    expect(after.supersededAt).toBeNull();
+
+    // The helper no-op'd BEFORE any child write: every child is still `running`
+    // (never terminalized by the stale owner).
+    for (const item of items) {
+      const child = getDb().query(
+        'SELECT status FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      ).get(run.id, item.id) as { status: string } | undefined;
+      expect(child).toBeTruthy();
+      expect(child!.status).toBe('running');
+    }
+
+    // The fresh owner reclaims the SAME parent and its run is untouched: no
+    // terminal state, no PR4 writes, no supersede — a clean re-freeze target.
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+    const reclaim = reclaimExpiredCohortRuns(
+      workspaceId,
+      new Date().toISOString(),
+      () => 'match',
+      'worker-b',
+      COHORT_LEASE_TTL_MS,
+    );
+    expect(reclaim.resumed.length).toBe(1);
+    const resumed = getCohortRunById(run.id)!;
+    expect(resumed.claimedBy).toBe('worker-b');
+    expect(resumed.status).toBe('freezing');
+    expect(resumed.productTypeOutcome).toBeNull();
+    expect(resumed.startedAt).toBeNull();
+    expect(resumed.completedAt).toBeNull();
+    expect(resumed.errorMessage).toBeNull();
   });
 
   it('abstained: no confident match -> outcome abstained, ids NULL, run transitions and finalizes membership', async () => {

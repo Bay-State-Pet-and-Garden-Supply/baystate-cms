@@ -53,6 +53,7 @@ import {
   writeExecutionProductType,
   writeFinalMembershipHash,
   writeProductTypeOutcomeOnly,
+  failFrozenCohortRunForConflict,
   insertProposalDependency,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
@@ -111,6 +112,8 @@ import type {
 import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
 import { llmRankOptions } from '../classification/curation-target-ranker';
+import { HeartbeatLostError } from '../classification/heartbeat-errors';
+export { HeartbeatLostError };
 import { onboardingEvents } from './sse-emitter';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import type { ProductLineItemSnapshot } from '../classification/types';
@@ -767,10 +770,17 @@ function assertStoredExecutionTypeMatches(
  * transaction so tests can deterministically simulate a freeze-window
  * mutation; `hooks.onOcrInFlight` (test seam, PR3 hardening A2) fires while a
  * member's OCR pull-forward transport is actually in flight so tests can
- * deterministically simulate a sibling reclaim mid-call; `hooks.beforeCasSupersede`
+ * deterministically simulate a sibling reclaim mid-call; `hooks.onTypeRankerInFlight`
+ * (test seam, PR4 re-review fix) fires while a member's `product_type_ranking`
+ * LLM transport is genuinely in flight so tests can deterministically simulate
+ * a sibling reclaim mid-ranking-call; `hooks.beforeCasSupersede`
  * (test seam, PR4 review fix) fires in the CAS-drift handler immediately
  * before the owner-guarded supersede attempt so tests can deterministically
- * simulate a sibling reclaim between the failed CAS and the supersede.
+ * simulate a sibling reclaim between the failed CAS and the supersede;
+ * `hooks.beforeConflictTerminal` (test seam, PR4 re-review fix P1-2) fires
+ * inside the final CAS immediately before the owner-guarded conflict terminal
+ * write so tests can deterministically simulate a sibling reclaim between
+ * conflict detection and the helper (the helper must no-op).
  * Production callers never pass any.
  */
 export async function freezeCohortForExecution(
@@ -780,7 +790,9 @@ export async function freezeCohortForExecution(
   hooks?: {
     beforeFinalCas?: () => void;
     onOcrInFlight?: () => void | Promise<void>;
+    onTypeRankerInFlight?: () => void | Promise<void>;
     beforeCasSupersede?: () => void;
+    beforeConflictTerminal?: () => void;
   },
 ): Promise<CohortRun> {
   const workerId = run.claimedBy ?? '';
@@ -999,8 +1011,16 @@ export async function freezeCohortForExecution(
           selectionMode: 'single',
         });
         if (typePacket.promptText.trim().length >= 8) {
+          // PR4 re-review fix (P1-1): the freeze-time `product_type_ranking`
+          // fallback runs under a scoped CohortLeaseKeeper EXACTLY like the
+          // OCR pull-forward above — the parent lease is renewed while the
+          // ranking transport is in flight, and the continuation asserts
+          // ownership before any further work. A sibling reclaim mid-call
+          // aborts the freeze with NO post-loss side effect. The keeper is
+          // always cleared in `finally`.
+          const rankerKeeper = new CohortLeaseKeeper(run.id, workerId, COHORT_LEASE_TTL_MS).start();
           try {
-            const ranked = await llmRankOptions({
+            const rankedPromise = llmRankOptions({
               targetLabel: resolvedTypeTarget.config.label,
               options: typeOptions,
               selectionMode: 'single',
@@ -1012,7 +1032,15 @@ export async function freezeCohortForExecution(
               protectedOperation: 'product_type_ranking',
               modelCall: buildModelCallContext(snapshot, memberRun.id, 'product_type_ranking', 1),
               snapshot,
+              // The ranker asserts ownership immediately before every
+              // terminal-preflight row and around every awaited transport
+              // call — a rejected assertion throws `HeartbeatLostError`.
+              assertHeld: () => rankerKeeper.assertHeld(),
             });
+            await hooks?.onTypeRankerInFlight?.();
+            const ranked = await rankedPromise;
+            // No write after ownership loss: the post-await assertion IS the guard.
+            rankerKeeper.assertHeld();
             if (ranked && ranked.values.length > 0) {
               // PR4 review fix (BLOCKER): `llmRankOptions` prompts and
               // normalizes exclusively against option LABELS; the persisted
@@ -1035,9 +1063,15 @@ export async function freezeCohortForExecution(
             }
             // No valid LLM values / no LLM config / no frozen policy → the
             // member abstains (fail-closed).
-          } catch {
+          } catch (err) {
+            // Ownership-loss exceptions are NEVER converted into an 'LLM
+            // unavailable → abstain' outcome: the stale owner must abort the
+            // freeze deterministically with no further side effects.
+            if (err instanceof HeartbeatLostError) throw err;
             // Policy denial / transport failure → abstain, never a silent type.
             memberTypeLlmResult = null;
+          } finally {
+            rankerKeeper.stop();
           }
         }
       }
@@ -1206,17 +1240,33 @@ export async function freezeCohortForExecution(
         }
       }
 
-      if (!transitionCohortRunToRunning(run.id, workerId)) {
-        throw new CohortFreezeOwnershipError(`Freeze CAS could not transition run ${run.id} to running (ownership lost).`);
-      }
-
-      // PR4 DECISION-D: a conflicted family NEVER executes — the run completes
-      // `failed` with the deterministic structured conflict reason (per-member
-      // ids + SKUs) via the owner-guarded, write-once terminal helper. The run
-      // stays the current historical decision, the cohort stays ready, and the
-      // operator resolves the family later (no UI in PR4).
+      // PR4 re-review fix (P1-2): a conflicted family NEVER passes through
+      // `running` — the parent transitions freezing → failed DIRECTLY via the
+      // owner-guarded helper (started_at stays NULL; no transition to running
+      // ever happens), which atomically terminalizes every freeze-created
+      // child run of this parent in the same transaction. The run stays the
+      // current historical decision, the cohort stays ready, and the operator
+      // resolves the family later (no UI in PR4). If the helper's CAS fails
+      // (ownership lost / no longer freezing), the run belongs to a fresh
+      // owner — throw; nothing may be written.
       if (typeResolution?.outcome === 'conflicted') {
-        completeCohortRun(run.id, 'failed', buildCohortProductTypeConflictReason(typeResolution), { ownerGuard: { workerId } });
+        // Test seam (PR4 re-review P1-2): fires inside the final CAS
+        // immediately before the owner-guarded conflict terminal write so
+        // tests can deterministically simulate a sibling reclaim between
+        // conflict detection and the helper.
+        hooks?.beforeConflictTerminal?.();
+        const conflicted = failFrozenCohortRunForConflict(
+          run.id,
+          workerId,
+          buildCohortProductTypeConflictReason(typeResolution),
+        );
+        if (!conflicted) {
+          throw new CohortFreezeOwnershipError(
+            `Freeze CAS lost ownership of run ${run.id} before the conflict terminal write (not freezing / claimed by ${workerId}).`,
+          );
+        }
+      } else if (!transitionCohortRunToRunning(run.id, workerId)) {
+        throw new CohortFreezeOwnershipError(`Freeze CAS could not transition run ${run.id} to running (ownership lost).`);
       }
 
       const finalized = getCohortRunById(run.id);
@@ -1744,20 +1794,7 @@ export interface CohortExecutionSummary {
   memberFailures: CohortMemberExecutionResult[];
 }
 
-/**
- * A cohort-level execution abort (claim ownership lost — PR3 hardening,
- * Commit A). Thrown when a heartbeat attempt returns false. The caller
- * aborts the member/cohort deterministically (fails the in-flight child run
- * and the parent) and initiates NO further side effects after the loss.
- * `processCohort` only throws this after all cohort-level validation has
- * passed. (Supersedes the M3 `CohortRunOwnershipAbortError` semantics.)
- */
-export class HeartbeatLostError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'HeartbeatLostError';
-  }
-}
+
 
 /**
  * Test-only crash simulation signal (PR3 hardening, Commit B / R3). Thrown by

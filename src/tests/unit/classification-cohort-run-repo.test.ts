@@ -31,6 +31,7 @@ import {
   writeExecutionProductType,
   writeFinalMembershipHash,
   writeProductTypeOutcomeOnly,
+  failFrozenCohortRunForConflict,
   insertProposalDependency,
   listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
@@ -801,6 +802,63 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     expect(transitionCohortRunToRunning(run3.id, 'worker-a')).toBe(true);
     expect(writeProductTypeOutcomeOnly(run3.id, 'worker-a', 'abstained')).toBe(false);
     expect(getCohortRunById(run3.id)!.productTypeOutcome).toBeNull();
+  });
+
+  it('failFrozenCohortRunForConflict: owner-guarded freezing→failed DIRECT (started_at stays NULL) and atomically terminalizes every running child (P1-2)', () => {
+    const wsId = newWorkspace();
+    const { items } = setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
+
+    // Two freeze-created child runs linked to the parent (still `running`).
+    ensureMemberRun(run.id, items[0].id, wsId, items[0].upc, null, null);
+    ensureMemberRun(run.id, items[1].id, wsId, items[1].upc, null, null);
+
+    // Wrong worker: the whole transaction is a no-op — parent untouched,
+    // children untouched.
+    expect(failFrozenCohortRunForConflict(run.id, 'worker-b', 'cohort_product_type_conflict: stale')).toBe(false);
+    expect(getCohortRunById(run.id)!.status).toBe('freezing');
+    expect(getCohortRunById(run.id)!.startedAt).toBeNull();
+    expect(getCohortRunById(run.id)!.errorMessage).toBeNull();
+    const children = getDb().query('SELECT status FROM classification_runs WHERE cohort_run_id = ?').all(run.id) as Array<{ status: string }>;
+    expect(children).toHaveLength(2);
+    expect(children.every(c => c.status === 'running')).toBe(true);
+
+    // Owner fails it DIRECTLY from `freezing`: status failed, started_at stays
+    // NULL (no transition to running ever happened), completed_at + reason set.
+    const reason = 'cohort_product_type_conflict: 2 distinct confident Product Types (dry-cat-food, dry-dog-food); members: ...';
+    expect(failFrozenCohortRunForConflict(run.id, 'worker-a', reason)).toBe(true);
+    const after = getCohortRunById(run.id)!;
+    expect(after.status).toBe('failed');
+    expect(after.startedAt).toBeNull();
+    expect(after.completedAt).not.toBeNull();
+    expect(after.errorMessage).toBe(reason);
+
+    // Every freeze-created child of this parent is terminal with the
+    // deterministic conflict reason (same transaction).
+    const childrenAfter = getDb().query('SELECT status, error_message, completed_at FROM classification_runs WHERE cohort_run_id = ?').all(run.id) as Array<{ status: string; error_message: string | null; completed_at: string | null }>;
+    expect(childrenAfter).toHaveLength(2);
+    for (const child of childrenAfter) {
+      expect(child.status).toBe('failed');
+      expect(child.error_message).toBe('Cohort Product Type conflict prevented member execution');
+      expect(child.completed_at).not.toBeNull();
+    }
+
+    // A second call (run already terminal) is a no-op — never overwritten.
+    expect(failFrozenCohortRunForConflict(run.id, 'worker-a', 'second reason')).toBe(false);
+    expect(getCohortRunById(run.id)!.errorMessage).toBe(reason);
+
+    // A run that already left `freezing` (running) is never failed by this
+    // helper — the CAS is status-guarded so a conflicted parent can never be
+    // failed through `running` (it fails while still freezing, or not at all).
+    const wsId2 = newWorkspace();
+    setupFamilyBatch(wsId2);
+    const [run2] = claimReadyCurationCohorts(wsId2, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run2.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run2.id, 'worker-a')).toBe(true);
+    expect(failFrozenCohortRunForConflict(run2.id, 'worker-a', 'cohort_product_type_conflict: late')).toBe(false);
+    expect(getCohortRunById(run2.id)!.status).toBe('running');
+    expect(getCohortRunById(run2.id)!.errorMessage).toBeNull();
   });
 
   it('insertProposalDependency is workspace-scoped and FK fail-closed; listDependenciesForProposal round-trips', () => {

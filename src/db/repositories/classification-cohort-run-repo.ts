@@ -548,6 +548,52 @@ export function cancelFreezingRun(runId: string, reason?: string): boolean {
   return result.changes > 0;
 }
 
+/**
+ * Direct `freezing → failed` for a conflicted cohort (issue #30 PR4 re-review,
+ * P1-2). A conflicted family NEVER passes through `running`: the parent is
+ * failed IN PLACE (started_at stays NULL — the status guard below guarantees
+ * no `freezing → running` transition ever happened), and every freeze-created
+ * child `classification_runs` row of this parent that is still `running` is
+ * atomically terminalized in the SAME transaction (mirrors the child cleanup
+ * in `supersedeCohortRun`/`supersedeCohortRunIfUnchanged`, keyed on the
+ * children's `cohort_run_id` linkage). The child reason is the deterministic
+ * constant so a retry/reclaim can distinguish a conflict-blocked child from
+ * a drift/supersession failure.
+ *
+ * One owner-guarded CAS transaction: the parent UPDATE matches ONLY while the
+ * run is STILL `freezing` AND claimed by `workerId`. If the CAS fails
+ * (ownership lost to a reclaiming sibling, or the run already left
+ * `freezing`), the WHOLE transaction is a no-op — no parent write, no child
+ * writes — and the caller treats it as ownership loss. `changes === 0` ⇒
+ * nothing was touched.
+ */
+export function failFrozenCohortRunForConflict(
+  runId: string,
+  workerId: string,
+  reason: string,
+): boolean {
+  const db = getDb();
+  let changes = 0;
+  db.transaction(() => {
+    const result = db.run(
+      `UPDATE classification_cohort_runs
+       SET status = 'failed', completed_at = ?, error_message = ?
+       WHERE id = ? AND claimed_by = ? AND status = 'freezing'`,
+      [now(), reason ?? null, runId, workerId],
+    );
+    changes = result.changes;
+    if (changes > 0) {
+      db.run(
+        `UPDATE classification_runs
+         SET status = 'failed', completed_at = ?, error_message = 'Cohort Product Type conflict prevented member execution'
+         WHERE cohort_run_id = ? AND status = 'running'`,
+        [now(), runId],
+      );
+    }
+  })();
+  return changes > 0;
+}
+
 // ─── Heartbeat (lease renewal) ──────────────────────────────────────────────────
 
 /**
