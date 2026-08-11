@@ -16,7 +16,10 @@
  *
  * The profile is resolved from the frozen runtime snapshot only — never from
  * the live config cache when a cohort execution type is present (fail-closed
- * guard). Flag OFF / legacy runs carry no execution type and gate exactly as
+ * guard). A Product Type with `attributeProfileId: null` is a legitimately
+ * EMPTY profile: universal attributes may proceed, every non-universal
+ * type-gated attribute is `not_applicable` — never "all fields" (PR5 P1-1).
+ * Flag OFF / legacy runs carry no execution type and gate exactly as
  * today.
  *
  * Per-Product-Type cardinality comes from the accepted type's profile
@@ -30,7 +33,7 @@ import type { StageDefinition, StageContext, StageInput, StageResult } from '../
 import { loadClassificationConfig } from '../config-loader';
 import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { processProductFieldTarget } from '../curation-target-processor';
-import { getEffectiveCurationProductType } from '../effective-curation-type';
+import { getEffectiveCurationProductType, resolveEffectiveTypeProfile } from '../effective-curation-type';
 import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
 import { evaluateAttributeApplicability } from './attribute-applicability';
 
@@ -72,9 +75,17 @@ export const productAttributeProposalsStage: StageDefinition = {
     const profiles = context.snapshot
       ? context.snapshot.attributeProfiles
       : getCachedAttributeProfiles(context.workspaceId);
-    const profile = effectiveTypeId
-      ? profiles.find(p => p.productTypeId === effectiveTypeId)
-      : null;
+    // PR5 P1-1: the effective path resolves the profile in the AUTHORITATIVE
+    // direction (frozen Product Type -> attributeProfileId -> profile.id) and
+    // fails closed on a missing declared profile; attributeProfileId: null is
+    // a legitimately EMPTY profile (universal-only, never 'all fields'). The
+    // legacy path (no cohort execution type) stays byte-identical.
+    const profile = resolveEffectiveTypeProfile(
+      effectiveTypeId,
+      profiles,
+      context.cohortExecutionType !== undefined,
+      context.snapshot,
+    );
     const profileAttributeIds = profile
       ? new Set(profile.attributes.map(entry => entry.attributeId))
       : null;

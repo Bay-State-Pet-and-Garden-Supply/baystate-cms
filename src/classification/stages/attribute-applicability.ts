@@ -20,7 +20,10 @@
  *   Product Type first, the frozen cohort Execution Product Type as fallback
  *   (reviewed override precedence; the execution type never beats a reviewed
  *   fact). The profile is resolved from the frozen runtime snapshot only —
- *   never from the live config cache when an execution type is present.
+ *   never from the live config cache when an execution type is present. A
+ *   Product Type with `attributeProfileId: null` is a legitimately EMPTY
+ *   profile: universal attributes may proceed, every non-universal
+ *   type-gated attribute is `not_applicable` — never "all fields" (PR5 P1-1).
  * - Conditions are evaluated only against accepted/reviewed facts; a
  *   condition whose fact is missing or whose shape is unrecognized evaluates
  *   to `unknown` (fail closed).
@@ -34,7 +37,7 @@ import type { ProductAttributeConfig } from '../../shared/schemas/classification
 import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
 import { loadClassificationConfig } from '../config-loader';
 import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
-import { getEffectiveCurationProductType } from '../effective-curation-type';
+import { getEffectiveCurationProductType, resolveEffectiveTypeProfile } from '../effective-curation-type';
 import { evaluateAttributeApplicability, type ApplicabilityState, type ApplicabilityInput, type AttributeApplicability } from '../applicability-evaluator';
 
 export type { ApplicabilityState, AttributeApplicability };
@@ -116,9 +119,17 @@ export const attributeApplicabilityStage: StageDefinition = {
     const profiles = context.snapshot
       ? context.snapshot.attributeProfiles
       : getCachedAttributeProfiles(context.workspaceId);
-    const profile = effectiveTypeId
-      ? profiles.find(p => p.productTypeId === effectiveTypeId)
-      : null;
+    // PR5 P1-1: the effective path resolves the profile in the AUTHORITATIVE
+    // direction (frozen Product Type -> attributeProfileId -> profile.id) and
+    // fails closed on a missing declared profile; attributeProfileId: null is
+    // a legitimately EMPTY profile (universal-only, never 'all fields'). The
+    // legacy path (no cohort execution type) stays byte-identical.
+    const profile = resolveEffectiveTypeProfile(
+      effectiveTypeId,
+      profiles,
+      context.cohortExecutionType !== undefined,
+      context.snapshot,
+    );
 
     const evaluations = evaluateTargetApplicability(
       resolved.productFields,

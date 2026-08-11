@@ -30,6 +30,7 @@
  */
 import type { StageContext, StageInput } from './types';
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
+import type { AttributeProfileConfig } from '../shared/schemas/classification';
 import { getProductTypeIdFromValue } from './assignment-projection';
 import { getReviewedPrimaryProductTypeId } from './proposal-selection';
 
@@ -95,6 +96,57 @@ export function getEffectiveCurationProductType(
     getReviewedPrimaryProductTypeId(input, context.snapshot),
     context.cohortExecutionType?.id ?? null,
   );
+}
+
+/**
+ * Resolve the Attribute Profile that gates the effective Curation Product
+ * Type (issue #30 PR5 P1-1).
+ *
+ * - Legacy path (`effectivePath === false`, no cohort execution type):
+ *   BYTE-IDENTICAL legacy semantics — the first profile whose `productTypeId`
+ *   equals the effective type, or null when none exists (the pre-existing
+ *   "no profile constraint" behavior is preserved for flag-OFF runs).
+ * - Effective path (`effectivePath === true`, prepared-cohort mode): the
+ *   AUTHORITATIVE direction — frozen Product Type -> `attributeProfileId` ->
+ *   `attributeProfiles.id`. `attributeProfileId: null` is a legitimately
+ *   EMPTY profile: universal attributes may proceed while EVERY non-universal
+ *   type-gated attribute is `not_applicable` (never "all fields"). A declared
+ *   profile missing from the frozen snapshot — or an effective type absent
+ *   from the frozen product types — throws (frozen snapshot inconsistency;
+ *   never a fallback to the live config cache).
+ */
+export function resolveEffectiveTypeProfile(
+  effectiveTypeId: string | null,
+  profiles: AttributeProfileConfig[],
+  effectivePath: boolean,
+  snapshot: RuntimeClassificationSnapshot | undefined,
+): { attributes: AttributeProfileConfig['attributes'] } | null {
+  if (effectiveTypeId === null) return null;
+  if (!effectivePath) {
+    const legacyProfile = profiles.find(profile => profile.productTypeId === effectiveTypeId);
+    return legacyProfile ? { attributes: legacyProfile.attributes } : null;
+  }
+  const productType = snapshot?.productTypes.find(candidate => candidate.id === effectiveTypeId);
+  if (!productType) {
+    throw new Error(
+      `Effective Product Type "${effectiveTypeId}" is missing from the frozen runtime snapshot; cannot resolve its Attribute Profile (failing closed).`,
+    );
+  }
+  if (productType.attributeProfileId === null) {
+    // Empty profile: universal attributes may proceed; every non-universal
+    // type-gated attribute is not_applicable. Never pass null here — the
+    // evaluator's null means "no profile constraint" (the unsafe all-fields
+    // interpretation this fix eliminates on the effective path).
+    return { attributes: [] };
+  }
+  const profile = profiles.find(candidate => candidate.id === productType.attributeProfileId);
+  if (!profile) {
+    throw new Error(
+      `Effective Product Type "${effectiveTypeId}" declares Attribute Profile "${productType.attributeProfileId}" ` +
+        'which is missing from the frozen runtime snapshot; failing closed (never falling back to the live config cache).',
+    );
+  }
+  return { attributes: profile.attributes };
 }
 
 /**

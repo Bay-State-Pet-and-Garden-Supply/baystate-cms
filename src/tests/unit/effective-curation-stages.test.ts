@@ -83,6 +83,13 @@ const manifest = {
 const sharedProductTypes: ClassificationConfig['productTypes'] = [
   { id: 'dry-dog-food', name: 'Dry Dog Food', description: null, attributeProfileId: 'dry-dog-food-profile', oldIdAliases: [] },
   { id: 'dog-treats', name: 'Dog Treats', description: null, attributeProfileId: 'dog-treats-profile', oldIdAliases: [] },
+  // PR5 P1-1: a Product Type is legitimately allowed attributeProfileId: null
+  // (no Attribute Profile configured) — on the effective path this must fail
+  // closed to an EMPTY profile, never unlock every field.
+  { id: 'plain-dog-food', name: 'Plain Dog Food', description: null, attributeProfileId: null, oldIdAliases: [] },
+  // PR5 P1-1: a Product Type whose declared profile is MISSING from the
+  // frozen snapshot — the effective path must throw, never fall back.
+  { id: 'broken-type', name: 'Broken Type', description: null, attributeProfileId: 'ghost-profile', oldIdAliases: [] },
 ];
 
 const sharedAttributes: ProductAttributeConfig[] = [
@@ -240,6 +247,10 @@ function withReviewedFacts(snapshot: RuntimeClassificationSnapshot, facts: Revie
 
 const EXECUTION_TYPE = { id: 'dry-dog-food', confidence: 0.9, outcome: 'coherent' as const };
 
+const NULL_PROFILE_EXECUTION_TYPE = { id: 'plain-dog-food', confidence: 0.9, outcome: 'coherent' as const };
+
+const MISSING_PROFILE_EXECUTION_TYPE = { id: 'broken-type', confidence: 0.9, outcome: 'coherent' as const };
+
 function applicabilityFor(result: Awaited<ReturnType<typeof attributeApplicabilityStage.execute>>, attributeId: string) {
   if (result.status !== 'succeeded') throw new Error(`stage not succeeded: ${result.status}`);
   const metadata = result.output.metadata as Record<string, unknown>;
@@ -291,6 +302,46 @@ describe('PR5 effective type — attribute applicability stage', () => {
     const lifeStage = applicabilityFor(result, 'life-stage');
     expect(lifeStage.state).toBe('unknown');
     expect(lifeStage.reason ?? '').toContain('condition');
+  });
+
+  it('effective type with attributeProfileId null fails closed to an EMPTY profile (never all fields)', async () => {
+    const snapshot = buildSnapshot(UNIVERSAL_CONFIG);
+    const result = await attributeApplicabilityStage.execute(STAGE_INPUT, makeContext(snapshot, NULL_PROFILE_EXECUTION_TYPE));
+    expect(result.status).toBe('succeeded');
+    const metadata = (result as { status: 'succeeded'; output: { metadata: Record<string, unknown> } }).output.metadata;
+
+    // Non-universal type-gated attributes are ALL not_applicable — a null
+    // attributeProfileId never unlocks every enabled field.
+    expect(applicabilityFor(result, 'flavor').state).toBe('not_applicable');
+    expect(applicabilityFor(result, 'color').state).toBe('not_applicable');
+    expect(applicabilityFor(result, 'life-stage').state).toBe('not_applicable');
+    // Universal attributes still proceed without a profile.
+    expect(applicabilityFor(result, 'scent').state).toBe('applicable');
+    expect(metadata.effectiveTypeId).toBe('plain-dog-food');
+    expect(metadata.effectiveTypeSource).toBe('execution');
+  });
+
+  it('throws when the effective type declares a profile missing from the frozen snapshot (fail closed)', async () => {
+    const snapshot = buildSnapshot(UNIVERSAL_CONFIG);
+    await expect(
+      attributeApplicabilityStage.execute(STAGE_INPUT, makeContext(snapshot, MISSING_PROFILE_EXECUTION_TYPE)),
+    ).rejects.toThrow(/declares Attribute Profile "ghost-profile".*missing from the frozen runtime snapshot/);
+  });
+
+  it('legacy/flag-OFF keeps byte-identical old behavior for a reviewed type with attributeProfileId null', async () => {
+    const snapshot = withReviewedFacts(buildSnapshot(BASE_CONFIG), [makeTypeFact('plain-dog-food')]);
+    const result = await attributeApplicabilityStage.execute(STAGE_INPUT, makeContext(snapshot));
+    expect(result.status).toBe('succeeded');
+    const metadata = (result as { status: 'succeeded'; output: { metadata: Record<string, unknown> } }).output.metadata;
+
+    expect(metadata.effectiveTypeId).toBe('plain-dog-food');
+    expect(metadata.effectiveTypeSource).toBe('reviewed');
+    // Legacy semantics are preserved exactly: no cohortExecutionType means the
+    // pre-existing profile lookup (by profile.productTypeId, null when absent)
+    // and its "no profile constraint" fall-through stay as-is.
+    expect(applicabilityFor(result, 'flavor').state).toBe('applicable');
+    expect(applicabilityFor(result, 'color').state).toBe('applicable');
+    expect(applicabilityFor(result, 'life-stage').state).toBe('applicable');
   });
 
   it('legacy/flag-OFF (no cohortExecutionType) keeps byte-identical unknown gating', async () => {
@@ -351,6 +402,26 @@ describe('PR5 effective type — product attribute proposals stage', () => {
     );
     expect(output.metadata.effectiveTypeId).toBeNull();
     expect(output.metadata.effectiveTypeSource).toBe('none');
+  });
+
+  it('empty-profile effective type emits ZERO non-universal proposals; universal attributes stay eligible', async () => {
+    const snapshot = buildSnapshot(UNIVERSAL_CONFIG);
+    const result = await productAttributeProposalsStage.execute(STAGE_INPUT, makeContext(snapshot, NULL_PROFILE_EXECUTION_TYPE));
+    expect(result.status === 'succeeded' || result.status === 'abstained').toBe(true);
+    const proposals = (result as { status: 'succeeded'; output: { proposals: Array<{ targetId: string }> } }).output?.proposals ?? [];
+
+    // Never 'all fields': no non-universal type-gated target may propose.
+    const nonUniversalTargets = ['flavor', 'color', 'life-stage'];
+    expect(proposals.filter(p => nonUniversalTargets.includes(p.targetId)).length).toBe(0);
+    // Universal attributes remain eligible: any proposal may only be scent.
+    expect(proposals.every(p => p.targetId === 'scent')).toBe(true);
+  });
+
+  it('throws when the effective type declares a profile missing from the frozen snapshot (fail closed)', async () => {
+    const snapshot = buildSnapshot(UNIVERSAL_CONFIG);
+    await expect(
+      productAttributeProposalsStage.execute(STAGE_INPUT, makeContext(snapshot, MISSING_PROFILE_EXECUTION_TYPE)),
+    ).rejects.toThrow(/declares Attribute Profile "ghost-profile".*missing from the frozen runtime snapshot/);
   });
 
   it('throws when a cohort execution type is present but the frozen snapshot is missing', async () => {

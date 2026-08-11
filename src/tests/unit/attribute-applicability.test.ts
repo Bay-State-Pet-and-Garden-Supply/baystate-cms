@@ -180,4 +180,35 @@ describe('evaluateAttributeApplicability', () => {
     expect(result.attributeId).toBe('flavor');
     expect(['applicable', 'not_applicable', 'unknown']).toContain(result.state);
   });
+
+  it('treats a non-null EMPTY profile set as not_applicable for every type-gated attribute (type exists, empty profile)', () => {
+    // PR5 P1-1: a type with a legitimately empty profile (attributeProfileId
+    // null) must gate to not_applicable — an empty Set means "no attribute
+    // from this profile may apply", never "no profile constraint".
+    const result = evaluateAttributeApplicability({
+      attribute: makeAttribute(),
+      profileAttributeIds: new Set<string>(),
+      conditions: [],
+      acceptedTypeId: 'plain-dog-food',
+      typeTargetEnabled: true,
+      reviewedFacts: [],
+    });
+    expect(result.state).toBe('not_applicable');
+  });
+
+  it('keeps the legacy null-profile semantics: a null profile with a type falls through to conditions (flag-OFF contract)', () => {
+    // The legacy path (no cohort execution type) is byte-identical: null
+    // profileAttributeIds means "no profile constraint" and, with no
+    // conditions, evaluates applicable. The effective path never passes null
+    // when a type exists — that unsafe interpretation is the bug this fixes.
+    const result = evaluateAttributeApplicability({
+      attribute: makeAttribute(),
+      profileAttributeIds: null,
+      conditions: [],
+      acceptedTypeId: 'plain-dog-food',
+      typeTargetEnabled: true,
+      reviewedFacts: [],
+    });
+    expect(result.state).toBe('applicable');
+  });
 });
