@@ -53,11 +53,13 @@ import {
 } from '../db/repositories/classification-cohort-run-repo';
 import {
   listItemsByBatch,
+  findItemById,
   updateItemExtractionData,
   updateItemStageStatus,
+  updateItemCurationData,
 } from '../db/repositories/onboarding-item-repo';
 import { getLatestExtractionSourcesByItemIds } from '../db/repositories/onboarding-extraction-repo';
-import { getRun, completeRun, createRun } from '../db/repositories/classification-run-repo';
+import { completeRun, createRun } from '../db/repositories/classification-run-repo';
 import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
 import {
   syncConfigToCache,
@@ -87,8 +89,8 @@ import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../classifica
 import type { ModelCallContext, ModelExecutionPlan, RuntimeRuleVersions } from '../classification/model-operation-registry';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { onboardingEvents } from './sse-emitter';
-import { determineProductGroup } from './product-line-grouper';
 import { redactTransportText } from '../classification/model-policy-gateway';
+import type { ProductLineItemSnapshot } from '../classification/types';
 import { getVlmConfig } from './vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
 import { curateItemWithPipeline } from './product-curator';
@@ -1051,39 +1053,210 @@ export interface PreparedCohortContext {
    * installed.
    */
   assertOwnershipHeld?: () => void;
+  /**
+   * Frozen product-line sibling context (PR3 hardening, Commit B / R2). Built
+   * ONCE by `processCohort` via `buildFrozenProductLineContext` from the
+   * persisted cohort + the FULL frozen execution-evidence projections.
+   * Prepared mode consumes ONLY this — never a live `listItemsByBatch` /
+   * `determineProductGroup` sibling read (a post-freeze sibling mutation is
+   * never visible to title/page coordination).
+   */
+  productLineContext?: {
+    groupId: string;
+    groupLabel: string;
+    siblingNames: string[];
+    siblingWebTitles: string[];
+    siblingOcrTitles: string[];
+    siblingSkus: string[];
+  };
+  /** Frozen per-SKU sibling snapshots (projection-derived) for cohort page coordination. */
+  productLineItems?: ProductLineItemSnapshot[];
+  /** Frozen member `OnboardingItem` views (projection-derived) for title coordination. */
+  frozenBatchItems?: OnboardingItem[];
 }
 
 /**
- * Overlay the frozen projection onto an item so the curator's downstream
- * synthesis (`ext`, `sourceUrl`) reads ONLY the frozen evidence — a mutation
- * of `extraction_data_json`/`source_url` after freeze is never visible to the
- * executed member.
+ * Build the frozen per-member execution view (PR3 hardening, Commit B / R2).
+ *
+ * Prepared mode CONSTRUCTS the executed member FROM the frozen projection — it
+ * never overlays onto live semantic evidence. Identity fields (id, upc,
+ * batchId, rowNumber, stage/status) are pipeline state and come from the live
+ * item; every SEMANTIC field comes from the projection:
+ * - `name`/`expectedName`/`brandHint`/`departmentHint`/`price`/`quantity`
+ *   from `spreadsheetIdentity`;
+ * - `sourceUrl` from the projection VERBATIM — an authoritative null STAYS
+ *   null, never `?? item.sourceUrl`;
+ * - `extractionData` constructed purely from projection fields (title/brand/
+ *   description/weight/bulletPoints/searchKeywords/customFields/
+ *   fieldProvenance/primaryImage/additionalImages/packagingTitle/ocr
+ *   {outcome,packagingOcrData,ocrInputHash,ocrExecutionDigest}/piEvidence) —
+ *   NO live `...ext` spread, so a post-freeze mutation of
+ *   `extraction_data_json`/`source_url`/`name`/`brand_hint` is never visible.
  */
-export function applyFrozenProjectionToItem(
-  item: OnboardingItem,
+
+/** The frozen `extractionData` view for one member projection — shared by
+ *  `buildFrozenItem` (live identity) and `frozenItemFromProjection` (synthetic
+ *  sibling views). Constructed PURELY from projection fields. */
+function frozenExtractionData(
   projection: ExecutionEvidenceProjectionMemberV1,
-): OnboardingItem {
-  const ext = item.extractionData ?? ({} as Record<string, unknown>);
+): OnboardingItem['extractionData'] {
   const frozen = projection.extraction;
   return {
-    ...item,
-    sourceUrl: projection.sourceUrl ?? item.sourceUrl,
-    extractionData: ({
-      ...ext,
-      title: frozen.title ?? null,
-      brand: frozen.brand ?? null,
-      description: frozen.description ?? null,
-      weight: frozen.weight ?? null,
-      bulletPoints: [...frozen.bulletPoints],
-      searchKeywords: frozen.searchKeywords ?? null,
-      primaryImage: frozen.primaryImage ?? null,
-      additionalImages: [...frozen.additionalImages],
-      customFields: { ...frozen.customFields },
-      fieldProvenance: { ...frozen.fieldProvenance },
-      packagingTitle: frozen.packagingTitle ?? null,
-      packagingOcrData: frozen.ocr.packagingOcrData ?? null,
-      ocrOutcome: frozen.ocr.outcome ?? null,
-    }) as OnboardingItem['extractionData'],
+    title: frozen.title ?? null,
+    brand: frozen.brand ?? null,
+    description: frozen.description ?? null,
+    weight: frozen.weight ?? null,
+    bulletPoints: [...frozen.bulletPoints],
+    searchKeywords: frozen.searchKeywords ?? null,
+    primaryImage: frozen.primaryImage ?? null,
+    additionalImages: [...frozen.additionalImages],
+    customFields: { ...frozen.customFields },
+    fieldProvenance: { ...frozen.fieldProvenance },
+    packagingTitle: frozen.packagingTitle ?? null,
+    packagingOcrData: frozen.ocr.packagingOcrData ?? null,
+    ocrOutcome: frozen.ocr.outcome ?? null,
+    ocrInputHash: frozen.ocr.ocrInputHash,
+    ocrExecutionDigest: frozen.ocr.ocrExecutionDigest ?? null,
+    productIntelligenceEvidence: frozen.piEvidence.map(entry => ({
+      runId: entry.runId,
+      resultHash: entry.resultHash,
+      importRecordId: entry.importRecordId,
+    })),
+  } as unknown as OnboardingItem['extractionData'];
+}
+
+export function buildFrozenItem(
+  projection: ExecutionEvidenceProjectionMemberV1,
+  liveItem: OnboardingItem,
+): OnboardingItem {
+  const spread = projection.spreadsheetIdentity;
+  return {
+    ...liveItem,
+    name: spread.name,
+    expectedName: spread.expectedName,
+    brandHint: spread.brandHint,
+    departmentHint: spread.departmentHint,
+    price: spread.price,
+    quantity: spread.quantity,
+    // Authoritative null STAYS null — never fall back to a post-freeze live value.
+    sourceUrl: projection.sourceUrl,
+    extractionData: frozenExtractionData(projection),
+  };
+}
+
+/** Minimal frozen `OnboardingItem` view for ONE member — identity from the
+ *  projection (member item id, sku, ordinal) + spreadsheet identity + frozen
+ *  extraction. Used ONLY as the frozen sibling input for title coordination
+ *  (`coordinateCohortItemsOnce`); never persisted. */
+function frozenItemFromProjection(
+  projection: ExecutionEvidenceProjectionMemberV1,
+  batchId: string,
+): OnboardingItem {
+  const spread = projection.spreadsheetIdentity;
+  return {
+    id: projection.onboardingItemId,
+    batchId,
+    upc: projection.productSku ?? '',
+    name: spread.name,
+    price: spread.price,
+    quantity: spread.quantity,
+    brandHint: spread.brandHint,
+    departmentHint: spread.departmentHint,
+    sourceUrl: projection.sourceUrl,
+    expectedName: spread.expectedName,
+    sourceType: 'official_page',
+    acceptedEvidenceAttemptIds: [],
+    acceptedEvidenceAttemptId: null,
+    sourcingDecision: projection.sourcingDecision,
+    stage: 'curation',
+    stageStatus: 'pending',
+    status: 'curated',
+    errorMessage: null,
+    retryCount: 0,
+    isDuplicate: false,
+    existingSku: null,
+    extractionData: frozenExtractionData(projection),
+    curationData: null,
+    rowNumber: spread.rowNumber,
+    createdAt: '',
+    updatedAt: '',
+  };
+}
+
+/**
+ * Frozen product-line sibling context (PR3 hardening, Commit B / R2).
+ *
+ * Derived ENTIRELY from the persisted cohort + the FULL frozen
+ * execution-evidence projections — sibling skus/names/brands from
+ * `spreadsheetIdentity`, webTitles from projection titles, ocrTitles from
+ * projection OCR, descriptions from the projection. NO `listItemsByBatch` /
+ * `determineProductGroup` live reads: a post-freeze mutation of a sibling's
+ * `extraction_data_json`/`name`/`brand_hint` is never visible to title/page
+ * coordination. `frozenBatchItems` are frozen `OnboardingItem` views (one per
+ * member) consumed as the title-coordination input; `productLineItems` are the
+ * frozen per-SKU snapshots consumed by cohort page coordination.
+ */
+export interface FrozenProductLineContext {
+  productLineContext: {
+    groupId: string;
+    groupLabel: string;
+    siblingNames: string[];
+    siblingWebTitles: string[];
+    siblingOcrTitles: string[];
+    siblingSkus: string[];
+  };
+  productLineItems: ProductLineItemSnapshot[];
+  frozenBatchItems: OnboardingItem[];
+}
+
+export function buildFrozenProductLineContext(
+  cohort: CurationCohort,
+  members: CurationCohortMember[],
+  projections: ExecutionEvidenceProjectionMemberV1[],
+): FrozenProductLineContext {
+  const ordered = [...projections].sort((a, b) => a.ordinal - b.ordinal);
+  const siblingNames: string[] = [];
+  const siblingWebTitles: string[] = [];
+  const siblingOcrTitles: string[] = [];
+  const siblingSkus: string[] = [];
+  const productLineItems: ProductLineItemSnapshot[] = [];
+  const frozenBatchItems: OnboardingItem[] = [];
+
+  for (const projection of ordered) {
+    const name = projection.spreadsheetIdentity.name;
+    const sku = projection.productSku ?? '';
+    const ocr = projection.extraction.ocr.packagingOcrData;
+    siblingNames.push(name);
+    siblingWebTitles.push(projection.extraction.title ?? '');
+    const ocrTitle = ocr?.productName?.trim() || projection.extraction.packagingTitle?.trim() || '';
+    if (ocrTitle) siblingOcrTitles.push(ocrTitle);
+    if (sku) siblingSkus.push(sku);
+    productLineItems.push({
+      sku,
+      name,
+      webTitle: projection.extraction.title ?? null,
+      brand: projection.extraction.brand ?? projection.spreadsheetIdentity.brandHint ?? null,
+      description: projection.extraction.description ?? '',
+      species: ocr?.species ?? [],
+      flavor: ocr?.flavorVariety ?? null,
+      lifeStage: ocr?.lifeStage ?? null,
+      productForm: ocr?.productForm ?? null,
+      healthConcern: ocr?.healthConcernFunction ?? [],
+    });
+    frozenBatchItems.push(frozenItemFromProjection(projection, cohort.batchId));
+  }
+
+  return {
+    productLineContext: {
+      groupId: cohort.groupKey,
+      groupLabel: cohort.groupLabel,
+      siblingNames,
+      siblingWebTitles,
+      siblingOcrTitles,
+      siblingSkus,
+    },
+    productLineItems,
+    frozenBatchItems,
   };
 }
 
@@ -1117,6 +1290,23 @@ export class HeartbeatLostError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'HeartbeatLostError';
+  }
+}
+
+/**
+ * Test-only crash simulation signal (PR3 hardening, Commit B / R3). Thrown by
+ * the `afterMemberPipeline` test seam to deterministically simulate a worker
+ * crash EXACTLY between a member's pipeline completion and its atomic
+ * projection commit. Like `HeartbeatLostError`, it aborts the member/cohort
+ * with NO member-failure write — the child stays `running`, no
+ * `curation_data_json`, no item stage write — and a reclaim re-executes the
+ * member. Documented test-only (mirrors the `beforeFinalCas` freeze seam);
+ * production callers never throw it.
+ */
+export class MemberCommitCrashSimulationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MemberCommitCrashSimulationError';
   }
 }
 
@@ -1269,15 +1459,36 @@ function buildPreparedCohortContextForMember(
  * returns false throws `HeartbeatLostError`; the caller aborts the
  * member/cohort deterministically with NO terminal write at all (the run now
  * belongs to the reclaiming worker — the stale owner never fails the child,
- * completes the parent, or writes the item). Crash-recovery resume (same run
- * id, reclaim-on-match) never re-executes a member whose child run already
- * completed under this parent.
+ * completes the parent, or writes the item).
+ *
+ * Frozen execution purity (PR3 hardening, Commit B / R2): sibling context is
+ * built ONCE from the persisted cohort + the FULL frozen execution-evidence
+ * projections (`buildFrozenProductLineContext`) — the live
+ * `listItemsByBatch`/`determineProductGroup` sibling reads are gone from the
+ * cohort path, and every member executes on `buildFrozenItem` (projection
+ * semantics + live identity only).
+ *
+ * Member-projection atomic commit (PR3 hardening, Commit B / R3): prepared
+ * `curateItemWithPipeline` leaves the child run RUNNING; per member this
+ * function writes `curation_data_json` + item `completed` + the child
+ * terminal status in ONE transaction. Crash-recovery resume (same run id,
+ * reclaim-on-match) re-executes a member UNLESS the recovery skip rule holds:
+ * child run terminal-success AND `curation_data_json.classificationRunId ===
+ * childRunId` AND item `stageStatus === 'completed'`. The test-only
+ * `hooks.afterMemberPipeline` seam (mirrors `beforeFinalCas`) simulates a
+ * crash exactly between pipeline completion and that commit — see
+ * `MemberCommitCrashSimulationError`.
  */
 export async function processCohort(
   run: CohortRun,
   workspacePath: string,
   workspaceId: string,
-  hooks?: { onPipelineInFlight?: () => void | Promise<void> },
+  hooks?: {
+    onPipelineInFlight?: () => void | Promise<void>;
+    /** Test-only crash seam (R3): fires after a member pipeline completes and
+     *  before its atomic projection commit. Production callers never pass it. */
+    afterMemberPipeline?: () => void | Promise<void>;
+  },
 ): Promise<CohortExecutionSummary> {
   if (run.status !== 'running') {
     const reason = `processCohort aborted: run ${run.id} is not 'running' (status=${run.status}); only a frozen run may be executed.`;
@@ -1329,14 +1540,19 @@ export async function processCohort(
     completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
     throw new Error(reason);
   }
-  const items = listItemsByBatch(cohort.batchId);
-  const itemsById = new Map(items.map(item => [item.id, item]));
+  // PR3 hardening (Commit B / R2): cohort execution loads member identity
+  // per-member (pipeline state only — id/upc/stage/status/curation data for
+  // the skip rule). NO batch-wide listItemsByBatch read in the cohort path:
+  // all SEMANTIC evidence comes from the frozen projection.
+  const itemsById = new Map<string, OnboardingItem>();
   for (const memberProjection of projection.members) {
-    if (!itemsById.has(memberProjection.onboardingItemId)) {
+    const liveItem = findItemById(memberProjection.onboardingItemId);
+    if (!liveItem) {
       const reason = `processCohort aborted: member item ${memberProjection.onboardingItemId} not found in batch ${cohort.batchId}.`;
       completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
       throw new Error(reason);
     }
+    itemsById.set(liveItem.id, liveItem);
   }
 
   // The frozen projection is the authority for member ordering (ordinal).
@@ -1344,7 +1560,14 @@ export async function processCohort(
   const memberFailures: CohortMemberExecutionResult[] = [];
   let hasAbstentions = false;
   let completedMembers = 0;
-  const nowIso = new Date().toISOString();
+
+  // Frozen product-line sibling context (PR3 hardening, Commit B / R2): built
+  // ONCE from the persisted cohort + the FULL frozen projections. Prepared
+  // members use ONLY this — the live listItemsByBatch/determineProductGroup
+  // sibling reads are gone from the cohort execution path, so a post-freeze
+  // mutation of a sibling's extraction_data_json/name/brand_hint is never
+  // visible to title/page coordination.
+  const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
 
   // Scoped periodic heartbeat (PR3 hardening, Commit A): the lease is renewed
   // when `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3`, so a long
@@ -1374,18 +1597,26 @@ export async function processCohort(
   for (const memberProjection of orderedMembers) {
     const item = itemsById.get(memberProjection.onboardingItemId)!;
 
-    // Resume guard (crash-recovery reclaim-on-match keeps the SAME run id): a
-    // member whose child run already completed under THIS parent is never
-    // re-executed.
-    const completedChild = getDb().query(
-      `SELECT status FROM classification_runs
-       WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status IN ('completed','completed_with_abstentions')
+    // Resume guard (crash-recovery reclaim-on-match keeps the SAME run id).
+    // Recovery skip rule (PR3 hardening, Commit B / R3): a member is skipped
+    // ONLY IF the child run is terminal-success AND the item's committed
+    // projection references exactly that child AND the item stage is
+    // completed. Otherwise the member is re-executed (a still-running child
+    // with no projection commit is reused via ensureMemberRun).
+    const childRow = getDb().query(
+      `SELECT id, status FROM classification_runs
+       WHERE cohort_run_id = ? AND onboarding_item_id = ?
        ORDER BY started_at DESC LIMIT 1`,
-    ).get(run.id, item.id) as { status: string } | undefined;
-    if (completedChild) {
+    ).get(run.id, item.id) as { id: string; status: string } | undefined;
+    const projectionCommitted =
+      childRow !== undefined &&
+      (childRow.status === 'completed' || childRow.status === 'completed_with_abstentions') &&
+      item.curationData?.classificationRunId === childRow.id &&
+      item.stageStatus === 'completed';
+    if (projectionCommitted) {
       completedMembers++;
-      if (completedChild.status === 'completed_with_abstentions') hasAbstentions = true;
-      console.log(`[CohortCurator] Member ${item.upc ?? item.id} already completed under run ${run.id} — resume guard skips re-execution.`);
+      if (childRow.status === 'completed_with_abstentions') hasAbstentions = true;
+      console.log(`[CohortCurator] Member ${item.upc ?? item.id} projection already committed under run ${run.id} (child ${childRow.id}) — resume guard skips re-execution.`);
       continue;
     }
 
@@ -1394,16 +1625,35 @@ export async function processCohort(
       // Ownership assertion BEFORE the first member side effect (child create).
       renewHeartbeat();
       const childRun = ensureMemberRun(run.id, item.id, workspaceId, item.upc ?? '', null, null);
+      if (!childRun.configSnapshotId || !childRun.configSnapshotHash) {
+        // A freshly created child (re-execution after a terminal child with no
+        // committed projection — R3 skip-rule recovery) inherits the
+        // freeze-persisted member snapshot refs from the prior child under this
+        // parent; the member runtime snapshot is immutable, so the refs are
+        // exact. With no prior refs, buildPreparedCohortContextForMember fails
+        // closed below (deterministic member failure).
+        const prior = getDb().query(
+          `SELECT config_snapshot_id, config_snapshot_hash FROM classification_runs
+           WHERE cohort_run_id = ? AND onboarding_item_id = ?
+             AND config_snapshot_id IS NOT NULL AND config_snapshot_hash IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1`,
+        ).get(run.id, item.id) as { config_snapshot_id: string; config_snapshot_hash: string } | undefined;
+        if (prior) {
+          getDb().run(
+            'UPDATE classification_runs SET config_snapshot_id = ?, config_snapshot_hash = ? WHERE id = ?',
+            [prior.config_snapshot_id, prior.config_snapshot_hash, childRun.id],
+          );
+          childRun.configSnapshotId = prior.config_snapshot_id;
+          childRun.configSnapshotHash = prior.config_snapshot_hash;
+        }
+      }
       const prepared = buildPreparedCohortContextForMember(run.id, memberProjection, childRun, workspaceId);
 
-      // Sibling context for family-aware curation (read-only hints) — the same
-      // handoff the legacy per-SKU worker uses (item.siblingGroup).
-      const batchItems = listItemsByBatch(cohort.batchId);
-      try {
-        (item as any).siblingGroup = determineProductGroup(item as any, batchItems as any) ?? null;
-      } catch (err) {
-        console.warn(`[CohortCurator] Sibling context for ${item.upc ?? item.id} failed (non-blocking): ${redactTransportText(err instanceof Error ? err.message : String(err))}`);
-      }
+      // Frozen sibling context (Commit B / R2) — attached from the
+      // projection-derived line context, never from a live batch query.
+      prepared.productLineContext = frozenLineContext.productLineContext;
+      prepared.productLineItems = frozenLineContext.productLineItems;
+      prepared.frozenBatchItems = frozenLineContext.frozenBatchItems;
 
       // Scoped ownership-guarded lease keeper around the long-awaited member
       // pipeline (PR3 hardening A2): the parent lease is renewed on a TTL/3
@@ -1419,22 +1669,33 @@ export async function processCohort(
         const pipelinePromise = curateItemWithPipeline(item, workspacePath, workspaceId, prepared);
         await hooks?.onPipelineInFlight?.();
         curationData = await pipelinePromise;
+        // Test-only crash seam (R3): simulates a worker crash EXACTLY between
+        // the member's pipeline completion and its atomic projection commit.
+        // The MemberCommitCrashSimulationError is rethrown by the member catch
+        // with NO member-failure write — a reclaim re-executes the member.
+        await hooks?.afterMemberPipeline?.();
         // No write after ownership loss: the post-await assertion IS the guard.
         pipelineKeeper.assertHeld();
       } finally {
         pipelineKeeper.stop();
       }
 
-      // Persist curation_data_json exactly as the legacy worker does.
-      getDb().query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
-        JSON.stringify(curationData),
-        nowIso,
-        item.id,
-      );
-      updateItemStageStatus(item.id, 'completed');
+      // ONE atomic member-projection commit (PR3 hardening, Commit B / R3):
+      // curation_data_json + item stage completion + the child terminal status
+      // (derived from the pipeline result) are written in ONE transaction — a
+      // crash never leaves a completed child without its projection, and the
+      // recovery skip rule requires all three together.
+      const childTerminalStatus: 'completed' | 'completed_with_abstentions' =
+        curationData.classificationProposals.some(p => p.proposalType === 'reviewable_abstention')
+          ? 'completed_with_abstentions'
+          : 'completed';
+      getDb().transaction(() => {
+        updateItemCurationData(item.id, JSON.stringify(curationData));
+        updateItemStageStatus(item.id, 'completed');
+        completeRun(childRun.id, childTerminalStatus);
+      })();
       completedMembers++;
-      const childStatus = getRun(childRun.id)?.status;
-      if (childStatus === 'completed_with_abstentions') hasAbstentions = true;
+      if (childTerminalStatus === 'completed_with_abstentions') hasAbstentions = true;
 
       onboardingEvents.emitItemStatus(cohort.batchId, item.id, 'completed', {
         stage: 'curation',
@@ -1448,6 +1709,12 @@ export async function processCohort(
     } catch (err) {
       if (err instanceof HeartbeatLostError) {
         abortOnHeartbeatLost(err);
+      }
+      // Simulated worker crash (test-only seam): rethrow with NO member-failure
+      // write — exactly like the heartbeat-lost abort, the caller observes a
+      // process crash and a reclaim re-executes the member atomically.
+      if (err instanceof MemberCommitCrashSimulationError) {
+        throw err;
       }
       const errorText = redactTransportText(err instanceof Error ? err.message : String(err));
       console.error(`[CohortCurator] Member ${item.upc ?? item.id} failed under run ${run.id}: ${errorText}`);

@@ -37,7 +37,7 @@ import type { ProductLineItemSnapshot, StageDefinition } from '../classification
 import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
-import { applyFrozenProjectionToItem } from './cohort-curator';
+import { buildFrozenItem } from './cohort-curator';
 import type { PreparedCohortContext } from './cohort-curator';
 
 // ─── Page Assignment Validation ───────────────────────────────────────────────
@@ -112,7 +112,11 @@ export async function curateItemWithPipeline(
   // prepared context, this function is byte-identical to today's behavior.
   const cohortMode = preparedCohort !== undefined;
   if (cohortMode) {
-    item = applyFrozenProjectionToItem(item, preparedCohort!.memberProjection);
+    // PR3 hardening (Commit B / R2): prepared mode CONSTRUCTS the executed
+    // member FROM the frozen projection — identity from the live item, every
+    // semantic field from the projection (authoritative null sourceUrl stays
+    // null; NO live `...ext` spread).
+    item = buildFrozenItem(preparedCohort!.memberProjection, item);
   }
   const ext = item.extractionData || ({} as any);
 
@@ -320,91 +324,123 @@ export async function curateItemWithPipeline(
     // results across variants. Prefer context passed from the worker
     // (item.siblingGroup) to avoid re-querying. Fall back to internal
     // batch query when set directly (tests, API calls).
-    let productLineGroup: ReturnType<typeof determineProductGroup> | null =
-      (item as any).siblingGroup ?? null;
-
-    if (!productLineGroup) {
-      try {
-        const db = getDb();
-        const batchRows = db.query(
-          `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
-        ).all(item.id) as Array<{
-          id: string;
-          upc: string;
-          name: string;
-          brand_hint: string | null;
-          extraction_data_json: string | null;
-        }>;
-
-        const batchItems: OnboardingItem[] = batchRows.map(r => ({
-          id: r.id,
-          batchId: item.batchId,
-          upc: r.upc,
-          name: r.name,
-          price: null,
-          quantity: null,
-          brandHint: r.brand_hint,
-          departmentHint: null,
-          sourceUrl: null,
-          expectedName: null,
-          sourceType: 'official_page',
-          acceptedEvidenceAttemptId: null,
-          acceptedEvidenceAttemptIds: [],
-          sourcingDecision: null,
-          stage: 'curation' as const,
-          stageStatus: 'pending' as const,
-          rowNumber: 0,
-          isDuplicate: false,
-          existingSku: null,
-          extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
-          curationData: null,
-          status: 'active' as any,
-          errorMessage: null,
-          retryCount: 0,
-          createdAt: '',
-          updatedAt: '',
-        }));
-
-        productLineGroup = determineProductGroup(item, batchItems);
-        if (productLineGroup) {
-          console.log(`[ProductCurator] Product line group "${productLineGroup.groupId}": ${productLineGroup.siblingNames.length} siblings`);
-        }
-      } catch (err: any) {
-        console.warn(`[ProductCurator] Product-line grouping failed (non-blocking): ${err.message}`);
-      }
-    } else {
-      console.log(`[ProductCurator] Using sibling context from worker for ${item.upc}: group "${productLineGroup.groupId}"`);
-    }
-
+    //
+    // PR3 hardening (Commit B / R2): prepared-cohort mode NEVER loads live
+    // sibling data. The frozen product-line context (built by processCohort
+    // via buildFrozenProductLineContext from the persisted cohort + full
+    // execution-evidence projections) is the only sibling input — a
+    // post-freeze mutation of a sibling's extraction_data_json/name/brand_hint
+    // is never visible to title/page coordination.
+    let productLineGroup: ReturnType<typeof determineProductGroup> | null = null;
     const attachedBatchItems = (item as any).batchItems as OnboardingItem[] | undefined;
-    let batchItemsForCoordination: OnboardingItem[] = attachedBatchItems ?? [];
-    if (productLineGroup && batchItemsForCoordination.length === 0) {
-      try {
-        batchItemsForCoordination = listItemsByBatch(item.batchId);
-      } catch (error) {
-        console.warn(`[ProductCurator] Failed to load batch snapshot for cohort coordination: ${error instanceof Error ? error.message : String(error)}`);
+    let batchItemsForCoordination: OnboardingItem[] = [];
+
+    if (cohortMode) {
+      const frozenCtx = preparedCohort!;
+      if (frozenCtx.productLineContext && frozenCtx.productLineContext.siblingSkus.length >= 2) {
+        productLineGroup = {
+          groupId: frozenCtx.productLineContext.groupId,
+          groupLabel: frozenCtx.productLineContext.groupLabel,
+          normalizedBrand: '',
+          normalizedName: '',
+          siblingNames: frozenCtx.productLineContext.siblingNames,
+          siblingWebTitles: frozenCtx.productLineContext.siblingWebTitles,
+          siblingOcrTitles: frozenCtx.productLineContext.siblingOcrTitles,
+          siblingSkus: frozenCtx.productLineContext.siblingSkus,
+          sizeVariantCount: 0,
+          flavorVariantCount: 0,
+        };
+        console.log(`[ProductCurator] Using frozen sibling context for ${item.upc}: group "${productLineGroup.groupId}"`);
+      }
+      batchItemsForCoordination = frozenCtx.frozenBatchItems ?? [];
+    } else {
+      productLineGroup = (item as any).siblingGroup ?? null;
+      if (!productLineGroup) {
+        try {
+          const db = getDb();
+          const batchRows = db.query(
+            `SELECT id, upc, name, brand_hint, extraction_data_json FROM onboarding_items WHERE batch_id = (SELECT batch_id FROM onboarding_items WHERE id = ?)`
+          ).all(item.id) as Array<{
+            id: string;
+            upc: string;
+            name: string;
+            brand_hint: string | null;
+            extraction_data_json: string | null;
+          }>;
+
+          const batchItems: OnboardingItem[] = batchRows.map(r => ({
+            id: r.id,
+            batchId: item.batchId,
+            upc: r.upc,
+            name: r.name,
+            price: null,
+            quantity: null,
+            brandHint: r.brand_hint,
+            departmentHint: null,
+            sourceUrl: null,
+            expectedName: null,
+            sourceType: 'official_page',
+            acceptedEvidenceAttemptId: null,
+            acceptedEvidenceAttemptIds: [],
+            sourcingDecision: null,
+            stage: 'curation' as const,
+            stageStatus: 'pending' as const,
+            rowNumber: 0,
+            isDuplicate: false,
+            existingSku: null,
+            extractionData: r.extraction_data_json ? JSON.parse(r.extraction_data_json) : null,
+            curationData: null,
+            status: 'active' as any,
+            errorMessage: null,
+            retryCount: 0,
+            createdAt: '',
+            updatedAt: '',
+          }));
+
+          productLineGroup = determineProductGroup(item, batchItems);
+          if (productLineGroup) {
+            console.log(`[ProductCurator] Product line group "${productLineGroup.groupId}": ${productLineGroup.siblingNames.length} siblings`);
+          }
+        } catch (err: any) {
+          console.warn(`[ProductCurator] Product-line grouping failed (non-blocking): ${err.message}`);
+        }
+      } else {
+        console.log(`[ProductCurator] Using sibling context from worker for ${item.upc}: group "${productLineGroup.groupId}"`);
+      }
+
+      batchItemsForCoordination = attachedBatchItems ?? [];
+      if (productLineGroup && batchItemsForCoordination.length === 0) {
+        try {
+          batchItemsForCoordination = listItemsByBatch(item.batchId);
+        } catch (error) {
+          console.warn(`[ProductCurator] Failed to load batch snapshot for cohort coordination: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
     }
 
-    const productLineItems: ProductLineItemSnapshot[] | undefined = productLineGroup
-      ? productLineGroup.siblingSkus.map((sku, index) => {
-          const sibling = batchItemsForCoordination.find(candidate => candidate.upc === sku);
-          const extraction = sibling?.extractionData;
-          const ocr = extraction?.packagingOcrData;
-          return {
-            sku,
-            name: sibling?.expectedName ?? sibling?.name ?? productLineGroup!.siblingNames[index] ?? sku,
-            webTitle: extraction?.title ?? productLineGroup!.siblingWebTitles[index] ?? null,
-            brand: extraction?.brand ?? sibling?.brandHint ?? (productLineGroup!.normalizedBrand || null),
-            description: extraction?.description ?? '',
-            species: ocr?.species ?? [],
-            flavor: ocr?.flavorVariety ?? null,
-            lifeStage: ocr?.lifeStage ?? null,
-            productForm: ocr?.productForm ?? null,
-            healthConcern: ocr?.healthConcernFunction ?? [],
-          };
-        })
-      : undefined;
+    const productLineItems: ProductLineItemSnapshot[] | undefined = cohortMode
+      ? productLineGroup
+        ? preparedCohort!.productLineItems
+        : undefined
+      : productLineGroup
+        ? productLineGroup.siblingSkus.map((sku, index) => {
+            const sibling = batchItemsForCoordination.find(candidate => candidate.upc === sku);
+            const extraction = sibling?.extractionData;
+            const ocr = extraction?.packagingOcrData;
+            return {
+              sku,
+              name: sibling?.expectedName ?? sibling?.name ?? productLineGroup!.siblingNames[index] ?? sku,
+              webTitle: extraction?.title ?? productLineGroup!.siblingWebTitles[index] ?? null,
+              brand: extraction?.brand ?? sibling?.brandHint ?? (productLineGroup!.normalizedBrand || null),
+              description: extraction?.description ?? '',
+              species: ocr?.species ?? [],
+              flavor: ocr?.flavorVariety ?? null,
+              lifeStage: ocr?.lifeStage ?? null,
+              productForm: ocr?.productForm ?? null,
+              healthConcern: ocr?.healthConcernFunction ?? [],
+            };
+          })
+        : undefined;
 
     // Coordinate every title in a multi-item group through one cached,
     // all-or-nothing cohort decision. No sibling title is written here; each
@@ -483,12 +519,22 @@ export async function curateItemWithPipeline(
     // Determine final status
     const hasAbstentions = result.proposals.some(p => p.proposalType === 'reviewable_abstention');
     const finalStatus = hasAbstentions ? 'completed_with_abstentions' : 'completed';
-    // Ownership-guarded terminal child write (PR3 hardening A2): in
-    // prepared-cohort mode the member's terminal write only proceeds while
-    // the parent claim is still held — a sibling reclaim during the pipeline
-    // leaves the child untouched (the new owner re-executes the member).
-    preparedCohort?.assertOwnershipHeld?.();
-    completeRun(run.id, finalStatus);
+    // PR3 hardening (Commit B / R3): prepared-cohort mode leaves the child run
+    // RUNNING — the terminal child write happens atomically with the
+    // member-projection commit in processCohort (curation_data_json + item
+    // stage + child terminal status in ONE transaction). A crash between
+    // pipeline completion and that commit is therefore recovered: the recovery
+    // skip rule only skips a member whose committed projection references a
+    // terminal-success child. The child run id rides in
+    // `curationData.classificationRunId`. Legacy (non-cohort) mode completes
+    // the child exactly as today.
+    if (!cohortMode) {
+      // Ownership-guarded terminal child write (PR3 hardening A2): in
+      // prepared-cohort mode the member's terminal write only proceeds while
+      // the parent claim is still held — a sibling reclaim during the pipeline
+      // leaves the child untouched (the new owner re-executes the member).
+      completeRun(run.id, finalStatus);
+    }
 
     // Collect persisted evidence and proposals
     const allEvidence = getEvidenceByRun(run.id);
@@ -588,7 +634,10 @@ export async function curateItemWithPipeline(
     });
     const suggestedProductType = typeSelection.proposal?.targetId ?? null;
 
-    if (suggestedPages.length === 0 && (suggestedProductType || item.name)) {
+    // PR3 hardening (Commit B / R2): the live product_pages fallback is a
+    // post-freeze semantic read — cohort mode uses ONLY the frozen
+    // verifiedPageIds (above), never the mutable page_index.
+    if (!cohortMode && suggestedPages.length === 0 && (suggestedProductType || item.name)) {
       try {
         const text = `${suggestedProductType || ''} ${item.name}`.toLowerCase();
         const catalogPages = getDb().query(
@@ -633,7 +682,13 @@ export async function curateItemWithPipeline(
       ? ext.distributorEvidenceAttemptIds
       : [];
 
-    if (distAttemptIds.length > 0) {
+    // PR3 hardening (Commit B / R2): cohort mode DISABLES the live distributor
+    // consolidation (image backfill and distributor-copy reads) — frozen
+    // evidence carries what was consolidated pre-freeze, and the live
+    // onboarding_evidence_attempts rows may have mutated after the freeze.
+    // (Freezing attempt rows into the projection is deferred — the projection
+    // stays execution-evidence-v1.)
+    if (!cohortMode && distAttemptIds.length > 0) {
       try {
         const distAttempts = getEvidenceAttemptsByIdsForItem(
           item.id,

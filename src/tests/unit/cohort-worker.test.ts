@@ -35,7 +35,9 @@ import {
   processCohort,
   verifyCohortRunFrozen,
   HeartbeatLostError,
+  MemberCommitCrashSimulationError,
 } from '../../onboarding/cohort-curator';
+import { getRun, completeRun } from '../../db/repositories/classification-run-repo';
 import {
   overrideCohortCurationFlags,
   resetCohortCurationFlagsOverride,
@@ -597,6 +599,236 @@ function firstCohortId(workspaceId: string): string {
   if (!row) throw new Error('no cohort formed');
   return row.id;
 }
+
+describe('PR3 hardening — Commit B (R2 frozen execution purity, end-to-end)', () => {
+  it('R2: post-freeze mutations of name, brand_hint, product_pages and evidence attempts do not affect cohort execution', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // The frozen spreadsheet names contain 'chew' — in legacy mode the live
+    // product_pages fallback would suggest the matching store page. Cohort
+    // mode must NEVER consult the mutable page_index after freeze.
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Chew Treats Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Chew Treats Beef 10 lb' }),
+    });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // MUTATE the live world AFTER the freeze:
+    const a = findItemById(items[0].id)!;
+    getDb().run(
+      'UPDATE onboarding_items SET name = ?, brand_hint = ?, source_url = ? WHERE id = ?',
+      ['MUTATED NAME A', 'MUTATED BRAND', 'https://brand.example.com/mutated-a', a.id],
+    );
+    const b = findItemById(items[1].id)!;
+    const mutatedSibling = JSON.parse(JSON.stringify(b.extractionData));
+    mutatedSibling.title = 'MUTATED SIBLING TITLE';
+    mutatedSibling.description = 'MUTATED SIBLING DESC';
+    mutatedSibling.brand = 'MUTATED SIBLING BRAND';
+    mutatedSibling.packagingOcrData = { ...mutatedSibling.packagingOcrData, productName: 'MUTATED SIBLING OCR' };
+    updateItemExtractionData(b.id, JSON.stringify(mutatedSibling));
+    // A live store page matching the frozen name pattern ('chew').
+    getDb().run(
+      "INSERT OR REPLACE INTO product_pages (product_sku, page_name, created_at) VALUES (?, ?, ?)",
+      ['999999999999', 'Dog Treats Bones Bully Sticks & Natural Chews', new Date().toISOString()],
+    );
+    // Live distributor evidence attempts for member A (never consulted in
+    // cohort mode).
+    getDb().run(
+      `INSERT INTO onboarding_evidence_attempts (id, item_id, provider_id, lookup_upc, outcome, confidence, matched_fields_json, created_at)
+       VALUES (?, ?, 'provider-x', ?, 'success', 0.9, '[]', ?)`,
+      [randomUUID(), a.id, a.upc, new Date().toISOString()],
+    );
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+
+    const storedA = findItemById(a.id)!;
+    expect(storedA.stageStatus).toBe('completed');
+    // Title from FROZEN spreadsheet identity (deterministic cohort fallback —
+    // no LLM configured in the fixture) — never the mutated live name/brand.
+    expect(storedA.curationData!.curatedTitle).not.toContain('MUTATED NAME');
+    expect(storedA.curationData!.curatedTitle).not.toContain('MUTATED BRAND');
+    expect(storedA.curationData!.curatedTitle).toContain('Chew Treats');
+    // Evidence built from the frozen projection only (frozen spreadsheet name
+    // + frozen web title) — the live mutations are absent.
+    const nameValues = storedA.curationData!.classificationEvidence
+      .filter(e => e.sourceField === 'name')
+      .map(e => String(e.value));
+    expect(nameValues.some(v => v.includes('MUTATED'))).toBe(false);
+    expect(nameValues.some(v => v === 'Original Web Title')).toBe(true);
+    // The live product_pages fallback was NOT consulted: the frozen names
+    // contain 'chew' and the page exists, but cohort mode uses ONLY the frozen
+    // verifiedPageIds (none in this fixture).
+    expect(storedA.curationData!.suggestedPages).not.toContain('Dog Treats Bones Bully Sticks & Natural Chews');
+    // The live distributor-attempt rows were never consulted: no distributor
+    // copy consolidation in cohort mode → curatedDescription stays null.
+    expect(storedA.curationData!.curatedDescription).toBeNull();
+
+    // Sibling B's title also comes from its own frozen identity — the mutated
+    // sibling extraction never fed title coordination.
+    const storedB = findItemById(b.id)!;
+    expect(storedB.stageStatus).toBe('completed');
+    expect(storedB.curationData!.curatedTitle).not.toContain('MUTATED');
+    const bNameValues = storedB.curationData!.classificationEvidence
+      .filter(e => e.sourceField === 'name')
+      .map(e => String(e.value));
+    expect(bNameValues.some(v => v.includes('MUTATED'))).toBe(false);
+    expect(bNameValues.some(v => v === 'Original Web Title')).toBe(true);
+  });
+});
+
+describe('PR3 hardening — Commit B (R3 member-projection atomic commit)', () => {
+  it('R3: crash exactly between pipeline completion and member commit → reclaim re-executes the member and commits the projection atomically', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // Crash EXACTLY between pipeline completion and item persistence (test
+    // seam, documented test-only like beforeFinalCas).
+    await expect(processCohort(finalized, wsPath, workspaceId, {
+      afterMemberPipeline: () => {
+        throw new MemberCommitCrashSimulationError('simulated crash between pipeline completion and member commit');
+      },
+    })).rejects.toThrow('simulated crash between pipeline completion and member commit');
+
+    // The crash left NO projection commit and NO member-failure write: the
+    // item is untouched, the child stays running, the parent stays running.
+    const item = findItemById(items[0].id)!;
+    expect(item.stageStatus).toBe('pending');
+    expect(item.curationData).toBeNull();
+    const parentAfterCrash = getCohortRunById(finalized.id)!;
+    expect(parentAfterCrash.status).toBe('running');
+    expect(parentAfterCrash.completedAt).toBeNull();
+    const childAfterCrash = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status = ?',
+    ).get(finalized.id, items[0].id, 'running') as Record<string, any> | undefined;
+    expect(childAfterCrash).toBeTruthy();
+
+    // Reclaim (frozen world unchanged → match) resumes the SAME run, and the
+    // re-executed member commits its projection atomically.
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', finalized.id]);
+    const reclaim = reclaimExpiredCohortRuns(
+      workspaceId,
+      new Date().toISOString(),
+      () => verifyCohortRunFrozen(getCohortRunById(finalized.id)!, wsPath, workspaceId) ? 'match' : 'drift',
+      'worker-b',
+      COHORT_LEASE_TTL_MS,
+    );
+    expect(reclaim.resumed.length).toBe(1);
+    expect(reclaim.resumed[0].id).toBe(finalized.id);
+
+    const resumed = getCohortRunById(finalized.id)!;
+    const summary = await processCohort(resumed, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(1);
+
+    // The projection committed: curation data + item completed + child
+    // terminal-success together, all referencing the same child run.
+    const stored = findItemById(items[0].id)!;
+    expect(stored.stageStatus).toBe('completed');
+    expect(stored.curationData).not.toBeNull();
+    const childId = stored.curationData!.classificationRunId!;
+    expect(childId).toBe(String(childAfterCrash!.id));
+    expect(getRun(childId)!.status).toBe('completed');
+    expect(getCohortRunById(finalized.id)!.status).toBe('completed');
+  });
+
+  it('R3 recovery skip rule: a terminal-success child WITHOUT a committed projection is re-executed and committed atomically', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // Simulate the PRE-Commit-B crash: the old prepared mode completed the
+    // child immediately after the pipeline but crashed BEFORE writing
+    // curation_data_json / completing the item.
+    const child = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(finalized.id, items[0].id) as Record<string, any>;
+    completeRun(String(child.id), 'completed');
+
+    // Resume: the child is terminal-success BUT no committed projection exists
+    // (no curation data referencing it, item not completed) → the recovery skip
+    // rule does NOT apply → the member is re-executed and committed atomically
+    // under a NEW child (inheriting the freeze-persisted snapshot refs).
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(1);
+
+    const stored = findItemById(items[0].id)!;
+    expect(stored.stageStatus).toBe('completed');
+    expect(stored.curationData).not.toBeNull();
+    // The committed projection references a NEW child (the old terminal child
+    // was never re-used for execution).
+    expect(stored.curationData!.classificationRunId).not.toBe(String(child.id));
+    const committedChild = getRun(stored.curationData!.classificationRunId!)!;
+    expect(committedChild.status).toBe('completed');
+    expect(String(committedChild.cohortRunId)).toBe(finalized.id);
+    const children = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at ASC',
+    ).all(finalized.id, items[0].id) as Array<Record<string, any>>;
+    expect(children.length).toBe(2);
+  });
+
+  it('R3 recovery skip rule: a fully committed member (child terminal-success + matching curation data + item completed) is skipped on resume', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb' }),
+    });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // Execute member 1 fully, then crash before member 2's commit (simulated
+    // via the member-crash seam firing on the SECOND member's pipeline
+    // completion — member 1's atomic commit already landed).
+    let memberPipelines = 0;
+    await expect(processCohort(finalized, wsPath, workspaceId, {
+      afterMemberPipeline: () => {
+        memberPipelines++;
+        if (memberPipelines >= 2) {
+          throw new MemberCommitCrashSimulationError('simulated crash after member 1 commit');
+        }
+      },
+    })).rejects.toThrow('simulated crash after member 1 commit');
+    expect(memberPipelines).toBe(2);
+
+    // Member 1 committed fully; member 2 has no committed projection.
+    const first = findItemById(items[0].id)!;
+    const second = findItemById(items[1].id)!;
+    expect(first.stageStatus).toBe('completed');
+    expect(first.curationData).not.toBeNull();
+    expect(second.stageStatus).toBe('pending');
+    expect(second.curationData).toBeNull();
+
+    // Resume the same run: member 1 is skipped by the recovery skip rule (its
+    // child is terminal-success + curation data references it + item completed);
+    // member 2 is re-executed and committed atomically.
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(2);
+    const firstAfter = findItemById(items[0].id)!;
+    expect(firstAfter.stageStatus).toBe('completed');
+    const committed = getRun(first.curationData!.classificationRunId!)!;
+    expect(['completed', 'completed_with_abstentions']).toContain(committed.status);
+    expect(committed.status).not.toBe('failed');
+    const secondAfter = findItemById(items[1].id)!;
+    expect(secondAfter.stageStatus).toBe('completed');
+    expect(secondAfter.curationData).not.toBeNull();
+    // The child run for member 2 was never completed before its commit.
+    const secondChild = getRun(secondAfter.curationData!.classificationRunId!)!;
+    expect(['completed', 'completed_with_abstentions']).toContain(secondChild.status);
+  });
+});
 
 // Reference the exported execution types so the module graph is exercised.
 export type { OnboardingItem };

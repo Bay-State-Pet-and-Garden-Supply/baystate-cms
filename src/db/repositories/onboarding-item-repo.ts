@@ -674,7 +674,9 @@ export function updateItemExtractionData(id: string, extractionDataJson: string)
   ).run(extractionDataJson, now, id);
 }
 
-function updateItemCurationData(id: string, curationDataJson: string): void {
+/** Write the item's curation_data_json (used by the legacy worker and by the
+ *  cohort member-projection atomic commit — PR3 hardening Commit B / R3). */
+export function updateItemCurationData(id: string, curationDataJson: string): void {
   const db = getDb();
   const now = new Date().toISOString();
   db.query(

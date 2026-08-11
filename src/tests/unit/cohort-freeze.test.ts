@@ -45,6 +45,8 @@ import {
   runFrozenOcrPullForward,
   computeOcrExecutionDigest,
   HeartbeatLostError,
+  buildFrozenItem,
+  buildFrozenProductLineContext,
 } from '../../onboarding/cohort-curator';
 import type { PreparedCohortContext } from '../../onboarding/cohort-curator';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
@@ -551,14 +553,18 @@ describe('two-phase freeze service (PR3 M2)', () => {
     const ocrEvidence = evidence.filter(e => e.metadata && (e.metadata as any).provenance === 'packaging_ocr');
     expect(ocrEvidence.length).toBeGreaterThan(0);
     expect(ocrEvidence.some(e => String(e.value) === 'Package OCR Name')).toBe(true);
-    // The frozen child run completed — never a second running run. Some stages
-    // may abstain in the fixture config, so both completion statuses are valid.
+    // The frozen child run STAYS RUNNING (PR3 hardening, Commit B / R3): the
+    // prepared pipeline no longer completes the child — the terminal child
+    // write is part of the atomic member-projection commit in processCohort
+    // (curation_data_json + item stage + child terminal in ONE transaction).
+    // Exactly ONE child (the freeze-created run) exists; no second run was
+    // created.
     const childStatus = getRun(String(child.id))!.status;
-    expect(['completed', 'completed_with_abstentions']).toContain(childStatus);
+    expect(childStatus).toBe('running');
     const runningChildren = getDb().query(
       "SELECT COUNT(*) AS cnt FROM classification_runs WHERE cohort_run_id = ? AND status = 'running'",
     ).get(run.id) as { cnt: number };
-    expect(Number(runningChildren.cnt)).toBe(0);
+    expect(Number(runningChildren.cnt)).toBe(1);
   });
 
   it('verifyCohortRunFrozen: NULL-hash freezing run resumes vacuously; a frozen run drifts when evidence changed', async () => {
@@ -828,6 +834,125 @@ describe('OCR pull-forward exactly-once (PR3 M2)', () => {
 
 // Reference the projection member type so the type-level contract is exercised.
 export type { ExecutionEvidenceProjectionMemberV1 };
+
+describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
+  it('R2 buildFrozenItem: constructs from the frozen projection only — identity from live, semantics from projection, authoritative null sourceUrl stays null', () => {
+    const { workspaceId } = newWorkspace();
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    const cohort = cohorts[0];
+    const members = getCohortMembers(cohort.id);
+    const sources = new Map(items.map(item => [item.id, item.sourceUrl ?? '']));
+    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
+    const member = projection.members[0];
+
+    // MUTATE the live item after freeze: name/brand_hint/source_url/extraction.
+    const live = findItemById(items[0].id)!;
+    const mutatedExt = JSON.parse(JSON.stringify(live.extractionData));
+    mutatedExt.title = 'MUTATED TITLE';
+    mutatedExt.description = 'MUTATED DESC';
+    mutatedExt.distributorEvidenceAttemptIds = ['att-mutated'];
+    const mutatedLive: OnboardingItem = {
+      ...live,
+      name: 'MUTATED NAME',
+      brandHint: 'MUTATED BRAND',
+      sourceUrl: 'https://brand.example.com/mutated',
+      extractionData: mutatedExt,
+    };
+
+    const frozen = buildFrozenItem(member, mutatedLive);
+
+    // Identity is pipeline state from the live item.
+    expect(frozen.id).toBe(mutatedLive.id);
+    expect(frozen.upc).toBe(mutatedLive.upc);
+    expect(frozen.batchId).toBe(mutatedLive.batchId);
+    expect(frozen.rowNumber).toBe(mutatedLive.rowNumber);
+    expect(frozen.stage).toBe(mutatedLive.stage);
+    expect(frozen.stageStatus).toBe(mutatedLive.stageStatus);
+    // Semantic fields come from the frozen projection, never the live mutation.
+    expect(frozen.name).toBe(member.spreadsheetIdentity.name);
+    expect(frozen.expectedName).toBe(member.spreadsheetIdentity.expectedName);
+    expect(frozen.brandHint).toBe(member.spreadsheetIdentity.brandHint);
+    expect(frozen.price).toBe(member.spreadsheetIdentity.price);
+    expect(frozen.quantity).toBe(member.spreadsheetIdentity.quantity);
+    expect(frozen.sourceUrl).toBe(member.sourceUrl);
+    // extractionData is built PURELY from projection fields — no live spread.
+    expect(frozen.extractionData?.title).toBe(member.extraction.title);
+    expect(frozen.extractionData?.description).toBe(member.extraction.description);
+    expect(frozen.extractionData?.brand).toBe(member.extraction.brand);
+    expect(frozen.extractionData?.packagingOcrData?.productName).toBe(member.extraction.ocr.packagingOcrData?.productName);
+    expect((frozen.extractionData as any).distributorEvidenceAttemptIds).toBeUndefined();
+    expect((frozen.extractionData as any).ocrInputHash).toBe(member.extraction.ocr.ocrInputHash);
+    expect((frozen.extractionData as any).ocrExecutionDigest).toBe(member.extraction.ocr.ocrExecutionDigest ?? null);
+
+    // Authoritative null sourceUrl STAYS null even when the live value is set
+    // post-freeze — never `?? item.sourceUrl`.
+    const nullSource = { ...member, sourceUrl: null };
+    const frozenNull = buildFrozenItem(nullSource, { ...mutatedLive, sourceUrl: 'https://brand.example.com/post-freeze' });
+    expect(frozenNull.sourceUrl).toBeNull();
+  });
+
+  it('R2 buildFrozenProductLineContext: sibling context derived purely from the persisted cohort + frozen projections — a post-freeze sibling mutation is invisible', () => {
+    const { workspaceId } = newWorkspace();
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb' }),
+    });
+    const cohort = cohorts[0];
+    const members = getCohortMembers(cohort.id);
+    const sources = new Map(items.map(item => [item.id, item.sourceUrl ?? '']));
+    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
+
+    const ctx = buildFrozenProductLineContext(cohort, members, projection.members);
+    expect(ctx.productLineContext.groupId).toBe(cohort.groupKey);
+    expect(ctx.productLineContext.groupLabel).toBe(cohort.groupLabel);
+    expect(ctx.productLineContext.siblingNames).toHaveLength(2);
+    expect(ctx.productLineContext.siblingSkus).toHaveLength(2);
+    // Ordinal order (insertion), while projection.members are sorted by item id —
+    // compare as sets.
+    expect([...ctx.productLineContext.siblingSkus].sort()).toEqual(
+      projection.members.map(m => m.productSku).filter((sku): sku is string => sku !== null).sort(),
+    );
+    // webTitles from projection titles, ocrTitles from projection OCR.
+    for (const m of projection.members) {
+      expect(ctx.productLineContext.siblingWebTitles).toContain(m.extraction.title ?? '');
+    }
+    for (const m of projection.members) {
+      const ocrName = m.extraction.ocr.packagingOcrData?.productName?.trim();
+      if (ocrName) expect(ctx.productLineContext.siblingOcrTitles).toContain(ocrName);
+    }
+    expect(ctx.productLineItems).toHaveLength(2);
+    for (const line of ctx.productLineItems) {
+      const m = projection.members.find(member => member.productSku === line.sku)!;
+      expect(line.webTitle).toBe(m.extraction.title);
+      expect(line.description).toBe(m.extraction.description ?? '');
+      expect(line.brand).toBe(m.extraction.brand ?? m.spreadsheetIdentity.brandHint);
+    }
+    // Frozen member views carry frozen web/OCR titles (title-coordination input).
+    for (const frozenItem of ctx.frozenBatchItems) {
+      expect(frozenItem.extractionData?.title).toBe('Original Web Title');
+      expect(frozenItem.extractionData?.packagingOcrData?.productName).toBe('Package OCR Name');
+    }
+
+    // MUTATE a sibling's live extraction_data_json AFTER the freeze — the
+    // projection-derived context is byte-identical (a pure function of the
+    // persisted cohort + projections; no live reads at all).
+    const sibling = items.find(i => i.upc === '100000000002')!;
+    const live = findItemById(sibling.id)!;
+    const mutatedSibling = JSON.parse(JSON.stringify(live.extractionData));
+    mutatedSibling.title = 'MUTATED SIBLING TITLE';
+    mutatedSibling.packagingOcrData = { ...mutatedSibling.packagingOcrData, productName: 'MUTATED SIBLING OCR' };
+    updateItemExtractionData(sibling.id, JSON.stringify(mutatedSibling));
+
+    const ctxAfter = buildFrozenProductLineContext(cohort, getCohortMembers(cohort.id), projection.members);
+    expect(ctxAfter.productLineContext.siblingWebTitles).toEqual(ctx.productLineContext.siblingWebTitles);
+    expect(ctxAfter.productLineContext.siblingOcrTitles).toEqual(ctx.productLineContext.siblingOcrTitles);
+    expect(ctxAfter.productLineItems.map(l => l.webTitle)).toEqual(ctx.productLineItems.map(l => l.webTitle));
+    expect(ctxAfter.productLineContext.siblingWebTitles).not.toContain('MUTATED SIBLING TITLE');
+    expect(ctxAfter.productLineContext.siblingOcrTitles).not.toContain('MUTATED SIBLING OCR');
+  });
+});
 
 describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
   it('R5: a cancelled pre-freeze run is NOT a vacuous match — reclaim supersedes it so the slot reopens', async () => {
