@@ -482,6 +482,73 @@ describe('resolveCohortProductType', () => {
     expect(resolution.perMember[0].isAbstention).toBe(true);
     expect(resolution.perMember[0].productTypeId).toBeNull();
   });
+
+  it('LLM label result maps to the canonical option VALUE (BLOCKER fix): a label id never reaches the aggregation as an id', () => {
+    // Deterministic match absent (neutral evidence) -> the LLM fallback is
+    // applied. llmRankOptions returns the option LABEL 'Dry Dog Food'; the
+    // member result must carry the canonical VALUE 'dry-dog-food' so a
+    // deterministic+LLM mix matching the same type is coherent, never falsely
+    // conflicted.
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        // LLM member: neutral evidence, LLM picks the 'Dry Dog Food' LABEL.
+        memberInput(makeMemberProjection({ itemId: 'item-llm', name: 'Purina Pro Plan Dog Food Chicken 5 lb' }), TYPE_PRODUCT_TYPES),
+        // Deterministic member: 'dry' present -> confident keyword match.
+        memberInput(makeMemberProjection({ itemId: 'item-kw', name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }), TYPE_PRODUCT_TYPES),
+      ],
+      memberLlmResults: [
+        { productTypeId: 'Dry Dog Food', confidence: 0.8 },
+        null,
+      ],
+    });
+    expect(resolution.outcome).toBe('coherent');
+    if (resolution.outcome !== 'coherent') return;
+    // The persisted id is the canonical value, never the display label.
+    expect(resolution.productTypeId).toBe('dry-dog-food');
+    expect(resolution.confidence).toBeCloseTo(0.8, 4);
+    const llmMember = resolution.perMember[0];
+    expect(llmMember.isAbstention).toBe(false);
+    expect(llmMember.productTypeId).toBe('dry-dog-food');
+    expect(llmMember.source).toBe('llm');
+    expect(resolution.perMember[1].source).toBe('keyword');
+    expect(resolution.contradictingEvidenceIds).toEqual([]);
+  });
+
+  it('an LLM result whose label maps to NO frozen option abstains (fail closed — never an id from an unknown label)', () => {
+    // Deterministic match absent; the LLM returns a label outside the frozen
+    // options. The member must abstain rather than contribute a guessed id.
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        memberInput(makeMemberProjection({ itemId: 'item-llm', name: 'Purina Pro Plan Dog Food Chicken 5 lb' }), TYPE_PRODUCT_TYPES),
+      ],
+      memberLlmResults: [
+        { productTypeId: 'Premium Wet Cat Food', confidence: 0.8 },
+      ],
+    });
+    expect(resolution.outcome).toBe('abstained');
+    expect(resolution.productTypeId).toBeNull();
+    expect(resolution.perMember[0].isAbstention).toBe(true);
+    expect(resolution.perMember[0].productTypeId).toBeNull();
+  });
+
+  it('an LLM result that already carries the canonical VALUE passes through unchanged', () => {
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        memberInput(makeMemberProjection({ itemId: 'item-llm', name: 'Purina Pro Plan Dog Food Chicken 5 lb' }), TYPE_PRODUCT_TYPES),
+      ],
+      memberLlmResults: [
+        { productTypeId: 'dry-dog-food', confidence: 0.8 },
+      ],
+    });
+    expect(resolution.outcome).toBe('coherent');
+    if (resolution.outcome !== 'coherent') return;
+    expect(resolution.productTypeId).toBe('dry-dog-food');
+    expect(resolution.perMember[0].source).toBe('llm');
+    expect(resolution.perMember[0].productTypeId).toBe('dry-dog-food');
+  });
 });
 
 // ─── C3b: validateCohortFamilyInvariants ─────────────────────────────────────

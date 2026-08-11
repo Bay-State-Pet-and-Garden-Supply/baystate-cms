@@ -32,7 +32,7 @@ import {
 } from '../../db/repositories/classification-cohort-run-repo';
 import { createRun, getRun } from '../../db/repositories/classification-run-repo';
 import { upsertConfigSnapshot, syncConfigToCache } from '../../db/repositories/classification-config-repo';
-import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import { upsertApiKey, deleteApiKey } from '../../db/repositories/api-key-repo';
 import { saveClassificationConfig, loadClassificationConfig, loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
 import { generateCandidate, buildFocusedFiles } from '../../classification/config-generator';
 import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
@@ -170,10 +170,11 @@ function saveV1ConfigWithProductTypes(
  * targets are disabled so the run-start readiness gate passes without a
  * verified Page import; `store/field-registry.json` attests the mapped Catalog
  * Fields; a real catalog-evidence artifact + git commit satisfy the active
- * catalog binding checks.
+ * catalog binding checks. `seed` defaults to the reviewed Bay State seed;
+ * tests may pass a cloned/modified seed (e.g. id≠label Product Type options).
  */
-function writeActiveV2Bundle(wsPath: string): { bundle: ReturnType<typeof generateCandidate>['bundle']; xmlFields: string[] } {
-  const candidate = generateCandidate(BayStatePetGardenSeed, EVIDENCE);
+function writeActiveV2Bundle(wsPath: string, seed: typeof BayStatePetGardenSeed = BayStatePetGardenSeed): { bundle: ReturnType<typeof generateCandidate>['bundle']; xmlFields: string[] } {
+  const candidate = generateCandidate(seed, EVIDENCE);
   const bundle = candidate.bundle;
   const xmlFields = [...new Set(bundle.attributeMappings.map(mapping => mapping.catalogField))];
   fs.writeFileSync(
@@ -231,6 +232,42 @@ function writeActiveV2Bundle(wsPath: string): { bundle: ReturnType<typeof genera
     fs.writeFileSync(path.join(dir, name), content);
   }
   return { bundle: { ...adjusted, manifest }, xmlFields };
+}
+
+/**
+ * The reviewed Bay State seed CLONED with Product Type options where the id
+ * differs from the label ({ value: 'dry-dog-food', label: 'Dry Dog Food' })
+ * and a model policy that resolves a protected local ollama route (needed to
+ * exercise a SUCCESSFUL run-bound `product_type_ranking` LLM fallback).
+ * Everything else (attributes, mappings, curation targets, brands, data
+ * sharing) stays from the reviewed seed so generation/validation passes.
+ */
+function llmTypeFallbackSeed(): typeof BayStatePetGardenSeed {
+  const seed: typeof BayStatePetGardenSeed = JSON.parse(JSON.stringify(BayStatePetGardenSeed));
+  seed.productTypes = [
+    { id: 'dry-dog-food', name: 'Dry Dog Food', description: 'Dry food for dogs.' },
+    { id: 'dry-cat-food', name: 'Dry Cat Food', description: 'Dry food for cats.' },
+  ];
+  seed.profileTemplates = [
+    {
+      id: 'pet-food',
+      name: 'Pet Food',
+      productTypeIds: ['dry-dog-food', 'dry-cat-food'],
+      attributes: [
+        { attributeId: 'food-form', required: false, cardinality: 'single' as const },
+        { attributeId: 'flavor', required: false, cardinality: 'single' as const },
+        { attributeId: 'species', required: false, cardinality: 'single' as const },
+        { attributeId: 'life-stage', required: false, cardinality: 'single' as const },
+        { attributeId: 'breed-size', required: false, cardinality: 'single' as const },
+        { attributeId: 'dietary-features', required: false, cardinality: 'single' as const },
+        { attributeId: 'health-benefits', required: false, cardinality: 'single' as const },
+        { attributeId: 'nutrition', required: false, cardinality: 'single' as const },
+        { attributeId: 'product-type', required: false, cardinality: 'single' as const },
+        { attributeId: 'product-cross-sell', required: false, cardinality: 'single' as const },
+      ],
+    },
+  ];
+  return seed;
 }
 
 function settledExtraction(overrides: Record<string, any> = {}): Record<string, any> {
@@ -1642,6 +1679,84 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
   });
 
+  it('BLOCKER fix: a SUCCESSFUL run-bound LLM fallback persists the canonical id (label->value), records DECISION-A provenance on the member child run, and a deterministic+LLM mix matching the same type is NOT falsely conflicted', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // Active v2 bundle whose Product Type options have id != label
+    // ({value:'dry-dog-food', label:'Dry Dog Food'}) and whose model policy
+    // resolves a protected local ollama route for `product_type_ranking`.
+    const { bundle } = writeActiveV2Bundle(wsPath, llmTypeFallbackSeed());
+    upsertConfigSnapshot(workspaceId, bundle);
+
+    // Member 1: shared-family name WITHOUT the 'dry' discriminator (dog/food
+    // only → 2/3 token match, below the floor) → the run-bound LLM ranker
+    // fallback fires. Member 2: the same family with the 'dry' token in its
+    // web title → confident deterministic match. Both resolve to the SAME
+    // type — the mix must be coherent, never falsely conflicted.
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb', title: 'Purina Pro Plan Dry Dog Food 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    // The protected route resolves to the configured ollama provider
+    // (loopback endpoint + credential row); the transport is stubbed to
+    // return the ranker's JSON selecting the 'Dry Dog Food' LABEL.
+    // The shared test DB may carry an 'ollama_vlm' row from an earlier test —
+    // delete it so the freeze's OCR pull-forward settles `disabled` (no VLM
+    // transport) and the ONLY stubbed transport is the LLM ranker call.
+    deleteApiKey('ollama_vlm');
+    upsertApiKey('ollama', 'test-key', 'http://127.0.0.1:11434', 'qwen2.5vl:latest');
+    const originalFetch = globalThis.fetch;
+    let rankerTransports = 0;
+    globalThis.fetch = (async () => {
+      rankerTransports++;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ values: ['Dry Dog Food'], confidence: 0.8 }) } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+      const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+      expect(finalized.status).toBe('running');
+      // BLOCKER fix: the persisted execution id is the canonical option VALUE
+      // ('dry-dog-food'), never the LLM label ('Dry Dog Food').
+      expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+      // The deterministic (member 2) + LLM (member 1) mix matching the same
+      // type is NOT falsely conflicted — storing the label as the id would
+      // have produced two distinct ids ('dry-dog-food' vs 'Dry Dog Food').
+      expect(finalized.productTypeOutcome).toBe('coherent');
+      expect(finalized.productTypeConfidence).toBeCloseTo(0.8, 4);
+      expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
+
+      // DECISION-A provenance: exactly one `product_type_ranking` model-call
+      // row, bound to the LLM member's CHILD run (not the parent).
+      expect(rankerTransports).toBe(1);
+      const llmMember = items.find(i => i.upc === '100000000001')!;
+      const childRun = getDb().query(
+        'SELECT id FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      ).get(finalized.id, llmMember.id) as { id: string } | undefined;
+      expect(childRun).toBeTruthy();
+      const calls = getDb().query(
+        'SELECT run_id, operation, status FROM classification_model_calls WHERE operation = ?',
+      ).all('product_type_ranking') as Array<{ run_id: string; operation: string; status: string }>;
+      expect(calls).toHaveLength(1);
+      expect(calls[0].run_id).toBe(childRun!.id);
+      expect(calls[0].status).toBe('success');
+      // Member 2's confident deterministic match never invoked the ranker.
+      const secondChild = getDb().query(
+        'SELECT id FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      ).get(finalized.id, items.find(i => i.upc === '100000000002')!.id) as { id: string } | undefined;
+      expect(getDb().query(
+        'SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE run_id = ?',
+      ).get(secondChild!.id) as { cnt: number }).toMatchObject({ cnt: 0 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('flag OFF: freeze is byte-identical — all PR4 columns NULL and zero model calls', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveV1Config(workspaceId, wsPath);
@@ -1667,7 +1782,7 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     expect(Number(after.cnt)).toBe(Number(before.cnt));
   });
 
-  it('write-once: a pre-written execution type is never overwritten by the freeze CAS (re-entrant path)', async () => {
+  it('write-once: a pre-written execution type matching the fresh resolution is preserved (re-entrant path finalizes)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveV1Config(workspaceId, wsPath);
     createReadyCohort(workspaceId, {
@@ -1677,24 +1792,68 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
 
     const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
-    // The type slot is already taken (an earlier freeze wrote it and the run
-    // was reclaimed mid-freeze — the write-once CAS slot guard is the
-    // backstop). A re-entrant freeze must NOT overwrite it.
+    // The type slot is already taken by the SAME tuple a prior freeze attempt
+    // would have resolved (a crash after the write, before the transition).
+    // The write-once CAS slot guard is the backstop: a re-entrant freeze must
+    // NOT overwrite it — and because the stored tuple equals the fresh
+    // resolution, the shared semantic commit verifies and finalizes.
     expect(writeExecutionProductType(run.id, 'worker-a', {
-      executionProductTypeId: 'prewritten-type',
-      productTypeConfidence: 0.55,
+      executionProductTypeId: 'dry-dog-food',
+      productTypeConfidence: 0.8,
       productTypeOutcome: 'coherent',
     })).toBe(true);
 
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('running');
     // The freeze's own writeExecutionProductType CAS no-oped — the original
-    // type is preserved even though the fresh resolution was coherent.
-    expect(finalized.executionProductTypeId).toBe('prewritten-type');
-    expect(finalized.productTypeConfidence).toBe(0.55);
+    // type is preserved (stored tuple == fresh resolution → the no-op write
+    // verification passes and the run finalizes).
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    expect(finalized.productTypeConfidence).toBe(0.8);
     expect(finalized.productTypeOutcome).toBe('coherent');
     // The membership hash still finalizes (its slot was free).
     expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
+  });
+
+  it('mismatch-rejection: a prewritten type that differs from the fresh resolution is NEVER blessed — freeze refuses to finalize/transition', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // Two valid configured options; the member evidence resolves to
+    // dry-dog-food but the prewritten tuple claims dry-cat-food — an
+    // incoherent shared semantic state that must not execute.
+    saveV1ConfigWithProductTypes(workspaceId, wsPath, [
+      { id: 'dry-dog-food', name: 'Dry Dog Food' },
+      { id: 'dry-cat-food', name: 'Dry Cat Food' },
+    ]);
+    createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    // A different VALID option than the fresh resolution ('dry-dog-food').
+    expect(writeExecutionProductType(run.id, 'worker-a', {
+      executionProductTypeId: 'dry-cat-food',
+      productTypeConfidence: 0.8,
+      productTypeOutcome: 'coherent',
+    })).toBe(true);
+
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    // Fail-closed: the run NEVER transitions to `running` — the incoherent
+    // prewritten tuple is superseded (drift path) so execution never starts
+    // from it, and the prewritten values are preserved (never overwritten).
+    expect(finalized.status).not.toBe('running');
+    expect(finalized.status).toBe('superseded');
+    expect(finalized.supersededAt).not.toBeNull();
+    expect(finalized.errorMessage).toContain('execution_product_type_id');
+    expect(finalized.executionProductTypeId).toBe('dry-cat-food');
+    expect(finalized.productTypeConfidence).toBe(0.8);
+    expect(finalized.productTypeOutcome).toBe('coherent');
+    // The frozen membership hash was rolled back with the aborted transaction
+    // (nothing was finalized).
+    expect(finalized.finalMembershipHash).toBeNull();
+    // The cohort stays ready — the next claim creates a fresh run.
+    expect(getCohortById(finalized.cohortId)!.status).toBe('ready');
   });
 
   it('ownership lost mid-freeze: the stale owner writes no-op — the run stays with the new owner and all PR4 columns stay NULL', async () => {

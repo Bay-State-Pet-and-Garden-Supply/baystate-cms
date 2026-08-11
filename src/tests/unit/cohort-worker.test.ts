@@ -1037,7 +1037,110 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
       expect(deps[0].dependencyKind).toBe('execution_product_type');
       expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
     }
-    expect(dependencyRowCount(workspaceId)).toBe(proposals.length);
+    // PR4 review fix (SHOULD-FIX 3): EVERY persisted proposal row of the
+    // child run — including any row left over from the pre-crash attempt — is
+    // stamped. Left-join every child-run proposal against its dependency rows
+    // and assert zero orphans.
+    const childRunId = stored.curationData!.classificationRunId!;
+    const allChildProposals = getDb().query(
+      'SELECT id FROM classification_proposals WHERE run_id = ?',
+    ).all(childRunId) as Array<{ id: string }>;
+    expect(allChildProposals.length).toBeGreaterThan(0);
+    const unstamped = getDb().query(
+      `SELECT p.id FROM classification_proposals p
+       LEFT JOIN classification_proposal_dependencies d
+         ON d.proposal_id = p.id AND d.dependency_kind = 'execution_product_type'
+       WHERE p.run_id = ? AND d.id IS NULL`,
+    ).all(childRunId);
+    expect(unstamped).toHaveLength(0);
+    expect(dependencyRowCount(workspaceId)).toBe(allChildProposals.length);
+  });
+
+  it('in-transaction seam: dependency rows + item projection + child terminal status are all VISIBLE inside the member commit (before it commits)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    // The seam fires INSIDE the member-projection transaction, after the
+    // dependency rows are inserted. Reads on the same connection must observe
+    // the uncommitted writes: dependency rows, the item projection
+    // (curation_data_json + stageStatus), and the child terminal status.
+    let observed: {
+      depCount: number;
+      itemStageStatus: string | null;
+      curationDataRunId: string | null;
+      childStatus: string | null;
+    } | null = null;
+    const summary = await processCohort(finalized, wsPath, workspaceId, {
+      afterMemberProjectionDependencyInsert: () => {
+        const item = findItemById(items[0].id)!;
+        const childId = item.curationData?.classificationRunId ?? null;
+        observed = {
+          depCount: dependencyRowCount(workspaceId),
+          itemStageStatus: item.stageStatus,
+          curationDataRunId: childId,
+          childStatus: childId ? getRun(childId)!.status : null,
+        };
+      },
+    });
+    expect(summary.parentStatus).toBe('completed');
+    expect(observed).not.toBeNull();
+    // Inside the transaction the dependency rows already exist …
+    expect(observed!.depCount).toBeGreaterThan(0);
+    // … the item projection is already committed-in-transaction (curation
+    // data referencing the child + stage completed) …
+    expect(observed!.itemStageStatus).toBe('completed');
+    expect(observed!.curationDataRunId).not.toBeNull();
+    // … and the child run is already terminal.
+    expect(['completed', 'completed_with_abstentions']).toContain(observed!.childStatus as string);
+    // After the commit the same state is durable (nothing rolled back).
+    const stored = findItemById(items[0].id)!;
+    expect(stored.stageStatus).toBe('completed');
+    expect(dependencyRowCount(workspaceId)).toBe(observed!.depCount);
+    expect(getRun(observed!.curationDataRunId!)!.status).toBe(observed!.childStatus!);
+  });
+
+  it('in-transaction seam throw rolls EVERYTHING back: zero dependency rows, item not completed, child still running', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    // A throw from the in-transaction seam aborts the whole member commit: the
+    // transaction rolls back the dependency rows, the item projection, and the
+    // child terminal write together.
+    await expect(processCohort(finalized, wsPath, workspaceId, {
+      afterMemberProjectionDependencyInsert: () => {
+        throw new MemberCommitCrashSimulationError('simulated crash inside the member-projection transaction');
+      },
+    })).rejects.toThrow('simulated crash inside the member-projection transaction');
+
+    // EVERYTHING rolled back: zero dependency rows, item not completed (no
+    // curation data, stage still pending), child still running.
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+    const item = findItemById(items[0].id)!;
+    expect(item.stageStatus).toBe('pending');
+    expect(item.curationData).toBeNull();
+    const childRow = getDb().query(
+      'SELECT id, status FROM classification_runs WHERE cohort_run_id = ?',
+    ).get(finalized.id) as { id: string; status: string } | undefined;
+    expect(childRow).toBeTruthy();
+    expect(childRow!.status).toBe('running');
   });
 
   it('flag OFF: member runs record ZERO dependency rows even though proposals are created (byte-identical)', async () => {
@@ -1144,19 +1247,22 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
 
     const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
     // Write the type columns DIRECTLY via the C2 primitive with an EXACT
-    // confidence — the freeze's own write-once CAS no-ops, so the stamped hash
-    // is derived from these exact values (no float-formatting ambiguity).
+    // confidence matching the fresh resolution (0.8 — the deterministic
+    // keyword match for 'Dry Dog Food'); the freeze's own write-once CAS
+    // no-ops, the stored tuple verification passes (same resolved tuple), and
+    // the stamped hash is derived from these exact values (no float-formatting
+    // ambiguity).
     expect(writeExecutionProductType(run.id, 'worker-a', {
       executionProductTypeId: 'dry-dog-food',
-      productTypeConfidence: 0.75,
+      productTypeConfidence: 0.8,
       productTypeOutcome: 'coherent',
     })).toBe(true);
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('running');
     expect(finalized.executionProductTypeId).toBe('dry-dog-food');
-    expect(finalized.productTypeConfidence).toBe(0.75);
+    expect(finalized.productTypeConfidence).toBe(0.8);
 
-    const expectedHash = hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.75 });
+    const expectedHash = hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.8 });
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
     for (const item of items) {
@@ -1172,7 +1278,7 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     }
     // Deterministic: recomputing the same {id, confidence} yields the same
     // 64-hex digest — the future invalidation key is stable.
-    expect(hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.75 })).toBe(expectedHash);
+    expect(hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.8 })).toBe(expectedHash);
     expect(expectedHash).toMatch(/^[a-f0-9]{64}$/);
   });
 });
@@ -1202,6 +1308,13 @@ describe('PR4 C5 — shadow mode + additive view fields (issue #30)', () => {
 
     // Deterministic-only: the observer computes the SAME outcome the active
     // freeze would (coherent, keyword source) — but writes nothing.
+    // PR4 review fix (SHOULD-FIX 6): the COMPLETE raw run row is captured
+    // before the observation and deep-equal'd after — every column (status,
+    // lease, authority hashes, timestamps, error state) is untouched, not just
+    // the PR4 fields.
+    const rawBefore = getDb().query(
+      'SELECT * FROM classification_cohort_runs WHERE id = ?',
+    ).get(run.id) as Record<string, unknown>;
     const observations = observeCohortShadowTypeResolution(workspaceId, wsPath);
     expect(observations).toHaveLength(1);
     const observation = observations[0];
@@ -1215,8 +1328,13 @@ describe('PR4 C5 — shadow mode + additive view fields (issue #30)', () => {
       expect(member.source).toBe('keyword');
     }
 
-    // Write NOTHING: the run row is untouched (all PR4 columns NULL), zero
-    // dependency rows, zero model calls.
+    // Write NOTHING: the run row is untouched (ALL columns — complete raw row
+    // deep-equal, not just the PR4 columns), zero dependency rows, zero model
+    // calls.
+    const rawAfter = getDb().query(
+      'SELECT * FROM classification_cohort_runs WHERE id = ?',
+    ).get(run.id) as Record<string, unknown>;
+    expect(rawAfter).toEqual(rawBefore);
     const after = getCohortRunById(run.id)!;
     expect(after.executionProductTypeId).toBeNull();
     expect(after.productTypeConfidence).toBeNull();

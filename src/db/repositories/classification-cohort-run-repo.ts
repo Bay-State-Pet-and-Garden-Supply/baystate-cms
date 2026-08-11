@@ -282,11 +282,16 @@ export interface ExecutionProductTypeFields {
 /**
  * Write the cohort-level Execution Product Type onto a `freezing` run.
  * Write-once CAS: the UPDATE matches ONLY when the run is still `freezing`
- * AND claimed by `workerId` AND `execution_product_type_id` is still NULL —
- * a second write (id already set), a stale owner, or a run that already left
- * `freezing` is a no-op (false). Modeled on `freezeCohortRunAuthorities`.
- * No FK on `execution_product_type_id` (product types are config/bundle-
- * derived; `target_id` precedent is FK-free).
+ * AND claimed by `workerId` AND ALL THREE semantic slots are still NULL —
+ * `execution_product_type_id`, `product_type_confidence`, and
+ * `product_type_outcome`. A second write (any slot already set — including a
+ * prior abstain/conflict written via `writeProductTypeOutcomeOnly`), a stale
+ * owner, or a run that already left `freezing` is a no-op (false). The
+ * outcome-only guard closes the PR4 cross-path hole: a coherent write can
+ * never overwrite a previously write-once abstained/conflicted outcome, and
+ * vice versa. Modeled on `freezeCohortRunAuthorities`. No FK on
+ * `execution_product_type_id` (product types are config/bundle-derived;
+ * `target_id` precedent is FK-free).
  */
 export function writeExecutionProductType(
   runId: string,
@@ -296,7 +301,10 @@ export function writeExecutionProductType(
   const result = getDb().run(
     `UPDATE classification_cohort_runs
      SET execution_product_type_id = ?, product_type_confidence = ?, product_type_outcome = ?
-     WHERE id = ? AND claimed_by = ? AND status = 'freezing' AND execution_product_type_id IS NULL`,
+     WHERE id = ? AND claimed_by = ? AND status = 'freezing'
+       AND execution_product_type_id IS NULL
+       AND product_type_confidence IS NULL
+       AND product_type_outcome IS NULL`,
     [fields.executionProductTypeId, fields.productTypeConfidence, fields.productTypeOutcome, runId, workerId],
   );
   return result.changes > 0;
@@ -351,8 +359,18 @@ export function writeProductTypeOutcomeOnly(
  * `dependency_target_id` = the run's execution_product_type_id at proposal
  * creation, `dependency_value_hash` = hashCanonicalJson({executionProductTypeId,
  * productTypeConfidence}) — the future invalidation key, PR5+).
- * Workspace-scoped and FK fail-closed: an unknown `proposalId`/`workspaceId`
- * throws a FOREIGN KEY constraint error. Returns the new row id.
+ *
+ * IDEMPOTENT (PR4 review fix): `(proposal_id, dependency_kind)` is unique
+ * (`idx_classification_proposal_dependencies_unique`, schema v6), and the
+ * insert is a check-then-insert in the caller's transaction — a re-stamped
+ * row (e.g. the member commit re-executing after a crash-recovery resume
+ * re-stamps a proposal row persisted by a pre-crash attempt) returns the
+ * EXISTING row id without a second row. The unique index is the DB-level
+ * backstop: a concurrent duplicate insert fails closed (UNIQUE) rather than
+ * ever creating two rows. Workspace-scoped and FK fail-closed: a NEW row
+ * with an unknown `proposalId`/`workspaceId` throws a FOREIGN KEY constraint
+ * error.
+ * Returns the (existing or newly inserted) row id.
  */
 export function insertProposalDependency(input: {
   workspaceId: string;
@@ -361,8 +379,13 @@ export function insertProposalDependency(input: {
   dependencyTargetId: string;
   dependencyValueHash: string;
 }): string {
+  const db = getDb();
+  const existing = db.query(
+    'SELECT id FROM classification_proposal_dependencies WHERE proposal_id = ? AND dependency_kind = ?',
+  ).get(input.proposalId, input.dependencyKind) as { id: string } | undefined;
+  if (existing) return existing.id;
   const id = randomUUID();
-  getDb().run(
+  db.run(
     `INSERT INTO classification_proposal_dependencies
        (id, workspace_id, proposal_id, dependency_kind, dependency_target_id, dependency_value_hash, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,

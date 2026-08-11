@@ -233,3 +233,9 @@ CREATE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_proposal
   ON classification_proposal_dependencies(proposal_id);
 CREATE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_target
   ON classification_proposal_dependencies(dependency_target_id);
+-- PR4 review fix: one dependency row per (proposal, kind). The member commit
+-- stamps every proposal row belonging to the child run (including rows
+-- persisted by a pre-crash attempt) via an idempotent check-then-insert; this
+-- unique index is the race-safe backstop that makes a re-stamp a no-op.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_unique
+  ON classification_proposal_dependencies(proposal_id, dependency_kind);

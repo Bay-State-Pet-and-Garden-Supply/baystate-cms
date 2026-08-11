@@ -544,7 +544,8 @@ function resolveMemberResult(
   llmResult?: MemberLlmRankResult | null,
 ): PerMemberProductTypeResult {
   const evidence = evidenceFromProjection(member.projection);
-  const { match, packet } = scoreTypeMatch(evidence, resolveProductTypeOptions(member.memberSnapshot));
+  const options = resolveProductTypeOptions(member.memberSnapshot);
+  const { match, packet } = scoreTypeMatch(evidence, options);
   // LLM ranker fallback (PR4 C4a freeze integration, DECISION-A): applied ONLY
   // when the deterministic keyword match is absent or below the caller's
   // confidence floor — a confident deterministic match always wins, exactly
@@ -552,21 +553,58 @@ function resolveMemberResult(
   // fallback). The LLM result's own confidence still passes through the floor
   // gate below (a sub-floor LLM match counts as an abstention).
   const belowFloor = match.productTypeId === null || match.confidence === null || match.confidence < confidenceFloor;
+  // PR4 review fix (BLOCKER): `llmRankOptions` returns option LABELS, but the
+  // persisted execution Product Type id must be the option's canonical VALUE
+  // (pt.id). Map the LLM label back through the member's frozen options; no
+  // exact match ⇒ the member abstains (fail closed — never an id guessed from
+  // a display label). The freeze integration already canonicalizes, so an
+  // already-canonical id passes through unchanged.
   const effective = belowFloor && llmResult
-    ? { productTypeId: llmResult.productTypeId, confidence: llmResult.confidence, source: 'llm' as const }
+    ? mapLlmRankResultToMemberOption(llmResult, options)
     : match;
-  const isAbstention = effective.productTypeId === null || effective.confidence === null || effective.confidence < confidenceFloor;
+  // A null effective result (unmappable LLM label) is an abstention; a
+  // below-floor match/LLM confidence also counts as an abstention (the raw
+  // values stay visible for diagnostics).
+  const isAbstention = effective === null
+    || effective.productTypeId === null
+    || effective.confidence === null
+    || effective.confidence < confidenceFloor;
 
   return {
     onboardingItemId: member.projection.onboardingItemId,
     productSku: member.projection.productSku,
-    productTypeId: effective.productTypeId,
-    confidence: effective.confidence,
-    source: effective.source,
+    productTypeId: effective?.productTypeId ?? null,
+    confidence: effective?.confidence ?? null,
+    source: effective?.source ?? null,
     isAbstention,
     supportingEvidenceIds: isAbstention ? [] : packet.evidenceIds,
     contradictingEvidenceIds: [],
   };
+}
+
+/**
+ * Map a run-bound LLM ranker result back to the member's frozen Product Type
+ * option VALUE (pt.id). `llmRankOptions` prompts and normalizes exclusively
+ * against `option.label` (`curation-target-ranker.ts`); the stored
+ * `execution_product_type_id` must be the canonical `option.value`. An exact
+ * value match passes through (the freeze integration already canonicalizes);
+ * an exact label match maps to its value. No exact match → null: the member
+ * abstains (fail closed — a label outside the frozen options is never turned
+ * into an id).
+ */
+function mapLlmRankResultToMemberOption(
+  llmResult: MemberLlmRankResult,
+  options: ResolvedTargetOption[],
+): { productTypeId: string; confidence: number; source: 'llm' } | null {
+  const byValue = options.find(option => option.value === llmResult.productTypeId);
+  if (byValue) {
+    return { productTypeId: byValue.value, confidence: llmResult.confidence, source: 'llm' as const };
+  }
+  const byLabel = options.find(option => option.label === llmResult.productTypeId);
+  if (byLabel) {
+    return { productTypeId: byLabel.value, confidence: llmResult.confidence, source: 'llm' as const };
+  }
+  return null;
 }
 
 /**

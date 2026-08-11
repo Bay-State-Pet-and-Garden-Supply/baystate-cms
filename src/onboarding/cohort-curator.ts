@@ -695,6 +695,67 @@ function buildCohortProductTypeConflictReason(
 }
 
 /**
+ * Confidence equality with a tiny epsilon: `product_type_confidence` is a REAL
+ * column whose value may be re-derived from the keyword matcher's float
+ * arithmetic (`0.45 + score * 0.35`), so a re-stored value can differ from the
+ * freshly computed one in the last ulp. Genuinely different confidences are
+ * still caught (the epsilon is 1e-9).
+ */
+function confidenceCloseTo(a: number | null, b: number | null): boolean {
+  if (a === null || b === null) return a === b;
+  return Math.abs(a - b) <= 1e-9;
+}
+
+/**
+ * PR4 review fix (SHOULD-FIX 4): when a write-once shared-semantic write
+ * no-ops during freeze finalization, the run must NOT be blessed into
+ * `running` with a mismatched tuple. Reload the stored tuple and require it
+ * to equal the freshly resolved `{id, confidence, outcome}`; when
+ * `final_membership_hash` is already set it must equal the candidate
+ * membership hash (and for a conflicted outcome — which finalizes nothing —
+ * the hash slot must stay NULL). Any mismatch throws `CohortFreezeCasError`:
+ * the caller supersedes the run (fail-closed, no execution from an incoherent
+ * run; the cohort stays ready for a fresh claim).
+ */
+function assertStoredExecutionTypeMatches(
+  runId: string,
+  expected: { id: string | null; confidence: number | null; outcome: ExecutionProductTypeOutcome },
+  expectedFinalMembershipHash: string | null,
+): void {
+  const stored = getCohortRunById(runId);
+  if (!stored) {
+    throw new CohortFreezeCasError(`run ${runId} disappeared during the shared semantic commit.`);
+  }
+  if (stored.productTypeOutcome !== expected.outcome) {
+    throw new CohortFreezeCasError(
+      `run ${runId} already carries product_type_outcome '${stored.productTypeOutcome}' but the fresh resolution is '${expected.outcome}' — refusing to finalize an incoherent run.`,
+    );
+  }
+  if (stored.executionProductTypeId !== expected.id) {
+    throw new CohortFreezeCasError(
+      `run ${runId} already carries execution_product_type_id '${stored.executionProductTypeId}' but the fresh resolution is '${expected.id}' — refusing to finalize an incoherent run.`,
+    );
+  }
+  if (!confidenceCloseTo(stored.productTypeConfidence, expected.confidence)) {
+    throw new CohortFreezeCasError(
+      `run ${runId} already carries product_type_confidence ${stored.productTypeConfidence} but the fresh resolution is ${expected.confidence} — refusing to finalize an incoherent run.`,
+    );
+  }
+  const storedHash = stored.finalMembershipHash;
+  if (expectedFinalMembershipHash === null) {
+    if (storedHash !== null) {
+      throw new CohortFreezeCasError(
+        `run ${runId} already carries final_membership_hash ${storedHash} but the fresh resolution is conflicted — nothing may be finalized.`,
+      );
+    }
+  } else if (storedHash !== null && storedHash !== expectedFinalMembershipHash) {
+    throw new CohortFreezeCasError(
+      `run ${runId} already carries final_membership_hash ${storedHash} but the candidate membership hash is ${expectedFinalMembershipHash} — refusing to finalize an incoherent run.`,
+    );
+  }
+}
+
+/**
  * Freeze a claimed cohort for execution (the ONLY path to `freezing →
  * running`). Returns the run in its final state:
  * - `running` on success (authorities + snapshot persisted, transitioned);
@@ -945,7 +1006,19 @@ export async function freezeCohortForExecution(
               snapshot,
             });
             if (ranked && ranked.values.length > 0) {
-              memberTypeLlmResult = { productTypeId: ranked.values[0], confidence: ranked.confidence };
+              // PR4 review fix (BLOCKER): `llmRankOptions` prompts and
+              // normalizes exclusively against option LABELS; the persisted
+              // `execution_product_type_id` must be the option's canonical
+              // VALUE (pt.id). Map the returned label back through this
+              // member's FROZEN typeOptions; if no exact label maps the
+              // member abstains (fail closed — never an id guessed from a
+              // display label). `resolveCohortProductType` applies the same
+              // defensive mapping to its `memberLlmResults` input.
+              const llmLabel = ranked.values[0];
+              const matchedOption = typeOptions.find(option => option.label === llmLabel);
+              memberTypeLlmResult = matchedOption
+                ? { productTypeId: matchedOption.value, confidence: ranked.confidence }
+                : null;
             }
             // No valid LLM values / no LLM config / no frozen policy → the
             // member abstains (fail-closed).
@@ -1074,22 +1147,49 @@ export async function freezeCohortForExecution(
         if (typeResolution.outcome === 'coherent' || typeResolution.outcome === 'coherent_with_abstentions') {
           // Write-once CAS: a second write (re-entrant freeze / pre-written
           // run) is a no-op — an existing execution type is never overwritten.
-          writeExecutionProductType(run.id, workerId, {
+          const typeWritten = writeExecutionProductType(run.id, workerId, {
             executionProductTypeId: typeResolution.productTypeId,
             productTypeConfidence: typeResolution.confidence,
             productTypeOutcome: typeResolution.outcome,
           });
-          writeFinalMembershipHash(run.id, workerId, run.candidateMembershipHash);
+          const hashWritten = writeFinalMembershipHash(run.id, workerId, run.candidateMembershipHash);
+          // PR4 review fix (SHOULD-FIX 4): a no-op write must not bless a
+          // mismatched prewritten tuple as finalized. Reload the stored tuple
+          // and require it to equal the fresh resolution (+ the candidate
+          // membership hash when the hash slot is already taken); any
+          // mismatch throws CohortFreezeCasError and the run is superseded —
+          // it never transitions to `running` from an incoherent state.
+          if (!typeWritten || !hashWritten) {
+            assertStoredExecutionTypeMatches(
+              run.id,
+              {
+                id: typeResolution.productTypeId,
+                confidence: typeResolution.confidence,
+                outcome: typeResolution.outcome,
+              },
+              run.candidateMembershipHash,
+            );
+          }
         } else if (typeResolution.outcome === 'abstained') {
-          writeProductTypeOutcomeOnly(run.id, workerId, 'abstained');
+          const outcomeWritten = writeProductTypeOutcomeOnly(run.id, workerId, 'abstained');
           // Abstention still finalizes membership (no family invariant to
           // violate) — final membership = candidate membership.
-          writeFinalMembershipHash(run.id, workerId, run.candidateMembershipHash);
+          const hashWritten = writeFinalMembershipHash(run.id, workerId, run.candidateMembershipHash);
+          if (!outcomeWritten || !hashWritten) {
+            assertStoredExecutionTypeMatches(
+              run.id,
+              { id: null, confidence: null, outcome: 'abstained' },
+              run.candidateMembershipHash,
+            );
+          }
         } else {
           // Conflicted: record the outcome ONLY. The execution type id stays
           // NULL (never majority-forced) and final_membership_hash is NOT
           // written (nothing is finalized); the run completes `failed` below.
-          writeProductTypeOutcomeOnly(run.id, workerId, 'conflicted');
+          const outcomeWritten = writeProductTypeOutcomeOnly(run.id, workerId, 'conflicted');
+          if (!outcomeWritten) {
+            assertStoredExecutionTypeMatches(run.id, { id: null, confidence: null, outcome: 'conflicted' }, null);
+          }
         }
       }
 
@@ -1842,6 +1942,13 @@ export async function processCohort(
     /** Test-only crash seam (R3): fires after a member pipeline completes and
      *  before its atomic projection commit. Production callers never pass it. */
     afterMemberPipeline?: () => void | Promise<void>;
+    /** Test-only in-transaction seam (PR4 review SHOULD-FIX 5): fires INSIDE
+     *  the member-projection transaction after the dependency rows are
+     *  inserted but before the callback returns, so tests can observe the
+     *  uncommitted rows / item projection / child terminal status, or throw
+     *  to prove the whole member commit rolls back atomically. Production
+     *  callers never pass it. */
+    afterMemberProjectionDependencyInsert?: () => void;
   },
 ): Promise<CohortExecutionSummary> {
   if (run.status !== 'running') {
@@ -2041,11 +2148,16 @@ export async function processCohort(
       // recovery skip rule requires all three together. PR4 C4b dependency
       // metadata rows are stamped INSIDE this same transaction: when the
       // member executed under a coherent cohort Execution Product Type, every
-      // proposal the member pipeline created gets ONE
-      // `execution_product_type` dependency row. Written here (and only here)
-      // means the rows exist IFF the member projection commit exists — a crash
-      // before this transaction leaves zero rows, and a committed projection
-      // is never missing its dependencies.
+      // proposal of the child run gets ONE `execution_product_type` dependency
+      // row. Written here (and only here) means the rows exist IFF the member
+      // projection commit exists — a crash before this transaction leaves zero
+      // rows, and a committed projection is never missing its dependencies.
+      // PR4 review fix (SHOULD-FIX 3): the stamping targets EVERY proposal row
+      // belonging to the child run — including rows persisted by a pre-crash
+      // attempt (a crash seam can leave earlier-attempt proposals on the same
+      // child run) — not just the current attempt's curation-data list. The
+      // insert is idempotent ((proposal_id, dependency_kind) unique + a
+      // check-then-insert), so re-stamping is a no-op.
       const childTerminalStatus: 'completed' | 'completed_with_abstentions' =
         curationData.classificationProposals.some(p => p.proposalType === 'reviewable_abstention')
           ? 'completed_with_abstentions'
@@ -2060,16 +2172,23 @@ export async function processCohort(
             executionProductTypeId: execType.id,
             productTypeConfidence: execType.confidence,
           });
-          for (const proposal of curationData.classificationProposals) {
+          const childProposalRows = getDb().query(
+            'SELECT id FROM classification_proposals WHERE run_id = ?',
+          ).all(childRun.id) as Array<{ id: string }>;
+          for (const proposalRow of childProposalRows) {
             insertProposalDependency({
               workspaceId,
-              proposalId: proposal.id,
+              proposalId: proposalRow.id,
               dependencyKind: 'execution_product_type',
               dependencyTargetId: execType.id,
               dependencyValueHash,
             });
           }
         }
+        // Test-only in-transaction seam (PR4 review SHOULD-FIX 5): fires
+        // after the dependency rows are inserted, before the callback returns
+        // and before the transaction commits.
+        hooks?.afterMemberProjectionDependencyInsert?.();
       })();
       completedMembers++;
       if (childTerminalStatus === 'completed_with_abstentions') hasAbstentions = true;

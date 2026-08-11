@@ -689,6 +689,51 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     expect(getCohortRunById(run.id)!.productTypeOutcome).toBeNull();
   });
 
+  it('cross-path write-once: a coherent type write never overwrites a prior outcome-only write (abstain then type)', () => {
+    const wsId = newWorkspace();
+    setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+    // Path 1: an abstention wrote ONLY the outcome marker (id/confidence stay
+    // NULL by design).
+    expect(writeProductTypeOutcomeOnly(run.id, 'worker-a', 'abstained')).toBe(true);
+    expect(getCohortRunById(run.id)!.productTypeOutcome).toBe('abstained');
+
+    // Path 2: a later coherent resolution must NOT overwrite the write-once
+    // outcome — the CAS requires ALL THREE semantic slots to be NULL.
+    expect(writeExecutionProductType(run.id, 'worker-a', {
+      executionProductTypeId: 'type-1',
+      productTypeConfidence: 0.9,
+      productTypeOutcome: 'coherent',
+    })).toBe(false);
+    const after = getCohortRunById(run.id)!;
+    expect(after.productTypeOutcome).toBe('abstained');
+    expect(after.executionProductTypeId).toBeNull();
+    expect(after.productTypeConfidence).toBeNull();
+  });
+
+  it('cross-path write-once: an outcome-only write never overwrites a prior coherent type write (type then outcome)', () => {
+    const wsId = newWorkspace();
+    setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+    // Path 1: the shared semantic commit wrote the coherent tuple.
+    expect(writeExecutionProductType(run.id, 'worker-a', {
+      executionProductTypeId: 'type-1',
+      productTypeConfidence: 0.9,
+      productTypeOutcome: 'coherent',
+    })).toBe(true);
+    expect(getCohortRunById(run.id)!.productTypeOutcome).toBe('coherent');
+
+    // Path 2: an abstain/conflict outcome-only write must no-op — the
+    // outcome slot is taken by the coherent write (write-once).
+    expect(writeProductTypeOutcomeOnly(run.id, 'worker-a', 'conflicted')).toBe(false);
+    const after = getCohortRunById(run.id)!;
+    expect(after.productTypeOutcome).toBe('coherent');
+    expect(after.executionProductTypeId).toBe('type-1');
+    expect(after.productTypeConfidence).toBe(0.9);
+  });
+
   it('writeFinalMembershipHash is write-once, ownership-guarded, and status-guarded', () => {
     const wsId = newWorkspace();
     setupFamilyBatch(wsId);
@@ -794,13 +839,29 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     });
     expect(deps[0].createdAt).not.toBeNull();
 
-    // A second row lists in insertion order.
-    const dependencyId2 = insertProposalDependency({
+    // A second row with the SAME (proposal, kind) is idempotent: the unique
+    // (proposal_id, dependency_kind) index + INSERT OR IGNORE make the
+    // re-stamp a no-op and return the EXISTING row id (the member commit
+    // re-stamps proposals left over from a pre-crash attempt).
+    const dependencyIdAgain = insertProposalDependency({
       workspaceId: wsId,
       proposalId,
       dependencyKind: 'execution_product_type',
       dependencyTargetId: 'type-1',
       dependencyValueHash: 'g'.repeat(64),
+    });
+    expect(dependencyIdAgain).toBe(dependencyId);
+    expect(listDependenciesForProposal(proposalId).length).toBe(1);
+    expect(listDependenciesForProposal(proposalId)[0].dependencyValueHash).toBe('h'.repeat(64));
+
+    // A DIFFERENT dependency_kind is a distinct row (second row, insertion
+    // order preserved).
+    const dependencyId2 = insertProposalDependency({
+      workspaceId: wsId,
+      proposalId,
+      dependencyKind: 'reviewed_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'i'.repeat(64),
     });
     expect(listDependenciesForProposal(proposalId).length).toBe(2);
     expect(listDependenciesForProposal(proposalId)[1].id).toBe(dependencyId2);
@@ -814,11 +875,13 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
       dependencyValueHash: 'h'.repeat(64),
     })).toThrow(/FOREIGN KEY constraint failed/);
 
-    // Unknown workspace: FK fail-closed.
+    // Unknown workspace: FK fail-closed. A NEW (proposal, kind) pair is used
+    // so the check-then-insert cannot resolve to a pre-existing row — the
+    // genuine INSERT path surfaces the workspace FK violation.
     expect(() => insertProposalDependency({
       workspaceId: 'no-such-workspace',
       proposalId,
-      dependencyKind: 'execution_product_type',
+      dependencyKind: 'workspace_fk_check',
       dependencyTargetId: 'type-1',
       dependencyValueHash: 'h'.repeat(64),
     })).toThrow(/FOREIGN KEY constraint failed/);
