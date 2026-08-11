@@ -30,7 +30,7 @@
  *  7. immutability: superseding the run leaves the output rows untouched; a
  *     fresh claim/freeze creates a NEW run with NEW output rows.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi, mock } from 'bun:test';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -194,7 +194,11 @@ function mockCallLlmForTaskWithProvenance(
   };
 }
 
-vi.mock('../../onboarding/llm-client', () => ({
+// PR6 review round 2: Bun-native `mock.module` with `persist: false` — the mock
+// is scoped to THIS file and auto-restored after it completes, so co-running
+// with llm-client-task-routing / model-policy gateway suites in one `bun test`
+// invocation never leaks (Bun's vi.mock registry is shared per worker).
+mock.module('../../onboarding/llm-client', () => ({
   getLlmConfigForTask: () => mockGetLlmConfigForTask(),
   callLlmForTask: (task: string, prompt: string, systemPrompt: string, options: Record<string, any>) =>
     mockCallLlmForTask(task, prompt, systemPrompt, options),
