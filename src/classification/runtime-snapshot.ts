@@ -595,6 +595,62 @@ export function getModelExecutionPlanEntry(
   return snapshot.modelExecutionPlan.entries.find(e => e.operation === operation) ?? null;
 }
 
+/** Strip URL credentials before hashing — an OCR authority digest never bakes
+ *  credentials into even a digest. Deterministic for identical authorities. */
+function sanitizeUrlForDigest(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    // Not a URL — hash the raw string (still a digest, no plaintext leak).
+    return url;
+  }
+}
+
+/**
+ * OCR execution-authority digest (PR3 hardening, Commit A / R4 + A2):
+ * - v2 snapshots: `hashCanonicalJson({planDigest, ruleVersionsDigest})` over
+ *   the member snapshot's `evidence_extraction` model-execution-plan entry
+ *   (provider, model, locality, prompt/rule versions, frozen local-VLM route
+ *   WITHOUT credentials) plus `runtimeRuleVersions.digest`. The stored OCR is
+ *   only reusable when this digest matches the CURRENT snapshot's authority —
+ *   a model-policy / local-VLM-route change re-runs OCR under the new
+ *   authority.
+ * - v1 (legacy) snapshots: a deterministic legacy-authority digest,
+ *   `hashCanonicalJson({authorityKind:'v1', snapshotHash})`, bound to the
+ *   snapshot's content identity. A changed v1 config/evidence set changes the
+ *   snapshot hash and therefore the digest — legacy OCR is NEVER "unbound":
+ *   it is always executed under SOME authority digest (Commit A2 fail-closed).
+ * Returns null only for an impossible v2 snapshot with a missing plan/rules
+ * (the freeze fails closed on that); callers treat null as "never reuse".
+ */
+export function computeOcrExecutionDigest(snapshot: RuntimeClassificationSnapshot): string | null {
+  if (snapshot.schemaVersion !== 2) {
+    return hashCanonicalJson({ authorityKind: 'v1', snapshotHash: snapshot.snapshotHash });
+  }
+  const plan = snapshot.modelExecutionPlan;
+  const rules = snapshot.runtimeRuleVersions;
+  if (!plan || !rules) return null;
+  const entry = plan.entries.find(e => e.operation === 'evidence_extraction');
+  if (!entry) return null;
+  const planDigest = hashCanonicalJson({
+    operation: entry.operation,
+    stage: entry.stage,
+    provider: entry.provider,
+    model: entry.model,
+    locality: entry.locality,
+    fromOverride: entry.fromOverride,
+    promptTemplateVersion: entry.promptTemplateVersion,
+    ruleVersion: entry.ruleVersion,
+    localVlmBaseUrl: sanitizeUrlForDigest(entry.localVlmBaseUrl),
+    localVlmModel: entry.localVlmModel ?? null,
+  });
+  return hashCanonicalJson({ planDigest, ruleVersionsDigest: rules.digest });
+}
+
 /**
  * Build the durable model-call audit context for a run-bound protected call
  * from the frozen snapshot plan, FAILING CLOSED when the snapshot has no

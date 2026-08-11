@@ -85,6 +85,17 @@ export interface StageContext {
   /** Current run ID for recording results */
   runId: string;
   /**
+   * Optional ownership assertion injected by the cohort executor (PR3
+   * hardening C). When present, `runPipeline` invokes it IMMEDIATELY BEFORE
+   * every post-await persistence transaction / terminal update — a rejected
+   * assertion (claim lost to a reclaiming sibling) throws `HeartbeatLostError`
+   * and that persistence is SKIPPED, so a stale owner never writes run-scoped
+   * shared state (model calls / stage results / evidence / proposals) after
+   * ownership moves. Absent in legacy (non-cohort) invocations — zero behavior
+   * change.
+   */
+  assertHeld?: () => void;
+  /**
    * Optional product-line group context for sibling-aware processing.
    * Populated before name_consolidation when the item belongs to a
    * product line with sibling items in the same batch.

@@ -475,6 +475,12 @@ export async function curateItemWithPipeline(
       runId: run.id,
       configSnapshotRef,
       snapshot: runtimeSnapshot,
+      // PR3 hardening C (1a): the member pipeline asserts the parent claim
+      // immediately before EVERY post-await persistence transaction / terminal
+      // update (evidence/proposals/links/stage completion). A rejected
+      // assertion throws `HeartbeatLostError` and the persistence is skipped.
+      // Absent in legacy mode — zero behavior change.
+      assertHeld: preparedCohort?.assertOwnershipHeld,
       // Prepared-cohort mode: the evidence stage consumes the frozen member
       // projection instead of reading onboarding_items (amendment 4).
       cohortFrozenEvidence: cohortMode ? preparedCohort!.memberProjection : undefined,

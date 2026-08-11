@@ -25,6 +25,7 @@ import {
   listCohortRunsByCohort,
   cancelFreezingRun,
   reclaimExpiredCohortRuns,
+  getCohortSnapshotByHash,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
@@ -47,6 +48,7 @@ import { hashCanonicalJson } from '../../shared/stable-id';
 import type { ClassificationConfig } from '../../shared/schemas/classification';
 import type { InsertItemData } from '../../db/repositories/onboarding-item-repo';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
+import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
 import type { CurationCohort } from '../../shared/schemas/cohorts';
 
 let workspacePath: string;
@@ -225,6 +227,22 @@ function hasLegacyPerItemRuns(itemIds: string[]): boolean {
 /** Every classification run for these items must be a cohort-linked child. */
 function assertAllRunsCohortLinked(itemIds: string[]): void {
   expect(hasLegacyPerItemRuns(itemIds)).toBe(false);
+}
+
+/** Run-scoped shared-state row counts (fix 1c race assertions). */
+function tableCounts(): Record<string, number> {
+  const tables = [
+    'classification_model_calls',
+    'classification_stage_results',
+    'classification_evidence',
+    'classification_proposals',
+  ];
+  const counts: Record<string, number> = {};
+  for (const table of tables) {
+    const row = getDb().query(`SELECT COUNT(*) AS cnt FROM ${table}`).get() as { cnt: number };
+    counts[table] = Number(row.cnt);
+  }
+  return counts;
 }
 
 describe('OnboardingWorker Curation cohort integration (issue #30, PR3 M3)', () => {
@@ -553,6 +571,10 @@ describe('processCohort heartbeat hardening (issue #30, PR3 hardening Commit A)'
     // lease is expired and a sibling worker reclaims the run, exactly like a
     // real slow-call concurrent reclaim.
     let reclaimed = false;
+    // Run-scoped shared state snapshot AT the reclaim instant (fix 1c): after
+    // the abort the stale owner must not have added/updated a single row in
+    // the pipeline's persistence tables.
+    let tablesAtReclaim: Record<string, number> = {};
     await expect(processCohort(finalized, wsPath, workspaceId, {
       onPipelineInFlight: () => {
         if (reclaimed) return;
@@ -567,9 +589,16 @@ describe('processCohort heartbeat hardening (issue #30, PR3 hardening Commit A)'
         );
         expect(reclaim.resumed.length).toBe(1);
         expect(reclaim.resumed[0].id).toBe(finalized.id);
+        // Snapshot the persistence tables the moment ownership moved.
+        tablesAtReclaim = tableCounts();
       },
     })).rejects.toBeInstanceOf(HeartbeatLostError);
     expect(reclaimed).toBe(true);
+
+    // Fix 1c: the stale owner never persisted run-scoped shared state after
+    // the reclaim — model calls / stage results / evidence / proposals are
+    // row-count-identical to the reclaim instant.
+    expect(tableCounts()).toEqual(tablesAtReclaim);
 
     // The new owner's run remains ACTIVE (status running, claimed_by the
     // sibling): the stale abort path wrote NO terminal state onto it.
@@ -610,6 +639,30 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity, end-to-end)', 
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Chew Treats Chicken 5 lb' }),
       '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Chew Treats Beef 10 lb' }),
     });
+
+    // Fix 6: a REAL linked evidence attempt — created and LINKED to member A
+    // BEFORE the freeze (item.sourcingDecision.acceptedEvidenceAttemptIds
+    // references it), so the frozen projection carries the reference and the
+    // live-attempt gates have a genuinely consumable attempt if they regress.
+    const attemptId = randomUUID();
+    getDb().run(
+      `INSERT INTO onboarding_evidence_attempts (id, item_id, provider_id, lookup_upc, outcome, confidence, matched_fields_json, identity_json, created_at)
+       VALUES (?, ?, 'provider-x', ?, 'found', 0.9, '[]', ?, ?)`,
+      [attemptId, items[0].id, items[0].upc, JSON.stringify({ description: 'SENTINEL DISTRIBUTOR COPY', images: ['https://sentinel.example.com/primary.png'] }), new Date().toISOString()],
+    );
+    getDb().run(
+      'UPDATE onboarding_items SET sourcing_decision_json = ? WHERE id = ?',
+      [JSON.stringify({
+        route: 'bundle_to_curation',
+        origin: 'automatic_policy',
+        acceptedEvidenceAttemptIds: [attemptId],
+        providerIds: ['provider-x'],
+        conflicts: [],
+        warnings: [],
+        decidedAt: new Date().toISOString(),
+      }), items[0].id],
+    );
+
     const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
     expect(finalized.status).toBe('running');
@@ -633,11 +686,14 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity, end-to-end)', 
       ['999999999999', 'Dog Treats Bones Bully Sticks & Natural Chews', new Date().toISOString()],
     );
     // Live distributor evidence attempts for member A (never consulted in
-    // cohort mode).
+    // cohort mode). The LINKED attempt is mutated AFTER the freeze — its
+    // sentinel copy/images must never reach curation output (fix 6).
     getDb().run(
-      `INSERT INTO onboarding_evidence_attempts (id, item_id, provider_id, lookup_upc, outcome, confidence, matched_fields_json, created_at)
-       VALUES (?, ?, 'provider-x', ?, 'success', 0.9, '[]', ?)`,
-      [randomUUID(), a.id, a.upc, new Date().toISOString()],
+      'UPDATE onboarding_evidence_attempts SET identity_json = ? WHERE id = ?',
+      [JSON.stringify({
+        description: 'POST-FREEZE SENTINEL COPY',
+        images: ['https://sentinel.example.com/post-freeze.png'],
+      }), attemptId],
     );
 
     const summary = await processCohort(finalized, wsPath, workspaceId);
@@ -661,9 +717,24 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity, end-to-end)', 
     // contain 'chew' and the page exists, but cohort mode uses ONLY the frozen
     // verifiedPageIds (none in this fixture).
     expect(storedA.curationData!.suggestedPages).not.toContain('Dog Treats Bones Bully Sticks & Natural Chews');
-    // The live distributor-attempt rows were never consulted: no distributor
-    // copy consolidation in cohort mode → curatedDescription stays null.
+    // The LINKED distributor-attempt rows were never consulted: no distributor
+    // copy consolidation in cohort mode → curatedDescription stays null and
+    // the sentinel copy/images (mutated AFTER the freeze) never reach any
+    // curation output.
     expect(storedA.curationData!.curatedDescription).toBeNull();
+    const curationJsonA = JSON.stringify(storedA.curationData);
+    expect(curationJsonA).not.toContain('SENTINEL');
+    expect(curationJsonA).not.toContain('sentinel.example.com');
+    // The frozen member's extraction view keeps the projection's primaryImage
+    // — a post-freeze attempt-image mutation can never backfill it.
+    expect(storedA.extractionData?.primaryImage).toBe('https://img.example.com/primary.jpg');
+    expect(JSON.stringify(storedA.extractionData)).not.toContain('sentinel.example.com');
+    // The frozen projection captured the linked attempt id (the gate has a
+    // real attempt to consume — the test is NOT vacuous).
+    const snapA = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
+    const projectionA = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snapA.payloadJson));
+    const memberA = projectionA.members.find(m => m.onboardingItemId === items[0].id)!;
+    expect(memberA.sourcingDecision?.acceptedEvidenceAttemptIds).toContain(attemptId);
 
     // Sibling B's title also comes from its own frozen identity — the mutated
     // sibling extraction never fed title coordination.

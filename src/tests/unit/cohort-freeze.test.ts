@@ -245,6 +245,22 @@ function expectedOcrInputHash(sourceUrl: string, ext: Record<string, any>): stri
   });
 }
 
+/** Run-scoped shared-state row counts (fix 1c race assertions). */
+function tableCounts(): Record<string, number> {
+  const tables = [
+    'classification_model_calls',
+    'classification_stage_results',
+    'classification_evidence',
+    'classification_proposals',
+  ];
+  const counts: Record<string, number> = {};
+  for (const table of tables) {
+    const row = getDb().query(`SELECT COUNT(*) AS cnt FROM ${table}`).get() as { cnt: number };
+    counts[table] = Number(row.cnt);
+  }
+  return counts;
+}
+
 function makeItemsData(extByUpc: Record<string, Record<string, any>>): InsertItemData[] {
   return Object.entries(extByUpc).map(([upc, ext], index) => ({
     upc,
@@ -487,6 +503,12 @@ describe('two-phase freeze service (PR3 M2)', () => {
   it('frozen-means-frozen: member executes on the frozen projection only — a post-freeze mutation is never visible', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveV1Config(workspaceId, wsPath);
+    // The fixture's stored OCR predates the execution-authority binding (no
+    // ocrExecutionDigest), so the freeze re-runs it under the CURRENT
+    // authority. With the VLM disabled the re-run settles as `disabled` with
+    // NO usable OCR — the unbound stored OCR is CLEARED (fix 2a: never
+    // preserved and re-stamped), and the frozen evidence stage materializes no
+    // packaging-OCR evidence from it (fail-closed on the authority digest).
     const { items } = createReadyCohort(workspaceId, {
       '100000000001': settledExtraction(),
     });
@@ -549,10 +571,13 @@ describe('two-phase freeze service (PR3 M2)', () => {
     expect(nameValues.some(v => v === 'Original Web Title')).toBe(true);
     expect(evidence.some(e => e.sourceField === 'description' && String(e.value).includes('MUTATED DESC'))).toBe(false);
     expect(evidence.some(e => e.sourceField === 'description' && String(e.value) === 'Original description')).toBe(true);
-    // Frozen OCR evidence materialized from the frozen projection.
+    // Frozen OCR evidence: the unbound stored OCR was re-run under the
+    // current authority and settled as `disabled` with no usable data — the
+    // frozen stage materializes NO packaging-OCR evidence from it (fix 2a
+    // fail-closed; the stale 'Package OCR Name' from the fixture is gone).
     const ocrEvidence = evidence.filter(e => e.metadata && (e.metadata as any).provenance === 'packaging_ocr');
-    expect(ocrEvidence.length).toBeGreaterThan(0);
-    expect(ocrEvidence.some(e => String(e.value) === 'Package OCR Name')).toBe(true);
+    expect(ocrEvidence.length).toBe(0);
+    expect(ocrEvidence.some(e => String(e.value) === 'Package OCR Name')).toBe(false);
     // The frozen child run STAYS RUNNING (PR3 hardening, Commit B / R3): the
     // prepared pipeline no longer completes the child — the terminal child
     // write is part of the atomic member-projection commit in processCohort
@@ -847,7 +872,10 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
     const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
     const member = projection.members[0];
 
-    // MUTATE the live item after freeze: name/brand_hint/source_url/extraction.
+    // MUTATE the live item after freeze: name/brand_hint/source_url/extraction
+    // PLUS live semantic fields (sourcing decision, accepted attempt IDs,
+    // prior curation data, source type) that must never leak into the
+    // executed member.
     const live = findItemById(items[0].id)!;
     const mutatedExt = JSON.parse(JSON.stringify(live.extractionData));
     mutatedExt.title = 'MUTATED TITLE';
@@ -859,6 +887,18 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
       brandHint: 'MUTATED BRAND',
       sourceUrl: 'https://brand.example.com/mutated',
       extractionData: mutatedExt,
+      sourcingDecision: {
+        route: 'fallback_to_discovery',
+        origin: 'operator_override',
+        acceptedEvidenceAttemptIds: ['att-mutated-live'],
+        providerIds: ['provider-mutated'],
+        conflicts: [],
+        warnings: [],
+        decidedAt: new Date().toISOString(),
+      },
+      acceptedEvidenceAttemptIds: ['att-mutated-live'],
+      curationData: { curatedTitle: 'MUTATED CURATION' } as never,
+      sourceType: 'distributor_record',
     };
 
     const frozen = buildFrozenItem(member, mutatedLive);
@@ -885,6 +925,18 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
     expect((frozen.extractionData as any).distributorEvidenceAttemptIds).toBeUndefined();
     expect((frozen.extractionData as any).ocrInputHash).toBe(member.extraction.ocr.ocrInputHash);
     expect((frozen.extractionData as any).ocrExecutionDigest).toBe(member.extraction.ocr.ocrExecutionDigest ?? null);
+    // The frozen extraction view carries the projection's member evidence
+    // identity (the execution contract's H2 input).
+    expect((frozen.extractionData as any).evidenceHash).toBe(member.evidenceHash);
+    // Live semantic fields never leak: sourcingDecision comes from the
+    // projection (null here), attempt IDs are cleared, curation data is null,
+    // and the source type is the neutral official-page value.
+    expect(frozen.sourcingDecision).toBe(member.sourcingDecision);
+    expect(frozen.acceptedEvidenceAttemptIds).toEqual([]);
+    expect(frozen.acceptedEvidenceAttemptId).toBeNull();
+    expect(frozen.curationData).toBeNull();
+    expect(frozen.sourceType).toBe('official_page');
+    expect(frozen.coordinatedTitle).toBeNull();
 
     // Authoritative null sourceUrl STAYS null even when the live value is set
     // post-freeze — never `?? item.sourceUrl`.
@@ -901,8 +953,15 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
     });
     const cohort = cohorts[0];
     const members = getCohortMembers(cohort.id);
-    const sources = new Map(items.map(item => [item.id, item.sourceUrl ?? '']));
-    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, items, sources);
+    // Give member 2 a distinct spreadsheet brand hint AFTER cohort formation
+    // (the family is still grouped on the original 'Acme' hint): the frozen
+    // sibling brand must come from spreadsheetIdentity, never the
+    // web-extracted brand 'Acme'.
+    const siblingItem = items.find(i => i.upc === '100000000002')!;
+    getDb().run('UPDATE onboarding_items SET brand_hint = ? WHERE id = ?', ['Spreadsheet Brand', siblingItem.id]);
+    const updatedItems = items.map(item => findItemById(item.id)!);
+    const sources = new Map(updatedItems.map(item => [item.id, item.sourceUrl ?? '']));
+    const projection = buildExecutionEvidenceProjection(workspaceId, cohort, members, updatedItems, sources);
 
     const ctx = buildFrozenProductLineContext(cohort, members, projection.members);
     expect(ctx.productLineContext.groupId).toBe(cohort.groupKey);
@@ -927,8 +986,16 @@ describe('PR3 hardening — Commit B (R2 frozen execution purity)', () => {
       const m = projection.members.find(member => member.productSku === line.sku)!;
       expect(line.webTitle).toBe(m.extraction.title);
       expect(line.description).toBe(m.extraction.description ?? '');
-      expect(line.brand).toBe(m.extraction.brand ?? m.spreadsheetIdentity.brandHint);
+      // Frozen sibling brand is sourced from spreadsheetIdentity (PR3
+      // hardening C / R2) — never the web-extracted extraction brand.
+      expect(line.brand).toBe(m.spreadsheetIdentity.brandHint);
     }
+    // Item 2 proves the precedence: its web-extracted brand is 'Acme' but the
+    // frozen sibling brand is the spreadsheet hint 'Spreadsheet Brand'.
+    const beefLine = ctx.productLineItems.find(line => line.sku === '100000000002')!;
+    const beefProjection = projection.members.find(m => m.productSku === '100000000002')!;
+    expect(beefProjection.extraction.brand).toBe('Acme');
+    expect(beefLine.brand).toBe('Spreadsheet Brand');
     // Frozen member views carry frozen web/OCR titles (title-coordination input).
     for (const frozenItem of ctx.frozenBatchItems) {
       expect(frozenItem.extractionData?.title).toBe('Original Web Title');
@@ -1113,6 +1180,159 @@ describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
       const callsB = getDb().query('SELECT * FROM classification_model_calls WHERE run_id = ?').all(String(childB.id)) as Array<Record<string, any>>;
       expect(callsB.length).toBe(1);
       expect(String(callsB[0].model)).toBe('vlm-model-b');
+
+      // Positive path of the digest guard (fix 2b): the digest-bound OCR
+      // (stored digest === snapshot B's plan/rule digest) materializes through
+      // the frozen evidence stage with NO additional model call.
+      const snapB = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
+      const projectionB = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snapB.payloadJson));
+      const memberProjectionB = projectionB.members[0];
+      const { evidenceExtractionStage } = await import('../../classification/stages/evidence-extraction');
+      const stageContext = {
+        workspacePath: wsPath,
+        workspaceId,
+        runId: String(childB.id),
+        configSnapshotRef: snapshotB.configSnapshotRef,
+        snapshot: snapshotB,
+        cohortFrozenEvidence: memberProjectionB,
+      };
+      const stageInput = { sku: items[0].upc, onboardingItemId: items[0].id, evidence: [], acceptedProposals: [], allProposals: [] };
+      const stageResult = await evidenceExtractionStage.execute(stageInput, stageContext as never);
+      expect(stageResult.status).toBe('succeeded');
+      const stageOut = (stageResult as { status: 'succeeded'; output: { evidence: Array<Record<string, any>> } }).output;
+      expect(stageOut.evidence.some(e => e.metadata?.provenance === 'packaging_ocr' && String(e.value) === 'Pkg Under B')).toBe(true);
+      // And the SAME projection with a MISMATCHED stored digest never
+      // materializes the OCR (fail-closed on the execution authority, not just
+      // the input hash).
+      const tamperedProjection = {
+        ...memberProjectionB,
+        extraction: {
+          ...memberProjectionB.extraction,
+          ocr: { ...memberProjectionB.extraction.ocr, ocrExecutionDigest: 'f'.repeat(64) },
+        },
+      } as never;
+      const tamperedResult = await evidenceExtractionStage.execute(
+        stageInput,
+        { ...stageContext, cohortFrozenEvidence: tamperedProjection } as never,
+      );
+      const tamperedOut = (tamperedResult as { status: 'succeeded'; output: { evidence: Array<Record<string, any>> } }).output;
+      expect(tamperedOut.evidence.some(e => e.metadata?.provenance === 'packaging_ocr')).toBe(false);
+    } finally {
+      serverA.stop(true);
+      serverB.stop(true);
+    }
+  });
+
+  it('R4 fail-closed rerun: authority B FAILS (HTTP 500) → A\'s OCR is cleared from extraction_data_json and the terminal outcome is B\'s, never A\'s values', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { bundle } = writeActiveV2Bundle(wsPath);
+    upsertConfigSnapshot(workspaceId, bundle);
+
+    // Authority A: loopback VLM succeeds. Authority B: image loads but the
+    // VLM route returns HTTP 500 — the re-run produces NO usable OCR.
+    const serverA = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          return Response.json({ message: { content: JSON.stringify({ productName: 'Pkg Under A', brand: 'Acme' }) } });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    const serverB = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === '/img.png') {
+          return new Response(Buffer.alloc(2048, 7), { headers: { 'Content-Type': 'image/png' } });
+        }
+        if (url.pathname === '/api/chat') {
+          return new Response('VLM exploded', { status: 500 });
+        }
+        return new Response('not found', { status: 404 });
+      },
+    });
+    try {
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${serverA.port}`, 'vlm-model-a');
+
+      // Unsettled OCR: the first freeze must run a real transport under A.
+      const unresolved = settledExtraction({
+        _name: 'Purina Pro Plan Dog Food Chicken 5 lb',
+        primaryImage: `http://127.0.0.1:${serverA.port}/img.png`,
+        additionalImages: [],
+      });
+      delete unresolved.ocrOutcome;
+      delete unresolved.packagingOcrData;
+      delete unresolved.packagingTitle;
+      delete unresolved.ocrInputHash;
+      const { items } = createReadyCohort(workspaceId, { '100000000001': unresolved });
+      const readStoredExt = (): Record<string, any> => JSON.parse(
+        String((getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string }).extraction_data_json),
+      );
+
+      const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+      // Freeze attempt 1: OCR runs under authority A, then crash before the
+      // final CAS. A's OCR + digest persist in extraction_data_json.
+      let crashed = false;
+      await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+        beforeFinalCas: () => {
+          if (crashed) return;
+          crashed = true;
+          throw new Error('simulated crash before final CAS');
+        },
+      })).rejects.toThrow('simulated crash before final CAS');
+      const storedA = readStoredExt();
+      expect(storedA.ocrOutcome.status).toBe('succeeded');
+      expect(storedA.packagingOcrData.productName).toBe('Pkg Under A');
+      const digestA = storedA.ocrExecutionDigest;
+      expect(digestA).toMatch(/^[a-f0-9]{64}$/);
+
+      // The world moved on: the local VLM route changes to authority B.
+      upsertApiKey('ollama_vlm', 'enabled', `http://127.0.0.1:${serverB.port}`, 'vlm-model-b');
+
+      // Reclaim the SAME parent (crash mid-freeze → vacuous match).
+      getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+      const reclaim = reclaimExpiredCohortRuns(
+        workspaceId,
+        new Date().toISOString(),
+        () => (verifyCohortRunFrozen(getCohortRunById(run.id)!, wsPath, workspaceId) ? 'match' : 'drift'),
+        'worker-b',
+        COHORT_LEASE_TTL_MS,
+      );
+      expect(reclaim.resumed.length).toBe(1);
+      const resumed = getCohortRunById(run.id)!;
+      expect(resumed.claimedBy).toBe('worker-b');
+
+      // Re-freeze under B: the digest mismatch re-runs OCR under B; B's
+      // transport FAILS → no usable OCR. Fix 2a: A's OCR data/title are
+      // UNCONDITIONALLY cleared — never preserved and re-stamped with B's
+      // digest.
+      const finalized = await freezeCohortForExecution(resumed, wsPath, workspaceId);
+      expect(finalized.status).toBe('running');
+
+      const storedB = readStoredExt();
+      expect(storedB.packagingOcrData).toBeNull();
+      expect(storedB.packagingTitle).toBeNull();
+      expect(storedB.ocrOutcome.status).toBe('failed');
+      expect(storedB.ocrOutcome.model).toBe('vlm-model-b');
+      expect(storedB.ocrExecutionDigest).not.toBe(digestA);
+      const childB = getDb().query(
+        'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? AND status = ?',
+      ).get(run.id, items[0].id, 'running') as Record<string, any>;
+      const snapshotB = getRuntimeSnapshotByHash(workspaceId, String(childB.config_snapshot_hash))!;
+      expect(storedB.ocrExecutionDigest).toBe(computeOcrExecutionDigest(snapshotB));
+      // The frozen projection reflects B's terminal outcome — A's OCR is gone.
+      const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
+      const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+      expect(projection.members[0].extraction.ocr.packagingOcrData).toBeNull();
+      expect(projection.members[0].extraction.ocr.ocrExecutionDigest).toBe(storedB.ocrExecutionDigest);
     } finally {
       serverA.stop(true);
       serverB.stop(true);
@@ -1170,6 +1390,18 @@ describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
       // assertion fails, and the freeze aborts with NO extraction_data_json
       // write-back and NO terminal write.
       let reclaimed = false;
+      // Run-scoped shared state snapshot AT the reclaim instant: after the
+      // abort the stale owner must not have added/updated a single row in
+      // these tables (fix 1c). Model-call rows are scoped to THIS freeze's
+      // child run (start-before-transport provenance already inserted).
+      let tablesAtReclaim: Record<string, number> = {};
+      let modelCallsAtReclaim: Array<{ id: string; status: string }> = [];
+      const childRunIdForCalls = (): string | null => {
+        const row = getDb().query(
+          'SELECT id FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+        ).get(run.id, items[0].id) as { id: string } | undefined;
+        return row ? String(row.id) : null;
+      };
       await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
         onOcrInFlight: () => {
           if (reclaimed) return;
@@ -1184,9 +1416,32 @@ describe('PR3 hardening — Commit A (recovery/atomicity)', () => {
           );
           expect(reclaim.resumed.length).toBe(1);
           expect(reclaim.resumed[0].id).toBe(run.id);
+          // Snapshot run-scoped tables + the in-flight model-call row state
+          // at the moment ownership moved — no NEW or UPDATED rows may appear
+          // afterwards.
+          tablesAtReclaim = tableCounts();
+          const childId = childRunIdForCalls();
+          modelCallsAtReclaim = childId
+            ? (getDb().query('SELECT id, status FROM classification_model_calls WHERE run_id = ?').all(childId) as Array<{ id: string; status: string }>)
+              .map(r => ({ id: String(r.id), status: String(r.status) }))
+            : [];
         },
       })).rejects.toBeInstanceOf(HeartbeatLostError);
       expect(reclaimed).toBe(true);
+
+      // Fix 1c: the stale owner never persisted run-scoped shared state after
+      // ownership moved — model calls / stage results / evidence / proposals
+      // are row-count-identical, and the in-flight OCR model call on THIS
+      // freeze's child was NEVER terminalized (still `started`, never
+      // `success`/`failed`).
+      expect(tableCounts()).toEqual(tablesAtReclaim);
+      const childIdAfter = childRunIdForCalls();
+      const modelCallsAfter = childIdAfter
+        ? (getDb().query('SELECT id, status FROM classification_model_calls WHERE run_id = ?').all(childIdAfter) as Array<{ id: string; status: string }>)
+          .map(r => ({ id: String(r.id), status: String(r.status) }))
+        : [];
+      expect(modelCallsAfter).toEqual(modelCallsAtReclaim);
+      expect(modelCallsAfter.every(call => call.status === 'started')).toBe(true);
 
       // The new owner's run is INTACT: still `freezing` (no supersede, no
       // terminal write), claimed by worker-b, nothing finalized.

@@ -78,6 +78,7 @@ import {
   requireModelCallContext,
   getModelExecutionPlanEntry,
   getRuntimeSnapshotByHash,
+  computeOcrExecutionDigest,
 } from '../classification/runtime-snapshot';
 import type {
   PageSnapshotState,
@@ -117,6 +118,11 @@ import type { ResolvedTargetOption } from '../classification/curation-target-res
 
 const now = () => new Date().toISOString();
 
+// Re-exported so tests keep importing the OCR execution-authority digest from
+// the cohort module; the implementation lives with the runtime snapshot it
+// derives from (runtime-snapshot.ts).
+export { computeOcrExecutionDigest };
+
 // ─── ocrInputHash (amendment 7) ────────────────────────────────────────────────
 
 /**
@@ -152,62 +158,6 @@ function storedOcrInputHash(item: OnboardingItem): string | null {
 function storedOcrExecutionDigest(item: OnboardingItem): string | null {
   const ext = item.extractionData as { ocrExecutionDigest?: unknown } | null | undefined;
   return ext && typeof ext.ocrExecutionDigest === 'string' ? ext.ocrExecutionDigest : null;
-}
-
-/** Strip URL credentials before hashing — an OCR authority digest never bakes
- *  credentials into even a digest. Deterministic for identical authorities. */
-function sanitizeUrlForDigest(url: string | null | undefined): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    parsed.username = '';
-    parsed.password = '';
-    return parsed.toString();
-  } catch {
-    // Not a URL — hash the raw string (still a digest, no plaintext leak).
-    return url;
-  }
-}
-
-/**
- * OCR execution-authority digest (PR3 hardening, Commit A / R4 + A2):
- * - v2 snapshots: `hashCanonicalJson({planDigest, ruleVersionsDigest})` over
- *   the member snapshot's `evidence_extraction` model-execution-plan entry
- *   (provider, model, locality, prompt/rule versions, frozen local-VLM route
- *   WITHOUT credentials) plus `runtimeRuleVersions.digest`. The stored OCR is
- *   only reusable when this digest matches the CURRENT snapshot's authority —
- *   a model-policy / local-VLM-route change re-runs OCR under the new
- *   authority.
- * - v1 (legacy) snapshots: a deterministic legacy-authority digest,
- *   `hashCanonicalJson({authorityKind:'v1', snapshotHash})`, bound to the
- *   snapshot's content identity. A changed v1 config/evidence set changes the
- *   snapshot hash and therefore the digest — legacy OCR is NEVER "unbound":
- *   it is always executed under SOME authority digest (Commit A2 fail-closed).
- * Returns null only for an impossible v2 snapshot with a missing plan/rules
- * (the freeze fails closed on that); callers treat null as "never reuse".
- */
-export function computeOcrExecutionDigest(snapshot: RuntimeClassificationSnapshot): string | null {
-  if (snapshot.schemaVersion !== 2) {
-    return hashCanonicalJson({ authorityKind: 'v1', snapshotHash: snapshot.snapshotHash });
-  }
-  const plan = snapshot.modelExecutionPlan;
-  const rules = snapshot.runtimeRuleVersions;
-  if (!plan || !rules) return null;
-  const entry = plan.entries.find(e => e.operation === 'evidence_extraction');
-  if (!entry) return null;
-  const planDigest = hashCanonicalJson({
-    operation: entry.operation,
-    stage: entry.stage,
-    provider: entry.provider,
-    model: entry.model,
-    locality: entry.locality,
-    fromOverride: entry.fromOverride,
-    promptTemplateVersion: entry.promptTemplateVersion,
-    ruleVersion: entry.ruleVersion,
-    localVlmBaseUrl: sanitizeUrlForDigest(entry.localVlmBaseUrl),
-    localVlmModel: entry.localVlmModel ?? null,
-  });
-  return hashCanonicalJson({ planDigest, ruleVersionsDigest: rules.digest });
 }
 
 /** OCR is settled ⇔ structured OCR data exists OR the attempt reached a
@@ -475,6 +425,12 @@ export async function runFrozenOcrPullForward(params: {
   childRunId: string;
   item: OnboardingItem;
   workspacePath: string;
+  /**
+   * Ownership assertion (PR3 hardening C) forwarded to the OCR transport's
+   * terminal model-call updates. Run-bound cohort calls pass the scoped lease
+   * keeper's `assertHeld`; legacy/absent → the transport is unchanged.
+   */
+  assertHeld?: () => void;
 }): Promise<{ packagingOcrData: PackagingOcrData | null; ocrOutcome: OcrAttemptOutcome }> {
   const { snapshot, childRunId, item, workspacePath } = params;
   const sku = item.upc;
@@ -537,9 +493,14 @@ export async function runFrozenOcrPullForward(params: {
           snapshot,
           frozenVlmRoute: localFrozenRoute,
           modelPolicyDigest: evidencePolicyView?.policyDigest ?? '',
+          assertHeld: params.assertHeld,
         });
         if (ocrResult && hasOcrContent(ocrResult)) ocrResults.push(ocrResult);
       } catch (err) {
+        // PR3 hardening C: an ownership assertion failure during the transport's
+        // terminal update aborts the freeze IMMEDIATELY — no further images or
+        // writes from the stale owner.
+        if (err instanceof HeartbeatLostError) throw err;
         console.warn(`[CohortCurator] Freeze OCR failed for image ${i + 1}/${imageUrls.length} of SKU ${sku}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
@@ -586,6 +547,8 @@ export async function runFrozenOcrPullForward(params: {
         }
       }
     } catch (err) {
+      // PR3 hardening C: same immediate-abort rule for the cloud fallback.
+      if (err instanceof HeartbeatLostError) throw err;
       console.warn(`[CohortCurator] Freeze cloud packaging OCR failed for SKU ${sku}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -817,16 +780,25 @@ export async function freezeCohortForExecution(
           childRunId: memberRun.id,
           item,
           workspacePath,
+          // PR3 hardening C: the OCR transport asserts ownership immediately
+          // before every terminal model-call update — a sibling reclaim
+          // mid-transport skips the terminal write and aborts the freeze.
+          assertHeld: () => ocrKeeper.assertHeld(),
         });
         await hooks?.onOcrInFlight?.();
         const ocr = await ocrPromise;
         // No write after ownership loss: the post-await assertion IS the guard.
         ocrKeeper.assertHeld();
+        // PR3 hardening C (2a): a re-run outcome ALWAYS replaces the stored
+        // OCR — packagingOcrData/packagingTitle are overwritten UNCONDITIONALLY
+        // (null when the re-run produced no usable OCR). Old-authority OCR is
+        // NEVER preserved and re-stamped with the new digest: an authority-
+        // mismatch re-run that returns no usable OCR clears A's data instead of
+        // stamping it as B's.
         const updatedExt = {
           ...item.extractionData,
-          ...(ocr.packagingOcrData
-            ? { packagingOcrData: ocr.packagingOcrData, packagingTitle: ocr.packagingOcrData.productName }
-            : {}),
+          packagingOcrData: ocr.packagingOcrData ?? null,
+          packagingTitle: ocr.packagingOcrData?.productName ?? null,
           ...(ocr.ocrOutcome ? { ocrOutcome: ocr.ocrOutcome } : {}),
           ocrInputHash: currentOcrInputHash,
           ocrExecutionDigest: currentOcrExecutionDigest,
@@ -1122,6 +1094,10 @@ function frozenExtractionData(
       resultHash: entry.resultHash,
       importRecordId: entry.importRecordId,
     })),
+    // Member-local evidence identity (H2) from the frozen projection — the
+    // executed member's extraction view carries the same evidence identity
+    // the execution contract is bound to.
+    evidenceHash: projection.evidenceHash,
   } as unknown as OnboardingItem['extractionData'];
 }
 
@@ -1130,8 +1106,29 @@ export function buildFrozenItem(
   liveItem: OnboardingItem,
 ): OnboardingItem {
   const spread = projection.spreadsheetIdentity;
+  // PR3 hardening C (4): the executed member is CONSTRUCTED — never assembled
+  // by spreading the live item. (a) the permitted live identity/pipeline
+  // fields below (pipeline state, not semantic evidence); (b) every SEMANTIC
+  // field from the frozen projection: spreadsheet identity, authoritative
+  // sourceUrl, sourcingDecision, and a purely projection-built extraction
+  // view. Live semantic fields (sourcingDecision, accepted attempt IDs, prior
+  // curation data, source type) can never leak into the executed member.
   return {
-    ...liveItem,
+    // (a) Live identity / pipeline state.
+    id: liveItem.id,
+    upc: liveItem.upc,
+    batchId: liveItem.batchId,
+    rowNumber: liveItem.rowNumber,
+    stage: liveItem.stage,
+    stageStatus: liveItem.stageStatus,
+    status: 'curated',
+    errorMessage: null,
+    retryCount: 0,
+    isDuplicate: false,
+    existingSku: null,
+    createdAt: liveItem.createdAt,
+    updatedAt: liveItem.updatedAt,
+    // (b) Projection semantics — NO live spread.
     name: spread.name,
     expectedName: spread.expectedName,
     brandHint: spread.brandHint,
@@ -1140,6 +1137,12 @@ export function buildFrozenItem(
     quantity: spread.quantity,
     // Authoritative null STAYS null — never fall back to a post-freeze live value.
     sourceUrl: projection.sourceUrl,
+    sourceType: 'official_page',
+    coordinatedTitle: null,
+    acceptedEvidenceAttemptId: null,
+    acceptedEvidenceAttemptIds: [],
+    sourcingDecision: projection.sourcingDecision,
+    curationData: null,
     extractionData: frozenExtractionData(projection),
   };
 }
@@ -1235,7 +1238,10 @@ export function buildFrozenProductLineContext(
       sku,
       name,
       webTitle: projection.extraction.title ?? null,
-      brand: projection.extraction.brand ?? projection.spreadsheetIdentity.brandHint ?? null,
+      // PR3 hardening C (5): the frozen sibling brand comes from
+      // spreadsheetIdentity (the trusted import hint) — never the
+      // web-extracted brand.
+      brand: projection.spreadsheetIdentity.brandHint ?? null,
       description: projection.extraction.description ?? '',
       species: ocr?.species ?? [],
       flavor: ocr?.flavorVariety ?? null,
@@ -1343,13 +1349,24 @@ class CohortLeaseKeeper {
   }
 
   /** Start the periodic renewal; the wrapped operation always begins with a
-   *  freshly asserted lease. Idempotent. */
+   *  freshly asserted lease. Idempotent. PR3 hardening C: the INITIAL renewal
+   *  runs BEFORE the timer is installed and a rejected renewal throws
+   *  `HeartbeatLostError` IMMEDIATELY — callers must never begin OCR/pipeline
+   *  side effects after ownership is already known lost. */
   start(): this {
     if (this.timer) return this;
+    // Renew BEFORE installing the timer: if the run is no longer claimed by
+    // us (a sibling reclaimed it, or it went terminal/superseded), ownership
+    // is already lost — throw before any side effect begins.
+    if (!this.renew()) {
+      this.lost = true;
+      throw new HeartbeatLostError(
+        `Claim ownership already lost at operation start (run ${this.runId} is no longer claimed by ${this.workerId}).`,
+      );
+    }
     this.timer = setInterval(() => {
       this.renew();
     }, this.intervalMs);
-    this.renew();
     return this;
   }
 

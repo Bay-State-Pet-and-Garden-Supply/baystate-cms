@@ -5,6 +5,7 @@ import type { NormalizedEvidenceInput, EvidenceInputField } from '../product-evi
 import { resolveBrand } from '../brand-resolution';
 import { CanonicalBrandEvidenceValueSchema } from '../../shared/schemas/classification';
 import { hashCanonicalJson } from '../../shared/stable-id';
+import { computeOcrExecutionDigest } from '../runtime-snapshot';
 import type { ExecutionEvidenceProjectionMemberV1 } from '../../shared/schemas/cohorts';
 import type { ClassificationEvidence } from '../../shared/types';
 import * as crypto from 'node:crypto';
@@ -105,8 +106,11 @@ function executeFrozenEvidenceExtraction(
   // ── FROZEN packaging OCR materialization (NO model call) ────────────────
   // The stored OCR is trusted only when its recorded ocrInputHash matches the
   // projection's own input set (recomputed from frozen fields — never a live
-  // onboarding_items read). A terminal outcome + matching hash proves the OCR
-  // belongs to exactly these inputs, so the exactly-once OCR guarantee holds.
+  // onboarding_items read) AND its execution-authority digest is non-null AND
+  // equals the member runtime snapshot's plan/rule digest (PR3 hardening C / R4
+  // fail-closed): a stored OCR executed under a DIFFERENT authority (model
+  // policy / local-VLM route) is never materialized even when the input hash
+  // matches — provenance always follows the authority that produced it.
   const frozenOcr = ext.ocr;
   const ocrInputHashMatches =
     frozenOcr.packagingOcrData != null &&
@@ -116,7 +120,11 @@ function executeFrozenEvidenceExtraction(
       primaryImage: ext.primaryImage,
       additionalImages: ext.additionalImages,
     }) === frozenOcr.ocrInputHash;
-  if (frozenOcr.packagingOcrData && ocrInputHashMatches) {
+  const executionDigestMatches =
+    frozenOcr.ocrExecutionDigest != null &&
+    context.snapshot != null &&
+    computeOcrExecutionDigest(context.snapshot) === frozenOcr.ocrExecutionDigest;
+  if (frozenOcr.packagingOcrData && ocrInputHashMatches && executionDigestMatches) {
     const modelCallIds = frozenOcr.packagingOcrData.metadata?.modelCallIds;
     const visualEvidence = packagingOcrDataToEvidence(frozenOcr.packagingOcrData, {
       runId: context.runId,

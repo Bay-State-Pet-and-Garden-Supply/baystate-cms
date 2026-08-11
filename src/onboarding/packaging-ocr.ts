@@ -368,6 +368,17 @@ export interface ExtractPackagingOcrParams {
   frozenVlmRoute?: { baseUrl: string; model: string } | null;
   /** Frozen model-policy digest bound to the snapshot (for the audit row). */
   modelPolicyDigest?: string | null;
+  /**
+   * Ownership assertion for run-bound cohort OCR (PR3 hardening C). When
+   * provided, it is invoked IMMEDIATELY BEFORE every terminal model-call
+   * update (`completeModelCall` / `markTerminal`) — a rejected assertion
+   * (the cohort run's lease was lost to a reclaiming sibling mid-flight)
+   * throws `HeartbeatLostError` and that terminal update is SKIPPED, so a
+   * stale owner never writes `classification_model_calls` state after
+   * ownership moves. Absent in legacy (non-run-bound) calls — zero behavior
+   * change.
+   */
+  assertHeld?: () => void;
 }
 
 /**
@@ -497,6 +508,8 @@ export async function extractPackagingOcr(
   if (!base64Image) {
     console.warn(`[PackagingOcr] Could not load image for OCR: ${imageUrl}`);
     if (callId) {
+      // PR3 hardening C: assert ownership before the terminal update.
+      params.assertHeld?.();
       completeModelCall(callId, {
         status: MODEL_CALL_STATUS.failed,
         durationMs: 0,
@@ -520,6 +533,10 @@ export async function extractPackagingOcr(
     errorMessage?: string,
   ): boolean => {
     if (!callId) return true;
+    // PR3 hardening C: assert ownership immediately before EVERY terminal
+    // model-call update — a rejected assertion throws `HeartbeatLostError`
+    // and the update is skipped (no stale-owner write after a reclaim).
+    params.assertHeld?.();
     terminalWritten = true;
     return completeModelCall(callId, {
       status,

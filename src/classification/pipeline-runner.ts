@@ -239,6 +239,17 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
   const acceptedProposals: ClassificationProposal[] = [...input.acceptedProposals];
   const stageOutputs: Partial<Record<ClassificationStageName, StageOutput>> = {};
 
+  // PR3 hardening C (in-flight lease assertion): when the cohort executor
+  // injects an ownership assertion (`StageContext.assertHeld`), it is invoked
+  // IMMEDIATELY BEFORE every post-await persistence transaction / terminal
+  // update below. A rejected assertion throws `HeartbeatLostError` and that
+  // persistence is SKIPPED — a stale owner never writes run-scoped shared
+  // state (model calls / stage results / evidence / proposals) after a sibling
+  // reclaim. Absent in legacy mode (no-op).
+  const assertOwnership = (): void => {
+    context.assertHeld?.();
+  };
+
   for (const stageName of order) {
     const stage = stages.find(s => s.name === stageName);
     if (!stage) continue;
@@ -261,6 +272,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           snapshotHash: context.snapshot?.snapshotHash,
         });
 
+        assertOwnership();
         persistStageCompletion({
           runId: context.runId,
           sku: input.sku,
@@ -308,6 +320,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
           proposals: [abstentionProposal],
           snapshotHash: context.snapshot?.snapshotHash,
         });
+        assertOwnership();
         persistStageCompletion({
           runId: context.runId,
           sku: input.sku,
@@ -322,12 +335,14 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
         });
         allProposals.push(abstentionProposal);
       } else {
+        assertOwnership();
         recordStageResult(context.runId, stageName, 'failed', undefined, result.error);
         failureRecorded = true;
         throw new Error(`Stage ${stageName} failed: ${result.error}`);
       }
     } catch (err) {
       if (!failureRecorded) {
+        assertOwnership();
         recordStageResult(
           context.runId,
           stageName,
