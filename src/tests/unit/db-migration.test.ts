@@ -918,7 +918,7 @@ describe('SQLite Migration', () => {
     expect(row.relation).toBe('legacy');
   });
 
-  it('rebuilds v1 curation_cohorts with an ON DELETE CASCADE batch FK (v1 → v2 → v3 → v4 → v5)', () => {
+  it('rebuilds v1 curation_cohorts with an ON DELETE CASCADE batch FK (v1 → v2 → v3 → v4 → v5 → v6)', () => {
     const db = getDb();
     const now = new Date().toISOString();
 
@@ -1003,11 +1003,12 @@ describe('SQLite Migration', () => {
 
     expect(() => runMigrations()).not.toThrow();
 
-    // Marker advanced all the way to v5 (the v1→v2 hop feeds the v2→v3 hop,
+    // Marker advanced all the way to v6 (the v1→v2 hop feeds the v2→v3 hop,
     // which feeds the v3→v4 hop that drops the execution-metadata columns,
-    // which feeds the v4→v5 hop that adds classification_cohort_runs).
+    // which feeds the v4→v5 hop that adds classification_cohort_runs, which
+    // feeds the v5→v6 hop that adds PR4 C1's dependency table).
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('5');
+    expect(version.value).toBe('6');
 
     const fks = db.query("PRAGMA foreign_key_list('curation_cohorts')").all() as Array<{ from: string; table: string; on_delete: string }>;
     const batchFk = fks.find(f => f.from === 'batch_id');
@@ -1037,10 +1038,10 @@ describe('SQLite Migration', () => {
     expect(db.query("PRAGMA foreign_key_check('curation_cohorts')").all()).toHaveLength(0);
     expect(db.query("PRAGMA foreign_key_check('curation_cohort_members')").all()).toHaveLength(0);
 
-    // Idempotent: a second run keeps the marker and the v5 shape.
+    // Idempotent: a second run keeps the marker and the v6 shape.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version2.value).toBe('5');
+    expect(version2.value).toBe('6');
 
     // End-to-end: the real deleteBatch now cascades to the cohort AND member rows.
     expect(deleteBatch(batchId)).toBe(true);
@@ -1070,10 +1071,10 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
     try { unlinkSync(dbPath); } catch { /* ok */ }
   });
 
-  it('fresh install: marker absent -> v5 directly with the narrowed status CHECK, CASCADE FK, and no execution-metadata columns', () => {
+  it('fresh install: marker absent -> v6 directly with the narrowed status CHECK, CASCADE FK, and no execution-metadata columns', () => {
     const db = getDb();
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('5');
+    expect(version.value).toBe('6');
 
     // cohort-migration.sql is the FINAL schema: narrowed CHECK + CASCADE FK +
     // NO started_at/completed_at (execution metadata belongs to cohort runs),
@@ -1086,10 +1087,10 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
     expect(tableSql.sql).not.toContain('started_at');
     expect(tableSql.sql).not.toContain('completed_at');
 
-    // Idempotent: a second run keeps marker '5'.
+    // Idempotent: a second run keeps marker '6'.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version2.value).toBe('5');
+    expect(version2.value).toBe('6');
   });
 
   it('marker-2 DB: v2 -> v3 -> v4 -> v5 rebuild preserves data, maps legacy execution statuses, narrows the CHECK, drops execution columns, and keeps cascade', () => {
@@ -1175,9 +1176,9 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
 
     expect(() => runMigrations()).not.toThrow();
 
-    // Marker advanced to v5 (v2 → v3 → v4 → v5 hops).
+    // Marker advanced to v6 (v2 → v3 → v4 → v5 → v6 hops).
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('5');
+    expect(version.value).toBe('6');
 
     // Data preserved: the 'running' row survived and was deterministically
     // mapped to 'ready' (dropping the never-durable execution state leaves a
@@ -1306,9 +1307,9 @@ describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
 
     expect(() => runMigrations()).not.toThrow();
 
-    // Marker advanced to v5 (v3 → v4 → v5 hops).
+    // Marker advanced to v6 (v3 → v4 → v5 → v6 hops).
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('5');
+    expect(version.value).toBe('6');
 
     // The execution-metadata columns are GONE.
     const cols = db.query('PRAGMA table_info(curation_cohorts)').all() as Array<{ name: string }>;
@@ -1374,10 +1375,10 @@ describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
     try { unlinkSync(dbPath); } catch { /* ok */ }
   });
 
-  it('fresh install: marker absent -> v5 directly with classification_cohort_runs, cohort_run_id, and the current-run index', () => {
+  it('fresh install: marker absent -> v6 directly with classification_cohort_runs, cohort_run_id, and the current-run index', () => {
     const db = getDb();
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('5');
+    expect(version.value).toBe('6');
 
     // The v5 parent run table exists with the PR3 M1 lifecycle CHECKs.
     const runTable = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='classification_cohort_runs'").get() as { sql: string } | undefined;
@@ -1517,7 +1518,7 @@ describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
     db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
   });
 
-  it('marker-4 DB: v4 -> v5 hop execs the cohort SQL and bumps the marker (idempotent)', () => {
+  it('marker-4 DB: v4 -> v5 -> v6 hops exec the cohort SQL and bump the marker (idempotent)', () => {
     const db = getDb();
     // Simulate a pre-PR3 v4 database: rewind the marker and drop the v5 table.
     const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
@@ -1533,7 +1534,7 @@ describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
     expect(() => runMigrations()).not.toThrow();
 
     const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version.value).toBe('5');
+    expect(version.value).toBe('6');
     expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='classification_cohort_runs'").get()).toBeTruthy();
     expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_current'").get()).toBeTruthy();
     expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_lease'").get()).toBeTruthy();
@@ -1544,9 +1545,9 @@ describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
     expect(runCols.map(c => c.name)).toContain('cohort_run_id');
     expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_runs_cohort_run_id'").get()).toBeTruthy();
 
-    // Idempotent: a second run keeps the marker and the v5 shape.
+    // Idempotent: a second run keeps the marker and the v6 shape.
     expect(() => runMigrations()).not.toThrow();
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
-    expect(version2.value).toBe('5');
+    expect(version2.value).toBe('6');
   });
 });

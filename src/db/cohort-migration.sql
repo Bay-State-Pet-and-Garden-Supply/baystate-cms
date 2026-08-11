@@ -1,4 +1,4 @@
--- Cohort Migration (issue #30; schema v5 = FINAL, PR3 M1 + M2)
+-- Cohort Migration (issue #30; schema v6 = FINAL, PR3 M1 + M2, PR4 C1)
 -- Adds durable candidate product-family tables for cohort-centric Curation
 -- (v1–v4) plus the parent cohort RUN table (v5, PR3 M1) and the
 -- content-addressed execution-evidence snapshot table (v5, PR3 M2).
@@ -7,6 +7,21 @@
 -- CREATE INDEX IF NOT EXISTS for idempotence. Historical cohort rows are
 -- superseded, never mutated; a superseded row is no longer the active cohort.
 --
+-- v6 (issue #30 PR4 C1): adds the nullable `product_type_outcome` column to
+-- `classification_cohort_runs` (the PR4 Execution Product Type outcome marker:
+-- 'coherent' | 'coherent_with_abstentions' | 'conflicted' | 'abstained'; NULL
+-- until PR4 resolves it — abstain/conflict deliberately leave the execution
+-- id/confidence NULL) plus the `classification_proposal_dependencies` table
+-- (PR4 dependency metadata: every proposal a member pipeline creates under a
+-- coherent cohort execution type gets one dependency row keyed off the
+-- execution type — no recompute/invalidation machinery yet, that is PR5+).
+-- Fresh installs read the FINAL v6 shape directly from this file; existing
+-- databases are converged in runMigrations(): marker-'5' databases run
+-- db.exec(cohortSql) (idempotent — creates the dependency table + indexes)
+-- and bump to '6', and the PRAGMA-guarded `product_type_outcome` ALTER lives
+-- OUTSIDE the version gate (precedent: the `evidence_snapshot_id` block) so
+-- pre-C1 '5' databases converge. Existing run rows keep NULL placeholders —
+-- no backfill required (historical runs predate execution types).
 -- v4 (issue #31 cleanup F3): execution metadata (`started_at`/`completed_at`)
 -- is REMOVED from curation_cohorts. The candidate cohort row is a candidate
 -- family record only; execution timestamps are owned solely by
@@ -119,8 +134,14 @@ CREATE INDEX IF NOT EXISTS idx_classification_cohort_snapshots_ws
 -- Authority columns: candidate_membership_hash is frozen at claim (the
 -- cohort's membership_hash — H1 identity). final_membership_hash and
 -- execution_product_type_id/product_type_confidence are PR4 placeholders
--- (NULL until PR4 writes them once). evidence_snapshot_id references the
--- persisted classification_cohort_snapshots row (M2) whose payload produced
+-- (NULL until PR4 writes them once). product_type_outcome (v6, PR4 C1) is
+-- the PR4 Execution Product Type outcome marker — NULL until PR4 resolves
+-- it; abstain/conflict deliberately leave the execution id/confidence NULL
+-- and only write the outcome. No FK on execution_product_type_id (product
+-- types are config/bundle-derived; `target_id` precedent is FK-free) and no
+-- NOT NULL after completion (would break abstain/conflict runs).
+-- evidence_snapshot_id references the persisted
+-- classification_cohort_snapshots row (M2) whose payload produced
 -- evidence_snapshot_hash; both are NULL while freezing. config_snapshot_id/
 -- hash, page_import_id/hash and model_policy_digest are nullable mirrors of
 -- the per-SKU classification_runs authority columns (frozen by the freeze
@@ -139,8 +160,12 @@ CREATE TABLE IF NOT EXISTS classification_cohort_runs (
   page_import_id TEXT REFERENCES page_imports(id),  -- H4 authority ref (nullable mirror)
   page_import_hash TEXT,
   model_policy_digest TEXT,                 -- H5 unbound model-execution digest (nullable mirror)
-  execution_product_type_id TEXT,           -- PR4 placeholder
+  execution_product_type_id TEXT,           -- PR4 placeholder (no FK; config/bundle-derived id)
   product_type_confidence REAL CHECK (product_type_confidence IS NULL OR (product_type_confidence >= 0 AND product_type_confidence <= 1)),
+  -- PR4 C1 (v6): Execution Product Type outcome marker. NULL until PR4
+  -- resolves it; abstain/conflict write the outcome while id/confidence stay
+  -- NULL. Queryable run-row state (architecture-report §8 DECISION-F).
+  product_type_outcome TEXT CHECK (product_type_outcome IS NULL OR product_type_outcome IN ('coherent','coherent_with_abstentions','conflicted','abstained')),
   status TEXT NOT NULL DEFAULT 'freezing' CHECK (status IN
     ('freezing','running','completed','completed_with_abstentions','completed_with_member_failures','failed','cancelled','superseded')),
   claimed_by TEXT,                          -- worker id that owns the claim lease
@@ -173,3 +198,38 @@ CREATE INDEX IF NOT EXISTS idx_classification_cohort_runs_lease
 -- own the same cohort. `superseded` frees the slot for a legitimate retry.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_cohort_runs_current
   ON classification_cohort_runs(cohort_id) WHERE status != 'superseded';
+
+-- ════════════════════════════════════════════════════════════════════════════
+-- classification_proposal_dependencies (issue #30, PR4 C1; cohort schema v6)
+--
+-- PR4 dependency metadata (architecture-report §6): when a member SKU run
+-- executes under a coherent cohort Execution Product Type, every
+-- primary_product_type / field_assignment / category_page proposal the member
+-- pipeline creates is stamped with ONE dependency row:
+--   dependency_kind       = 'execution_product_type'
+--   dependency_target_id  = the run's execution_product_type_id at proposal creation
+--   dependency_value_hash = hashCanonicalJson({executionProductTypeId, productTypeConfidence})
+-- The hash is the future invalidation key (PR5/PR9/PR11): if the Execution
+-- Product Type changes, affected downstream proposals become stale and are
+-- recomputed or invalidated. PR4 RECORDS metadata only — no staleness
+-- recompute, no invalidation sweep, no promotion consumption. Written in the
+-- same member-projection atomic commit as the proposals they reference.
+--
+-- proposal_id has a real FK (ON DELETE CASCADE): deleting a proposal removes
+-- its dependency metadata. dependency_target_id has NO FK (product types are
+-- config/bundle-derived; `target_id` precedent is FK-free).
+CREATE TABLE IF NOT EXISTS classification_proposal_dependencies (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  proposal_id TEXT NOT NULL REFERENCES classification_proposals(id) ON DELETE CASCADE,
+  dependency_kind TEXT NOT NULL,            -- 'execution_product_type' (PR4)
+  dependency_target_id TEXT NOT NULL,       -- execution_product_type_id at proposal creation
+  dependency_value_hash TEXT NOT NULL,      -- hashCanonicalJson({executionProductTypeId, productTypeConfidence})
+  created_at TEXT NOT NULL
+);
+
+-- Supporting lookup indexes (v6)
+CREATE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_proposal
+  ON classification_proposal_dependencies(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_target
+  ON classification_proposal_dependencies(dependency_target_id);

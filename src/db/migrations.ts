@@ -695,25 +695,33 @@ export function runMigrations(): void {
   }
 
   // Run cohort migration if not already applied (issue #30 PR1; candidate
-  // schema v4 = FINAL from issue #31 cleanup F3, plus PR3 M1 v5 run table).
-  // One-shot SQL file gated by an app_meta marker. cohort-migration.sql now
-  // carries the FINAL v5 shape (v4 candidate tables + the v5
-  // `classification_cohort_runs` parent run table), so a FRESH install
-  // executes the SQL and writes marker '5' directly. Existing databases
+  // schema v4 = FINAL from issue #31 cleanup F3, plus PR3 M1 v5 run table and
+  // PR4 C1 v6 outcome/dependency columns). One-shot SQL file gated by an
+  // app_meta marker. cohort-migration.sql now carries the FINAL v6 shape (v4
+  // candidate tables + the v5 `classification_cohort_runs` parent run table
+  // with the PR4 C1 `product_type_outcome` column + the v6
+  // `classification_proposal_dependencies` table), so a FRESH install
+  // executes the SQL and writes marker '6' directly. Existing databases
   // advance through the hops below: marker '1' runs the v1→v2 rebuild (CASCADE
   // FK, v2-era wide CHECK) → writes '2', then the v2→v3 rebuild narrows the
   // CHECK → writes '3', then the v3→v4 rebuild drops the execution-metadata
   // columns → writes '4', then the v4→v5 hop execs the idempotent cohort SQL
-  // (creating classification_cohort_runs + indexes) → writes '5'; marker '2'
-  // runs the v2→v3, v3→v4 and v4→v5 hops; marker '3' runs the v3→v4 and v4→v5
-  // hops; marker '4' runs only the v4→v5 hop; marker '5' skips everything.
+  // (creating classification_cohort_runs + indexes) → writes '5', then the
+  // v5→v6 hop execs the idempotent cohort SQL (creating
+  // classification_proposal_dependencies + indexes; the run table already
+  // exists so its CREATE TABLE is a no-op) → writes '6'; marker '2' runs the
+  // v2→v3, v3→v4, v4→v5 and v5→v6 hops; marker '3' runs the v3→v4, v4→v5 and
+  // v5→v6 hops; marker '4' runs the v4→v5 and v5→v6 hops; marker '5' runs the
+  // v5→v6 hop; marker '6' skips everything. The PRAGMA-guarded
+  // `product_type_outcome` ALTER (pre-C1 '5' databases) lives OUTSIDE the
+  // gate below.
   const cohortVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
     | { value: string }
     | undefined;
   if (!cohortVersion) {
     const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
     db.exec(cohortSql);
-    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '5');");
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '6');");
   }
 
   // ── Curation cohorts v1 → v2: batch deletion must cascade ────────────────
@@ -929,6 +937,30 @@ export function runMigrations(): void {
     console.log('[Migrations] curation_cohort_schema_version bumped to 5.');
   }
 
+  // ── Curation cohorts v5 → v6: PR4 C1 outcome column + dependencies ──
+  //
+  // v6 is additive: `classification_proposal_dependencies` (+ 2 indexes) and
+  // the nullable `product_type_outcome` CHECK column on
+  // `classification_cohort_runs`. The cohort SQL file is the FINAL v6 shape,
+  // so the hop is `db.exec(cohortSql)` (idempotent — creates the dependency
+  // table and its indexes; the run-table CREATE is a no-op because the table
+  // already exists) plus the marker bump, mirroring the fresh-install path.
+  // The `product_type_outcome` COLUMN for a pre-C1 '5' database is added by
+  // the PRAGMA-guarded ALTER block OUTSIDE the gate below (SQLite cannot add
+  // the column via the idempotent CREATE TABLE IF NOT EXISTS). Runs for
+  // marker-'5' databases (and marker-'1'/'2'/'3'/'4' databases advanced by
+  // the hops above); marker '6' skips.
+  const cohortV5 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV5 && cohortV5.value === '5') {
+    console.log('[Migrations] Adding classification_proposal_dependencies + product_type_outcome (cohort schema v5 → v6)...');
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '6') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 6.');
+  }
+
   // classification_runs.cohort_run_id (issue #30, PR3 M1) — child per-SKU runs
   // link to their parent cohort run. ON DELETE SET NULL per the epic; plain FK
   // (mirrors classification_runs.onboarding_item_id). PRAGMA-guarded and
@@ -975,6 +1007,38 @@ export function runMigrations(): void {
     }
   } catch (e) {
     console.error('[Migrations] Failed to add classification_cohort_snapshots / evidence_snapshot_id:', e);
+  }
+
+  // ── classification_proposal_dependencies + product_type_outcome (issue #30 PR4 C1) ─
+  //
+  // PR4 C1 adds the v6 dependency table and the nullable `product_type_outcome`
+  // CHECK column on classification_cohort_runs. Both are additive and run
+  // OUTSIDE the version gate: a pre-C1 marker-'5' database (created from the
+  // PR3 file before C1) still needs the column — the idempotent cohort SQL
+  // exec in the v5→v6 hop creates the dependency table + indexes but CANNOT
+  // add the column (CREATE TABLE IF NOT EXISTS is a no-op for the existing
+  // run table) — and the fresh-install/version-gated path (cohort SQL file)
+  // already creates both, so this block is a no-op there. Table creation is
+  // idempotent (cohort SQL file uses CREATE TABLE/INDEX IF NOT EXISTS); the
+  // column ALTER is PRAGMA-guarded (precedent: evidence_snapshot_id above).
+  // Existing rows keep NULL outcome — no backfill (historical runs predate
+  // execution types).
+  try {
+    const hasDependencyTable = db.query(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposal_dependencies'",
+    ).get();
+    if (!hasDependencyTable) {
+      const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+      db.exec(cohortSql);
+      console.log('[Migrations] Added classification_proposal_dependencies (PR4 C1).');
+    }
+    const cohortRunColsV6 = db.query('PRAGMA table_info(classification_cohort_runs)').all() as Array<{ name: string }>;
+    if (cohortRunColsV6.length > 0 && !cohortRunColsV6.some(col => col.name === 'product_type_outcome')) {
+      db.exec("ALTER TABLE classification_cohort_runs ADD COLUMN product_type_outcome TEXT CHECK (product_type_outcome IS NULL OR product_type_outcome IN ('coherent','coherent_with_abstentions','conflicted','abstained'));");
+      console.log('[Migrations] Added classification_cohort_runs.product_type_outcome.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add classification_proposal_dependencies / product_type_outcome:', e);
   }
   // ── Clean up product_draft_projection noise proposals ───────────────────
   //

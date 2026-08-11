@@ -56,6 +56,7 @@ export interface CohortRunRow {
   model_policy_digest: string | null;
   execution_product_type_id: string | null;
   product_type_confidence: number | null;
+  product_type_outcome: string | null;
   status: string;
   claimed_by: string | null;
   claimed_at: string | null;
@@ -85,6 +86,7 @@ export function mapCohortRunRow(row: Record<string, any>): CohortRun {
     modelPolicyDigest: row.model_policy_digest ?? null,
     executionProductTypeId: row.execution_product_type_id ?? null,
     productTypeConfidence: row.product_type_confidence === null || row.product_type_confidence === undefined ? null : Number(row.product_type_confidence),
+    productTypeOutcome: row.product_type_outcome ?? null,
     status: row.status,
     claimedBy: row.claimed_by ?? null,
     claimedAt: row.claimed_at ?? null,
