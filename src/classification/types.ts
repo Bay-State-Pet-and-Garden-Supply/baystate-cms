@@ -111,7 +111,12 @@ export interface StageContext {
   /** Frozen, read-only per-SKU inputs used for cohort page coordination. */
   productLineItems?: ProductLineItemSnapshot[];
   /** Pre-computed coordinated title from cohort LLM call. When present,
-   *  name_consolidation uses this instead of making its own LLM call. */
+   *  name_consolidation uses this instead of making its own LLM call.
+   *  PR6 (issue #30): in prepared-cohort (active cohort) mode this comes
+   *  from the DURABLE parent-run outputs (`classification_cohort_outputs`,
+   *  kind `curated_title`) persisted by `ensureCohortTitlesCoordinated`
+   *  before the member loop — never from the in-memory coordinator cache
+   *  (legacy/shadow keep the coordinator + `cohortCache` path). */
   preComputedTitle?: string;
   /** Source of the pre-computed title, required when preComputedTitle is set. */
   preComputedTitleSource?: 'llm_cohort' | 'cohort_fallback';

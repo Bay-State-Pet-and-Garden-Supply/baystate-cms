@@ -12,12 +12,15 @@ import {
   listItemsByBatch,
   findItemById,
   updateItemExtractionData,
+  updateItemStageStatus,
+  updateItemCurationData,
 } from '../../db/repositories/onboarding-item-repo';
 import { insertExtraction } from '../../db/repositories/onboarding-extraction-repo';
 import {
   refreshCandidateCohorts,
   updateCohortStatus,
   getCohortById,
+  getCohortMembers,
 } from '../../db/repositories/curation-cohort-repo';
 import {
   claimReadyCurationCohorts,
@@ -41,7 +44,9 @@ import {
   HeartbeatLostError,
   MemberCommitCrashSimulationError,
   observeCohortShadowTypeResolution,
+  buildFrozenProductLineContext,
 } from '../../onboarding/cohort-curator';
+import type { PreparedCohortContext } from '../../onboarding/cohort-curator';
 import { listCandidateCohortViews } from '../../onboarding/curation-cohort-service';
 import { getRun, completeRun } from '../../db/repositories/classification-run-repo';
 import {
@@ -60,8 +65,18 @@ import type { ClassificationConfig } from '../../shared/schemas/classification';
 import type { InsertItemData } from '../../db/repositories/onboarding-item-repo';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
-import type { CurationCohort } from '../../shared/schemas/cohorts';
+import type { CurationCohort, CohortRun, ExecutionEvidenceProjectionV1 } from '../../shared/schemas/cohorts';
 import { CurationCohortViewSchema } from '../../shared/schemas/cohorts';
+import { computeCohortTitleInputHash } from '../../onboarding/cohort-title-hash';
+import { curateItemWithPipeline } from '../../onboarding/product-curator';
+import {
+  getCohortTitleOutputsByRun,
+  replaceCohortTitleOutputs,
+  countCohortTitleOutputs,
+} from '../../db/repositories/classification-cohort-output-repo';
+import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
+import * as llmClient from '../../onboarding/llm-client';
+import * as cohortNameCoordinator from '../../onboarding/cohort-name-coordinator';
 
 let workspacePath: string;
 
@@ -2084,6 +2099,319 @@ describe('PR5 C4 — acceptance integration: execution-driven first pass, review
       const parsed = findItemById(row.id)!;
       expect(parsed.curationData!.classificationProposals.some(p => p.proposalType === 'field_assignment')).toBe(false);
     }
+  });
+});
+
+describe('PR6 C5 — prepared members consume the durable parent title outputs (issue #30)', () => {
+  /** Replicate the parent op's T-hash inputs in this v1 harness: v1 member
+   *  snapshots carry NO modelPolicy and NO frozen model-execution plan, so the
+   *  parent op hashes with `modelPolicyDigest: null` + registry-const plan
+   *  versions — exactly what the seeded output rows must hash to. */
+  function expectedTitleInputHash(run: CohortRun, projection: ExecutionEvidenceProjectionV1): string {
+    return computeCohortTitleInputHash({ run, projection, modelPolicyDigest: null });
+  }
+
+  function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
+    const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
+    return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  }
+
+  const SEEDED_TITLES = [
+    ['100000000001', 'Purina Pro Plan Dog Food Chicken 5 lb'],
+    ['100000000002', 'Purina Pro Plan Dog Food Beef 10 lb'],
+  ] as const;
+
+  /** Seed `curated_title` outputs exactly as a prior processCohort entry
+   *  would have persisted them (llm_cohort + the canonical T-hash). */
+  function seedCohortTitleOutputs(workspaceId: string, run: CohortRun, inputHash: string): void {
+    replaceCohortTitleOutputs({
+      workspaceId,
+      runId: run.id,
+      inputHash,
+      outputs: SEEDED_TITLES.map(([productSku, title]) => ({
+        productSku,
+        title,
+        source: 'llm_cohort' as const,
+      })),
+    });
+  }
+
+  /** Number of `callLlmForTask` invocations carrying the cohort title op. */
+  function titleCallInvocationCount(spy: ReturnType<typeof vi.spyOn>): number {
+    return spy.mock.calls.filter(([, , , options]: any[]) =>
+      (options as Record<string, any> | undefined)?.protectedOperation === 'cohort_title_consolidation',
+    ).length;
+  }
+
+  function countTitleAuditRows(): number {
+    const row = getDb().query(
+      "SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE operation = 'cohort_title_consolidation'",
+    ).get() as { cnt: number };
+    return Number(row.cnt);
+  }
+
+  /** Build a prepared-cohort context for one member from the frozen run
+   *  (mirrors `buildPreparedCohortContextForMember`'s inputs).
+   *  `coordinatedTitles` defaults to the run's persisted durable outputs. */
+  function buildPreparedContext(
+    workspaceId: string,
+    run: CohortRun,
+    item: OnboardingItem,
+    frozenLineContext: ReturnType<typeof buildFrozenProductLineContext>,
+    coordinatedTitles?: Map<string, { title: string; source: 'llm_cohort' | 'cohort_fallback' }>,
+  ): PreparedCohortContext {
+    const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
+    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+    const memberProjection = projection.members.find(m => m.onboardingItemId === item.id)!;
+    const child = getDb().query(
+      'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(run.id, item.id) as Record<string, any>;
+    const memberSnapshot = getRuntimeSnapshotByHash(workspaceId, String(child.config_snapshot_hash))!;
+    return {
+      memberProjection,
+      parentRunId: run.id,
+      memberSnapshotId: String(child.config_snapshot_id),
+      memberSnapshotHash: String(child.config_snapshot_hash),
+      sharedAuthorities: {
+        configSnapshotRef: memberSnapshot.configSnapshotRef,
+        pages: memberSnapshot.pages,
+        pageImportId: memberSnapshot.pageImportId,
+        pageImportHash: memberSnapshot.pageImportHash,
+        fieldOptions: memberSnapshot.fieldOptions,
+        focusedFileHashes: memberSnapshot.focusedFileHashes,
+        catalogEvidenceHash: memberSnapshot.catalogEvidenceHash,
+        // v1 harness: the frozen snapshot carries no model policy.
+        modelPolicyView: null,
+      },
+      productLineContext: frozenLineContext.productLineContext,
+      productLineItems: frozenLineContext.productLineItems,
+      frozenBatchItems: frozenLineContext.frozenBatchItems,
+      coordinatedTitles: coordinatedTitles ?? new Map(
+        getCohortTitleOutputsByRun(run.id).map(row => [
+          row.productSku,
+          JSON.parse(row.outputValueJson) as { title: string; source: 'llm_cohort' | 'cohort_fallback' },
+        ]),
+      ),
+    };
+  }
+
+  /** Freeze a ready two-member cohort under active flags (v1 harness). */
+  async function freezeTwoMemberCohort(): Promise<{
+    workspaceId: string;
+    workspacePath: string;
+    run: CohortRun;
+    items: OnboardingItem[];
+    projection: ExecutionEvidenceProjectionV1;
+    frozenLineContext: ReturnType<typeof buildFrozenProductLineContext>;
+  }> {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    const projection = loadFrozenProjection(workspaceId, finalized);
+    const cohort = getCohortById(finalized.cohortId)!;
+    const members = getCohortMembers(cohort.id);
+    const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+    return { workspaceId, workspacePath: wsPath, run: finalized, items, projection, frozenLineContext };
+  }
+
+  it('prepared member consumes the persisted parent title output (curatedTitle === persisted value, titleSource === llm_cohort, ZERO title LLM calls)', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items, projection } = await freezeTwoMemberCohort();
+
+    // Seed the durable outputs (complete set + matching T-hash). The parent op
+    // must REUSE with zero calls; members consume the persisted titles.
+    const inputHash = expectedTitleInputHash(run, projection);
+    seedCohortTitleOutputs(workspaceId, run, inputHash);
+    expect(countCohortTitleOutputs(run.id)).toBe(2);
+
+    const titleCallSpy = vi.spyOn(llmClient, 'callLlmForTask');
+    try {
+      const summary = await processCohort(run, wsPath, workspaceId);
+      expect(summary.parentStatus).toBe('completed');
+      expect(summary.completedMembers).toBe(2);
+    } finally {
+      titleCallSpy.mockRestore();
+    }
+
+    // Both members consumed the persisted titles byte-for-byte.
+    const titleByUpc = new Map<string, string>(SEEDED_TITLES.map(([upc, title]) => [upc, title]));
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      const expected = titleByUpc.get(item.upc)!;
+      expect(stored.stageStatus).toBe('completed');
+      expect(stored.curationData!.curatedTitle).toBe(expected);
+      expect(stored.curationData!.titleSource).toBe('llm_cohort');
+    }
+    // ZERO title calls: the reuse path made no LLM invocation and the
+    // short-circuited name_consolidation consumed the persisted title.
+    expect(titleCallInvocationCount(titleCallSpy)).toBe(0);
+    expect(countTitleAuditRows()).toBe(0);
+    // The durable rows are untouched (reuse is read-only).
+    expect(countCohortTitleOutputs(run.id)).toBe(2);
+  });
+
+  it('member retry via crash-recovery re-executes against the SAME persisted title with ZERO new title calls', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items, frozenLineContext } = await freezeTwoMemberCohort();
+    const projection = loadFrozenProjection(workspaceId, run);
+    const inputHash = expectedTitleInputHash(run, projection);
+    seedCohortTitleOutputs(workspaceId, run, inputHash);
+
+    const titleCallSpy = vi.spyOn(llmClient, 'callLlmForTask');
+    try {
+      // Crash EXACTLY after the SECOND member's pipeline completes (before its
+      // atomic projection commit): member 1 commits, member 2 does not, and
+      // the parent stays running — the durable outputs were already written by
+      // the parent op before the member loop.
+      let pipelineCount = 0;
+      await expect(processCohort(run, wsPath, workspaceId, {
+        afterMemberPipeline: () => {
+          pipelineCount++;
+          if (pipelineCount === 2) {
+            throw new MemberCommitCrashSimulationError('simulated crash between pipeline completion and member commit');
+          }
+        },
+      })).rejects.toThrow('simulated crash between pipeline completion and member commit');
+
+      // Member 1 committed with the persisted title; member 2 untouched.
+      const memberOne = findItemById(items[0].id)!;
+      const memberTwo = findItemById(items[1].id)!;
+      expect(memberOne.stageStatus).toBe('completed');
+      expect(memberOne.curationData!.curatedTitle).toBe('Purina Pro Plan Dog Food Chicken 5 lb');
+      expect(memberTwo.stageStatus).toBe('pending');
+      expect(memberTwo.curationData).toBeNull();
+
+      // Kill/restart: clear the coordinator cache (prove DB authority), expire
+      // the lease, reclaim with a NEW worker id — resume the SAME run via the
+      // verifyCohortRunFrozen match.
+      cohortNameCoordinator.clearCohortCoordinationCache();
+      getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+      const reclaim = reclaimExpiredCohortRuns(
+        workspaceId,
+        new Date().toISOString(),
+        () => verifyCohortRunFrozen(getCohortRunById(run.id)!, wsPath, workspaceId) ? 'match' : 'drift',
+        'worker-b',
+        COHORT_LEASE_TTL_MS,
+      );
+      expect(reclaim.resumed.length).toBe(1);
+      expect(reclaim.resumed[0].id).toBe(run.id);
+
+      // Resume: the parent op REUSES the durable set (zero calls). Note the
+      // ordinal-0 member is re-executed: the parent op's `ensureMemberRun`
+      // creates a fresh running child when the ordinal-0 child is terminal
+      // (PR6 C4 crash-recovery contract — the audit binding always has a
+      // running child), so the resume guard re-executes member 1 via that
+      // fresh child. Member 2 re-executes via its still-running child. Both
+      // re-executed members consume the SAME persisted titles byte-for-byte.
+      const resumed = getCohortRunById(run.id)!;
+      const summary = await processCohort(resumed, wsPath, workspaceId);
+      expect(summary.parentStatus).toBe('completed');
+      expect(summary.completedMembers).toBe(2);
+      const memberTwoAfter = findItemById(items[1].id)!;
+      expect(memberTwoAfter.stageStatus).toBe('completed');
+      expect(memberTwoAfter.curationData!.curatedTitle).toBe('Purina Pro Plan Dog Food Beef 10 lb');
+      expect(memberTwoAfter.curationData!.titleSource).toBe('llm_cohort');
+      // ZERO new title calls across BOTH processCohort entries (the durable set
+      // was complete + hash-matched on every re-entry; members never fall to a
+      // per-item title LLM).
+      expect(titleCallInvocationCount(titleCallSpy)).toBe(0);
+      expect(countTitleAuditRows()).toBe(0);
+
+      // Crash-recovery retry pattern on a committed member: reset it to
+      // pending + clear its curation data, then re-run its pipeline in prepared
+      // mode — the re-executed member consumes the SAME persisted title
+      // byte-for-byte with ZERO title calls.
+      updateItemStageStatus(items[1].id, 'pending');
+      updateItemCurationData(items[1].id, '');
+      const prepared = buildPreparedContext(workspaceId, resumed, items[1], frozenLineContext);
+      const rerun = await curateItemWithPipeline(findItemById(items[1].id)!, wsPath, workspaceId, prepared);
+      expect(rerun.curatedTitle).toBe('Purina Pro Plan Dog Food Beef 10 lb');
+      expect(rerun.titleSource).toBe('llm_cohort');
+      expect(titleCallInvocationCount(titleCallSpy)).toBe(0);
+    } finally {
+      titleCallSpy.mockRestore();
+    }
+  });
+
+  it('legacy flag-OFF: coordinateCohortItemsOnce is still invoked and the cohortCache dedups the batch (spy assertions)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb' }),
+    });
+    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
+
+    const onceSpy = vi.spyOn(cohortNameCoordinator, 'coordinateCohortItemsOnce');
+    const uncachedSpy = vi.spyOn(cohortNameCoordinator, 'coordinateCohortItems');
+    const captured = { onceCalls: 0, uncachedCalls: 0 };
+    try {
+      const worker = new OnboardingWorker(workspaceId, wsPath);
+      await worker.poll();
+      await drainWorker(worker);
+      // Capture BEFORE mockRestore() clears the mock call history.
+      captured.onceCalls = onceSpy.mock.calls.length;
+      captured.uncachedCalls = uncachedSpy.mock.calls.length;
+    } finally {
+      onceSpy.mockRestore();
+      uncachedSpy.mockRestore();
+    }
+
+    // The legacy per-item path invoked the CACHED coordinator once per member…
+    expect(captured.onceCalls).toBe(2);
+    // …but the in-memory cohortCache deduped the underlying uncached pass:
+    // exactly ONE `coordinateCohortItems` execution for the shared batch.
+    expect(captured.uncachedCalls).toBe(1);
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      expect(stored.curationData!.curatedTitle).not.toBeNull();
+      // The coordinator's per-group outcome (llm_cohort vs cohort_fallback)
+      // depends on whether the llm-client mock from cohort-title-coordinator
+      // is active in this process — the assertion that matters here is the
+      // spy-based proof that the legacy coordinator + cache path ran.
+      expect(['llm_cohort', 'cohort_fallback']).toContain(stored.curationData!.titleSource);
+    }
+    // Flag OFF: no cohort run, zero durable output rows, byte-identical legacy.
+    expect(cohortRunCount(workspaceId)).toBe(0);
+    const outputRows = getDb().query(
+      'SELECT COUNT(*) AS cnt FROM classification_cohort_outputs WHERE workspace_id = ?',
+    ).get(workspaceId) as { cnt: number };
+    expect(Number(outputRows.cnt)).toBe(0);
+  });
+
+  it('missing member output: prepared member with an empty coordinatedTitles map falls back deterministically with a warning and completes', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items, frozenLineContext } = await freezeTwoMemberCohort();
+
+    // Simulate the parent-op contract violation: the durable map is EMPTY for
+    // a member that is part of a >=2-sibling group (the all-or-nothing
+    // transaction makes this unreachable in the normal flow — DECISION-R).
+    const prepared = buildPreparedContext(workspaceId, run, items[0], frozenLineContext);
+    prepared.coordinatedTitles = new Map();
+
+    const capturedWarns: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: any[]) => {
+      capturedWarns.push(args.map(String).join(' '));
+    });
+    const titleCallSpy = vi.spyOn(llmClient, 'callLlmForTask');
+    try {
+      const curationData = await curateItemWithPipeline(findItemById(items[0].id)!, wsPath, workspaceId, prepared);
+      // Deterministic fallback + member pipeline completes (no throw, no
+      // per-item title LLM call). The fallback title equals the deterministic
+      // formatter's output for the frozen spreadsheet identity.
+      const live = findItemById(items[0].id)!;
+      const expectedFallback = cohortNameCoordinator.formatDeterministicTitle(live.name ?? live.upc, live.brandHint);
+      expect(curationData.curatedTitle).toBe(expectedFallback);
+      expect(curationData.titleSource).toBe('cohort_fallback');
+      expect(titleCallInvocationCount(titleCallSpy)).toBe(0);
+    } finally {
+      warnSpy.mockRestore();
+      titleCallSpy.mockRestore();
+    }
+    expect(capturedWarns.some(line => line.includes('missing a persisted cohort title output'))).toBe(true);
   });
 });
 

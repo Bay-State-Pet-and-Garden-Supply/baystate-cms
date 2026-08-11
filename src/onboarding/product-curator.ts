@@ -448,23 +448,45 @@ export async function curateItemWithPipeline(
     let preComputedTitle: string | undefined;
     let preComputedTitleSource: 'llm_cohort' | 'cohort_fallback' | undefined;
     if ((productLineGroup?.siblingSkus.length ?? 0) >= 2) {
-      try {
-        const coordinated = await coordinateCohortItemsOnce(item.batchId, batchItemsForCoordination, runModelPolicyView);
-        const selected = coordinated.get(item.upc);
+      if (cohortMode) {
+        // PR6 (issue #30): prepared children NEVER call
+        // `coordinateCohortItemsOnce()`. The parent title op
+        // (`ensureCohortTitlesCoordinated`) already persisted every group
+        // member's title into `classification_cohort_outputs` BEFORE the
+        // member loop; read it here. A missing entry is a parent-op contract
+        // violation — fall back deterministically with a warning (never a
+        // per-item LLM call; DECISION-R). The coordinator + `cohortCache` are
+        // never consulted in active cohort mode.
+        const selected = preparedCohort!.coordinatedTitles?.get(item.upc);
         if (selected) {
           preComputedTitle = selected.title;
           preComputedTitleSource = selected.source;
         } else {
-          // A grouped item must never fall through to an independent title LLM.
+          console.warn(
+            `[ProductCurator] Member ${item.upc} missing a persisted cohort title output — using deterministic fallback.`,
+          );
           preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
           preComputedTitleSource = 'cohort_fallback';
         }
-      } catch (err) {
-        console.warn(
-          `[ProductCurator] Cohort title coordination failed for ${item.upc}; using deterministic fallback: ${redactTransportText(err instanceof Error ? err.message : String(err))}`,
-        );
-        preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
-        preComputedTitleSource = 'cohort_fallback';
+      } else {
+        try {
+          const coordinated = await coordinateCohortItemsOnce(item.batchId, batchItemsForCoordination, runModelPolicyView);
+          const selected = coordinated.get(item.upc);
+          if (selected) {
+            preComputedTitle = selected.title;
+            preComputedTitleSource = selected.source;
+          } else {
+            // A grouped item must never fall through to an independent title LLM.
+            preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
+            preComputedTitleSource = 'cohort_fallback';
+          }
+        } catch (err) {
+          console.warn(
+            `[ProductCurator] Cohort title coordination failed for ${item.upc}; using deterministic fallback: ${redactTransportText(err instanceof Error ? err.message : String(err))}`,
+          );
+          preComputedTitle = formatDeterministicTitle(item.name ?? item.upc, item.brandHint);
+          preComputedTitleSource = 'cohort_fallback';
+        }
       }
     }
 
