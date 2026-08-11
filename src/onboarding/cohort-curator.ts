@@ -694,13 +694,24 @@ function buildCohortProductTypeConflictReason(
   const confident = resolution.perMember.filter(
     (m): m is ConfidentMemberProductTypeResult => !m.isAbstention,
   );
-  const distinctIds = [...new Set(confident.map(m => m.productTypeId))].sort((a, b) => a.localeCompare(b));
+  // PR5 hardening (P1-2): the distinct id set is the union of contribution
+  // ids AND raw confident inferences — a reviewed-first projection must never
+  // hide the inferred side of a reviewed-vs-inference family conflict.
+  const distinctIds = [...new Set([
+    ...confident.map(m => m.productTypeId),
+    ...resolution.perMember.map(m => m.inferredTypeId).filter((id): id is string => id !== null),
+  ])].sort((a, b) => a.localeCompare(b));
   const reviewedIds = [...new Set(
     resolution.perMember.map(m => m.reviewedTypeId).filter((id): id is string => id !== null),
   )].sort((a, b) => a.localeCompare(b));
   const detail = [...resolution.perMember]
     .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId))
-    .map(m => `${m.onboardingItemId}${m.productSku ? ` (${m.productSku})` : ''} -> ${m.productTypeId ?? 'abstained'}@${(m.confidence ?? 0).toFixed(3)}${m.reviewedTypeId ? ` (reviewed:${m.reviewedTypeId})` : ''}`)
+    .map(m => {
+      const inferredNote = m.inferredTypeId && m.inferredTypeId !== m.productTypeId
+        ? ` (inferred:${m.inferredTypeId})`
+        : '';
+      return `${m.onboardingItemId}${m.productSku ? ` (${m.productSku})` : ''} -> ${m.productTypeId ?? 'abstained'}@${(m.confidence ?? 0).toFixed(3)}${m.reviewedTypeId ? ` (reviewed:${m.reviewedTypeId})` : ''}${inferredNote}`;
+    })
     .join('; ');
   const reviewedNote = reviewedIds.length > 0
     ? `; reviewed types: ${reviewedIds.join(', ')}`
@@ -1571,8 +1582,11 @@ export interface PreparedCohortContext {
    * coherent_with_abstentions). Absent when the flag was OFF, the cohort
    * abstained/conflicted (id stays NULL by design), or the run predates PR4.
    * Metadata only: PR4 consumes it to stamp ONE `execution_product_type`
-   * dependency row per proposal inside the member-projection atomic commit;
-   * no gate logic reads it (review authority is unchanged).
+   * dependency row per `field_assignment` proposal inside the member-projection
+   * atomic commit (PR5 hardening: proposal-accurate separate kinds —
+   * `execution_product_type` vs `reviewed_product_type`; only the effective
+   * type's field-assignment proposals are stamped); no gate logic reads it
+   * (review authority is unchanged).
    */
   cohortExecutionType?: {
     id: string | null;

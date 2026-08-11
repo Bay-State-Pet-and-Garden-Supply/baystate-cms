@@ -2409,6 +2409,41 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     }
   });
 
+  it('PR5 hardening P1-2 SINGLE-member reviewed-vs-own-inference freeze regression: reviewed dog-treats + own confident inference dry-dog-food -> CONFLICTED with BOTH ids in the reason', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1ConfigWithProductTypes(workspaceId, wsPath, [
+      { id: 'dry-dog-food', name: 'Dry Dog Food' },
+      { id: 'dog-treats', name: 'Dog Treats' },
+    ]);
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+    });
+    expect(cohorts).toHaveLength(1);
+    // SINGLE member: its own evidence confidently infers dry-dog-food while
+    // a compatible reviewed fact says dog-treats — no sibling surfaces the
+    // inferred id, so the reason must carry the raw inferred side itself.
+    seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dog-treats');
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('failed');
+    expect(finalized.startedAt).toBeNull();
+    expect(finalized.productTypeOutcome).toBe('conflicted');
+    expect(finalized.executionProductTypeId).toBeNull();
+    // The reason lists BOTH distinct types (reviewed + raw inferred) and the
+    // per-member detail carries the (inferred:dry-dog-food) note.
+    expect(finalized.errorMessage).toContain('cohort_product_type_conflict');
+    expect(finalized.errorMessage).toContain('2 distinct confident Product Types');
+    expect(finalized.errorMessage).toContain('dry-dog-food');
+    expect(finalized.errorMessage).toContain('dog-treats');
+    expect(finalized.errorMessage).toContain('reviewed:dog-treats');
+    expect(finalized.errorMessage).toContain('inferred:dry-dog-food');
+    for (const item of items) {
+      expect(finalized.errorMessage).toContain(item.id);
+    }
+  });
+
   it('PR5 hardening P1-2 same-ID override: member reviewed dry-dog-food + inference dry-dog-food -> coherent, per-member result source reviewed', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     saveV1Config(workspaceId, wsPath);

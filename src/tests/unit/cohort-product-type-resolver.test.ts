@@ -205,6 +205,7 @@ function coherentResults(typeIds: string[]): PerMemberProductTypeResult[] {
     confidence: 0.8,
     source: 'keyword' as const,
     reviewedTypeId: null,
+    inferredTypeId: null,
     isAbstention: false,
     supportingEvidenceIds: [`ev-${index + 1}`],
     contradictingEvidenceIds: [],
@@ -662,6 +663,35 @@ describe('resolveCohortProductType — reviewed-fact coherence (PR5 hardening P1
     expect(resolution.perMember[1].productTypeId).toBe('dry-dog-food');
     // The inferred side's evidence contradicts the reviewed type.
     expect(resolution.contradictingEvidenceIds.length).toBeGreaterThan(0);
+  });
+
+  it('reviewed-vs-own-inference SINGLE member: the raw inferred id stays visible for conflict diagnostics (never hidden by the reviewed-first projection)', () => {
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        // One member only: reviewed dog-treats while its OWN evidence
+        // confidently infers dry-dog-food. Rule 2 conflicts — the reason must
+        // surface BOTH sides even though no sibling exposes the inferred id.
+        memberInput(makeMemberProjection({ itemId: 'item-a', name: 'Purina Pro Plan Dry Dog Food 5 lb' }), TYPE_PRODUCT_TYPES, undefined, 'dog-treats'),
+      ],
+    });
+    expect(resolution.outcome).toBe('conflicted');
+    if (resolution.outcome !== 'conflicted') return;
+    expect(resolution.productTypeId).toBeNull();
+    // Reviewed-first contribution: the member reports reviewed dog-treats.
+    expect(resolution.perMember[0].source).toBe('reviewed');
+    expect(resolution.perMember[0].productTypeId).toBe('dog-treats');
+    expect(resolution.perMember[0].reviewedTypeId).toBe('dog-treats');
+    // The RAW inference stays visible for diagnostics.
+    expect(resolution.perMember[0].inferredTypeId).toBe('dry-dog-food');
+    // The contradicted side's evidence is present.
+    expect(resolution.contradictingEvidenceIds.length).toBeGreaterThan(0);
+    // Union of contribution + raw inferred ids = both sides.
+    const distinct = new Set([
+      ...resolution.perMember.filter(m => !m.isAbstention).map(m => m.productTypeId),
+      ...resolution.perMember.map(m => m.inferredTypeId).filter((id): id is string => id !== null),
+    ]);
+    expect([...distinct].sort()).toEqual(['dog-treats', 'dry-dog-food']);
   });
 
   it('agreement: a reviewed type agreeing with the inferred type -> coherent with member contribution source reviewed', () => {

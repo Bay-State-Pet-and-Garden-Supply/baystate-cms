@@ -454,6 +454,14 @@ export interface PerMemberProductTypeResult {
    * reviewed-vs-inferred) aggregate over this field.
    */
   reviewedTypeId: string | null;
+  /**
+   * PR5 hardening: the member's RAW confident inferred type id (keyword/LLM
+   * match), retained for conflict diagnostics when a reviewed contribution
+   * overrides it. Null for reviewed-driven contributions that had no
+   * inference and for members without any confident inference. Never drives
+   * aggregation — `productTypeId` is the contribution.
+   */
+  inferredTypeId: string | null;
   /** True when the member contributes no id (no reviewed type AND no
    *  confident inference). */
   isAbstention: boolean;
@@ -594,6 +602,11 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
     confidence: res.reviewedTypeId !== null ? REVIEWED_CONTRIBUTION_CONFIDENCE : res.inferredConfidence,
     source: res.reviewedTypeId !== null ? 'reviewed' : res.inferredSource,
     reviewedTypeId: res.reviewedTypeId,
+    // PR5 hardening: the RAW confident inference stays visible for conflict
+    // diagnostics even when a reviewed contribution overrides it (the
+    // reviewed-first projection must never hide the inferred side of a
+    // reviewed-vs-inference family conflict).
+    inferredTypeId: res.reviewedTypeId !== null ? res.inferredTypeId : null,
     isAbstention: res.reviewedTypeId === null && res.inferredAbstention,
     supportingEvidenceIds: res.reviewedTypeId !== null ? [] : res.supportingEvidenceIds,
     contradictingEvidenceIds: [],
@@ -619,7 +632,9 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
       confidence: null,
       memberSupport,
       supportingEvidenceIds: [],
-      contradictingEvidenceIds: confident.flatMap(member => member.supportingEvidenceIds),
+      // The contradicted side's evidence: every confident raw inference
+      // (reviewed-first members keep their raw inferred packet on `res`).
+      contradictingEvidenceIds: confidentInferred.flatMap(res => res.supportingEvidenceIds),
       perMember,
       confidenceFloor,
     };
@@ -633,7 +648,7 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
       confidence: null,
       memberSupport,
       supportingEvidenceIds: [],
-      contradictingEvidenceIds: confident.flatMap(member => member.supportingEvidenceIds),
+      contradictingEvidenceIds: confidentInferred.flatMap(res => res.supportingEvidenceIds),
       perMember,
       confidenceFloor,
     };

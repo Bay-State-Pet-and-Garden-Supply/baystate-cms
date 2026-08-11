@@ -12,9 +12,12 @@
 -- 'coherent' | 'coherent_with_abstentions' | 'conflicted' | 'abstained'; NULL
 -- until PR4 resolves it — abstain/conflict deliberately leave the execution
 -- id/confidence NULL) plus the `classification_proposal_dependencies` table
--- (PR4 dependency metadata: every proposal a member pipeline creates under a
--- coherent cohort execution type gets one dependency row keyed off the
--- execution type — no recompute/invalidation machinery yet, that is PR5+).
+-- (PR4 dependency metadata: every `field_assignment` proposal a member
+-- pipeline creates under a coherent cohort execution type gets one
+-- dependency row keyed off the effective type — PR5 hardening refined this
+-- to proposal-accurate separate kinds (`execution_product_type` vs
+-- `reviewed_product_type`); no recompute/invalidation machinery yet, that
+-- is PR6+).
 -- Fresh installs read the FINAL v6 shape directly from this file; existing
 -- databases are converged in runMigrations(): marker-'5' databases run
 -- db.exec(cohortSql) (idempotent — creates the dependency table + indexes)
@@ -242,8 +245,9 @@ CREATE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_proposal
 CREATE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_target
   ON classification_proposal_dependencies(dependency_target_id);
 -- PR4 review fix: one dependency row per (proposal, kind). The member commit
--- stamps every proposal row belonging to the child run (including rows
--- persisted by a pre-crash attempt) via an idempotent check-then-insert; this
--- unique index is the race-safe backstop that makes a re-stamp a no-op.
+-- stamps every `field_assignment` proposal row belonging to the child run
+-- (including rows persisted by a pre-crash attempt) via an idempotent
+-- check-then-insert; this unique index is the race-safe backstop that makes
+-- a re-stamp a no-op.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_classification_proposal_dependencies_unique
   ON classification_proposal_dependencies(proposal_id, dependency_kind);
