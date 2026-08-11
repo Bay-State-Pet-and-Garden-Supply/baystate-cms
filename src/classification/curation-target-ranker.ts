@@ -60,11 +60,14 @@ export interface LlmRankOptionsParams {
    * AFTER every awaited transport call — a rejected assertion (the cohort
    * run's claim was lost to a reclaiming sibling) throws
    * `HeartbeatLostError` and the ranker aborts with NO further side effects
-   * (no preflight rows, no retry, no returned values). The underlying
-   * transport (`callLlmForTaskWithProvenance`, src/onboarding/llm-client.ts)
-   * is deliberately untouched; this seam plus the pre/post-await boundaries
-   * ARE the ownership guard surface. Absent in legacy/non-cohort
-   * invocations — zero behavior change.
+   * (no preflight rows, no retry, no returned values). The seam is also
+   * threaded into the audited transport (`callLlmForTaskWithProvenance`,
+   * src/onboarding/llm-client.ts) via the options object, so the transport
+   * re-asserts ownership immediately before its `started` model-call row
+   * insert and before every terminal `classification_model_calls` update —
+   * a stale owner never begins new audit provenance and never terminalizes
+   * an in-flight row. Absent in legacy/non-cohort invocations — zero
+   * behavior change.
    */
   assertHeld?: () => void;
 }
@@ -178,6 +181,9 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
         modelPolicy: params.modelPolicy,
         ...(operation ? { protectedOperation: operation } : {}),
         ...auditedCall,
+        // PR4 P1-1: thread the caller's ownership assertion INTO the audited
+        // transport so it re-asserts before its own durable audit writes.
+        assertHeld,
       },
     );
     // Ownership assertion IMMEDIATELY AFTER the transport returns and BEFORE
@@ -218,6 +224,9 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
             ...(retryModelCall && params.snapshot
               ? { modelCall: retryModelCall, snapshot: params.snapshot }
               : {}),
+            // PR4 P1-1: the retry transport re-asserts ownership before its
+            // own durable audit writes exactly like the primary call.
+            assertHeld,
           },
         );
         assertHeld?.();

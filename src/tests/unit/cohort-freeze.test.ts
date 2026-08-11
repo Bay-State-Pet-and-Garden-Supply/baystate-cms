@@ -37,7 +37,7 @@ import { saveClassificationConfig, loadClassificationConfig, loadRuntimeConfigAu
 import { generateCandidate, buildFocusedFiles } from '../../classification/config-generator';
 import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
 import { computeClassificationBundleHash } from '../../classification/config-validation';
-import { buildRuntimeSnapshot, getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
+import { buildRuntimeSnapshot, getRuntimeSnapshotByHash, buildModelCallContext } from '../../classification/runtime-snapshot';
 import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
 import {
   freezeCohortForExecution,
@@ -67,6 +67,7 @@ import type { ClassificationConfig } from '../../shared/schemas/classification';
 import type { InsertItemData } from '../../db/repositories/onboarding-item-repo';
 import { computeExtractionHash } from '../../db/repositories/curation-cohort-repo';
 import { reclaimExpiredCohortRuns } from '../../db/repositories/classification-cohort-run-repo';
+import { callLlmForTaskWithProvenance } from '../../onboarding/llm-client';
 
 let workspacePath: string;
 
@@ -1643,7 +1644,7 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     }
   });
 
-  it('P1-1 re-review: a sibling reclaim while product_type_ranking is GENUINELY in-flight aborts with HeartbeatLostError, the stale owner adds/terminalizes NOTHING (model-call row count for the in-flight child unchanged), and the new owner keeps the run', async () => {
+  it('P1-1 re-review: a sibling reclaim while the product_type_ranking TRANSPORT is genuinely in flight (fetch invoked, model call started) aborts with HeartbeatLostError; the stale owner adds NO rows and the in-flight model call stays `started` (the audited transport seam skips the stale terminalization); the new owner keeps the run', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const { bundle } = writeActiveV2Bundle(wsPath, llmTypeFallbackSeed());
     upsertConfigSnapshot(workspaceId, bundle);
@@ -1669,9 +1670,17 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     const originalFetch = globalThis.fetch;
     let releaseRankerTransport!: () => void;
     const rankerGate = new Promise<void>((resolve) => { releaseRankerTransport = resolve; });
+    // The stubbed fetch SIGNALS the instant it is invoked — the transport is
+    // GENUINELY in flight. The hook awaits this signal before reclaiming, so
+    // the reclaim can never fire during the client's acquireLlmSlot queue
+    // wait (BLOCKER-test fix: the old hook fired too early and proved
+    // nothing about an in-flight transport).
+    let signalRankerFetchStarted!: () => void;
+    const rankerFetchStarted = new Promise<void>((resolve) => { signalRankerFetchStarted = resolve; });
     let rankerTransports = 0;
     globalThis.fetch = (async () => {
       rankerTransports++;
+      signalRankerFetchStarted();
       // The transport genuinely hangs (the model call is in flight) until the
       // test seam releases it AFTER the reclaim + snapshot.
       await rankerGate;
@@ -1699,7 +1708,13 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
         return row ? String(row.id) : null;
       };
       await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
-        onTypeRankerInFlight: () => {
+        onTypeRankerInFlight: async () => {
+          if (reclaimed) return;
+          // WAIT until the transport is GENUINELY in flight: the reclaim must
+          // not fire during the client's acquireLlmSlot suspension (that
+          // would not prove the fetch was ever invoked). The stub signals on
+          // actual invocation.
+          await rankerFetchStarted;
           if (reclaimed) return;
           reclaimed = true;
           getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
@@ -1714,16 +1729,20 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
           expect(reclaim.resumed[0].id).toBe(run.id);
           // Snapshot run-scoped tables + the in-flight model-call row state at
           // the moment ownership moved — the stale owner must add/terminalize
-          // NOTHING afterwards.
+          // NOTHING afterwards. The ranker's `started` row IS present now
+          // (the transport is in flight) with status 'started'.
           tablesAtReclaim = tableCounts();
           const childId = childRunIdForCalls();
           modelCallsAtReclaim = childId
             ? (getDb().query('SELECT id, status FROM classification_model_calls WHERE run_id = ?').all(childId) as Array<{ id: string; status: string }>)
               .map(r => ({ id: String(r.id), status: String(r.status) }))
             : [];
+          expect(modelCallsAtReclaim.length).toBe(1);
+          expect(modelCallsAtReclaim.every(call => call.status === 'started')).toBe(true);
           // Release the hanging transport AFTER the reclaim + snapshot: the
-          // ranker's post-await ownership assertion must reject the stale
-          // continuation and abort the freeze with no further side effects.
+          // transport's own pre-terminal ownership assertion (PR4 P1-1 seam in
+          // llm-client.ts) must skip the stale `success` terminalization and
+          // abort the freeze with no further side effects.
           releaseRankerTransport();
         },
       })).rejects.toBeInstanceOf(HeartbeatLostError);
@@ -1732,24 +1751,25 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
       // never fires — no OCR transport at all in this scenario).
       expect(rankerTransports).toBe(1);
 
-      // Fix P1-1: the stale owner's guard surface added/terminalized NOTHING
-      // after ownership moved — model calls / stage results / evidence /
-      // proposals are row-count-identical to the reclaim instant. (The
-      // FORBIDDEN transport itself terminalizes its in-flight row after the
-      // fetch resolves — that write lives in llm-client.ts, deliberately
-      // outside the guard surface; the RANKER's own post-loss writes are
-      // zero.)
+      // Fix P1-1: the stale owner added/terminalized NOTHING after ownership
+      // moved — model calls / stage results / evidence / proposals are
+      // row-count-identical to the reclaim instant, AND the in-flight model
+      // call's row is IDENTICAL (still `started`): the audited transport's
+      // pre-terminal ownership assertion (PR4 P1-1 seam in llm-client.ts)
+      // skipped the stale terminalization — no row status change, no new
+      // row. The row remains `started` as a crash-equivalent abandoned row.
       expect(tableCounts()).toEqual(tablesAtReclaim);
       const childIdAfter = childRunIdForCalls();
       const modelCallsAfter = childIdAfter
         ? (getDb().query('SELECT id, status FROM classification_model_calls WHERE run_id = ?').all(childIdAfter) as Array<{ id: string; status: string }>)
           .map(r => ({ id: String(r.id), status: String(r.status) }))
         : [];
-      // Model-call row count for the in-flight child run is UNCHANGED: the
-      // stale owner never added a row, and the ranker seam never wrote a
-      // terminal preflight/abort row after the loss.
-      expect(modelCallsAfter).toHaveLength(modelCallsAtReclaim.length);
+      // NO NEW model-call rows AND NO row status changes for the child run:
+      // the stale owner's continuation raised HeartbeatLostError (reject
+      // above) without terminalizing the row it had started before reclaim.
+      expect(modelCallsAfter).toEqual(modelCallsAtReclaim);
       expect(modelCallsAfter.length).toBe(1);
+      expect(modelCallsAfter.every(call => call.status === 'started')).toBe(true);
 
       // The new owner's run is INTACT: still `freezing`, claimed by worker-b,
       // nothing finalized, no supersede, all PR4 columns NULL.
@@ -1773,6 +1793,93 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
       // Restore the PRIOR api_keys rows for both services this test touched
       // (byte-identical: original ids/timestamps), so later tests observe the
       // same key state as before this test ran.
+      getDb().run('DELETE FROM api_keys WHERE service IN (?, ?)', ['ollama_vlm', 'ollama']);
+      for (const prior of [priorVlmKey, priorOllamaKey]) {
+        if (!prior) continue;
+        getDb().run(
+          'INSERT INTO api_keys (id, service, api_key, base_url, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [prior.id, prior.service, prior.api_key, prior.base_url, prior.model, prior.created_at, prior.updated_at],
+        );
+      }
+    }
+  });
+
+  it('P1-1 seam (pre-await): ownership lost BEFORE the audited transport -> the pre-start assertion aborts with HeartbeatLostError, NO started model-call row and NO transport at all (BLOCKER-test fix)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // In-memory v2 snapshot whose frozen plan covers the protected
+    // `product_type_ranking` operation (same seed the freeze tests use) so
+    // the audited call resolves a route and reaches the pre-start seam.
+    const candidate = generateCandidate(llmTypeFallbackSeed(), EVIDENCE);
+    const authority = { kind: 'v2' as const, bundle: candidate.bundle };
+    const snapshot = buildRuntimeSnapshot({
+      workspaceId,
+      workspacePath: wsPath,
+      productSku: 'SKU-OWNERSHIP-LOST',
+      authority,
+      configSnapshotRef: {
+        id: candidate.bundle.manifest.bundleHash,
+        hash: candidate.bundle.manifest.bundleHash,
+        sourceCommit: null,
+        createdAt: new Date().toISOString(),
+      },
+      sourceProductHash: '',
+    });
+    expect(snapshot.schemaVersion).toBe(2);
+    expect(snapshot.modelExecutionPlan!.entries.some(e => e.operation === 'product_type_ranking')).toBe(true);
+
+    const run = createRun(workspaceId, 'SKU-OWNERSHIP-LOST', null, null, { sourceKind: 'onboarding' });
+    const modelCall = buildModelCallContext(snapshot, run.id, 'product_type_ranking', 1)!;
+    expect(modelCall).not.toBeNull();
+    const modelPolicy = modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash);
+    expect(modelPolicy).not.toBeNull();
+
+    // Provider credential so the protected route resolves (the pre-start seam
+    // sits AFTER route resolution and BEFORE the started-row insert).
+    const priorVlmKey = getDb().query('SELECT id, service, api_key, base_url, model, created_at, updated_at FROM api_keys WHERE service = ?').get('ollama_vlm') as Record<string, any> | undefined;
+    const priorOllamaKey = getDb().query('SELECT id, service, api_key, base_url, model, created_at, updated_at FROM api_keys WHERE service = ?').get('ollama') as Record<string, any> | undefined;
+    deleteApiKey('ollama_vlm');
+    upsertApiKey('ollama', 'test-key', 'http://127.0.0.1:11434', 'qwen2.5vl:latest');
+    const originalFetch = globalThis.fetch;
+    let transports = 0;
+    globalThis.fetch = (async () => {
+      transports++;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ values: ['Dry Dog Food'], confidence: 0.8 }) } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      // The claim was already lost before the call: the pre-start ownership
+      // assertion must abort BEFORE the started row exists and BEFORE any
+      // transport starts — and the audit layer must neither swallow the
+      // HeartbeatLostError nor write a stranded row.
+      await expect(
+        callLlmForTaskWithProvenance(
+          'product_type_classification',
+          'Choose the best product type from: ["Dry Dog Food"]. Evidence: Purina Pro Plan Dog Food.',
+          'You are a strict catalog classifier.',
+          {
+            allowFallback: true,
+            modelPolicy,
+            protectedOperation: 'product_type_ranking',
+            modelCall,
+            snapshot,
+            assertHeld: () => {
+              throw new HeartbeatLostError('Claim ownership already lost at operation start (run r is no longer claimed by worker-a).');
+            },
+          },
+        ),
+      ).rejects.toBeInstanceOf(HeartbeatLostError);
+      // No transport was ever invoked...
+      expect(transports).toBe(0);
+      // ...and NO started model-call row exists for the run (no provenance
+      // row for a stale owner — 'no started row at all').
+      const calls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE run_id = ?').get(run.id) as { cnt: number };
+      expect(calls.cnt).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
       getDb().run('DELETE FROM api_keys WHERE service IN (?, ?)', ['ollama_vlm', 'ollama']);
       for (const prior of [priorVlmKey, priorOllamaKey]) {
         if (!prior) continue;

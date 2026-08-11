@@ -50,6 +50,7 @@ import {
   type ModelCallContext,
 } from '../classification/model-operation-registry';
 import { assertModelPlanCompatible, type RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
+import { HeartbeatLostError } from '../classification/heartbeat-errors';
 import {
   insertModelCallStart,
   completeModelCall,
@@ -430,6 +431,19 @@ export interface CallLlmForTaskOptions {
   modelCall?: ModelCallContext;
   /** Immutable runtime snapshot the call is bound to (plan compatibility). */
   snapshot?: RuntimeClassificationSnapshot | null;
+  /**
+   * Optional ownership assertion injected by lease-scoped callers (cohort
+   * freeze executor, PR4 P1-1). When present, audited calls re-assert caller
+   * ownership before run-scoped audit writes: IMMEDIATELY BEFORE the
+   * `started` model-call row is inserted and immediately before EVERY
+   * terminal `classification_model_calls` update. A rejected assertion (the
+   * cohort run's claim was lost to a reclaiming sibling) throws
+   * `HeartbeatLostError` and the call aborts with NO durable audit write —
+   * the started row is never created, and an in-flight started row is never
+   * terminalized (it remains a crash-equivalent abandoned row). Absent in
+   * legacy/non-cohort invocations — zero behavior change.
+   */
+  assertHeld?: () => void;
   /** Workspace ID for general telemetry logging (defaults to 'default'). */
   workspaceId?: string;
 }
@@ -501,6 +515,10 @@ async function callLlmForTaskAudited(
     });
   } catch (err) {
     if (err instanceof ModelPolicyDeniedError) {
+      // PR4 P1-1 seam: a stale owner must not write even a pre-transport
+      // terminal row after the claim moved. A rejected assertion throws
+      // `HeartbeatLostError` and aborts before the denial row is written.
+      options.assertHeld?.();
       // Record the denial as a durable terminal row (no transport happened).
       insertTerminalModelCall({
         runId: ctx.runId,
@@ -524,6 +542,11 @@ async function callLlmForTaskAudited(
     throw err;
   }
   if (!config) {
+    // PR4 P1-1 seam: a stale owner must not write even a pre-transport
+    // terminal row after the claim moved. A rejected assertion throws
+    // `HeartbeatLostError` and aborts (never a silent null for a lost
+    // owner).
+    options.assertHeld?.();
     // No model available (disabled policy or no credential): durable
     // `unavailable` row so the attempted call is observable.
     insertTerminalModelCall({
@@ -554,6 +577,12 @@ async function callLlmForTaskAudited(
   if (options.modelPolicy) {
     assertModelPolicyIntact(options.modelPolicy);
   }
+
+  // PR4 P1-1 seam: re-assert caller ownership immediately before the durable
+  // `started` row — ownership lost while the caller was queued prevents the
+  // started row entirely (a stale owner never begins new audit provenance).
+  // A rejected assertion throws `HeartbeatLostError` and propagates.
+  options.assertHeld?.();
 
   // Insert the `started` audit row BEFORE transport. A failed start insert
   // MUST abort the call with a thrown error (never a silent null): without a
@@ -601,6 +630,12 @@ async function callLlmForTaskAudited(
   // throwing (fetch errors, non-OK responses, empty content).
   let terminalWritten = false;
   const markTerminal = (update: Parameters<typeof completeModelCall>[1]): boolean => {
+    // PR4 P1-1 seam: re-assert ownership before EVERY terminal write — a
+    // stale owner (lease reclaimed mid-call) must never terminalize its
+    // in-flight model-call row. A rejected assertion throws
+    // `HeartbeatLostError`; the row stays `started` (crash-equivalent
+    // abandoned) and the error propagates. Absent assertHeld = unchanged.
+    options.assertHeld?.();
     terminalWritten = true;
     return completeModelCall(callId, update);
   };
@@ -708,9 +743,15 @@ async function callLlmForTaskAudited(
       },
     };
   } catch (err) {
+    // PR4 P1-1 seam: ownership loss is NEVER swallowed or converted into a
+    // terminal/null outcome — a stale owner aborts with NO further audit
+    // write (the in-flight row stays `started`, crash-equivalent abandoned)
+    // and the `HeartbeatLostError` propagates to abort the stale run.
+    if (err instanceof HeartbeatLostError) throw err;
     // Outer terminalization: any exception after the start row that did not
     // already write a terminal row (route re-assertion, JSON decode, etc.)
-    // leaves a durable `failed` row. A stranded `started` row is impossible.
+    // leaves a durable `failed` row. A stranded `started` row is impossible
+    // for a still-owned call.
     if (!terminalWritten) {
       try {
         markTerminal({
@@ -721,6 +762,9 @@ async function callLlmForTaskAudited(
           costBasis: resolvedLocality === 'local' ? COST_BASIS.localZero : COST_BASIS.unknown,
         });
       } catch (terminalErr) {
+        // A stale-owner assertion inside the fallback terminalization must
+        // also propagate, never be logged away.
+        if (terminalErr instanceof HeartbeatLostError) throw terminalErr;
         console.error(
           `[LLMClient] Failed to terminalize model call ${callId} after error: `,
           redactTransportText(terminalErr instanceof Error ? terminalErr.message : String(terminalErr)),
