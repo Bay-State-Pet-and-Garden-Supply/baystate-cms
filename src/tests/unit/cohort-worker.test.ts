@@ -31,7 +31,7 @@ import {
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
-import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
+import { syncConfigToCache, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
 import { OnboardingWorker } from '../../onboarding/job-queue';
 import {
   freezeCohortForExecution,
@@ -272,10 +272,66 @@ const V1_CONFIG_TYPE_ENABLED: ClassificationConfig = {
   ),
 };
 
+/**
+ * V1_CONFIG_TYPE_ENABLED with the `test-flavor` product_field target also
+ * ENABLED (PR5 fixture): under a coherent cohort Execution Product Type the
+ * member pipeline additionally emits `field_assignment` (flavor) proposals.
+ */
+const V1_CONFIG_TYPE_AND_FIELD_ENABLED: ClassificationConfig = {
+  ...V1_CONFIG,
+  curationTargets: V1_CONFIG.curationTargets.map(target =>
+    target.id === 'test-product-type' || target.id === 'test-flavor' ? { ...target, enabled: true } : target,
+  ),
+};
+
 /** Save + cache the type-target-enabled config for one workspace. */
 function saveTypeEnabledConfig(wsId: string, wsPath: string): void {
   saveClassificationConfig(wsPath, V1_CONFIG_TYPE_ENABLED);
   syncConfigToCache(wsId, loadClassificationConfig(wsPath));
+}
+
+/** Save + cache the type-and-field-target-enabled config for one workspace. */
+function saveTypeAndFieldEnabledConfig(wsId: string, wsPath: string): void {
+  saveClassificationConfig(wsPath, V1_CONFIG_TYPE_AND_FIELD_ENABLED);
+  syncConfigToCache(wsId, loadClassificationConfig(wsPath));
+}
+
+/**
+ * Seed a provenance-compatible reviewed (accepted) `primary_product_type`
+ * decision on a PRIOR run for one SKU under the CURRENT config (PR5
+ * reviewed-override fixture). The member's freeze-built runtime snapshot then
+ * carries a reviewed type fact that outranks the cohort Execution Product
+ * Type (reviewed-first, DECISION-H).
+ */
+function seedReviewedTypeDecision(
+  wsId: string,
+  wsPath: string,
+  sku: string,
+  itemId: string,
+  typeId: string,
+): void {
+  const { hash } = createConfigSnapshot(wsId, loadClassificationConfig(wsPath));
+  const now = new Date().toISOString();
+  const runId = `prior-type-run-${sku}`;
+  const proposalId = `prior-type-proposal-${sku}`;
+  getDb().run(
+    `INSERT INTO classification_runs
+     (id, workspace_id, onboarding_item_id, product_sku, source_kind, config_snapshot_hash, status, started_at)
+     VALUES (?, ?, ?, ?, 'onboarding', ?, 'completed', ?)`,
+    [runId, wsId, itemId, sku, hash, now],
+  );
+  getDb().run(
+    `INSERT INTO classification_proposals
+     (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+     VALUES (?, ?, ?, 'primary_product_type', ?, ?, 0.95, 'accepted', ?)`,
+    [proposalId, runId, sku, typeId, JSON.stringify({ productTypeId: typeId }), now],
+  );
+  getDb().run(
+    `INSERT INTO classification_proposal_decisions
+     (id, proposal_id, decision, revised_value_json, revised_target_id, created_at, superseded_at)
+     VALUES (?, ?, 'accepted', ?, ?, ?, NULL)`,
+    [`prior-type-decision-${sku}`, proposalId, JSON.stringify({ productTypeId: typeId }), typeId, now],
+  );
 }
 
 describe('OnboardingWorker Curation cohort integration (issue #30, PR3 M3)', () => {
@@ -1280,6 +1336,166 @@ describe('PR4 C4b — proposal dependency metadata on cohort execution type (iss
     // 64-hex digest — the future invalidation key is stable.
     expect(hashCanonicalJson({ executionProductTypeId: 'dry-dog-food', productTypeConfidence: 0.8 })).toBe(expectedHash);
     expect(expectedHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+});
+
+// PR5 (issue #30): executor-side effective type + execution-source-only
+// dependency stamping (DECISION-H) + effectiveProductType in curation data
+// (DECISION-J).
+describe('PR5 C3 — executor-side effective type + dependency-stamping refinement (issue #30)', () => {
+  it('coherent cohort with type+field targets: pending flavor field_assignment proposals each carry an execution_product_type row (source=execution)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.productTypeOutcome).toBe('coherent');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(2);
+
+    const expectedHash = hashCanonicalJson({
+      executionProductTypeId: finalized.executionProductTypeId!,
+      productTypeConfidence: finalized.productTypeConfidence!,
+    });
+    let totalProposals = 0;
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const proposals = stored.curationData!.classificationProposals;
+      expect(proposals.length).toBeGreaterThan(0);
+      totalProposals += proposals.length;
+      // PR5 delta: the first-pass member emits a pending flavor field_assignment.
+      const flavor = proposals.find(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor');
+      expect(flavor).toBeDefined();
+      expect(flavor!.status).toBe('pending');
+      for (const proposal of proposals) {
+        const deps = listDependenciesForProposal(proposal.id);
+        expect(deps).toHaveLength(1);
+        expect(deps[0].dependencyKind).toBe('execution_product_type');
+        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+        expect(deps[0].dependencyValueHash).toBe(expectedHash);
+        expect(deps[0].workspaceId).toBe(workspaceId);
+        expect(deps[0].proposalId).toBe(proposal.id);
+      }
+      // DECISION-J: the member's curation data exposes the effective type.
+      expect(stored.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
+    }
+    expect(dependencyRowCount(workspaceId)).toBe(totalProposals);
+  });
+
+  it('reviewed-override member: proposals carry ZERO execution_product_type rows while the sibling\'s do (DECISION-H)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    // Member 1 gets a provenance-compatible reviewed type fact (same type id as
+    // the execution type — reviewed-first precedence still applies).
+    seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dry-dog-food');
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+
+    const reviewedMember = findItemById(items[0].id)!;
+    expect(reviewedMember.stageStatus).toBe('completed');
+    expect(reviewedMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'reviewed' });
+    const reviewedProposals = reviewedMember.curationData!.classificationProposals;
+    expect(reviewedProposals.length).toBeGreaterThan(0);
+    for (const proposal of reviewedProposals) {
+      const executionDeps = listDependenciesForProposal(proposal.id)
+        .filter(d => d.dependencyKind === 'execution_product_type');
+      expect(executionDeps).toHaveLength(0);
+    }
+
+    const executionMember = findItemById(items[1].id)!;
+    expect(executionMember.stageStatus).toBe('completed');
+    expect(executionMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
+    const executionProposals = executionMember.curationData!.classificationProposals;
+    expect(executionProposals.length).toBeGreaterThan(0);
+    for (const proposal of executionProposals) {
+      const executionDeps = listDependenciesForProposal(proposal.id)
+        .filter(d => d.dependencyKind === 'execution_product_type');
+      expect(executionDeps).toHaveLength(1);
+      expect(executionDeps[0].dependencyTargetId).toBe('dry-dog-food');
+    }
+    expect(dependencyRowCount(workspaceId)).toBe(executionProposals.length);
+  });
+
+  it('flag OFF: no cohortExecutionType, no execution dependency rows, flavor unknown, effective source none', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeOutcome).toBeNull();
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const proposals = stored.curationData!.classificationProposals;
+      // The enabled type target still produced proposals, but the flavor field
+      // target stays blocked: effective type is none → flavor unknown.
+      expect(proposals.length).toBeGreaterThan(0);
+      expect(proposals.some(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')).toBe(false);
+      // DECISION-J: cohort members expose the effective type even without an
+      // execution type — here a `none` source (id null).
+      expect(stored.curationData!.effectiveProductType).toEqual({ id: null, source: 'none' });
+    }
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+  });
+
+  it('abstained cohort: no execution type -> no dependency rows, no flavor proposals, effective source none', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.productTypeOutcome).toBe('abstained');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeConfidence).toBeNull();
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const proposals = stored.curationData!.classificationProposals;
+      // Deterministic abstention, not "all fields": no flavor proposals.
+      expect(proposals.some(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')).toBe(false);
+      expect(stored.curationData!.effectiveProductType).toEqual({ id: null, source: 'none' });
+    }
+    expect(dependencyRowCount(workspaceId)).toBe(0);
   });
 });
 

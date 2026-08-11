@@ -763,6 +763,15 @@ export async function curateItemWithPipeline(
         eventJson: { status: sr.status, output: sr.output_json },
         createdAt: String(sr.started_at),
       })),
+      // PR5 (DECISION-J): expose the member's effective Curation Product Type
+      // (reviewed-first / cohort Execution Product Type fallback / none) on
+      // the curation data — read-only observability in prepared-cohort mode
+      // only. `preparedCohort.effectiveType` is always present in cohort mode;
+      // legacy (non-cohort) runs never carry the key (undefined keys are
+      // dropped by JSON.stringify), keeping flag-OFF output byte-identical.
+      effectiveProductType: cohortMode && preparedCohort!.effectiveType
+        ? { id: preparedCohort!.effectiveType.id, source: preparedCohort!.effectiveType.source }
+        : undefined,
     };
   } catch (err) {
     console.error(`[ProductCurator] Classification pipeline failed:`, redactTransportText(err instanceof Error ? err.message : String(err)));

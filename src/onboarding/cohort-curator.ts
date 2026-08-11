@@ -110,6 +110,7 @@ import type {
   CohortMemberInput,
 } from '../classification/cohort-product-type-resolver';
 import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
+import { getEffectiveCurationTypeForSnapshot } from '../classification/effective-curation-type';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
 import { llmRankOptions } from '../classification/curation-target-ranker';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
@@ -1555,6 +1556,21 @@ export interface PreparedCohortContext {
     confidence: number | null;
     outcome: 'coherent' | 'coherent_with_abstentions' | 'conflicted' | 'abstained' | null;
   };
+  /**
+   * PR5 (DECISION-H/J): the member's effective Curation Product Type — the
+   * reviewed (accepted) Primary Product Type from the frozen snapshot's
+   * provenance-compatible facts first, the cohort Execution Product Type as
+   * fallback, else none. Resolved ONCE in
+   * `buildPreparedCohortContextForMember` via `getEffectiveCurationTypeForSnapshot`,
+   * so the stages (via `StageContext.cohortExecutionType`) and the
+   * member-projection dependency stamping agree by construction. Only
+   * `source === 'execution'` with a non-null id triggers
+   * `execution_product_type` dependency rows (reviewed-override and `none`
+   * members stamp nothing), and the value is exposed read-only on the
+   * member's `curation_data_json` as `effectiveProductType` (cohort mode
+   * only). Absent for legacy (non-cohort) invocations.
+   */
+  effectiveType?: { id: string | null; source: 'reviewed' | 'execution' | 'none' };
 }
 
 /**
@@ -1935,6 +1951,19 @@ function buildPreparedCohortContextForMember(
         outcome: parentRun.productTypeOutcome,
       }
     : undefined;
+  // PR5 (DECISION-H/J): resolve the member's effective Curation Product Type
+  // ONCE here — reviewed facts from the member's frozen snapshot first, the
+  // cohort Execution Product Type as fallback, else none. The stages
+  // (`getEffectiveCurationProductType`) and the member-projection dependency
+  // stamping read the SAME resolution, so they agree by construction.
+  const resolvedEffectiveType = getEffectiveCurationTypeForSnapshot(
+    memberSnapshot,
+    parentRun.executionProductTypeId,
+  );
+  const effectiveType = {
+    id: resolvedEffectiveType.effectiveTypeId,
+    source: resolvedEffectiveType.source,
+  };
   return {
     memberProjection,
     parentRunId: parentRun.id,
@@ -1953,6 +1982,7 @@ function buildPreparedCohortContextForMember(
         : null,
     },
     cohortExecutionType,
+    effectiveType,
   };
 }
 
@@ -2218,12 +2248,17 @@ export async function processCohort(
       // (derived from the pipeline result) are written in ONE transaction — a
       // crash never leaves a completed child without its projection, and the
       // recovery skip rule requires all three together. PR4 C4b dependency
-      // metadata rows are stamped INSIDE this same transaction: when the
-      // member executed under a coherent cohort Execution Product Type, every
-      // proposal of the child run gets ONE `execution_product_type` dependency
-      // row. Written here (and only here) means the rows exist IFF the member
-      // projection commit exists — a crash before this transaction leaves zero
-      // rows, and a committed projection is never missing its dependencies.
+      // metadata rows are stamped INSIDE this same transaction: every proposal
+      // of the child run gets ONE `execution_product_type` dependency row
+      // when the member's effective Curation Product Type actually came from
+      // the cohort Execution Product Type (PR5 DECISION-H — execution-source
+      // only). A reviewed-override member (effective source `reviewed`) or a
+      // `none` member is never execution-driven and stamps NOTHING, so a
+      // future execution-type change can never falsely stale reviewed-driven
+      // proposals. Written here (and only here) means the rows exist IFF the
+      // member projection commit exists — a crash before this transaction
+      // leaves zero rows, and a committed projection is never missing its
+      // dependencies.
       // PR4 review fix (SHOULD-FIX 3): the stamping targets EVERY proposal row
       // belonging to the child run — including rows persisted by a pre-crash
       // attempt (a crash seam can leave earlier-attempt proposals on the same
@@ -2239,9 +2274,19 @@ export async function processCohort(
         updateItemStageStatus(item.id, 'completed');
         completeRun(childRun.id, childTerminalStatus);
         const execType = prepared.cohortExecutionType;
-        if (execType && execType.id !== null) {
+        // PR5 (DECISION-H): stamp `execution_product_type` dependency rows
+        // ONLY when the member's effective Curation Product Type came from the
+        // cohort Execution Product Type. `source === 'execution'` implies the
+        // execution id was non-null (the resolver never emits `execution` for
+        // an absent id), so `execType` is defined here; the dependency value
+        // hash tuple is unchanged from PR4.
+        if (
+          prepared.effectiveType?.source === 'execution' &&
+          prepared.effectiveType.id !== null &&
+          execType !== undefined
+        ) {
           const dependencyValueHash = hashCanonicalJson({
-            executionProductTypeId: execType.id,
+            executionProductTypeId: prepared.effectiveType.id,
             productTypeConfidence: execType.confidence,
           });
           const childProposalRows = getDb().query(
@@ -2252,7 +2297,7 @@ export async function processCohort(
               workspaceId,
               proposalId: proposalRow.id,
               dependencyKind: 'execution_product_type',
-              dependencyTargetId: execType.id,
+              dependencyTargetId: prepared.effectiveType.id,
               dependencyValueHash,
             });
           }

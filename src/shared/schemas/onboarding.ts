@@ -342,6 +342,18 @@ export const CurationDataSchema = z.object({
   classificationProposals: z.array(ClassificationProposalSchema).default(() => []),
   classificationDecisions: z.array(ClassificationProposalDecisionSchema).default(() => []),
   classificationHistory: z.array(ClassificationHistoryEventSchema).default(() => []),
+  /**
+   * PR5 (issue #30, DECISION-J): the member's effective Curation Product Type
+   * in prepared-cohort mode — the reviewed (accepted) Primary Product Type
+   * first, the frozen cohort Execution Product Type as fallback, else none.
+   * Read-only observability: the Review UI ignores unknown keys, Promotion
+   * never consumes it (the Execution Type is never reviewed truth), and
+   * legacy (non-cohort) runs never carry the key.
+   */
+  effectiveProductType: z.object({
+    id: z.string().nullable(),
+    source: z.enum(['reviewed', 'execution', 'none']),
+  }).nullable().optional(),
 });
 
 export type CurationData = z.infer<typeof CurationDataSchema>;

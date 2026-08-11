@@ -127,11 +127,14 @@ export interface StageContext {
    * Cohort-level Execution Product Type resolved at freeze (issue #30 PR4
    * C4b). Present ONLY in prepared-cohort mode when the parent run row carries
    * a non-null `execution_product_type_id` (coherent /
-   * coherent_with_abstentions). METADATA ONLY in PR4 — the cohort type is
-   * recorded as proposal dependency metadata by the cohort executor; NO gate
-   * logic reads this field (review authority stays on the member's own
-   * reviewed proposals; `getReviewedPrimaryProductTypeId` and every
-   * applicability/attribute/page/promotion gate are unchanged). Flag OFF,
+   * coherent_with_abstentions). PR4: metadata only — recorded as proposal
+   * dependency metadata by the cohort executor. PR5: read by
+   * `getEffectiveCurationProductType` for the two Curation applicability
+   * stages (`attribute_applicability` / `product_attribute_proposals`) as the
+   * execution-source fallback behind the reviewed Primary Product Type; still
+   * metadata-only for every other stage (review authority stays on the
+   * member's own reviewed proposals; `category_page_proposals`, the review
+   * completion gate, and Promotion are unchanged). Flag OFF,
    * abstained/conflicted cohorts, and legacy non-cohort runs leave it absent.
    */
   cohortExecutionType?: {
