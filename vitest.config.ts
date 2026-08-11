@@ -121,6 +121,9 @@ export default defineConfig({
       'src/tests/unit/cohort-v6-migration.test.ts',
       // PR4 C3 pure resolver (bun:test imports — vitest cannot collect it)
       'src/tests/unit/cohort-product-type-resolver.test.ts',
+      // PR5 effective-curation-type suites (bun:test imports — vitest cannot collect them)
+      'src/tests/unit/effective-curation-type.test.ts',
+      'src/tests/unit/effective-curation-stages.test.ts',
       // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
       'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],
