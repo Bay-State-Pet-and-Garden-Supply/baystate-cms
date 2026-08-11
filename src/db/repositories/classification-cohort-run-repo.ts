@@ -21,10 +21,14 @@
  * at most one current run per cohort, and superseding frees the slot for a
  * legitimate retry. `getCurrentCohortRun` reads that invariant directly.
  *
- * Reclaim: `reclaimExpiredCohortRuns` resumes the SAME run when the expired
- * lease's frozen authorities still match current state (reassign worker,
- * keep run id — re-freeze allowed for crash-mid-freeze rows with NULL
- * hashes), and supersedes on drift (new run on the next claim).
+ * Reclaim (PR3 hardening, Commit A): `reclaimExpiredCohortRuns` compares
+ * `lease_expires_at < :nowIso` (expiry timestamps compare to NOW — callers pass
+ * `new Date().toISOString()`, never `now - TTL`). RESUME is a CAS on the
+ * observed `{claimed_by, lease_expires_at}` (plus `status IN ('freezing',
+ * 'running')`): `changes === 0` means the row changed since selection and the
+ * run is NEVER handed out. The drift branch supersedes via
+ * `supersedeCohortRunIfUnchanged` — a stale drift verdict can never supersede
+ * a run another worker already resumed.
  */
 import { getDb } from '../connection';
 import { createRun, getRun } from './classification-run-repo';
@@ -391,46 +395,99 @@ export interface CohortRunReclaimResult {
  *
  * `verifyFrozen` is injected so the repo stays pure SQL and tests can
  * deterministically force match/drift verdicts.
+ *
+ * `nowIso` is the caller's NOW (`new Date().toISOString()`): expiry timestamps
+ * compare to now, so a lease is reclaimable the moment `lease_expires_at`
+ * passes `now` — never only after a full extra TTL has elapsed.
  */
 export function reclaimExpiredCohortRuns(
   workspaceId: string,
-  staleBefore: string,
+  nowIso: string,
   verifyFrozen: (run: CohortRun) => 'match' | 'drift',
   workerId: string,
   leaseTtlMs: number,
 ): CohortRunReclaimResult {
   const db = getDb();
-  const nowIso = now();
   const leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
   const expired = db.query(
     `SELECT * FROM classification_cohort_runs
      WHERE workspace_id = ? AND status IN ('freezing','running')
        AND (lease_expires_at IS NULL OR lease_expires_at < ?)
      ORDER BY created_at ASC`,
-  ).all(workspaceId, staleBefore) as Record<string, any>[];
+  ).all(workspaceId, nowIso) as Record<string, any>[];
 
   const resumed: CohortRun[] = [];
   const superseded: CohortRun[] = [];
   for (const row of expired) {
     const run = mapCohortRunRow(row);
     if (verifyFrozen(run) === 'match') {
+      // RESUME is a CAS on the state observed at SELECT time: reassign the
+      // worker and refresh the lease ONLY when the row is unchanged since
+      // selection. changes === 0 ⇒ a sibling worker already resumed (or the
+      // run left freezing/running) ⇒ this run is NEVER handed out twice.
       const updated = db.run(
         `UPDATE classification_cohort_runs
          SET claimed_by = ?, claimed_at = ?, lease_expires_at = ?
-         WHERE id = ? AND status IN ('freezing','running')`,
-        [workerId, nowIso, leaseExpiresAt, run.id],
+         WHERE id = ? AND status IN ('freezing','running')
+           AND claimed_by IS ? AND lease_expires_at IS ?`,
+        [workerId, nowIso, leaseExpiresAt, run.id, run.claimedBy, run.leaseExpiresAt],
       );
       if (updated.changes > 0) {
         const resumedRow = getCohortRunById(run.id);
         if (resumedRow) resumed.push(resumedRow);
       }
     } else {
-      supersedeCohortRun(run.id, 'Authority drift during lease reclaim');
-      const supersededRow = getCohortRunById(run.id);
-      if (supersededRow) superseded.push(supersededRow);
+      // Drift verdict is ONLY applied via the observed-state CAS: a stale
+      // drift verdict (row already resumed by another worker) must never
+      // supersede that worker's fresh claim.
+      const supersededOk = supersedeCohortRunIfUnchanged(
+        run.id,
+        { claimedBy: run.claimedBy, leaseExpiresAt: run.leaseExpiresAt, status: run.status },
+        'Authority drift during lease reclaim',
+      );
+      if (supersededOk) {
+        const supersededRow = getCohortRunById(run.id);
+        if (supersededRow) superseded.push(supersededRow);
+      }
     }
   }
   return { resumed, superseded };
+}
+
+/**
+ * CAS-guarded supersession. Supersedes the run ONLY when it still matches the
+ * `observed` state (owner, lease expiry, status) captured at selection time —
+ * `changes > 0` only then. On success the linked RUNNING child classification
+ * runs are failed so `idx_classification_runs_one_running_item` never blocks a
+ * member retry under a new run (mirrors `supersedeCohortRun`). Returns false
+ * when the row changed since selection (never hand out / never supersede).
+ * The reclaim drift branch uses ONLY this function.
+ */
+export function supersedeCohortRunIfUnchanged(
+  runId: string,
+  observed: { claimedBy: string | null; leaseExpiresAt: string | null; status: string },
+  reason: string,
+): boolean {
+  const db = getDb();
+  let changes = 0;
+  db.transaction(() => {
+    const result = db.run(
+      `UPDATE classification_cohort_runs
+       SET status = 'superseded', superseded_at = ?, error_message = ?
+       WHERE id = ? AND claimed_by IS ? AND lease_expires_at IS ? AND status = ?`,
+      [now(), reason ?? null, runId, observed.claimedBy, observed.leaseExpiresAt, observed.status],
+    );
+    changes = result.changes;
+    if (changes > 0) {
+      db.run(
+        `UPDATE classification_runs
+         SET status = 'failed', completed_at = ?, error_message = 'Superseded by cohort run supersession'
+         WHERE cohort_run_id = ? AND status = 'running'`,
+        [now(), runId],
+      );
+    }
+  })();
+  return changes > 0;
 }
 
 // ─── Reads ────────────────────────────────────────────────────────────────────

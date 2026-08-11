@@ -23,6 +23,7 @@ import {
   getCohortRunById,
   getCurrentCohortRun,
   listCohortRunsByCohort,
+  cancelFreezingRun,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
@@ -32,6 +33,7 @@ import {
   freezeCohortForExecution,
   processCohort,
   verifyCohortRunFrozen,
+  HeartbeatLostError,
 } from '../../onboarding/cohort-curator';
 import {
   overrideCohortCurationFlags,
@@ -404,6 +406,39 @@ describe('OnboardingWorker Curation cohort integration (issue #30, PR3 M3)', () 
     expect(stored.stageStatus).toBe('completed');
     expect(stored.curationData).not.toBeNull();
   });
+
+  it('R5: a cancelled pre-freeze run is superseded on the next poll (retryable terminal) so the slot reopens', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    // A previous worker claimed the cohort and cancelled the freezing run
+    // (e.g. a freeze that could never finalize). The cancelled run still holds
+    // the current-run slot — it is NOT a vacuous match for reclaim.
+    const [claimed] = claimReadyCurationCohorts(workspaceId, 10, 'crashed-worker', COHORT_LEASE_TTL_MS);
+    expect(cancelFreezingRun(claimed.id, 'Freeze could never finalize')).toBe(true);
+    const cancelled = getCohortRunById(claimed.id)!;
+    expect(verifyCohortRunFrozen(cancelled, wsPath, workspaceId)).toBe(false);
+
+    const worker = new OnboardingWorker(workspaceId, wsPath);
+    await worker.poll();
+    await drainWorker(worker);
+
+    // The reconcile path treated the cancelled run as retryable: superseded,
+    // then a fresh run was claimed + executed.
+    const history = listCohortRunsByCohort(cancelled.cohortId);
+    expect(history.length).toBe(2);
+    const oldRun = history.find(r => r.id === cancelled.id)!;
+    expect(oldRun.status).toBe('superseded');
+    expect(oldRun.errorMessage).toContain('Cancelled run retry');
+    const fresh = history.find(r => r.id !== cancelled.id)!;
+    expect(['completed', 'completed_with_abstentions', 'completed_with_member_failures']).toContain(fresh.status);
+    const stored = findItemById(items[0].id)!;
+    expect(stored.stageStatus).toBe('completed');
+    expect(stored.curationData).not.toBeNull();
+  });
 });
 
 describe('processCohort completion semantics (issue #30, PR3 M3)', () => {
@@ -497,6 +532,45 @@ describe('processCohort completion semantics (issue #30, PR3 M3)', () => {
     const { completeCohortRun } = await import('../../db/repositories/classification-cohort-run-repo');
     expect(completeCohortRun(finalized.id, 'completed')).toBe(false);
     expect(getCohortRunById(finalized.id)!.status).toBe('failed');
+  });
+});
+
+describe('processCohort heartbeat hardening (issue #30, PR3 hardening Commit A)', () => {
+  it('heartbeat lost mid-execution aborts the member deterministically with NO further side effects', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    const evidenceBefore = getDb().query('SELECT COUNT(*) AS cnt FROM classification_evidence').get() as { cnt: number };
+    const stageBefore = getDb().query('SELECT COUNT(*) AS cnt FROM classification_stage_results').get() as { cnt: number };
+
+    // A sibling worker reclaims the lease while this owner is "busy" — the
+    // run is no longer claimed by worker-a, so the next heartbeat fails.
+    getDb().run(
+      'UPDATE classification_cohort_runs SET claimed_by = ?, lease_expires_at = ? WHERE id = ?',
+      ['sibling-worker', new Date(Date.now() + COHORT_LEASE_TTL_MS).toISOString(), finalized.id],
+    );
+
+    // The member aborts: HeartbeatLostError propagates, the parent is failed
+    // deterministically, and NO member side effects were produced after the
+    // ownership loss (no curation data, item not completed, no evidence/stage
+    // rows, no SSE member completion).
+    await expect(processCohort(finalized, wsPath, workspaceId)).rejects.toBeInstanceOf(HeartbeatLostError);
+
+    const parent = getCohortRunById(finalized.id)!;
+    expect(parent.status).toBe('failed');
+    expect(parent.errorMessage).toContain('Claim ownership lost');
+    const item = findItemById(items[0].id)!;
+    expect(item.stageStatus).not.toBe('completed');
+    expect(item.curationData).toBeNull();
+    const evidenceAfter = getDb().query('SELECT COUNT(*) AS cnt FROM classification_evidence').get() as { cnt: number };
+    const stageAfter = getDb().query('SELECT COUNT(*) AS cnt FROM classification_stage_results').get() as { cnt: number };
+    expect(Number(evidenceAfter.cnt)).toBe(Number(evidenceBefore.cnt));
+    expect(Number(stageAfter.cnt)).toBe(Number(stageBefore.cnt));
   });
 });
 

@@ -57,7 +57,7 @@ import {
   updateItemStageStatus,
 } from '../db/repositories/onboarding-item-repo';
 import { getLatestExtractionSourcesByItemIds } from '../db/repositories/onboarding-extraction-repo';
-import { getRun } from '../db/repositories/classification-run-repo';
+import { getRun, completeRun, createRun } from '../db/repositories/classification-run-repo';
 import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
 import {
   syncConfigToCache,
@@ -141,6 +141,61 @@ function storedOcrInputHash(item: OnboardingItem): string | null {
   return ext && typeof ext.ocrInputHash === 'string' ? ext.ocrInputHash : null;
 }
 
+/** The ocrExecutionDigest recorded with the item's stored OCR (top-level
+ *  marker in extraction_data_json, alongside ocrInputHash), or null when the
+ *  stored OCR predates the execution-authority binding (unknown authority ⇒
+ *  the reuse guard fails closed under a v2 snapshot). */
+function storedOcrExecutionDigest(item: OnboardingItem): string | null {
+  const ext = item.extractionData as { ocrExecutionDigest?: unknown } | null | undefined;
+  return ext && typeof ext.ocrExecutionDigest === 'string' ? ext.ocrExecutionDigest : null;
+}
+
+/** Strip URL credentials before hashing — an OCR authority digest never bakes
+ *  credentials into even a digest. Deterministic for identical authorities. */
+function sanitizeUrlForDigest(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    // Not a URL — hash the raw string (still a digest, no plaintext leak).
+    return url;
+  }
+}
+
+/**
+ * OCR execution-authority digest (PR3 hardening, Commit A / R4):
+ * `hashCanonicalJson({planDigest, ruleVersionsDigest})` over the member
+ * snapshot's `evidence_extraction` model-execution-plan entry (provider,
+ * model, locality, prompt/rule versions, frozen local-VLM route WITHOUT
+ * credentials) plus `runtimeRuleVersions.digest`. The stored OCR is only
+ * reusable when this digest matches the CURRENT snapshot's authority — a
+ * model-policy / local-VLM-route change re-runs OCR under the new authority.
+ * Returns null for legacy v1 snapshots (no frozen plan).
+ */
+export function computeOcrExecutionDigest(snapshot: RuntimeClassificationSnapshot): string | null {
+  const plan = snapshot.modelExecutionPlan;
+  const rules = snapshot.runtimeRuleVersions;
+  if (!plan || !rules) return null;
+  const entry = plan.entries.find(e => e.operation === 'evidence_extraction');
+  if (!entry) return null;
+  const planDigest = hashCanonicalJson({
+    operation: entry.operation,
+    stage: entry.stage,
+    provider: entry.provider,
+    model: entry.model,
+    locality: entry.locality,
+    fromOverride: entry.fromOverride,
+    promptTemplateVersion: entry.promptTemplateVersion,
+    ruleVersion: entry.ruleVersion,
+    localVlmBaseUrl: sanitizeUrlForDigest(entry.localVlmBaseUrl),
+    localVlmModel: entry.localVlmModel ?? null,
+  });
+  return hashCanonicalJson({ planDigest, ruleVersionsDigest: rules.digest });
+}
+
 /** OCR is settled ⇔ structured OCR data exists OR the attempt reached a
  *  terminal outcome (`succeeded | disabled | failed | no_image`). Mirrors the
  *  curation-cohort-service readiness check (curation-cohort-service.ts:196). */
@@ -170,8 +225,9 @@ function hasOcrContent(ocr: PackagingOcrData | undefined | null): boolean {
  * entry (SORTED by onboardingItemId for deterministic hashing):
  * - `spreadsheetIdentity` — the frozen spreadsheet hints;
  * - `extraction` — the complete normalized extraction evidence the frozen-mode
- *   evidence stage may consume, including the OCR outcome/data and the
- *   `ocrInputHash` the OCR was started against;
+ *   evidence stage may consume, including the OCR outcome/data, the
+ *   `ocrInputHash` the OCR was started against, and the `ocrExecutionDigest`
+ *   (execution-authority binding, Commit A) it was executed under;
  * - `evidenceHash` — `computeExtractionHash(item)` (member-local H2 input).
  *
  * Fails closed when a member has no extraction hash (the freeze gate requires
@@ -253,6 +309,7 @@ export function buildExecutionEvidenceProjection(
           outcome: ext.ocrOutcome ?? null,
           packagingOcrData: ext.packagingOcrData ?? null,
           ocrInputHash: computeOcrInputHash(item, extractionSourceUrl),
+          ocrExecutionDigest: storedOcrExecutionDigest(item),
         },
         piEvidence,
         piImportComplete,
@@ -556,6 +613,20 @@ class CohortFreezeOwnershipError extends Error {
   }
 }
 
+/**
+ * True when a child classification run accumulated model-call or stage side
+ * effects (PR3 hardening, Commit A / R4). A running child with side effects
+ * under a DIFFERENT snapshot authority is retired (never rebound); a
+ * side-effect-free child is re-linked to the new snapshot in place.
+ */
+function childRunHasSideEffects(childRunId: string): boolean {
+  const db = getDb();
+  const call = db.query('SELECT 1 FROM classification_model_calls WHERE run_id = ? LIMIT 1').get(childRunId);
+  if (call) return true;
+  const stage = db.query('SELECT 1 FROM classification_stage_results WHERE run_id = ? LIMIT 1').get(childRunId);
+  return Boolean(stage);
+}
+
 export interface FreezeMemberResult {
   member: CurationCohortMember;
   item: OnboardingItem;
@@ -624,9 +695,21 @@ export async function freezeCohortForExecution(
   const captured = captureCohortAuthorities(workspacePath, workspaceId);
 
   // 3–4. Per member: snapshot (frozen fieldOptions) + persist + child run +
-  //      OCR pull-forward + recompute hash.
+  //      OCR pull-forward + recompute hash. The parent lease is heartbeated
+  //      at member granularity (TTL/3 cadence) so a multi-member freeze with
+  //      long OCR calls stays inside the TTL; a rejected heartbeat aborts the
+  //      freeze (a sibling owns the run now — no further side effects).
   const frozenMembers: FreezeMemberResult[] = [];
+  let lastHeartbeatAt = 0;
   for (const member of members) {
+    if (Date.now() - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3) {
+      if (!heartbeatCohortRun(run.id, workerId, COHORT_LEASE_TTL_MS)) {
+        throw new HeartbeatLostError(
+          `freeze lost claim ownership of run ${run.id} (heartbeat rejected; run no longer claimed by ${workerId} / no longer freezing).`,
+        );
+      }
+      lastHeartbeatAt = Date.now();
+    }
     const item = itemsById.get(member.onboardingItemId)!;
     const extractionSourceUrl = extractionSources.get(item.id) ?? null;
     const currentOcrInputHash = computeOcrInputHash(item, extractionSourceUrl);
@@ -661,20 +744,37 @@ export async function freezeCohortForExecution(
     }
 
     const { id: runtimeSnapId, hash: runtimeSnapHash } = persistRuntimeSnapshot(snapshot);
-    const memberRun = ensureMemberRun(run.id, item.id, workspaceId, item.upc, runtimeSnapId, runtimeSnapHash);
+    let memberRun = ensureMemberRun(run.id, item.id, workspaceId, item.upc, runtimeSnapId, runtimeSnapHash);
     if (memberRun.configSnapshotId !== runtimeSnapId || memberRun.configSnapshotHash !== runtimeSnapHash) {
-      // Re-link the child run to the freeze-persisted snapshot (idempotent
-      // ensureMemberRun may have returned a run created by a prior partial
-      // freeze with stale refs).
-      getDb().run(
-        'UPDATE classification_runs SET config_snapshot_id = ?, config_snapshot_hash = ? WHERE id = ?',
-        [runtimeSnapId, runtimeSnapHash, memberRun.id],
-      );
+      // Reusing an existing RUNNING child whose snapshot refs differ from the
+      // freshly built snapshot (a prior partial freeze captured the child
+      // under a DIFFERENT authority). If the child already accumulated
+      // model-call/stage side effects, rebinding it would stamp new
+      // provenance onto old work — retire it and create a NEW child under the
+      // same parent with the new snapshot. With no side effects the refs are
+      // updated in place (idempotent ensureMemberRun may have returned a run
+      // created by a prior partial freeze with stale refs).
+      if (childRunHasSideEffects(memberRun.id)) {
+        completeRun(memberRun.id, 'failed', 'snapshot changed during resume');
+        memberRun = createRun(workspaceId, item.upc, runtimeSnapId, runtimeSnapHash, {
+          onboardingItemId: item.id,
+          cohortRunId: run.id,
+        });
+      } else {
+        getDb().run(
+          'UPDATE classification_runs SET config_snapshot_id = ?, config_snapshot_hash = ? WHERE id = ?',
+          [runtimeSnapId, runtimeSnapHash, memberRun.id],
+        );
+      }
     }
 
     // OCR pull-forward: run ONE run-bound OCR call when the stored OCR is
-    // unsettled OR its recorded input set no longer matches the current one.
-    const ocrNeedsRun = !isOcrSettled(item) || storedOcrInputHash(item) !== currentOcrInputHash;
+    // unsettled, OR its recorded input set no longer matches the current one,
+    // OR its execution-authority digest no longer matches the CURRENT
+    // snapshot's plan/rule digest (R4: old OCR under a changed model policy /
+    // local-VLM route is NEVER accepted — it re-runs under the new authority).
+    const currentOcrExecutionDigest = computeOcrExecutionDigest(snapshot);
+    const ocrNeedsRun = !isOcrSettled(item) || storedOcrInputHash(item) !== currentOcrInputHash || storedOcrExecutionDigest(item) !== currentOcrExecutionDigest;
     let frozenItem = item;
     if (ocrNeedsRun) {
       const ocr = await runFrozenOcrPullForward({
@@ -690,6 +790,7 @@ export async function freezeCohortForExecution(
           : {}),
         ...(ocr.ocrOutcome ? { ocrOutcome: ocr.ocrOutcome } : {}),
         ocrInputHash: currentOcrInputHash,
+        ocrExecutionDigest: currentOcrExecutionDigest,
       };
       updateItemExtractionData(item.id, JSON.stringify(updatedExt));
       frozenItem = { ...item, extractionData: updatedExt as OnboardingItem['extractionData'] };
@@ -828,7 +929,10 @@ export async function freezeCohortForExecution(
  * Production `verifyFrozen` verdict for lease reclaim. True ('match') when the
  * run may be resumed:
  * - a `freezing` run with NULL frozen hashes is a crash mid-freeze → vacuous
- *   match (re-freeze allowed, same run id);
+ *   match ONLY while the run is still actively reclaimable (`status ===
+ *   'freezing'`). A cancelled/failed/superseded NULL-hash run is NOT a
+ *   vacuous match — it must be superseded (retry / slot reopen), never
+ *   resumed as if it were a live freeze;
  * - otherwise the CURRENT world must still match the frozen run: cohort ready +
  *   non-superseded, membership hash equal, the rebuilt execution-evidence
  *   projection hashes to `evidenceSnapshotHash`, and config/page/policy
@@ -841,8 +945,10 @@ export function verifyCohortRunFrozen(
 ): boolean {
   try {
     if (run.evidenceSnapshotHash === null) {
-      // Crash mid-freeze (nothing finalized yet) → resume and re-freeze.
-      return true;
+      // Crash mid-freeze (nothing finalized yet) → resume and re-freeze — but
+      // only a run that is STILL a live `freezing` claim. A terminal
+      // NULL-hash run (cancelled/failed/superseded) is never a vacuous match.
+      return run.status === 'freezing';
     }
     const cohort = getCohortById(run.cohortId);
     if (!cohort || cohort.status !== 'ready' || cohort.supersededAt !== null) return false;
@@ -951,15 +1057,17 @@ export interface CohortExecutionSummary {
 }
 
 /**
- * A cohort-level execution abort (claim ownership lost). Never recorded as a
- * member failure and never completes the parent — a sibling worker now owns
- * the run (reclaimed lease) and will finish it. `processCohort` only throws
- * this after all cohort-level validation has passed.
+ * A cohort-level execution abort (claim ownership lost — PR3 hardening,
+ * Commit A). Thrown when a heartbeat attempt returns false. The caller
+ * aborts the member/cohort deterministically (fails the in-flight child run
+ * and the parent) and initiates NO further side effects after the loss.
+ * `processCohort` only throws this after all cohort-level validation has
+ * passed. (Supersedes the M3 `CohortRunOwnershipAbortError` semantics.)
  */
-class CohortRunOwnershipAbortError extends Error {
+export class HeartbeatLostError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'CohortRunOwnershipAbortError';
+    this.name = 'HeartbeatLostError';
   }
 }
 
@@ -1010,12 +1118,12 @@ function buildPreparedCohortContextForMember(
 
 /**
  * Execute a frozen (`running`) cohort run (PR3 M3, contract D step 6). Per
- * member in ordinal order: heartbeat the parent lease (renew, ownership-
- * guarded), run `curateItemWithPipeline` in prepared-cohort mode against the
- * freeze-persisted member projection + runtime snapshot, persist
- * `curation_data_json`, mark the item's Curation stage completed, and record
- * failures WITHOUT aborting the cohort — a member failure never stops the
- * remaining members.
+ * member in ordinal order: renew the parent lease on a scoped periodic
+ * cadence (TTL/3 — ownership-guarded), run `curateItemWithPipeline` in
+ * prepared-cohort mode against the freeze-persisted member projection +
+ * runtime snapshot, persist `curation_data_json`, mark the item's Curation
+ * stage completed, and record failures WITHOUT aborting the cohort — a member
+ * failure never stops the remaining members.
  *
  * Parent completion (write-once via `completeCohortRun`):
  * - `completed` — every member completed;
@@ -1026,10 +1134,14 @@ function buildPreparedCohortContextForMember(
  * - `failed` — the cohort-level semantic state is unreachable (missing frozen
  *   snapshot / members / items / ownership) — thrown after completing the run.
  *
- * Ownership loss mid-execution throws `CohortRunOwnershipAbortError` WITHOUT
- * completing the parent (a reclaimed sibling owns the run now). Crash-recovery
- * resume (same run id, reclaim-on-match) never re-executes a member whose
- * child run already completed under this parent.
+ * Heartbeat hardening (PR3 hardening, Commit A): the lease is renewed when
+ * `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3` (so a long OCR/model/
+ * pipeline call can no longer silently outlive the TTL). A heartbeat attempt
+ * that returns false throws `HeartbeatLostError`; the caller aborts the
+ * member/cohort deterministically (fails the in-flight child run + the parent)
+ * with NO new side effects after ownership loss. Crash-recovery resume (same
+ * run id, reclaim-on-match) never re-executes a member whose child run already
+ * completed under this parent.
  */
 export async function processCohort(
   run: CohortRun,
@@ -1101,6 +1213,34 @@ export async function processCohort(
   let completedMembers = 0;
   const nowIso = new Date().toISOString();
 
+  // Scoped periodic heartbeat (PR3 hardening, Commit A): the lease is renewed
+  // when `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3`, so a long
+  // OCR/model/pipeline call can no longer silently outlive the TTL. `lastHeartbeatAt`
+  // starts at 0 so the FIRST check always attempts a heartbeat (the lease may be
+  // near expiry from the reclaim). A rejected heartbeat throws `HeartbeatLostError`.
+  const HEARTBEAT_INTERVAL_MS = Math.floor(COHORT_LEASE_TTL_MS / 3);
+  let lastHeartbeatAt = 0;
+  const renewHeartbeat = (force = false): void => {
+    if (!force && Date.now() - lastHeartbeatAt <= HEARTBEAT_INTERVAL_MS) return;
+    if (!heartbeatCohortRun(run.id, workerId, COHORT_LEASE_TTL_MS)) {
+      throw new HeartbeatLostError(
+        `processCohort lost claim ownership of run ${run.id} (heartbeat rejected: run is no longer claimed by ${workerId} / no longer freezing or running).`,
+      );
+    }
+    lastHeartbeatAt = Date.now();
+  };
+
+  // Deterministic abort on ownership loss: fail the in-flight member child run
+  // + the parent and rethrow. Records NOTHING further (no member failure, no
+  // SSE event) — no new side effects after the loss.
+  const abortOnHeartbeatLost = (err: HeartbeatLostError, activeChildRunId: string | null): never => {
+    if (activeChildRunId) {
+      completeRun(activeChildRunId, 'failed', 'ownership lost during execution');
+    }
+    completeCohortRun(run.id, 'failed', `Claim ownership lost during execution: ${redactTransportText(err.message)}`);
+    throw err;
+  };
+
   for (const memberProjection of orderedMembers) {
     const item = itemsById.get(memberProjection.onboardingItemId)!;
 
@@ -1119,14 +1259,12 @@ export async function processCohort(
       continue;
     }
 
-    if (!heartbeatCohortRun(run.id, workerId, COHORT_LEASE_TTL_MS)) {
-      throw new CohortRunOwnershipAbortError(
-        `processCohort lost claim ownership of run ${run.id} before executing member ${memberProjection.onboardingItemId}.`,
-      );
-    }
-
+    let activeChildRunId: string | null = null;
     try {
+      // Ownership assertion BEFORE the first member side effect (child create).
+      renewHeartbeat();
       const childRun = ensureMemberRun(run.id, item.id, workspaceId, item.upc ?? '', null, null);
+      activeChildRunId = childRun.id;
       const prepared = buildPreparedCohortContextForMember(run.id, memberProjection, childRun, workspaceId);
 
       // Sibling context for family-aware curation (read-only hints) — the same
@@ -1139,6 +1277,10 @@ export async function processCohort(
       }
 
       const curationData = await curateItemWithPipeline(item, workspacePath, workspaceId, prepared);
+
+      // Ownership assertion before the member's DB writes (pipeline done — the
+      // lease may have expired mid-pipeline).
+      renewHeartbeat();
 
       // Persist curation_data_json exactly as the legacy worker does.
       getDb().query('UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?').run(
@@ -1161,7 +1303,9 @@ export async function processCohort(
         `title="${curationData.curatedTitle || 'N/A'}", suggestedPages=[${(curationData.suggestedPages || []).join(', ') || 'none'}]`,
       );
     } catch (err) {
-      if (err instanceof CohortRunOwnershipAbortError) throw err;
+      if (err instanceof HeartbeatLostError) {
+        abortOnHeartbeatLost(err, activeChildRunId);
+      }
       const errorText = redactTransportText(err instanceof Error ? err.message : String(err));
       console.error(`[CohortCurator] Member ${item.upc ?? item.id} failed under run ${run.id}: ${errorText}`);
       // Record and continue — a member failure never aborts the cohort unless
@@ -1176,15 +1320,17 @@ export async function processCohort(
     }
   }
 
-  // Post-execution heartbeat: if the claim was lost while processing the last
-  // member (a sibling reclaimed the lease), the parent completion belongs to
-  // the sibling — never complete a run we no longer own. (Member boundaries
-  // renew the lease, so the next member's heartbeat-before is the previous
-  // member's heartbeat-after.)
-  if (!heartbeatCohortRun(run.id, workerId, COHORT_LEASE_TTL_MS)) {
-    throw new CohortRunOwnershipAbortError(
-      `processCohort lost claim ownership of run ${run.id} after executing all members.`,
-    );
+  // Post-execution ownership assertion (forced): if the claim was lost while
+  // processing the last member (a sibling reclaimed the lease), the parent
+  // completion must not proceed under a lost claim — abort deterministically.
+  try {
+    renewHeartbeat(true);
+  } catch (err) {
+    if (err instanceof HeartbeatLostError) {
+      completeCohortRun(run.id, 'failed', `Claim ownership lost after executing all members: ${redactTransportText(err.message)}`);
+      throw err;
+    }
+    throw err;
   }
 
   const parentStatus = memberFailures.length > 0

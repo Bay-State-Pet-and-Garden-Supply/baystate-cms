@@ -167,6 +167,15 @@ export const ExecutionEvidenceProjectionMemberSchema = z.object({
       packagingOcrData: PackagingOcrDataSchema.nullable(),
       /** SHA-256 over the canonical {sourceUrl, extractionSourceUrl, primaryImage, additionalImages} set the OCR was started against. */
       ocrInputHash: z.string(),
+      /**
+       * OCR execution-authority digest (PR3 hardening, Commit A):
+       * `hashCanonicalJson({planDigest, ruleVersionsDigest})` over the
+       * member snapshot's evidence_extraction plan entry + runtime rule
+       * versions — the authority the stored OCR was executed under. Additive
+       * optional: pre-hardening projections (execution-evidence-v1) parse
+       * without it; the freeze-time reuse guard fails closed on mismatch.
+       */
+      ocrExecutionDigest: z.string().nullable().optional(),
     }),
     /** Product Intelligence imports attached to the member (identity triple, sorted by runId). */
     piEvidence: z.array(z.object({

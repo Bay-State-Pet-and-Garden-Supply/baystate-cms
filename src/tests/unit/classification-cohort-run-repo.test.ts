@@ -22,6 +22,7 @@ import {
   transitionCohortRunToRunning,
   completeCohortRun,
   supersedeCohortRun,
+  supersedeCohortRunIfUnchanged,
   cancelFreezingRun,
   reclaimExpiredCohortRuns,
   getCurrentCohortRun,
@@ -342,8 +343,9 @@ describe('classification cohort run repo (issue #30, PR3 M1)', () => {
     // Age the lease into the past (crashed owner).
     getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
 
-    const staleBefore = new Date().toISOString();
-    const result = reclaimExpiredCohortRuns(wsId, staleBefore, () => 'match', 'worker-b', COHORT_LEASE_TTL_MS);
+    // PR3 hardening (Commit A): expiry timestamps compare to NOW.
+    const nowIso = new Date().toISOString();
+    const result = reclaimExpiredCohortRuns(wsId, nowIso, () => 'match', 'worker-b', COHORT_LEASE_TTL_MS);
     expect(result.superseded.length).toBe(0);
     expect(result.resumed.length).toBe(1);
 
@@ -368,8 +370,8 @@ describe('classification cohort run repo (issue #30, PR3 M1)', () => {
     expect(freezeAuthorities(run.id, 'worker-a', 'old-stale-h2')).toBe(true);
     getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
 
-    const staleBefore = new Date().toISOString();
-    const result = reclaimExpiredCohortRuns(wsId, staleBefore, () => 'drift', 'worker-b', COHORT_LEASE_TTL_MS);
+    const nowIso = new Date().toISOString();
+    const result = reclaimExpiredCohortRuns(wsId, nowIso, () => 'drift', 'worker-b', COHORT_LEASE_TTL_MS);
     expect(result.resumed.length).toBe(0);
     expect(result.superseded.length).toBe(1);
     expect(result.superseded[0].id).toBe(run.id);
@@ -381,6 +383,123 @@ describe('classification cohort run repo (issue #30, PR3 M1)', () => {
     expect(retried.length).toBe(1);
     expect(retried[0].cohortId).toBe(cohorts[0].id);
     expect(retried[0].id).not.toBe(run.id);
+  });
+
+  it('R1 time math: a lease is reclaimable the moment it passes its TTL — expiry timestamps compare to NOW, not now − TTL', () => {
+    const wsId = newWorkspace();
+    const { cohorts } = setupFamilyBatch(wsId);
+    const runs = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const run = runs.find(r => r.cohortId === cohorts[0].id)!;
+
+    // The lease expired 30 seconds ago (well inside one full TTL). Under the
+    // pre-hardening semantics (`lease_expires_at < now - TTL`) this row would
+    // only be reclaimable after ~2×TTL; with NOW semantics it is immediately
+    // reclaimable.
+    getDb().run(
+      'UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?',
+      [new Date(Date.now() - 30_000).toISOString(), run.id],
+    );
+
+    const result = reclaimExpiredCohortRuns(wsId, new Date().toISOString(), () => 'match', 'worker-b', COHORT_LEASE_TTL_MS);
+    expect(result.resumed.length).toBe(1);
+    expect(result.resumed[0].id).toBe(run.id);
+  });
+
+  it('R1 reclaim CAS race (a): a second reclaim with the pre-resume observed state cannot clobber a first reclaim', () => {
+    const wsId = newWorkspace();
+    const { cohorts } = setupFamilyBatch(wsId);
+    const runs = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const run = runs.find(r => r.cohortId === cohorts[0].id)!;
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+
+    // B selects the expired row. Between B's SELECT and B's CAS UPDATE, A
+    // reclaims the run first — simulated by running A's reclaim inside B's
+    // verifyFrozen hook, so B's observed {claimed_by, lease_expires_at} is
+    // stale by the time B's resume CAS runs.
+    let aRan = false;
+    const resultB = reclaimExpiredCohortRuns(wsId, new Date().toISOString(), selected => {
+      if (!aRan && selected.id === run.id) {
+        aRan = true;
+        const resultA = reclaimExpiredCohortRuns(wsId, new Date().toISOString(), () => 'match', 'worker-a2', COHORT_LEASE_TTL_MS);
+        expect(resultA.resumed.length).toBe(1);
+        expect(resultA.resumed[0].id).toBe(run.id);
+      }
+      return 'match';
+    }, 'worker-b2', COHORT_LEASE_TTL_MS);
+    expect(aRan).toBe(true);
+
+    // B's CAS failed (row changed since selection): the run is NOT in B's
+    // result and A's claim is intact — the run is never handed out twice.
+    expect(resultB.resumed.length).toBe(0);
+    expect(resultB.superseded.length).toBe(0);
+    const after = getCohortRunById(run.id)!;
+    expect(after.claimedBy).toBe('worker-a2');
+    expect(after.status).toBe('freezing');
+  });
+
+  it('R1 reclaim CAS race (b): a stale drift verdict cannot supersede a run another worker already resumed', () => {
+    const wsId = newWorkspace();
+    const { cohorts } = setupFamilyBatch(wsId);
+    const runs = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const run = runs.find(r => r.cohortId === cohorts[0].id)!;
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+
+    // B selects the expired row and reaches a DRIFT verdict; inside B's
+    // verifyFrozen hook A resumes the run first (fresh claim under worker-a2).
+    // B's drift supersede must then fail its CAS — R stays A's.
+    let aRan = false;
+    const resultB = reclaimExpiredCohortRuns(wsId, new Date().toISOString(), selected => {
+      if (!aRan && selected.id === run.id) {
+        aRan = true;
+        const resultA = reclaimExpiredCohortRuns(wsId, new Date().toISOString(), () => 'match', 'worker-a2', COHORT_LEASE_TTL_MS);
+        expect(resultA.resumed.length).toBe(1);
+      }
+      return 'drift'; // stale verdict against pre-A state
+    }, 'worker-b2', COHORT_LEASE_TTL_MS);
+    expect(aRan).toBe(true);
+
+    expect(resultB.superseded.length).toBe(0);
+    expect(resultB.resumed.length).toBe(0);
+    const after = getCohortRunById(run.id)!;
+    expect(after.status).toBe('freezing');
+    expect(after.claimedBy).toBe('worker-a2');
+    expect(after.supersededAt).toBeNull();
+  });
+
+  it('supersedeCohortRunIfUnchanged is a CAS: matching observed state supersedes + fails children; stale state is a no-op', () => {
+    const wsId = newWorkspace();
+    const { items } = setupFamilyBatch(wsId);
+    const runs = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const run = runs[0]; // freezing (crash mid-freeze candidate)
+
+    // Linked running children (freeze path creates them eagerly).
+    const child1 = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
+    expect(child1.cohortRunId).toBe(run.id);
+
+    const observed = getCohortRunById(run.id)!;
+    // Stale observed state (wrong worker) → no-op.
+    expect(supersedeCohortRunIfUnchanged(run.id, {
+      claimedBy: 'some-other-worker',
+      leaseExpiresAt: observed.leaseExpiresAt,
+      status: observed.status,
+    }, 'stale verdict')).toBe(false);
+    expect(getCohortRunById(run.id)!.status).toBe('freezing');
+    expect(getRun(child1.id)!.status).toBe('running');
+
+    // Matching observed state → supersedes AND fails the linked running child.
+    expect(supersedeCohortRunIfUnchanged(run.id, {
+      claimedBy: observed.claimedBy,
+      leaseExpiresAt: observed.leaseExpiresAt,
+      status: observed.status,
+    }, 'Authority drift during lease reclaim')).toBe(true);
+    const superseded = getCohortRunById(run.id)!;
+    expect(superseded.status).toBe('superseded');
+    expect(superseded.supersededAt).not.toBeNull();
+    expect(superseded.errorMessage).toContain('Authority drift during lease reclaim');
+    expect(getRun(child1.id)!.status).toBe('failed');
+
+    // No transition out of `superseded`.
+    expect(supersedeCohortRunIfUnchanged(run.id, observed, 'again')).toBe(false);
   });
 
   it('cancelFreezingRun cancels a freezing run (terminal) and frees the slot only after supersede', () => {

@@ -147,10 +147,13 @@ export class OnboardingWorker {
     const flags = getCohortCurationFlags();
     if (isCohortCurationActive(flags)) {
       try {
-        const staleBefore = new Date(Date.now() - COHORT_LEASE_TTL_MS).toISOString();
+        // PR3 hardening (Commit A): expiry timestamps compare to NOW — the
+        // caller passes `new Date().toISOString()`, never `now - TTL` (a lease
+        // is reclaimable the moment it passes its TTL, not a full TTL later).
+        const nowIso = new Date().toISOString();
         const reclaim = reclaimExpiredCohortRuns(
           this.workspaceId,
-          staleBefore,
+          nowIso,
           run => verifyCohortRunFrozen(run, this.workspacePath, this.workspaceId) ? 'match' : 'drift',
           this.workerId,
           COHORT_LEASE_TTL_MS,
@@ -265,10 +268,11 @@ export class OnboardingWorker {
    */
   private claimAndDispatchCohortRuns(inFlightBatches: Set<string>): void {
     try {
-      const staleBefore = new Date(Date.now() - COHORT_LEASE_TTL_MS).toISOString();
+      // PR3 hardening (Commit A): expiry timestamps compare to NOW.
+      const nowIso = new Date().toISOString();
       const reclaim = reclaimExpiredCohortRuns(
         this.workspaceId,
-        staleBefore,
+        nowIso,
         run => verifyCohortRunFrozen(run, this.workspacePath, this.workspaceId) ? 'match' : 'drift',
         this.workerId,
         COHORT_LEASE_TTL_MS,
@@ -299,12 +303,26 @@ export class OnboardingWorker {
    * (opens the slot so the claim can create a fresh run); match → leave the
    * terminal run as the current historical decision (never re-claimed until
    * drift supersedes it). Never runs from read endpoints.
+   *
+   * PR3 hardening (Commit A, R5): a `cancelled` current run is a RETRYABLE
+   * terminal — a cancelled pre-freeze run never carries frozen evidence (it
+   * left `freezing` via `cancelFreezingRun` with NULL hashes), so it is
+   * superseded unconditionally before claiming and the slot reopens. A
+   * `failed`/completed run is re-verified against the frozen world as before.
    */
   private reconcileDriftedTerminalRuns(): void {
     const readyCohorts = listCohortsByWorkspace(this.workspaceId).filter(c => c.status === 'ready');
     for (const cohort of readyCohorts) {
       const current = getCurrentCohortRun(cohort.id);
       if (!current || !COHORT_RUN_TERMINAL.has(current.status)) continue;
+      // Cancelled ⇒ retryable: supersede so the claim slot reopens. This never
+      // needs a frozen-world re-verification (there is no frozen world to
+      // match — a cancelled pre-freeze run has no evidence snapshot).
+      if (current.status === 'cancelled') {
+        supersedeCohortRun(current.id, 'Cancelled run retry (slot reopen)');
+        console.warn(`[OnboardingWorker] Superseded cancelled run ${current.id} for ready cohort ${cohort.id} — slot reopened.`);
+        continue;
+      }
       if (verifyCohortRunFrozen(current, this.workspacePath, this.workspaceId)) {
         // Frozen world still matches — the terminal run is the current
         // historical decision; a new run is NOT created.
