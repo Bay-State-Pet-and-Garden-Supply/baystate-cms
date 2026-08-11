@@ -101,6 +101,10 @@ let titleCallCount = 0;
 let auditCallSeq = 0;
 /** When true, the mock throws (simulating an LLM transport failure). */
 let failNextTitleCall = false;
+/** When true, the mock writes a durable `policy_denied` terminal row then throws (simulating the audited wrapper's denied path). */
+let denyNextTitleCall = false;
+/** When true, the mock writes a durable `unavailable` terminal row then returns null (simulating the audited wrapper's unavailable path). */
+let unavailableNextTitleCall = false;
 /** When true, the mock expires + reclaims `reclaimRunId` before returning. */
 let reclaimAfterTitleCall = false;
 let reclaimRunId: string | null = null;
@@ -170,6 +174,19 @@ function writeAuditPair(runId: string, snapshotHash: string | null, callId: stri
   );
 }
 
+/** Write a durable terminal `classification_model_calls` row for a status with NO transport. */
+function writeTerminalRow(runId: string, snapshotHash: string | null, status: 'policy_denied' | 'unavailable'): void {
+  const now = new Date().toISOString();
+  getDb().run(
+    `INSERT INTO classification_model_calls
+       (id, run_id, stage_name, operation, attempt, provider, model, locality, snapshot_hash,
+        prompt_template_version, rule_version, system_prompt_hash, user_prompt_hash, started_at,
+        ended_at, status, created_at)
+     VALUES (?, ?, 'name_consolidation', 'cohort_title_consolidation', 1, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [`title-terminal-${++auditCallSeq}`, runId, snapshotHash, 'cohort-title-consolidation-prompt-v1', 'cohort-title-consolidation-rules-v1', 'sys-hash', 'user-hash', now, now, status, now],
+  );
+}
+
 function mockCallLlmForTaskWithProvenance(
   _task: string,
   prompt: string,
@@ -178,6 +195,24 @@ function mockCallLlmForTaskWithProvenance(
 ): { content: string; callId: string; provider: string; model: string; usage: Record<string, number | null> } | null {
   if (options?.protectedOperation !== 'cohort_title_consolidation') return null;
   titleCallCount++;
+  if (denyNextTitleCall) {
+    // PR6 review fix: the audited wrapper writes a durable policy_denied
+    // terminal row BEFORE transport, then throws — the coordinator must fall
+    // back deterministically with the audited row persisted.
+    if (options.modelCall) {
+      writeTerminalRow(options.modelCall.runId, options.modelCall.snapshotHash ?? null, 'policy_denied');
+    }
+    throw new Error('Model policy denied (mock)');
+  }
+  if (unavailableNextTitleCall) {
+    // PR6 review fix: the audited wrapper writes a durable unavailable
+    // terminal row and returns null (no transport) — the coordinator falls
+    // back with the audited row persisted.
+    if (options.modelCall) {
+      writeTerminalRow(options.modelCall.runId, options.modelCall.snapshotHash ?? null, 'unavailable');
+    }
+    return null;
+  }
   if (failNextTitleCall) {
     throw new Error('transport down');
   }
@@ -241,6 +276,8 @@ afterAll(() => {
 afterEach(() => {
   titleCallCount = 0;
   failNextTitleCall = false;
+  denyNextTitleCall = false;
+  unavailableNextTitleCall = false;
   reclaimAfterTitleCall = false;
   reclaimRunId = null;
   reclaimWorkspaceId = null;
@@ -754,6 +791,63 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(rows.every(r => r.modelCallId === null)).toBe(true);
     const parsed = rows.map(r => JSON.parse(r.outputValueJson));
     expect(parsed.every((p: any) => p.source === 'cohort_fallback')).toBe(true);
+  });
+
+  it('policy-denied resolution: durable audited policy_denied terminal row + deterministic fallback persisted (never a silent non-audited fallback)', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const childRunId = ordinal0ChildRunId(fixture);
+    denyNextTitleCall = true;
+
+    const map = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+
+    // Deterministic fallback persisted (group-level catch converts the denial).
+    expect(map.size).toBe(2);
+    const rows = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.modelCallId === null)).toBe(true);
+    const parsed = rows.map(r => JSON.parse(r.outputValueJson));
+    expect(parsed.every((p: any) => p.source === 'cohort_fallback')).toBe(true);
+    // The audited terminal row EXISTS (the preflight bypass lets the audited
+    // wrapper write it before throwing), bound to the ordinal-0 child run.
+    const denied = getDb().query(
+      `SELECT status FROM classification_model_calls WHERE run_id = ? AND operation = 'cohort_title_consolidation' AND status = 'policy_denied'`,
+    ).all(childRunId) as Array<{ status: string }>;
+    expect(denied.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('unavailable resolution: durable audited unavailable terminal row + deterministic fallback persisted (never a silent non-audited fallback)', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const childRunId = ordinal0ChildRunId(fixture);
+    unavailableNextTitleCall = true;
+
+    const map = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+
+    expect(map.size).toBe(2);
+    const rows = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.modelCallId === null)).toBe(true);
+    const parsed = rows.map(r => JSON.parse(r.outputValueJson));
+    expect(parsed.every((p: any) => p.source === 'cohort_fallback')).toBe(true);
+    const unavailable = getDb().query(
+      `SELECT status FROM classification_model_calls WHERE run_id = ? AND operation = 'cohort_title_consolidation' AND status = 'unavailable'`,
+    ).all(childRunId) as Array<{ status: string }>;
+    expect(unavailable.length).toBeGreaterThanOrEqual(1);
   });
 
   it('singleton members: no output row, no call (DECISION-O)', async () => {

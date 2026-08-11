@@ -423,13 +423,20 @@ async function coordinateGroup(
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
   opts?: CohortCoordinationOptions,
 ): Promise<Map<string, CoordinatedTitle>> {
-  const llmConfig = getLlmConfigForTask('product_curation', {
-    allowFallback: true,
-    modelPolicy,
-    protectedOperation: 'cohort_title_consolidation',
-  });
-  if (!llmConfig) {
-    throw new Error('No LLM configured for product_curation');
+  // PR6 review fix: the legacy preflight MUST NOT run for audited calls —
+  // `callLlmForTaskWithProvenance` resolves the config itself and writes the
+  // durable `policy_denied` / `unavailable` terminal `classification_model_calls`
+  // rows on those paths. A preflight throw here would exit before the audited
+  // wrapper, silently persisting a fallback with NO audited terminal row.
+  if (!opts?.modelCall) {
+    const llmConfig = getLlmConfigForTask('product_curation', {
+      allowFallback: true,
+      modelPolicy,
+      protectedOperation: 'cohort_title_consolidation',
+    });
+    if (!llmConfig) {
+      throw new Error('No LLM configured for product_curation');
+    }
   }
 
   const siblings = items.map(item => ({
