@@ -17,14 +17,16 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
-import { callLlmForTask, getLlmConfigForTask } from '../../onboarding/llm-client';
+import { callLlmForTask, callLlmForTaskWithProvenance, getLlmConfigForTask } from '../../onboarding/llm-client';
 import {
   coordinateCohortItems,
   coordinateCohortItemsOnce,
   clearCohortCoordinationCache,
   formatDeterministicTitle,
+  groupByProductLine,
 } from '../../onboarding/cohort-name-coordinator';
 import { buildCohortPrompt } from '../../onboarding/title-prompt-template';
+import { HeartbeatLostError } from '../../classification/heartbeat-errors';
 
 vi.mock('../../onboarding/llm-client', () => ({
   getLlmConfigForTask: vi.fn(() => ({
@@ -39,6 +41,18 @@ vi.mock('../../onboarding/llm-client', () => ({
         'U1': 'Woof Pupsicle Small',
         'U2': 'Woof Pupsicle Large',
       }),
+  ),
+  callLlmForTaskWithProvenance: vi.fn(
+    async (_task: string, _prompt: string, _systemPrompt: string, _options: Record<string, any>) => ({
+      content: JSON.stringify({
+        'U1': 'Woof Pupsicle Small',
+        'U2': 'Woof Pupsicle Large',
+      }),
+      callId: 'mock-call-1',
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    }),
   ),
 }));
 
@@ -388,6 +402,140 @@ describe('Cohort Name Coordinator', () => {
     await coordinateCohortItemsOnce('batch-inval-web', items1);
     await coordinateCohortItemsOnce('batch-inval-web', items2);
     expect(callLlmForTask).toHaveBeenCalledTimes(2);
+  });
+
+  // ─── PR6 C3: additive audit/ownership threading ────────────────────────
+
+  const AUDIT_OPTS = {
+    modelCall: {
+      runId: 'run-1',
+      snapshotHash: 'snap-1',
+      stage: 'name_consolidation' as const,
+      operation: 'cohort_title_consolidation' as const,
+      attempt: 1,
+      promptTemplateVersion: 'cohort-title-consolidation-prompt-v1',
+      ruleVersion: 'cohort-title-consolidation-rules-v1',
+    },
+    snapshot: {
+      schemaVersion: 2,
+      snapshotHash: 'snap-1',
+      modelExecutionPlan: {
+        entries: [{ operation: 'cohort_title_consolidation', stage: 'name_consolidation' }],
+      },
+    } as any,
+  };
+
+  it('audited path threads modelCall/snapshot/assertHeld into the transport with the right operation', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const assertHeld = vi.fn();
+    const result = await coordinateCohortItems(items, undefined, {
+      modelCall: AUDIT_OPTS.modelCall,
+      snapshot: AUDIT_OPTS.snapshot,
+      assertHeld,
+    });
+
+    // The audited transport received the threaded options + right operation.
+    expect(callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+    const options = (callLlmForTaskWithProvenance as any).mock.calls[0][3];
+    expect(options.modelCall).toEqual(AUDIT_OPTS.modelCall);
+    expect(options.snapshot).toBe(AUDIT_OPTS.snapshot);
+    expect(options.assertHeld).toBe(assertHeld);
+    expect(options.protectedOperation).toBe('cohort_title_consolidation');
+    // The legacy non-audited transport was NOT used.
+    expect(callLlmForTask).not.toHaveBeenCalled();
+    // The response content still parses through the coordinator.
+    expect(result.get('U1')).toEqual({ title: 'Woof Pupsicle Small', source: 'llm_cohort' });
+    expect(result.get('U2')).toEqual({ title: 'Woof Pupsicle Large', source: 'llm_cohort' });
+  });
+
+  it('absent opts keeps the legacy non-audited call byte-identical (options.modelCall undefined)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items);
+    expect(callLlmForTask).toHaveBeenCalledTimes(1);
+    expect(callLlmForTaskWithProvenance).not.toHaveBeenCalled();
+    const options = (callLlmForTask as any).mock.calls[0][3];
+    expect(options.modelCall).toBeUndefined();
+    expect(options.snapshot).toBeUndefined();
+    expect(options.assertHeld).toBeUndefined();
+    expect(options.protectedOperation).toBe('cohort_title_consolidation');
+    expect(result.get('U1')!.source).toBe('llm_cohort');
+  });
+
+  it('onCoordinatedCallId fires with the audited call id', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const callIds: string[] = [];
+    const result = await coordinateCohortItems(items, undefined, {
+      modelCall: AUDIT_OPTS.modelCall,
+      snapshot: AUDIT_OPTS.snapshot,
+      onCoordinatedCallId: (callId: string) => callIds.push(callId),
+    });
+    expect(callIds).toEqual(['mock-call-1']);
+    expect(result.size).toBe(2);
+  });
+
+  it('HeartbeatLostError from the transport propagates out of coordinateCohortItems — never converted to fallback', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    (callLlmForTaskWithProvenance as any).mockRejectedValueOnce(new HeartbeatLostError('claim ownership lost'));
+
+    await expect(
+      coordinateCohortItems(items, undefined, {
+        modelCall: AUDIT_OPTS.modelCall,
+        snapshot: AUDIT_OPTS.snapshot,
+      }),
+    ).rejects.toBeInstanceOf(HeartbeatLostError);
+    // Distinguishable from a generic transport error: the generic throw still
+    // produces the group-wide deterministic fallback map.
+    (callLlmForTaskWithProvenance as any).mockRejectedValueOnce(new Error('transport down'));
+    const fallback = await coordinateCohortItems(items, undefined, {
+      modelCall: AUDIT_OPTS.modelCall,
+      snapshot: AUDIT_OPTS.snapshot,
+    });
+    expect(fallback.size).toBe(2);
+    for (const entry of fallback.values()) {
+      expect(entry.source).toBe('cohort_fallback');
+    }
+  });
+
+  it('HeartbeatLostError from a non-audited call also propagates (generic throw still falls back)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    (callLlmForTask as any).mockRejectedValueOnce(new HeartbeatLostError('claim ownership lost'));
+    await expect(coordinateCohortItems(items)).rejects.toBeInstanceOf(HeartbeatLostError);
+
+    (callLlmForTask as any).mockRejectedValueOnce(new Error('transport down'));
+    const fallback = await coordinateCohortItems(items);
+    expect(fallback.size).toBe(2);
+    for (const entry of fallback.values()) {
+      expect(entry.source).toBe('cohort_fallback');
+    }
+  });
+
+  it('groupByProductLine (PR6 C4) is deterministic over the same items the coordinator coordinates', () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', brandHint: 'Woof' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', brandHint: 'Woof' }),
+      makeItem({ upc: 'U3', name: 'UNRELATED PRODUCT', brandHint: 'Other' }),
+    ] as OnboardingItem[];
+    const groups = groupByProductLine(items);
+    const multiMember: string[] = [];
+    for (const groupItems of groups.values()) {
+      if (groupItems.length > 1) multiMember.push(...groupItems.map(i => i.upc));
+    }
+    expect(multiMember.sort()).toEqual(['U1', 'U2']);
   });
 
   // ─── Deterministic fallback formatter ───────────────────────────────────

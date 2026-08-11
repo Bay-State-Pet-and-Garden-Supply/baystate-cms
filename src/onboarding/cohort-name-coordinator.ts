@@ -14,10 +14,13 @@
  * sibling gets a deterministic fallback (source: 'cohort_fallback').
  * Singletons are never coordinated and return absent.
  */
-import { getLlmConfigForTask, callLlmForTask } from './llm-client';
+import { getLlmConfigForTask, callLlmForTask, callLlmForTaskWithProvenance } from './llm-client';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import { normalizeBrand, extractNameStem } from './product-line-grouper';
 import { buildCohortPrompt, FORMAT_RULES } from './title-prompt-template';
+import { HeartbeatLostError } from '../classification/heartbeat-errors';
+import type { ModelCallContext } from '../classification/model-operation-registry';
+import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -27,6 +30,38 @@ export interface CoordinatedTitle {
   title: string;
   /** How the title was produced. */
   source: 'llm_cohort' | 'cohort_fallback';
+}
+
+/**
+ * Additive audit/ownership options for the uncached cohort title call (PR6
+ * C3, issue #30). Absent → today's non-audited, non-lease-scoped call — the
+ * legacy per-item and shadow paths stay byte-identical.
+ */
+export interface CohortCoordinationOptions {
+  /**
+   * Durable model-call audit context (issue #17 work item E). When present
+   * the group call is audited through `classification_model_calls` (started
+   * → terminal on every path) and the returned callId is surfaced via
+   * `onCoordinatedCallId` for durable output-row provenance.
+   */
+  modelCall?: ModelCallContext;
+  /**
+   * Immutable runtime snapshot the audited call is bound to. Plan
+   * compatibility fails closed when the snapshot's frozen plan lacks the
+   * operation.
+   */
+  snapshot?: RuntimeClassificationSnapshot | null;
+  /**
+   * Ownership assertion forwarded to the audited transport (lease-scoped
+   * callers re-assert the cohort claim before every run-scoped audit write; a
+   * rejected assertion throws `HeartbeatLostError`).
+   */
+  assertHeld?: () => void;
+  /**
+   * PR6: invoked with the audited model-call id when the group call returned
+   * one — the durable `model_call_id` provenance for persisted output rows.
+   */
+  onCoordinatedCallId?: (callId: string) => void;
 }
 
 /** Stable fingerprint inputs for cache. Excludes volatile fields. */
@@ -100,6 +135,12 @@ function buildCacheKey(
  * Concurrent calls for the same batch with the same stable inputs share
  * one promise/LLM pass. The resolved map is reused until the stable
  * fingerprint changes (name, brandHint, expectedName, or web title).
+ *
+ * PR6 (issue #30): this cached path is the LEGACY / flag-OFF / shadow
+ * authority ONLY. Active cohort mode never calls it — the parent title op
+ * (`ensureCohortTitlesCoordinated`, PR6 C4) coordinates ONCE per run and
+ * persists durable `classification_cohort_outputs`; the DB outputs are the
+ * authority there, never this in-memory `cohortCache`.
  *
  * @param batchId - The onboarding batch ID.
  * @param items   - Items from the same batch.
@@ -282,6 +323,8 @@ function validateCohortResponse(
  * Coordinate cohort names for a set of onboarding items.
  *
  * @param items - Items from the same batch (any stage)
+ * @param opts  - Optional audit/ownership threading (PR6 C3). Absent → the
+ *   legacy non-audited call (byte-identical legacy/shadow behavior).
  * @returns Map of UPC → CoordinatedTitle. Only includes items
  *   from multi-item groups. Missing entries fall back to per-item.
  */
@@ -289,6 +332,7 @@ function validateCohortResponse(
 export async function coordinateCohortItems(
   items: OnboardingItem[],
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  opts?: CohortCoordinationOptions,
 ): Promise<Map<string, CoordinatedTitle>> {
   const result = new Map<string, CoordinatedTitle>();
 
@@ -300,11 +344,20 @@ export async function coordinateCohortItems(
     if (groupItems.length <= 1) continue;
 
     try {
-      const groupResult = await coordinateGroup(groupItems, modelPolicy);
+      const groupResult = await coordinateGroup(groupItems, modelPolicy, opts);
       for (const [upc, ct] of groupResult) {
         result.set(upc, ct);
       }
     } catch (err: any) {
+      // PR6 C3: ownership loss is NEVER converted into an 'LLM unavailable →
+      // fallback' outcome. `HeartbeatLostError` (a sibling worker reclaimed
+      // the cohort run) rethrows unchanged so the stale owner aborts
+      // deterministically with NO output rows — the run belongs to the
+      // reclaiming worker, which re-enters the parent op and coordinates only
+      // if no complete durable output set exists yet.
+      if (err instanceof HeartbeatLostError) {
+        throw err;
+      }
       console.warn(
         `[CohortCoordinator] Coordination failed for group, using fallbacks: ${redactTransportText(err.message)}`,
       );
@@ -323,8 +376,13 @@ export async function coordinateCohortItems(
 
 /**
  * Group items by product line using normalizeBrand + extractNameStem.
+ *
+ * PR6 C4 (issue #30): exported so the parent title op
+ * (`ensureCohortTitlesCoordinated`) can compute the exact multi-item-group
+ * member set over the FROZEN sibling views for its completeness/reuse check
+ * with the SAME grouping the coordinator uses — single source of truth.
  */
-function groupByProductLine(
+export function groupByProductLine(
   items: OnboardingItem[],
 ): Map<string, OnboardingItem[]> {
   const groups = new Map<string, OnboardingItem[]>();
@@ -349,10 +407,18 @@ function groupByProductLine(
 /**
  * Make ONE LLM call for a group of sibling items.
  * Throws on any failure so the caller provides all-or-nothing fallback.
+ *
+ * PR6 C3: when `opts.modelCall` is present the group call is AUDITED — the
+ * audit context + snapshot + ownership assertion are threaded into the
+ * audited transport (`callLlmForTaskWithProvenance`) so the
+ * `classification_model_calls` started/terminal rows are written on every
+ * path and the durable callId is surfaced via `opts.onCoordinatedCallId`.
+ * Absent opts → the legacy non-audited `callLlmForTask` call, byte-identical.
  */
 async function coordinateGroup(
   items: OnboardingItem[],
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  opts?: CohortCoordinationOptions,
 ): Promise<Map<string, CoordinatedTitle>> {
   const llmConfig = getLlmConfigForTask('product_curation', {
     allowFallback: true,
@@ -385,16 +451,42 @@ async function coordinateGroup(
 
   const prompt = buildCohortPrompt(truncatedSiblings);
 
-  const response = await callLlmForTask(
-    'product_curation',
-    prompt,
-    'You are a clean product taxonomy assistant.',
-    {
-      allowFallback: true,
-      modelPolicy,
-      protectedOperation: 'cohort_title_consolidation',
-    },
-  );
+  let response: string | null;
+  if (opts?.modelCall) {
+    // Audited path (PR6 C3): the started → terminal `classification_model_calls`
+    // rows are written by the transport on every path, the model output is
+    // returned only after the terminal row is durable, and the returned
+    // callId is surfaced for durable output-row provenance.
+    const result = await callLlmForTaskWithProvenance(
+      'product_curation',
+      prompt,
+      'You are a clean product taxonomy assistant.',
+      {
+        allowFallback: true,
+        modelPolicy,
+        protectedOperation: 'cohort_title_consolidation',
+        modelCall: opts.modelCall,
+        snapshot: opts.snapshot ?? null,
+        assertHeld: opts.assertHeld,
+      },
+    );
+    response = result?.content ?? null;
+    if (result) {
+      opts.onCoordinatedCallId?.(result.callId);
+    }
+  } else {
+    // Legacy / shadow byte-identical path: non-audited transport.
+    response = await callLlmForTask(
+      'product_curation',
+      prompt,
+      'You are a clean product taxonomy assistant.',
+      {
+        allowFallback: true,
+        modelPolicy,
+        protectedOperation: 'cohort_title_consolidation',
+      },
+    );
+  }
 
   if (!response || response.length < 2) {
     throw new Error('LLM returned empty response');
