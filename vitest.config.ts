@@ -119,6 +119,8 @@ export default defineConfig({
       'src/tests/unit/cohort-worker.test.ts',
       'src/tests/unit/classification-cohort-run-repo.test.ts',
       'src/tests/unit/cohort-v6-migration.test.ts',
+      // PR4 C3 pure resolver (bun:test imports — vitest cannot collect it)
+      'src/tests/unit/cohort-product-type-resolver.test.ts',
       // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
       'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],
