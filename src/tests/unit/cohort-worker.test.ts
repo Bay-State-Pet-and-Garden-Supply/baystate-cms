@@ -17,6 +17,7 @@ import { insertExtraction } from '../../db/repositories/onboarding-extraction-re
 import {
   refreshCandidateCohorts,
   updateCohortStatus,
+  getCohortById,
 } from '../../db/repositories/curation-cohort-repo';
 import {
   claimReadyCurationCohorts,
@@ -1923,48 +1924,50 @@ describe('PR5 C4 — acceptance integration: execution-driven first pass, review
     expect(JSON.parse(promoHistory!.event_json).acceptedProductType).toBeNull();
   });
 
-  it('acceptance: reviewed override (different type) beats the Execution Type end-to-end; zero execution dependency rows for the reviewed member', async () => {
+  it('acceptance (PR5 hardening P1-2): a reviewed override DIFFERING from the cohort\'s inferred type conflicts at freeze — run failed, no execution type, no member executes, children terminal', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     savePr5AcceptanceOverrideConfig(workspaceId, wsPath);
     const { items } = createReadyCohort(workspaceId, {
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
       '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
     });
-    // Member A carries a reviewed type fact for a DIFFERENT type (dog-treats).
+    // Member A carries a reviewed type fact for a DIFFERENT type (dog-treats)
+    // while the cohort's evidence confidently infers dry-dog-food. Under
+    // P1-2 the reviewed type is a family_invariant: it must resolve
+    // identically across finalized members, so the freeze CONFLICTS (never
+    // silently curate two effective types — member A under the Dog Treats
+    // profile, siblings under dry-dog-food).
     seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dog-treats');
     overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
 
     const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
     const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
-    expect(finalized.status).toBe('running');
-    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
-
-    const summary = await processCohort(finalized, wsPath, workspaceId);
-    // The reviewed member's own profile (dog-treats -> color) is applicable
-    // but carries no color evidence, so its attribute-proposals stage abstains
-    // (deterministic abstention, not a failure) — the parent may complete
-    // with abstentions.
-    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
-
-    // Reviewed override member: effective source 'reviewed' with the reviewed
-    // type's own profile (color, not flavor) and NO execution dependency rows.
-    const reviewedMember = findItemById(items[0].id)!;
-    expect(reviewedMember.curationData!.effectiveProductType).toEqual({ id: 'dog-treats', source: 'reviewed' });
-    const reviewedProposals = reviewedMember.curationData!.classificationProposals;
-    expect(reviewedProposals.some(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')).toBe(false);
-    for (const proposal of reviewedProposals) {
-      expect(listDependenciesForProposal(proposal.id).filter(d => d.dependencyKind === 'execution_product_type')).toHaveLength(0);
+    expect(finalized.status).toBe('failed');
+    expect(finalized.startedAt).toBeNull();
+    expect(finalized.productTypeOutcome).toBe('conflicted');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeConfidence).toBeNull();
+    expect(finalized.finalMembershipHash).toBeNull();
+    expect(finalized.errorMessage).toContain('cohort_product_type_conflict');
+    expect(finalized.errorMessage).toContain('dry-dog-food');
+    expect(finalized.errorMessage).toContain('dog-treats');
+    expect(finalized.errorMessage).toContain('reviewed:dog-treats');
+    // Conflict disposition unchanged: the failed run stays the current
+    // historical decision (not superseded) and the cohort stays ready.
+    expect(getCohortRunById(finalized.id)!.supersededAt).toBeNull();
+    expect(getCohortById(finalized.cohortId)!.status).toBe('ready');
+    // NO member ever executes: every freeze-created child is terminal and no
+    // item reaches completed curation.
+    for (const item of items) {
+      const child = getDb().query(
+        'SELECT status FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      ).get(finalized.id, item.id) as { status: string } | undefined;
+      expect(child).toBeTruthy();
+      expect(child!.status).not.toBe('running');
+      expect(findItemById(item.id)!.stageStatus).toBe('pending');
     }
-
-    // Sibling (no reviewed fact): execution-driven flavor proposals with rows.
-    const executionMember = findItemById(items[1].id)!;
-    expect(executionMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
-    const executionProposals = executionMember.curationData!.classificationProposals;
-    expect(executionProposals.some(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')).toBe(true);
-    for (const proposal of executionProposals) {
-      expect(listDependenciesForProposal(proposal.id).filter(d => d.dependencyKind === 'execution_product_type')).toHaveLength(1);
-    }
-    expect(dependencyRowCount(workspaceId)).toBe(executionProposals.length);
+    // Nothing curated, no dependency rows, no model calls.
+    expect(dependencyRowCount(workspaceId)).toBe(0);
   });
 
   it('acceptance: flag OFF + shadow variants stay byte-identical legacy (no flavor proposals, no dependency rows, no effective-type metadata)', async () => {

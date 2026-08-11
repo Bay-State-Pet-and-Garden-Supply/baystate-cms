@@ -31,7 +31,7 @@ import {
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { createRun, getRun } from '../../db/repositories/classification-run-repo';
-import { upsertConfigSnapshot, syncConfigToCache } from '../../db/repositories/classification-config-repo';
+import { upsertConfigSnapshot, syncConfigToCache, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
 import { upsertApiKey, deleteApiKey } from '../../db/repositories/api-key-repo';
 import { saveClassificationConfig, loadClassificationConfig, loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
 import { generateCandidate, buildFocusedFiles } from '../../classification/config-generator';
@@ -52,6 +52,8 @@ import {
 } from '../../onboarding/cohort-curator';
 import type { PreparedCohortContext } from '../../onboarding/cohort-curator';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
+import { resolveCohortProductType } from '../../classification/cohort-product-type-resolver';
+import { getReviewedTypeFromSnapshot } from '../../classification/effective-curation-type';
 import { canonicalJsonFileString, hashCanonicalJson, sha256Hex } from '../../shared/stable-id';
 import {
   overrideCohortCurationFlags,
@@ -375,6 +377,46 @@ function createReadyCohort(
   const formed = refreshCandidateCohorts(wsId, batchId, listItemsByBatch(batchId));
   for (const cohort of formed) updateCohortStatus(cohort.id, 'ready');
   return { batchId, items: listItemsByBatch(batchId), cohorts: formed };
+}
+
+/**
+ * Seed a provenance-compatible reviewed (accepted) `primary_product_type`
+ * decision on a PRIOR run for one SKU under the CURRENT config (PR5
+ * reviewed-fact fixture). The member's freeze-built runtime snapshot then
+ * carries a compatible reviewed type fact that participates in the cohort
+ * coherence rules at freeze time (PR5 hardening P1-2). Item ids are unique
+ * per test (randomUUID) — deterministic ids derived from them never collide
+ * across workspaces sharing one database file.
+ */
+function seedReviewedTypeDecision(
+  wsId: string,
+  wsPath: string,
+  sku: string,
+  itemId: string,
+  typeId: string,
+): void {
+  const { hash } = createConfigSnapshot(wsId, loadClassificationConfig(wsPath));
+  const now = new Date().toISOString();
+  const runId = `prior-type-run-${itemId}`;
+  const proposalId = `prior-type-proposal-${itemId}`;
+  getDb().run(
+    `INSERT INTO classification_runs
+     (id, workspace_id, onboarding_item_id, product_sku, source_kind, config_snapshot_hash, status, started_at)
+     VALUES (?, ?, ?, ?, 'onboarding', ?, 'completed', ?)`,
+    [runId, wsId, itemId, sku, hash, now],
+  );
+  getDb().run(
+    `INSERT INTO classification_proposals
+     (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+     VALUES (?, ?, ?, 'primary_product_type', ?, ?, 0.95, 'accepted', ?)`,
+    [proposalId, runId, sku, typeId, JSON.stringify({ productTypeId: typeId }), now],
+  );
+  getDb().run(
+    `INSERT INTO classification_proposal_decisions
+     (id, proposal_id, decision, revised_value_json, revised_target_id, created_at, superseded_at)
+     VALUES (?, ?, 'accepted', ?, ?, ?, NULL)`,
+    [`prior-type-decision-${itemId}`, proposalId, JSON.stringify({ productTypeId: typeId }), typeId, now],
+  );
 }
 
 describe('execution-evidence projection builder (PR3 M2)', () => {
@@ -2311,5 +2353,141 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     expect(after.supersededAt).toBeNull();
     expect(after.errorMessage).toBeNull();
     expect(after.evidenceSnapshotHash).toBeNull();
+  });
+
+  it('PR5 hardening P1-2 freeze-conflict regression: a provenance-compatible reviewed dog-treats fact with evidence inferring dry-dog-food -> CONFLICTED (run failed, no execution type, no final_membership_hash, children terminal, reason mentions both ids)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1ConfigWithProductTypes(workspaceId, wsPath, [
+      { id: 'dry-dog-food', name: 'Dry Dog Food' },
+      { id: 'dog-treats', name: 'Dog Treats' },
+    ]);
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    expect(cohorts).toHaveLength(1);
+    // Member A carries an accepted dog-treats decision on a prior run,
+    // carried as a compatible reviewed fact; BOTH members' evidence
+    // confidently infers dry-dog-food — the family must conflict at freeze
+    // (never silently curate two effective types).
+    seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dog-treats');
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('failed');
+    expect(finalized.completedAt).not.toBeNull();
+    // Conflict disposition unchanged (P1-2): freezing -> failed DIRECTLY,
+    // started_at stays NULL (no transition to running ever happened).
+    expect(finalized.startedAt).toBeNull();
+    expect(finalized.productTypeOutcome).toBe('conflicted');
+    expect(finalized.executionProductTypeId).toBeNull();
+    expect(finalized.productTypeConfidence).toBeNull();
+    expect(finalized.finalMembershipHash).toBeNull();
+    // Conflict reason mentions BOTH ids (inferred + reviewed).
+    expect(finalized.errorMessage).toContain('cohort_product_type_conflict');
+    expect(finalized.errorMessage).toContain('dry-dog-food');
+    expect(finalized.errorMessage).toContain('dog-treats');
+    // The per-member json carries the reviewed id.
+    expect(finalized.errorMessage).toContain('reviewed:dog-treats');
+    for (const item of items) {
+      expect(finalized.errorMessage).toContain(item.id);
+    }
+    // The failed run stays the current historical decision (not superseded);
+    // the cohort stays ready for the operator to resolve the family later.
+    expect(getCohortRunById(run.id)!.supersededAt).toBeNull();
+    expect(getCohortById(finalized.cohortId)!.status).toBe('ready');
+    // Children terminalized with the deterministic conflict reason.
+    for (const item of items) {
+      const child = getDb().query(
+        'SELECT status, error_message, completed_at FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+      ).get(finalized.id, item.id) as { status: string; error_message: string | null; completed_at: string | null } | undefined;
+      expect(child).toBeTruthy();
+      expect(child!.status).not.toBe('running');
+      expect(child!.error_message).toBe('Cohort Product Type conflict prevented member execution');
+      expect(child!.completed_at).not.toBeNull();
+    }
+  });
+
+  it('PR5 hardening P1-2 same-ID override: member reviewed dry-dog-food + inference dry-dog-food -> coherent, per-member result source reviewed', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1Config(workspaceId, wsPath);
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    expect(cohorts).toHaveLength(1);
+    // Same-ID reviewed override: the member's reviewed fact agrees with the
+    // confident inference, so the cohort stays coherent (source 'reviewed').
+    seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dry-dog-food');
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.productTypeOutcome).toBe('coherent');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
+
+    // Per-member contribution source 'reviewed' for the reviewed member:
+    // reconstruct the freeze-time resolution from the persisted projection +
+    // the freeze-persisted member runtime snapshots.
+    const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
+    const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson));
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: projection.members.map(mp => {
+        const child = getDb().query(
+          'SELECT config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+        ).get(finalized.id, mp.onboardingItemId) as { config_snapshot_hash: string } | undefined;
+        const memberSnapshot = child ? getRuntimeSnapshotByHash(workspaceId, child.config_snapshot_hash) : null;
+        if (!memberSnapshot) throw new Error(`member snapshot not found for ${mp.onboardingItemId}`);
+        return {
+          projection: mp,
+          memberSnapshot,
+          reviewedTypeId: getReviewedTypeFromSnapshot(memberSnapshot),
+        };
+      }),
+    });
+    expect(resolution.outcome).toBe('coherent');
+    if (resolution.outcome !== 'coherent') return;
+    const reviewedMember = resolution.perMember.find(m => m.onboardingItemId === items[0].id)!;
+    expect(reviewedMember.source).toBe('reviewed');
+    expect(reviewedMember.reviewedTypeId).toBe('dry-dog-food');
+    expect(reviewedMember.productTypeId).toBe('dry-dog-food');
+    const sibling = resolution.perMember.find(m => m.onboardingItemId === items[1].id)!;
+    expect(sibling.source).toBe('keyword');
+    expect(sibling.reviewedTypeId).toBeNull();
+  });
+
+  it('PR5 hardening P1-2 reviewed-resolves-abstainer: member with no confident inference but a reviewed dog-treats fact + sibling inferring dog-treats -> coherent dog-treats', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1ConfigWithProductTypes(workspaceId, wsPath, [
+      { id: 'dry-dog-food', name: 'Dry Dog Food' },
+      { id: 'dog-treats', name: 'Dog Treats' },
+    ]);
+    const { items, cohorts } = createReadyCohort(workspaceId, {
+      // Same family stem ('purina pro plan dog food') so the cohort groups as
+      // ONE family. Member A: neutral evidence (no confident deterministic
+      // match — 'dog food' is 2/3 of 'Dry Dog Food' and 1/2 of 'Dog Treats',
+      // both below the floor; the run-bound LLM fallback abstains in this
+      // env) + a reviewed dog-treats fact. The reviewed type RESOLVES the
+      // abstainer.
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+      // Member B: same family stem, web title carries the 'Dog Treats'
+      // discriminator -> confident deterministic match.
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dog Food Beef 10 lb', title: 'Purina Pro Plan Dog Treats Beef 10 lb' }),
+    });
+    expect(cohorts).toHaveLength(1);
+    seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dog-treats');
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.productTypeOutcome).toBe('coherent');
+    expect(finalized.executionProductTypeId).toBe('dog-treats');
+    expect(finalized.productTypeConfidence).toBeCloseTo(0.8, 4);
+    expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
   });
 });

@@ -14,6 +14,7 @@ import type {
 } from '../../shared/schemas/cohorts';
 import type { RuntimeClassificationSnapshot } from '../../classification/runtime-snapshot';
 import type { BrandConfig } from '../../shared/schemas/classification';
+import type { ReviewedFact } from '../../classification/reviewed-facts';
 
 // ─── Fixtures (pure — no DB) ──────────────────────────────────────────────────
 
@@ -187,8 +188,13 @@ function memberInput(
   projection: ExecutionEvidenceProjectionMemberV1,
   productTypes: Array<{ id: string; name: string }>,
   curationTargets?: unknown[],
+  reviewedTypeId?: string | null,
 ): CohortMemberInput {
-  return { projection, memberSnapshot: makeSnapshot(productTypes, curationTargets) };
+  return {
+    projection,
+    memberSnapshot: makeSnapshot(productTypes, curationTargets),
+    ...(reviewedTypeId !== undefined ? { reviewedTypeId } : {}),
+  };
 }
 
 function coherentResults(typeIds: string[]): PerMemberProductTypeResult[] {
@@ -198,6 +204,7 @@ function coherentResults(typeIds: string[]): PerMemberProductTypeResult[] {
     productTypeId: typeId,
     confidence: 0.8,
     source: 'keyword' as const,
+    reviewedTypeId: null,
     isAbstention: false,
     supportingEvidenceIds: [`ev-${index + 1}`],
     contradictingEvidenceIds: [],
@@ -576,6 +583,166 @@ describe('resolveCohortProductType', () => {
     expect(resolution.perMember[0].productTypeId).toBeNull();
     // The ambiguous label never resolved to the first matching option.
     expect(resolution.perMember[0].productTypeId).not.toBe('dry-dog-food');
+  });
+});
+
+// ─── PR5 hardening (P1-2): reviewed-fact coherence at freeze time ────────────
+
+/** Minimal `primary_product_type` reviewed fact carried in a frozen snapshot. */
+function makeTypeFact(productTypeId: string): ReviewedFact {
+  return {
+    proposalId: 'p-type',
+    decisionId: 'd-type',
+    runId: 'run-prior',
+    workspaceId: 'ws',
+    productSku: 'SKU-1',
+    proposalType: 'primary_product_type',
+    targetId: productTypeId,
+    value: { productTypeId },
+    configSnapshotHash: 'cfg',
+    sourceHash: 'src',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+/** Spread-copy the snapshot fixture with a seeded reviewed type fact (the
+ *  resolver's snapshot-derived fallback path). */
+function withReviewedFacts(snapshot: RuntimeClassificationSnapshot, typeId: string): RuntimeClassificationSnapshot {
+  return { ...snapshot, reviewedFacts: [makeTypeFact(typeId)] } as RuntimeClassificationSnapshot;
+}
+
+describe('resolveCohortProductType — reviewed-fact coherence (PR5 hardening P1-2)', () => {
+  it('reviewed-vs-reviewed: any two members\' compatible reviewed types differ -> conflicted (both reviewed ids visible)', () => {
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        // Both members abstain at inference (neutral evidence) — the reviewed
+        // types alone disagree, which is enough for a family conflict.
+        memberInput(makeMemberProjection({ itemId: 'item-a', name: 'Generic Pet Product 25 lb' }), TYPE_PRODUCT_TYPES, undefined, 'dog-treats'),
+        memberInput(makeMemberProjection({ itemId: 'item-b', name: 'Generic Pet Product 30 lb' }), TYPE_PRODUCT_TYPES, undefined, 'dry-dog-food'),
+      ],
+    });
+    expect(resolution.outcome).toBe('conflicted');
+    if (resolution.outcome !== 'conflicted') return;
+    expect(resolution.productTypeId).toBeNull();
+    expect(resolution.perMember).toHaveLength(2);
+    expect(resolution.perMember[0].reviewedTypeId).toBe('dog-treats');
+    expect(resolution.perMember[1].reviewedTypeId).toBe('dry-dog-food');
+    expect(resolution.perMember[0].source).toBe('reviewed');
+    expect(resolution.perMember[1].source).toBe('reviewed');
+    expect(resolution.perMember[0].productTypeId).toBe('dog-treats');
+    expect(resolution.perMember[1].productTypeId).toBe('dry-dog-food');
+    // Reviewed contributions carry maximum certainty (1.0), never a floor gate.
+    expect(resolution.perMember[0].confidence).toBe(1);
+    expect(resolution.perMember.every(m => !m.isAbstention)).toBe(true);
+    // The reviewed facts drive the disagreement; no inferred evidence exists.
+    expect(resolution.contradictingEvidenceIds).toEqual([]);
+  });
+
+  it('reviewed-vs-inferred: a reviewed type differing from the cohort\'s confident inferred type -> conflicted (never silently coexist)', () => {
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        // Member A carries a reviewed dog-treats fact while its OWN evidence
+        // confidently infers dry-dog-food.
+        memberInput(makeMemberProjection({ itemId: 'item-a', name: 'Purina Pro Plan Dry Dog Food 5 lb' }), TYPE_PRODUCT_TYPES, undefined, 'dog-treats'),
+        // Member B (no reviewed fact) confidently infers dry-dog-food too.
+        memberInput(makeMemberProjection({ itemId: 'item-b', name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }), TYPE_PRODUCT_TYPES),
+      ],
+    });
+    expect(resolution.outcome).toBe('conflicted');
+    if (resolution.outcome !== 'conflicted') return;
+    expect(resolution.productTypeId).toBeNull();
+    // The reviewed member still reports its reviewed contribution (source
+    // 'reviewed'); the inferred side contributes dry-dog-food.
+    expect(resolution.perMember[0].source).toBe('reviewed');
+    expect(resolution.perMember[0].productTypeId).toBe('dog-treats');
+    expect(resolution.perMember[0].reviewedTypeId).toBe('dog-treats');
+    expect(resolution.perMember[1].source).toBe('keyword');
+    expect(resolution.perMember[1].productTypeId).toBe('dry-dog-food');
+    // The inferred side's evidence contradicts the reviewed type.
+    expect(resolution.contradictingEvidenceIds.length).toBeGreaterThan(0);
+  });
+
+  it('agreement: a reviewed type agreeing with the inferred type -> coherent with member contribution source reviewed', () => {
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        memberInput(makeMemberProjection({ itemId: 'item-a', name: 'Purina Pro Plan Dry Dog Food 5 lb' }), [{ id: 'dry-dog-food', name: 'Dry Dog Food' }], undefined, 'dry-dog-food'),
+        memberInput(makeMemberProjection({ itemId: 'item-b', name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }), [{ id: 'dry-dog-food', name: 'Dry Dog Food' }]),
+      ],
+    });
+    expect(resolution.outcome).toBe('coherent');
+    if (resolution.outcome !== 'coherent') return;
+    expect(resolution.productTypeId).toBe('dry-dog-food');
+    const reviewedMember = resolution.perMember[0];
+    expect(reviewedMember.source).toBe('reviewed');
+    expect(reviewedMember.reviewedTypeId).toBe('dry-dog-food');
+    expect(reviewedMember.productTypeId).toBe('dry-dog-food');
+    expect(reviewedMember.confidence).toBe(1);
+    expect(reviewedMember.isAbstention).toBe(false);
+    expect(reviewedMember.supportingEvidenceIds).toEqual([]);
+    // The inferred sibling still contributes via the keyword matcher; the
+    // cohort confidence is min over confident members (0.8 keyword vs 1.0).
+    expect(resolution.perMember[1].source).toBe('keyword');
+    expect(resolution.confidence).toBeCloseTo(0.8, 4);
+    expect(resolution.contradictingEvidenceIds).toEqual([]);
+  });
+
+  it('resolution: a reviewed type resolves an otherwise-abstaining member; all members agree -> coherent with that id', () => {
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        // Member A has NO confident inference (neutral evidence) but carries a
+        // reviewed dog-treats fact — the reviewed type resolves the abstainer.
+        memberInput(makeMemberProjection({ itemId: 'item-a', name: 'Generic Pet Product 25 lb' }), [{ id: 'dog-treats', name: 'Dog Treats' }], undefined, 'dog-treats'),
+        // Member B confidently infers dog-treats.
+        memberInput(makeMemberProjection({ itemId: 'item-b', name: 'Purina Pro Plan Dog Treats Beef 10 lb' }), [{ id: 'dog-treats', name: 'Dog Treats' }]),
+      ],
+    });
+    expect(resolution.outcome).toBe('coherent');
+    if (resolution.outcome !== 'coherent') return;
+    expect(resolution.productTypeId).toBe('dog-treats');
+    expect(resolution.perMember[0].isAbstention).toBe(false);
+    expect(resolution.perMember[0].source).toBe('reviewed');
+    expect(resolution.perMember[0].reviewedTypeId).toBe('dog-treats');
+    expect(resolution.perMember[0].productTypeId).toBe('dog-treats');
+    expect(resolution.perMember[1].source).toBe('keyword');
+    expect(resolution.memberSupport).toEqual({ confidentCount: 2, memberCount: 2 });
+    expect(resolution.contradictingEvidenceIds).toEqual([]);
+  });
+
+  it('snapshot-derived fallback: the reviewed type is read from memberSnapshot.reviewedFacts when the input omits it', () => {
+    const projectionA = makeMemberProjection({ itemId: 'item-a', name: 'Generic Pet Product 25 lb' });
+    const snapshotA = withReviewedFacts(makeSnapshot([{ id: 'dog-treats', name: 'Dog Treats' }]), 'dog-treats');
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        { projection: projectionA, memberSnapshot: snapshotA },
+        memberInput(makeMemberProjection({ itemId: 'item-b', name: 'Purina Pro Plan Dog Treats Beef 10 lb' }), [{ id: 'dog-treats', name: 'Dog Treats' }]),
+      ],
+    });
+    expect(resolution.outcome).toBe('coherent');
+    if (resolution.outcome !== 'coherent') return;
+    expect(resolution.productTypeId).toBe('dog-treats');
+    expect(resolution.perMember[0].source).toBe('reviewed');
+    expect(resolution.perMember[0].reviewedTypeId).toBe('dog-treats');
+  });
+
+  it('a reviewed member without any sibling still contributes its reviewed type (single-member resolution)', () => {
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        memberInput(makeMemberProjection({ itemId: 'item-a', name: 'Generic Pet Product 25 lb' }), [{ id: 'dog-treats', name: 'Dog Treats' }], undefined, 'dog-treats'),
+      ],
+    });
+    expect(resolution.outcome).toBe('coherent');
+    if (resolution.outcome !== 'coherent') return;
+    expect(resolution.productTypeId).toBe('dog-treats');
+    expect(resolution.confidence).toBe(1);
+    expect(resolution.perMember[0].source).toBe('reviewed');
+    expect(resolution.perMember[0].reviewedTypeId).toBe('dog-treats');
+    expect(resolution.perMember[0].isAbstention).toBe(false);
   });
 });
 

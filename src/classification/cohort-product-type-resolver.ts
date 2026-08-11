@@ -22,6 +22,13 @@
  * - >=2 confident DISTINCT ids                -> `conflicted` (id never picked)
  * - no confident match                        -> `abstained`
  * A member result below `confidenceFloor` counts as an abstention.
+ *
+ * PR5 hardening (P1-2): a member's compatible reviewed Primary Product Type
+ * (from its snapshot's provenance-compatible reviewed facts) participates at
+ * coherence time as a family_invariant — any reviewed-vs-reviewed or
+ * reviewed-vs-confident-inference disagreement is `conflicted` (never
+ * silently coexist), an agreeing reviewed type contributes with source
+ * 'reviewed', and a reviewed type may resolve an otherwise-abstaining member.
  */
 import { randomUUID } from 'node:crypto';
 import { hashCanonicalJson } from '../shared/stable-id';
@@ -39,6 +46,7 @@ import { matchKeywordOptions } from './curation-target-matcher';
 import { buildEvidenceTargetPacket } from './evidence-targeting';
 import { resolveTargetsFromSnapshot, type ResolvedTargetOption } from './curation-target-resolver';
 import { resolveBrand } from './brand-resolution';
+import { getReviewedTypeFromSnapshot } from './effective-curation-type';
 
 const now = () => new Date().toISOString();
 
@@ -358,6 +366,16 @@ export interface CohortMemberInput {
   projection: ExecutionEvidenceProjectionMemberV1;
   /** The member's immutable runtime snapshot (carries productTypes/curationTargets). */
   memberSnapshot: RuntimeClassificationSnapshot;
+  /**
+   * PR5 hardening (P1-2): the member's compatible reviewed Primary Product
+   * Type id, derived from `memberSnapshot.reviewedFacts` (the freeze extracts
+   * it via `getReviewedTypeFromSnapshot`; the resolver falls back to deriving
+   * it from the snapshot when the caller omits it). Null/absent when the
+   * member carries no reviewed type. Reviewed facts are provenance-compatible
+   * BY CONSTRUCTION of the runtime snapshot, so no live-config re-check is
+   * needed here.
+   */
+  reviewedTypeId?: string | null;
 }
 
 /**
@@ -409,18 +427,43 @@ export interface ResolveCohortProductTypeInput {
 export interface PerMemberProductTypeResult {
   onboardingItemId: string;
   productSku: string | null;
+  /**
+   * The member's contribution id: the compatible reviewed Product Type when
+   * present, else the raw inferred match, else null. A below-floor raw match
+   * stays visible here (its values are diagnostics; `isAbstention` is the
+   * floor-normalized view the aggregation uses).
+   */
   productTypeId: string | null;
+  /**
+   * Contribution confidence: 1.0 for a reviewed contribution (an accepted
+   * decision carries maximum certainty — the min-aggregation is unaffected
+   * whenever any inferred sibling exists), else the raw inferred confidence.
+   */
   confidence: number | null;
-  /** 'keyword' when the deterministic matcher produced the match, 'llm' when
-   *  the freeze-time run-bound ranker did, else null. */
-  source: 'keyword' | 'llm' | null;
-  /** True when the member contributes no confident match (no match, or confidence < floor). */
+  /**
+   * 'reviewed' when a compatible reviewed type drives the contribution,
+   * 'keyword' when the deterministic matcher produced the match, 'llm' when
+   * the freeze-time run-bound ranker did, 'none' when the member has no
+   * contribution at all (no match and no reviewed type).
+   */
+  source: 'reviewed' | 'keyword' | 'llm' | 'none';
+  /**
+   * PR5 hardening (P1-2): the member's compatible reviewed Primary Product
+   * Type id from the snapshot's provenance-compatible reviewed facts, or
+   * null. The family_invariant coherence rules (reviewed-vs-reviewed,
+   * reviewed-vs-inferred) aggregate over this field.
+   */
+  reviewedTypeId: string | null;
+  /** True when the member contributes no id (no reviewed type AND no
+   *  confident inference). */
   isAbstention: boolean;
   /**
-   * Evidence ids that drove the member's confident match (the bounded packet
-   * the keyword score was computed over). Empty for abstentions — the pure
-   * keyword matcher has no contradiction signal, so member-level
-   * `contradictingEvidenceIds` is always [].
+   * Evidence ids that drove the member's raw inferred match (the bounded
+   * packet the keyword score was computed over). Empty for abstentions and
+   * for reviewed contributions (a reviewed fact carries its own decision
+   * provenance, not the evidence packet) — the pure keyword matcher has no
+   * contradiction signal, so member-level `contradictingEvidenceIds` is
+   * always [].
    */
   supportingEvidenceIds: string[];
   contradictingEvidenceIds: string[];
@@ -430,7 +473,7 @@ export interface PerMemberProductTypeResult {
 export type ConfidentMemberProductTypeResult = PerMemberProductTypeResult & {
   productTypeId: string;
   confidence: number;
-  source: 'keyword' | 'llm';
+  source: 'reviewed' | 'keyword' | 'llm';
 };
 
 /** Member support for the resolved type: confident members vs total members. */
@@ -468,6 +511,42 @@ export type CohortProductTypeResolution =
   | (CohortProductTypeResolutionBase & { outcome: 'conflicted'; productTypeId: null; confidence: null })
   | (CohortProductTypeResolutionBase & { outcome: 'abstained'; productTypeId: null; confidence: null });
 
+/** Confidence assigned to a reviewed contribution: an accepted (reviewed)
+ *  decision carries maximum certainty. The cohort min-aggregation is
+ *  unaffected whenever any inferred sibling exists, and a fully-reviewed
+ *  coherent cohort reports 1.0. */
+const REVIEWED_CONTRIBUTION_CONFIDENCE = 1;
+
+/** Normalize a reviewed type id: null/undefined and empty strings are absent
+ *  (fail closed, never a lookup key — mirrors `getReviewedTypeFromSnapshot`). */
+function normalizeReviewedTypeId(id: string | null | undefined): string | null {
+  if (id === null || id === undefined || id.length === 0) return null;
+  return id;
+}
+
+/**
+ * Per-member internal resolution: the compatible reviewed type AND the raw
+ * floor-gated inferred match, kept separate so the aggregation can apply the
+ * PR5 hardening (P1-2) reviewed-fact coherence rules (a reviewed type and a
+ * differing confident inference must conflict, never silently coexist).
+ */
+interface MemberResolution {
+  onboardingItemId: string;
+  productSku: string | null;
+  /** Compatible reviewed Primary Product Type id (normalized), or null. */
+  reviewedTypeId: string | null;
+  /** Raw inferred id (keyword/LLM), or null when no match at all. */
+  inferredTypeId: string | null;
+  /** Raw inferred confidence, or null when no match at all. */
+  inferredConfidence: number | null;
+  /** Raw inferred source — 'keyword'/'llm', 'none' when no match at all. */
+  inferredSource: 'keyword' | 'llm' | 'none';
+  /** True when the raw inference contributes no confident id (no match, or confidence < floor). */
+  inferredAbstention: boolean;
+  /** Evidence packet ids behind the raw match ([] when no confident match). */
+  supportingEvidenceIds: string[];
+}
+
 /**
  * Resolve the cohort-level Execution Product Type from frozen member evidence.
  * Pure aggregation with NO majority forcing:
@@ -478,38 +557,91 @@ export type CohortProductTypeResolution =
  * - >=2 confident DISTINCT ids                         -> `conflicted` (id stays null)
  * - no confident match                                 -> `abstained` (incl. empty input)
  *
+ * PR5 hardening (P1-2) — reviewed-fact coherence rules (Primary Product Type
+ * is a family_invariant: it must resolve identically across finalized
+ * members). The member's compatible reviewed type (from its snapshot's
+ * provenance-compatible reviewed facts) participates at coherence time:
+ *
+ * - any two members' compatible reviewed types DIFFER          -> `conflicted`
+ * - a member's reviewed type differs from the cohort's confident
+ *   inferred type                                             -> `conflicted`
+ *   (never silently coexist: the member would curate under one profile while
+ *   the cohort execution type drives the siblings' profiles)
+ * - a reviewed type agrees with the inferred type             -> `coherent`
+ *   (the member's contribution source is 'reviewed')
+ * - a reviewed type RESOLVES an otherwise-abstaining member   -> the member
+ *   contributes that type; all members resolving to the same id (reviewed
+ *   and/or inferred) -> `coherent` with that id.
+ *
  * Product type options resolve per member from its frozen runtime snapshot
  * (`resolveTargetsFromSnapshot`); members with no enabled product-type target
  * or no options abstain. An empty members array resolves to `abstained`.
  */
 export function resolveCohortProductType(input: ResolveCohortProductTypeInput): CohortProductTypeResolution {
   const { members, confidenceFloor, memberLlmResults } = input;
-  const perMember = members.map((member, index) =>
-    resolveMemberResult(member, confidenceFloor, memberLlmResults?.[index] ?? null),
+  const resolutions = members.map((member, index) =>
+    resolveMemberResolution(member, confidenceFloor, memberLlmResults?.[index] ?? null),
   );
-  const memberCount = perMember.length;
+  const memberCount = resolutions.length;
+
+  // Effective contribution view (reviewed-first — exactly like the PR5
+  // effective curation type: a member with a compatible reviewed type
+  // contributes that type with source 'reviewed').
+  const perMember: PerMemberProductTypeResult[] = resolutions.map(res => ({
+    onboardingItemId: res.onboardingItemId,
+    productSku: res.productSku,
+    productTypeId: res.reviewedTypeId ?? res.inferredTypeId,
+    confidence: res.reviewedTypeId !== null ? REVIEWED_CONTRIBUTION_CONFIDENCE : res.inferredConfidence,
+    source: res.reviewedTypeId !== null ? 'reviewed' : res.inferredSource,
+    reviewedTypeId: res.reviewedTypeId,
+    isAbstention: res.reviewedTypeId === null && res.inferredAbstention,
+    supportingEvidenceIds: res.reviewedTypeId !== null ? [] : res.supportingEvidenceIds,
+    contradictingEvidenceIds: [],
+  }));
 
   const confident = perMember.filter(
     (member): member is ConfidentMemberProductTypeResult => !member.isAbstention,
   );
   const memberSupport: CohortTypeMemberSupport = { confidentCount: confident.length, memberCount };
 
-  if (confident.length === 0) {
+  // ── PR5 hardening (P1-2): reviewed-fact coherence ──────────────────────────
+  const reviewedIds = [...new Set(
+    resolutions.map(res => res.reviewedTypeId).filter((id): id is string => id !== null),
+  )];
+  const confidentInferred = resolutions.filter(res => !res.inferredAbstention && res.inferredTypeId !== null);
+  const inferredIds = [...new Set(confidentInferred.map(res => res.inferredTypeId as string))];
+
+  // Rule 1: any two members' compatible reviewed types DIFFER -> conflicted.
+  if (reviewedIds.length >= 2) {
     return {
-      outcome: 'abstained',
+      outcome: 'conflicted',
       productTypeId: null,
       confidence: null,
       memberSupport,
       supportingEvidenceIds: [],
-      contradictingEvidenceIds: [],
+      contradictingEvidenceIds: confident.flatMap(member => member.supportingEvidenceIds),
       perMember,
       confidenceFloor,
     };
   }
-
-  const distinctIds = [...new Set(confident.map(member => member.productTypeId))];
-  if (distinctIds.length >= 2) {
-    // Family-invariant disagreement = evidence conflict (ADR: never normalized).
+  // Rule 2: a member's reviewed type differs from the cohort's confident
+  // inferred type -> conflicted (never silently coexist).
+  if (reviewedIds.length === 1 && inferredIds.some(id => id !== reviewedIds[0])) {
+    return {
+      outcome: 'conflicted',
+      productTypeId: null,
+      confidence: null,
+      memberSupport,
+      supportingEvidenceIds: [],
+      contradictingEvidenceIds: confident.flatMap(member => member.supportingEvidenceIds),
+      perMember,
+      confidenceFloor,
+    };
+  }
+  // Legacy rule: >=2 confident DISTINCT inferred ids -> conflicted (id stays
+  // null; each side's evidence contradicts the other's — never resolved by
+  // source order or majority).
+  if (inferredIds.length >= 2) {
     return {
       outcome: 'conflicted',
       productTypeId: null,
@@ -522,7 +654,42 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
     };
   }
 
-  const productTypeId = distinctIds[0];
+  // Contribution ids after reviewed coherence: all reviewed ids agree with
+  // each other and with every confident inference (a reviewed type may also
+  // RESOLVE an otherwise-abstaining member). Only NON-abstaining members
+  // contribute — a below-floor raw match stays visible on its result as a
+  // diagnostic but never counts as a contribution.
+  const contributionIds = [...new Set(
+    confident.map(member => member.productTypeId).filter((id): id is string => id !== null),
+  )];
+  if (contributionIds.length === 0) {
+    return {
+      outcome: 'abstained',
+      productTypeId: null,
+      confidence: null,
+      memberSupport,
+      supportingEvidenceIds: [],
+      contradictingEvidenceIds: [],
+      perMember,
+      confidenceFloor,
+    };
+  }
+  // Defensive: the reviewed rules above guarantee a single contribution id
+  // here (any disagreement is a conflict); the >=2 case is never forced.
+  if (contributionIds.length >= 2) {
+    return {
+      outcome: 'conflicted',
+      productTypeId: null,
+      confidence: null,
+      memberSupport,
+      supportingEvidenceIds: [],
+      contradictingEvidenceIds: confident.flatMap(member => member.supportingEvidenceIds),
+      perMember,
+      confidenceFloor,
+    };
+  }
+
+  const productTypeId = contributionIds[0];
   const confidence = Math.min(...confident.map(member => member.confidence));
   const outcome = memberCount > confident.length ? 'coherent_with_abstentions' : 'coherent';
 
@@ -538,11 +705,11 @@ export function resolveCohortProductType(input: ResolveCohortProductTypeInput): 
   };
 }
 
-function resolveMemberResult(
+function resolveMemberResolution(
   member: CohortMemberInput,
   confidenceFloor: number,
   llmResult?: MemberLlmRankResult | null,
-): PerMemberProductTypeResult {
+): MemberResolution {
   const evidence = evidenceFromProjection(member.projection);
   const options = resolveProductTypeOptions(member.memberSnapshot);
   const { match, packet } = scoreTypeMatch(evidence, options);
@@ -570,15 +737,24 @@ function resolveMemberResult(
     || effective.confidence === null
     || effective.confidence < confidenceFloor;
 
+  // PR5 hardening (P1-2): the member's compatible reviewed Primary Product
+  // Type. The freeze passes it explicitly (extracted from the snapshot's
+  // provenance-compatible reviewed facts via `getReviewedTypeFromSnapshot`);
+  // when omitted the resolver derives it from the snapshot itself so every
+  // caller (shadow observer, tests) behaves identically.
+  const reviewedTypeId = normalizeReviewedTypeId(
+    member.reviewedTypeId ?? getReviewedTypeFromSnapshot(member.memberSnapshot),
+  );
+
   return {
     onboardingItemId: member.projection.onboardingItemId,
     productSku: member.projection.productSku,
-    productTypeId: effective?.productTypeId ?? null,
-    confidence: effective?.confidence ?? null,
-    source: effective?.source ?? null,
-    isAbstention,
+    reviewedTypeId,
+    inferredTypeId: effective?.productTypeId ?? null,
+    inferredConfidence: effective?.confidence ?? null,
+    inferredSource: effective?.source ?? 'none',
+    inferredAbstention: isAbstention,
     supportingEvidenceIds: isAbstention ? [] : packet.evidenceIds,
-    contradictingEvidenceIds: [],
   };
 }
 

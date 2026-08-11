@@ -110,7 +110,7 @@ import type {
   CohortMemberInput,
 } from '../classification/cohort-product-type-resolver';
 import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
-import { getEffectiveCurationTypeForSnapshot } from '../classification/effective-curation-type';
+import { getEffectiveCurationTypeForSnapshot, getReviewedTypeFromSnapshot } from '../classification/effective-curation-type';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
 import { llmRankOptions } from '../classification/curation-target-ranker';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
@@ -682,8 +682,11 @@ export interface FreezeMemberResult {
  * Type resolution (PR4 architecture-report §4 / DECISION-D): per-member ids +
  * SKUs + the distinct confident ids, written into the run's `error_message`
  * when the run completes `failed`. Members are sorted by onboardingItemId so
- * the message is stable across retries. Never majority-forced; no type is
- * written on conflict.
+ * the message is stable across retries. PR5 hardening (P1-2): reviewed ids
+ * participate as family-invariant contributions — the per-member detail
+ * carries the reviewed type id when present and the header lists every
+ * reviewed type involved. Never majority-forced; no type is written on
+ * conflict.
  */
 function buildCohortProductTypeConflictReason(
   resolution: Extract<CohortProductTypeResolution, { outcome: 'conflicted' }>,
@@ -692,11 +695,17 @@ function buildCohortProductTypeConflictReason(
     (m): m is ConfidentMemberProductTypeResult => !m.isAbstention,
   );
   const distinctIds = [...new Set(confident.map(m => m.productTypeId))].sort((a, b) => a.localeCompare(b));
+  const reviewedIds = [...new Set(
+    resolution.perMember.map(m => m.reviewedTypeId).filter((id): id is string => id !== null),
+  )].sort((a, b) => a.localeCompare(b));
   const detail = [...resolution.perMember]
     .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId))
-    .map(m => `${m.onboardingItemId}${m.productSku ? ` (${m.productSku})` : ''} -> ${m.productTypeId ?? 'abstained'}@${(m.confidence ?? 0).toFixed(3)}`)
+    .map(m => `${m.onboardingItemId}${m.productSku ? ` (${m.productSku})` : ''} -> ${m.productTypeId ?? 'abstained'}@${(m.confidence ?? 0).toFixed(3)}${m.reviewedTypeId ? ` (reviewed:${m.reviewedTypeId})` : ''}`)
     .join('; ');
-  return `cohort_product_type_conflict: ${distinctIds.length} distinct confident Product Types (${distinctIds.join(', ')}); members: ${detail}; no execution type written (family conflict, never majority-forced).`;
+  const reviewedNote = reviewedIds.length > 0
+    ? `; reviewed types: ${reviewedIds.join(', ')}`
+    : '';
+  return `cohort_product_type_conflict: ${distinctIds.length} distinct confident Product Types (${distinctIds.join(', ')}); members: ${detail}${reviewedNote}; no execution type written (family conflict, never majority-forced).`;
 }
 
 /**
@@ -1188,7 +1197,19 @@ export async function freezeCohortForExecution(
             if (!memberProjection) {
               throw new CohortFreezeCasError(`member ${fm.member.onboardingItemId} missing from the frozen execution-evidence projection.`);
             }
-            return { projection: memberProjection, memberSnapshot: fm.snapshot };
+            return {
+              projection: memberProjection,
+              memberSnapshot: fm.snapshot,
+              // PR5 hardening (P1-2): the member's compatible reviewed
+              // Primary Product Type from its frozen snapshot's
+              // provenance-compatible reviewed facts participates in the
+              // cohort coherence rules at freeze time (a reviewed type that
+              // differs from a confident inference — or another member's
+              // reviewed type — conflicts; an agreeing reviewed type
+              // contributes with source 'reviewed'; a reviewed type may
+              // resolve an otherwise-abstaining member).
+              reviewedTypeId: getReviewedTypeFromSnapshot(fm.snapshot),
+            };
           }),
           memberLlmResults: memberTypeLlmResults,
         });
@@ -1375,9 +1396,11 @@ export interface CohortShadowObservationMember {
   onboardingItemId: string;
   productSku: string | null;
   productTypeId: string | null;
-  /** 'keyword' when the deterministic matcher produced the match, else null
-   *  (shadow never invokes the LLM ranker — DECISION-E). */
-  source: 'keyword' | 'llm' | null;
+  /** 'reviewed' when a compatible reviewed type drives the contribution,
+   *  'keyword' when the deterministic matcher produced the match, 'llm' when
+   *  the run-bound ranker did, 'none' for an abstention (shadow never invokes
+   *  the LLM ranker — DECISION-E). */
+  source: 'reviewed' | 'keyword' | 'llm' | 'none';
 }
 
 /** One ready cohort's deterministic-only Execution Product Type observation. */

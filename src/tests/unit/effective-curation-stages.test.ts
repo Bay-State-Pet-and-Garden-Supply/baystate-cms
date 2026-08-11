@@ -296,6 +296,21 @@ describe('PR5 effective type — attribute applicability stage', () => {
     expect(applicabilityFor(result, 'color').state).toBe('applicable');
   });
 
+  it('PR5 hardening P1-2: same-ID reviewed override — reviewed dry-dog-food agrees with the execution type, source stays reviewed', async () => {
+    const snapshot = withReviewedFacts(buildSnapshot(UNIVERSAL_CONFIG), [makeTypeFact('dry-dog-food')]);
+    const result = await attributeApplicabilityStage.execute(STAGE_INPUT, makeContext(snapshot, EXECUTION_TYPE));
+    expect(result.status).toBe('succeeded');
+    const metadata = (result as { status: 'succeeded'; output: { metadata: Record<string, unknown> } }).output.metadata;
+
+    // Same-ID override (reviewed dry-dog-food == execution dry-dog-food): the
+    // reviewed fact still wins the source attribution (reviewed-first,
+    // DECISION-H), and the profile is the reviewed type's own.
+    expect(metadata.effectiveTypeId).toBe('dry-dog-food');
+    expect(metadata.effectiveTypeSource).toBe('reviewed');
+    expect(applicabilityFor(result, 'flavor').state).toBe('applicable');
+    expect(applicabilityFor(result, 'color').state).toBe('not_applicable');
+  });
+
   it('condition-carrying profile entry stays unknown with an unreviewed discriminator (DECISION-I)', async () => {
     const snapshot = buildSnapshot(UNIVERSAL_CONFIG);
     const result = await attributeApplicabilityStage.execute(STAGE_INPUT, makeContext(snapshot, EXECUTION_TYPE));
