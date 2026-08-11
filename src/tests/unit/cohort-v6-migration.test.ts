@@ -106,6 +106,17 @@ describe('cohort schema v6 migration — fresh install (issue #30 PR4 C1)', () =
     expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_proposal_dependencies_proposal'").get()).toBeTruthy();
     expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_proposal_dependencies_target'").get()).toBeTruthy();
 
+    // PR4 review NOTE: the UNIQUE (proposal_id, dependency_kind) index — the
+    // DB-level race backstop for the dependency stamping — exists after a
+    // fresh install and is introspectable via PRAGMA index_list / index_info.
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_proposal_dependencies_unique'").get()).toBeTruthy();
+    const depIndexes = db.query("PRAGMA index_list('classification_proposal_dependencies')").all() as Array<{ name: string; unique: number }>;
+    const uniqueIdx = depIndexes.find(i => i.name === 'idx_classification_proposal_dependencies_unique');
+    expect(uniqueIdx).toBeTruthy();
+    expect(Number(uniqueIdx!.unique)).toBe(1);
+    const uniqueCols = db.query("PRAGMA index_info('idx_classification_proposal_dependencies_unique')").all() as Array<{ seqno: number; name: string }>;
+    expect(uniqueCols.map(c => c.name)).toEqual(['proposal_id', 'dependency_kind']);
+
     // The run table carries product_type_outcome with the PR4 CHECK and keeps
     // the PR4 placeholder columns.
     const runTable = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='classification_cohort_runs'").get() as { sql: string } | undefined;
@@ -142,6 +153,36 @@ describe('cohort schema v6 migration — fresh install (issue #30 PR4 C1)', () =
         [randomUUID(), wsId, 'h'.repeat(64), new Date().toISOString()],
       );
     }).toThrow(/FOREIGN KEY constraint failed/);
+
+    // PR4 review NOTE: the unique index is the race backstop — a direct
+    // duplicate (proposal_id, dependency_kind) INSERT is rejected (UNIQUE),
+    // never a second row.
+    const runId = randomUUID();
+    getDb().run(
+      `INSERT INTO classification_runs (id, workspace_id, product_sku, started_at)
+       VALUES (?, ?, 'SKU-UNIQ', ?)`,
+      [runId, wsId, new Date().toISOString()],
+    );
+    const proposalId = randomUUID();
+    getDb().run(
+      `INSERT INTO classification_proposals (id, run_id, product_sku, proposal_type, proposed_value_json, confidence, status, created_at)
+       VALUES (?, ?, 'SKU-UNIQ', 'primary_product_type', '"type-1"', 0.9, 'pending', ?)`,
+      [proposalId, runId, new Date().toISOString()],
+    );
+    getDb().run(
+      `INSERT INTO classification_proposal_dependencies
+         (id, workspace_id, proposal_id, dependency_kind, dependency_target_id, dependency_value_hash, created_at)
+       VALUES (?, ?, ?, 'execution_product_type', 'type-1', ?, ?)`,
+      [randomUUID(), wsId, proposalId, 'h'.repeat(64), new Date().toISOString()],
+    );
+    expect(() => {
+      getDb().run(
+        `INSERT INTO classification_proposal_dependencies
+           (id, workspace_id, proposal_id, dependency_kind, dependency_target_id, dependency_value_hash, created_at)
+         VALUES (?, ?, ?, 'execution_product_type', 'type-1', ?, ?)`,
+        [randomUUID(), wsId, proposalId, 'h'.repeat(64), new Date().toISOString()],
+      );
+    }).toThrow(/UNIQUE constraint failed: classification_proposal_dependencies.proposal_id, classification_proposal_dependencies.dependency_kind/);
 
     // Idempotent: a second migration run keeps marker '6' and the v6 shape.
     expect(() => runMigrations()).not.toThrow();
@@ -253,6 +294,17 @@ describe('cohort schema v6 migration — pre-C1 marker-5 convergence (issue #30 
     expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='classification_proposal_dependencies'").get()).toBeTruthy();
     expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_proposal_dependencies_proposal'").get()).toBeTruthy();
     expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_proposal_dependencies_target'").get()).toBeTruthy();
+
+    // PR4 review NOTE: the UNIQUE (proposal_id, dependency_kind) index — the
+    // race backstop — exists after the '5'->'6' convergence too, with the same
+    // unique column pair (PRAGMA index_list / index_info).
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_proposal_dependencies_unique'").get()).toBeTruthy();
+    const depIndexes = db.query("PRAGMA index_list('classification_proposal_dependencies')").all() as Array<{ name: string; unique: number }>;
+    const uniqueIdx = depIndexes.find(i => i.name === 'idx_classification_proposal_dependencies_unique');
+    expect(uniqueIdx).toBeTruthy();
+    expect(Number(uniqueIdx!.unique)).toBe(1);
+    const uniqueCols = db.query("PRAGMA index_info('idx_classification_proposal_dependencies_unique')").all() as Array<{ seqno: number; name: string }>;
+    expect(uniqueCols.map(c => c.name)).toEqual(['proposal_id', 'dependency_kind']);
 
     // product_type_outcome column added by the OUTSIDE-the-gate ALTER, and the
     // v5 run-row indexes recreated by the hop.

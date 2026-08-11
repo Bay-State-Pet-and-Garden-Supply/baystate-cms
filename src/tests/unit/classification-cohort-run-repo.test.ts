@@ -840,19 +840,57 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     expect(deps[0].createdAt).not.toBeNull();
 
     // A second row with the SAME (proposal, kind) is idempotent: the unique
-    // (proposal_id, dependency_kind) index + INSERT OR IGNORE make the
-    // re-stamp a no-op and return the EXISTING row id (the member commit
-    // re-stamps proposals left over from a pre-crash attempt).
+    // (proposal_id, dependency_kind) index + the tuple-equality fast path make
+    // an IDENTICAL re-stamp a no-op and return the EXISTING row id (the
+    // member commit re-stamps proposals left over from a pre-crash attempt —
+    // always with the same workspace/target/hash).
     const dependencyIdAgain = insertProposalDependency({
       workspaceId: wsId,
       proposalId,
       dependencyKind: 'execution_product_type',
       dependencyTargetId: 'type-1',
-      dependencyValueHash: 'g'.repeat(64),
+      dependencyValueHash: 'h'.repeat(64),
     });
     expect(dependencyIdAgain).toBe(dependencyId);
     expect(listDependenciesForProposal(proposalId).length).toBe(1);
     expect(listDependenciesForProposal(proposalId)[0].dependencyValueHash).toBe('h'.repeat(64));
+
+    // PR4 review fix (SHOULD-FIX): a re-stamp under a DIFFERENT tuple on the
+    // existing-row path FAILS CLOSED — a changed target, changed hash, or
+    // changed workspace is incoherent (the proposal was stamped under a
+    // different execution type / workspace) and is never silently blessed as
+    // the existing row. The unique (proposal_id, dependency_kind) index
+    // forbids a second row, so inserting would only surface a confusing
+    // UNIQUE error — throw a descriptive error instead.
+    expect(() => insertProposalDependency({
+      workspaceId: wsId,
+      proposalId,
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-2',
+      dependencyValueHash: 'h'.repeat(64),
+    })).toThrow(/different tuple/);
+    expect(() => insertProposalDependency({
+      workspaceId: wsId,
+      proposalId,
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'g'.repeat(64),
+    })).toThrow(/different tuple/);
+    expect(() => insertProposalDependency({
+      workspaceId: 'some-other-workspace',
+      proposalId,
+      dependencyKind: 'execution_product_type',
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'h'.repeat(64),
+    })).toThrow(/different tuple/);
+    // The failing re-stamps never created or mutated rows — the existing
+    // tuple is untouched.
+    expect(listDependenciesForProposal(proposalId).length).toBe(1);
+    expect(listDependenciesForProposal(proposalId)[0]).toMatchObject({
+      workspaceId: wsId,
+      dependencyTargetId: 'type-1',
+      dependencyValueHash: 'h'.repeat(64),
+    });
 
     // A DIFFERENT dependency_kind is a distinct row (second row, insertion
     // order preserved).

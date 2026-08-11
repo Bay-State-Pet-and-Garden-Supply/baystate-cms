@@ -43,7 +43,7 @@ import {
   ensureMemberRun,
   freezeCohortRunAuthorities,
   transitionCohortRunToRunning,
-  supersedeCohortRun,
+  supersedeCohortRunIfUnchanged,
   persistCohortSnapshot,
   getCohortRunById,
   completeCohortRun,
@@ -100,6 +100,7 @@ import {
   evidenceFromProjection,
   matchMemberDeterministically,
   resolveCohortProductType,
+  mapRankedLabelToOptionExactlyOne,
 } from '../classification/cohort-product-type-resolver';
 import type {
   CohortProductTypeResolution,
@@ -766,14 +767,21 @@ function assertStoredExecutionTypeMatches(
  * transaction so tests can deterministically simulate a freeze-window
  * mutation; `hooks.onOcrInFlight` (test seam, PR3 hardening A2) fires while a
  * member's OCR pull-forward transport is actually in flight so tests can
- * deterministically simulate a sibling reclaim mid-call. Production callers
- * never pass either.
+ * deterministically simulate a sibling reclaim mid-call; `hooks.beforeCasSupersede`
+ * (test seam, PR4 review fix) fires in the CAS-drift handler immediately
+ * before the owner-guarded supersede attempt so tests can deterministically
+ * simulate a sibling reclaim between the failed CAS and the supersede.
+ * Production callers never pass any.
  */
 export async function freezeCohortForExecution(
   run: CohortRun,
   workspacePath: string,
   workspaceId: string,
-  hooks?: { beforeFinalCas?: () => void; onOcrInFlight?: () => void | Promise<void> },
+  hooks?: {
+    beforeFinalCas?: () => void;
+    onOcrInFlight?: () => void | Promise<void>;
+    beforeCasSupersede?: () => void;
+  },
 ): Promise<CohortRun> {
   const workerId = run.claimedBy ?? '';
   if (!workerId) {
@@ -1015,9 +1023,14 @@ export async function freezeCohortForExecution(
               // display label). `resolveCohortProductType` applies the same
               // defensive mapping to its `memberLlmResults` input.
               const llmLabel = ranked.values[0];
-              const matchedOption = typeOptions.find(option => option.label === llmLabel);
-              memberTypeLlmResult = matchedOption
-                ? { productTypeId: matchedOption.value, confidence: ranked.confidence }
+              // PR4 review fix (SHOULD-FIX): duplicate Product Type display
+              // labels are permitted by config validation, so a label matching
+              // TWO frozen options is ambiguous — the member must abstain
+              // (fail closed), never silently pick the first match. Exactly
+              // one matching option maps the label to its canonical VALUE.
+              const mappedId = mapRankedLabelToOptionExactlyOne(llmLabel, typeOptions);
+              memberTypeLlmResult = mappedId !== null
+                ? { productTypeId: mappedId, confidence: ranked.confidence }
                 : null;
             }
             // No valid LLM values / no LLM config / no frozen policy → the
@@ -1218,14 +1231,36 @@ export async function freezeCohortForExecution(
     return finalize();
   } catch (err) {
     if (err instanceof CohortFreezeCasError) {
-      // Drift → supersede the freezing run (and fail its linked running
-      // children). Execution never starts from a mixed-time snapshot; the
-      // cohort stays ready and the next claim creates a fresh run.
+      // PR4 review fix (BLOCKER): the supersede is OWNER/observed-state
+      // guarded. Between the failed final CAS (which rolled back its
+      // transaction) and this supersede attempt, another worker can reclaim
+      // the run — an unconditional supersede would kill the fresh owner's run
+      // and child. Reload the row and supersede ONLY while it is STILL
+      // claimed by THIS worker and still `freezing`, CAS'd on the observed
+      // {claimed_by, lease_expires_at, status}. The observed values are read
+      // FRESH (never the claim-time snapshot): the freeze's periodic
+      // heartbeats renew lease_expires_at, and the CAS must match the row as
+      // it exists now. A failed supersede, or a run already owned elsewhere
+      // / not freezing anymore, is ownership loss: no further mutation — the
+      // run survives with its new owner and the CAS error is surfaced.
+      hooks?.beforeCasSupersede?.();
       const reason = `Freeze CAS drift: ${err.message}`;
-      supersedeCohortRun(run.id, reason);
-      const superseded = getCohortRunById(run.id);
-      if (!superseded) throw err;
-      return superseded;
+      const current = getCohortRunById(run.id);
+      if (current !== null && current.status === 'freezing' && current.claimedBy === workerId) {
+        const superseded = supersedeCohortRunIfUnchanged(
+          run.id,
+          { claimedBy: current.claimedBy, leaseExpiresAt: current.leaseExpiresAt, status: current.status },
+          reason,
+        );
+        if (superseded) {
+          const supersededRow = getCohortRunById(run.id);
+          if (supersededRow) return supersededRow;
+        }
+      }
+      console.warn(
+        `[CohortCurator] Freeze CAS supersede skipped for run ${run.id}: ownership changed after the failed CAS (no mutation — the run survives with its new owner).`,
+      );
+      throw err;
     }
     throw err;
   }

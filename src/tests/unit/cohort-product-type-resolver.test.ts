@@ -549,6 +549,34 @@ describe('resolveCohortProductType', () => {
     expect(resolution.perMember[0].source).toBe('llm');
     expect(resolution.perMember[0].productTypeId).toBe('dry-dog-food');
   });
+
+  it('SHOULD-FIX: an LLM label matching TWO frozen options (duplicate display labels) abstains — never picks the first', () => {
+    // Config validation permits duplicate display labels (warning, not
+    // rejection), so a label that matches two frozen options is ambiguous.
+    // The member must abstain (fail closed) rather than silently resolve the
+    // label to the FIRST option's canonical id.
+    const duplicateLabelTypes = [
+      { id: 'dry-dog-food', name: 'Dry Dog Food' },
+      { id: 'dry-dog-food-supersize', name: 'Dry Dog Food' }, // same label, distinct id
+    ];
+    const resolution = resolveCohortProductType({
+      confidenceFloor: 0.7,
+      members: [
+        // Neutral evidence → no confident deterministic match → the LLM
+        // fallback applies and returns the ambiguous 'Dry Dog Food' LABEL.
+        memberInput(makeMemberProjection({ itemId: 'item-llm', name: 'Purina Pro Plan Dog Food Chicken 5 lb' }), duplicateLabelTypes),
+      ],
+      memberLlmResults: [
+        { productTypeId: 'Dry Dog Food', confidence: 0.8 },
+      ],
+    });
+    expect(resolution.outcome).toBe('abstained');
+    expect(resolution.productTypeId).toBeNull();
+    expect(resolution.perMember[0].isAbstention).toBe(true);
+    expect(resolution.perMember[0].productTypeId).toBeNull();
+    // The ambiguous label never resolved to the first matching option.
+    expect(resolution.perMember[0].productTypeId).not.toBe('dry-dog-food');
+  });
 });
 
 // ─── C3b: validateCohortFamilyInvariants ─────────────────────────────────────

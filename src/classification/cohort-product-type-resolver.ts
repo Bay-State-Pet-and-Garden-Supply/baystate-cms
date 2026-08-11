@@ -588,22 +588,40 @@ function resolveMemberResult(
  * against `option.label` (`curation-target-ranker.ts`); the stored
  * `execution_product_type_id` must be the canonical `option.value`. An exact
  * value match passes through (the freeze integration already canonicalizes);
- * an exact label match maps to its value. No exact match → null: the member
- * abstains (fail closed — a label outside the frozen options is never turned
- * into an id).
+ * an exact label match maps to its value. A label matching NO frozen option,
+ * or more than one (duplicate display labels are permitted by config
+ * validation), is ambiguous → null: the member abstains (fail closed — a
+ * label outside the frozen options is never turned into an id, and a
+ * duplicate label never silently selects the first match).
  */
 function mapLlmRankResultToMemberOption(
   llmResult: MemberLlmRankResult,
   options: ResolvedTargetOption[],
 ): { productTypeId: string; confidence: number; source: 'llm' } | null {
-  const byValue = options.find(option => option.value === llmResult.productTypeId);
-  if (byValue) {
-    return { productTypeId: byValue.value, confidence: llmResult.confidence, source: 'llm' as const };
-  }
-  const byLabel = options.find(option => option.label === llmResult.productTypeId);
-  if (byLabel) {
-    return { productTypeId: byLabel.value, confidence: llmResult.confidence, source: 'llm' as const };
-  }
+  const productTypeId = mapRankedLabelToOptionExactlyOne(llmResult.productTypeId, options);
+  if (productTypeId === null) return null;
+  return { productTypeId, confidence: llmResult.confidence, source: 'llm' as const };
+}
+
+/**
+ * PR4 review fix (SHOULD-FIX): resolve a ranker-returned LABEL to the frozen
+ * Product Type option VALUE, requiring EXACTLY ONE matching option. Duplicate
+ * display labels are permitted by config validation (warning, not rejection),
+ * so a label matching two options is ambiguous — return null and let the
+ * member abstain, never pick the first. An exact canonical VALUE match passes
+ * through unchanged (ids are unique by config validation; the exact-one guard
+ * is defensive). Shared by the resolver and the freeze integration so both
+ * label-mapping sites behave identically.
+ */
+export function mapRankedLabelToOptionExactlyOne(
+  label: string,
+  options: ResolvedTargetOption[],
+): string | null {
+  const byValue = options.filter(option => option.value === label);
+  if (byValue.length === 1) return byValue[0].value;
+  const byLabel = options.filter(option => option.label === label);
+  if (byLabel.length === 1) return byLabel[0].value;
+  // No exact match, or an ambiguous one (multiple values/labels) → abstain.
   return null;
 }
 

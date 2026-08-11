@@ -365,11 +365,16 @@ export function writeProductTypeOutcomeOnly(
  * insert is a check-then-insert in the caller's transaction — a re-stamped
  * row (e.g. the member commit re-executing after a crash-recovery resume
  * re-stamps a proposal row persisted by a pre-crash attempt) returns the
- * EXISTING row id without a second row. The unique index is the DB-level
- * backstop: a concurrent duplicate insert fails closed (UNIQUE) rather than
- * ever creating two rows. Workspace-scoped and FK fail-closed: a NEW row
- * with an unknown `proposalId`/`workspaceId` throws a FOREIGN KEY constraint
- * error.
+ * EXISTING row id without a second row. The existing-row fast path RELOADS
+ * the full row and requires workspace, target, and hash equality before
+ * reusing it; any mismatch FAILS CLOSED (throws) rather than silently
+ * blessing a proposal stamped under a different execution type / workspace
+ * — the unique index forbids a second row anyway, so 'insert the new row'
+ * would only surface a confusing UNIQUE error. The unique index is the
+ * DB-level backstop for a concurrent duplicate insert (fails closed via
+ * UNIQUE rather than ever creating two rows). Workspace-scoped and FK
+ * fail-closed: a NEW row with an unknown `proposalId`/`workspaceId` throws
+ * a FOREIGN KEY constraint error.
  * Returns the (existing or newly inserted) row id.
  */
 export function insertProposalDependency(input: {
@@ -381,9 +386,31 @@ export function insertProposalDependency(input: {
 }): string {
   const db = getDb();
   const existing = db.query(
-    'SELECT id FROM classification_proposal_dependencies WHERE proposal_id = ? AND dependency_kind = ?',
-  ).get(input.proposalId, input.dependencyKind) as { id: string } | undefined;
-  if (existing) return existing.id;
+    `SELECT id, workspace_id, dependency_target_id, dependency_value_hash
+     FROM classification_proposal_dependencies
+     WHERE proposal_id = ? AND dependency_kind = ?`,
+  ).get(input.proposalId, input.dependencyKind) as
+    | { id: string; workspace_id: string; dependency_target_id: string; dependency_value_hash: string }
+    | undefined;
+  if (existing) {
+    if (
+      existing.workspace_id !== input.workspaceId ||
+      existing.dependency_target_id !== input.dependencyTargetId ||
+      existing.dependency_value_hash !== input.dependencyValueHash
+    ) {
+      // Fail closed: a re-stamp under a DIFFERENT tuple is incoherent state
+      // (the proposal's dependency metadata was stamped under another
+      // execution type / workspace). Inserting a second row would violate the
+      // unique index; reusing the row would silently record the wrong
+      // invalidation key. Throw and roll the caller's transaction back.
+      throw new Error(
+        `Dependency row already exists for proposal ${input.proposalId} kind ${input.dependencyKind} ` +
+          `with a different tuple (workspace ${existing.workspace_id}, target ${existing.dependency_target_id}); ` +
+          `refusing to reuse it for workspace ${input.workspaceId}, target ${input.dependencyTargetId}.`,
+      );
+    }
+    return existing.id;
+  }
   const id = randomUUID();
   db.run(
     `INSERT INTO classification_proposal_dependencies

@@ -1704,6 +1704,11 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     // The shared test DB may carry an 'ollama_vlm' row from an earlier test —
     // delete it so the freeze's OCR pull-forward settles `disabled` (no VLM
     // transport) and the ONLY stubbed transport is the LLM ranker call.
+    // Test hygiene (PR4 review SHOULD-FIX): capture the PRIOR api_keys state
+    // for both services so the finally block can restore it exactly — later
+    // tests must not inherit this test's keys.
+    const priorVlmKey = getDb().query('SELECT id, service, api_key, base_url, model, created_at, updated_at FROM api_keys WHERE service = ?').get('ollama_vlm') as Record<string, any> | undefined;
+    const priorOllamaKey = getDb().query('SELECT id, service, api_key, base_url, model, created_at, updated_at FROM api_keys WHERE service = ?').get('ollama') as Record<string, any> | undefined;
     deleteApiKey('ollama_vlm');
     upsertApiKey('ollama', 'test-key', 'http://127.0.0.1:11434', 'qwen2.5vl:latest');
     const originalFetch = globalThis.fetch;
@@ -1732,7 +1737,9 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
       expect(finalized.finalMembershipHash).toBe(run.candidateMembershipHash);
 
       // DECISION-A provenance: exactly one `product_type_ranking` model-call
-      // row, bound to the LLM member's CHILD run (not the parent).
+      // row on THIS freeze, bound to the LLM member's CHILD run (not the
+      // parent). Scoped by run id — never a global query (the shared file DB
+      // may legitimately carry model-call rows from other tests).
       expect(rankerTransports).toBe(1);
       const llmMember = items.find(i => i.upc === '100000000001')!;
       const childRun = getDb().query(
@@ -1740,8 +1747,8 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
       ).get(finalized.id, llmMember.id) as { id: string } | undefined;
       expect(childRun).toBeTruthy();
       const calls = getDb().query(
-        'SELECT run_id, operation, status FROM classification_model_calls WHERE operation = ?',
-      ).all('product_type_ranking') as Array<{ run_id: string; operation: string; status: string }>;
+        'SELECT run_id, operation, status FROM classification_model_calls WHERE operation = ? AND run_id = ?',
+      ).all('product_type_ranking', childRun!.id) as Array<{ run_id: string; operation: string; status: string }>;
       expect(calls).toHaveLength(1);
       expect(calls[0].run_id).toBe(childRun!.id);
       expect(calls[0].status).toBe('success');
@@ -1754,6 +1761,17 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
       ).get(secondChild!.id) as { cnt: number }).toMatchObject({ cnt: 0 });
     } finally {
       globalThis.fetch = originalFetch;
+      // Restore the PRIOR api_keys rows for both services this test touched
+      // (byte-identical: original ids/timestamps), so later tests observe the
+      // same key state as before this test ran.
+      getDb().run('DELETE FROM api_keys WHERE service IN (?, ?)', ['ollama_vlm', 'ollama']);
+      for (const prior of [priorVlmKey, priorOllamaKey]) {
+        if (!prior) continue;
+        getDb().run(
+          'INSERT INTO api_keys (id, service, api_key, base_url, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [prior.id, prior.service, prior.api_key, prior.base_url, prior.model, prior.created_at, prior.updated_at],
+        );
+      }
     }
   });
 
@@ -1893,5 +1911,60 @@ describe('PR4 C4a — freeze-time execution product type resolution (issue #30)'
     expect(after.productTypeConfidence).toBeNull();
     expect(after.productTypeOutcome).toBeNull();
     expect(after.finalMembershipHash).toBeNull();
+  });
+
+  it('BLOCKER fix: a sibling reclaim between the failed CAS and the supersede attempt is never killed — the stale supersede no-ops and the fresh owner keeps the run', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveV1Config(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction(),
+    });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+
+    let mutated = false;
+    let reclaimed = false;
+    // The freeze-window mutation makes the final CAS throw (drift); while that
+    // CAS-error handler is running, a sibling worker's lease reclaim resumes
+    // the run. The stale caller (worker-a) must then NOT supersede the fresh
+    // owner's (worker-b) run.
+    await expect(freezeCohortForExecution(run, wsPath, workspaceId, {
+      beforeFinalCas: () => {
+        if (mutated) return;
+        mutated = true;
+        const live = findItemById(items[0].id)!;
+        updateItemExtractionData(
+          items[0].id,
+          JSON.stringify({ ...live.extractionData, title: 'MUTATED IN WINDOW' }),
+        );
+      },
+      beforeCasSupersede: () => {
+        if (reclaimed) return;
+        reclaimed = true;
+        // The failed final CAS rolled back (run still `freezing`, NULL
+        // hashes); its lease expires and a sibling worker resumes the run
+        // BEFORE the stale caller attempts its supersede.
+        getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', run.id]);
+        const reclaim = reclaimExpiredCohortRuns(
+          workspaceId,
+          new Date().toISOString(),
+          () => verifyCohortRunFrozen(run, wsPath, workspaceId) ? 'match' : 'drift',
+          'worker-b',
+          COHORT_LEASE_TTL_MS,
+        );
+        expect(reclaim.resumed.length).toBe(1);
+        expect(reclaim.superseded.length).toBe(0);
+      },
+    })).rejects.toThrow(/evidence changed during the freeze window/);
+    expect(mutated).toBe(true);
+    expect(reclaimed).toBe(true);
+
+    // The stale supersede no-opped: the run SURVIVED with the fresh owner
+    // (worker-b) — never superseded, never killed, no terminal write.
+    const after = getCohortRunById(run.id)!;
+    expect(after.status).toBe('freezing');
+    expect(after.claimedBy).toBe('worker-b');
+    expect(after.supersededAt).toBeNull();
+    expect(after.errorMessage).toBeNull();
+    expect(after.evidenceSnapshotHash).toBeNull();
   });
 });
