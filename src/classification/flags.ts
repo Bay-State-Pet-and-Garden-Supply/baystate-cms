@@ -18,6 +18,16 @@
  *   processCohort. `cohortShadowOnly` observes without installing the claim
  *   barrier.
  *
+ * PR5 note (issue #30): the effective-type path is active-mode-only BY
+ * CONSTRUCTION, so no new flag is added. Only active runs
+ * (`cohortCurationV2Enabled && !cohortShadowOnly`) freeze a cohort Execution
+ * Product Type; the two attribute-applicability stages then fall back to it
+ * behind the reviewed Primary Product Type (reviewed-first / execution
+ * fallback), and the executor stamps `execution_product_type` dependency rows
+ * only for execution-driven members. Flag OFF and shadow runs never carry a
+ * cohort execution type, so stage gating, dependency rows, and
+ * `curation_data_json` stay byte-identical to PR4/legacy.
+ *
  * @see https://github.com/Bay-State-Pet-and-Garden-Supply/baystate-cms/issues/30
  */
 

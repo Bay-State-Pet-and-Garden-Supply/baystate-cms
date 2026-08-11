@@ -49,6 +49,12 @@ import {
   getCohortCurationFlags,
 } from '../../classification/flags';
 import { hashCanonicalJson } from '../../shared/stable-id';
+import { createHash } from 'node:crypto';
+import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
+import { promoteItems } from '../../onboarding/draft-promoter';
+import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
+import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
+import { listChangeSetItems } from '../../db/repositories/change-set-repo';
 import type { ClassificationConfig } from '../../shared/schemas/classification';
 import type { InsertItemData } from '../../db/repositories/onboarding-item-repo';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
@@ -297,6 +303,140 @@ function saveTypeAndFieldEnabledConfig(wsId: string, wsPath: string): void {
 }
 
 /**
+ * PR5 acceptance fixture: the product_type + flavor + color curation targets
+ * are ENABLED. `color` exists in the fixture (mapped to ProductField2) but is
+ * NOT in `dry-dog-food-profile` and is NOT universal — the acceptance
+ * scenario proves ONLY the profile's attributes are unlocked by the Execution
+ * Type (color stays `not_applicable`).
+ */
+const V1_CONFIG_PR5_ACCEPTANCE: ClassificationConfig = {
+  ...V1_CONFIG,
+  attributes: [
+    ...V1_CONFIG.attributes,
+    {
+      id: 'color',
+      name: 'Color',
+      description: null,
+      valueMode: 'controlled' as const,
+      canonicalUnit: null,
+      allowedValues: ['Red', 'Blue'],
+      valueAliases: [],
+      visualEvidenceEligibility: 'eligible' as const,
+      isClaim: false,
+      isCompositionAttribute: false,
+      group: 'Food',
+    },
+  ],
+  attributeMappings: [
+    ...V1_CONFIG.attributeMappings,
+    {
+      id: 'color-mapping',
+      attributeId: 'color',
+      catalogField: 'ProductField2',
+      serialization: { format: 'direct' as const, separator: ', ', prefix: '', suffix: '' },
+      isStale: false,
+    },
+  ],
+  curationTargets: [
+    ...V1_CONFIG.curationTargets.map(target =>
+      target.id === 'test-product-type' || target.id === 'test-flavor' ? { ...target, enabled: true } : target,
+    ),
+    {
+      id: 'test-color',
+      kind: 'product_field' as const,
+      label: 'Test Color',
+      enabled: true,
+      selectionMode: 'single' as const,
+      attributeId: 'color',
+      catalogField: 'ProductField2',
+      optionSource: 'configured' as const,
+      required: false,
+      mandatory: false,
+      sortOrder: 3,
+    },
+  ],
+};
+
+/**
+ * PR5 acceptance override fixture: `V1_CONFIG_PR5_ACCEPTANCE` plus a second
+ * Product Type `dog-treats` with its own profile (`color` only). A reviewed
+ * override seeded to `dog-treats` must outrank the cohort Execution Product
+ * Type (`dry-dog-food`) end-to-end (DECISION-H precedence).
+ */
+const V1_CONFIG_PR5_ACCEPTANCE_OVERRIDE: ClassificationConfig = {
+  ...V1_CONFIG_PR5_ACCEPTANCE,
+  productTypes: [
+    ...V1_CONFIG_PR5_ACCEPTANCE.productTypes,
+    { id: 'dog-treats', name: 'Dog Treats', description: null, attributeProfileId: 'dog-treats-profile', oldIdAliases: [] },
+  ],
+  attributeProfiles: [
+    ...V1_CONFIG_PR5_ACCEPTANCE.attributeProfiles,
+    {
+      id: 'dog-treats-profile',
+      productTypeId: 'dog-treats',
+      name: 'Dog Treats Profile',
+      attributes: [{ attributeId: 'color', required: true, cardinality: 'single' as const, applicabilityConditions: [], constraints: {}, confidenceThresholds: {}, valueAliases: [] }],
+    },
+  ],
+};
+
+/** Save + cache the PR5 acceptance config for one workspace. */
+function savePr5AcceptanceConfig(wsId: string, wsPath: string): void {
+  saveClassificationConfig(wsPath, V1_CONFIG_PR5_ACCEPTANCE);
+  syncConfigToCache(wsId, loadClassificationConfig(wsPath));
+}
+
+/** Save + cache the PR5 acceptance override config for one workspace. */
+function savePr5AcceptanceOverrideConfig(wsId: string, wsPath: string): void {
+  saveClassificationConfig(wsPath, V1_CONFIG_PR5_ACCEPTANCE_OVERRIDE);
+  syncConfigToCache(wsId, loadClassificationConfig(wsPath));
+}
+
+/**
+ * Activate a verified Page import with one page and return its verified id
+ * (promotion acceptance helper).
+ */
+function activateVerifiedPage(wsId: string, pageName: string, suffix: string): string {
+  const key = `vp-${suffix}-${pageName.replace(/\s+/g, '-').toLowerCase()}`;
+  activatePageImportFromRecords({
+    workspaceId: wsId,
+    sourceHash: createHash('sha256').update(key).digest('hex'),
+    parserFormatVersion: 'pages-xml-1',
+    records: [{
+      identity: { kind: 'exported_guid', key, status: 'verified' },
+      name: pageName,
+      parentRef: null,
+      availability: 'available',
+    }],
+    activatedBy: 'test',
+  });
+  const verified = listVerifiedPageOptions(wsId).find(p => p.name === pageName);
+  if (!verified) throw new Error(`verified page not created: ${pageName}`);
+  return verified.id;
+}
+
+/**
+ * Seed an ACCEPTED category_page proposal + decision on a child run (the
+ * promotion acceptance gate requires a verified page assignment).
+ */
+function seedAcceptedPageProposal(wsId: string, runId: string, sku: string, pageId: string, pageName: string): void {
+  const now = new Date().toISOString();
+  const proposalId = `page-proposal-${runId}`;
+  getDb().run(
+    `INSERT OR IGNORE INTO classification_proposals
+     (id, run_id, product_sku, proposal_type, target_id, proposed_value_json, confidence, status, created_at)
+     VALUES (?, ?, ?, 'category_page', ?, ?, 1.0, 'accepted', ?)`,
+    [proposalId, runId, sku, pageId, JSON.stringify({ pageId, pageName }), now],
+  );
+  getDb().run(
+    `INSERT OR IGNORE INTO classification_proposal_decisions
+     (id, proposal_id, decision, decision_key, created_at)
+     VALUES (?, ?, 'accepted', ?, ?)`,
+    [`page-decision-${runId}`, proposalId, `page-token-${runId}`, now],
+  );
+}
+
+/**
  * Seed a provenance-compatible reviewed (accepted) `primary_product_type`
  * decision on a PRIOR run for one SKU under the CURRENT config (PR5
  * reviewed-override fixture). The member's freeze-built runtime snapshot then
@@ -312,8 +452,10 @@ function seedReviewedTypeDecision(
 ): void {
   const { hash } = createConfigSnapshot(wsId, loadClassificationConfig(wsPath));
   const now = new Date().toISOString();
-  const runId = `prior-type-run-${sku}`;
-  const proposalId = `prior-type-proposal-${sku}`;
+  // Item ids are unique per test (randomUUID) — deterministic ids derived from
+  // them never collide across workspaces sharing one database file.
+  const runId = `prior-type-run-${itemId}`;
+  const proposalId = `prior-type-proposal-${itemId}`;
   getDb().run(
     `INSERT INTO classification_runs
      (id, workspace_id, onboarding_item_id, product_sku, source_kind, config_snapshot_hash, status, started_at)
@@ -330,7 +472,7 @@ function seedReviewedTypeDecision(
     `INSERT INTO classification_proposal_decisions
      (id, proposal_id, decision, revised_value_json, revised_target_id, created_at, superseded_at)
      VALUES (?, ?, 'accepted', ?, ?, ?, NULL)`,
-    [`prior-type-decision-${sku}`, proposalId, JSON.stringify({ productTypeId: typeId }), typeId, now],
+    [`prior-type-decision-${itemId}`, proposalId, JSON.stringify({ productTypeId: typeId }), typeId, now],
   );
 }
 
@@ -1658,6 +1800,229 @@ describe('PR4 C5 — shadow mode + additive view fields (issue #30)', () => {
     });
     expect(parsedWithNulls.executionProductTypeId).toBeNull();
     expect(parsedWithNulls.productTypeOutcome).toBeNull();
+  });
+});
+
+// PR5 acceptance integration (issue #30): type-first Curation without
+// reviewed truth — the frozen Execution Product Type unlocks first-pass
+// applicability INSIDE Curation only, while review and promotion authority
+// stay on the member's own reviewed values.
+describe('PR5 C4 — acceptance integration: execution-driven first pass, reviewed authority (issue #30)', () => {
+  it('freeze coherent; first-pass member emits pending flavor field_assignment (no reviewed/accepted type); color not_applicable; gate blocks type_gated_without_reviewed_type; promotion writes no field value / no accepted type', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    savePr5AcceptanceConfig(workspaceId, wsPath);
+    const { batchId, items } = createReadyCohort(workspaceId, {
+      // Member A is used for the review-completion gate; member B carries a
+      // relative primary image + price so the promotion acceptance path can
+      // complete without network access.
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({
+        _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb',
+        price: '$24.99',
+        primaryImage: 'products/images/acme/beef.jpg',
+        additionalImages: [],
+      }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    // (1) Freeze: the shared semantic commit writes the Execution Type.
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.productTypeOutcome).toBe('coherent');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    expect(finalized.productTypeConfidence).toBeCloseTo(0.8, 4);
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(2);
+
+    // (2) First-pass member Curation WITHOUT any reviewed type: a pending
+    // field_assignment (flavor) exists, no accepted type proposal anywhere.
+    const memberA = findItemById(items[0].id)!;
+    expect(memberA.stageStatus).toBe('completed');
+    const proposalsA = memberA.curationData!.classificationProposals;
+    const flavorProposal = proposalsA.find(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor');
+    expect(flavorProposal).toBeDefined();
+    expect(flavorProposal!.status).toBe('pending');
+    expect(flavorProposal!.proposedValue).toBe('Chicken');
+    expect(proposalsA.some(p => p.proposalType === 'primary_product_type' && p.status === 'accepted')).toBe(false);
+    expect(memberA.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
+
+    // (3) color (in the fixture, NOT in the execution profile, NOT universal)
+    // is not_applicable and produces NO proposal. The applicability stage
+    // metadata records the execution source.
+    expect(proposalsA.some(p => p.proposalType === 'field_assignment' && p.targetId === 'color')).toBe(false);
+    const applicabilityEvent = memberA.curationData!.classificationHistory.find(h => h.eventType === 'stage_attribute_applicability');
+    expect(applicabilityEvent).toBeDefined();
+    const applicabilityOutput = JSON.parse(String(applicabilityEvent!.eventJson.output)) as {
+      metadata: { effectiveTypeSource?: string; applicability?: Array<{ attributeId: string; state: string }> };
+    };
+    expect(applicabilityOutput.metadata.effectiveTypeSource).toBe('execution');
+    const colorEvaluation = applicabilityOutput.metadata.applicability!.find(e => e.attributeId === 'color');
+    expect(colorEvaluation).toBeDefined();
+    expect(colorEvaluation!.state).toBe('not_applicable');
+
+    // (4) Review completion gate: the reviewer accepted the flavor but did NOT
+    // accept a type — the gate blocks with type_gated_without_reviewed_type
+    // (the Execution Type is never reviewed truth).
+    const childRunIdA = memberA.curationData!.classificationRunId!;
+    const childProposalsA = getDb().query(
+      'SELECT id, proposal_type FROM classification_proposals WHERE run_id = ?',
+    ).all(childRunIdA) as Array<{ id: string; proposal_type: string }>;
+    const typeProposalA = childProposalsA.find(p => p.proposal_type === 'primary_product_type');
+    expect(typeProposalA).toBeDefined();
+    const now = new Date().toISOString();
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      [`decision-flavor-${childRunIdA}`, flavorProposal!.id, `token-flavor-${childRunIdA}`, now],
+    );
+    getDb().run('UPDATE classification_proposals SET status = ? WHERE id = ?', ['accepted', flavorProposal!.id]);
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'rejected', ?, ?)`,
+      [`decision-type-${childRunIdA}`, typeProposalA!.id, `token-type-${childRunIdA}`, now],
+    );
+    getDb().run('UPDATE classification_proposals SET status = ? WHERE id = ?', ['rejected', typeProposalA!.id]);
+    const gate = validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: items[0].id,
+      productSku: items[0].upc,
+      activeRunId: childRunIdA,
+    });
+    expect(gate).toMatchObject({
+      ok: false,
+      code: 'type_gated_without_reviewed_type',
+    });
+
+    // (5) Draft promotion of the sibling (its pending flavor proposal was never
+    // accepted): no ProductField1 flavor value is written and acceptedProductType
+    // stays null — the Execution Type never becomes an accepted field/type.
+    const memberB = findItemById(items[1].id)!;
+    expect(memberB.stageStatus).toBe('completed');
+    const childRunIdB = memberB.curationData!.classificationRunId!;
+    expect(getRun(childRunIdB)!.status).toBe('completed');
+    const pageId = activateVerifiedPage(workspaceId, 'Dog Food', 'pr5-acceptance');
+    seedAcceptedPageProposal(workspaceId, childRunIdB, items[1].upc, pageId, 'Dog Food');
+    const promoteResult = await promoteItems(workspaceId, wsPath, batchId, [items[1].id]);
+    expect(promoteResult.failures).toEqual([]);
+    expect(promoteResult.count).toBe(1);
+    const changeSetItems = listChangeSetItems(promoteResult.changeSetId!);
+    const drafted = JSON.parse(changeSetItems[0].draftJson) as { customFields: Record<string, string> };
+    expect(drafted.customFields.ProductField1).toBeDefined();
+    expect(drafted.customFields.ProductField1).not.toBe('Beef');
+    expect(drafted.customFields.ProductField1).not.toBe('Chicken');
+    expect(drafted.customFields.ProductField2).toBeUndefined();
+    const promoHistory = getDb().query(
+      `SELECT event_json FROM classification_history_events
+       WHERE product_sku = ? AND event_type = 'promotion'
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get(items[1].upc) as { event_json: string } | undefined;
+    expect(promoHistory).toBeDefined();
+    expect(JSON.parse(promoHistory!.event_json).acceptedProductType).toBeNull();
+  });
+
+  it('acceptance: reviewed override (different type) beats the Execution Type end-to-end; zero execution dependency rows for the reviewed member', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    savePr5AcceptanceOverrideConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    // Member A carries a reviewed type fact for a DIFFERENT type (dog-treats).
+    seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dog-treats');
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    // The reviewed member's own profile (dog-treats -> color) is applicable
+    // but carries no color evidence, so its attribute-proposals stage abstains
+    // (deterministic abstention, not a failure) — the parent may complete
+    // with abstentions.
+    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
+
+    // Reviewed override member: effective source 'reviewed' with the reviewed
+    // type's own profile (color, not flavor) and NO execution dependency rows.
+    const reviewedMember = findItemById(items[0].id)!;
+    expect(reviewedMember.curationData!.effectiveProductType).toEqual({ id: 'dog-treats', source: 'reviewed' });
+    const reviewedProposals = reviewedMember.curationData!.classificationProposals;
+    expect(reviewedProposals.some(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')).toBe(false);
+    for (const proposal of reviewedProposals) {
+      expect(listDependenciesForProposal(proposal.id).filter(d => d.dependencyKind === 'execution_product_type')).toHaveLength(0);
+    }
+
+    // Sibling (no reviewed fact): execution-driven flavor proposals with rows.
+    const executionMember = findItemById(items[1].id)!;
+    expect(executionMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
+    const executionProposals = executionMember.curationData!.classificationProposals;
+    expect(executionProposals.some(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')).toBe(true);
+    for (const proposal of executionProposals) {
+      expect(listDependenciesForProposal(proposal.id).filter(d => d.dependencyKind === 'execution_product_type')).toHaveLength(1);
+    }
+    expect(dependencyRowCount(workspaceId)).toBe(executionProposals.length);
+  });
+
+  it('acceptance: flag OFF + shadow variants stay byte-identical legacy (no flavor proposals, no dependency rows, no effective-type metadata)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
+
+    // Flag OFF: the worker uses the legacy per-item path — no cohort runs, no
+    // flavor proposals (type-gated without a reviewed type), zero dependency
+    // rows, and NO effective-type metadata in curation_data_json.
+    const worker = new OnboardingWorker(workspaceId, wsPath);
+    await worker.poll();
+    await drainWorker(worker);
+    expect(cohortRunCount(workspaceId)).toBe(0);
+    expect(hasLegacyPerItemRuns(items.map(i => i.id))).toBe(true);
+    expect(dependencyRowCount(workspaceId)).toBe(0);
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const rawRow = getDb().query(
+        'SELECT curation_data_json FROM onboarding_items WHERE id = ?',
+      ).get(item.id) as { curation_data_json: string | null };
+      const raw = JSON.parse(rawRow.curation_data_json ?? '{}') as Record<string, unknown>;
+      expect(raw.effectiveProductType).toBeUndefined();
+      const proposals = stored.curationData!.classificationProposals;
+      expect(proposals.some(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')).toBe(false);
+      expect(proposals.some(p => p.proposalType === 'field_assignment')).toBe(false);
+    }
+
+    // Shadow variant in a second workspace: same byte-identical legacy path.
+    const { workspaceId: shadowWs, workspacePath: shadowPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(shadowWs, shadowPath);
+    createReadyCohort(shadowWs, {
+      '100000000003': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Salmon 5 lb' }),
+      '100000000004': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Lamb 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
+    const shadowWorker = new OnboardingWorker(shadowWs, shadowPath);
+    await shadowWorker.poll();
+    await drainWorker(shadowWorker);
+    expect(cohortRunCount(shadowWs)).toBe(0);
+    expect(dependencyRowCount(shadowWs)).toBe(0);
+    const shadowItems = getDb().query(
+      `SELECT i.id, i.curation_data_json FROM onboarding_items i
+       JOIN onboarding_batches b ON b.id = i.batch_id
+       WHERE b.workspace_id = ?`,
+    ).all(shadowWs) as Array<{ id: string; curation_data_json: string | null }>;
+    expect(shadowItems.length).toBe(2);
+    for (const row of shadowItems) {
+      const raw = JSON.parse(row.curation_data_json ?? '{}') as Record<string, unknown>;
+      expect(raw.effectiveProductType).toBeUndefined();
+      const parsed = findItemById(row.id)!;
+      expect(parsed.curationData!.classificationProposals.some(p => p.proposalType === 'field_assignment')).toBe(false);
+    }
   });
 });
 
