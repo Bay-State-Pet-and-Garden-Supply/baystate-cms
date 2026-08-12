@@ -110,6 +110,19 @@ export interface StageContext {
   };
   /** Frozen, read-only per-SKU inputs used for cohort page coordination. */
   productLineItems?: ProductLineItemSnapshot[];
+  /**
+   * PR7 C4/C5 (issue #30): the parent-run durable page outputs (persisted into
+   * `classification_cohort_outputs` BEFORE the member loop by
+   * `ensureCohortPagesCoordinated`). Map productSku → the parsed
+   * `CohortPageOutputSchema` payload PLUS the audited parent model-call id
+   * that produced its row. Present ONLY in active cohort mode after the
+   * parent page op; absent for legacy/shadow (which keep the coordinator
+   * cache + singleton LLM path byte-identical). When present, the
+   * `category_page_proposals` stage is a MATERIALIZER: it skips the
+   * reviewed-Type gate (DECISION-D) and both LLM paths and turns the stored
+   * result into the existing proposal shape with ZERO Page LLM calls.
+   */
+  coordinatedPages?: Map<string, CoordinatedPageMemberValue>;
   /** Pre-computed coordinated title from cohort LLM call. When present,
    *  name_consolidation uses this instead of making its own LLM call.
    *  PR6 (issue #30): in prepared-cohort (active cohort) mode this comes
@@ -158,6 +171,20 @@ export interface StageContext {
     topK?: number;
     minSimilarity?: number;
   };
+}
+
+/**
+ * PR7 C4/C5 (issue #30): one member's durable parent page output — the parsed
+ * `CohortPageOutputSchema` payload PLUS the audited parent model-call id that
+ * produced its row (`classification_cohort_outputs.model_call_id`; null for
+ * deterministic abstentions). The child `category_page_proposals` materializer
+ * consumes this to stamp proposal provenance with ZERO Page LLM calls.
+ */
+export interface CoordinatedPageMemberValue {
+  /** The parsed durable payload ({status:'assigned', pages, source} | {status:'abstained', reason}). */
+  output: import('../shared/schemas/cohorts').CohortPageOutput;
+  /** The audited parent model-call id that produced the row (null when the row carries none). */
+  modelCallId: string | null;
 }
 
 // ─── Stage Definition ──────────────────────────────────────────────────────────

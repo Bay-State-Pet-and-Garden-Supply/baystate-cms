@@ -119,11 +119,15 @@ export { HeartbeatLostError };
 import { CohortLeaseKeeper } from './cohort-lease-keeper';
 import { onboardingEvents } from './sse-emitter';
 import { redactTransportText } from '../classification/model-policy-gateway';
-import type { ProductLineItemSnapshot } from '../classification/types';
+import type { ProductLineItemSnapshot, CoordinatedPageMemberValue } from '../classification/types';
 import { getVlmConfig } from './vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
 import { curateItemWithPipeline } from './product-curator';
 import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError } from './cohort-title-coordinator';
+import {
+  ensureCohortPagesCoordinated,
+  CohortPageAuthorityDriftError,
+} from './cohort-page-coordinator';
 import { groupByProductLine } from './cohort-name-coordinator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
 import {
@@ -1587,6 +1591,18 @@ export interface PreparedCohortContext {
    */
   coordinatedTitles?: Map<string, { title: string; source: 'llm_cohort' | 'cohort_fallback' }>;
   /**
+   * PR7 C4/C5: the parent-run durable page outputs (persisted into
+   * `classification_cohort_outputs` BEFORE the member loop by
+   * `ensureCohortPagesCoordinated`). Map productSku → the parsed
+   * `CohortPageOutputSchema` payload PLUS the audited parent model-call id
+   * that produced its row. Present ONLY in active cohort mode after the
+   * parent page op; absent for legacy/shadow (which keep the coordinator
+   * cache + singleton LLM path). The `category_page_proposals` stage
+   * materializes these with ZERO Page LLM calls (DECISION-D). Empty when the
+   * page target is disabled / no verified pages (DECISION-C expected-empty).
+   */
+  coordinatedPages?: Map<string, CoordinatedPageMemberValue>;
+  /**
    * PR6 review fix (SHOULD-FIX 2): per-SKU ACTUAL frozen `groupByProductLine`
    * group sizes (the exact grouping the parent title op's coordinator uses),
    * attached from `FrozenProductLineContext`. The member materialization gates
@@ -2186,6 +2202,49 @@ export async function processCohort(
     throw err;
   }
 
+  // PR7 (issue #30): the durable parent PAGE op (architecture-report §4.1 —
+  // runs AFTER the title op, BEFORE the member loop). Computes the canonical
+  // page input hash (P-hash) from frozen page authority only; reuses the
+  // persisted `classification_cohort_outputs` (kind `coordinated_page`) when
+  // the complete P-set + hash match (ZERO FURTHER calls after commit);
+  // otherwise coordinates ONCE (only when the set is empty) under a scoped
+  // lease keeper — multi-item groups via the UNCACHED page core
+  // (`coordinateCohortPagesCore`) and singletons via the single-item path
+  // (`llmAssignCategoryPages` over the frozen-derived member context,
+  // DECISION-A: pages cover ALL members) — and persists EVERY member's result
+  // (assigned or abstained) all-or-nothing and WRITE-ONCE. Prepared members
+  // then materialize these outputs at the `coordinatedPages` seam (PR7 C5);
+  // the transient coordinator + its in-memory cache are never consulted in
+  // active cohort mode. Config-level absence (page target disabled / no
+  // verified pages, DECISION-C) is expected-empty: no rows, children abstain
+  // deterministically. Drift (a committed set that no longer matches the
+  // frozen page authority, or a commit-race) throws
+  // `CohortPageAuthorityDriftError` — the set is WRITE-ONCE and can never be
+  // replaced — and SUPERSEDES the parent via the SAME primitive as titles
+  // (`supersedeOwnedCohortRunForOutputDrift`): parent `running→superseded` +
+  // every running child terminalized atomically, so the next claim creates a
+  // NEW revision. `HeartbeatLostError` propagates with NO output rows — the
+  // reclaiming worker re-enters and reuses-or-coordinates.
+  let coordinatedPages: Map<string, CoordinatedPageMemberValue>;
+  try {
+    coordinatedPages = await ensureCohortPagesCoordinated({
+      run,
+      workspaceId,
+      workspacePath,
+      projection,
+      cohort,
+      members,
+      frozenLineContext,
+    });
+  } catch (err) {
+    if (err instanceof CohortPageAuthorityDriftError) {
+      const reason = `processCohort aborted: ${err.message}`;
+      supersedeOwnedCohortRunForOutputDrift(run.id, workerId, reason);
+      throw new Error(reason, { cause: err });
+    }
+    throw err;
+  }
+
   // Scoped periodic heartbeat (PR3 hardening, Commit A): the lease is renewed
   // when `now - lastHeartbeatAt > COHORT_LEASE_TTL_MS / 3`, so a long
   // OCR/model/pipeline call can no longer silently outlive the TTL. `lastHeartbeatAt`
@@ -2275,6 +2334,11 @@ export async function processCohort(
       // PR6: the durable parent-run title outputs (attached for every member;
       // only multi-item group members have entries).
       prepared.coordinatedTitles = coordinatedTitles;
+      // PR7: the durable parent-run page outputs (attached for every member —
+      // the P-set covers groups AND singletons; empty map in DECISION-C
+      // config-level absence). The `category_page_proposals` stage materializes
+      // these with ZERO Page LLM calls.
+      prepared.coordinatedPages = coordinatedPages;
 
       // Scoped ownership-guarded lease keeper around the long-awaited member
       // pipeline (PR3 hardening A2): the parent lease is renewed on a TTL/3
