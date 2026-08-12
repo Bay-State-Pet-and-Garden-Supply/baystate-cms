@@ -27,8 +27,8 @@
  *     exactly ONE invocation because the commit completed on the first entry;
  *     the general guarantee is ZERO FURTHER calls AFTER COMMIT (replay-safe),
  *     not "one call forever" (a crash between transport success and the
- *     outputs commit may re-invoke coordination once — each invocation
- *     audited; covered in cohort-title-coordinator.test.ts);
+ *     outputs commit may re-invoke coordination — each invocation audited,
+ *     no retry cap; covered in cohort-title-coordinator.test.ts);
  *  5. flag OFF → zero output rows, the legacy coordinator + cohortCache path
  *     (byte-identical), zero parent-level title calls;
  *  6. shadow (`cohortCurationV2Enabled && cohortShadowOnly`) → the legacy

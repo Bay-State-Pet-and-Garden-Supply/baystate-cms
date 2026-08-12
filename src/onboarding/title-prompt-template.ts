@@ -33,6 +33,13 @@ export interface CohortSiblingInput {
   ocrTitle: string | null;
   brand: string | null;
   /**
+   * PR6 hardening C (issue #30 P1-3): the web-extracted brand the T-hash
+   * claims (`extraction.brand`). Rendered ONLY when present and only when the
+   * caller opts into the T-hash signals (`includeTitleHashSignals`) — legacy
+   * callers never populate it and stay byte-identical.
+   */
+  webBrand?: string | null;
+  /**
    * PR6 hardening B (issue #30 P1-3): structured OCR weight the canonical
    * title input hash (T-hash) claims (DECISION-Q). Absent = normal — the
    * prompt renders no weight segment when the sibling has no OCR weight.
@@ -46,12 +53,12 @@ export interface CohortSiblingInput {
 }
 
 /**
- * PR6 hardening B (issue #30 P1-3): the frozen Execution Product Type as
- * title context — the same authority `computeCohortTitleInputHash` claims
- * (`executionProductType.id`). `label` is the frozen product-type option's
- * name from the member snapshot (null when the run's type id has no matching
- * option — the prompt still renders the id so prompt authority never lags the
- * hash authority).
+ * PR6 hardening B/C (issue #30 P1-3): the frozen Execution Product Type as
+ * title context — the SAME authority `computeCohortTitleInputHash` claims
+ * (`executionProductType.id` + `executionProductType.label`). When `label` is
+ * present the prompt renders BOTH: `"<id> (<label>)"` (e.g. "dog-food-dry
+ * (Dry Dog Food)"); when `label` is null it renders the id alone, so prompt
+ * authority never lags the hash authority.
  */
 export interface CohortExecutionTypeContext {
   id: string;
@@ -69,21 +76,25 @@ export function buildCohortPrompt(
       const webTitle = s.webTitle ?? 'N/A';
       const ocrTitle = s.ocrTitle ?? 'N/A';
       const brand = s.brand ?? 'N/A';
-      // PR6 hardening B (P1-3): the structured OCR signals the T-hash claims
+      // PR6 hardening B/C (P1-3): the structured OCR signals the T-hash claims
       // are rendered ONLY when present — absent weight/flavor adds no segment
       // (flavor absence is normal), so legacy callers stay byte-identical.
+      const webBrand = s.webBrand?.trim() ? ` | Web Brand: "${s.webBrand}"` : '';
       const ocrWeight = s.ocrWeight?.trim() ? ` | OCR Weight: "${s.ocrWeight}"` : '';
       const ocrFlavor = s.ocrFlavor?.trim() ? ` | OCR Flavor: "${s.ocrFlavor}"` : '';
-      return `${i + 1}. [${s.upc}] Raw Spreadsheet: "${s.name}" | Expected: "${expectedName}" | Web: "${webTitle}" | OCR: "${ocrTitle}" | Brand: "${brand}"${ocrWeight}${ocrFlavor}`;
+      return `${i + 1}. [${s.upc}] Raw Spreadsheet: "${s.name}" | Expected: "${expectedName}" | Web: "${webTitle}" | OCR: "${ocrTitle}" | Brand: "${brand}"${webBrand}${ocrWeight}${ocrFlavor}`;
     })
     .join('\n');
 
   const groupLabel = siblings[0]?.name ?? 'Unknown Product Line';
-  // PR6 hardening B (P1-3): the frozen Execution Product Type as title
-  // context — rendered only when the caller supplies it (legacy/shadow
-  // callers omit it and stay byte-identical).
+  // PR6 hardening B/C (P1-3): the frozen Execution Product Type as title
+  // context — rendered ONLY when the caller supplies it (legacy/shadow
+  // callers omit it and stay byte-identical). BOTH the id and the frozen
+  // label render when the label exists (`"dog-food-dry (Dry Dog Food)"`) so
+  // the prompted authority can never diverge from the hashed authority; the
+  // id renders alone when the label is null.
   const typeContextLine = executionTypeContext
-    ? `\nProduct Type Context: "${executionTypeContext.label ?? executionTypeContext.id}"`
+    ? `\nProduct Type Context: "${executionTypeContext.label ? `${executionTypeContext.id} (${executionTypeContext.label})` : executionTypeContext.id}"`
     : '';
 
   return `You are a product cataloging assistant for a premium pet supply store.

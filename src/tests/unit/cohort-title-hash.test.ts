@@ -3,6 +3,7 @@ import {
   computeCohortTitleInputHash,
   computeCohortTitleInputHashForFormatRules,
   titleAuthorityFromProjectionMember,
+  titleExecutionTypeAuthorityFromRun,
 } from '../../onboarding/cohort-title-hash';
 import type { CohortTitleAuthorityMember } from '../../onboarding/cohort-title-hash';
 import { buildCohortPrompt, FORMAT_RULES } from '../../onboarding/title-prompt-template';
@@ -143,12 +144,13 @@ function makeProjection(members: ExecutionEvidenceProjectionMemberV1[]): Executi
 }
 
 function makeParams(
-  overrides: Partial<Parameters<typeof computeCohortTitleInputHash>[0]> = {},
-): Parameters<typeof computeCohortTitleInputHash>[0] {
+  overrides: Partial<ParityParams> = {},
+): ParityParams {
   return {
     run: makeRun(),
     projection: makeProjection([makeMember()]),
     modelPolicyDigest: 'policy-digest-1',
+    typeLabelSource: LABEL_SOURCE,
     ...overrides,
   };
 }
@@ -172,12 +174,46 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-const hash = (params: Parameters<typeof computeCohortTitleInputHash>[0]) => computeCohortTitleInputHash(params);
+/**
+ * The frozen snapshot-shaped label source the real parent op would read the
+ * Execution Product Type label from (mirrors the ordinal-0 member snapshot's
+ * `productTypes`). The run's executionProductTypeId 'type-1' resolves to
+ * 'Dry Dog Food'.
+ */
+const LABEL_SOURCE = {
+  productTypes: [
+    { id: 'type-1', name: 'Dry Dog Food' },
+    { id: 'type-2', name: 'Wet Dog Food' },
+  ],
+};
+
+type CohortTitleHashParams = Parameters<typeof computeCohortTitleInputHash>[0];
+/**
+ * The hash params plus the test-only label source. The T-hash is computed
+ * with the label RESOLVED THROUGH THE SHARED PRODUCTION BUILDER
+ * (`titleExecutionTypeAuthorityFromRun`) — the same authority the prompt
+ * consumes — so mutating either the run id or the label source moves the
+ * hash AND the prompt together (no independent/duplicated authority).
+ */
+type ParityParams = CohortTitleHashParams & {
+  typeLabelSource?: { productTypes: Array<{ id: string; name: string }> } | null;
+};
+
+/** Strip the test-only label source and resolve the T-hash's
+ *  `executionTypeLabel` through the SHARED production builder (the same
+ *  resolution the parent op performs). */
+function resolveParams(params: ParityParams): CohortTitleHashParams {
+  const { typeLabelSource, ...rest } = params;
+  const authority = titleExecutionTypeAuthorityFromRun(rest.run, typeLabelSource ?? LABEL_SOURCE);
+  return { ...rest, executionTypeLabel: authority.label };
+}
+
+const hash = (params: ParityParams): string => computeCohortTitleInputHash(resolveParams(params));
 
 /** The coordinator's sibling-input shape derived from the frozen member
- *  authority (mirrors `coordinateGroup`'s mapping over the frozen item views,
- *  which are built from the same projection) — so the prompt side of the
- *  parity tests consumes exactly the authority the hash claims. */
+ *  authority (mirrors `coordinateGroup`'s signals-ON mapping over the frozen
+ *  item views, which are built from the same projection) — so the prompt side
+ *  of the parity tests consumes exactly the authority the hash claims. */
 function siblingFromAuthority(a: CohortTitleAuthorityMember): CohortSiblingInput {
   return {
     upc: a.productSku ?? '',
@@ -186,16 +222,23 @@ function siblingFromAuthority(a: CohortTitleAuthorityMember): CohortSiblingInput
     webTitle: a.webTitle,
     ocrTitle: a.packagingOcrTitle,
     brand: a.brandHint,
+    webBrand: a.webBrand,
     ocrWeight: a.ocrWeight,
     ocrFlavor: a.ocrFlavor,
   };
 }
 
-/** The cohort prompt the coordinator would build for these hash params. */
-function promptForParams(params: Parameters<typeof computeCohortTitleInputHash>[0]): string {
+/** The cohort prompt the coordinator would build for these hash params — the
+ *  Execution Product Type context comes from the SAME shared builder
+ *  (`titleExecutionTypeAuthorityFromRun`) the hash resolves its label with. */
+function promptForParams(params: ParityParams): string {
   const members = [...params.projection.members]
     .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId));
-  return buildCohortPrompt(members.map(m => siblingFromAuthority(titleAuthorityFromProjectionMember(m))));
+  const authority = titleExecutionTypeAuthorityFromRun(params.run, params.typeLabelSource ?? LABEL_SOURCE);
+  return buildCohortPrompt(
+    members.map(m => siblingFromAuthority(titleAuthorityFromProjectionMember(m))),
+    authority.id ? { id: authority.id, label: authority.label } : null,
+  );
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -307,6 +350,13 @@ describe('computeCohortTitleInputHash — membership + execution type (PR6 C2)',
     expect(hash(makeParams({ run: makeRun({ executionProductTypeId: 'type-2' }) }))).not.toBe(hash(base));
   });
 
+  it('executionTypeLabel change changes the hash (the label is part of the hashed authority — PR6 hardening C)', () => {
+    const base = makeParams();
+    const labelChanged = clone(base);
+    labelChanged.typeLabelSource = { productTypes: [{ id: 'type-1', name: 'Renamed Dry Dog Food' }] };
+    expect(hash(labelChanged)).not.toBe(hash(base));
+  });
+
   it('productTypeConfidence change changes the hash', () => {
     const base = makeParams();
     expect(hash(makeParams({ run: makeRun({ productTypeConfidence: 0.5 }) }))).not.toBe(hash(base));
@@ -331,11 +381,12 @@ describe('computeCohortTitleInputHash — membership + execution type (PR6 C2)',
 describe('computeCohortTitleInputHash — format rules digest (PR6 C2)', () => {
   it('the FORMAT_RULES digest participates (parameterized internal)', () => {
     const base = makeParams();
+    const resolved = resolveParams(base);
     // The public entry point uses the module constant.
-    expect(computeCohortTitleInputHashForFormatRules(base, FORMAT_RULES)).toBe(hash(base));
+    expect(computeCohortTitleInputHashForFormatRules(resolved, FORMAT_RULES)).toBe(hash(base));
     // A simulated constant change alters the hash without mutating the module.
-    expect(computeCohortTitleInputHashForFormatRules(base, `${FORMAT_RULES}\n- New rule line`)).not.toBe(hash(base));
-    expect(computeCohortTitleInputHashForFormatRules(base, 'completely different rules')).not.toBe(hash(base));
+    expect(computeCohortTitleInputHashForFormatRules(resolved, `${FORMAT_RULES}\n- New rule line`)).not.toBe(hash(base));
+    expect(computeCohortTitleInputHashForFormatRules(resolved, 'completely different rules')).not.toBe(hash(base));
   });
 });
 
@@ -433,8 +484,16 @@ describe('computeCohortTitleInputHash — exclusions: hash ONLY frozen title aut
   });
 });
 
-describe('computeCohortTitleInputHash — PARITY: hash authority == prompt authority (PR6 hardening B / P1-3)', () => {
-  it('mutating the frozen OCR flavor changes BOTH the T-hash AND the prompt content', () => {
+describe('computeCohortTitleInputHash — PARITY: hash authority == prompt authority (PR6 hardening B/C / P1-3)', () => {
+  // Each parity test mutates ONE field of the frozen authority at a time and
+  // proves BOTH the T-hash AND the prompt change. The prompt is derived from
+  // the SAME authority the hash covers (`titleAuthorityFromProjectionMember`
+  // for member fields + `titleExecutionTypeAuthorityFromRun` for the type) —
+  // no independently-constructed test authority. The REAL coordinator mapping
+  // (one field at a time, through `ensureCohortTitlesCoordinated`) is covered
+  // in cohort-title-coordinator.test.ts.
+
+  it('flavor-only mutation changes BOTH the T-hash AND the prompt content', () => {
     const base = makeParams();
     const changed = clone(base);
     changed.projection.members[0].extraction.ocr.packagingOcrData!.flavorVariety = 'Salmon';
@@ -447,7 +506,7 @@ describe('computeCohortTitleInputHash — PARITY: hash authority == prompt autho
     expect(promptChanged).not.toContain('OCR Flavor: "Chicken"');
   });
 
-  it('mutating the frozen OCR weight changes BOTH the T-hash AND the prompt content', () => {
+  it('weight-only mutation changes BOTH the T-hash AND the prompt content', () => {
     const base = makeParams();
     const changed = clone(base);
     changed.projection.members[0].extraction.ocr.packagingOcrData!.weight = '10 lb';
@@ -458,16 +517,45 @@ describe('computeCohortTitleInputHash — PARITY: hash authority == prompt autho
     expect(promptChanged).toContain('OCR Weight: "10 lb"');
   });
 
-  it('mutating the execution type id changes BOTH the T-hash AND the prompt content', () => {
+  it('webBrand-only mutation changes BOTH the T-hash AND the prompt content (PR6 hardening C)', () => {
     const base = makeParams();
-    const typeMutated = makeParams({ run: makeRun({ executionProductTypeId: 'type-2' }) });
-    expect(hash(typeMutated)).not.toBe(hash(base));
-    const sibling = siblingFromAuthority(titleAuthorityFromProjectionMember(base.projection.members[0]));
-    const promptBase = buildCohortPrompt([sibling], { id: 'type-1', label: 'Dry Dog Food' });
-    const promptChanged = buildCohortPrompt([sibling], { id: 'type-2', label: 'Wet Dog Food' });
+    const changed = clone(base);
+    changed.projection.members[0].extraction.brand = 'AnotherBrand';
+    expect(hash(changed)).not.toBe(hash(base));
+    const promptBase = promptForParams(base);
+    const promptChanged = promptForParams(changed);
     expect(promptChanged).not.toBe(promptBase);
-    expect(promptBase).toContain('Product Type Context: "Dry Dog Food"');
-    expect(promptChanged).toContain('Product Type Context: "Wet Dog Food"');
+    expect(promptBase).toContain('Web Brand: "PawCo"');
+    expect(promptChanged).toContain('Web Brand: "AnotherBrand"');
+    expect(promptChanged).not.toContain('Web Brand: "PawCo"');
+  });
+
+  it('id-only mutation changes BOTH the T-hash AND the prompt (the prompt renders the id + its derived label)', () => {
+    const base = makeParams();
+    const idMutated = makeParams({ run: makeRun({ executionProductTypeId: 'type-2' }) });
+    expect(hash(idMutated)).not.toBe(hash(base));
+    const promptBase = promptForParams(base);
+    const promptChanged = promptForParams(idMutated);
+    expect(promptChanged).not.toBe(promptBase);
+    expect(promptBase).toContain('Product Type Context: "type-1 (Dry Dog Food)"');
+    expect(promptChanged).toContain('Product Type Context: "type-2 (Wet Dog Food)"');
+  });
+
+  it('label-only mutation (same id, renamed option) changes BOTH the T-hash AND the prompt (PR6 hardening C)', () => {
+    const base = makeParams();
+    const labelMutated = clone(base);
+    labelMutated.typeLabelSource = {
+      productTypes: [
+        { id: 'type-1', name: 'Dry Dog Food (Renamed)' },
+        { id: 'type-2', name: 'Wet Dog Food' },
+      ],
+    };
+    expect(hash(labelMutated)).not.toBe(hash(base));
+    const promptBase = promptForParams(base);
+    const promptChanged = promptForParams(labelMutated);
+    expect(promptChanged).not.toBe(promptBase);
+    expect(promptBase).toContain('Product Type Context: "type-1 (Dry Dog Food)"');
+    expect(promptChanged).toContain('Product Type Context: "type-1 (Dry Dog Food (Renamed))"');
   });
 
   it('absent OCR weight/flavor renders NO prompt segments while still participating in the hash (NULL vs value)', () => {

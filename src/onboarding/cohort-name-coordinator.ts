@@ -59,10 +59,11 @@ export interface CohortCoordinationOptions {
    */
   assertHeld?: () => void;
   /**
-   * PR6 hardening B (issue #30 P1-3): the frozen Execution Product Type as
+   * PR6 hardening B/C (issue #30 P1-3): the frozen Execution Product Type as
    * title context — the same authority the canonical title input hash
-   * (T-hash) claims. Absent/null → no context line (legacy/shadow callers
-   * stay byte-identical).
+   * (T-hash) claims. Rendered ONLY when `includeTitleHashSignals` is true;
+   * absent/null → no context line (legacy/shadow/no-opts callers stay
+   * byte-identical).
    */
   executionTypeContext?: CohortExecutionTypeContext | null;
   /**
@@ -73,6 +74,15 @@ export interface CohortCoordinationOptions {
    * call ids and each output row can be persisted with ITS producing call.
    */
   onCoordinatedCallId?: (callId: string, skus: string[]) => void;
+  /**
+   * PR6 hardening C (issue #30 P1-3): explicit opt-in to the T-hash-only
+   * prompt signals — `webBrand`, `ocrWeight`, `ocrFlavor`, and the Execution
+   * Product Type context. Set ONLY by `ensureCohortTitlesCoordinated` (the
+   * active parent op). When absent/false the sibling mapping and prompt are
+   * the EXACT pre-hardening shape (byte-identical legacy/shadow/no-opts
+   * calls), even when the items carry OCR/web data.
+   */
+  includeTitleHashSignals?: boolean;
 }
 
 /** Stable fingerprint inputs for cache. Excludes volatile fields. */
@@ -149,9 +159,10 @@ function buildCacheKey(
  *
  * PR6 (issue #30): this cached path is the LEGACY / flag-OFF / shadow
  * authority ONLY. Active cohort mode never calls it — the parent title op
- * (`ensureCohortTitlesCoordinated`, PR6 C4) coordinates ONCE per run and
- * persists durable `classification_cohort_outputs`; the DB outputs are the
- * authority there, never this in-memory `cohortCache`.
+ * (`ensureCohortTitlesCoordinated`, PR6 C4) persists durable
+ * `classification_cohort_outputs` WRITE-ONCE (at most one ACTIVE coordination
+ * call at a time; ZERO FURTHER calls once the durable set commits); the DB
+ * outputs are the authority there, never this in-memory `cohortCache`.
  *
  * @param batchId - The onboarding batch ID.
  * @param items   - Items from the same batch.
@@ -454,12 +465,18 @@ async function coordinateGroup(
     webTitle: item.extractionData?.title ?? null,
     ocrTitle: item.extractionData?.packagingOcrData?.productName ?? item.extractionData?.packagingTitle ?? null,
     brand: item.brandHint,
-    // PR6 hardening B (P1-3): the SAME structured OCR signals the T-hash
-    // claims (DECISION-Q: `ocr.packagingOcrData?.weight` / `?.flavorVariety`)
-    // — the prompt now consumes exactly the authority the hash asserts, so a
-    // weight/flavor change never re-invokes with an identical prompt.
-    ocrWeight: item.extractionData?.packagingOcrData?.weight ?? null,
-    ocrFlavor: item.extractionData?.packagingOcrData?.flavorVariety ?? null,
+    // PR6 hardening C (P1-3): the T-hash-claimed signals (webBrand + the
+    // structured OCR weight/flavor) are added to the sibling mapping ONLY when
+    // the ACTIVE parent op opts in (`includeTitleHashSignals`). Without the
+    // opt-in the mapping is the EXACT pre-hardening shape — legacy/shadow/
+    // no-opts prompts stay byte-identical even when items carry OCR/web data.
+    ...(opts?.includeTitleHashSignals === true
+      ? {
+          webBrand: item.extractionData?.brand ?? null,
+          ocrWeight: item.extractionData?.packagingOcrData?.weight ?? null,
+          ocrFlavor: item.extractionData?.packagingOcrData?.flavorVariety ?? null,
+        }
+      : {}),
   }));
 
   // All items in one prompt (no cap). Individual signal strings are
@@ -470,12 +487,22 @@ async function coordinateGroup(
     expectedName: s.expectedName?.slice(0, 500) ?? null,
     webTitle: s.webTitle?.slice(0, 500) ?? null,
     ocrTitle: s.ocrTitle?.slice(0, 500) ?? null,
-    ocrWeight: s.ocrWeight?.slice(0, 500) ?? null,
-    ocrFlavor: s.ocrFlavor?.slice(0, 500) ?? null,
+    ...(opts?.includeTitleHashSignals === true
+      ? {
+          webBrand: s.webBrand?.slice(0, 200) ?? null,
+          ocrWeight: s.ocrWeight?.slice(0, 500) ?? null,
+          ocrFlavor: s.ocrFlavor?.slice(0, 500) ?? null,
+        }
+      : {}),
     brand: s.brand?.slice(0, 200) ?? null,
   }));
 
-  const prompt = buildCohortPrompt(truncatedSiblings, opts?.executionTypeContext ?? null);
+  // PR6 hardening C (P1-3): the Execution Product Type context is part of the
+  // T-hash-only prompt signals — it renders ONLY when the active parent op
+  // opted in (absent opt-in ⇒ the EXACT pre-hardening prompt builds).
+  const effectiveTypeContext =
+    opts?.includeTitleHashSignals === true ? (opts?.executionTypeContext ?? null) : null;
+  const prompt = buildCohortPrompt(truncatedSiblings, effectiveTypeContext);
 
   let response: string | null;
   if (opts?.modelCall) {

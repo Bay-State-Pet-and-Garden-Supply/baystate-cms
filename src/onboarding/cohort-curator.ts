@@ -2145,11 +2145,13 @@ export async function processCohort(
   // "one LLM call per cohort revision forever". At most one ACTIVE
   // coordination call runs at a time (lease-scoped); once the durable output
   // set commits there are ZERO FURTHER calls (replay-safe after commit —
-  // retries/reclaims/member re-executions consume the committed set); but a
+  // retries/reclaims/member re-executions consume the committed set); a
   // crash between transport success and the outputs transaction leaves the
   // audited call durable with NO committed rows, so a reclaim re-invokes
-  // coordination once (each invocation audited). Transport-level exactly-once
-  // would need provider idempotency keys — out of scope.
+  // coordination (each invocation audited — there is NO retry cap and no
+  // provider idempotency; ONLY a successful commit ends further calls).
+  // Transport-level exactly-once would need provider idempotency keys — out
+  // of scope.
   //
   // PR6 hardening A: a committed output set that no longer matches the frozen
   // title authority (or a commit-race) is `CohortTitleAuthorityDriftError` —

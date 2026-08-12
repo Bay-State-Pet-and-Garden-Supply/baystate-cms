@@ -67,7 +67,7 @@ import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
 import type { CurationCohort, CohortRun, ExecutionEvidenceProjectionV1 } from '../../shared/schemas/cohorts';
 import { CurationCohortViewSchema } from '../../shared/schemas/cohorts';
-import { computeCohortTitleInputHash } from '../../onboarding/cohort-title-hash';
+import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
 import {
   getCohortTitleOutputsByRun,
@@ -110,11 +110,37 @@ function loadFrozenProjectionForRun(workspaceId: string, run: CohortRun): Execut
   return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
 }
 
+/** Resolve the frozen Execution Product Type label exactly as the parent op
+ *  does: the shared builder over the ordinal-0 member's frozen runtime
+ *  snapshot (matched by the run's `executionProductTypeId`). */
+function resolvedExecutionTypeLabel(
+  workspaceId: string,
+  run: CohortRun,
+  projection: ExecutionEvidenceProjectionV1,
+): string | null {
+  const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
+  const child = getDb().query(
+    'SELECT config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+  ).get(run.id, ordered[0]?.onboardingItemId ?? '') as { config_snapshot_hash: string } | undefined;
+  const snapshot = child?.config_snapshot_hash
+    ? getRuntimeSnapshotByHash(workspaceId, child.config_snapshot_hash)
+    : null;
+  return titleExecutionTypeAuthorityFromRun(run, snapshot).label;
+}
+
 function seedV1TitleOutputs(workspaceId: string, run: CohortRun): void {
   const projection = loadFrozenProjectionForRun(workspaceId, run);
   // v1 member snapshots carry no model policy and no frozen plan → the parent
-  // op hashes with `modelPolicyDigest: null` + registry-const versions.
-  const inputHash = computeCohortTitleInputHash({ run, projection, modelPolicyDigest: null });
+  // op hashes with `modelPolicyDigest: null` + registry-const versions. PR6
+  // hardening C (P1-3): the label is part of the hashed authority — resolve it
+  // through the SAME shared builder the parent op uses, or a resolved-type run
+  // sees write-once drift on the seeded set.
+  const inputHash = computeCohortTitleInputHash({
+    run,
+    projection,
+    modelPolicyDigest: null,
+    executionTypeLabel: resolvedExecutionTypeLabel(workspaceId, run, projection),
+  });
   const outputs = projection.members
     .map(member => ({
       productSku: member.productSku ?? '',
@@ -2171,9 +2197,15 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
   /** Replicate the parent op's T-hash inputs in this v1 harness: v1 member
    *  snapshots carry NO modelPolicy and NO frozen model-execution plan, so the
    *  parent op hashes with `modelPolicyDigest: null` + registry-const plan
-   *  versions — exactly what the seeded output rows must hash to. */
-  function expectedTitleInputHash(run: CohortRun, projection: ExecutionEvidenceProjectionV1): string {
-    return computeCohortTitleInputHash({ run, projection, modelPolicyDigest: null });
+   *  versions — exactly what the seeded output rows must hash to. PR6 hardening
+   *  C (P1-3): the label participates, resolved via the shared builder. */
+  function expectedTitleInputHash(workspaceId: string, run: CohortRun, projection: ExecutionEvidenceProjectionV1): string {
+    return computeCohortTitleInputHash({
+      run,
+      projection,
+      modelPolicyDigest: null,
+      executionTypeLabel: resolvedExecutionTypeLabel(workspaceId, run, projection),
+    });
   }
 
   function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
@@ -2292,7 +2324,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
 
     // Seed the durable outputs (complete set + matching T-hash). The parent op
     // must REUSE with zero calls; members consume the persisted titles.
-    const inputHash = expectedTitleInputHash(run, projection);
+    const inputHash = expectedTitleInputHash(workspaceId, run, projection);
     seedCohortTitleOutputs(workspaceId, run, inputHash);
     expect(countCohortTitleOutputs(run.id)).toBe(2);
 
@@ -2325,7 +2357,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
   it('member retry via crash-recovery re-executes against the SAME persisted title with ZERO new title calls', async () => {
     const { workspaceId, workspacePath: wsPath, run, items, frozenLineContext } = await freezeTwoMemberCohort();
     const projection = loadFrozenProjection(workspaceId, run);
-    const inputHash = expectedTitleInputHash(run, projection);
+    const inputHash = expectedTitleInputHash(workspaceId, run, projection);
     seedCohortTitleOutputs(workspaceId, run, inputHash);
 
     const titleCallSpy = vi.spyOn(llmClient, 'callLlmForTask');
@@ -2406,7 +2438,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
   it('PR6 hardening A: a committed title set under a mismatched authority fails the parent run closed (drift → failed, children stay pending, no re-coordination)', async () => {
     const { workspaceId, workspacePath: wsPath, run, items } = await freezeTwoMemberCohort();
     const projection = loadFrozenProjection(workspaceId, run);
-    const inputHash = expectedTitleInputHash(run, projection);
+    const inputHash = expectedTitleInputHash(workspaceId, run, projection);
 
     // A NONEMPTY committed set whose rows do NOT match the freshly computed
     // T-hash simulates the dangerous split: members would have completed under

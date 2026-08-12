@@ -21,10 +21,12 @@
  *    returns the parsed map with ZERO LLM calls.
  *
  * 3. **Drift fails closed (PR6 hardening A)** — when a NONEMPTY committed set
- *    does NOT match the freshly computed T-hash (or is incomplete), the set
- *    is WRITE-ONCE and can never be replaced: the op throws
- *    `CohortTitleAuthorityDriftError` (run id + expected hash + stored
- *    hash(es) + row count) — it NEVER re-coordinates and NEVER replaces.
+ *    does NOT EXACTLY equal the expected multi-item-group member set (missing
+ *    rows, EXTRA rows, or rows whose `input_hash` does not match the freshly
+ *    computed T-hash), the set is WRITE-ONCE and can never be replaced: the
+ *    op throws `CohortTitleAuthorityDriftError` (run id + expected hash +
+ *    stored hash(es) + row count) — it NEVER re-coordinates and NEVER
+ *    replaces.
  *
  * 4. **Coordinate — only when the set is EMPTY** — under a scoped
  *    `CohortLeaseKeeper`: groups the frozen sibling views, calls the
@@ -63,11 +65,13 @@
  *   the reuse path (complete set + T-hash match) is read-only;
  * - replay-safe after commit: any retry, reclaim, or member re-execution
  *   consumes the committed set with zero calls and byte-identical titles;
- * - a crash between transport success and output commit MAY re-invoke
- *   coordination exactly once — the second attempt commits a complete,
- *   consistent set, and a third entry reuses with zero calls. The
+ * - each pre-commit crash MAY cause another independently audited
+ *   invocation — there is NO retry cap and no provider idempotency, so
+ *   repeated crashes in the same pre-commit window can produce more than
+ *   two audited calls; ONLY a successful commit makes later entries
+ *   call-free (every subsequent entry reuses with zero calls). The
  *   test-only `afterCoordinatedCall` seam (PR6 hardening B) deterministically
- *   simulates that window.
+ *   simulates a single such window.
  *
  * PR6 review round 1 hardening: the op performs ZERO writes before the lease
  * is asserted (the ordinal-0 child run + its immutable snapshot refs are PURE
@@ -89,7 +93,7 @@ import {
 } from '../classification/runtime-snapshot';
 import { getCohortMemberRunForTitleAudit } from '../db/repositories/classification-cohort-run-repo';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
-import { computeCohortTitleInputHash } from './cohort-title-hash';
+import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from './cohort-title-hash';
 import { coordinateCohortItems, groupByProductLine } from './cohort-name-coordinator';
 import { CohortLeaseKeeper } from './cohort-lease-keeper';
 import { COHORT_LEASE_TTL_MS } from '../db/repositories/classification-cohort-run-repo';
@@ -195,9 +199,6 @@ export async function ensureCohortTitlesCoordinated(
       if (item.upc) multiMemberSkus.add(item.upc);
     }
   }
-  if (multiMemberSkus.size === 0) {
-    return new Map();
-  }
 
   // Step 1 — T-hash from FROZEN title authority. The ordinal-0 member child
   // run (DECISION-N audit binding) was created at freeze with the immutable
@@ -239,19 +240,47 @@ export async function ensureCohortTitlesCoordinated(
     memberSnapshot0.snapshotHash,
   );
   const titlePlanEntry = getModelExecutionPlanEntry(memberSnapshot0, 'cohort_title_consolidation');
+  // PR6 hardening C (P1-3): ONE canonical Execution Product Type title
+  // authority {id, label, confidence, outcome} — the SAME object feeds the
+  // T-hash (label participates) and the prompted context (id + label render).
+  // A label change therefore changes BOTH the hash and the prompt; a null run
+  // type (abstained/conflicted) yields all-null fields for both.
+  const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(run, memberSnapshot0);
   const inputHash = computeCohortTitleInputHash({
     run,
     projection,
     modelPolicyDigest: unboundPolicyView?.policyDigest ?? null,
     titlePlanEntry: titlePlanEntry ?? undefined,
+    executionTypeLabel: executionTypeAuthority.label,
   });
 
-  // Step 2 — REUSE when the persisted set is complete AND every row's hash
-  // matches the freshly computed T-hash. Pure reads: no keeper, no LLM, no
-  // writes.
+  // Step 2 — persisted rows are read BEFORE any early return so the
+  // no-multi-member case can also fail closed on unexpected rows
+  // (PR6 hardening C SHOULD-FIX 1). Pure read: no keeper, no LLM, no writes.
   const existingRows = getCohortTitleOutputsByRun(run.id);
+
+  // DECISION-O + SHOULD-FIX 1 (PR6 hardening C): no multi-item groups ⇒ NO
+  // output rows are expected. Any persisted rows for this run are write-once
+  // corruption — FAIL CLOSED with the deterministic drift error (never a
+  // silent empty-map return).
+  if (multiMemberSkus.size === 0) {
+    if (existingRows.length > 0) {
+      const storedHashes = [...new Set(existingRows.map(row => row.inputHash))];
+      throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, existingRows.length);
+    }
+    return new Map();
+  }
+
+  // Step 3 — REUSE when the persisted set is EXACTLY the expected set AND
+  // every row's hash matches the freshly computed T-hash. Pure reads.
   const rowBySku = new Map(existingRows.map(row => [row.productSku, row]));
-  const complete = existingRows.length > 0 && [...multiMemberSkus].every(sku => rowBySku.has(sku));
+  // PR6 hardening C (SHOULD-FIX 1): EXACT-SET EQUALITY — the persisted row
+  // count must equal the expected multi-member SKU count AND every expected
+  // SKU must be present. A same-hash set carrying UNEXPECTED EXTRA rows is
+  // write-once corruption — drift, never reuse.
+  const complete =
+    existingRows.length === multiMemberSkus.size &&
+    [...multiMemberSkus].every(sku => rowBySku.has(sku));
   const hashMatch = existingRows.every(row => row.inputHash === inputHash);
   if (complete && hashMatch) {
     const map = new Map<string, CohortTitleOutput>();
@@ -265,18 +294,19 @@ export async function ensureCohortTitlesCoordinated(
     return map;
   }
 
-  // Step 3 (PR6 hardening A) — WRITE-ONCE: any NONEMPTY committed set that is
-  // incomplete or whose rows do not match the freshly computed T-hash is
-  // authority drift. The set can never be replaced (the DELETE/replace path
-  // is gone), so the op FAILS CLOSED — it NEVER re-coordinates and NEVER
-  // deletes. An incomplete nonempty set can only be corruption: the insert is
-  // all-or-nothing, so a partial set is never produced by any writer.
+  // Step 4 (PR6 hardening A) — WRITE-ONCE: any NONEMPTY committed set that is
+  // incomplete or over-complete (extra rows) or whose rows do not match the
+  // freshly computed T-hash is authority drift. The set can never be replaced
+  // (the DELETE/replace path is gone), so the op FAILS CLOSED — it NEVER
+  // re-coordinates and NEVER deletes. An incomplete/over-complete nonempty
+  // set can only be corruption: the insert is all-or-nothing, so a partial or
+  // extra-row set is never produced by any writer.
   if (existingRows.length > 0) {
     const storedHashes = [...new Set(existingRows.map(row => row.inputHash))];
     throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, existingRows.length);
   }
 
-  // Step 4 — coordinate ONCE under a scoped lease keeper + persist
+  // Step 5 — coordinate ONCE under a scoped lease keeper + persist
   // all-or-nothing. The keeper renews the parent lease on a TTL/3 cadence
   // while the audited call is in flight; `assertHeld` (forwarded into the
   // transport AND re-asserted after the await) aborts with `HeartbeatLostError`
@@ -309,21 +339,15 @@ export async function ensureCohortTitlesCoordinated(
           '— refusing to make a non-audited title call.',
       );
     }
-    // PR6 hardening B (P1-3): thread the frozen Execution Product Type as
-    // title context — the T-hash already claims it (id/confidence/outcome),
-    // so the prompt must consume the SAME authority. The label is the frozen
-    // product-type option's name from the ordinal-0 member snapshot (matched
-    // by id; null when the type id has no matching option — the prompt still
-    // renders the id, so prompt authority never lags the hash authority).
-    // A null run type (abstained/conflicted) passes null → no context line,
-    // mirroring the hash's `executionProductType.id: null` state.
-    const executionTypeId = run.executionProductTypeId;
-    const executionTypeContext = executionTypeId
-      ? {
-          id: executionTypeId,
-          label:
-            memberSnapshot0.productTypes.find(pt => pt.id === executionTypeId)?.name ?? null,
-        }
+    // PR6 hardening C (P1-3): thread the frozen Execution Product Type as
+    // title context via the SAME canonical authority the T-hash covers
+    // (`titleExecutionTypeAuthorityFromRun` built in step 1 — id + label +
+    // confidence + outcome). With signals ON the prompt renders BOTH the id
+    // and the frozen label (`"dog-food-dry (Dry Dog Food)"`); a null run type
+    // (abstained/conflicted) passes null → no context line, mirroring the
+    // hash's `executionProductType.id: null` state.
+    const executionTypeContext = executionTypeAuthority.id
+      ? { id: executionTypeAuthority.id, label: executionTypeAuthority.label }
       : null;
     // PR6 review SHOULD-FIX 1: per-group model-call provenance — each group's
     // producing call id is captured for ITS member SKUs, so every persisted
@@ -341,6 +365,11 @@ export async function ensureCohortTitlesCoordinated(
         modelCall: modelCallContext,
         snapshot: memberSnapshot0,
         assertHeld: () => keeper.assertHeld(),
+        // PR6 hardening C (P1-3): the ACTIVE parent op is the ONLY caller that
+        // opts into the T-hash-only prompt signals (webBrand/ocrWeight/
+        // ocrFlavor + Execution Product Type context) — legacy/shadow calls
+        // never pass this and stay byte-identical.
+        includeTitleHashSignals: true,
         executionTypeContext,
         onCoordinatedCallId: (callId: string, skus: string[]) => {
           for (const sku of skus) {
@@ -365,9 +394,10 @@ export async function ensureCohortTitlesCoordinated(
     // Test-only crash seam (PR6 hardening B, P1-1): a crash EXACTLY here —
     // after the audited call resolved (its audit rows durable) and after the
     // ownership guard, but BEFORE the outputs transaction — leaves ZERO
-    // committed rows. A reclaim re-enters and re-coordinates once; each
-    // invocation is independently audited. Production callers never pass
-    // `afterCoordinatedCall`, so this is a no-op in production.
+    // committed rows. A reclaim re-enters; the set is still empty, so it
+    // coordinates again (each invocation independently audited). Production
+    // callers never pass `afterCoordinatedCall`, so this is a no-op in
+    // production.
     await params.afterCoordinatedCall?.();
 
     // ONE transaction — all members persist or NONE (architecture-report §5).

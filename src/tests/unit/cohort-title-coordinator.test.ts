@@ -74,7 +74,7 @@ import {
   snapshotHash,
 } from '../../classification/runtime-snapshot';
 import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
-import { computeCohortTitleInputHash } from '../../onboarding/cohort-title-hash';
+import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
 import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError } from '../../onboarding/cohort-title-coordinator';
 import {
   freezeCohortForExecution,
@@ -563,6 +563,9 @@ function expectedInputHash(fixture: FrozenCohortFixture): string {
   const view = snapshot?.modelPolicy
     ? modelPolicyViewFromConfig(snapshot.modelPolicy as never)
     : null;
+  // PR6 hardening C (P1-3): the label participates in the T-hash, resolved
+  // through the SAME shared builder the parent op uses.
+  const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(fixture.run, snapshot);
   return computeCohortTitleInputHash({
     run: fixture.run,
     projection: fixture.projection,
@@ -570,6 +573,7 @@ function expectedInputHash(fixture: FrozenCohortFixture): string {
     titlePlanEntry: snapshot
       ? (getModelExecutionPlanEntry(snapshot, 'cohort_title_consolidation') ?? undefined)
       : undefined,
+    executionTypeLabel: executionTypeAuthority.label,
   });
 }
 
@@ -934,6 +938,9 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     ).get(fixture.run.id, ordered[0].onboardingItemId) as { config_snapshot_hash: string };
     const snapshot = getRuntimeSnapshotByHash(fixture.workspaceId, child.config_snapshot_hash)!;
     const planEntry = getModelExecutionPlanEntry(snapshot, 'cohort_title_consolidation') ?? undefined;
+    // PR6 hardening C (P1-3): the label is part of the hashed authority —
+    // mirror the parent op's resolution through the shared builder.
+    const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(fixture.run, snapshot);
 
     // (a) The BOUND digest (with snapshotHash) differs from the UNBOUND digest
     //     (routing fields only) — the old snapshot-bound view smuggled H3/H4/
@@ -950,12 +957,14 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       projection: fixture.projection,
       modelPolicyDigest: unboundView!.policyDigest,
       titlePlanEntry: planEntry,
+      executionTypeLabel: executionTypeAuthority.label,
     });
     const hashWithBound = computeCohortTitleInputHash({
       run: fixture.run,
       projection: fixture.projection,
       modelPolicyDigest: boundView!.policyDigest,
       titlePlanEntry: planEntry,
+      executionTypeLabel: executionTypeAuthority.label,
     });
     expect(persistedHash).toBe(hashWithUnbound);
     expect(persistedHash).not.toBe(hashWithBound);
@@ -975,6 +984,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       projection: fixture.projection,
       modelPolicyDigest: mutatedUnbound!.policyDigest,
       titlePlanEntry: planEntry,
+      executionTypeLabel: executionTypeAuthority.label,
     })).toBe(persistedHash);
 
     // (d) A TITLE-ROUTE change (name_consolidation stage override) changes the
@@ -996,6 +1006,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       projection: fixture.projection,
       modelPolicyDigest: routeUnbound!.policyDigest,
       titlePlanEntry: planEntry,
+      executionTypeLabel: executionTypeAuthority.label,
     })).not.toBe(persistedHash);
   });
 
@@ -1155,7 +1166,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(rows.every(r => (JSON.parse(r.outputValueJson) as { source: string }).source === 'llm_cohort')).toBe(true);
   });
 
-  it('P1-1 honest contract: crash between transport success and output commit → reclaim re-coordinates EXACTLY once more (2 audited calls total for the revision); the SECOND attempt commits a complete consistent set; a THIRD entry reuses with zero calls', async () => {
+  it('P1-1 honest contract: single simulated crash between transport success and output commit → reclaim re-invokes audited coordination → commit → a subsequent entry reuses with zero calls', async () => {
     const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
     const childRunId = ordinal0ChildRunId(fixture);
     const inputHash = expectedInputHash(fixture);
@@ -1207,10 +1218,13 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     const resumedRun = getCohortRunById(fixture.run.id)!;
     expect(resumedRun.claimedBy).toBe('sibling-worker');
 
-    // Attempt #2 (reclaim re-entry): the set is still EMPTY ⇒ re-coordinates
-    // EXACTLY once more. The SECOND attempt's committed set is COMPLETE +
-    // CONSISTENT: 2 rows, both share the canonical input_hash, the returned
-    // map equals the persisted rows.
+    // Attempt #2 (reclaim re-entry): the set is still EMPTY ⇒ the reclaiming
+    // worker re-invokes audited coordination. This single-simulated-crash
+    // scenario shows ONE such re-invocation (each invocation audited); the
+    // honest contract is that repeated pre-commit crashes would each cause
+    // another independently audited call — there is no retry cap. The SECOND
+    // attempt's committed set is COMPLETE + CONSISTENT: 2 rows, both share
+    // the canonical input_hash, the returned map equals the persisted rows.
     const secondMap = await ensureCohortTitlesCoordinated({
       run: resumedRun,
       workspaceId: fixture.workspaceId,
@@ -1315,10 +1329,214 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     // (DECISION-Q) now appear in the prompt.
     expect(prompt).toContain('OCR Weight: "5 lb"');
     expect(prompt).toContain('OCR Flavor: "Chicken"');
-    // Execution Product Type context with the frozen option's name.
-    expect(prompt).toContain('Product Type Context: "Dry Dog Food"');
+    // Execution Product Type context with BOTH the frozen id AND the frozen
+    // option's label — the prompt consumes exactly the authority the T-hash
+    // covers (id + label + confidence + outcome).
+    expect(prompt).toContain('Product Type Context: "dog-food-dry (Dry Dog Food)"');
     // The persisted input_hash still equals the T-hash over the SAME frozen
     // authority the prompt consumed (hash authority == prompt authority).
     expect(getCohortTitleOutputsByRun(fixture.run.id)[0].inputHash).toBe(expectedInputHash(fixture));
+  });
+
+  it('PR6 hardening C SHOULD-FIX 1: extra-row corruption — a complete same-hash set PLUS an unexpected row is DRIFT (never reused, zero new calls)', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const first = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(first.size).toBe(2);
+    expect(titleCallCount).toBe(1);
+    const rows = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rows).toHaveLength(2);
+
+    // Simulate corruption: an unexpected EXTRA row for a SKU that is NOT a
+    // multi-item-group member, carrying the SAME input_hash — the exact shape
+    // the old subset-only reuse check silently accepted as "complete".
+    getDb().run(
+      `INSERT INTO classification_cohort_outputs
+         (id, workspace_id, cohort_run_id, output_kind, product_sku, input_hash, output_value_json, model_call_id, created_at)
+       VALUES (?, ?, ?, 'curated_title', ?, ?, ?, NULL, ?)`,
+      [randomUUID(), fixture.workspaceId, fixture.run.id, '100000000003', rows[0].inputHash,
+        JSON.stringify({ title: 'Bogus Extra Title', source: 'cohort_fallback' }), new Date().toISOString()],
+    );
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(3);
+    const rowsBefore = getCohortTitleOutputsByRun(fixture.run.id);
+
+    // EXACT-SET equality (PR6 hardening C): row count 3 !== expected 2 ⇒ the
+    // over-complete set is write-once corruption — drift, never reuse.
+    await expect(
+      ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      }),
+    ).rejects.toBeInstanceOf(CohortTitleAuthorityDriftError);
+    // ZERO new model calls; the over-complete set is untouched.
+    expect(titleCallCount).toBe(1);
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(3);
+    expect(getCohortTitleOutputsByRun(fixture.run.id)).toEqual(rowsBefore);
+  });
+
+  it('PR6 hardening C SHOULD-FIX 1: a run with NO multi-item groups but persisted output rows FAILS CLOSED (never a silent empty-map return)', async () => {
+    const fixture = await freezeCohortFixture({
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dog Food Chicken 5 lb' }),
+    });
+    // The single-member cohort has no multi-item groups ⇒ NO output rows are
+    // expected (DECISION-O). Simulate corruption: an unexpected row for the run.
+    getDb().run(
+      `INSERT INTO classification_cohort_outputs
+         (id, workspace_id, cohort_run_id, output_kind, product_sku, input_hash, output_value_json, model_call_id, created_at)
+       VALUES (?, ?, ?, 'curated_title', ?, ?, ?, NULL, ?)`,
+      [randomUUID(), fixture.workspaceId, fixture.run.id, '100000000001', 'a'.repeat(64),
+        JSON.stringify({ title: 'Bogus Row', source: 'cohort_fallback' }), new Date().toISOString()],
+    );
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(1);
+
+    await expect(
+      ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      }),
+    ).rejects.toBeInstanceOf(CohortTitleAuthorityDriftError);
+    // Zero transport, zero output writes — the corruption is loud, not silent.
+    expect(titleCallCount).toBe(0);
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(1);
+  });
+
+  // ─── PR6 hardening C (P1-3): REAL-mapping parity — one field at a time ─────
+
+  /** Run the REAL parent op once against a flags-ON fixture with OCR injected
+   *  and an optional single-field mutation, then capture the REAL prompt (from
+   *  the mocked transport) and the REAL persisted T-hash. Each test runs TWO
+   *  full freezes (base + mutated) so the assertions never rely on a
+   *  test-only mirror of the coordinator mapping. */
+  async function coordinateOnceWithMutation(
+    mutate?: (f: FrozenCohortFixture) => void,
+  ): Promise<{ prompt: string; hash: string }> {
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    let fixture: FrozenCohortFixture;
+    try {
+      fixture = await freezeCohortFixture({
+        '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+        '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+      });
+    } finally {
+      resetCohortCurationFlagsOverride();
+    }
+    const ocrInjection = {
+      productName: 'Package OCR Name',
+      brand: 'Acme',
+      species: [],
+      flavorVariety: 'Chicken',
+      weight: '5 lb',
+      confidenceByField: { productName: 0.95, weight: 0.8 },
+      metadata: null,
+    } as unknown as NonNullable<ExecutionEvidenceProjectionV1['members'][number]['extraction']['ocr']['packagingOcrData']>;
+    for (const member of fixture.projection.members) {
+      // Deep-clone per member so a single-field mutation touches ONE member.
+      member.extraction.ocr.packagingOcrData = JSON.parse(JSON.stringify(ocrInjection));
+    }
+    mutate?.(fixture);
+    fixture.frozenLineContext = buildFrozenProductLineContext(
+      fixture.cohort,
+      fixture.members,
+      fixture.projection.members,
+    );
+    const map = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(map.size).toBe(2);
+    const rows = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rows).toHaveLength(2);
+    return { prompt: lastPrompts[lastPrompts.length - 1], hash: rows[0].inputHash };
+  }
+
+  it('P1-3 PARITY (real coordinator): id-only mutation → BOTH the persisted T-hash AND the prompted authority change', async () => {
+    const base = await coordinateOnceWithMutation();
+    const mutated = await coordinateOnceWithMutation(f => {
+      f.run.executionProductTypeId = 'dog-food-wet';
+    });
+    expect(mutated.hash).not.toBe(base.hash);
+    expect(mutated.prompt).not.toBe(base.prompt);
+    expect(base.prompt).toContain('Product Type Context: "dog-food-dry (Dry Dog Food)"');
+    expect(mutated.prompt).toContain('Product Type Context: "dog-food-wet (Wet Dog Food)"');
+  });
+
+  it('P1-3 PARITY (real coordinator): label-only mutation (same id, renamed frozen option) → BOTH the T-hash AND the prompted authority change', async () => {
+    const base = await coordinateOnceWithMutation();
+    const mutated = await coordinateOnceWithMutation(f => {
+      const ordered = [...f.projection.members].sort((a, b) => a.ordinal - b.ordinal);
+      const child = getDb().query(
+        'SELECT config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+      ).get(f.run.id, ordered[0].onboardingItemId) as { config_snapshot_hash: string };
+      const stored = getDb().query(
+        'SELECT config_json FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?',
+      ).get(f.workspaceId, child.config_snapshot_hash) as { config_json: string };
+      const snapshot = JSON.parse(stored.config_json);
+      const type = snapshot.productTypes.find((t: any) => t.id === 'dog-food-dry');
+      expect(type).toBeTruthy();
+      type.name = 'Dry Dog Food (Renamed)';
+      getDb().run(
+        'UPDATE classification_config_snapshots SET config_json = ? WHERE workspace_id = ? AND snapshot_hash = ?',
+        [JSON.stringify(snapshot), f.workspaceId, child.config_snapshot_hash],
+      );
+    });
+    expect(mutated.hash).not.toBe(base.hash);
+    expect(mutated.prompt).not.toBe(base.prompt);
+    expect(base.prompt).toContain('Product Type Context: "dog-food-dry (Dry Dog Food)"');
+    expect(mutated.prompt).toContain('Product Type Context: "dog-food-dry (Dry Dog Food (Renamed))"');
+  });
+
+  it('P1-3 PARITY (real coordinator): webBrand-only mutation → BOTH the T-hash AND the prompted authority change', async () => {
+    const base = await coordinateOnceWithMutation();
+    const mutated = await coordinateOnceWithMutation(f => {
+      f.projection.members[0].extraction.brand = 'AnotherBrand';
+    });
+    expect(mutated.hash).not.toBe(base.hash);
+    expect(mutated.prompt).not.toBe(base.prompt);
+    expect(base.prompt).toContain('Web Brand: "Acme"');
+    expect(mutated.prompt).toContain('Web Brand: "AnotherBrand"');
+  });
+
+  it('P1-3 PARITY (real coordinator): weight-only mutation → BOTH the T-hash AND the prompted authority change', async () => {
+    const base = await coordinateOnceWithMutation();
+    const mutated = await coordinateOnceWithMutation(f => {
+      f.projection.members[0].extraction.ocr.packagingOcrData!.weight = '10 lb';
+    });
+    expect(mutated.hash).not.toBe(base.hash);
+    expect(mutated.prompt).not.toBe(base.prompt);
+    expect(base.prompt).toContain('OCR Weight: "5 lb"');
+    expect(mutated.prompt).toContain('OCR Weight: "10 lb"');
+  });
+
+  it('P1-3 PARITY (real coordinator): flavor-only mutation → BOTH the T-hash AND the prompted authority change', async () => {
+    const base = await coordinateOnceWithMutation();
+    const mutated = await coordinateOnceWithMutation(f => {
+      f.projection.members[0].extraction.ocr.packagingOcrData!.flavorVariety = 'Salmon';
+    });
+    expect(mutated.hash).not.toBe(base.hash);
+    expect(mutated.prompt).not.toBe(base.prompt);
+    expect(base.prompt).toContain('OCR Flavor: "Chicken"');
+    expect(mutated.prompt).toContain('OCR Flavor: "Salmon"');
   });
 });

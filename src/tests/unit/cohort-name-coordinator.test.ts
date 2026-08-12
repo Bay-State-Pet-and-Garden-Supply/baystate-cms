@@ -540,7 +540,7 @@ describe('Cohort Name Coordinator', () => {
 
   // ─── PR6 hardening B (P1-3): the prompt consumes EXACTLY the T-hash authority ─
 
-  it('renders OCR weight/flavor lines when the siblings carry them (the structured OCR signals the T-hash claims)', async () => {
+  it('LEGACY no-opts calls with populated OCR data build the EXACT pre-hardening prompt (byte-identical frozen baseline)', async () => {
     const items = [
       makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', extractionData: { title: 'Test', packagingOcrData: { weight: '5 lb', flavorVariety: 'Chicken' }, packagingTitle: null } }),
       makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', extractionData: { title: 'Test', packagingOcrData: { weight: '10 lb', flavorVariety: 'Beef' }, packagingTitle: null } }),
@@ -548,10 +548,46 @@ describe('Cohort Name Coordinator', () => {
     const result = await coordinateCohortItems(items);
     expect(result.size).toBe(2);
     const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
-    expect(prompt).toContain('OCR Weight: "5 lb"');
-    expect(prompt).toContain('OCR Flavor: "Chicken"');
-    expect(prompt).toContain('OCR Weight: "10 lb"');
-    expect(prompt).toContain('OCR Flavor: "Beef"');
+    // Frozen pre-hardening baseline: the ENTIRE prompt, byte-for-byte, even
+    // though the items carry OCR weight/flavor data. `toBe` (never
+    // `toContain`) — any future unconditional signal (webBrand / OCR weight /
+    // OCR flavor / Product Type Context) breaks this exact equality.
+    expect(prompt).toBe(
+`You are a product cataloging assistant for a premium pet supply store.
+Below are 2 variants of the same product. Assign a clean, store-ready name to EACH.
+ALL names MUST use the same format.
+
+Product Line: "WOOF PUPSICLE SM"
+
+- NEVER use parentheses around variants, sizes, flavors, or any other attribute.
+- Order: Brand -> Product Line/Product -> Form/Species -> Flavor/Color -> Size/Count
+- Every numeric quantity (size, weight, count) from the original spreadsheet name is MANDATORY in the output title. You MUST include them exactly as they appear in the spreadsheet name input. Never omit a known measurement.
+- Convert attached quantities: 2.64OZ->2.64 oz, 6OZ->6 oz, 16OZ->16 oz, 5CT->5-Count, 6PK->6-Pack. The number AND unit must both appear.
+- When all siblings share the same size/weight (e.g., all are 2.64 oz), include it on every sibling. When sizes differ, each variant gets its own.
+- Position: size/weight/count MUST be the final token(s) in the title, after all descriptive text.
+- Expand abbreviations: SM->Small, MD->Medium, LG->Large, XL->X-Large, XXL->XX-Large, CHKN/CKN->Chicken, SLMN->Salmon, TRKY->Turkey, DNTL->Dental
+- Normalize quantities and units: 5CT->5-Count, 6PK->6-Pack, OZ->oz, LB->lb
+- Clean casing: title case for normal words, preserve configured brand/trademark capitalization
+- Include ALL identity-bearing tokens evidenced by the inputs: brand, product line, product form, species, flavor, color, size, count
+- Include the brand exactly once
+- Never invent a brand, product line, form, species, flavor, color, size, count, or claim not present in the inputs
+- Format must be consistent across ALL siblings in a product line (same order, same skeleton)
+- Each sibling must get a unique name reflecting its specific variant attributes
+- Do not include prices, UPCs, distributor codes, marketing fluff, or promotional text
+- No parentheses, no quotes, no markdown in the final titles
+
+Variants:
+1. [U1] Raw Spreadsheet: "WOOF PUPSICLE SM" | Expected: "N/A" | Web: "Test" | OCR: "N/A" | Brand: "TestBrand"
+2. [U2] Raw Spreadsheet: "WOOF PUPSICLE LG" | Expected: "N/A" | Web: "Test" | OCR: "N/A" | Brand: "TestBrand"
+
+Return ONLY valid JSON: {"UPC1": "name1", "UPC2": "name2", ...}`,
+    );
+    // Belt-and-braces: none of the T-hash-only signals leaked into the legacy
+    // prompt even though the items carried OCR data.
+    expect(prompt).not.toContain('OCR Weight:');
+    expect(prompt).not.toContain('OCR Flavor:');
+    expect(prompt).not.toContain('Web Brand:');
+    expect(prompt).not.toContain('Product Type Context:');
   });
 
   it('renders NO OCR weight/flavor segments when absent — flavor absence is normal (legacy callers byte-identical)', async () => {
@@ -566,35 +602,68 @@ describe('Cohort Name Coordinator', () => {
     expect(prompt).not.toContain('Product Type Context:');
   });
 
-  it('renders the Execution Product Type context line with the label when provided and ABSENT when null', async () => {
+  it('renders the Execution Product Type context line with BOTH id and label when signals are ON, and ABSENT when the opt-in/null context is absent', async () => {
     const items = [
       makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
       makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
     ] as OnboardingItem[];
     const result = await coordinateCohortItems(items, undefined, {
+      includeTitleHashSignals: true,
       executionTypeContext: { id: 'dog-food-dry', label: 'Dry Dog Food' },
     });
     expect(result.size).toBe(2);
     const promptWithType = (callLlmForTask as any).mock.calls[0][1] as string;
-    expect(promptWithType).toContain('Product Type Context: "Dry Dog Food"');
-    expect(promptWithType).not.toContain('Product Type Context: "dog-food-dry"');
+    // PR6 hardening C: the prompt renders BOTH the frozen id AND the label so
+    // the prompted authority equals the hashed authority (id + label).
+    expect(promptWithType).toContain('Product Type Context: "dog-food-dry (Dry Dog Food)"');
+    expect(promptWithType).not.toContain('Product Type Context: "Dry Dog Food"');
 
     // A null context (abstained/conflicted run) → no type line.
-    await coordinateCohortItems(items, undefined, { executionTypeContext: null });
+    await coordinateCohortItems(items, undefined, { includeTitleHashSignals: true, executionTypeContext: null });
     const promptNullType = (callLlmForTask as any).mock.calls[1][1] as string;
     expect(promptNullType).not.toContain('Product Type Context:');
+
+    // The opt-in is required: the SAME context supplied WITHOUT
+    // includeTitleHashSignals renders nothing (legacy callers byte-identical).
+    await coordinateCohortItems(items, undefined, {
+      executionTypeContext: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+    });
+    const promptNoOptIn = (callLlmForTask as any).mock.calls[2][1] as string;
+    expect(promptNoOptIn).not.toContain('Product Type Context:');
   });
 
-  it('renders the type id when the label is missing (prompt authority never lags the hash authority)', async () => {
+  it('renders the type id alone when the label is missing (signals ON — prompt authority never lags the hash authority)', async () => {
     const items = [
       makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
       makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
     ] as OnboardingItem[];
     await coordinateCohortItems(items, undefined, {
+      includeTitleHashSignals: true,
       executionTypeContext: { id: 'dog-food-dry', label: null },
     });
     const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
     expect(prompt).toContain('Product Type Context: "dog-food-dry"');
+  });
+
+  it('signals ON: renders webBrand + OCR weight/flavor + the id-and-label type context — the full T-hash authority', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', extractionData: { title: 'Test', brand: 'PawCo', packagingOcrData: { weight: '5 lb', flavorVariety: 'Chicken' }, packagingTitle: null } }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', extractionData: { title: 'Test', brand: 'PawCo', packagingOcrData: { weight: '10 lb', flavorVariety: 'Beef' }, packagingTitle: null } }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items, undefined, {
+      includeTitleHashSignals: true,
+      executionTypeContext: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+    });
+    expect(result.size).toBe(2);
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    // webBrand parity (P1-3): the T-hash includes extraction.brand — with
+    // signals ON the prompt renders it too.
+    expect(prompt).toContain('Web Brand: "PawCo"');
+    expect(prompt).toContain('OCR Weight: "5 lb"');
+    expect(prompt).toContain('OCR Flavor: "Chicken"');
+    expect(prompt).toContain('OCR Weight: "10 lb"');
+    expect(prompt).toContain('OCR Flavor: "Beef"');
+    expect(prompt).toContain('Product Type Context: "dog-food-dry (Dry Dog Food)"');
   });
 
   it('legacy callers without opts build a byte-identical prompt (no P1-3 additions)', async () => {
