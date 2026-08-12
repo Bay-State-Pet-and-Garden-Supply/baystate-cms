@@ -14,6 +14,7 @@ import {
 import {
   refreshCandidateCohorts,
   updateCohortStatus,
+  getCohortMembers,
 } from '../../db/repositories/curation-cohort-repo';
 import {
   claimReadyCurationCohorts,
@@ -33,7 +34,9 @@ import {
   writeProductTypeOutcomeOnly,
   failFrozenCohortRunForConflict,
   supersedeOwnedCohortRunForOutputDrift,
-  supersedeIdleCohortRun,
+  rerunIdleCohortRevision,
+  CohortRerunBusyError,
+  CohortRerunStageConflictError,
   insertProposalDependency,
   listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
@@ -906,9 +909,10 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     expect(getCohortRunById(run.id)!.errorMessage).toBe(reason);
   });
 
-  it('supersedeIdleCohortRun: an idle TERMINAL parent (sticky claimed_by, e.g. a completed run with blocked members) is superseded; linked running children terminalized; old rows intact; second call no-ops (PR10 C1)', () => {
+  it('rerunIdleCohortRevision: ONE cohort-atomic op — idle TERMINAL parent superseded + children terminalized + EXACT members reset in the same transaction; claim slot reopens (PR10 C1 + review R1)', () => {
     const wsId = newWorkspace();
-    const { items } = setupFamilyBatch(wsId);
+    const { items, cohorts } = setupFamilyBatch(wsId);
+    const cohort = cohorts[0];
     const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
     expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
     expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
@@ -918,12 +922,19 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     // historical ownership evidence, not an active claim.
     expect(completeCohortRun(run.id, 'completed_with_member_failures', '1 member failed', { ownerGuard: { workerId: 'worker-a' } })).toBe(true);
     const terminal = getCohortRunById(run.id)!;
-    expect(terminal.status).toBe('completed_with_member_failures');
     expect(terminal.claimedBy).toBe('worker-a'); // sticky historical ownership
 
-    // Idle supersede succeeds: parent superseded + superseded_at + reason; the
-    // linked running child is terminalized with the deterministic drift message.
-    expect(supersedeIdleCohortRun(run.id, 'New cohort revision requested by reviewer')).toBe(true);
+    // Simulate the review state: every cohort member advanced to review.
+    const memberIds = getCohortMembers(cohort.id).map(m => m.onboardingItemId);
+    for (const id of memberIds) {
+      getDb().run("UPDATE onboarding_items SET stage = 'review', stage_status = 'completed', curation_data_json = '{\"curatedTitle\":\"x\"}' WHERE id = ?", [id]);
+    }
+
+    // ONE cohort-atomic re-run: parent superseded + child terminalized +
+    // EXACT members reset (curation/pending, curation_data cleared).
+    const outcome = rerunIdleCohortRevision(cohort.id, run.id, 'New cohort revision requested by reviewer');
+    expect(outcome.superseded).toBe(true);
+    expect(outcome.resetMemberCount).toBe(memberIds.length);
     const superseded = getCohortRunById(run.id)!;
     expect(superseded.status).toBe('superseded');
     expect(superseded.supersededAt).not.toBeNull();
@@ -931,15 +942,20 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     // Children terminal (mirrors the drift primitive's child cleanup).
     expect(getRun(child.id)!.status).toBe('failed');
     expect(getRun(child.id)!.errorMessage).toBe('Cohort output authority drift superseded parent run');
-    expect(getRun(child.id)!.completedAt).not.toBeNull();
-    // Old rows stay intact (historical decision never redefined): the frozen
-    // authority hash and completion data are untouched.
-    const historical = getCohortRunById(run.id)!;
-    expect(historical.evidenceSnapshotHash).toBe('e'.repeat(64));
-    expect(historical.completedAt).not.toBeNull();
+    // Old rows stay intact.
+    expect(getCohortRunById(run.id)!.evidenceSnapshotHash).toBe('e'.repeat(64));
+    expect(getCohortRunById(run.id)!.completedAt).not.toBeNull();
+    // EXACT members reset (never batch-wide, never filtered by stage).
+    for (const id of memberIds) {
+      const item = getDb().query('SELECT stage, stage_status, curation_data_json FROM onboarding_items WHERE id = ?').get(id) as { stage: string; stage_status: string; curation_data_json: string | null };
+      expect(item.stage).toBe('curation');
+      expect(item.stage_status).toBe('pending');
+      expect(item.curation_data_json).toBeNull();
+    }
 
-    // Second call (already superseded) is a no-op — never overwritten.
-    expect(supersedeIdleCohortRun(run.id, 'again')).toBe(false);
+    // Second call (already superseded) rolls back: CohortRerunBusyError, zero
+    // mutation — the superseded message is never overwritten.
+    expect(() => rerunIdleCohortRevision(cohort.id, run.id, 'again')).toThrow(CohortRerunBusyError);
     expect(getCohortRunById(run.id)!.errorMessage).toContain('New cohort revision');
 
     // The claim slot reopens: the next claim creates a NEW revision.
@@ -949,17 +965,24 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     expect(retried[0].id).not.toBe(run.id);
   });
 
-  it('supersedeIdleCohortRun: a CLAIMED run (running, owner set) is NEVER matched — fail-closed run_busy semantics; the owner-guarded drift variant is the worker path (PR10 C1)', () => {
+  it('rerunIdleCohortRevision: a CLAIMED run (running, owner set) is NEVER matched — CohortRerunBusyError with ZERO mutation; the owner-guarded drift variant is the worker path (PR10 C1)', () => {
     const wsId = newWorkspace();
-    const { items } = setupFamilyBatch(wsId);
+    const { items, cohorts } = setupFamilyBatch(wsId);
+    const cohort = cohorts[0];
     const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
     expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
     expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
     const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
 
-    // A reviewer-facing re-run must never yank a live worker: the idle
-    // variant no-ops on an ACTIVELY HELD running run (zero mutation).
-    expect(supersedeIdleCohortRun(run.id, 'New cohort revision requested by reviewer')).toBe(false);
+    // Members in the review state (so the stage validation passes and the CAS
+    // is actually reached — the CAS is the concurrency guard under test).
+    for (const id of getCohortMembers(cohort.id).map(m => m.onboardingItemId)) {
+      getDb().run("UPDATE onboarding_items SET stage = 'review', stage_status = 'completed' WHERE id = ?", [id]);
+    }
+
+    // A reviewer-facing re-run must never yank a live worker: the idle CAS
+    // fails inside the transaction -> CohortRerunBusyError, zero mutation.
+    expect(() => rerunIdleCohortRevision(cohort.id, run.id, 'New cohort revision requested by reviewer')).toThrow(CohortRerunBusyError);
     const after = getCohortRunById(run.id)!;
     expect(after.status).toBe('running');
     expect(after.supersededAt).toBeNull();
@@ -969,6 +992,99 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     // The owner-guarded drift variant (worker-side) succeeds with the owner.
     expect(supersedeOwnedCohortRunForOutputDrift(run.id, 'worker-a', 'processCohort output drift')).toBe(true);
     expect(getCohortRunById(run.id)!.status).toBe('superseded');
+  });
+
+  it('rerunIdleCohortRevision: TWO cohorts in ONE batch — re-running cohort A leaves EVERY cohort B item byte-equivalent (PR10 review R1, cross-cohort isolation)', () => {
+    const wsId = newWorkspace();
+    const { cohorts } = setupFamilyBatch(wsId);
+    // setupFamilyBatch forms TWO cohorts: the Purina group (2 items) + the
+    // Acme singleton (1 item).
+    const cohortA = cohorts.find(c => c.groupKey.includes('purina')) ?? cohorts[0];
+    const cohortB = cohorts.find(c => c !== cohortA)!;
+    const bMembers = getCohortMembers(cohortB.id).map(m => m.onboardingItemId);
+    expect(bMembers.length).toBeGreaterThan(0);
+    const [runA] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(runA.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(runA.id, 'worker-a')).toBe(true);
+    expect(completeCohortRun(runA.id, 'completed_with_member_failures', 'blocked', { ownerGuard: { workerId: 'worker-a' } })).toBe(true);
+
+    // Both cohorts' members in the review state; capture B's full row first.
+    for (const id of [...getCohortMembers(cohortA.id).map(m => m.onboardingItemId), ...bMembers]) {
+      getDb().run("UPDATE onboarding_items SET stage = 'review', stage_status = 'completed', curation_data_json = '{\"curatedTitle\":\"x\"}' WHERE id = ?", [id]);
+    }
+    const bBefore = bMembers.map(id => getDb().query('SELECT stage, stage_status, curation_data_json, claimed_by, claimed_at FROM onboarding_items WHERE id = ?').get(id));
+
+    // Re-run cohort A ONLY.
+    const outcome = rerunIdleCohortRevision(cohortA.id, runA.id, 'reviewer');
+    expect(outcome.superseded).toBe(true);
+
+    // EVERY cohort B item is byte-equivalent for stage/status/curation/claims.
+    bMembers.forEach((id, i) => {
+      const after = getDb().query('SELECT stage, stage_status, curation_data_json, claimed_by, claimed_at FROM onboarding_items WHERE id = ?').get(id);
+      expect(after).toEqual(bBefore[i]);
+    });
+  });
+
+  it('rerunIdleCohortRevision: ATOMIC ROLLBACK — a failure after the parent CAS leaves parent, children, and items all unchanged (PR10 review R1)', () => {
+    const wsId = newWorkspace();
+    const { items, cohorts } = setupFamilyBatch(wsId);
+    const cohort = cohorts[0];
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
+    const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
+    expect(completeCohortRun(run.id, 'completed_with_member_failures', 'blocked', { ownerGuard: { workerId: 'worker-a' } })).toBe(true);
+    const memberIds = getCohortMembers(cohort.id).map(m => m.onboardingItemId);
+    for (const id of memberIds) {
+      getDb().run("UPDATE onboarding_items SET stage = 'review', stage_status = 'completed', curation_data_json = '{\"curatedTitle\":\"x\"}' WHERE id = ?", [id]);
+    }
+
+    // Inject a failure AFTER the parent CAS (the test seam) — the whole
+    // transaction must roll back.
+    expect(() => rerunIdleCohortRevision(cohort.id, run.id, 'reviewer', {
+      afterParentSupersede: () => { throw new Error('injected reset failure'); },
+    })).toThrow('injected reset failure');
+
+    // Parent unchanged (still the completed run, NOT superseded).
+    const parent = getCohortRunById(run.id)!;
+    expect(parent.status).toBe('completed_with_member_failures');
+    expect(parent.supersededAt).toBeNull();
+    // Children unchanged (still running).
+    expect(getRun(child.id)!.status).toBe('running');
+    // Items unchanged (still review/completed with curation data).
+    for (const id of memberIds) {
+      const item = getDb().query('SELECT stage, stage_status, curation_data_json FROM onboarding_items WHERE id = ?').get(id) as { stage: string; stage_status: string; curation_data_json: string | null };
+      expect(item.stage).toBe('review');
+      expect(item.stage_status).toBe('completed');
+      expect(item.curation_data_json).not.toBeNull();
+    }
+  });
+
+  it('rerunIdleCohortRevision: a member OUTSIDE review/curation fails the whole request closed — CohortRerunStageConflictError, ZERO mutation (PR10 review R1, exact membership)', () => {
+    const wsId = newWorkspace();
+    const { items, cohorts } = setupFamilyBatch(wsId);
+    const cohort = cohorts[0];
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
+    const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
+    expect(completeCohortRun(run.id, 'completed_with_member_failures', 'blocked', { ownerGuard: { workerId: 'worker-a' } })).toBe(true);
+    const memberIds = getCohortMembers(cohort.id).map(m => m.onboardingItemId);
+    for (const id of memberIds) {
+      getDb().run("UPDATE onboarding_items SET stage = 'review', stage_status = 'completed', curation_data_json = '{\"curatedTitle\":\"x\"}' WHERE id = ?", [id]);
+    }
+    // One member advanced further (promotion) — the re-run contract never
+    // silently skips it nor destroys downstream state.
+    getDb().run("UPDATE onboarding_items SET stage = 'promotion', stage_status = 'completed' WHERE id = ?", [memberIds[0]]);
+
+    expect(() => rerunIdleCohortRevision(cohort.id, run.id, 'reviewer')).toThrow(CohortRerunStageConflictError);
+    // ZERO mutation: parent not superseded, child still running, items unchanged.
+    expect(getCohortRunById(run.id)!.status).toBe('completed_with_member_failures');
+    expect(getCohortRunById(run.id)!.supersededAt).toBeNull();
+    expect(getRun(child.id)!.status).toBe('running');
+    const promoted = getDb().query('SELECT stage, stage_status FROM onboarding_items WHERE id = ?').get(memberIds[0]) as { stage: string; stage_status: string };
+    expect(promoted.stage).toBe('promotion');
+    expect(promoted.stage_status).toBe('completed');
   });
 
   it('insertProposalDependency is workspace-scoped and FK fail-closed; listDependenciesForProposal round-trips', () => {

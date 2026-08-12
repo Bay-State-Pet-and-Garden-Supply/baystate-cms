@@ -173,7 +173,9 @@ import { getDb } from '../../db/connection';
 import { getCohortById } from '../../db/repositories/curation-cohort-repo';
 import {
   getCurrentCohortRun,
-  supersedeIdleCohortRun,
+  rerunIdleCohortRevision,
+  CohortRerunBusyError,
+  CohortRerunStageConflictError,
 } from '../../db/repositories/classification-cohort-run-repo';
 
 const route = new Hono();
@@ -550,10 +552,14 @@ route.get('/onboarding/batches/:id/cohorts', async (c) => {
  * weakened: there is NO manual override anywhere; a still-conflicted member
  * blocks again with fresh findings.
  *
- * Lifecycle: supersedes the cohort's current non-superseded parent run
- * (idle-terminal supersede via `supersedeIdleCohortRun`) and resets the
- * cohort's members to curation/pending with `curation_data_json` cleared, so
- * the job queue's next poll claims a NEW parent revision.
+ * Lifecycle: ONE cohort-atomic operation (`rerunIdleCohortRevision`) —
+ * validates EVERY cohort member is in review/curation (fail closed BEFORE any
+ * mutation), CAS-supersedes the current non-superseded parent run
+ * (idle-terminal supersede), terminalizes linked running children, and resets
+ * the EXACT `curation_cohort_members` to curation/pending with
+ * `curation_data_json` cleared — all in ONE transaction, so the claim slot
+ * opens ONLY when the member reset becomes visible (PR10 review R1: never
+ * batch-wide, never two transactions).
  *
  * Fail-closed guards:
  * - Unknown cohort (or a cohort outside the active workspace) => 404.
@@ -564,8 +570,11 @@ route.get('/onboarding/batches/:id/cohorts', async (c) => {
  *   re-run never yanks a live worker (the owner-guarded drift primitive is
  *   the worker's own supersede path inside `processCohort`; this route never
  *   calls it).
+ * - A cohort member outside review/curation (e.g. already in promotion) =>
+ *   400 `member_stage_conflict`, ZERO mutation (the re-run contract never
+ *   silently skips a member nor destroys downstream state).
  * - The idle-supersede CAS failing (superseded concurrently) => 400
- *   `run_busy`, zero mutation.
+ *   `run_busy`, zero mutation (the whole transaction rolled back).
  *
  * Legacy/shadow cohorts have no cohort runs at all => `no_active_run` (400).
  */
@@ -599,27 +608,28 @@ route.post('/onboarding/cohorts/:id/re-run', async (c) => {
   }
 
   const reason = 'New cohort revision requested by reviewer';
-  const superseded = supersedeIdleCohortRun(currentRun.id, reason);
-  if (!superseded) {
-    return c.json({
-      error: `Cohort run ${currentRun.id} could not be superseded; it may have been superseded or claimed concurrently.`,
-      code: 'run_busy',
-    }, 400);
+  // ONE cohort-atomic operation: stage validation + parent CAS + child
+  // terminalization + EXACT-member reset in a single transaction (PR10 review
+  // R1). Any failure rolls back EVERYTHING — the parent is never superseded
+  // without the member reset becoming visible.
+  try {
+    rerunIdleCohortRevision(cohort.id, currentRun.id, reason);
+  } catch (err) {
+    if (err instanceof CohortRerunStageConflictError) {
+      return c.json({
+        error: err.message,
+        code: 'member_stage_conflict',
+        memberItemId: err.memberItemId,
+      }, 400);
+    }
+    if (err instanceof CohortRerunBusyError) {
+      return c.json({
+        error: err.message,
+        code: 'run_busy',
+      }, 400);
+    }
+    throw err;
   }
-
-  // Reset the cohort's members so the NEW revision re-coordinates them from
-  // fresh evidence: curation stage + pending + curation_data cleared (the
-  // run-owned projections of the superseded revision are historical). One
-  // transaction, cohort-batch scoped (the approved reset contract).
-  const db = getDb();
-  db.transaction(() => {
-    db.query(
-      `UPDATE onboarding_items
-       SET stage = 'curation', stage_status = 'pending', curation_data_json = NULL,
-           claimed_by = NULL, claimed_at = NULL, updated_at = ?
-       WHERE batch_id = ? AND stage IN ('review','curation')`,
-    ).run(new Date().toISOString(), cohort.batchId);
-  })();
 
   return c.json({ superseded: true, cohortId });
 });
