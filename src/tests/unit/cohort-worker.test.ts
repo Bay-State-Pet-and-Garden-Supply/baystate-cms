@@ -2435,7 +2435,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     }
   });
 
-  it('PR6 hardening A: a committed title set under a mismatched authority fails the parent run closed (drift → failed, children stay pending, no re-coordination)', async () => {
+  it('PR6 hardening A+E: a committed title set under a mismatched authority SUPERSEDES the parent run, terminalizes its running children, and reopens the claim slot (drift → superseded, no re-coordination)', async () => {
     const { workspaceId, workspacePath: wsPath, run, items } = await freezeTwoMemberCohort();
     const projection = loadFrozenProjection(workspaceId, run);
     const inputHash = expectedTitleInputHash(workspaceId, run, projection);
@@ -2443,7 +2443,9 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     // A NONEMPTY committed set whose rows do NOT match the freshly computed
     // T-hash simulates the dangerous split: members would have completed under
     // outputs A while the authority changed. WRITE-ONCE means the set can never
-    // be replaced — the parent op must terminate the run deterministically.
+    // be replaced — the parent op must SUPERSEDE the run (hardening E) so a
+    // NEW revision can be claimed immediately, terminalizing the freeze-created
+    // running children atomically.
     insertCohortTitleOutputsOnce({
       workspaceId,
       runId: run.id,
@@ -2453,17 +2455,35 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     expect(countCohortTitleOutputs(run.id)).toBe(2);
     const seededBefore = getCohortTitleOutputsByRun(run.id);
 
+    // The freeze created running children before the parent op — capture them.
+    const childrenBefore = getDb().query(
+      'SELECT id, status FROM classification_runs WHERE cohort_run_id = ?',
+    ).all(run.id) as Array<{ id: string; status: string }>;
+    expect(childrenBefore.length).toBeGreaterThan(0);
+    expect(childrenBefore.every(c => c.status === 'running')).toBe(true);
+
     await expect(processCohort(run, wsPath, workspaceId)).rejects.toThrow(/CohortTitleAuthorityDrift/);
 
-    // The parent run is TERMINAL (failed) with the deterministic drift
-    // message — a reclaim can never re-enter coordination for it.
+    // The parent is SUPERSEDED (not failed) with the deterministic drift
+    // message — the historical decision stays immutable.
     const terminal = getCohortRunById(run.id)!;
-    expect(terminal.status).toBe('failed');
+    expect(terminal.status).toBe('superseded');
+    expect(terminal.supersededAt).not.toBeNull();
     expect(terminal.errorMessage).toContain('write-once');
     expect(terminal.errorMessage).toContain(inputHash);
     expect(terminal.errorMessage).toContain(run.id);
 
-    // Children not yet run stay pending — no member writes happened.
+    // EVERY formerly-running child is terminal with the deterministic reason.
+    for (const child of childrenBefore) {
+      const after = getDb().query(
+        'SELECT status, completed_at, error_message FROM classification_runs WHERE id = ?',
+      ).get(child.id) as { status: string; completed_at: string | null; error_message: string | null };
+      expect(after.status).toBe('failed');
+      expect(after.completed_at).not.toBeNull();
+      expect(after.error_message).toBe('Cohort output authority drift superseded parent run');
+    }
+
+    // Onboarding members were NOT executed — no member writes happened.
     for (const item of items) {
       const stored = findItemById(item.id)!;
       expect(stored.stageStatus).toBe('pending');
@@ -2471,6 +2491,11 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     }
     // The committed set is untouched (never replaced, never extended).
     expect(getCohortTitleOutputsByRun(run.id)).toEqual(seededBefore);
+
+    // The claim slot REOPENED: a NEW parent revision can be claimed immediately.
+    const nextRun = claimReadyCurationCohorts(workspaceId, 10, 'worker-next', COHORT_LEASE_TTL_MS);
+    expect(nextRun.length).toBe(1);
+    expect(nextRun[0].id).not.toBe(run.id);
   });
 
   it('legacy flag-OFF: coordinateCohortItemsOnce is still invoked and the cohortCache dedups the batch (spy assertions)', async () => {

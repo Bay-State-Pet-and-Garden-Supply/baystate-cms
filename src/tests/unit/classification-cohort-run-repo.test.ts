@@ -32,6 +32,7 @@ import {
   writeFinalMembershipHash,
   writeProductTypeOutcomeOnly,
   failFrozenCohortRunForConflict,
+  supersedeOwnedCohortRunForOutputDrift,
   insertProposalDependency,
   listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
@@ -859,6 +860,49 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     expect(failFrozenCohortRunForConflict(run2.id, 'worker-a', 'cohort_product_type_conflict: late')).toBe(false);
     expect(getCohortRunById(run2.id)!.status).toBe('running');
     expect(getCohortRunById(run2.id)!.errorMessage).toBeNull();
+  });
+
+  it('supersedeOwnedCohortRunForOutputDrift: owner-guarded running→superseded DIRECT, atomically terminalizes every running child, wrong owner no-ops (PR6 hardening E)', () => {
+    const wsId = newWorkspace();
+    const { items } = setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
+
+    // Two freeze-created child runs linked to the parent (still `running`).
+    ensureMemberRun(run.id, items[0].id, wsId, items[0].upc, null, null);
+    ensureMemberRun(run.id, items[1].id, wsId, items[1].upc, null, null);
+
+    // Wrong owner: the whole transaction is a no-op — parent untouched,
+    // children untouched.
+    const reason = 'processCohort aborted: CohortTitleAuthorityDriftError: ...';
+    expect(supersedeOwnedCohortRunForOutputDrift(run.id, 'worker-b', reason)).toBe(false);
+    expect(getCohortRunById(run.id)!.status).toBe('running');
+    expect(getCohortRunById(run.id)!.supersededAt).toBeNull();
+    expect(getCohortRunById(run.id)!.errorMessage).toBeNull();
+    const children = getDb().query('SELECT status FROM classification_runs WHERE cohort_run_id = ?').all(run.id) as Array<{ status: string }>;
+    expect(children).toHaveLength(2);
+    expect(children.every(c => c.status === 'running')).toBe(true);
+
+    // Owner supersedes it DIRECTLY from `running`: status superseded,
+    // superseded_at + reason set; every running child terminalized in the
+    // same transaction with the deterministic drift message.
+    expect(supersedeOwnedCohortRunForOutputDrift(run.id, 'worker-a', reason)).toBe(true);
+    const after = getCohortRunById(run.id)!;
+    expect(after.status).toBe('superseded');
+    expect(after.supersededAt).not.toBeNull();
+    expect(after.errorMessage).toBe(reason);
+    const childrenAfter = getDb().query('SELECT status, error_message, completed_at FROM classification_runs WHERE cohort_run_id = ?').all(run.id) as Array<{ status: string; error_message: string | null; completed_at: string | null }>;
+    expect(childrenAfter).toHaveLength(2);
+    for (const child of childrenAfter) {
+      expect(child.status).toBe('failed');
+      expect(child.error_message).toBe('Cohort output authority drift superseded parent run');
+      expect(child.completed_at).not.toBeNull();
+    }
+
+    // A second call (run already superseded) is a no-op — never overwritten.
+    expect(supersedeOwnedCohortRunForOutputDrift(run.id, 'worker-a', 'second reason')).toBe(false);
+    expect(getCohortRunById(run.id)!.errorMessage).toBe(reason);
   });
 
   it('insertProposalDependency is workspace-scoped and FK fail-closed; listDependenciesForProposal round-trips', () => {

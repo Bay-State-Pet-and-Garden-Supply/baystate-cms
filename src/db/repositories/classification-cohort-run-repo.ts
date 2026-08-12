@@ -629,6 +629,44 @@ export function failFrozenCohortRunForConflict(
   return changes > 0;
 }
 
+/**
+ * Owner-guarded SUPERSEDE for output-authority drift (issue #30, PR6
+ * hardening E). A committed `classification_cohort_outputs` set is WRITE-ONCE:
+ * when the frozen title authority no longer matches it (or a commit-race
+ * occurred), the run's decision is HISTORICAL and must not be redefined — the
+ * parent is superseded (NOT failed) so `claimReadyCurationCohorts` can
+ * immediately create a NEW revision, and every freeze-created running child
+ * is terminalized in the same transaction (mirrors
+ * `failFrozenCohortRunForConflict`). Parent CAS failure ⇒ ownership loss ⇒
+ * whole transaction no-ops and no child is touched.
+ */
+export function supersedeOwnedCohortRunForOutputDrift(
+  runId: string,
+  workerId: string,
+  reason: string,
+): boolean {
+  const db = getDb();
+  let changes = 0;
+  db.transaction(() => {
+    const result = db.run(
+      `UPDATE classification_cohort_runs
+       SET status = 'superseded', superseded_at = ?, error_message = ?
+       WHERE id = ? AND claimed_by = ? AND status = 'running'`,
+      [now(), reason ?? null, runId, workerId],
+    );
+    changes = result.changes;
+    if (changes > 0) {
+      db.run(
+        `UPDATE classification_runs
+         SET status = 'failed', completed_at = ?, error_message = 'Cohort output authority drift superseded parent run'
+         WHERE cohort_run_id = ? AND status = 'running'`,
+        [now(), runId],
+      );
+    }
+  })();
+  return changes > 0;
+}
+
 // ─── Heartbeat (lease renewal) ──────────────────────────────────────────────────
 
 /**

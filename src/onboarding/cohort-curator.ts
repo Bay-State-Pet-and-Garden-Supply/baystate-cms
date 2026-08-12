@@ -54,6 +54,7 @@ import {
   writeFinalMembershipHash,
   writeProductTypeOutcomeOnly,
   failFrozenCohortRunForConflict,
+  supersedeOwnedCohortRunForOutputDrift,
   insertProposalDependency,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
@@ -2155,11 +2156,12 @@ export async function processCohort(
   //
   // PR6 hardening A: a committed output set that no longer matches the frozen
   // title authority (or a commit-race) is `CohortTitleAuthorityDriftError` —
-  // the set is WRITE-ONCE and can never be replaced, so the parent op
-  // terminates the run DETERMINISTICALLY (owner-guarded `failed` terminal via
-  // the existing `completeCohortRun` path) instead of re-entering coordination
-  // and retrying forever. Children not yet run stay pending — no member
-  // writes, no further coordination.
+  // the set is WRITE-ONCE and can never be replaced. PR6 hardening E: the
+  // drift SUPERSEDES the parent (authority drift supersedes a run rather than
+  // redefining its historical decision) and atomically terminalizes every
+  // freeze-created running child, so `claimReadyCurationCohorts` can
+  // immediately create a NEW revision; children never executed, no further
+  // coordination, no member writes.
   let coordinatedTitles: Map<string, CohortTitleOutput>;
   try {
     coordinatedTitles = await ensureCohortTitlesCoordinated({
@@ -2174,10 +2176,11 @@ export async function processCohort(
   } catch (err) {
     if (err instanceof CohortTitleAuthorityDriftError) {
       const reason = `processCohort aborted: ${err.message}`;
-      // Owner-guarded terminal write: a run another worker reclaimed is never
-      // failed by this (stale) caller. The run is now terminal, so a reclaim
-      // can never re-enter coordination for it.
-      completeCohortRun(run.id, 'failed', reason, { ownerGuard: { workerId } });
+      // Owner-guarded supersede: a run another worker reclaimed is never
+      // superseded (nor its children terminalized) by this stale caller. The
+      // superseded parent is no longer the current run, so the next claim
+      // creates a NEW revision with a fresh title-output set.
+      supersedeOwnedCohortRunForOutputDrift(run.id, workerId, reason);
       throw new Error(reason, { cause: err });
     }
     throw err;
