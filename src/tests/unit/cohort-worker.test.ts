@@ -3031,5 +3031,195 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
   });
 });
 
+// ─── PR9 C2 (issue #30): per-member semantic validation at the projection
+//      commit + post-loop mutual Brand coherence (DECISION-A) ────────────────
+
+/** V1_CONFIG_TYPE_AND_FIELD_ENABLED + a second Product Type ('dog-treats',
+ *  SAME flavor profile) — lets a test force the parent Execution Product Type
+ *  authority to a DIFFERENT type than the members' own proposals. */
+const V1_CONFIG_TWO_TYPES: ClassificationConfig = {
+  ...V1_CONFIG_TYPE_AND_FIELD_ENABLED,
+  productTypes: [
+    ...V1_CONFIG_TYPE_AND_FIELD_ENABLED.productTypes,
+    { id: 'dog-treats', name: 'Dog Treats', description: null, attributeProfileId: 'dog-treats-profile', oldIdAliases: [] },
+  ],
+  attributeProfiles: [
+    ...V1_CONFIG_TYPE_AND_FIELD_ENABLED.attributeProfiles,
+    {
+      id: 'dog-treats-profile',
+      productTypeId: 'dog-treats',
+      name: 'Dog Treats Profile',
+      attributes: [{ attributeId: 'flavor', required: true, cardinality: 'single' as const, applicabilityConditions: [], constraints: {}, confidenceThresholds: {}, valueAliases: [] }],
+    },
+  ],
+};
+
+/** Save + cache the two-type config for one workspace. */
+function saveTwoTypesConfig(wsId: string, wsPath: string): void {
+  saveClassificationConfig(wsPath, V1_CONFIG_TWO_TYPES);
+  syncConfigToCache(wsId, loadClassificationConfig(wsPath));
+}
+
+describe('PR9 C2 — per-member semantic validation + post-loop brand coherence (issue #30, DECISION-A)', () => {
+  it('coherent cohort: every member commits with semanticValidation.status=passed and the parent completes', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    seedV1TitleOutputs(workspaceId, finalized);
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(2);
+    expect(summary.memberFailures).toEqual([]);
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const sv = stored.curationData!.semanticValidation!;
+      expect(sv.status).toBe('passed');
+      expect(sv.findings).toEqual([]);
+    }
+  });
+
+  it('conflicting Product Type: the member commits BLOCKED (family_product_type), parent completes with member failures, curationData + proposals preserved', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTwoTypesConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    // Force the parent authority to a DIFFERENT type: the members' own
+    // proposals still say dry-dog-food → family_product_type findings.
+    getDb().run(
+      'UPDATE classification_cohort_runs SET execution_product_type_id = ? WHERE id = ?',
+      ['dog-treats', finalized.id],
+    );
+    const mutatedRun = getCohortRunById(finalized.id)!;
+    seedV1TitleOutputs(workspaceId, mutatedRun);
+
+    const summary = await processCohort(mutatedRun, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.completedMembers).toBe(2);
+    expect(summary.memberFailures).toHaveLength(2);
+
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      // BLOCKED-NOT-DESTROYED: the member's projection committed (item
+      // completed) with curationData + proposals intact.
+      expect(stored.stageStatus).toBe('completed');
+      const curationData = stored.curationData!;
+      const sv = curationData.semanticValidation!;
+      expect(sv.status).toBe('blocked');
+      const finding = sv.findings.find(f => f.code === 'family_product_type')!;
+      expect(finding.memberSku).toBe(item.upc);
+      expect(finding.message).toContain('dry-dog-food');
+      expect(finding.message).toContain('dog-treats');
+      // CurationData + proposals preserved for the Review UX (PR10).
+      expect(curationData.curatedTitle).not.toBeNull();
+      expect(curationData.classificationProposals.length).toBeGreaterThan(0);
+      expect(curationData.suggestedProductType).toBe('dry-dog-food');
+    }
+    const finalRun = getCohortRunById(finalized.id)!;
+    expect(finalRun.errorMessage).toContain('Semantic validation blocked');
+  });
+
+  it('post-loop brand coherence: a member whose FROZEN extraction brand conflicts with the canonical cohort Brand is blocked after the loop (family_brand)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    // Member 2 shares the cohort brandHint (Acme → same candidate cohort) but
+    // its FROZEN extraction brand conflicts with the canonical cohort Brand.
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Acme', brand: 'Generic' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    seedV1TitleOutputs(workspaceId, finalized);
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.memberFailures).toHaveLength(1);
+    expect(summary.memberFailures[0].productSku).toBe('100000000002');
+
+    // Member 1 stays PASSED (canonical brand).
+    const memberOne = findItemById(items[0].id)!;
+    expect(memberOne.curationData!.semanticValidation!.status).toBe('passed');
+    // Member 2 was owner-guarded-UPDATED after the loop to blocked.
+    const memberTwo = findItemById(items[1].id)!;
+    expect(memberTwo.stageStatus).toBe('completed');
+    const sv = memberTwo.curationData!.semanticValidation!;
+    expect(sv.status).toBe('blocked');
+    const finding = sv.findings.find(f => f.code === 'family_brand')!;
+    expect(finding.memberSku).toBe('100000000002');
+    expect(finding.message).toContain('generic');
+    expect(finding.message).toContain('acme');
+    // curationData + proposals intact.
+    expect(memberTwo.curationData!.curatedTitle).not.toBeNull();
+    expect(memberTwo.curationData!.classificationProposals.length).toBeGreaterThan(0);
+  });
+
+  it('crash between a member commit and the post-loop brand check: a reclaim re-enters and re-runs the brand check over the committed members', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Acme', brand: 'Generic' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    seedV1TitleOutputs(workspaceId, finalized);
+
+    // Crash AFTER member 2's projection commit (test-only seam) — the brand
+    // check never runs in this attempt; the committed members survive.
+    let commitCount = 0;
+    await expect(processCohort(finalized, wsPath, workspaceId, {
+      afterMemberCommit: () => {
+        commitCount++;
+        if (commitCount === 2) {
+          throw new MemberCommitCrashSimulationError('simulated crash between member commit and post-loop brand check');
+        }
+      },
+    })).rejects.toThrow('simulated crash between member commit and post-loop brand check');
+    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
+    expect(findItemById(items[1].id)!.stageStatus).toBe('completed');
+    expect(getCohortRunById(finalized.id)!.status).toBe('running');
+
+    // Reclaim + re-enter: both committed members are skipped by the resume
+    // guard, the post-loop brand check re-runs over the committed evidence.
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', finalized.id]);
+    const reclaim = reclaimExpiredCohortRuns(
+      workspaceId,
+      new Date().toISOString(),
+      () => verifyCohortRunFrozen(getCohortRunById(finalized.id)!, wsPath, workspaceId) ? 'match' : 'drift',
+      'worker-b',
+      COHORT_LEASE_TTL_MS,
+    );
+    expect(reclaim.resumed.length).toBe(1);
+    const resumed = getCohortRunById(finalized.id)!;
+    const summary = await processCohort(resumed, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.completedMembers).toBe(2);
+
+    const memberTwo = findItemById(items[1].id)!;
+    const sv = memberTwo.curationData!.semanticValidation!;
+    expect(sv.status).toBe('blocked');
+    expect(sv.findings.some(f => f.code === 'family_brand')).toBe(true);
+  });
+});
+
 // Reference the exported execution types so the module graph is exercised.
 export type { OnboardingItem };

@@ -354,6 +354,32 @@ export const CurationDataSchema = z.object({
     id: z.string().nullable(),
     source: z.enum(['reviewed', 'execution', 'none']),
   }).nullable().optional(),
+  /**
+   * PR9 (issue #30, DECISION-A): the member's cohort semantic validation
+   * result — computed from FROZEN authority at the member-projection commit
+   * (family_invariant Product Type/Brand, coordinated_variant title/page
+   * correspondence to the parent durable outputs, member_local profile
+   * applicability) and re-evaluated for mutual Brand coherence after the
+   * member loop. Additive key: absent in legacy/shadow runs (byte-identical).
+   * A 'blocked' status is NOT review-ready (the review completion gate
+   * refuses it with code 'semantic_validation_blocked') while curationData
+   * + proposals stay intact for the Review UX (blocked-not-destroyed).
+   */
+  semanticValidation: z.object({
+    status: z.enum(['passed', 'blocked']),
+    findings: z.array(z.object({
+      code: z.enum([
+        'family_product_type',
+        'family_brand',
+        'coordinated_title',
+        'coordinated_page',
+        'member_attribute_applicability',
+        'member_cardinality',
+      ]),
+      memberSku: z.string(),
+      message: z.string(),
+    })),
+  }).nullable().optional(),
 });
 
 export type CurationData = z.infer<typeof CurationDataSchema>;

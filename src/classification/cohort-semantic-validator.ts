@@ -133,10 +133,19 @@ export function validateMemberSemantics(
 
   // ── family_invariant: Primary Product Type vs the parent authority ───────
   // The cohort Execution Product Type is the family authority; a member whose
-  // suggested type disagrees is a hard semantic failure. When the parent has
-  // no execution type (abstained/conflicted run), there is no family authority
-  // to enforce against.
-  if (input.parentExecutionType.id !== null && input.parentExecutionType.id.length > 0) {
+  // suggested type disagrees is a hard semantic failure. A member with NO
+  // suggested type abstains on the family invariant (the pipeline's type
+  // stage may legitimately abstain when the member's extraction evidence is
+  // inconclusive — the freeze resolver sees the spreadsheet name, the member
+  // pipeline only the extraction evidence) — an abstention is never a
+  // conflict. When the parent has no execution type (abstained/conflicted
+  // run), there is no family authority to enforce against.
+  if (
+    input.parentExecutionType.id !== null &&
+    input.parentExecutionType.id.length > 0 &&
+    input.suggestedProductType !== null &&
+    input.suggestedProductType.length > 0
+  ) {
     if (input.suggestedProductType !== input.parentExecutionType.id) {
       const label = input.parentExecutionType.label
         ? ` (${input.parentExecutionType.label})`
@@ -145,7 +154,7 @@ export function validateMemberSemantics(
         code: 'family_product_type',
         memberSku,
         message:
-          `Primary Product Type "${input.suggestedProductType ?? '(none)'}" does not match the ` +
+          `Primary Product Type "${input.suggestedProductType}" does not match the ` +
           `family invariant (cohort Execution Product Type "${input.parentExecutionType.id}"${label}).`,
       });
     }
@@ -219,10 +228,19 @@ export function validateMemberSemantics(
 
 // ─── member_local: profile applicability + cardinality (defense-in-depth) ─────
 
+export interface MemberLocalProposal {
+  targetId: string | null;
+  /** The proposal's proposed value (used for canonical-value de-dup). */
+  proposedValue?: unknown;
+  /** Effective reviewer-corrected value (canonical when present). */
+  revisedValue?: unknown;
+  hasRevisedValue?: boolean;
+}
+
 export interface MemberLocalAttributesInput {
   memberSku: string;
   /** field_assignment proposals ONLY (the caller filters). */
-  proposals: Array<{ targetId: string | null }>;
+  proposals: MemberLocalProposal[];
   /** The member's effective Curation Product Type id (null = none). */
   effectiveTypeId: string | null;
   /** The frozen snapshot attribute config. */
@@ -269,11 +287,22 @@ export function validateMemberLocalAttributes(
   const isUniversal = (id: string) =>
     universal.has(id) || attributeFor(id)?.isUniversal === true;
 
-  // Per-target proposal counts for the cardinality re-check.
-  const counts = new Map<string, number>();
+  // Cardinality re-check inputs: DISTINCT canonical values per target id. A
+  // re-executed member (crash between pipeline completion and the atomic
+  // commit) legitimately accumulates IDENTICAL proposals from earlier
+  // attempts on the same child run — those are an audit artifact, never a
+  // semantic breach. Two DIFFERENT values for a single-cardinality attribute
+  // are the breach this defense-in-depth check is here to catch.
+  const canonicalValueOf = (proposal: MemberLocalProposal): unknown =>
+    proposal.hasRevisedValue ? proposal.revisedValue : proposal.proposedValue;
+  const distinctValuesByTarget = new Map<string, Set<string>>();
   for (const proposal of input.proposals) {
     if (!proposal.targetId) continue;
-    counts.set(proposal.targetId, (counts.get(proposal.targetId) ?? 0) + 1);
+    const valueKey = JSON.stringify(canonicalValueOf(proposal));
+    if (!distinctValuesByTarget.has(proposal.targetId)) {
+      distinctValuesByTarget.set(proposal.targetId, new Set());
+    }
+    distinctValuesByTarget.get(proposal.targetId)!.add(valueKey);
   }
 
   for (const proposal of input.proposals) {
@@ -311,11 +340,11 @@ export function validateMemberLocalAttributes(
     }
   }
 
-  // Cardinality re-check (defense-in-depth): more than one proposal for a
-  // single-cardinality attribute is a breach the pipeline should already
-  // have thrown on.
-  for (const [targetId, count] of counts) {
-    if (count <= 1) continue;
+  // Cardinality re-check (defense-in-depth): more than one DISTINCT value
+  // for a single-cardinality attribute is a breach the pipeline should
+  // already have thrown on.
+  for (const [targetId, values] of distinctValuesByTarget) {
+    if (values.size <= 1) continue;
     const declared = cardinality.get(targetId);
     let effectiveCardinality: 'single' | 'multiple';
     if (declared) {
@@ -332,7 +361,7 @@ export function validateMemberLocalAttributes(
         code: 'member_cardinality',
         memberSku,
         message:
-          `Attribute "${targetId}" received ${count} field_assignment proposals but is single-cardinality.`,
+          `Attribute "${targetId}" received ${values.size} distinct field_assignment value(s) but is single-cardinality.`,
       });
     }
   }

@@ -55,10 +55,13 @@ describe('validateMemberSemantics — family_invariant Product Type', () => {
     expect(finding.message).toContain('dog-treats');
   });
 
-  it('blocks a member with no suggested PT when the parent has one', () => {
+  it('passes a member with no suggested PT (the type stage abstained) — an abstention is never a conflict', () => {
+    // The member pipeline's type stage may legitimately abstain (extraction
+    // evidence inconclusive) while the freeze resolver saw the spreadsheet
+    // name — a null suggested type is an abstention on the family invariant,
+    // not a conflict.
     const result = validateMemberSemantics(coherentMember({ suggestedProductType: null }));
-    expect(result.status).toBe('blocked');
-    expect(result.findings.some(f => f.code === 'family_product_type')).toBe(true);
+    expect(result.status).toBe('passed');
   });
 
   it('enforces nothing when the parent has no execution type (abstained/conflicted)', () => {
@@ -277,9 +280,12 @@ describe('validateMemberLocalAttributes — profile applicability', () => {
     expect(result.findings.some(f => f.code === 'member_attribute_applicability')).toBe(true);
   });
 
-  it('records a cardinality finding for a single-cardinality attribute with >1 proposals', () => {
+  it('records a cardinality finding for a single-cardinality attribute with >1 distinct values', () => {
     const result = validateMemberLocalAttributes(localInput({
-      proposals: [{ targetId: 'flavor' }, { targetId: 'flavor' }],
+      proposals: [
+        { targetId: 'flavor', proposedValue: 'Chicken' },
+        { targetId: 'flavor', proposedValue: 'Beef' },
+      ],
     }));
     expect(result.status).toBe('blocked');
     const finding = result.findings.find(f => f.code === 'member_cardinality')!;
@@ -287,10 +293,26 @@ describe('validateMemberLocalAttributes — profile applicability', () => {
     expect(finding.message).toContain('2');
   });
 
-  it('passes multiple proposals for a multiple-cardinality attribute', () => {
+  it('ignores identical retry duplicates (re-executed member accumulation)', () => {
+    // A re-executed member (crash between pipeline completion and the atomic
+    // commit) legitimately accumulates IDENTICAL proposals from earlier
+    // attempts on the same child run — never a semantic breach.
     const result = validateMemberLocalAttributes(localInput({
-      proposals: [{ targetId: 'flavor' }, { targetId: 'flavor' }],
-      cardinalityByAttributeId: new Map([['flavor', 'multiple']]),
+      proposals: [
+        { targetId: 'flavor', proposedValue: 'Chicken' },
+        { targetId: 'flavor', proposedValue: 'Chicken' },
+      ],
+    }));
+    expect(result.status).toBe('passed');
+  });
+
+  it('passes multiple distinct values for a multiple-cardinality attribute', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [
+        { targetId: 'flavor', proposedValue: 'Chicken' },
+        { targetId: 'flavor', proposedValue: 'Beef' },
+      ],
+      cardinalityByAttributeId: new Map<string, 'single' | 'multiple'>([['flavor', 'multiple']]),
     }));
     expect(result.status).toBe('passed');
   });
