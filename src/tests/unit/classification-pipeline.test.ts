@@ -918,16 +918,6 @@ describe('Classification Pipeline Integration', () => {
     );
   }
 
-  /** A completed run with one decided reviewable proposal (gate passes the
-   *  non-semantic checks). */
-  function completedRunWithDecision(suffix: string, itemId: string): string {
-    const item = createReviewGateItem(suffix);
-    const run = createRun(workspaceId, item.upc, null, null, item.id);
-    completeRun(run.id, 'completed');
-    decide(seedReviewProposal(run.id, item.upc), 'accepted');
-    return run.id;
-  }
-
   it('refuses an item whose semanticValidation is blocked (code + first finding reason)', () => {
     const item = createReviewGateItem('BLOCKED');
     const run = createRun(workspaceId, item.upc, null, null, item.id);

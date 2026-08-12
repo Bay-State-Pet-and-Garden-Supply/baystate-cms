@@ -119,7 +119,6 @@ import {
   validateMemberLocalAttributes,
   validateCohortBrandCoherence,
 } from '../classification/cohort-semantic-validator';
-import type { CohortSemanticFindings } from '../classification/cohort-semantic-validator';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
 import { llmRankOptions } from '../classification/curation-target-ranker';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';

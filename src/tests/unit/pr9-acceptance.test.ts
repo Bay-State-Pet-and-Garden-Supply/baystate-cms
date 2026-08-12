@@ -38,22 +38,15 @@ import { insertExtraction } from '../../db/repositories/onboarding-extraction-re
 import {
   refreshCandidateCohorts,
   updateCohortStatus,
-  getCohortById,
-  getCohortMembers,
   computeMembershipHash,
 } from '../../db/repositories/curation-cohort-repo';
 import {
   claimReadyCurationCohorts,
   getCohortRunById,
-  getCohortSnapshotByHash,
   listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { upsertConfigSnapshot } from '../../db/repositories/classification-config-repo';
-import {
-  getCohortTitleOutputsByRun,
-  getCohortPageOutputsByRun,
-} from '../../db/repositories/classification-cohort-output-repo';
 import { generateCandidate, buildFocusedFiles } from '../../classification/config-generator';
 import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
 import { computeClassificationBundleHash } from '../../classification/config-validation';
@@ -63,11 +56,9 @@ import { validateReviewCompletionGate } from '../../classification/review-comple
 import {
   validateMemberSemantics,
   validateMemberLocalAttributes,
-  validateCohortBrandCoherence,
 } from '../../classification/cohort-semantic-validator';
 import { clearCohortCoordinationCache } from '../../onboarding/cohort-name-coordinator';
 import { clearCohortPageCoordinationCache } from '../../classification/cohort-page-coordinator';
-import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
 import {
   overrideCohortCurationFlags,
   resetCohortCurationFlagsOverride,
@@ -79,14 +70,12 @@ import {
   ClassificationManifestV2Schema,
   ClassificationFocusedFileNames,
 } from '../../shared/schemas/classification';
-import { ExecutionEvidenceProjectionV1Schema, CohortPageOutputSchema } from '../../shared/schemas/cohorts';
-import type { CohortRun, CurationCohort, ExecutionEvidenceProjectionV1 } from '../../shared/schemas/cohorts';
+import type { CohortRun, CurationCohort } from '../../shared/schemas/cohorts';
 import type { OnboardingItem, CurationData } from '../../shared/schemas/onboarding';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
 import type { InsertItemData } from '../../db/repositories/onboarding-item-repo';
 import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
-import type { CoordinatedPageMemberValue } from '../../classification/types';
 
 // ─── llm-client mock (counting; production audit semantics) ───────────────────
 
@@ -453,11 +442,6 @@ async function freezeActiveCohort(
   const finalized = await freezeCohortForExecution(run, wsPath, wsId);
   expect(finalized.status).toBe('running');
   return finalized;
-}
-
-function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
-  const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-  return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
 }
 
 /** Seed a reviewed Primary Product Type decision for a member (reviewed-first
