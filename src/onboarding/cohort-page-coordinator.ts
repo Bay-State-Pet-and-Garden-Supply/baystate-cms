@@ -239,7 +239,7 @@ export interface EnsureCohortPagesCoordinatedParams {
 export async function ensureCohortPagesCoordinated(
   params: EnsureCohortPagesCoordinatedParams,
 ): Promise<Map<string, CoordinatedPageMemberValue>> {
-  const { run, workspaceId, workspacePath, projection, frozenLineContext } = params;
+  const { run, workspaceId, workspacePath: _workspacePath, projection, frozenLineContext } = params;
   // `cohort` and `members` are accepted for contract symmetry with
   // `processCohort` (which holds all three) but are not page inputs: the
   // frozen projection + the frozen line context + the run row are the entire
@@ -476,6 +476,12 @@ export async function ensureCohortPagesCoordinated(
           // invocation — skip the >=2 products guard so the v2 prompt family
           // renders (prompt-parity with groups).
           allowSingleProduct: skus.length === 1,
+          // PR7 review round 3 (P1): the parent transport/preflight routes as
+          // ITS OWN frozen operation ('cohort_page_assignment_parent' with v2
+          // prompt/rule versions) — never the legacy 'cohort_page_assignment'
+          // v1 identity. The core also fail-closes when the modelCall
+          // context's operation diverges.
+          protectedOperation: 'cohort_page_assignment_parent',
         },
       );
       for (const sku of skus) {

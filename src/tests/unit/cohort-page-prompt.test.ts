@@ -225,6 +225,52 @@ describe('PR7 review R1 (B1) — the ACTIVE parent transport prompt is v2 (full 
     expect(transportOptions.protectedOperation).toBe('cohort_page_assignment');
   });
 
+  it('round-3 P1: the parent path routes the transport as its OWN operation (cohort_page_assignment_parent) while the bare core keeps the legacy default', async () => {
+    mocks.callLlmForTask.mockResolvedValue(validResponse(params().products));
+    // Parent invocation: explicit protectedOperation override drives BOTH the
+    // preflight config resolution and the audited transport.
+    await coordinateCohortPagesCore(
+      params(),
+      {
+        executionTypeContext: { id: 'type-1', label: 'Dry Dog Food', confidence: 0.95, outcome: 'coherent' },
+        protectedOperation: 'cohort_page_assignment_parent',
+      },
+    );
+    const [, , , transportOptions] = mocks.callLlmForTaskWithProvenance.mock.calls[0] as [
+      string, string, string, Record<string, unknown>,
+    ];
+    expect(transportOptions.protectedOperation).toBe('cohort_page_assignment_parent');
+    const [, preflightOptions] = mocks.getLlmConfigForTask.mock.calls[0] as [string, Record<string, unknown>];
+    expect(preflightOptions.protectedOperation).toBe('cohort_page_assignment_parent');
+    // Bare core call (no opts): legacy v1 identity, unchanged.
+    await coordinateCohortPagesCore(params());
+    const [, , , legacyTransportOptions] = mocks.callLlmForTaskWithProvenance.mock.calls[1] as [
+      string, string, string, Record<string, unknown>,
+    ];
+    expect(legacyTransportOptions.protectedOperation).toBe('cohort_page_assignment');
+  });
+
+  it('round-3 P1: a modelCall context whose operation diverges from the effective protected operation FAILS CLOSED before any transport', async () => {
+    mocks.callLlmForTask.mockResolvedValue(validResponse(params().products));
+    const modelCall = {
+      runId: 'run-1',
+      snapshotHash: 'snap-1',
+      stage: 'category_page_proposals' as const,
+      operation: 'page_assignment' as const,
+      attempt: 1,
+      promptTemplateVersion: 'page-assignment-prompt-v1',
+      ruleVersion: 'page-assignment-rules-v1',
+    };
+    await expect(
+      coordinateCohortPagesCore(
+        { ...params(), modelCall },
+        { protectedOperation: 'cohort_page_assignment_parent' },
+      ),
+    ).rejects.toThrow(/provenance mismatch/);
+    expect(mocks.callLlmForTaskWithProvenance).not.toHaveBeenCalled();
+    expect(mocks.getLlmConfigForTask).not.toHaveBeenCalled();
+  });
+
   it('sends the FROZEN v1 prompt byte-for-byte when the legacy wrapper calls the core without opts', async () => {
     mocks.callLlmForTask.mockResolvedValue(validResponse(params().products));
     await coordinateCohortPagesCore(params());

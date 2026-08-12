@@ -1,7 +1,7 @@
 import { callLlmForTaskWithProvenance, getLlmConfigForTask } from '../onboarding/llm-client';
 import { PAGE_AUTHORITY_TRUNCATION } from '../onboarding/cohort-page-hash';
 import type { ExecutionTypeTitleAuthority } from '../onboarding/cohort-title-hash';
-import { redactTransportText, type ModelPolicyView } from './model-policy-gateway';
+import { redactTransportText, type ModelPolicyView, type ProtectedOperation } from './model-policy-gateway';
 import type { ModelCallContext } from './model-operation-registry';
 import { MODEL_CALL_STATUS } from './model-operation-registry';
 import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
@@ -219,6 +219,17 @@ export interface CohortPageCoordinationCoreOptions {
    * wrapper passes nothing → the guard is unchanged (byte-identical).
    */
   allowSingleProduct?: boolean;
+  /**
+   * PR7 review R2 (round-3 P1): the protected operation used for BOTH the
+   * preflight config resolution AND the audited transport. The parent op
+   * passes `'cohort_page_assignment_parent'` (its own frozen operation with
+   * v2 prompt/rule versions); the legacy wrapper passes nothing →
+   * `'cohort_page_assignment'` (v1 identity, byte-identical). Whenever a
+   * `modelCall` context is supplied, its `operation` MUST equal this value —
+   * a provenance split (audited as one operation, routed as another) is a
+   * fail-closed programming error, never silently tolerated.
+   */
+  protectedOperation?: ProtectedOperation;
 }
 
 /**
@@ -246,12 +257,25 @@ export async function coordinateCohortPagesCore(
   if (new Set(params.products.map(product => product.sku)).size !== params.products.length) {
     return abstainAll(params.products, 'Cohort input contains duplicate SKUs.');
   }
+  // PR7 review round 3 (P1): ONE effective protected operation drives both
+  // the preflight config resolution and the audited transport — the parent
+  // op passes 'cohort_page_assignment_parent' (its own frozen v2 operation),
+  // the legacy wrapper passes nothing ('cohort_page_assignment' v1,
+  // byte-identical). A supplied modelCall context whose operation differs
+  // is a provenance split (audited as one operation, routed as another) —
+  // fail closed; callers must keep the two synchronized.
+  const operation = opts?.protectedOperation ?? 'cohort_page_assignment';
+  if (params.modelCall && params.modelCall.operation !== operation) {
+    throw new Error(
+      `Cohort page coordination provenance mismatch: model-call context operation "${params.modelCall.operation}" ` +
+        `differs from the effective protected operation "${operation}".`, );
+  }
   let llmConfigured: boolean;
   try {
     llmConfigured = Boolean(getLlmConfigForTask('category_page_assignment', {
       allowFallback: true,
       modelPolicy: params.modelPolicy,
-      protectedOperation: 'cohort_page_assignment',
+      protectedOperation: operation,
     }));
   } catch (err) {
     opts?.assertHeld?.();
@@ -288,7 +312,7 @@ export async function coordinateCohortPagesCore(
       {
         allowFallback: true,
         modelPolicy: params.modelPolicy,
-        protectedOperation: 'cohort_page_assignment',
+        protectedOperation: operation,
         ...(opts?.assertHeld ? { assertHeld: opts.assertHeld } : {}),
         ...(params.modelCall
           ? { modelCall: params.modelCall, snapshot: params.snapshot }

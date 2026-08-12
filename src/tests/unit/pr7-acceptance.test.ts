@@ -228,7 +228,7 @@ function cannedSingletonResponse(prompt: string): string {
 
 function mockGetLlmConfigForTask(_task: string, options: Record<string, any>): Record<string, any> | null {
   const operation = options?.protectedOperation;
-  if (denyPageMode !== 'none' && (operation === 'cohort_page_assignment' || operation === 'page_assignment')) {
+  if (denyPageMode !== 'none' && (operation === 'cohort_page_assignment' || operation === 'page_assignment' || operation === 'cohort_page_assignment_parent')) {
     if (denyPageMode === 'policyDenied') {
       // The policy gateway THROWS for a denied route (distinct from the null
       // "unavailable" resolution) — the group core records a policyDenied
@@ -283,7 +283,7 @@ async function mockCallLlmForTaskWithProvenance(
   options: Record<string, any>,
 ): Promise<{ content: string; callId: string; provider: string; model: string; usage: Record<string, number | null> } | null> {
   const operation = options?.protectedOperation;
-  if (operation !== 'cohort_page_assignment' && operation !== 'page_assignment') return null;
+  if (operation !== 'cohort_page_assignment' && operation !== 'page_assignment' && operation !== 'cohort_page_assignment_parent') return null;
   if (denyPageMode === 'unavailable') return null;
   if (denyPageMode === 'policyDenied') throw new Error('Model policy denied (policy_denied)');
   const callId = `page-call-${++auditCallSeq}`;

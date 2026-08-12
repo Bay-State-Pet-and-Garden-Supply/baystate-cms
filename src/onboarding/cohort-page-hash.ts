@@ -58,10 +58,12 @@
  * entry for the parent operation `cohort_page_assignment_parent` — so a
  * mid-flight credential lookup failure or a live policy change can never flip
  * the hash and needlessly supersede a committed decision. `buildCohortPageAuthorityBundle`
- * resolves `modelAuthority` ({provider, model}) and `ruleVersion` from that
- * entry when a snapshot is supplied; the parent op always supplies the frozen
- * ordinal-0 snapshot. The entry's ruleVersion is the version authority — the
- * hash hardcodes no page version of its own.
+ * resolves the `modelExecutionAuthority` ({provider, model, promptTemplateVersion,
+ * ruleVersion} — ALL four from the SAME frozen plan entry) when a snapshot is
+ * supplied; the parent op always supplies the frozen ordinal-0 snapshot. Both
+ * semantic versions participate in the P-hash, so a prompt-template bump
+ * changes the hash even when rules/provider/model are unchanged — the hash
+ * hardcodes no page version of its own.
  */
 import { hashCanonicalJson } from '../shared/stable-id';
 import { getModelExecutionPlanEntry, type RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
@@ -133,6 +135,23 @@ export interface CohortPageModelAuthority {
   model: string;
 }
 
+/**
+ * The frozen operation-specific Page model-EXECUTION authority (PR7 review
+ * round 3, P1): provider/model AND both independent semantic versions
+ * (promptTemplateVersion + ruleVersion) from the SAME frozen
+ * `cohort_page_assignment_parent` model-execution-plan entry. The registry
+ * treats the two versions as independently bumpable (prompt text vs
+ * deterministic post-processing), so BOTH participate in the P-hash — a
+ * prompt-template bump that changes the Page decision must change the hash
+ * even when rules/provider/model are unchanged.
+ */
+export interface CohortPageModelExecutionAuthority {
+  provider: string;
+  model: string;
+  promptTemplateVersion: string;
+  ruleVersion: string;
+}
+
 /** The frozen page-catalog + selection slice the P-hash covers (H4 Page
  *  catalog is deliberately NOT in the hash — only the exact list the prompt
  *  renders, sorted by id). */
@@ -166,13 +185,10 @@ export interface CohortPageAuthorityBundle {
   selection: { selectionMode: 'single' | 'multiple'; maxPages: number };
   /** The frozen Execution Product Type authority (id+label+confidence+outcome). */
   executionTypeAuthority: ExecutionTypeTitleAuthority;
-  /** The frozen operation-specific Page model authority (from the frozen
-   *  model-execution-plan entry); null when unconfigured / no plan entry. */
-  modelAuthority: CohortPageModelAuthority | null;
-  /** The parent Page prompt/rule version authority — ALWAYS the frozen
-   *  model-execution-plan entry's ruleVersion in production (PR7 review R2
-   *  F2c); never a hash-local hardcoded constant. */
-  ruleVersion: string;
+  /** The frozen operation-specific Page model-EXECUTION authority (from the
+   *  frozen model-execution-plan entry — provider, model, prompt-template
+   *  version, rule version); null when unconfigured / no plan entry. */
+  modelExecutionAuthority: CohortPageModelExecutionAuthority | null;
 }
 
 export interface CohortPageAuthorityBundleParams {
@@ -199,24 +215,20 @@ export interface CohortPageAuthorityBundleParams {
   executionTypeAuthority?: ExecutionTypeTitleAuthority | null;
   /**
    * PR7 review R2 (F2c): the frozen ordinal-0 member runtime snapshot the
-   * parent op passes in. `modelAuthority` ({provider, model}) and `ruleVersion`
-   * are derived from its frozen model-execution-plan entry for
-   * `cohort_page_assignment_parent` — NEVER live credentials. Absent for
-   * direct/test construction.
+   * parent op passes in. The `modelExecutionAuthority` (provider, model,
+   * prompt-template version, rule version) is derived from the frozen
+   * model-execution-plan entry for `cohort_page_assignment_parent` — NEVER
+   * live credentials. Absent for direct/test construction.
    */
   snapshot?: RuntimeClassificationSnapshot | null;
   /**
-   * Explicit frozen operation-specific Page model authority (DECISION-B);
-   * null when unconfigured — still hashed as null. Overrides the
-   * snapshot-derived authority (tests/direct construction).
+   * Explicit frozen operation-specific Page model-EXECUTION authority
+   * (DECISION-B); null when unconfigured — still hashed as null. Overrides
+   * the snapshot-derived authority (tests/direct construction). In production
+   * this ALWAYS comes from the frozen plan entry (provider + model + BOTH
+   * semantic versions).
    */
-  modelAuthority?: CohortPageModelAuthority | null;
-  /**
-   * Explicit rule-version authority (overrides the snapshot-derived entry
-   * ruleVersion; tests/direct construction). In production this ALWAYS comes
-   * from the frozen plan entry.
-   */
-  ruleVersion?: string;
+  modelExecutionAuthority?: CohortPageModelExecutionAuthority | null;
 }
 
 /**
@@ -228,24 +240,35 @@ export interface CohortPageAuthorityBundleParams {
  * prompt.
  *
  * PR7 review R2 (F2c / P1-C): when `snapshot` is supplied, the bundle's
- * `modelAuthority` and `ruleVersion` come from the frozen model-execution-plan
- * entry for `cohort_page_assignment_parent` (provider/model + ruleVersion) —
- * the P-hash therefore never touches live credential/config resolution.
+ * `modelExecutionAuthority` comes from the frozen model-execution-plan entry
+ * for `cohort_page_assignment_parent` (provider + model + promptTemplateVersion
+ * + ruleVersion — ALL four from the same entry) — the P-hash therefore never
+ * touches live credential/config resolution, and a prompt-template bump that
+ * can change the Page decision changes the P-hash even when rules and
+ * provider/model are unchanged.
  */
 export function buildCohortPageAuthorityBundle(
   params: CohortPageAuthorityBundleParams,
 ): CohortPageAuthorityBundle {
   const { run, projection, pagePlan, executionTypeAuthority, snapshot } = params;
-  // FROZEN-PLAN authority: the plan entry's provider/model + ruleVersion are
-  // the version + model authority of the P-hash (never live credentials). A
+  // FROZEN-PLAN authority: the plan entry's provider/model + BOTH semantic
+  // versions are the authority of the P-hash (never live credentials). A
   // missing entry (legacy schema-v1 snapshot, pre-change registry-v1 plan)
-  // resolves to null authority + the parent v2 rules fallback — production
-  // always reaches the entry (the parent op fails closed otherwise).
+  // resolves to null — production always reaches the entry (the parent op
+  // fails closed otherwise).
   const planEntry = snapshot
     ? getModelExecutionPlanEntry(snapshot, 'cohort_page_assignment_parent')
     : null;
-  const modelAuthority = params.modelAuthority ?? (planEntry ? { provider: planEntry.provider, model: planEntry.model } : null);
-  const ruleVersion = params.ruleVersion ?? planEntry?.ruleVersion ?? 'cohort-page-assignment-parent-rules-v2';
+  const modelExecutionAuthority =
+    params.modelExecutionAuthority ??
+    (planEntry
+      ? {
+          provider: planEntry.provider,
+          model: planEntry.model,
+          promptTemplateVersion: planEntry.promptTemplateVersion,
+          ruleVersion: planEntry.ruleVersion,
+        }
+      : null);
   const members = [...projection.members]
     .map(pageAuthorityFromProjectionMember)
     .sort((a, b) => a.sku.localeCompare(b.sku));
@@ -260,8 +283,7 @@ export function buildCohortPageAuthorityBundle(
       confidence: run.productTypeConfidence,
       outcome: run.productTypeOutcome,
     },
-    modelAuthority,
-    ruleVersion,
+    modelExecutionAuthority,
   };
 }
 
@@ -328,7 +350,11 @@ export function pageAuthorityFromProjectionMember(
  * Consumes ONLY the canonical `CohortPageAuthorityBundle` — the SAME bundle
  * the parent v2 prompt renders — so hashed authority == prompted authority
  * by construction. Deterministic and pure — no DB access, no live item reads,
- * no live credential resolution.
+ * no live credential resolution. The model-EXECUTION authority (provider,
+ * model, promptTemplateVersion, ruleVersion — ALL four from the frozen plan
+ * entry) participates as ONE object, so a prompt-template bump changes the
+ * P-hash even when rules/provider/model are unchanged (PR7 review round 3,
+ * P1).
  */
 export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): string {
   return hashCanonicalJson({
@@ -339,7 +365,6 @@ export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): s
     executionProductType: bundle.executionTypeAuthority,
     pages: bundle.pages,
     selection: bundle.selection,
-    promptRuleVersion: bundle.ruleVersion,
-    modelAuthority: bundle.modelAuthority ?? null,
+    modelExecutionAuthority: bundle.modelExecutionAuthority ?? null,
   });
 }
