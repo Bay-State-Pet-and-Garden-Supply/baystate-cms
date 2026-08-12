@@ -14,6 +14,7 @@ import { validatePromotionGate, resolvePromotionEffectiveTypeId } from '../../cl
 import type { PromotionGateInput } from '../../classification/promotion-gate';
 import type { ClassificationRunRow } from '../../db/repositories/classification-run-repo';
 import type { CohortRun } from '../../shared/schemas/cohorts';
+import type { RuntimeClassificationSnapshot } from '../../classification/runtime-snapshot';
 import type { ClassificationProposal } from '../../shared/types';
 import type { CurationData } from '../../shared/schemas/onboarding';
 
@@ -36,6 +37,39 @@ function run(overrides: Partial<ClassificationRunRow> = {}): ClassificationRunRo
     cohortRunId: null,
     ...overrides,
   };
+}
+
+/** A frozen snapshot carrying ONE provenance-compatible reviewed PT fact. */
+function snapshotWithReviewedFact(typeId: string): RuntimeClassificationSnapshot {
+  return {
+    schemaVersion: 2,
+    snapshotHash: 'snap-reviewed-1',
+    workspaceId: 'ws-1',
+    workspacePath: '/tmp/ws',
+    productSku: 'SKU-1',
+    createdAt: '2025-01-01T00:00:00.000Z',
+    config: {} as never,
+    configSnapshotRef: { id: 'x', hash: 'y', sourceCommit: null, createdAt: '2025-01-01T00:00:00.000Z' },
+    modelExecutionPlan: { version: 1 as const, registryVersion: 2, entries: [], digest: 'plan-digest' },
+    runtimeRuleVersions: { version: 1 as const, registryVersion: 2, promptTemplateVersions: {}, ruleVersions: {}, outputPolicyVersion: 'v1', digest: 'rules-digest' },
+    modelPolicy: {} as never,
+    attributeMappings: [],
+    attributes: [],
+    brands: [],
+    reviewedFacts: [
+      {
+        proposalId: 'pt-proposal-1',
+        decisionId: 'pt-decision-1',
+        runId: 'run-1',
+        workspaceId: 'ws-1',
+        productSku: 'SKU-1',
+        proposalType: 'primary_product_type',
+        targetId: typeId,
+        value: { productTypeId: typeId },
+      },
+    ],
+    rules: [] as never,
+  } as unknown as RuntimeClassificationSnapshot;
 }
 
 function cohortRun(overrides: Partial<CohortRun> = {}): CohortRun {
@@ -407,23 +441,73 @@ describe('PR11 C1 — validatePromotionGate (pure)', () => {
       activeRun: run({ cohortRunId: 'parent-1' }),
       parentRun: cohortRun(),
       curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
+      effectiveTypeId: 'dog-food-dry', // a reviewed authority exists
     }));
     // No authority refusal — the gate continues to the stale checks.
     expect(result.ok).toBe(true);
   });
-});
 
-describe('PR11 C1 — resolvePromotionEffectiveTypeId (reviewed-first, PR11 review R1 P1-A)', () => {
-  it('cohort child with NO reviewed type: the Execution Product Type fills the gap (first-pass Curation semantics)', () => {
-    expect(resolvePromotionEffectiveTypeId(cohortRun(), [proposal()])).toBe('dog-food-dry');
-    expect(resolvePromotionEffectiveTypeId(cohortRun({ executionProductTypeId: null }), [])).toBeNull();
+  // ── PR11 review R2 (P1): Reviewed Product Type authority completeness ────
+
+  it('R2: an active cohort child with NO reviewed type is REFUSED (reviewed_product_type_required) — even with a matching execution dependency', () => {
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ cohortRunId: 'parent-1' }),
+      parentRun: cohortRun(),
+      curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
+      effectiveTypeId: null, // no in-run decision, no frozen fact
+      acceptedProposals: [proposal({ proposalType: 'field_assignment', targetId: 'flavor' })],
+      dependencyLookup: () => [
+        { dependencyKind: 'execution_product_type', dependencyTargetId: 'dog-food-dry' },
+      ],
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('reviewed_product_type_required');
   });
 
-  it('cohort child WITH a reviewed type: REVIEWED wins even when the Execution Type differs (PR5 precedence — the flipped authority test)', () => {
+  it('R2: snapshot-reviewed wet + reviewed_product_type dependency wet => PASS', () => {
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ cohortRunId: 'parent-1' }),
+      parentRun: cohortRun({ executionProductTypeId: 'dry-dog-food' }),
+      curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
+      effectiveTypeId: 'wet-dog-food', // resolved from the frozen reviewed fact
+      acceptedProposals: [proposal({ proposalType: 'field_assignment', targetId: 'flavor' })],
+      dependencyLookup: () => [
+        { dependencyKind: 'reviewed_product_type', dependencyTargetId: 'wet-dog-food' },
+      ],
+    }));
+    expect(result.ok).toBe(true);
+  });
+
+  it('R2: snapshot-reviewed wet + execution_product_type dependency dry => STALE', () => {
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ cohortRunId: 'parent-1' }),
+      parentRun: cohortRun({ executionProductTypeId: 'dry-dog-food' }),
+      curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
+      effectiveTypeId: 'wet-dog-food', // resolved from the frozen reviewed fact
+      acceptedProposals: [proposal({ proposalType: 'field_assignment', targetId: 'flavor' })],
+      dependencyLookup: () => [
+        { dependencyKind: 'execution_product_type', dependencyTargetId: 'dog-food-dry' },
+      ],
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('stale_proposal');
+      expect(result.reason).toContain('wet-dog-food');
+    }
+  });
+});
+
+describe('PR11 C1 — resolvePromotionEffectiveTypeId (reviewed-first, PR11 review R1 P1-A + R2)', () => {
+  it('cohort child with NO reviewed type: the resolver returns null — the gate refuses (reviewed_product_type_required); Execution Type is Curation-only', () => {
+    expect(resolvePromotionEffectiveTypeId(cohortRun(), [proposal()], null)).toBeNull();
+    expect(resolvePromotionEffectiveTypeId(cohortRun({ executionProductTypeId: null }), [], null)).toBeNull();
+  });
+
+  it('cohort child WITH an accepted reviewed type: REVIEWED wins even when the Execution Type differs (PR5 precedence — the flipped authority test)', () => {
     expect(
       resolvePromotionEffectiveTypeId(cohortRun(), [
         proposal({ proposalType: 'primary_product_type', targetId: 'dog-food-dry' }),
-      ]),
+      ], null),
     ).toBe('dog-food-dry');
     // The reviewer-revised type is the promotion authority over the frozen
     // execution type — the exact inversion the R1 P1-A blocker described.
@@ -435,13 +519,27 @@ describe('PR11 C1 — resolvePromotionEffectiveTypeId (reviewed-first, PR11 revi
           hasRevisedTargetId: true,
           revisedTargetId: 'wet-dog-food',
         }),
-      ]),
+      ], null),
     ).toBe('wet-dog-food');
     expect(
       resolvePromotionEffectiveTypeId(cohortRun({ executionProductTypeId: 'dry-dog-food' }), [
         proposal({ proposalType: 'primary_product_type', targetId: 'wet-dog-food' }),
-      ]),
+      ], null),
     ).toBe('wet-dog-food');
+  });
+
+  it('R2: a FROZEN-SNAPSHOT reviewed fact is the reviewed authority when no in-run decision exists (PR5 second source)', () => {
+    const snapshot = snapshotWithReviewedFact('wet-dog-food');
+    expect(resolvePromotionEffectiveTypeId(cohortRun({ executionProductTypeId: 'dry-dog-food' }), [], snapshot)).toBe('wet-dog-food');
+  });
+
+  it('R2: an in-run accepted/revised decision OVERRIDES an older snapshot reviewed fact', () => {
+    const snapshot = snapshotWithReviewedFact('wet-dog-food');
+    expect(
+      resolvePromotionEffectiveTypeId(cohortRun(), [
+        proposal({ proposalType: 'primary_product_type', targetId: 'dry-dog-food' }),
+      ], snapshot),
+    ).toBe('dry-dog-food');
   });
 
   it('non-cohort member: the live accepted primary_product_type proposal target is the reviewed truth', () => {

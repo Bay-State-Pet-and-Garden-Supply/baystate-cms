@@ -31,7 +31,8 @@ import type { ClassificationProposal } from '../shared/types';
 import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import { getEffectivePrimaryProductTypeId } from './assignment-projection';
-import { resolveEffectiveCurationType } from './effective-curation-type';
+import { resolveEffectiveCurationType, getReviewedTypeFromSnapshot } from './effective-curation-type';
+import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
 
 export type PromotionGateResult =
   | { ok: true }
@@ -45,6 +46,7 @@ export type PromotionGateResult =
         | 'parent_superseded'
         | 'parent_not_completed'
         | 'workspace_mismatch'
+        | 'reviewed_product_type_required'
         | 'stale_proposal';
       reason: string;
     };
@@ -95,31 +97,27 @@ function firstFindingMessage(semanticValidation: Record<string, unknown>): strin
 
 /**
  * The item's CURRENT effective Product Type id for the staleness check
- * (architecture-report §2.1; PR11 review R1 P1-A):
+ * (architecture-report §2.1; PR11 review R1 P1-A + R2):
  *
- * REVIEWED-FIRST for ALL classified items — the shared PR5 resolver
- * (`resolveEffectiveCurationType`) semantics: Review and Promotion authority
- * stay on the member's own reviewed `primary_product_type` proposals; a
- * reviewer-revised Product Type (paired `revisedTargetId` in the live
- * decision, materialized by `getAcceptedProposals`) is the promotion
- * authority even when it differs from the frozen parent Execution Product
- * Type. The Execution Type ONLY fills the gap when no reviewed type exists
- * (first-pass Curation) — it is never treated as reviewed catalog truth over
- * a reviewed decision.
- *
- * This mirrors the curation-time stamping resolution exactly: dependencies
- * were stamped as `execution_product_type` when the member's effective type
- * was execution-sourced and `reviewed_product_type` when reviewed-sourced,
- * so comparing against the same reviewed-first resolution is what makes the
- * stale check truthful (reviewed wet + execution-stamped dry => STALE).
- *
- * `null` means no effective type exists — a proposal carrying a present
- * type-dependency is then itself stale (the dependency claims a type that
- * does not exist).
+ * REVIEWED-FIRST — Reviewed Product Type is the catalog/Promotion authority:
+ *   1. the in-run accepted/revised `primary_product_type` decision (paired
+ *      `revisedTargetId` materialized by `getAcceptedProposals`);
+ *   2. a provenance-compatible reviewed Primary Product Type fact carried in
+ *      the frozen runtime snapshot (`getReviewedTypeFromSnapshot` — the PR5
+ *      second reviewed source; the cohort executor's
+ *      `getEffectiveCurationTypeForSnapshot` uses the same fact when deciding
+ *      what drove member-local Curation, and dependency stamping records
+ *      `reviewed_product_type` when that snapshot fact won);
+ *   3. `null` — the Execution Product Type is NEVER a substitute for missing
+ *      reviewed authority at Promotion (issue #30: Execution drives first-pass
+ *      Curation; Reviewed is catalog truth). The gate refuses active cohort
+ *      children with `reviewed_product_type_required`; a present
+ *      type-dependency against a null reviewed type is itself stale.
  */
 export function resolvePromotionEffectiveTypeId(
   parentRun: CohortRun | null,
   acceptedProposals: ClassificationProposal[],
+  snapshot?: RuntimeClassificationSnapshot | null,
 ): string | null {
   let reviewedTypeId: string | null = null;
   for (const proposal of acceptedProposals) {
@@ -130,10 +128,10 @@ export function resolvePromotionEffectiveTypeId(
       break;
     }
   }
-  return resolveEffectiveCurationType(
-    reviewedTypeId,
-    parentRun?.executionProductTypeId ?? null,
-  ).effectiveTypeId;
+  if (reviewedTypeId === null) {
+    reviewedTypeId = getReviewedTypeFromSnapshot(snapshot ?? undefined);
+  }
+  return resolveEffectiveCurationType(reviewedTypeId, null).effectiveTypeId;
 }
 
 /**
@@ -261,6 +259,23 @@ export function validatePromotionGate(input: PromotionGateInput): PromotionGateR
         reason:
           `Cohort parent run ${parentRun.id} has status "${parentRun.status}"; a child cannot promote ` +
           'while its parent is in flight.',
+      };
+    }
+    // PR11 review R2 (P1): an ACTIVE cohort child with NO Reviewed Product
+    // Type — neither an in-run accepted/revised decision nor a
+    // provenance-compatible frozen reviewed fact — can never promote. The
+    // Execution Product Type drives first-pass Curation only; Reviewed Product
+    // Type is the catalog/Promotion authority (issue #30 core separation).
+    // The Execution Type remains available as dependency provenance/history
+    // but is NEVER a substitute for missing reviewed authority.
+    if (effectiveTypeId === null) {
+      return {
+        ok: false,
+        code: 'reviewed_product_type_required',
+        reason:
+          `Item ${itemId} (SKU ${productSku}) has no Reviewed Product Type — neither an accepted ` +
+          'primary_product_type decision nor a frozen reviewed fact — so it cannot promote ' +
+          '(the Execution Product Type is Curation-only authority).',
       };
     }
   }

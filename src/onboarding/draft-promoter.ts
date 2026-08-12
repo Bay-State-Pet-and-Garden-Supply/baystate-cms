@@ -17,10 +17,10 @@ import {
   recordHistoryEvent,
 } from '../db/repositories/classification-run-repo';
 import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
-import {
-  getCohortRunById,
+import { getCohortRunById,
   listDependenciesForProposal,
 } from '../db/repositories/classification-cohort-run-repo';
+import { getRuntimeSnapshotByHash } from '../classification/runtime-snapshot';
 import { validatePromotionGate, resolvePromotionEffectiveTypeId } from '../classification/promotion-gate';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
@@ -210,6 +210,15 @@ function computePromotionGate(
   const parentRun: CohortRun | null = activeRun?.cohortRunId
     ? getCohortRunById(activeRun.cohortRunId)
     : null;
+  // PR11 review R2 (P1): the frozen runtime snapshot of the child run carries
+  // provenance-compatible REVIEWED facts — the second reviewed-authority
+  // source (the cohort executor's `getEffectiveCurationTypeForSnapshot` uses
+  // the same facts for member-local Curation). Loaded by the caller; the gate
+  // stays pure.
+  const snapshot =
+    activeRun && activeRun.configSnapshotHash
+      ? getRuntimeSnapshotByHash(workspaceId, activeRun.configSnapshotHash)
+      : null;
   const gate = validatePromotionGate({
     workspaceId,
     itemId: item.id,
@@ -217,7 +226,7 @@ function computePromotionGate(
     curationData: item.curationData ?? null,
     activeRun,
     parentRun,
-    effectiveTypeId: resolvePromotionEffectiveTypeId(parentRun, activeProposals),
+    effectiveTypeId: resolvePromotionEffectiveTypeId(parentRun, activeProposals, snapshot),
     acceptedProposals: activeProposals,
     dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
   });

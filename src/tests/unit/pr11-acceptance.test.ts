@@ -786,7 +786,7 @@ describe('PR11 C4 — a cohort child of a SUPERSEDED parent never promotes (pare
 });
 
 describe('PR11 C4 — stale proposals: an accepted type dependency whose target no longer matches the current effective type refuses; matching and universal proposals promote', () => {
-  it('reviewed-first authority: parent execution-type mutation does NOT stale a member WITH a matching reviewed type — and DOES stale a member with NO reviewed type (execution fills the gap)', async () => {
+  it('reviewed-first authority: parent execution-type mutation does NOT stale a member WITH a matching reviewed type — and a member with NO reviewed type is REFUSED (reviewed_product_type_required, PR11 R2)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const prepared = prepareActiveV2Workspace(workspaceId, wsPath, COHERENT_PROMOTABLE);
     const run = await freezeActiveCohort(workspaceId, wsPath);
@@ -817,8 +817,11 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
     expect(withReviewed.count).toBe(3);
 
     // PART 2 — a member with NO reviewed type (its PT proposal carries no
-    // accepted decision): the Execution Type fills the gap (first-pass
-    // semantics), so the mutated parent makes the deps STALE.
+    // PART 2 — a member with NO reviewed type (its PT proposal carries no
+    // accepted decision and the frozen snapshot has no reviewed fact):
+    // Promotion REFUSES with reviewed_product_type_required — the Execution
+    // Type is Curation-only authority and is NEVER a substitute at Promotion
+    // (PR11 review R2).
     // Re-set the member to a fresh promotion attempt: strip the PT decision.
     for (const item of items) {
       const member = findItemById(item.id)!;
@@ -835,9 +838,8 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
     expect(retry.count).toBe(0);
     expect(retry.failures).toHaveLength(3);
     for (const failure of retry.failures) {
-      expect(failure.error).toContain('stale');
-      expect(failure.error).toContain('execution_product_type');
-      expect(failure.error).toContain('dog-food-wet');
+      expect(failure.error).toContain('Reviewed Product Type');
+      expect(failure.error).toContain('Curation-only');
     }
     expect(retry.changeSetId).toBeNull();
   });
@@ -913,6 +915,69 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
       .filter(ci => ci.sku === '100000000002')).toHaveLength(1);
     expect(listChangeSetItems(result.changeSetId!)
       .filter(ci => ci.sku === '100000000003')).toHaveLength(1);
+  });
+
+  it('R2 E2E: a FROZEN-SNAPSHOT reviewed fact (wet) is the promotion authority — execution-stamped dry deps become STALE', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const prepared = prepareActiveV2Workspace(workspaceId, wsPath, COHERENT_PROMOTABLE);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    expect(run.executionProductTypeId).toBe('dog-food-dry');
+    await processCohort(run, wsPath, workspaceId);
+    const items = prepared.items;
+
+    for (const item of items) decideAllProposals(findItemById(item.id)!);
+    for (const item of items) {
+      const member = findItemById(item.id)!;
+      const runId = member.curationData!.classificationRunId!;
+      // Remove the in-run accepted PT decision AFTER accepting everything (so
+      // no accepted type decision exists in this run — the frozen snapshot
+      // fact is then the ONLY reviewed authority).
+      const ptProposal = getDb().query(
+        "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'primary_product_type'",
+      ).get(runId) as { id: string } | undefined;
+      if (ptProposal) {
+        getDb().run('DELETE FROM classification_proposal_decisions WHERE proposal_id = ?', [ptProposal.id]);
+        getDb().run("UPDATE classification_proposals SET status = 'pending' WHERE id = ?", [ptProposal.id]);
+      }
+      // Inject a provenance-compatible REVIEWED fact (wet) into the child's
+      // frozen runtime snapshot — the PR5 second reviewed-authority source
+      // that `getRuntimeSnapshotByHash` loads at promotion.
+      const child = getDb().query(
+        'SELECT config_snapshot_hash FROM classification_runs WHERE id = ?',
+      ).get(runId) as { config_snapshot_hash: string | null };
+      expect(child.config_snapshot_hash).not.toBeNull();
+      const row = getDb().query(
+        'SELECT config_json FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?',
+      ).get(workspaceId, child.config_snapshot_hash) as { config_json: string };
+      const snapshot = JSON.parse(row.config_json) as Record<string, unknown>;
+      snapshot.reviewedFacts = [{
+        proposalId: `pt-${runId}`,
+        decisionId: `dec-${runId}`,
+        runId,
+        workspaceId,
+        productSku: member.upc,
+        proposalType: 'primary_product_type',
+        targetId: 'dog-food-wet',
+        value: { productTypeId: 'dog-food-wet' },
+      }];
+      getDb().run(
+        'UPDATE classification_config_snapshots SET config_json = ? WHERE workspace_id = ? AND snapshot_hash = ?',
+        [JSON.stringify(snapshot), workspaceId, child.config_snapshot_hash],
+      );
+    }
+    placeInPromotion(items.map(item => findItemById(item.id)!));
+
+    // The reviewed authority is now wet (frozen fact); the members'
+    // execution-stamped deps claim dry => STALE for every member.
+    const result = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
+    expect(result.count).toBe(0);
+    expect(result.failures).toHaveLength(3);
+    for (const failure of result.failures) {
+      expect(failure.error).toContain('stale');
+      expect(failure.error).toContain('execution_product_type');
+      expect(failure.error).toContain('dog-food-wet');
+    }
+    expect(result.changeSetId).toBeNull();
   });
 
   it('a universal-attribute proposal (NO dependency row) is never stale and promotes', async () => {
