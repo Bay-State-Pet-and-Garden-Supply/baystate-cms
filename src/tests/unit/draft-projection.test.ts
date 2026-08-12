@@ -27,7 +27,7 @@ import {
   productAttributeProposalsStage,
   categoryPageProposalsStage,
 } from '../../classification';
-import type { StageContext, StageInput, StageResult } from '../../classification/types';
+import type { StageContext, StageInput } from '../../classification/types';
 
 beforeAll(() => {
   // The stage imports the classification-config repo (which touches the DB

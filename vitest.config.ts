@@ -134,6 +134,8 @@ export default defineConfig({
       'src/tests/unit/draft-projection.test.ts',
       // PR8 synthesis-ordering guard suite (bun:test imports — vitest cannot collect it)
       'src/tests/unit/synthesis-ordering-guard.test.ts',
+      // PR8 acceptance (bun:test imports — vitest cannot collect it)
+      'src/tests/unit/pr8-acceptance.test.ts',
       // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
       'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],
