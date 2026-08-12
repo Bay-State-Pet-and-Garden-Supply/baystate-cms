@@ -139,8 +139,12 @@ export interface MemberSemanticsInput {
    * pipeline result — stable Page ID + display name. The BLOCKING page
    * correspondence is an EXACT SET MATCH on stable page ids against the
    * durable parent page ids; pageName correspondence is advisory-only
-   * (`coordinated_page_name_mismatch`, never blocking). Absent (direct/
-   * synthetic callers) → the legacy name-based comparison applies.
+   * (`coordinated_page_name_mismatch`, never blocking).
+   * PR9 review R3: PRESENCE is distinguished from NON-EMPTINESS — an
+   * explicitly supplied set (`!== undefined`) is the ONLY contract for an
+   * assigned durable result (empty-set vs non-empty durable BLOCKS;
+   * identity-less proposals BLOCK); the legacy name-based comparison applies
+   * ONLY when the set is absent entirely (direct/synthetic callers).
    */
   pageProposals?: Array<{ pageId: string | null; pageName: string }>;
   /** The member's suggested Primary Product Type (curationData.suggestedProductType). */
@@ -261,21 +265,44 @@ export function validateMemberSemantics(
   // result at the call site) must exact set-match the durable parent page
   // ids. pageName correspondence is an ADDITIONAL advisory diagnostic
   // (`coordinated_page_name_mismatch`, never blocking): Category Page
-  // Identity is the stable live-store id, not the display name. When
-  // `pageProposals` are absent (direct/synthetic callers) the legacy
-  // name-based comparison remains the fallback contract.
+  // Identity is the stable live-store id, not the display name.
+  // PR9 review R3: PRESENCE is distinguished from NON-EMPTINESS — an
+  // explicitly supplied set (active cohort caller) is the ONLY contract for
+  // an assigned durable result: any identity-less proposal BLOCKS, an empty
+  // set against a non-empty durable set BLOCKS, and the display-name
+  // fallback is reserved EXCLUSIVELY for callers that did not supply a
+  // proposal set at all (legacy/direct synthetic callers).
+  const pageProposalSetSupplied = input.pageProposals !== undefined;
   const pageProposals = input.pageProposals ?? [];
   const hasPageProposals = pageProposals.length > 0;
   const memberPageIds = pageProposals
     .map(proposal => proposal.pageId)
     .filter((id): id is string => id !== null && id !== undefined && id.length > 0);
+  const identityLessProposal = pageProposals.some(
+    proposal => !proposal.pageId || proposal.pageId.length === 0,
+  );
   if (input.durablePageOutput) {
     if (input.durablePageOutput.status === 'assigned') {
       const durablePages = input.durablePageOutput.pages;
-      if (hasPageProposals) {
-        // Stable Page ID identity comparison (R2-B): exact set match.
+      if (pageProposalSetSupplied) {
+        // Active cohort: the supplied proposal set is the ONLY authority.
+        // 1) An explicitly supplied `category_page` proposal without a stable
+        //    page identity is itself a hard finding (it can never verify
+        //    against the durable ids).
+        // 2) The exact proposal Page-ID set must equal the durable Page-ID
+        //    set — an EMPTY supplied set against a NON-EMPTY durable set is
+        //    a hard finding (the display-name fallback must never mask a
+        //    missing materialization).
         const durablePageIds = durablePages.map(page => page.pageId);
-        if (!sameStringSet(memberPageIds, durablePageIds)) {
+        if (identityLessProposal) {
+          findings.push({
+            code: 'coordinated_page',
+            memberSku,
+            message:
+              'One or more category_page proposals carry no stable page identity — the ' +
+              'materialized proposal set can never correspond to the durable assignment.',
+          });
+        } else if (!sameStringSet(memberPageIds, durablePageIds)) {
           findings.push({
             code: 'coordinated_page',
             memberSku,
@@ -302,8 +329,8 @@ export function validateMemberSemantics(
           }
         }
       } else {
-        // Fallback (no proposals supplied): name-based comparison — the
-        // pre-R2 contract for direct/synthetic callers.
+        // Fallback (no proposal set supplied at all): name-based comparison —
+        // the pre-R2 contract for direct/synthetic callers.
         const storedPageNames = durablePages.map(page => page.pageName);
         if (!sameStringSet(input.suggestedPages, storedPageNames)) {
           findings.push({

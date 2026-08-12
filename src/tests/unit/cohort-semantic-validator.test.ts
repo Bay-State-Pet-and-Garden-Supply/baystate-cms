@@ -266,6 +266,44 @@ describe('validateMemberSemantics — coordinated_variant pages', () => {
     expect(result.status).toBe('blocked');
     expect(result.findings.some(f => f.code === 'coordinated_page')).toBe(true);
   });
+
+  // ── PR9 review R3: PRESENCE vs NON-EMPTINESS of the proposal set ──────────
+
+  it('R3: an EXPLICITLY SUPPLIED EMPTY proposal set against an assigned durable set BLOCKS — the display-name fallback must never mask a missing materialization', () => {
+    const result = validateMemberSemantics(coherentMember({
+      suggestedPages: ['Dog Food Dry'], // display name matches the durable page
+      pageProposals: [], // production supplied the member's set — it is empty
+      durablePageOutput: { status: 'assigned' as const, pages: [{ pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 }] },
+    }));
+    expect(result.status).toBe('blocked');
+    const finding = result.findings.find(f => f.code === 'coordinated_page')!;
+    expect(finding.memberSku).toBe('100000000001');
+    expect(finding.message).toContain('p1');
+  });
+
+  it('R3: an EXPLICITLY SUPPLIED set containing an identity-less proposal BLOCKS even when the stable-id subset matches', () => {
+    const result = validateMemberSemantics(coherentMember({
+      suggestedPages: ['Dog Food Dry'],
+      pageProposals: [
+        { pageId: 'p1', pageName: 'Dog Food Dry' },
+        { pageId: null, pageName: 'Dog Food Dry' }, // no stable identity
+      ],
+      durablePageOutput: { status: 'assigned' as const, pages: [{ pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 }] },
+    }));
+    expect(result.status).toBe('blocked');
+    const finding = result.findings.find(f => f.code === 'coordinated_page')!;
+    expect(finding.memberSku).toBe('100000000001');
+    expect(finding.message).toContain('no stable page identity');
+  });
+
+  it('R3: the legacy name-based fallback still applies ONLY when the proposal set is absent entirely (direct/synthetic callers)', () => {
+    const result = validateMemberSemantics(coherentMember({
+      suggestedPages: ['Dog Food Dry'],
+      // pageProposals NOT supplied (undefined) — synthetic caller
+      durablePageOutput: { status: 'assigned' as const, pages: [{ pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 }] },
+    }));
+    expect(result.status).toBe('passed');
+  });
 });
 
 // ─── coordinated_variant: sibling VARIANT differences pass ───────────────────

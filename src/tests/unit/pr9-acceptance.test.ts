@@ -861,6 +861,51 @@ describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract
     expect(findItemById(items[2].id)!.curationData!.semanticValidation!.status).toBe('passed');
   });
 
+  it('R3 E2E: an EXPLICITLY EMPTY category_page proposal set against an assigned durable page output BLOCKS end-to-end — the production call site can never fall back to display names (PR9 review R3)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+
+    // Strip the FIRST member's materialized category_page proposals immediately
+    // before semantic validation while leaving suggestedPages (display names)
+    // intact — exactly the state the R3 fix must block: the production call
+    // site supplied an EMPTY proposal set against an assigned durable set.
+    let stripped = false;
+    const summary = await processCohort(run, wsPath, workspaceId, {
+      beforeSemanticValidation: (curationData) => {
+        if (stripped) return;
+        stripped = true;
+        curationData.classificationProposals = curationData.classificationProposals.filter(
+          p => p.proposalType !== 'category_page',
+        );
+      },
+    });
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.memberFailures).toHaveLength(1);
+    expect(summary.memberFailures[0].productSku).toBe(items[0].upc);
+
+    const memberOne = findItemById(items[0].id)!;
+    expect(memberOne.stageStatus).toBe('completed'); // blocked-not-destroyed
+    const sv = memberOne.curationData!.semanticValidation!;
+    expect(sv.status).toBe('blocked');
+    const finding = sv.findings.find(f => f.code === 'coordinated_page')!;
+    expect(finding.memberSku).toBe(items[0].upc);
+    // suggestedPages (display names) were intact — the block must NOT have
+    // come from a name comparison.
+    expect(memberOne.curationData!.suggestedPages.length).toBeGreaterThan(0);
+    const gate = validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: memberOne.id,
+      productSku: memberOne.upc,
+      activeRunId: memberOne.curationData!.classificationRunId!,
+    });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.code).toBe('semantic_validation_blocked');
+    // Siblings stay passed.
+    expect(findItemById(items[1].id)!.curationData!.semanticValidation!.status).toBe('passed');
+    expect(findItemById(items[2].id)!.curationData!.semanticValidation!.status).toBe('passed');
+  });
+
   it('MIGRATION TEST: legacy validateSiblingConsistency STILL warns on sibling page divergence, while the new validator PASSES each member against its own durable output', () => {
     // Sibling A pages=[Dog Food], Sibling B pages=[Dog Food, Brand - Acme].
     const { workspaceId } = newWorkspace();
