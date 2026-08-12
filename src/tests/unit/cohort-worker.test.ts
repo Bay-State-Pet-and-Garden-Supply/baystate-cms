@@ -584,6 +584,10 @@ describe('OnboardingWorker Curation cohort integration (issue #30, PR3 M3)', () 
       expect(stored.stage).toBe('curation');
       expect(stored.stageStatus).toBe('completed');
       expect(stored.curationData).not.toBeNull();
+      // PR9 (issue #30, DECISION-A): the semanticValidation key is written
+      // ONLY by processCohort (active cohort mode) — a flag-OFF legacy run
+      // must never carry it (byte-identical curationData).
+      expect((stored.curationData as Record<string, unknown>).semanticValidation).toBeUndefined();
     }
     expect(cohortRunCount(workspaceId)).toBe(0);
     expect(hasLegacyPerItemRuns(items.map(i => i.id))).toBe(true);

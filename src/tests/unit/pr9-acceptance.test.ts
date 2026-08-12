@@ -58,12 +58,20 @@ import { generateCandidate, buildFocusedFiles } from '../../classification/confi
 import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
 import { computeClassificationBundleHash } from '../../classification/config-validation';
 import { freezeCohortForExecution, processCohort } from '../../onboarding/cohort-curator';
+import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
+import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
+import {
+  validateMemberSemantics,
+  validateMemberLocalAttributes,
+  validateCohortBrandCoherence,
+} from '../../classification/cohort-semantic-validator';
 import { clearCohortCoordinationCache } from '../../onboarding/cohort-name-coordinator';
 import { clearCohortPageCoordinationCache } from '../../classification/cohort-page-coordinator';
 import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
 import {
   overrideCohortCurationFlags,
   resetCohortCurationFlagsOverride,
+  getCohortCurationFlags,
 } from '../../classification/flags';
 import type { ModelCallContext } from '../../classification/model-operation-registry';
 import { canonicalJsonFileString, sha256Hex, hashCanonicalJson } from '../../shared/stable-id';
@@ -571,5 +579,282 @@ describe('PR9 C4 — universal-attribute field_assignment proposals carry no pro
     expect(flavorDeps).toHaveLength(1);
     expect(flavorDeps[0].dependencyKind).toBe('reviewed_product_type');
     expect(flavorDeps[0].dependencyTargetId).toBe('dog-food-dry');
+  });
+});
+
+// ─── PR9 C5 (issue #30): acceptance suite — family invariants, coordinated
+//      variant contract, member-local profile, migration test ────────────────
+
+/** Fixture whose extraction TITLE carries the type keywords — lets the member
+ *  pipeline's primary_product_type stage produce a confident proposal (the
+ *  default fixture evidence is type-agnostic and abstains, which is why the
+ *  coherent runs above see null suggestedProductType). */
+const TYPE_KEYWORD_EXTRACTIONS = {
+  '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Acme', title: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+  '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Acme', title: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+  '100000000003': settledExtraction({ _name: 'Purina Pro Plan Adult Dog Food Salmon 5 lb', _brandHint: 'Acme', title: 'Purina Pro Plan Adult Dog Food Salmon 5 lb' }),
+};
+
+/** Insert an 'accepted' decision for every non-abstention proposal of the
+ *  member's active run (the review gate requires all proposals decided). */
+function decideAllProposals(item: OnboardingItem): void {
+  const runId = item.curationData!.classificationRunId!;
+  const proposals = getDb().query(
+    'SELECT id, proposal_type FROM classification_proposals WHERE run_id = ?',
+  ).all(runId) as Array<{ id: string; proposal_type: string }>;
+  const now = new Date().toISOString();
+  for (const proposal of proposals) {
+    if (proposal.proposal_type === 'reviewable_abstention') continue;
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      [`c5-decision-${proposal.id}`, proposal.id, `key-${proposal.id}`, now],
+    );
+    getDb().run('UPDATE classification_proposals SET status = ? WHERE id = ?', ['accepted', proposal.id]);
+  }
+}
+
+describe('PR9 C5 — acceptance: family invariants, coordinated-variant contract, member-local profile, migration test (issue #30)', () => {
+  it('coherent cohort => PASS + review-ready (all members semanticValidation passed; the review gate passes a decided member)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    expect(run.executionProductTypeId).toBe('dog-food-dry');
+
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
+    expect(summary.completedMembers).toBe(3);
+
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const sv = stored.curationData!.semanticValidation!;
+      expect(sv.status).toBe('passed');
+      expect(sv.findings).toEqual([]);
+    }
+
+    // Review gate: with every proposal decided, a coherent member IS
+    // review-ready.
+    decideAllProposals(findItemById(items[0].id)!);
+    const memberOne = findItemById(items[0].id)!;
+    const gate = validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: memberOne.id,
+      productSku: memberOne.upc,
+      activeRunId: memberOne.curationData!.classificationRunId!,
+    });
+    expect(gate.ok).toBe(true);
+  });
+
+  it('sibling Page differences + title variant differences => PASS (each member matches its OWN durable output; never sibling equality)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
+
+    const siblingA = findItemById(items[0].id)!;
+    const siblingB = findItemById(items[1].id)!;
+    // The canned page assignments differ per SKU, and the durable titles
+    // differ per variant (Chicken vs Beef).
+    expect(siblingA.curationData!.suggestedPages).not.toEqual(siblingB.curationData!.suggestedPages);
+    expect(siblingA.curationData!.curatedTitle).not.toEqual(siblingB.curationData!.curatedTitle);
+    // Both pass: each corresponds to its own durable parent output.
+    expect(siblingA.curationData!.semanticValidation!.status).toBe('passed');
+    expect(siblingB.curationData!.semanticValidation!.status).toBe('passed');
+  });
+
+  it('conflicting Brand => blocked family_brand; NOT review-ready (review gate refuses)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // Member 2 shares the cohort brandHint (Acme → same candidate cohort) but
+    // its FROZEN extraction brand conflicts with the canonical cohort Brand.
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Acme' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Acme', brand: 'Generic' }),
+      '100000000003': settledExtraction({ _name: 'Purina Pro Plan Adult Dog Food Salmon 5 lb', _brandHint: 'Acme' }),
+    });
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.memberFailures).toHaveLength(1);
+    expect(summary.memberFailures[0].productSku).toBe('100000000002');
+
+    const memberOne = findItemById(items[0].id)!;
+    expect(memberOne.curationData!.semanticValidation!.status).toBe('passed');
+    const memberTwo = findItemById(items[1].id)!;
+    expect(memberTwo.stageStatus).toBe('completed'); // blocked-not-destroyed
+    const sv = memberTwo.curationData!.semanticValidation!;
+    expect(sv.status).toBe('blocked');
+    const finding = sv.findings.find(f => f.code === 'family_brand')!;
+    expect(finding.memberSku).toBe('100000000002');
+    expect(finding.message).toContain('generic');
+    expect(finding.message).toContain('acme');
+
+    // Review gate refuses the blocked member.
+    const gate = validateReviewCompletionGate({
+      workspaceId,
+      onboardingItemId: memberTwo.id,
+      productSku: memberTwo.upc,
+      activeRunId: memberTwo.curationData!.classificationRunId!,
+    });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.code).toBe('semantic_validation_blocked');
+  });
+
+  it('conflicting Product Type => blocked family_product_type (parent authority vs member suggestion)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, TYPE_KEYWORD_EXTRACTIONS);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    expect(run.executionProductTypeId).toBe('dog-food-dry');
+
+    // Force the parent authority to a DIFFERENT real type: the members' own
+    // proposals still say dog-food-dry → family_product_type findings.
+    getDb().run(
+      'UPDATE classification_cohort_runs SET execution_product_type_id = ? WHERE id = ?',
+      ['dog-food-wet', run.id],
+    );
+    const mutatedRun = getCohortRunById(run.id)!;
+    const summary = await processCohort(mutatedRun, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.completedMembers).toBe(3);
+
+    // Members 1+2 (dry dog food) are blocked; member 3 (adult dog food) has
+    // no confident type suggestion and ABSTAINS on the family invariant.
+    for (const item of [items[0], items[1]]) {
+      const stored = findItemById(item.id)!;
+      const sv = stored.curationData!.semanticValidation!;
+      expect(sv.status).toBe('blocked');
+      const finding = sv.findings.find(f => f.code === 'family_product_type')!;
+      expect(finding.memberSku).toBe(item.upc);
+      expect(finding.message).toContain('dog-food-dry');
+      expect(finding.message).toContain('dog-food-wet');
+      expect(stored.curationData!.suggestedProductType).toBe('dog-food-dry');
+    }
+    // curationData + proposals preserved for the Review UX.
+    expect(findItemById(items[0].id)!.curationData!.classificationProposals.length).toBeGreaterThan(0);
+  });
+
+  it('singleton cohort follows the same validator architecture (per-member semanticValidation present and coherent)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Acme' }),
+    });
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
+    const stored = findItemById(items[0].id)!;
+    expect(stored.stageStatus).toBe('completed');
+    const sv = stored.curationData!.semanticValidation!;
+    expect(sv.status).toBe('passed');
+    expect(sv.findings).toEqual([]);
+  });
+
+  it('member-local defense-in-depth: an inapplicable attribute proposal and a single-cardinality breach block (pure validator over frozen-style inputs)', () => {
+    // The pipeline withholds inapplicable proposals by design — the
+    // member-local validator is the defense-in-depth re-assertion (PR9
+    // DECISION-A), exercised here directly over the frozen-style inputs the
+    // commit path computes (effective type 'dog-food-dry' → pet-food profile:
+    // flavor applicable, species NOT in the profile).
+    const attributeConfig = [
+      { id: 'brand', isUniversal: true },
+      { id: 'flavor', isUniversal: false },
+      { id: 'species', isUniversal: false },
+    ];
+    const inapplicable = validateMemberLocalAttributes({
+      memberSku: '100000000001',
+      proposals: [{ targetId: 'species', proposedValue: 'dog' }],
+      effectiveTypeId: 'dog-food-dry',
+      attributeConfig,
+      universalAttributeIds: ['brand'],
+      profileAttributeIds: new Set(['flavor']),
+      cardinalityByAttributeId: new Map<string, 'single' | 'multiple'>([['flavor', 'single']]),
+    });
+    expect(inapplicable.status).toBe('blocked');
+    expect(inapplicable.findings.some(f => f.code === 'member_attribute_applicability')).toBe(true);
+
+    const cardinality = validateMemberLocalAttributes({
+      memberSku: '100000000001',
+      proposals: [
+        { targetId: 'flavor', proposedValue: 'Chicken' },
+        { targetId: 'flavor', proposedValue: 'Beef' },
+      ],
+      effectiveTypeId: 'dog-food-dry',
+      attributeConfig,
+      universalAttributeIds: ['brand'],
+      profileAttributeIds: new Set(['flavor']),
+      cardinalityByAttributeId: new Map<string, 'single' | 'multiple'>([['flavor', 'single']]),
+    });
+    expect(cardinality.status).toBe('blocked');
+    expect(cardinality.findings.some(f => f.code === 'member_cardinality')).toBe(true);
+  });
+
+  it('MIGRATION TEST: legacy validateSiblingConsistency STILL warns on sibling page divergence, while the new validator PASSES each member against its own durable output', () => {
+    // Sibling A pages=[Dog Food], Sibling B pages=[Dog Food, Brand - Acme].
+    const { workspaceId } = newWorkspace();
+    const batchId = createBatch({ workspaceId, name: 'Migration Batch', fileName: 'migration.xlsx', totalItems: 2 }).id;
+    const items = insertItems(batchId, [
+      { upc: '900000000001', name: 'Acme Dog Food Chicken 5 lb', brandHint: 'Acme', rowNumber: 1, stage: 'curation' as const, stageStatus: 'completed' as const },
+      { upc: '900000000002', name: 'Acme Dog Food Beef 10 lb', brandHint: 'Acme', rowNumber: 2, stage: 'curation' as const, stageStatus: 'completed' as const },
+    ]);
+    getDb().run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ suggestedPages: ['Dog Food'] }), items[0].id],
+    );
+    getDb().run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      [JSON.stringify({ suggestedPages: ['Dog Food', 'Brand - Acme'] }), items[1].id],
+    );
+
+    // LEGACY unchanged: live-regrouping divergence warning on the same data.
+    const warnings = validateSiblingConsistency(batchId);
+    expect(warnings.some(w => w.field === 'category_page')).toBe(true);
+
+    // NEW validator: coordinated_variant contract — each member matches its
+    // OWN durable output, sibling equality is never required.
+    const siblingA = validateMemberSemantics({
+      memberSku: '900000000001',
+      parentExecutionType: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+      curatedTitle: 'Acme Dog Food Chicken 5 lb',
+      titleSource: 'cohort_fallback',
+      suggestedPages: ['Dog Food'],
+      suggestedProductType: 'dog-food-dry',
+      durableTitleOutput: { title: 'Acme Dog Food Chicken 5 lb', source: 'cohort_fallback' },
+      durablePageOutput: { status: 'assigned', pages: [{ pageId: 'p1', pageName: 'Dog Food', confidence: 0.9 }] },
+    });
+    const siblingB = validateMemberSemantics({
+      memberSku: '900000000002',
+      parentExecutionType: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+      curatedTitle: 'Acme Dog Food Beef 10 lb',
+      titleSource: 'cohort_fallback',
+      suggestedPages: ['Dog Food', 'Brand - Acme'],
+      suggestedProductType: 'dog-food-dry',
+      durableTitleOutput: { title: 'Acme Dog Food Beef 10 lb', source: 'cohort_fallback' },
+      durablePageOutput: { status: 'assigned', pages: [
+        { pageId: 'p1', pageName: 'Dog Food', confidence: 0.9 },
+        { pageId: 'p2', pageName: 'Brand - Acme', confidence: 0.7 },
+      ] },
+    });
+    expect(siblingA.status).toBe('passed');
+    expect(siblingB.status).toBe('passed');
+  });
+
+  it('flag OFF/shadow: the legacy warnings path is byte-identical and curationData carries NO semanticValidation key', async () => {
+    // flag OFF (default): no cohort runs ever execute — the semanticValidation
+    // key is written ONLY by processCohort (active cohort mode). Shadow mode
+    // keeps the legacy per-item path. Assert the flag-OFF surface + key
+    // absence at the module level (the cohort-worker flag-OFF test asserts the
+    // legacy worker path end-to-end; pr8 acceptance #4 freezes the byte-identical
+    // baseline).
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { items } = prepareActiveV2Workspace(workspaceId, wsPath, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Acme' }),
+    });
+    expect(getCohortCurationFlags().cohortCurationV2Enabled).toBe(false);
+    // No active cohort child can exist with the flag OFF — the surface stays
+    // legacy.
+    expect(activeCohortSemanticFindingsForItem(findItemById(items[0].id)!)).toBeNull();
+    // Shadow mode: same legacy surface.
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
+    expect(activeCohortSemanticFindingsForItem(findItemById(items[0].id)!)).toBeNull();
   });
 });
