@@ -120,6 +120,7 @@ import {
   validateMemberLocalAttributes,
   validateCohortBrandCoherence,
   mergeSemanticFindings,
+  isBlockingSemanticFinding,
 } from '../classification/cohort-semantic-validator';
 import type { CohortSemanticFinding } from '../classification/cohort-semantic-validator';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
@@ -2529,6 +2530,28 @@ export async function processCohort(
           curatedTitle: curationData.curatedTitle,
           titleSource: curationData.titleSource,
           suggestedPages: curationData.suggestedPages ?? [],
+          // PR9 review R2 (B): the member's category_page PROPOSALS — the
+          // stable Page ID is the BLOCKING page-identity comparison against
+          // the durable parent page ids (pageName correspondence stays an
+          // advisory diagnostic). Derived from the member pipeline result,
+          // never a live page read.
+          pageProposals: curationData.classificationProposals
+            .filter(proposal => proposal.proposalType === 'category_page')
+            .map(proposal => {
+              const value = proposal.proposedValue as
+                | { pageName?: unknown; pageId?: unknown }
+                | null
+                | undefined;
+              return {
+                pageId:
+                  typeof proposal.targetId === 'string' && proposal.targetId.length > 0
+                    ? proposal.targetId
+                    : typeof value?.pageId === 'string' && value.pageId.length > 0
+                      ? value.pageId
+                      : null,
+                pageName: typeof value?.pageName === 'string' ? value.pageName : '',
+              };
+            }),
           suggestedProductType: curationData.suggestedProductType,
           durableTitleOutput: durableTitleOutputForSemantic,
           durablePageOutput: durablePageOutputForSemantic,
@@ -2562,8 +2585,11 @@ export async function processCohort(
           ...memberSemanticsResult.findings,
           ...memberLocalResult.findings,
         ];
+        // PR9 review R2 (B): advisory findings
+        // (`coordinated_page_name_mismatch`) never block — the status
+        // reflects HARD findings only.
         semanticValidation = {
-          status: semanticFindings.length > 0 ? 'blocked' : 'passed',
+          status: semanticFindings.some(isBlockingSemanticFinding) ? 'blocked' : 'passed',
           findings: semanticFindings,
         };
       } finally {

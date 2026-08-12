@@ -32,6 +32,17 @@
  * completion gate refuses blocked items (`semantic_validation_blocked`,
  * review-completion-gate.ts), while the curationData carries the findings
  * for the Review UX (PR10).
+ *
+ * PR9 REVIEW ROUND 2 contracts (issue #30):
+ * - `coordinated_title`: EXACT correspondence — the committed curated title
+ *   AND its source must equal the durable parent output's title AND source
+ *   (a matching title with a different source is a violation: the member
+ *   pipeline materializes the parent output WITH its source).
+ * - `coordinated_page`: the BLOCKING comparison is STABLE PAGE IDS — the
+ *   member's `category_page` proposals must exact set-match the durable
+ *   parent page ids. `pageName` correspondence is ADVISORY-ONLY
+ *   (`coordinated_page_name_mismatch`, never blocking): Category Page
+ *   Identity is the stable live-store id, not the display name.
  */
 import { normalizeBrand } from '../onboarding/product-line-grouper';
 import { evaluateConditions } from './applicability-evaluator';
@@ -44,6 +55,7 @@ export type CohortSemanticFindingCode =
   | 'family_brand'
   | 'coordinated_title'
   | 'coordinated_page'
+  | 'coordinated_page_name_mismatch'
   | 'member_attribute_applicability'
   | 'member_cardinality';
 
@@ -69,8 +81,23 @@ function passed(): CohortSemanticFindings {
   return { status: 'passed', findings: [] };
 }
 
+/**
+ * Advisory-only finding codes NEVER block review (status stays 'passed').
+ * PR9 review R2 (B): `coordinated_page_name_mismatch` is the sole advisory
+ * code — pageName is display data; page identity (the stable id) is what
+ * blocks.
+ */
+const ADVISORY_FINDING_CODES = new Set<CohortSemanticFindingCode>(['coordinated_page_name_mismatch']);
+
+/** True when a finding is HARD (blocking). Advisory diagnostics never block. */
+export function isBlockingSemanticFinding(finding: CohortSemanticFinding): boolean {
+  return !ADVISORY_FINDING_CODES.has(finding.code);
+}
+
 function toFindings(findings: CohortSemanticFinding[]): CohortSemanticFindings {
-  return findings.length > 0 ? { status: 'blocked', findings } : passed();
+  return findings.some(isBlockingSemanticFinding)
+    ? { status: 'blocked', findings }
+    : { status: 'passed', findings };
 }
 
 /** Canonical set comparison (order-insensitive, deterministic). */
@@ -96,6 +123,15 @@ export interface MemberSemanticsInput {
   titleSource: string | null;
   /** The member's suggested Category Pages (curationData.suggestedPages). */
   suggestedPages: string[];
+  /**
+   * PR9 review R2 (B): the member's `category_page` PROPOSALS from the member
+   * pipeline result — stable Page ID + display name. The BLOCKING page
+   * correspondence is an EXACT SET MATCH on stable page ids against the
+   * durable parent page ids; pageName correspondence is advisory-only
+   * (`coordinated_page_name_mismatch`, never blocking). Absent (direct/
+   * synthetic callers) → the legacy name-based comparison applies.
+   */
+  pageProposals?: Array<{ pageId: string | null; pageName: string }>;
   /** The member's suggested Primary Product Type (curationData.suggestedProductType). */
   suggestedProductType: string | null;
   /**
@@ -174,15 +210,24 @@ export function validateMemberSemantics(
   }
 
   // ── coordinated_variant: title correspondence to the durable output ──────
+  // PR9 review R2 (B): EXACT correspondence — the committed projection must
+  // carry BOTH the durable coordinated title AND its exact source. A title
+  // that merely equals the durable text with a different source (e.g.
+  // 'llm_cohort' vs the durable 'cohort_fallback') is a coordinated-title
+  // violation, not a pass: the member pipeline materializes the parent
+  // output WITH its source, so a source mismatch means the projection did not
+  // actually come from the durable authority.
   if (input.durableTitleOutput) {
-    const sourceOk = input.titleSource !== null && COORDINATED_TITLE_SOURCES.has(input.titleSource);
-    if (input.curatedTitle !== input.durableTitleOutput.title || !sourceOk) {
+    const titleMatches =
+      input.curatedTitle === input.durableTitleOutput.title &&
+      input.titleSource === input.durableTitleOutput.source;
+    if (!titleMatches) {
       findings.push({
         code: 'coordinated_title',
         memberSku,
         message:
           `Curated title "${input.curatedTitle ?? '(none)'}" (source=${input.titleSource ?? 'none'}) ` +
-          `does not correspond to the parent durable coordinated title ` +
+          `does not exactly correspond to the parent durable coordinated title ` +
           `"${input.durableTitleOutput.title}" (source=${input.durableTitleOutput.source}) for this SKU.`,
       });
     }
@@ -200,27 +245,77 @@ export function validateMemberSemantics(
   }
 
   // ── coordinated_variant: page correspondence to the durable output ───────
+  // PR9 review R2 (B): the BLOCKING comparison is STABLE PAGE IDS — the
+  // member's `category_page` proposals (passed from the member pipeline
+  // result at the call site) must exact set-match the durable parent page
+  // ids. pageName correspondence is an ADDITIONAL advisory diagnostic
+  // (`coordinated_page_name_mismatch`, never blocking): Category Page
+  // Identity is the stable live-store id, not the display name. When
+  // `pageProposals` are absent (direct/synthetic callers) the legacy
+  // name-based comparison remains the fallback contract.
+  const pageProposals = input.pageProposals ?? [];
+  const hasPageProposals = pageProposals.length > 0;
+  const memberPageIds = pageProposals
+    .map(proposal => proposal.pageId)
+    .filter((id): id is string => id !== null && id !== undefined && id.length > 0);
   if (input.durablePageOutput) {
     if (input.durablePageOutput.status === 'assigned') {
-      const storedPageNames = input.durablePageOutput.pages.map(page => page.pageName);
-      if (!sameStringSet(input.suggestedPages, storedPageNames)) {
-        findings.push({
-          code: 'coordinated_page',
-          memberSku,
-          message:
-            `Suggested pages [${input.suggestedPages.join(', ')}] do not exactly match the parent ` +
-            `durable coordinated_page assignment [${storedPageNames.join(', ')}] for this SKU.`,
-        });
+      const durablePages = input.durablePageOutput.pages;
+      if (hasPageProposals) {
+        // Stable Page ID identity comparison (R2-B): exact set match.
+        const durablePageIds = durablePages.map(page => page.pageId);
+        if (!sameStringSet(memberPageIds, durablePageIds)) {
+          findings.push({
+            code: 'coordinated_page',
+            memberSku,
+            message:
+              `Suggested page ids [${memberPageIds.join(', ')}] do not exactly match the parent ` +
+              `durable coordinated_page assignment [${durablePageIds.join(', ')}] for this SKU.`,
+          });
+        } else {
+          // Advisory-only name correspondence for matched ids (R2-B): the
+          // pageName is display data — a mismatch is a diagnostic (stale or
+          // renamed store page), never a review blocker.
+          for (const durable of durablePages) {
+            const proposal = pageProposals.find(p => p.pageId === durable.pageId);
+            if (proposal && proposal.pageName !== durable.pageName) {
+              findings.push({
+                code: 'coordinated_page_name_mismatch',
+                memberSku,
+                message:
+                  `Suggested page "${proposal.pageName}" (id ${durable.pageId}) does not match the ` +
+                  `durable page name "${durable.pageName}" for this SKU (page identity matches; ` +
+                  'name mismatch is advisory).',
+              });
+            }
+          }
+        }
+      } else {
+        // Fallback (no proposals supplied): name-based comparison — the
+        // pre-R2 contract for direct/synthetic callers.
+        const storedPageNames = durablePages.map(page => page.pageName);
+        if (!sameStringSet(input.suggestedPages, storedPageNames)) {
+          findings.push({
+            code: 'coordinated_page',
+            memberSku,
+            message:
+              `Suggested pages [${input.suggestedPages.join(', ')}] do not exactly match the parent ` +
+              `durable coordinated_page assignment [${storedPageNames.join(', ')}] for this SKU.`,
+          });
+        }
       }
     } else {
-      // Abstained durable row ⇒ the member must carry zero pages.
-      if (input.suggestedPages.length > 0) {
+      // Abstained durable row ⇒ the member must carry zero pages AND zero
+      // category_page proposals (R2-B: a proposal with the same display name
+      // but a wrong id must NOT pass).
+      if (input.suggestedPages.length > 0 || pageProposals.length > 0) {
         findings.push({
           code: 'coordinated_page',
           memberSku,
           message:
             `Parent coordinated_page output abstained, but the member carries suggested pages ` +
-            `[${input.suggestedPages.join(', ')}].`,
+            `[${input.suggestedPages.join(', ')}]` +
+            (pageProposals.length > 0 ? ` and ${pageProposals.length} category_page proposal(s).` : '.'),
         });
       }
     }
@@ -234,6 +329,19 @@ export function validateMemberSemantics(
         'No parent coordinated_page output exists for this SKU (missing durable row); ' +
         'the member carries no valid page authority.',
     });
+  } else {
+    // Expected-empty (parent chose no page outputs BY DESIGN — DECISION-C):
+    // zero pages AND zero category_page proposals are mandatory (R2-B).
+    if (input.suggestedPages.length > 0 || pageProposals.length > 0) {
+      findings.push({
+        code: 'coordinated_page',
+        memberSku,
+        message:
+          `The parent page op chose expected-empty (no coordinated_page output rows), but the ` +
+          `member carries suggested pages [${input.suggestedPages.join(', ')}]` +
+          (pageProposals.length > 0 ? ` and ${pageProposals.length} category_page proposal(s).` : '.'),
+      });
+    }
   }
 
   return toFindings(findings);

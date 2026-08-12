@@ -323,6 +323,11 @@ export type ApproveDistributorImageRequest = z.infer<typeof ApproveDistributorIm
  * Exported so the review completion gate (R2-A) parses the committed payload
  * against the EXACT same schema the curator writes — missing or malformed
  * semantic data fails closed (never review-ready).
+ *
+ * PR9 review R2 (B): `coordinated_page_name_mismatch` is an ADVISORY-only
+ * finding code — the BLOCKING page correspondence is the stable Page ID
+ * set-match (`coordinated_page`); a pageName mismatch for a matched id is a
+ * diagnostic (stale/renamed store page), never a review blocker.
  */
 export const CohortSemanticValidationSchema = z.object({
   status: z.enum(['passed', 'blocked']),
@@ -332,6 +337,7 @@ export const CohortSemanticValidationSchema = z.object({
       'family_brand',
       'coordinated_title',
       'coordinated_page',
+      'coordinated_page_name_mismatch',
       'member_attribute_applicability',
       'member_cardinality',
     ]),
