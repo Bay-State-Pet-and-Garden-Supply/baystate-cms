@@ -170,6 +170,11 @@ import { validateReviewCompletionGate } from '../../classification/review-comple
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { SubmitProposalDecisionsRequestSchema } from '../../shared/schemas/classification';
 import { getDb } from '../../db/connection';
+import { getCohortById } from '../../db/repositories/curation-cohort-repo';
+import {
+  getCurrentCohortRun,
+  supersedeIdleCohortRun,
+} from '../../db/repositories/classification-cohort-run-repo';
 
 const route = new Hono();
 
@@ -532,6 +537,91 @@ route.get('/onboarding/batches/:id/cohorts', async (c) => {
   }
   const payload = CohortListResponseSchema.parse({ cohorts: listCandidateCohortViews(batchId) });
   return c.json(payload);
+});
+
+/**
+ * POST /api/onboarding/cohorts/:id/re-run
+ * Start a NEW cohort revision (issue #30, PR10 DECISION-C).
+ *
+ * Resolution semantics for a blocked review member: fix the underlying cause
+ * FIRST (member evidence, config, or a transient model issue) — the fresh
+ * revision then re-freezes from CURRENT extraction evidence, re-coordinates
+ * the family outputs, and re-validates every member. The gate is NEVER
+ * weakened: there is NO manual override anywhere; a still-conflicted member
+ * blocks again with fresh findings.
+ *
+ * Lifecycle: supersedes the cohort's current non-superseded parent run
+ * (idle-terminal supersede via `supersedeIdleCohortRun`) and resets the
+ * cohort's members to curation/pending with `curation_data_json` cleared, so
+ * the job queue's next poll claims a NEW parent revision.
+ *
+ * Fail-closed guards:
+ * - Unknown cohort (or a cohort outside the active workspace) => 404.
+ * - No current non-superseded run (incl. an already-superseded parent) =>
+ *   400 `no_active_run`.
+ * - ACTIVELY HELD parent (`status IN ('freezing','running') AND claimed_by IS
+ *   NOT NULL`) => 400 `run_busy` with ZERO mutation — a reviewer-facing
+ *   re-run never yanks a live worker (the owner-guarded drift primitive is
+ *   the worker's own supersede path inside `processCohort`; this route never
+ *   calls it).
+ * - The idle-supersede CAS failing (superseded concurrently) => 400
+ *   `run_busy`, zero mutation.
+ *
+ * Legacy/shadow cohorts have no cohort runs at all => `no_active_run` (400).
+ */
+route.post('/onboarding/cohorts/:id/re-run', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const cohortId = c.req.param('id');
+  const cohort = getCohortById(cohortId);
+  if (!cohort || cohort.workspaceId !== workspace.id) {
+    return c.json({ error: 'Cohort not found' }, 404);
+  }
+
+  const currentRun = getCurrentCohortRun(cohortId);
+  if (!currentRun) {
+    return c.json({ error: 'No active cohort run to supersede.', code: 'no_active_run' }, 400);
+  }
+
+  // Fail-closed on actively-held runs: a reviewer re-run must never race an
+  // in-flight freeze/execution (zero mutation on this path).
+  const activelyHeld =
+    (currentRun.status === 'freezing' || currentRun.status === 'running') &&
+    currentRun.claimedBy !== null;
+  if (activelyHeld) {
+    return c.json({
+      error: `Cohort run ${currentRun.id} is actively ${currentRun.status}; wait for it to finish before starting a new revision.`,
+      code: 'run_busy',
+    }, 400);
+  }
+
+  const reason = 'New cohort revision requested by reviewer';
+  const superseded = supersedeIdleCohortRun(currentRun.id, reason);
+  if (!superseded) {
+    return c.json({
+      error: `Cohort run ${currentRun.id} could not be superseded; it may have been superseded or claimed concurrently.`,
+      code: 'run_busy',
+    }, 400);
+  }
+
+  // Reset the cohort's members so the NEW revision re-coordinates them from
+  // fresh evidence: curation stage + pending + curation_data cleared (the
+  // run-owned projections of the superseded revision are historical). One
+  // transaction, cohort-batch scoped (the approved reset contract).
+  const db = getDb();
+  db.transaction(() => {
+    db.query(
+      `UPDATE onboarding_items
+       SET stage = 'curation', stage_status = 'pending', curation_data_json = NULL,
+           claimed_by = NULL, claimed_at = NULL, updated_at = ?
+       WHERE batch_id = ? AND stage IN ('review','curation')`,
+    ).run(new Date().toISOString(), cohort.batchId);
+  })();
+
+  return c.json({ superseded: true, cohortId });
 });
 
 /**
