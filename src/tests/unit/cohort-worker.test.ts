@@ -68,6 +68,14 @@ import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohort
 import type { CurationCohort, CohortRun, ExecutionEvidenceProjectionV1 } from '../../shared/schemas/cohorts';
 import { CurationCohortViewSchema } from '../../shared/schemas/cohorts';
 import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
+import {
+  computeCohortPageInputHash,
+  pageModelAuthorityFromConfig,
+  type CohortPagePlanAuthority,
+} from '../../onboarding/cohort-page-hash';
+import { resolveTargetsFromSnapshot } from '../../classification/curation-target-resolver';
+import { buildPageHierarchy } from '../../classification/page-assignment-llm';
+import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
 import {
   getCohortTitleOutputsByRun,
@@ -2684,6 +2692,257 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
       titleCallSpy.mockRestore();
     }
     expect(capturedWarns.some(line => line.includes('missing a persisted cohort title output'))).toBe(true);
+  });
+});
+
+// ─── PR7 C6 (issue #30): `execution_product_type` dependency stamped on
+// materialized `category_page` proposals (DECISION-E). The parent Page op
+// consumes the cohort Execution Product Type as page context, so the
+// materialized page decision IS downstream of the type — but ONLY under
+// execution-driven active cohort mode. Reviewed-driven (legacy/non-cohort)
+// runs keep today's behavior: `field_assignment` stamped
+// `reviewed_product_type`, `category_page` UNSTAMPED (Category Page
+// authority remains review-only there).
+describe('PR7 C6 — execution_product_type dependency on materialized page proposals (issue #30)', () => {
+  /** V1_CONFIG with the type + flavor + page curation targets ENABLED (so the
+   *  member pipeline materializes `category_page` proposals AND still emits
+   *  `field_assignment` proposals). */
+  const V1_CONFIG_TYPE_FIELD_AND_PAGE_ENABLED: ClassificationConfig = {
+    ...V1_CONFIG_TYPE_AND_FIELD_ENABLED,
+    curationTargets: V1_CONFIG_TYPE_AND_FIELD_ENABLED.curationTargets.map(target =>
+      target.id === 'test-pages' ? { ...target, enabled: true } : target,
+    ),
+  };
+
+  function saveTypeFieldAndPageEnabledConfig(wsId: string, wsPath: string): void {
+    saveClassificationConfig(wsPath, V1_CONFIG_TYPE_FIELD_AND_PAGE_ENABLED);
+    syncConfigToCache(wsId, loadClassificationConfig(wsPath));
+  }
+
+  /** Activate ONE verified Page import carrying every fixture page and return
+   *  the generated verified page_index ids by identity key (the SAME ids the
+   *  frozen page snapshot records and the seeded page outputs must use). */
+  function activateVerifiedPages(wsId: string): Map<string, string> {
+    const pages = [
+      { key: 'dog-food-dry', name: 'Dog Food Dry' },
+      { key: 'dog-treats', name: 'Dog Treats' },
+    ];
+    activatePageImportFromRecords({
+      workspaceId: wsId,
+      sourceHash: createHash('sha256').update('pr7-c6-pages').digest('hex'),
+      parserFormatVersion: 'pages-xml-1',
+      records: pages.map(page => ({
+        identity: { kind: 'exported_guid' as const, key: page.key, status: 'verified' as const },
+        name: page.name,
+        parentRef: null,
+        availability: 'available' as const,
+      })),
+      activatedBy: 'test',
+    });
+    const byKey = new Map<string, string>();
+    for (const row of listVerifiedPageOptions(wsId)) {
+      const match = pages.find(page => page.name === row.name);
+      if (match) byKey.set(match.key, row.id);
+    }
+    if (byKey.size !== pages.length) throw new Error('verified fixture pages not created');
+    return byKey;
+  }
+
+  /** Replicate the parent Page op's P-hash inputs for the v1 harness exactly:
+   *  the ordinal-0 member's frozen runtime snapshot (page target + verified
+   *  catalog + Execution Type label), a NULL model authority (v1 config has no
+   *  attested provider locality → `pageModelAuthorityFromConfig` resolves
+   *  null, hashed as null), and the shared Execution Type authority. The
+   *  seeded `coordinated_page` rows must hash to THIS value or the parent op
+   *  sees write-once drift. */
+  function expectedPageInputHash(
+    wsId: string,
+    wsPath: string,
+    run: CohortRun,
+    projection: ExecutionEvidenceProjectionV1,
+  ): string {
+    const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
+    const child = getDb().query(
+      'SELECT config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+    ).get(run.id, ordered[0]?.onboardingItemId ?? '') as { config_snapshot_hash: string } | undefined;
+    const snapshot = child?.config_snapshot_hash
+      ? getRuntimeSnapshotByHash(wsId, child.config_snapshot_hash)
+      : null;
+    if (!snapshot) throw new Error('ordinal-0 member runtime snapshot missing');
+    const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(run, snapshot);
+    const boundPolicyView = modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash);
+    const pageModelAuthority = pageModelAuthorityFromConfig(wsPath, boundPolicyView, snapshot.snapshotHash);
+    const resolved = resolveTargetsFromSnapshot(snapshot);
+    const pageTarget = resolved.pages[0];
+    const verifiedPagesAvailable = resolved.pages.length > 0 && pageTarget.options.length > 0;
+    const selectionMode = (pageTarget?.config.selectionMode ?? 'single') as 'single' | 'multiple';
+    const maxPages = selectionMode === 'multiple' ? 5 : 1;
+    const pagePlan: CohortPagePlanAuthority = {
+      pages: verifiedPagesAvailable
+        ? buildPageHierarchy(pageTarget.options, snapshot.pages.state === 'verified' ? snapshot.pages.records : [])
+        : [],
+      selectionMode,
+      maxPages,
+    };
+    return computeCohortPageInputHash({ run, projection, pagePlan, executionTypeAuthority, pageModelAuthority });
+  }
+
+  /** Seed `coordinated_page` outputs exactly as a prior processCohort entry
+   *  would have persisted them (`llm_cohort` + the canonical P-hash), so the
+   *  parent op REUSES with zero transport and members materialize proposals. */
+  function seedCohortPageOutputs(
+    wsId: string,
+    run: CohortRun,
+    inputHash: string,
+    pageBySku: Map<string, { pageId: string; pageName: string }>,
+  ): void {
+    insertCohortPageOutputsOnce({
+      workspaceId: wsId,
+      runId: run.id,
+      inputHash,
+      outputs: [...pageBySku.entries()].map(([productSku, page]) => ({
+        productSku,
+        output: {
+          status: 'assigned' as const,
+          pages: [{ pageId: page.pageId, pageName: page.pageName, confidence: 0.85 }],
+          source: 'llm_cohort' as const,
+        },
+        // NULL model_call_id: a v1 harness has no real audited transport rows,
+        // so the materializer links no call ids (the linkage validator never
+        // runs) — the dependency-stamping behavior is what this suite proves.
+        modelCallId: null,
+      })),
+    });
+  }
+
+  it('execution-driven cohort: EVERY materialized category_page proposal carries ONE execution_product_type dependency with the SAME value hash as field_assignment', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeFieldAndPageEnabledConfig(workspaceId, wsPath);
+    const pageIds = activateVerifiedPages(workspaceId);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    // Seed BOTH durable sets (v1 harness: no frozen plan → reuse, zero calls).
+    const projection = loadFrozenProjectionForRun(workspaceId, finalized);
+    seedV1TitleOutputs(workspaceId, finalized);
+    seedCohortPageOutputs(workspaceId, finalized, expectedPageInputHash(workspaceId, wsPath, finalized, projection), new Map([
+      ['100000000001', { pageId: pageIds.get('dog-food-dry')!, pageName: 'Dog Food Dry' }],
+      ['100000000002', { pageId: pageIds.get('dog-treats')!, pageName: 'Dog Treats' }],
+    ]));
+    expect(countCohortPageOutputs(finalized.id)).toBe(2);
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+    expect(summary.completedMembers).toBe(2);
+
+    const expectedHash = hashCanonicalJson({
+      executionProductTypeId: finalized.executionProductTypeId!,
+      productTypeConfidence: finalized.productTypeConfidence!,
+    });
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      const proposals = stored.curationData!.classificationProposals;
+      // PR7 C6: every materialized category_page proposal carries ONE
+      // execution_product_type row with the SAME {executionProductTypeId,
+      // productTypeConfidence} hash as field_assignment.
+      const pageProposals = proposals.filter(proposal => proposal.proposalType === 'category_page');
+      expect(pageProposals.length).toBeGreaterThan(0);
+      for (const proposal of pageProposals) {
+        const deps = listDependenciesForProposal(proposal.id);
+        expect(deps).toHaveLength(1);
+        expect(deps[0].dependencyKind).toBe('execution_product_type');
+        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+        expect(deps[0].dependencyValueHash).toBe(expectedHash);
+        expect(deps[0].workspaceId).toBe(workspaceId);
+        expect(deps[0].proposalId).toBe(proposal.id);
+      }
+      // field_assignment behavior unchanged (one execution_product_type row
+      // each, same value hash).
+      const fieldAssignments = proposals.filter(proposal => proposal.proposalType === 'field_assignment');
+      expect(fieldAssignments.length).toBeGreaterThan(0);
+      for (const proposal of fieldAssignments) {
+        const deps = listDependenciesForProposal(proposal.id);
+        expect(deps).toHaveLength(1);
+        expect(deps[0].dependencyKind).toBe('execution_product_type');
+        expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+        expect(deps[0].dependencyValueHash).toBe(expectedHash);
+      }
+      // primary_product_type proposals stay unstamped.
+      for (const proposal of proposals.filter(proposal => proposal.proposalType === 'primary_product_type')) {
+        expect(listDependenciesForProposal(proposal.id)).toHaveLength(0);
+      }
+    }
+  });
+
+  it('reviewed-driven member: field_assignment carries reviewed_product_type while category_page stays UNSTAMPED; the execution-driven sibling still stamps category_page', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeFieldAndPageEnabledConfig(workspaceId, wsPath);
+    const pageIds = activateVerifiedPages(workspaceId);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    // Member 1 gets a provenance-compatible reviewed type fact (same type id
+    // as the execution type — reviewed-first precedence still applies).
+    seedReviewedTypeDecision(workspaceId, wsPath, items[0].upc, items[0].id, 'dry-dog-food');
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+
+    const projection = loadFrozenProjectionForRun(workspaceId, finalized);
+    seedV1TitleOutputs(workspaceId, finalized);
+    seedCohortPageOutputs(workspaceId, finalized, expectedPageInputHash(workspaceId, wsPath, finalized, projection), new Map([
+      ['100000000001', { pageId: pageIds.get('dog-food-dry')!, pageName: 'Dog Food Dry' }],
+      ['100000000002', { pageId: pageIds.get('dog-treats')!, pageName: 'Dog Treats' }],
+    ]));
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed');
+
+    // Reviewed-driven member: field_assignment → reviewed_product_type rows;
+    // category_page → NO type dependency rows (pre-PR7 rule preserved).
+    const reviewedMember = findItemById(items[0].id)!;
+    expect(reviewedMember.stageStatus).toBe('completed');
+    expect(reviewedMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'reviewed' });
+    const reviewedProposals = reviewedMember.curationData!.classificationProposals;
+    const reviewedPages = reviewedProposals.filter(proposal => proposal.proposalType === 'category_page');
+    expect(reviewedPages.length).toBeGreaterThan(0);
+    for (const proposal of reviewedPages) {
+      expect(listDependenciesForProposal(proposal.id)).toHaveLength(0);
+    }
+    for (const proposal of reviewedProposals.filter(proposal => proposal.proposalType === 'field_assignment')) {
+      const deps = listDependenciesForProposal(proposal.id);
+      expect(deps).toHaveLength(1);
+      expect(deps[0].dependencyKind).toBe('reviewed_product_type');
+      expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+    }
+
+    // Execution-driven sibling: BOTH kinds stamped execution_product_type.
+    const executionMember = findItemById(items[1].id)!;
+    expect(executionMember.stageStatus).toBe('completed');
+    expect(executionMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'execution' });
+    const executionPages = executionMember.curationData!.classificationProposals.filter(
+      proposal => proposal.proposalType === 'category_page',
+    );
+    expect(executionPages.length).toBeGreaterThan(0);
+    for (const proposal of executionPages) {
+      const deps = listDependenciesForProposal(proposal.id);
+      expect(deps).toHaveLength(1);
+      expect(deps[0].dependencyKind).toBe('execution_product_type');
+      expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+    }
   });
 });
 

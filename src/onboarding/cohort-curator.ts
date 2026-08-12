@@ -2371,21 +2371,30 @@ export async function processCohort(
       // crash never leaves a completed child without its projection, and the
       // recovery skip rule requires all three together. PR4 C4b dependency
       // metadata rows are stamped INSIDE this same transaction, proposal-
-      // accurate with SEPARATE KINDS (PR5 hardening): only the child run's
+      // accurate with SEPARATE KINDS (PR5 hardening): the child run's
       // `field_assignment` proposals — the ones the effective Curation
       // Product Type actually drives — get ONE type dependency row each,
       // `execution_product_type` when the effective type came from the cohort
       // Execution Product Type (PR5 DECISION-H, execution-source only) and
       // `reviewed_product_type` when it came from a reviewed Primary Product
-      // Type. `primary_product_type` / `category_page` proposals are NEVER
-      // type-stamped (the type proposal is proposed from member evidence and
-      // is not downstream of the effective type; Category Page authority is
-      // review-only until PR7), and a `none` member stamps nothing — so a
-      // future type change can never falsely stale proposals the type did not
-      // drive. Written here (and only here) means the rows exist IFF the
-      // member projection commit exists — a crash before this transaction
-      // leaves zero rows, and a committed projection is never missing its
-      // dependencies.
+      // Type. PR7 C6 (issue #30, DECISION-E): materialized `category_page`
+      // proposals are ALSO genuinely type-dependent — and get ONE
+      // `execution_product_type` row each with the SAME value hash — but ONLY
+      // under execution-driven active-cohort mode (the parent Page op consumes
+      // the cohort Execution Product Type as page context, so the materialized
+      // page decision IS downstream of the type). Reviewed-driven
+      // (legacy/non-cohort) `category_page` proposals stay UNSTAMPED:
+      // Category Page authority there remains review-only (PR5), so the
+      // reviewed effective type drives only
+      // `attribute_applicability` / `product_attribute_proposals`.
+      // `primary_product_type` / `configuration_gap` / `reviewable_abstention`
+      // proposals are NEVER type-stamped (the type proposal is proposed from
+      // member evidence and is not downstream of the effective type), and a
+      // `none` member stamps nothing — so a future type change can never
+      // falsely stale proposals the type did not drive. Written here (and
+      // only here) means the rows exist IFF the member projection commit
+      // exists — a crash before this transaction leaves zero rows, and a
+      // committed projection is never missing its dependencies.
       // PR4 review fix (SHOULD-FIX 3) preserved: the stamping targets EVERY
       // `field_assignment` proposal row belonging to the child run —
       // including rows persisted by a pre-crash attempt (a crash seam can
@@ -2406,26 +2415,35 @@ export async function processCohort(
         const execType = prepared.cohortExecutionType;
         const effectiveType = prepared.effectiveType;
         // PR5 hardening (P2): proposal-accurate type dependency stamping with
-        // SEPARATE KINDS. ONLY `field_assignment` proposals are downstream of
-        // the effective Curation Product Type (PR5's effective type drives
-        // ONLY the `attribute_applicability` / `product_attribute_proposals`
-        // stages):
+        // SEPARATE KINDS. The proposals downstream of the effective Curation
+        // Product Type are:
+        //   - `field_assignment` proposals ALWAYS (the PR5 effective type
+        //     drives `attribute_applicability` /
+        //     `product_attribute_proposals`);
+        //   - `category_page` proposals ONLY under execution-driven active-
+        //     cohort mode (PR7 C6, DECISION-E): the parent Page op consumes
+        //     the cohort Execution Product Type as page context, so the
+        //     materialized page decision IS downstream of the type.
+        // Under each source:
         //   - source `execution` -> one `execution_product_type` row per
-        //     field_assignment proposal, target = the execution type id,
-        //     value hash = hashCanonicalJson({executionProductTypeId,
-        //     productTypeConfidence}) (unchanged PR4 tuple);
+        //     stamped proposal (field_assignment AND, in active cohort mode,
+        //     category_page), target = the execution type id, value hash =
+        //     hashCanonicalJson({executionProductTypeId,
+        //     productTypeConfidence}) (unchanged PR4 tuple — the SAME hash
+        //     shape for both proposal kinds);
         //   - source `reviewed` -> one `reviewed_product_type` row per
-        //     field_assignment proposal, target = the reviewed type id (= the
-        //     effective id — reviewed-first resolution, so the reviewed id
-        //     wins over the execution id), value hash =
+        //     field_assignment proposal ONLY (category_page stays UNSTAMPED:
+        //     reviewed-driven runs keep today's behavior — Category Page
+        //     authority remains review-only there), target = the reviewed
+        //     type id (= the effective id — reviewed-first resolution, so the
+        //     reviewed id wins over the execution id), value hash =
         //     hashCanonicalJson({reviewedProductTypeId});
         //   - source `none` -> no rows.
-        // `primary_product_type` / `category_page` / `configuration_gap` /
+        // `primary_product_type` / `configuration_gap` /
         // `reviewable_abstention` proposals get NO type dependency rows: the
         // primary-product-type proposal is proposed from member evidence and
         // is NOT downstream of the cohort Execution Type (a type change must
-        // never stale the type proposal itself), and Category Page proposals
-        // are review-authority-only until PR7. `source === 'execution'`
+        // never stale the type proposal itself). `source === 'execution'`
         // implies the execution id was non-null and `execType` is defined
         // (the resolver never emits `execution` for an absent id, and
         // `cohortExecutionType` is filled exactly when the parent run carries
@@ -2444,10 +2462,17 @@ export async function processCohort(
                 productTypeConfidence: execType!.confidence,
               })
             : hashCanonicalJson({ reviewedProductTypeId: dependencyTargetId });
-          const childFieldAssignmentRows = getDb().query(
-            "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'field_assignment'",
-          ).all(childRun.id) as Array<{ id: string }>;
-          for (const proposalRow of childFieldAssignmentRows) {
+          // PR7 C6: `category_page` proposals join the stamping set ONLY when
+          // execution-driven (active cohort mode — the materializer ran); a
+          // reviewed-driven run keeps the pre-PR7 rule where Category Page
+          // proposals are never type-stamped.
+          const stampableProposalTypes: string[] = ['field_assignment'];
+          if (executionDriven) stampableProposalTypes.push('category_page');
+          const typePlaceholders = stampableProposalTypes.map(() => '?').join(', ');
+          const childStampedRows = getDb().query(
+            `SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type IN (${typePlaceholders})`,
+          ).all(childRun.id, ...stampableProposalTypes) as Array<{ id: string }>;
+          for (const proposalRow of childStampedRows) {
             insertProposalDependency({
               workspaceId,
               proposalId: proposalRow.id,
