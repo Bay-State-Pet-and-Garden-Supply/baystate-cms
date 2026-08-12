@@ -33,12 +33,58 @@ import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { redactTransportText, type ModelPolicyView } from '../classification/model-policy-gateway';
 import { selectPrimaryProductTypeProposal } from '../classification/proposal-selection';
 import { determineProductGroup } from './product-line-grouper';
-import type { ProductLineItemSnapshot, StageDefinition } from '../classification/types';
+import type { ProductLineItemSnapshot, StageDefinition, PipelineRunResult, ClassificationStageName } from '../classification/types';
 import type { OnboardingItem, CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationEvidence } from '../shared/schemas/classification';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
 import { buildFrozenItem } from './cohort-curator';
 import type { PreparedCohortContext } from './cohort-curator';
+
+// ─── PR8 C3 — synthesis ordering guard (DECISION-C) ──────────────────────────
+
+/**
+ * The required stage set every active-cohort member pipeline must complete
+ * before post-pipeline synthesis (description / search-keyword synthesis)
+ * may run. Ordering guarantee (PR8 DECISION-C): synthesis is STRICTLY after
+ * every pipeline stage, and in cohort mode it consumes ONLY frozen member-run
+ * inputs — never live config, live Pages, current siblings, mutable
+ * onboarding extraction, or current Product Type data.
+ */
+export const COHORT_SYNTHESIS_REQUIRED_STAGES: ClassificationStageName[] = [
+  'evidence_extraction',
+  'name_consolidation',
+  'primary_product_type_proposal',
+  'attribute_applicability',
+  'product_attribute_proposals',
+  'category_page_proposals',
+  'product_draft_projection',
+];
+
+/**
+ * PR8 C3 (DECISION-C): fail-closed synthesis ordering assertion — runs after
+ * the pipeline completes and BEFORE `synthesizeSearchKeywords` /
+ * `curatedDescription` execute. A failed stage already fails the member (the
+ * pipeline throws); this guard makes the ordering contract explicit and fails
+ * closed when a required stage SILENTLY produced no terminal output (neither
+ * a `stageOutputs` entry for a succeeded stage nor a `reviewable_abstention`
+ * proposal for an abstained stage) — a member must never be synthesized into
+ * a partial draft from missing stage outputs.
+ */
+export function assertCohortSynthesisOrdering(result: PipelineRunResult): void {
+  const abstainedStages = new Set(
+    result.proposals
+      .filter(p => p.proposalType === 'reviewable_abstention')
+      .map(p => p.targetId as string),
+  );
+  for (const stageName of COHORT_SYNTHESIS_REQUIRED_STAGES) {
+    if (result.stageOutputs[stageName] !== undefined) continue;
+    if (abstainedStages.has(stageName)) continue;
+    throw new Error(
+      `Cohort synthesis ordering guard (PR8 DECISION-C): required stage "${stageName}" produced no terminal ` +
+        'output before description/search-keyword synthesis; failing closed — no partial draft is synthesized.',
+    );
+  }
+}
 
 // ─── Page Assignment Validation ───────────────────────────────────────────────
 
@@ -594,6 +640,15 @@ export async function curateItemWithPipeline(
       acceptedProposals: [],
       allProposals: [],
     });
+
+    // PR8 C3 (DECISION-C): description/search-keyword synthesis is strictly
+    // post-pipeline. In active cohort mode the pipeline must have produced a
+    // terminal output for every required stage BEFORE synthesis runs (a
+    // silently-no-output stage fails the member closed — never a partial
+    // draft). Legacy mode keeps the historical post-pipeline order.
+    if (cohortMode) {
+      assertCohortSynthesisOrdering(result);
+    }
 
     // Determine final status
     const hasAbstentions = result.proposals.some(p => p.proposalType === 'reviewable_abstention');
