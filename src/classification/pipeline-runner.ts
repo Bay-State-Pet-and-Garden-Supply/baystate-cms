@@ -328,7 +328,11 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
   for (const stageName of order) {
     const stage = stages.find(s => s.name === stageName);
     if (!stage) continue;
-    const stageInput: StageInput = { sku: input.sku, onboardingItemId: input.onboardingItemId, sourceKind: input.sourceKind, evidence: allEvidence, acceptedProposals, allProposals };
+    // PR8 C1 (issue #30): prior stage outputs are threaded to downstream
+    // stages so e.g. `product_draft_projection` reads the SAME
+    // `name_consolidation.metadata` the orchestrator reads post-run (never a
+    // re-derivation).
+    const stageInput: StageInput = { sku: input.sku, onboardingItemId: input.onboardingItemId, sourceKind: input.sourceKind, evidence: allEvidence, acceptedProposals, allProposals, stageOutputs };
     let failureRecorded = false;
     try {
       const result = await stage.execute(stageInput, context);
@@ -445,7 +449,7 @@ export async function runPipeline(stages: StageDefinition[], context: StageConte
   return { evidence: allEvidence, proposals: allProposals, stageOutputs };
 }
 
-function resolveStageOrder(stages: StageDefinition[]): ClassificationStageName[] {
+export function resolveStageOrder(stages: StageDefinition[]): ClassificationStageName[] {
   const names = new Set(stages.map(s => s.name));
   const inDegree = new Map<ClassificationStageName, number>();
   const dependents = new Map<ClassificationStageName, ClassificationStageName[]>();

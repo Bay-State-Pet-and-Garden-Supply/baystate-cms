@@ -130,6 +130,8 @@ export default defineConfig({
       // PR5 effective-curation-type suites (bun:test imports — vitest cannot collect them)
       'src/tests/unit/effective-curation-type.test.ts',
       'src/tests/unit/effective-curation-stages.test.ts',
+      // PR8 draft-projection stage suite (bun:test imports — vitest cannot collect it)
+      'src/tests/unit/draft-projection.test.ts',
       // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
       'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],

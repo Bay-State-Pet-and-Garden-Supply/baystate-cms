@@ -31,6 +31,16 @@ export interface StageInput {
   acceptedProposals: ClassificationProposal[];
   /** All proposals from this run (including pending/stale) */
   allProposals: ClassificationProposal[];
+  /**
+   * PR8 C1 (issue #30): outputs of the stages that already ran in this
+   * pipeline, keyed by stage name — the SAME `stageOutputs` map the pipeline
+   * runner returns after the run. Populated by `runPipeline` before every
+   * stage execution; a stage invoked directly in isolation (unit tests) omits
+   * it. Downstream stages read prior-stage output metadata here (e.g.
+   * `product_draft_projection` reads `name_consolidation.metadata` for the
+   * coordinated/consolidated title) — never a re-derivation.
+   */
+  stageOutputs?: Partial<Record<ClassificationStageName, StageOutput>>;
 }
 
 // ─── Stage Output ──────────────────────────────────────────────────────────────
