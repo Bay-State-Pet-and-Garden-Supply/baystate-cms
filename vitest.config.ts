@@ -136,6 +136,9 @@ export default defineConfig({
       'src/tests/unit/synthesis-ordering-guard.test.ts',
       // PR8 acceptance (bun:test imports — vitest cannot collect it)
       'src/tests/unit/pr8-acceptance.test.ts',
+      // PR10 acceptance (bun:test imports — vitest cannot collect it; runs
+      // under bun test via the test:db third invocation group)
+      'src/tests/unit/pr10-acceptance.test.ts',
       // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
       'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],
