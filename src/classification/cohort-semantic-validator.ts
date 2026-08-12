@@ -274,7 +274,6 @@ export function validateMemberSemantics(
   // proposal set at all (legacy/direct synthetic callers).
   const pageProposalSetSupplied = input.pageProposals !== undefined;
   const pageProposals = input.pageProposals ?? [];
-  const hasPageProposals = pageProposals.length > 0;
   const memberPageIds = pageProposals
     .map(proposal => proposal.pageId)
     .filter((id): id is string => id !== null && id !== undefined && id.length > 0);

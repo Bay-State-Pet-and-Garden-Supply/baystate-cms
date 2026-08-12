@@ -56,7 +56,6 @@ import {
   failFrozenCohortRunForConflict,
   supersedeOwnedCohortRunForOutputDrift,
   insertProposalDependency,
-  getCohortMemberRunForTitleAudit,
   writeCohortBrandSemanticUpdates,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
