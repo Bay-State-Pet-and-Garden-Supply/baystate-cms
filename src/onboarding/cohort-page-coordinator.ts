@@ -40,30 +40,33 @@
  *    stored hash(es) + row count) — it NEVER re-coordinates and NEVER deletes.
  *
  * 5. **Coordinate — only when the set is EMPTY** — under a scoped
- *    `CohortLeaseKeeper`: multi-item groups (per `groupByProductLine` over the
- *    FROZEN sibling views) go through the UNCACHED page core
- *    (`coordinateCohortPagesCore` from `src/classification/cohort-page-
- *    coordinator.ts` — the ONE prompt/validation authority, DECISION-H) with
- *    the keeper's `assertHeld` threaded into the audited transport and the
- *    `afterCoordinatedCall` crash seam; singleton members (group size 1) go
- *    through the single-item path (`llmAssignCategoryPages`) over a member
- *    context derived DETERMINISTICALLY from the frozen authority slice
- *    (`pageAuthorityFromProjectionMember` fields + the Execution Product Type
- *    label as productType + the frozen page hierarchy) — never from mutable
- *    data, so the P-hash covers the singleton decision by construction. The
- *    audited calls bind to the ordinal-0 member child run (mirrors the title
- *    op's DECISION-N audit binding) and FAIL CLOSED before any transport when
- *    the frozen plan has no compatible entry. Abstentions are DURABLE: every
- *    member gets a row — `{status:'assigned', pages, source:'llm_cohort'}`
- *    (model_call_id = the producing group/singleton call id) or
- *    `{status:'abstained', reason}` (model_call_id NULL for deterministic
- *    abstentions). All rows persist via `insertCohortPageOutputsOnce` in ONE
- *    transaction (all-or-nothing), and any `CohortOutputAlreadyCommittedError`
- *    from a commit race is converted to `CohortPageAuthorityDriftError`.
- *    `HeartbeatLostError` propagates unchanged (never converted into an 'LLM
- *    unavailable → fallback' outcome): a stale owner aborts with NO output
- *    rows and the run is left to the reclaiming sibling, which re-enters and
- *    reuses-or-coordinates.
+ *    `CohortLeaseKeeper`: EVERY group (multi-item AND singleton — per
+ *    `groupByProductLine` over the FROZEN sibling views, DECISION-A) goes
+ *    through the UNCACHED page core (`coordinateCohortPagesCore` from
+ *    `src/classification/cohort-page-coordinator.ts` — the ONE
+ *    prompt/validation authority, DECISION-H) with the keeper's `assertHeld`
+ *    threaded into the audited transport, the `afterCoordinatedCall` crash
+ *    seam, and the frozen Execution Type context (v2 prompt). Singletons are
+ *    ONE-MEMBER core invocations (`allowSingleProduct`) — the SAME v2 prompt
+ *    family, the SAME audited `cohort_page_assignment_parent` operation, and
+ *    the SAME lease/crash seams as groups (PR7 review R2, F2 — the legacy
+ *    `llmAssignCategoryPages` singleton path is gone from the parent op; the
+ *    operation mismatch and prompt-parity gap collapse). All members render
+ *    from the SAME canonical bundle the P-hash consumed — never from mutable
+ *    data, so the P-hash covers every decision by construction. The audited
+ *    calls bind to the ordinal-0 member child run (mirrors the title op's
+ *    DECISION-N audit binding) under the NEW `cohort_page_assignment_parent`
+ *    operation and FAIL CLOSED before any transport when the frozen plan has
+ *    no compatible entry. Abstentions are DURABLE: every member gets a row —
+ *    `{status:'assigned', pages, source:'llm_cohort'}` (model_call_id = the
+ *    producing group/singleton call id) or `{status:'abstained', reason}`
+ *    (model_call_id NULL for deterministic abstentions). All rows persist via
+ *    `insertCohortPageOutputsOnce` in ONE transaction (all-or-nothing), and
+ *    any `CohortOutputAlreadyCommittedError` from a commit race is converted
+ *    to `CohortPageAuthorityDriftError`. `HeartbeatLostError` propagates
+ *    unchanged (never converted into an 'LLM unavailable → fallback' outcome):
+ *    a stale owner aborts with NO output rows and the run is left to the
+ *    reclaiming sibling, which re-enters and reuses-or-coordinates.
  *
  * 6. Returns the freshly persisted map (sku → parsed payload + model_call_id).
  *
@@ -113,13 +116,12 @@ import { titleExecutionTypeAuthorityFromRun } from './cohort-title-hash';
 import {
   buildCohortPageAuthorityBundle,
   computeCohortPageInputHash,
-  pageModelAuthorityFromConfig,
   pageAuthorityMemberToSnapshot,
 } from './cohort-page-hash';
 import type { CohortPagePlanAuthority } from './cohort-page-hash';
 import { coordinateCohortPagesCore } from '../classification/cohort-page-coordinator';
 import type { CohortPageMemberResult } from '../classification/cohort-page-coordinator';
-import { buildPageHierarchy, llmAssignCategoryPages } from '../classification/page-assignment-llm';
+import { buildPageHierarchy } from '../classification/page-assignment-llm';
 import { resolveTargetsFromSnapshot } from '../classification/curation-target-resolver';
 import { groupByProductLine } from './cohort-name-coordinator';
 import { CohortLeaseKeeper } from './cohort-lease-keeper';
@@ -267,21 +269,18 @@ export async function ensureCohortPagesCoordinated(
     );
   }
 
-  // Step 1 — the canonical page authority (DECISION-B/DECISION-F): Execution
-  // Product Type (the SAME object the v2 prompt's type context renders),
-  // operation-specific Page model authority, and the frozen page target
-  // config + verified page catalog (the SAME derivation the child's
-  // `processPageTarget` uses: `targetConfig.selectionMode ?? 'single'`,
-  // `maxPages = multiple ? 5 : 1`, `buildPageHierarchy` over the frozen
-  // verified records).
+  // Step 1 — the canonical page authority (DECISION-B/DECISION-F + PR7 review
+  // R2 F2c): Execution Product Type (the SAME object the v2 prompt's type
+  // context renders), the FROZEN-PLAN Page model authority + rule version
+  // (derived inside `buildCohortPageAuthorityBundle` from THIS snapshot's
+  // `cohort_page_assignment_parent` plan entry — never live credentials), and
+  // the frozen page target config + verified page catalog (the SAME
+  // derivation the child's `processPageTarget` uses:
+  // `targetConfig.selectionMode ?? 'single'`, `maxPages = multiple ? 5 : 1`,
+  // `buildPageHierarchy` over the frozen verified records).
   const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(run, memberSnapshot0);
   const boundPolicyView = modelPolicyViewFromConfig(
     memberSnapshot0.modelPolicy as never,
-    memberSnapshot0.snapshotHash,
-  );
-  const pageModelAuthority = pageModelAuthorityFromConfig(
-    workspacePath,
-    boundPolicyView,
     memberSnapshot0.snapshotHash,
   );
   const resolved = resolveTargetsFromSnapshot(memberSnapshot0);
@@ -307,7 +306,9 @@ export async function ensureCohortPagesCoordinated(
   // prompt path builds its products/pages/selection from THIS bundle (never
   // re-deriving from the raw frozen line context), so hashed authority ==
   // prompted authority by construction (no duplicated truncation literals, no
-  // order dependence).
+  // order dependence). PR7 review R2 (F2c): the bundle derives modelAuthority
+  // + ruleVersion from the frozen plan entry via `snapshot` — the parent op
+  // loads memberSnapshot0 BEFORE building the bundle.
   const authorityBundle = buildCohortPageAuthorityBundle({
     run,
     projection,
@@ -315,7 +316,7 @@ export async function ensureCohortPagesCoordinated(
     pageCatalog: pagePlan.pages,
     pagePlan,
     executionTypeAuthority,
-    pageModelAuthority,
+    snapshot: memberSnapshot0,
   });
   // The P-set (DECISION-A): ALL members — groups AND singletons — unlike the
   // title kind's multi-item-group-only DECISION-O. Matches the bundle's sorted
@@ -392,27 +393,23 @@ export async function ensureCohortPagesCoordinated(
   }
   const keeper = new CohortLeaseKeeper(run.id, workerId, COHORT_LEASE_TTL_MS).start();
   try {
-    // FROZEN AUDIT AUTHORITY: the audited page calls bind to the ordinal-0
-    // member child run (mirrors the title op's DECISION-N audit binding). The
-    // group path uses the `cohort_page_assignment` operation and the
-    // singleton path the `page_assignment` operation (the SAME operations the
-    // child's `processPageTarget` uses — `buildModelCallContext` mirrors).
-    // FAIL CLOSED before any transport when the frozen plan has no compatible
-    // entry (schema-v1 snapshot, missing entry, version drift) — a
+    // FROZEN AUDIT AUTHORITY (PR7 review R2, F2): ONE audited model-call
+    // context for the NEW parent operation `cohort_page_assignment_parent` —
+    // shared by every parent page call (groups AND singletons — a singleton
+    // is a one-member invocation of the SAME core, so there is exactly ONE
+    // operation and ONE prompt family on the whole parent path). The audit
+    // rows therefore carry the operation + the v2 prompt/rule versions from
+    // the frozen plan (truthful provenance). FAIL CLOSED before any transport
+    // when the frozen plan has no compatible entry (schema-v1 snapshot,
+    // pre-change registry-v1 snapshot with no entry, version drift) — a
     // non-audited live page call is never made.
-    const groupModelCallContext = requireModelCallContext(
+    const parentModelCallContext = requireModelCallContext(
       memberSnapshot0,
       childRun0.id,
-      'cohort_page_assignment',
+      'cohort_page_assignment_parent',
       1,
     );
-    const singletonModelCallContext = requireModelCallContext(
-      memberSnapshot0,
-      childRun0.id,
-      'page_assignment',
-      1,
-    );
-    if (!groupModelCallContext || !singletonModelCallContext) {
+    if (!parentModelCallContext) {
       throw new Error(
         `[CohortPageCoordinator] No audited model-call context for ${member0.onboardingItemId} (run ${run.id}) ` +
           '— refusing to make a non-audited page call.',
@@ -422,30 +419,31 @@ export async function ensureCohortPagesCoordinated(
     const pageHierarchy = authorityBundle.pages;
     const selectionMode = authorityBundle.selection.selectionMode;
     const maxPages = authorityBundle.selection.maxPages;
-    // PR7 review R1 (B2): the group prompt renders the SAME normalized member
-    // slices the P-hash consumed (bundle members — sorted, shared truncation)
-    // converted to the `ProductLineItemSnapshot` shape `buildPrompt` renders.
-    // NEVER re-derives from the mutable/raw frozen line context.
+    // PR7 review R1 (B2): the parent prompt renders the SAME normalized
+    // member slices the P-hash consumed (bundle members — sorted, shared
+    // truncation) converted to the `ProductLineItemSnapshot` shape
+    // `buildPrompt` renders. NEVER re-derives from the mutable/raw frozen
+    // line context.
     const snapshotBySku = new Map(
       authorityBundle.members.map(member => [member.sku, pageAuthorityMemberToSnapshot(member)]),
     );
     const memberValues = new Map<string, CoordinatedPageMemberValue>();
-    const singletonSkus: string[] = [];
 
-    // Multi-item groups → the UNCACHED page core (the ONE prompt/validation
-    // authority shared with the legacy wrapper, DECISION-H). The audited
-    // group call id is shared by every member of the group (the titles
-    // provenance precedent). `afterCoordinatedCall` is threaded so the
-    // pre-commit crash seam fires after each successful group transport.
+    // EVERY group — multi-item AND singleton (DECISION-A) — goes through the
+    // UNCACHED page core (the ONE prompt/validation authority shared with the
+    // legacy wrapper, DECISION-H). The audited call id is shared by every
+    // member of the group (the titles provenance precedent). Singletons are
+    // ONE-MEMBER invocations with `allowSingleProduct` — the SAME v2 prompt
+    // family, the SAME `cohort_page_assignment_parent` operation, and the
+    // SAME ownership/crash seams as groups (PR7 review R2, F2: the legacy
+    // `llmAssignCategoryPages` singleton path is gone from the parent op).
+    // `afterCoordinatedCall` is threaded so the pre-commit crash seam fires
+    // after each successful transport.
     for (const [groupKey, groupItems] of groupByProductLine(frozenLineContext.frozenBatchItems).entries()) {
       const skus = groupItems
         .map(item => item.upc)
         .filter((sku): sku is string => Boolean(sku));
       if (skus.length === 0) continue;
-      if (skus.length === 1) {
-        singletonSkus.push(skus[0]);
-        continue;
-      }
       const products = skus
         .map(sku => snapshotBySku.get(sku))
         .filter((snapshot): snapshot is ProductLineItemSnapshot => Boolean(snapshot));
@@ -463,7 +461,7 @@ export async function ensureCohortPagesCoordinated(
           selectionMode,
           maxPages,
           modelPolicy: boundPolicyView,
-          modelCall: groupModelCallContext,
+          modelCall: parentModelCallContext,
           snapshot: memberSnapshot0,
         },
         {
@@ -474,6 +472,10 @@ export async function ensureCohortPagesCoordinated(
           // P-hash consumed). The legacy wrapper passes no opts → v1
           // byte-identical.
           executionTypeContext: authorityBundle.executionTypeAuthority,
+          // PR7 review R2 (F2): a singleton group is a ONE-MEMBER core
+          // invocation — skip the >=2 products guard so the v2 prompt family
+          // renders (prompt-parity with groups).
+          allowSingleProduct: skus.length === 1,
         },
       );
       for (const sku of skus) {
@@ -484,85 +486,6 @@ export async function ensureCohortPagesCoordinated(
           );
         }
         memberValues.set(sku, toMemberValue(result));
-      }
-    }
-
-    // Singletons → the single-item path over the FROZEN-derived member
-    // context (`pageAuthorityFromProjectionMember` fields + the Execution
-    // Product Type label as productType + the frozen page hierarchy) — NEVER
-    // mutable data, so the P-hash covers the singleton decision by
-    // construction. `llmAssignCategoryPages` is called with modelPolicy /
-    // modelCall / snapshot mirroring the child's singleton construction
-    // (`buildModelCallContext(..., 'page_assignment', 1)`).
-    for (const sku of singletonSkus) {
-      // PR7 review R1 (B2): the singleton authority comes from the SAME
-      // canonical bundle the P-hash consumed (never a re-derivation).
-      const authority = authorityBundle.members.find(member => member.sku === sku);
-      if (!authority) {
-        throw new Error(
-          `[CohortPageCoordinator] Singleton member ${sku} has no frozen projection member (run ${run.id}).`,
-        );
-      }
-      // Pre-await ownership assertion before the singleton transport.
-      keeper.assertHeld();
-      const llmResult = await llmAssignCategoryPages(
-        {
-          productName: authority.name,
-          productDescription: authority.description,
-          ocrSummary: {
-            species: authority.species,
-            flavor: authority.flavor,
-            lifeStage: authority.lifeStage,
-            productForm: authority.productForm,
-            healthConcern: authority.healthConcern,
-            productName: null,
-            brand: authority.brand,
-          },
-          productType: authorityBundle.executionTypeAuthority.label,
-          pages: pageHierarchy,
-          selectionMode,
-          maxPages,
-          modelPolicy: boundPolicyView,
-          modelCall: singletonModelCallContext,
-          snapshot: memberSnapshot0,
-        },
-        {
-          // PR7 review R1 (B3): the parent-owned singleton transport is pinned
-          // to the SAME protected operation the P-hash claims
-          // ('cohort_page_assignment') so the resolved {provider, model}
-          // equals the hashed model authority — never the legacy
-          // 'page_assignment' route (which all legacy callers keep, unchanged).
-          protectedOperation: 'cohort_page_assignment',
-        },
-      );
-      // Crash seam: the singleton transport resolved; simulate a pre-commit
-      // crash before any output set is persisted (hardening-B pattern).
-      await params.afterCoordinatedCall?.();
-      // Post-await ownership guard BEFORE any write.
-      keeper.assertHeld();
-      if (llmResult && llmResult.pages.length > 0) {
-        memberValues.set(sku, {
-          output: {
-            status: 'assigned',
-            pages: llmResult.pages.map(page => ({
-              pageId: page.pageId,
-              pageName: page.pageName,
-              confidence: page.confidence,
-            })),
-            source: 'llm_cohort',
-          },
-          modelCallId: llmResult.modelCallIds?.[0] ?? null,
-        });
-      } else {
-        // The singleton produced no safe assignment: DURABLE deterministic
-        // abstention (never a fallback invention, never a re-call on retry).
-        memberValues.set(sku, {
-          output: {
-            status: 'abstained',
-            reason: 'Cohort page assignment produced no result for singleton member.',
-          },
-          modelCallId: null,
-        });
       }
     }
 

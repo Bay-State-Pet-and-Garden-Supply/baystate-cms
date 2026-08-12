@@ -32,13 +32,13 @@
  * web-extracted brand), and species/flavor/lifeStage/productForm/healthConcern
  * from the packaging-OCR data.
  *
- * OPERATION-SPECIFIC MODEL AUTHORITY (DECISION-B): the P-hash covers the
- * `{provider, model}` resolved at freeze time via
- * `getLlmConfigForTask('category_page_assignment', {allowFallback,
- * modelPolicy, protectedOperation:'cohort_page_assignment'})` — NOT the broad
- * `policyDigest` P2 the T-hash carries (the Page projection is genuinely
- * operation-specific from day one). Unconfigured (policy absent/denied/no
- * credential) resolves to null and is hashed as null.
+ * OPERATION-SPECIFIC MODEL AUTHORITY (DECISION-B + PR7 review R2 F2c): the
+ * P-hash covers the `{provider, model}` from the FROZEN model-execution-plan
+ * entry for `cohort_page_assignment_parent` (never live
+ * `getLlmConfigForTask` — see the FROZEN-PLAN MODEL AUTHORITY note below) —
+ * NOT the broad `policyDigest` P2 the T-hash carries (the Page projection is
+ * genuinely operation-specific from day one). Unconfigured (no plan entry /
+ * no policy route) resolves to null and is hashed as null.
  *
  * HASH ONLY FROZEN PAGE AUTHORITY — explicit exclusions (mirroring titles):
  * - NO live `onboarding_items` rows, stage/status, `curation_data_json`, or
@@ -51,10 +51,20 @@
  *   `ocrInputHash` / `ocrExecutionDigest` (OCR provenance), images, sourcing.
  * - NO `modelPolicyDigest` (titles' P2); the page model authority is the
  *   operation-specific `{provider, model}` slice only.
+ *
+ * FROZEN-PLAN MODEL AUTHORITY (PR7 review R2, F2c — P1-C): the P-hash model
+ * authority + rule version NEVER come from live credentials. They are derived
+ * from the ordinal-0 member runtime snapshot's FROZEN model-execution-plan
+ * entry for the parent operation `cohort_page_assignment_parent` — so a
+ * mid-flight credential lookup failure or a live policy change can never flip
+ * the hash and needlessly supersede a committed decision. `buildCohortPageAuthorityBundle`
+ * resolves `modelAuthority` ({provider, model}) and `ruleVersion` from that
+ * entry when a snapshot is supplied; the parent op always supplies the frozen
+ * ordinal-0 snapshot. The entry's ruleVersion is the version authority — the
+ * hash hardcodes no page version of its own.
  */
 import { hashCanonicalJson } from '../shared/stable-id';
-import { getLlmConfigForTask } from './llm-client';
-import type { ModelPolicyView } from '../classification/model-policy-gateway';
+import { getModelExecutionPlanEntry, type RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
 import type { ProductLineItemSnapshot } from '../classification/types';
 import {
   type ExecutionTypeTitleAuthority,
@@ -80,10 +90,6 @@ export const PAGE_AUTHORITY_TRUNCATION = {
   brand: 200,
   description: 1500,
 } as const;
-
-/** The parent Page prompt/rule version (DECISION-F): the v2 prompt adds the
- *  Execution Product Type context block. Hashed into every P-hash. */
-export const PAGE_PROMPT_RULE_VERSION = 'cohort-pages-v2';
 
 /** Truncate a Page authority string to `maxChars` (null-safe). */
 export function normalizePageAuthorityString(value: string | null, maxChars: number): string | null {
@@ -160,10 +166,13 @@ export interface CohortPageAuthorityBundle {
   selection: { selectionMode: 'single' | 'multiple'; maxPages: number };
   /** The frozen Execution Product Type authority (id+label+confidence+outcome). */
   executionTypeAuthority: ExecutionTypeTitleAuthority;
-  /** The frozen operation-specific Page model authority; null when unconfigured. */
-  pageModelAuthority: CohortPageModelAuthority | null;
-  /** The parent Page prompt/rule version (DECISION-F). */
-  ruleVersion: 'cohort-pages-v2';
+  /** The frozen operation-specific Page model authority (from the frozen
+   *  model-execution-plan entry); null when unconfigured / no plan entry. */
+  modelAuthority: CohortPageModelAuthority | null;
+  /** The parent Page prompt/rule version authority — ALWAYS the frozen
+   *  model-execution-plan entry's ruleVersion in production (PR7 review R2
+   *  F2c); never a hash-local hardcoded constant. */
+  ruleVersion: string;
 }
 
 export interface CohortPageAuthorityBundleParams {
@@ -189,10 +198,25 @@ export interface CohortPageAuthorityBundleParams {
    */
   executionTypeAuthority?: ExecutionTypeTitleAuthority | null;
   /**
-   * Frozen operation-specific Page model authority (DECISION-B); null when
-   * unconfigured — still hashed as null.
+   * PR7 review R2 (F2c): the frozen ordinal-0 member runtime snapshot the
+   * parent op passes in. `modelAuthority` ({provider, model}) and `ruleVersion`
+   * are derived from its frozen model-execution-plan entry for
+   * `cohort_page_assignment_parent` — NEVER live credentials. Absent for
+   * direct/test construction.
    */
-  pageModelAuthority?: CohortPageModelAuthority | null;
+  snapshot?: RuntimeClassificationSnapshot | null;
+  /**
+   * Explicit frozen operation-specific Page model authority (DECISION-B);
+   * null when unconfigured — still hashed as null. Overrides the
+   * snapshot-derived authority (tests/direct construction).
+   */
+  modelAuthority?: CohortPageModelAuthority | null;
+  /**
+   * Explicit rule-version authority (overrides the snapshot-derived entry
+   * ruleVersion; tests/direct construction). In production this ALWAYS comes
+   * from the frozen plan entry.
+   */
+  ruleVersion?: string;
 }
 
 /**
@@ -202,11 +226,26 @@ export interface CohortPageAuthorityBundleParams {
  * are sorted by id, species/healthConcern arrays are sorted — so any
  * reordering of the raw inputs changes NEITHER the hash NOR the rendered
  * prompt.
+ *
+ * PR7 review R2 (F2c / P1-C): when `snapshot` is supplied, the bundle's
+ * `modelAuthority` and `ruleVersion` come from the frozen model-execution-plan
+ * entry for `cohort_page_assignment_parent` (provider/model + ruleVersion) —
+ * the P-hash therefore never touches live credential/config resolution.
  */
 export function buildCohortPageAuthorityBundle(
   params: CohortPageAuthorityBundleParams,
 ): CohortPageAuthorityBundle {
-  const { run, projection, pagePlan, executionTypeAuthority, pageModelAuthority } = params;
+  const { run, projection, pagePlan, executionTypeAuthority, snapshot } = params;
+  // FROZEN-PLAN authority: the plan entry's provider/model + ruleVersion are
+  // the version + model authority of the P-hash (never live credentials). A
+  // missing entry (legacy schema-v1 snapshot, pre-change registry-v1 plan)
+  // resolves to null authority + the parent v2 rules fallback — production
+  // always reaches the entry (the parent op fails closed otherwise).
+  const planEntry = snapshot
+    ? getModelExecutionPlanEntry(snapshot, 'cohort_page_assignment_parent')
+    : null;
+  const modelAuthority = params.modelAuthority ?? (planEntry ? { provider: planEntry.provider, model: planEntry.model } : null);
+  const ruleVersion = params.ruleVersion ?? planEntry?.ruleVersion ?? 'cohort-page-assignment-parent-rules-v2';
   const members = [...projection.members]
     .map(pageAuthorityFromProjectionMember)
     .sort((a, b) => a.sku.localeCompare(b.sku));
@@ -221,8 +260,8 @@ export function buildCohortPageAuthorityBundle(
       confidence: run.productTypeConfidence,
       outcome: run.productTypeOutcome,
     },
-    pageModelAuthority: pageModelAuthority ?? null,
-    ruleVersion: PAGE_PROMPT_RULE_VERSION,
+    modelAuthority,
+    ruleVersion,
   };
 }
 
@@ -276,37 +315,6 @@ export function pageAuthorityFromProjectionMember(
   };
 }
 
-/**
- * Resolve the frozen operation-specific Page model authority (DECISION-B):
- * `{provider, model}` via `getLlmConfigForTask('category_page_assignment',
- * {allowFallback, modelPolicy, protectedOperation:'cohort_page_assignment'})`
- * — the SAME resolution the coordinator's transport performs, so the hashed
- * authority equals the called authority. Returns null when unconfigured
- * (explicitly disabled policy, policy absent, or any route/credential
- * denial) — still hashed as null. `workspacePath`/`snapshotHash` are carried
- * as the parent-op freeze context; the resolution itself is driven by the
- * frozen policy view.
- */
-export function pageModelAuthorityFromConfig(
-  workspacePath: string,
-  modelPolicy: ModelPolicyView | null | undefined,
-  // The parent op passes the frozen snapshot hash as freeze context; the
-  // resolution itself is driven by the (already snapshot-bound) policy view.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  snapshotHash: string | null,
-): CohortPageModelAuthority | null {
-  try {
-    const config = getLlmConfigForTask('category_page_assignment', {
-      allowFallback: true,
-      modelPolicy,
-      protectedOperation: 'cohort_page_assignment',
-    });
-    return config ? { provider: config.provider, model: config.model } : null;
-  } catch {
-    return null;
-  }
-}
-
 // ─── Hash ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -314,11 +322,13 @@ export function pageModelAuthorityFromConfig(
  * authority bundle (PR7 review R1, B2): the sorted P-set member SKUs, the
  * per-member normalized authority slices, the execution Product Type
  * authority, the sorted frozen page list + selection mode/maxPages, the
- * prompt/rule version, and the operation-specific model authority.
+ * prompt/rule version (the frozen plan entry's ruleVersion — F2c), and the
+ * frozen operation-specific model authority.
  *
  * Consumes ONLY the canonical `CohortPageAuthorityBundle` — the SAME bundle
  * the parent v2 prompt renders — so hashed authority == prompted authority
- * by construction. Deterministic and pure — no DB access, no live item reads.
+ * by construction. Deterministic and pure — no DB access, no live item reads,
+ * no live credential resolution.
  */
 export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): string {
   return hashCanonicalJson({
@@ -330,6 +340,6 @@ export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): s
     pages: bundle.pages,
     selection: bundle.selection,
     promptRuleVersion: bundle.ruleVersion,
-    modelAuthority: bundle.pageModelAuthority ?? null,
+    modelAuthority: bundle.modelAuthority ?? null,
   });
 }

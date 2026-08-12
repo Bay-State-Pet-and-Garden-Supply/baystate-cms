@@ -212,6 +212,13 @@ export interface CohortPageCoordinationCoreOptions {
    * byte-for-byte.
    */
   executionTypeContext?: ExecutionTypeTitleAuthority | null;
+  /**
+   * PR7 review R2 (F2, singleton parity): when true, the 'requires at least
+   * two products' guard is skipped so a ONE-MEMBER invocation renders the
+   * SAME v2 prompt family as a group (the parent singleton path). The legacy
+   * wrapper passes nothing → the guard is unchanged (byte-identical).
+   */
+  allowSingleProduct?: boolean;
 }
 
 /**
@@ -228,7 +235,13 @@ export async function coordinateCohortPagesCore(
   params: CohortPageCoordinationParams,
   opts?: CohortPageCoordinationCoreOptions,
 ): Promise<Map<string, CohortPageMemberResult>> {
-  if (params.products.length < 2) return abstainAll(params.products, 'Cohort page coordination requires at least two products.');
+  // PR7 review R2 (F2): the parent singleton path is a ONE-MEMBER invocation
+  // of this same core — `allowSingleProduct` skips the >=2 guard so one
+  // member renders the SAME v2 prompt family as a group. The legacy wrapper
+  // passes no opts → the guard is byte-identical.
+  if (params.products.length < 2 && opts?.allowSingleProduct !== true) {
+    return abstainAll(params.products, 'Cohort page coordination requires at least two products.');
+  }
   if (params.pages.length === 0) return abstainAll(params.products, 'No configured Category Pages are available.');
   if (new Set(params.products.map(product => product.sku)).size !== params.products.length) {
     return abstainAll(params.products, 'Cohort input contains duplicate SKUs.');

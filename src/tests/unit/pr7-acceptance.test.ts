@@ -113,7 +113,6 @@ import { titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-titl
 import {
   buildCohortPageAuthorityBundle,
   computeCohortPageInputHash,
-  pageModelAuthorityFromConfig,
   type CohortPagePlanAuthority,
 } from '../../onboarding/cohort-page-hash';
 import { resolveTargetsFromSnapshot } from '../../classification/curation-target-resolver';
@@ -159,6 +158,13 @@ let auditCallSeq = 0;
  *  the active parent prompt must be the v2 text with the Execution Type block
  *  — asserted at the transport level). */
 let capturedGroupPrompt: string | null = null;
+/** PR7 review R2 (R1 lease test): when true, the mock blocks SINGLE-SKU
+ *  (singleton) core transports in flight — the started audit row is written,
+ *  then the response waits on a gate. The test reclaims the parent while the
+ *  call is in flight and then releases it. */
+let blockSingletonTransport = false;
+let releaseBlockedTransport: (() => void) | null = null;
+let blockedTransportCallId: string | null = null;
 
 const PAGE_NAMES = ['Dog Food Dry', 'Dog Treats', 'Brand - Acme'];
 
@@ -243,8 +249,14 @@ function mockGetLlmConfigForTask(_task: string, options: Record<string, any>): R
 /** Simulate the audited transport's durable started + success rows. The
  *  RETURNED call id must be a real `classification_model_calls.id` (the
  *  materialized proposals link to it), so the success row carries the returned
- *  id and the started row a suffixed mirror. */
-function writeAuditPair(runId: string, snapshotHash: string | null, callId: string, operation: string): void {
+ *  id and the started row a suffixed mirror. PR7 review R2 (F2d): the row is
+ *  manufactured per PRODUCTION semantics — operation + prompt/rule versions
+ *  come from the ModelCall context (`options.modelCall`), NEVER from the
+ *  transport's protectedOperation routing hint. */
+function writeAuditPair(
+  ctx: { runId: string; snapshotHash: string | null; operation: string; promptTemplateVersion: string; ruleVersion: string },
+  callId: string,
+): void {
   const now = new Date().toISOString();
   getDb().run(
     `INSERT INTO classification_model_calls
@@ -252,7 +264,7 @@ function writeAuditPair(runId: string, snapshotHash: string | null, callId: stri
         prompt_template_version, rule_version, system_prompt_hash, user_prompt_hash, started_at,
         ended_at, status, created_at)
      VALUES (?, ?, 'category_page_proposals', ?, 1, 'ollama', 'qwen2.5vl:latest', 'local', ?, ?, ?, ?, ?, ?, ?, 'started', ?)`,
-    [`${callId}-started`, runId, operation, snapshotHash, 'page-assignment-prompt-v1', 'page-assignment-rules-v1', 'sys-hash', 'user-hash', now, null, now],
+    [`${callId}-started`, ctx.runId, ctx.operation, ctx.snapshotHash, ctx.promptTemplateVersion, ctx.ruleVersion, 'sys-hash', 'user-hash', now, null, now],
   );
   getDb().run(
     `INSERT INTO classification_model_calls
@@ -260,31 +272,63 @@ function writeAuditPair(runId: string, snapshotHash: string | null, callId: stri
         prompt_template_version, rule_version, system_prompt_hash, user_prompt_hash, started_at,
         ended_at, status, created_at)
      VALUES (?, ?, 'category_page_proposals', ?, 1, 'ollama', 'qwen2.5vl:latest', 'local', ?, ?, ?, ?, ?, ?, ?, 'success', ?)`,
-    [callId, runId, operation, snapshotHash, 'page-assignment-prompt-v1', 'page-assignment-rules-v1', 'sys-hash', 'user-hash', now, now, now],
+    [callId, ctx.runId, ctx.operation, ctx.snapshotHash, ctx.promptTemplateVersion, ctx.ruleVersion, 'sys-hash', 'user-hash', now, now, now],
   );
 }
 
-function mockCallLlmForTaskWithProvenance(
+async function mockCallLlmForTaskWithProvenance(
   task: string,
   prompt: string,
   systemPrompt: string,
   options: Record<string, any>,
-): { content: string; callId: string; provider: string; model: string; usage: Record<string, number | null> } | null {
+): Promise<{ content: string; callId: string; provider: string; model: string; usage: Record<string, number | null> } | null> {
   const operation = options?.protectedOperation;
   if (operation !== 'cohort_page_assignment' && operation !== 'page_assignment') return null;
   if (denyPageMode === 'unavailable') return null;
   if (denyPageMode === 'policyDenied') throw new Error('Model policy denied (policy_denied)');
   const callId = `page-call-${++auditCallSeq}`;
-  // PR7 review R1 (B3): the parent singleton transport carries
-  // 'cohort_page_assignment' too — distinguish group vs singleton by the
-  // prompt shape so call-count assertions stay exact.
-  const isGroupPrompt = prompt.startsWith('Classify every product variant below');
-  if (isGroupPrompt) {
-    groupPageCallCount++;
-    capturedGroupPrompt = prompt;
+  // PR7 review R2 (F2): the parent singleton is a ONE-MEMBER core invocation,
+  // so ALL parent calls use the group prompt shape ('Classify every product
+  // variant below'). The legacy per-item singleton (llmAssignCategoryPages)
+  // still renders 'STORE CONTEXT:...'. Distinguish by PROMPT SHAPE + SKU
+  // count so the call-count assertions stay exact.
+  const isCorePrompt = prompt.startsWith('Classify every product variant below');
+  if (isCorePrompt) {
+    const skuCount = (prompt.match(/^SKU \S+$/gm) ?? []).length;
+    if (skuCount > 1) groupPageCallCount++;
+    else singletonPageCallCount++;
+    if (capturedGroupPrompt === null) capturedGroupPrompt = prompt;
     if (options.modelCall) {
       auditedPageCallCount++;
-      writeAuditPair(options.modelCall.runId, options.modelCall.snapshotHash ?? null, callId, operation);
+      // PR7 review R2 (R1 lease): a SINGLE-SKU core transport can be held in
+      // flight — the started audit row is durable, the response waits on the
+      // gate, and after release the ownership assertion re-runs (the real
+      // transport re-asserts before its terminal write).
+      if (blockSingletonTransport && skuCount === 1) {
+        options.assertHeld?.();
+        const startedId = `blocked-call-${++auditCallSeq}`;
+        const now = new Date().toISOString();
+        getDb().run(
+          `INSERT INTO classification_model_calls
+             (id, run_id, stage_name, operation, attempt, provider, model, locality, snapshot_hash,
+              prompt_template_version, rule_version, system_prompt_hash, user_prompt_hash, started_at,
+              ended_at, status, created_at)
+           VALUES (?, ?, 'category_page_proposals', ?, 1, 'ollama', 'qwen2.5vl:latest', 'local', ?, ?, ?, ?, ?, ?, NULL, 'started', ?)`,
+          [startedId, options.modelCall.runId, options.modelCall.operation, options.modelCall.snapshotHash ?? null,
+           options.modelCall.promptTemplateVersion, options.modelCall.ruleVersion, 'sys-hash', 'user-hash', now, now],
+        );
+        blockedTransportCallId = startedId;
+        await new Promise<void>(resolve => {
+          releaseBlockedTransport = resolve;
+        });
+        // Post-release ownership re-assertion (the real transport performs it
+        // immediately before the terminal success write). A stale owner's
+        // claim is gone → HeartbeatLostError, and the started row is NOT
+        // terminalized.
+        options.assertHeld?.();
+        throw new Error('blocked singleton transport must not complete for a stale owner');
+      }
+      writeAuditPair(options.modelCall, callId);
     }
     return {
       content: cannedGroupResponse(prompt),
@@ -294,10 +338,11 @@ function mockCallLlmForTaskWithProvenance(
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     };
   }
+  // Legacy per-item singleton (llmAssignCategoryPages — child path).
   singletonPageCallCount++;
   if (options.modelCall) {
     auditedPageCallCount++;
-    writeAuditPair(options.modelCall.runId, options.modelCall.snapshotHash ?? null, callId, operation);
+    writeAuditPair(options.modelCall, callId);
   }
   return {
     content: cannedSingletonResponse(prompt),
@@ -341,6 +386,9 @@ afterEach(() => {
   auditedPageCallCount = 0;
   denyPageMode = 'none';
   capturedGroupPrompt = null;
+  blockSingletonTransport = false;
+  releaseBlockedTransport = null;
+  blockedTransportCallId = null;
   resetCohortCurationFlagsOverride();
   clearCohortCoordinationCache();
   clearCohortPageCoordinationCache();
@@ -533,7 +581,7 @@ function cohortRunCount(wsId: string): number {
 function countPageAuditRowsForRun(cohortRunId: string): number {
   const row = getDb().query(
     `SELECT COUNT(*) AS cnt FROM classification_model_calls
-     WHERE operation IN ('cohort_page_assignment', 'page_assignment')
+     WHERE operation IN ('cohort_page_assignment', 'page_assignment', 'cohort_page_assignment_parent')
        AND run_id IN (SELECT id FROM classification_runs WHERE cohort_run_id = ?)`,
   ).get(cohortRunId) as { cnt: number };
   return Number(row.cnt);
@@ -701,10 +749,11 @@ function buildPreparedContext(
 }
 
 /** Replicate the parent Page op's P-hash for a frozen run (the ordinal-0
- *  member's frozen runtime snapshot → Execution Type + model authority +
- *  page plan → the canonical bundle) — used by the drift matrix so missing /
- *  extra member rows are caught by EXACT-SET completeness, not by a hash
- *  mismatch. */
+ *  member's frozen runtime snapshot → Execution Type + FROZEN-PLAN model
+ *  authority + page plan → the canonical bundle) — used by the drift matrix so
+ *  missing / extra member rows are caught by EXACT-SET completeness, not by a
+ *  hash mismatch. The bundle derives `modelAuthority` + `ruleVersion` from the
+ *  snapshot's `cohort_page_assignment_parent` plan entry (review R2 F2c). */
 function expectedPageInputHash(
   workspaceId: string,
   wsPath: string,
@@ -720,8 +769,6 @@ function expectedPageInputHash(
     : null;
   if (!snapshot) throw new Error('ordinal-0 member runtime snapshot missing');
   const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(run, snapshot);
-  const boundPolicyView = modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash);
-  const pageModelAuthority = pageModelAuthorityFromConfig(wsPath, boundPolicyView, snapshot.snapshotHash);
   const resolved = resolveTargetsFromSnapshot(snapshot);
   const pageTarget = resolved.pages[0];
   const verifiedPagesAvailable = resolved.pages.length > 0 && pageTarget.options.length > 0;
@@ -735,7 +782,7 @@ function expectedPageInputHash(
     maxPages,
   };
   return computeCohortPageInputHash(
-    buildCohortPageAuthorityBundle({ run, projection, pagePlan, executionTypeAuthority, pageModelAuthority }),
+    buildCohortPageAuthorityBundle({ run, projection, pagePlan, executionTypeAuthority, snapshot }),
   );
 }
 
@@ -1356,6 +1403,178 @@ describe('PR7 acceptance — durable parent page coordination, replay-safe after
       expect(promise1).toBe(promise2); // the SAME cached promise
       expect(result1).toBe(result2);
       expect(groupPageCallCount).toBe(groupCallsBeforeDedup + 1); // ONE shared transport for both entries
+
+      // PR7 review R2 (F2d): the LEGACY child-path audit rows keep the legacy
+      // operations + v1 versions (never the parent operation). Scoped to THIS
+      // workspace (the shared DB accumulates rows across tests).
+      const legacyGroupRows = getDb().query(
+        `SELECT operation, prompt_template_version, rule_version FROM classification_model_calls
+         WHERE operation = 'cohort_page_assignment'
+           AND run_id IN (SELECT id FROM classification_runs WHERE workspace_id = ?)`,
+      ).all(workspaceId) as Array<{ operation: string; prompt_template_version: string; rule_version: string }>;
+      expect(legacyGroupRows.length).toBeGreaterThan(0);
+      for (const row of legacyGroupRows) {
+        expect(row.operation).toBe('cohort_page_assignment');
+        expect(row.prompt_template_version).toBe('cohort-page-assignment-prompt-v1');
+        expect(row.rule_version).toBe('cohort-page-assignment-rules-v1');
+      }
+      const legacySingletonRows = getDb().query(
+        `SELECT operation, prompt_template_version, rule_version FROM classification_model_calls
+         WHERE operation = 'page_assignment'
+           AND run_id IN (SELECT id FROM classification_runs WHERE workspace_id = ?)`,
+      ).all(workspaceId) as Array<{ operation: string; prompt_template_version: string; rule_version: string }>;
+      expect(legacySingletonRows.length).toBeGreaterThan(0);
+      for (const row of legacySingletonRows) {
+        expect(row.operation).toBe('page_assignment');
+        expect(row.prompt_template_version).toBe('page-assignment-prompt-v1');
+        expect(row.rule_version).toBe('page-assignment-rules-v1');
+      }
+      // NO parent operation ever appears on the legacy path (this workspace).
+      const parentOperationRows = getDb().query(
+        `SELECT COUNT(*) AS cnt FROM classification_model_calls
+         WHERE operation = 'cohort_page_assignment_parent'
+           AND run_id IN (SELECT id FROM classification_runs WHERE workspace_id = ?)`,
+      ).get(workspaceId) as { cnt: number };
+      expect(Number(parentOperationRows.cnt)).toBe(0);
     }
+  });
+
+  it('R2 (F2d): parent page audit rows carry cohort_page_assignment_parent + the v2 prompt/rule versions', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const finalized = await freezeActiveCohort(workspaceId, wsPath);
+
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).not.toBe('failed');
+    // ONE group call + ONE singleton call, both audited under the parent op.
+    expect(groupPageCallCount).toBe(1);
+    expect(singletonPageCallCount).toBe(1);
+    expect(auditedPageCallCount).toBe(2);
+    const rows = getDb().query(
+      `SELECT operation, prompt_template_version, rule_version FROM classification_model_calls
+       WHERE operation = 'cohort_page_assignment_parent'
+         AND run_id IN (SELECT id FROM classification_runs WHERE cohort_run_id = ?)`,
+    ).all(finalized.id) as Array<{ operation: string; prompt_template_version: string; rule_version: string }>;
+    // The audit rows are manufactured per production semantics: every audited
+    // call writes a `started` row + a `success` row — 2 rows per call, so the
+    // two parent calls (group + singleton) produce FOUR rows.
+    expect(rows.length).toBe(4);
+    for (const row of rows) {
+      expect(row.operation).toBe('cohort_page_assignment_parent');
+      expect(row.prompt_template_version).toBe('cohort-page-assignment-parent-prompt-v2');
+      expect(row.rule_version).toBe('cohort-page-assignment-parent-rules-v2');
+    }
+    // The legacy child operations are NOT used by the active parent path.
+    const legacyRows = getDb().query(
+      `SELECT COUNT(*) AS cnt FROM classification_model_calls
+       WHERE operation IN ('cohort_page_assignment', 'page_assignment')
+         AND run_id IN (SELECT id FROM classification_runs WHERE cohort_run_id = ?)`,
+    ).get(finalized.id) as { cnt: number };
+    expect(Number(legacyRows.cnt)).toBe(0);
+  });
+
+  it('R1 lease (F2): a SINGLETON transport genuinely in flight → worker B reclaims → release → worker A REJECTS with HeartbeatLostError; the started row is NOT terminalized; zero page outputs', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const finalized = await freezeActiveCohort(workspaceId, wsPath);
+    const projection = loadFrozenProjection(workspaceId, finalized);
+    const cohort = getCohortById(finalized.cohortId)!;
+    const members = getCohortMembers(cohort.id);
+    const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+
+    // Block the SINGLETON core transport in flight (the two-sibling group
+    // call proceeds first; its durable set cannot commit while the singleton
+    // is in flight).
+    blockSingletonTransport = true;
+    const coordinating = ensureCohortPagesCoordinated({
+      run: finalized,
+      workspaceId,
+      workspacePath: wsPath,
+      projection,
+      cohort,
+      members,
+      frozenLineContext,
+    });
+
+    // Wait until the singleton transport is genuinely in flight (its started
+    // audit row is durable).
+    const startedRow = await (async (): Promise<{ id: string; status: string } | null> => {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if (blockedTransportCallId) {
+          return getDb().query(
+            'SELECT id, status FROM classification_model_calls WHERE id = ?',
+          ).get(blockedTransportCallId) as { id: string; status: string } | null;
+        }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      return null;
+    })();
+    expect(startedRow).not.toBeNull();
+    expect(startedRow!.status).toBe('started');
+
+    // Worker B reclaims the parent while worker A's singleton call is in
+    // flight (lease expired + verified-frozen match).
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', finalized.id]);
+    const reclaim = reclaimExpiredCohortRuns(
+      workspaceId,
+      new Date().toISOString(),
+      () => verifyCohortRunFrozen(getCohortRunById(finalized.id)!, wsPath, workspaceId) ? 'match' : 'drift',
+      'worker-b',
+      COHORT_LEASE_TTL_MS,
+    );
+    expect(reclaim.resumed.length).toBe(1);
+
+    // Release worker A's blocked transport: the post-release ownership
+    // re-assertion fails → the parent op rejects with HeartbeatLostError.
+    releaseBlockedTransport?.();
+    await expect(coordinating).rejects.toThrow(/claim ownership lost|HeartbeatLost/i);
+
+    // A wrote ZERO page outputs (the coordinate step never reached the
+    // all-or-nothing insert), and the started audit row is NOT terminalized.
+    expect(countCohortPageOutputs(finalized.id)).toBe(0);
+    const after = getDb().query(
+      'SELECT status, ended_at FROM classification_model_calls WHERE id = ?',
+    ).get(startedRow!.id) as { status: string; ended_at: string | null };
+    expect(after.status).toBe('started');
+    expect(after.ended_at).toBeNull();
+  });
+
+  it('R3 frozen authority (F2c / P1-C): commit a complete page set → live getLlmConfigForTask THROWS → re-enter the same run → P-hash unchanged → durable outputs reused with ZERO page transport', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    prepareActiveV2Workspace(workspaceId, wsPath, THREE_MEMBER_EXTRACTIONS);
+    const finalized = await freezeActiveCohort(workspaceId, wsPath);
+
+    // Establish the durable page set (one group + one singleton call).
+    const summary = await processCohort(finalized, wsPath, workspaceId);
+    expect(summary.parentStatus).not.toBe('failed');
+    expect(countCohortPageOutputs(finalized.id)).toBe(3);
+    const committedHash = getCohortPageOutputsByRun(finalized.id)[0].inputHash;
+    const callsAfterCommit = groupPageCallCount + singletonPageCallCount;
+    const auditedAfterCommit = countPageAuditRowsForRun(finalized.id);
+
+    // Simulate credential removal: live resolution THROWS for the page
+    // operation from now on. The parent op must never touch it (the P-hash
+    // model authority + rule version come from the FROZEN plan).
+    denyPageMode = 'unavailable';
+    const projection = loadFrozenProjection(workspaceId, finalized);
+    const cohort = getCohortById(finalized.cohortId)!;
+    const members = getCohortMembers(cohort.id);
+    const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+    const reused = await ensureCohortPagesCoordinated({
+      run: finalized,
+      workspaceId,
+      workspacePath: wsPath,
+      projection,
+      cohort,
+      members,
+      frozenLineContext,
+    });
+    expect(reused.size).toBe(3);
+    // ZERO page transport on re-entry, and the committed set's P-hash is
+    // unchanged (no needless supersession from a live credential failure).
+    expect(groupPageCallCount + singletonPageCallCount).toBe(callsAfterCommit);
+    expect(countPageAuditRowsForRun(finalized.id)).toBe(auditedAfterCommit);
+    expect(countCohortPageOutputs(finalized.id)).toBe(3);
+    expect(getCohortPageOutputsByRun(finalized.id).every(r => r.inputHash === committedHash)).toBe(true);
   });
 });

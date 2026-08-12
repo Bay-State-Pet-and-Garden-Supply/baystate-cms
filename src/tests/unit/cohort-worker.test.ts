@@ -71,12 +71,10 @@ import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from 
 import {
   buildCohortPageAuthorityBundle,
   computeCohortPageInputHash,
-  pageModelAuthorityFromConfig,
   type CohortPagePlanAuthority,
 } from '../../onboarding/cohort-page-hash';
 import { resolveTargetsFromSnapshot } from '../../classification/curation-target-resolver';
 import { buildPageHierarchy } from '../../classification/page-assignment-llm';
-import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
 import { curateItemWithPipeline } from '../../onboarding/product-curator';
 import {
   getCohortTitleOutputsByRun,
@@ -2751,11 +2749,12 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
 
   /** Replicate the parent Page op's P-hash inputs for the v1 harness exactly:
    *  the ordinal-0 member's frozen runtime snapshot (page target + verified
-   *  catalog + Execution Type label), a NULL model authority (v1 config has no
-   *  attested provider locality → `pageModelAuthorityFromConfig` resolves
-   *  null, hashed as null), and the shared Execution Type authority. The
-   *  seeded `coordinated_page` rows must hash to THIS value or the parent op
-   *  sees write-once drift. */
+   *  catalog + Execution Type label + the FROZEN-PLAN model authority — the
+   *  bundle derives `modelAuthority` + `ruleVersion` from the snapshot's plan
+   *  entry; a legacy v1 snapshot has no plan, so the authority resolves null
+   *  with the parent-v2 rules fallback, exactly as the parent op computes it
+   *  on the reuse path). The seeded `coordinated_page` rows must hash to THIS
+   *  value or the parent op sees write-once drift. */
   function expectedPageInputHash(
     wsId: string,
     wsPath: string,
@@ -2771,8 +2770,6 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
       : null;
     if (!snapshot) throw new Error('ordinal-0 member runtime snapshot missing');
     const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(run, snapshot);
-    const boundPolicyView = modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash);
-    const pageModelAuthority = pageModelAuthorityFromConfig(wsPath, boundPolicyView, snapshot.snapshotHash);
     const resolved = resolveTargetsFromSnapshot(snapshot);
     const pageTarget = resolved.pages[0];
     const verifiedPagesAvailable = resolved.pages.length > 0 && pageTarget.options.length > 0;
@@ -2786,7 +2783,7 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
       maxPages,
     };
     return computeCohortPageInputHash(
-      buildCohortPageAuthorityBundle({ run, projection, pagePlan, executionTypeAuthority, pageModelAuthority }),
+      buildCohortPageAuthorityBundle({ run, projection, pagePlan, executionTypeAuthority, snapshot }),
     );
   }
 

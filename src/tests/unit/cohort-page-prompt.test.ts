@@ -23,6 +23,13 @@ vi.mock('../../db/repositories/page-repo', () => ({ listPages: vi.fn(() => []) }
 vi.mock('../../db/repositories/classification-model-call-repo', () => ({
   recordTerminalPreflight: (...args: unknown[]) => mocks.recordTerminalPreflight(...args),
 }));
+// The page-hash module now derives the P-hash model authority from the frozen
+// model-execution-plan entry (PR7 review R2 F2c); mock the DB-backed
+// runtime-snapshot module so the Vitest graph never loads bun:sqlite. The
+// pure plan-entry lookup is exercised in the bun:test hash suite.
+vi.mock('../../classification/runtime-snapshot', () => ({
+  getModelExecutionPlanEntry: () => null,
+}));
 
 import {
   buildPrompt,
@@ -195,7 +202,7 @@ describe('buildPrompt — v2 Execution Type context block (PR7 C3 / DECISION-F +
       .toContain('EXECUTION PRODUCT TYPE CONTEXT:\nProduct Type Context: "not resolved"\nConfidence: null\nOutcome: null');
   });
 
-  it('exports PAGE_PROMPT_RULE_VERSION_V2 = cohort-pages-v2 (shared with the P-hash)', () => {
+  it('exports PAGE_PROMPT_RULE_VERSION_V2 = cohort-pages-v2 (the v2 prompt-family label; the P-hash version authority is the frozen plan ruleVersion — review R2 F2c)', () => {
     expect(PAGE_PROMPT_RULE_VERSION_V2).toBe('cohort-pages-v2');
   });
 });

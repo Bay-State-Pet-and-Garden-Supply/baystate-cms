@@ -8,11 +8,12 @@ import {
   computeCohortPageInputHash,
   pageAuthorityFromProjectionMember,
   pageAuthorityMemberToSnapshot,
-  pageModelAuthorityFromConfig,
   PAGE_AUTHORITY_TRUNCATION,
   normalizePageAuthorityString,
 } from '../../onboarding/cohort-page-hash';
 import { buildPrompt, coordinateCohortPagesCore } from '../../classification/cohort-page-coordinator';
+import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../../classification/model-operation-registry';
+import type { RuntimeClassificationSnapshot } from '../../classification/runtime-snapshot';
 import { titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
 import { initDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
@@ -195,7 +196,7 @@ function makeParams(
     projection: makeProjection([makeMember()]),
     pagePlan: PAGE_PLAN,
     executionTypeAuthority: titleExecutionTypeAuthorityFromRun(makeRun(), LABEL_SOURCE),
-    pageModelAuthority: { provider: 'ollama', model: 'qwen2.5vl' },
+    modelAuthority: { provider: 'ollama', model: 'qwen2.5vl' },
     ...overrides,
   };
 }
@@ -445,12 +446,17 @@ describe('computeCohortPageInputHash — membership + page plan + execution type
   });
 });
 
-describe('computeCohortPageInputHash — model authority participation (PR7 C2 / DECISION-B)', () => {
-  it('pageModelAuthority provider/model each participate; null hashes differently from a value', () => {
+describe('computeCohortPageInputHash — model authority participation (PR7 C2 / DECISION-B + review R2 F2c)', () => {
+  it('modelAuthority provider/model each participate; null hashes differently from a value', () => {
     const base = makeParams();
-    expect(hash(makeParams({ pageModelAuthority: { provider: 'openai', model: 'gpt-4o-mini' } }))).not.toBe(hash(base));
-    expect(hash(makeParams({ pageModelAuthority: { provider: 'ollama', model: 'gemma4:12b-mlx' } }))).not.toBe(hash(base));
-    expect(hash(makeParams({ pageModelAuthority: null }))).not.toBe(hash(base));
+    expect(hash(makeParams({ modelAuthority: { provider: 'openai', model: 'gpt-4o-mini' } }))).not.toBe(hash(base));
+    expect(hash(makeParams({ modelAuthority: { provider: 'ollama', model: 'gemma4:12b-mlx' } }))).not.toBe(hash(base));
+    expect(hash(makeParams({ modelAuthority: null }))).not.toBe(hash(base));
+  });
+
+  it('the rule version participates (a different frozen rule version changes the hash)', () => {
+    const base = makeParams();
+    expect(hash(makeParams({ ruleVersion: 'cohort-page-assignment-parent-rules-v1' }))).not.toBe(hash(base));
   });
 });
 
@@ -626,21 +632,78 @@ describe('pageAuthorityFromProjectionMember — the pure builder (PR7 C2)', () =
   });
 });
 
-describe('pageModelAuthorityFromConfig — operation-specific resolution (PR7 C2 / DECISION-B)', () => {
-  it('returns the frozen {provider, model} when a config resolves', () => {
-    mocks.getLlmConfigForTask = () => ({ provider: 'ollama', model: 'qwen2.5vl', apiKey: 'k', baseUrl: 'http://127.0.0.1:11434' });
-    expect(pageModelAuthorityFromConfig('/tmp/ws', {} as never, 'snap-hash')).toEqual({ provider: 'ollama', model: 'qwen2.5vl' });
-  });
+describe('PR7 review R2 (F2c) — FROZEN-PLAN Page model authority (P1-C)', () => {
+  /** A minimal schema-v2 runtime snapshot carrying a REAL frozen
+   *  model-execution plan + rule versions (the plan entry is the authority
+   *  source — never live credentials). */
+  function frozenPlanSnapshot(overrides: Partial<RuntimeClassificationSnapshot> = {}): RuntimeClassificationSnapshot {
+    const view = {
+      defaultProvider: 'ollama',
+      defaultModel: 'qwen2.5vl:latest',
+      providerLocalities: { ollama: 'local' },
+      stageOverrides: {},
+      imageDataSharing: 'local_only',
+      textDataSharing: 'local_only',
+      mlFeatures: {},
+    } as never;
+    return {
+      schemaVersion: 2,
+      snapshotHash: 'snap-hash-frozen-plan',
+      workspaceId: 'ws-1',
+      workspacePath: '/tmp/ws',
+      productSku: 'SKU-1',
+      createdAt: '2026-08-01T12:00:00.000Z',
+      config: {} as never,
+      configSnapshotRef: { id: 'x', hash: 'y', sourceCommit: null, createdAt: '2026-08-01T12:00:00.000Z' },
+      modelExecutionPlan: buildModelExecutionPlan(view, null),
+      runtimeRuleVersions: buildRuntimeRuleVersions(),
+      ...overrides,
+    } as unknown as RuntimeClassificationSnapshot;
+  }
 
-  it('returns null when the policy explicitly disables the model', () => {
-    mocks.getLlmConfigForTask = () => null;
-    expect(pageModelAuthorityFromConfig('/tmp/ws', null, null)).toBeNull();
-  });
-
-  it('returns null when resolution is unavailable (policy absent / denied — never throws)', () => {
+  it('buildCohortPageAuthorityBundle derives modelAuthority + ruleVersion from the frozen plan entry (never live config)', () => {
     mocks.getLlmConfigForTask = () => {
-      throw new Error('policy_absent');
+      throw new Error('live credential resolution must never run');
     };
-    expect(pageModelAuthorityFromConfig('/tmp/ws', undefined, null)).toBeNull();
+    const bundle = buildCohortPageAuthorityBundle(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined }));
+    // The plan entry's provider/model (the policy default) is the hashed
+    // authority; the entry's ruleVersion is the version authority.
+    expect(bundle.modelAuthority).toEqual({ provider: 'ollama', model: 'qwen2.5vl:latest' });
+    expect(bundle.ruleVersion).toBe('cohort-page-assignment-parent-rules-v2');
+  });
+
+  it('P1-C: a live getLlmConfigForTask THROW (simulated credential removal) cannot flip the P-hash', () => {
+    const hashBefore = hash(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined }));
+    mocks.getLlmConfigForTask = () => {
+      throw new Error('credential removed mid-flight');
+    };
+    // Re-entry computes the SAME hash — the parent op no longer touches live
+    // resolution at all, so a committed decision is never needlessly
+    // superseded by a credential lookup failure.
+    expect(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined }))).toBe(hashBefore);
+  });
+
+  it('the bundle modelAuthority/ruleVersion participate in the P-hash (snapshot-derived)', () => {
+    mocks.getLlmConfigForTask = () => null;
+    const base = hash(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined }));
+    // A different frozen plan (different model) must change the hash.
+    const otherPlan = frozenPlanSnapshot();
+    (otherPlan.modelExecutionPlan as unknown as { entries: Array<{ operation: string; provider: string; model: string }> }).entries = [
+      ...(otherPlan.modelExecutionPlan as unknown as { entries: Array<{ operation: string; provider: string; model: string }> }).entries.map(entry => ({
+        ...entry,
+        ...(entry.operation === 'cohort_page_assignment_parent' ? { provider: 'openai', model: 'gpt-4o-mini' } : {}),
+      })),
+    ];
+    expect(hash(makeParams({ snapshot: otherPlan, modelAuthority: undefined }))).not.toBe(base);
+  });
+
+  it('the hashed rule version equals the plan entry ruleVersion (the version authority — not a hash-local constant)', () => {
+    mocks.getLlmConfigForTask = () => null;
+    // The bundle carries the plan entry's rule version; an explicit override
+    // participates and changes the hash.
+    expect(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined, ruleVersion: 'cohort-page-assignment-parent-rules-v2' })))
+      .toBe(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined })));
+    expect(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined, ruleVersion: 'different-version' })))
+      .not.toBe(hash(makeParams({ snapshot: frozenPlanSnapshot(), modelAuthority: undefined })));
   });
 });
