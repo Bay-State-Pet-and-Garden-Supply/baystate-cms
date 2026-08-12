@@ -11,10 +11,13 @@ import {
   getCohortTitleOutputsByRun,
   insertCohortTitleOutputsOnce,
   countCohortTitleOutputs,
+  getCohortPageOutputsByRun,
+  insertCohortPageOutputsOnce,
+  countCohortPageOutputs,
   CohortOutputAlreadyCommittedError,
 } from '../../db/repositories/classification-cohort-output-repo';
 import * as cohortOutputRepo from '../../db/repositories/classification-cohort-output-repo';
-import { CohortTitleOutputSchema } from '../../shared/schemas/cohorts';
+import { CohortTitleOutputSchema, CohortPageOutputSchema } from '../../shared/schemas/cohorts';
 
 /**
  * PR6 C1 repo primitives (issue #30): `classification_cohort_outputs`
@@ -27,6 +30,13 @@ import { CohortTitleOutputSchema } from '../../shared/schemas/cohorts';
  *   (write-once — the DELETE/replace path is gone). All-or-nothing: any throw
  *   rolls back the whole set. NO update path anywhere (immutability).
  * - `countCohortTitleOutputs`: observability convenience.
+ *
+ * PR7 C1 (issue #30): the same write-once primitive is generalized per kind
+ * (DECISION-G) — `insertCohortPageOutputsOnce` / `getCohortPageOutputsByRun` /
+ * `countCohortPageOutputs` for `coordinated_page` rows (assigned OR
+ * abstained payloads; ALL cohort members incl. singletons). Kind isolation:
+ * one run holds title and page sets independently; a second insert of EITHER
+ * kind throws with the kind carried on the error.
  *
  * The outputs table FKs to `classification_cohort_runs` (ON DELETE CASCADE)
  * and `workspace`; batch deletion cascades cohort → run → outputs.
@@ -266,6 +276,174 @@ describe('classification-cohort-output repo — PR6 C1 (issue #30)', () => {
     expect(deleteBatch(batchId)).toBe(true);
     expect(countCohortTitleOutputs(run2)).toBe(0);
     expect(() => getDb().run('DELETE FROM workspace WHERE id = ?', [wsId])).not.toThrow();
+  });
+
+  it('PR7 C1: insert + read round-trips coordinated_page rows (assigned + abstained) through CohortPageOutputSchema', () => {
+    const { wsId, runId } = seedChain('page-output-key-a');
+
+    insertCohortPageOutputsOnce({
+      workspaceId: wsId,
+      runId,
+      inputHash: 'p'.repeat(64),
+      outputs: [
+        {
+          productSku: 'SKU-A',
+          output: {
+            status: 'assigned',
+            pages: [{ pageId: 'cat-wet', pageName: 'Cat Food Wet', confidence: 0.8 }],
+            source: 'llm_cohort',
+          },
+          modelCallId: 'page-call-1',
+        },
+        {
+          productSku: 'SKU-B',
+          output: { status: 'abstained', reason: 'No configured Category Pages are available.' },
+        },
+      ],
+    });
+
+    const rows = getCohortPageOutputsByRun(runId);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({
+      productSku: 'SKU-A',
+      inputHash: 'p'.repeat(64),
+      outputValueJson: JSON.stringify({
+        status: 'assigned',
+        pages: [{ pageId: 'cat-wet', pageName: 'Cat Food Wet', confidence: 0.8 }],
+        source: 'llm_cohort',
+      }),
+      modelCallId: 'page-call-1',
+    });
+    expect(rows[1]).toEqual({
+      productSku: 'SKU-B',
+      inputHash: 'p'.repeat(64),
+      outputValueJson: JSON.stringify({ status: 'abstained', reason: 'No configured Category Pages are available.' }),
+      modelCallId: null,
+    });
+
+    // output_value_json parses through the shared page payload schema.
+    const parsed = rows.map(row => CohortPageOutputSchema.parse(JSON.parse(row.outputValueJson)));
+    expect(parsed[0].status).toBe('assigned');
+    if (parsed[0].status === 'assigned') expect(parsed[0].pages[0].pageId).toBe('cat-wet');
+    expect(parsed[1].status).toBe('abstained');
+    expect(countCohortPageOutputs(runId)).toBe(2);
+
+    // Kind isolation: the page set never leaks into the title reads.
+    expect(getCohortTitleOutputsByRun(runId)).toEqual([]);
+    expect(getCohortPageOutputsByRun('no-such-run')).toEqual([]);
+  });
+
+  it('PR7 C1: write-once — a second coordinated_page insert throws CohortOutputAlreadyCommittedError carrying kind coordinated_page', () => {
+    const { wsId, runId } = seedChain('page-output-key-b');
+
+    insertCohortPageOutputsOnce({
+      workspaceId: wsId,
+      runId,
+      inputHash: 'p1'.repeat(8),
+      outputs: [
+        {
+          productSku: 'SKU-1',
+          output: {
+            status: 'assigned',
+            pages: [{ pageId: 'dog-food', pageName: 'Dog Food Dry', confidence: 0.9 }],
+            source: 'llm_cohort',
+          },
+        },
+        {
+          productSku: 'SKU-2',
+          output: { status: 'abstained', reason: 'Cohort page LLM policy denied.' },
+        },
+      ],
+    });
+    expect(countCohortPageOutputs(runId)).toBe(2);
+
+    let thrown: unknown;
+    try {
+      insertCohortPageOutputsOnce({
+        workspaceId: wsId,
+        runId,
+        inputHash: 'p2'.repeat(8),
+        outputs: [{ productSku: 'SKU-3', output: { status: 'abstained', reason: 'Never inserted.' } }],
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CohortOutputAlreadyCommittedError);
+    const err = thrown as CohortOutputAlreadyCommittedError;
+    expect(err.runId).toBe(runId);
+    expect(err.outputKind).toBe('coordinated_page');
+    expect(err.existingInputHash).toBe('p1'.repeat(8));
+    expect(err.message).toContain(runId);
+    expect(err.message).toContain('coordinated_page');
+
+    // The committed set is byte-identical — nothing was deleted or rewritten.
+    const rows = getCohortPageOutputsByRun(runId);
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.inputHash === 'p1'.repeat(8))).toBe(true);
+    expect(rows.map(r => r.productSku).sort()).toEqual(['SKU-1', 'SKU-2']);
+  });
+
+  it('PR7 C1: both kinds coexist on one run — title and page sets are independent (write-once per kind)', () => {
+    const { wsId, runId } = seedChain('page-output-key-c');
+
+    // Title set committed first.
+    insertCohortTitleOutputsOnce({
+      workspaceId: wsId,
+      runId,
+      inputHash: 't'.repeat(64),
+      outputs: [{ productSku: 'SKU-T', title: 'Chicken Formula', source: 'cohort_fallback' }],
+    });
+    expect(countCohortTitleOutputs(runId)).toBe(1);
+
+    // The page set is committed INDEPENDENTLY (same run, different kind).
+    insertCohortPageOutputsOnce({
+      workspaceId: wsId,
+      runId,
+      inputHash: 'p'.repeat(64),
+      outputs: [
+        {
+          productSku: 'SKU-T',
+          output: {
+            status: 'assigned',
+            pages: [{ pageId: 'cat-wet', pageName: 'Cat Food Wet', confidence: 0.7 }],
+            source: 'llm_cohort',
+          },
+        },
+      ],
+    });
+    expect(countCohortPageOutputs(runId)).toBe(1);
+    expect(countCohortTitleOutputs(runId)).toBe(1);
+
+    // …and a second PAGE insert still throws (write-once per kind).
+    let thrown: unknown;
+    try {
+      insertCohortPageOutputsOnce({
+        workspaceId: wsId,
+        runId,
+        inputHash: 'p2'.repeat(8),
+        outputs: [{ productSku: 'SKU-X', output: { status: 'abstained', reason: 'R' } }],
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CohortOutputAlreadyCommittedError);
+    expect((thrown as CohortOutputAlreadyCommittedError).outputKind).toBe('coordinated_page');
+  });
+
+  it('PR7 C1: inserting an empty page output list commits nothing and does not throw', () => {
+    const { wsId, runId } = seedChain('page-output-key-g');
+    expect(() =>
+      insertCohortPageOutputsOnce({ workspaceId: wsId, runId, inputHash: 'e'.repeat(64), outputs: [] }),
+    ).not.toThrow();
+    expect(countCohortPageOutputs(runId)).toBe(0);
+    // A later real insert still succeeds (no sentinel row was written).
+    insertCohortPageOutputsOnce({
+      workspaceId: wsId,
+      runId,
+      inputHash: 'e'.repeat(64),
+      outputs: [{ productSku: 'SKU-EMPTY-AFTER', output: { status: 'abstained', reason: 'Later' } }],
+    });
+    expect(countCohortPageOutputs(runId)).toBe(1);
   });
 
   it('immutability: the repo exposes no update function and no replace/delete write path', () => {

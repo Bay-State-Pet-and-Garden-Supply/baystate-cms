@@ -366,11 +366,11 @@ export type ProposalDependency = z.infer<typeof ProposalDependencySchema>;
  * The output-kind set of the durable cohort-run outputs table
  * (`classification_cohort_outputs`, cohort schema v7). `output_kind` is a
  * free-form DB string mirroring the `dependency_kind` precedent (no CHECK —
- * SQLite cannot alter a CHECK without a table rebuild, and PR7 extends the
- * kind set with 'coordinated_page'); this zod literal is the schema-level
- * validator for the kind PR6 writes.
+ * SQLite cannot alter a CHECK without a table rebuild); this zod enum is the
+ * schema-level validator for the kinds PR6 + PR7 write ('curated_title' and
+ * 'coordinated_page').
  */
-export const CohortOutputKind = z.literal('curated_title');
+export const CohortOutputKind = z.enum(['curated_title', 'coordinated_page']);
 
 export type CohortOutputKind = z.infer<typeof CohortOutputKind>;
 
@@ -394,6 +394,43 @@ export const CohortTitleOutputSchema = z.object({
 });
 
 export type CohortTitleOutput = z.infer<typeof CohortTitleOutputSchema>;
+
+/**
+ * One coordinated Category Page assignment of a `coordinated_page` output
+ * row (PR7, issue #30): `pageId`/`pageName` from the frozen page catalog,
+ * plus the model-reported confidence (recorded for audit; never an
+ * acceptance signal).
+ */
+export const CohortPageAssignmentSchema = z.object({
+  pageId: z.string(),
+  pageName: z.string(),
+  confidence: z.number(),
+});
+
+export type CohortPageAssignment = z.infer<typeof CohortPageAssignmentSchema>;
+
+/**
+ * The `output_value_json` payload of a `coordinated_page` output row (PR7,
+ * DECISION-C). A Page result is durable whether ASSIGNED or ABSTAINED:
+ * `assigned` rows carry the page list with the `llm_cohort` source;
+ * `abstained` rows carry the deterministic reason. Rows cover ALL cohort
+ * members (groups AND singletons — the P-set), unlike the curated_title
+ * kind's multi-item-group-only DECISION-O; both kinds are write-once per
+ * (cohort_run_id, output_kind).
+ */
+export const CohortPageOutputSchema = z.union([
+  z.object({
+    status: z.literal('assigned'),
+    pages: z.array(CohortPageAssignmentSchema),
+    source: z.literal('llm_cohort'),
+  }),
+  z.object({
+    status: z.literal('abstained'),
+    reason: z.string(),
+  }),
+]);
+
+export type CohortPageOutput = z.infer<typeof CohortPageOutputSchema>;
 
 /**
  * Row shape of a persisted cohort output (`classification_cohort_outputs`,

@@ -20,6 +20,17 @@
 -- read the FINAL v7 shape directly from this file; existing databases are
 -- converged in runMigrations(): marker-'6' databases run db.exec(cohortSql)
 -- (idempotent — creates the outputs table + indexes) and bump to '7'.
+--
+-- PR7 (issue #30, durable coordinated Category Pages): the same table carries
+-- 'coordinated_page' outputs — one row per (run, kind, product_sku), the
+-- payload being {status:'assigned', pages, source:'llm_cohort'} or
+-- {status:'abstained', reason}. Page outputs cover ALL cohort members —
+-- groups AND singletons (DECISION-A: singletons are parent-owned too) — a
+-- deliberate asymmetry vs the 'curated_title' kind, which writes multi-item
+-- group members only (DECISION-O). Both kinds are write-once per
+-- (cohort_run_id, output_kind) with kind isolation enforced by the SQL
+-- predicates, so one run can hold both sets independently. NO DDL change:
+-- output_kind is already free-form and the UNIQUE index already spans it.
 -- v6 (issue #30 PR4 C1): adds the nullable `product_type_outcome` column to
 -- `classification_cohort_runs` (the PR4 Execution Product Type outcome marker:
 -- 'coherent' | 'coherent_with_abstentions' | 'conflicted' | 'abstained'; NULL
