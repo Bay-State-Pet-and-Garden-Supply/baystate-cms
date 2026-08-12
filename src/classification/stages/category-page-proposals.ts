@@ -19,7 +19,7 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { loadClassificationConfig } from '../config-loader';
 import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
-import { processPageTarget } from '../curation-target-processor';
+import { processPageTarget, materializeCoordinatedPages } from '../curation-target-processor';
 import { getReviewedPrimaryProductTypeId } from '../proposal-selection';
 
 export const categoryPageProposalsStage: StageDefinition = {
@@ -41,6 +41,32 @@ export const categoryPageProposalsStage: StageDefinition = {
           proposals: [],
           abstained: false,
           message: 'Page assignment is not enabled as a curation target.',
+        },
+      };
+    }
+
+    // PR7 C5 (issue #30, DECISION-D): in ACTIVE cohort mode the parent page op
+    // (`ensureCohortPagesCoordinated`) already consumed the frozen Execution
+    // Product Type authority and persisted every member's result — the child
+    // is a MATERIALIZER: the reviewed-Type gate and both LLM paths are
+    // SKIPPED, and the stored result is turned into the existing proposal
+    // shape with ZERO Page LLM calls. Legacy/shadow/non-cohort runs keep the
+    // reviewed-Type gate + the coordinator/singleton LLM paths byte-identical.
+    if (context.coordinatedPages !== undefined) {
+      const result = await materializeCoordinatedPages(resolved.pages[0], input, context);
+      if (result.proposals.length === 0) {
+        return {
+          status: 'abstained',
+          reason: `No category page matches found: ${result.message}`,
+        };
+      }
+      return {
+        status: 'succeeded',
+        output: {
+          evidence: [],
+          proposals: result.proposals,
+          abstained: false,
+          message: result.message,
         },
       };
     }

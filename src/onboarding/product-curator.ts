@@ -536,6 +536,12 @@ export async function curateItemWithPipeline(
       productLineItems,
       preComputedTitle,
       preComputedTitleSource,
+      // PR7 C4/C5: the durable parent-run page outputs (attached for every
+      // member — groups AND singletons; empty map in DECISION-C config-level
+      // absence). When present, the `category_page_proposals` stage skips the
+      // reviewed-Type gate and both LLM paths and MATERIALIZES the stored
+      // result with ZERO Page LLM calls.
+      coordinatedPages: preparedCohort?.coordinatedPages,
     };
 
     // Initial evidence starts empty — evidence_extraction stage handles

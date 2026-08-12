@@ -6,8 +6,9 @@
  * delegate to, so stage files contain orchestration only — no duplication
  * of matching, ranking, or proposal construction logic.
  */
-import type { StageContext, StageInput } from './types';
+import type { StageContext, StageInput, CoordinatedPageMemberValue } from './types';
 import { type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
+import { CohortPageOutputSchema } from '../shared/schemas/cohorts';
 import { loadClassificationConfig } from './config-loader';
 import {
   resolveEnabledTargets,
@@ -531,6 +532,118 @@ export async function processPageTarget(
   return {
     proposals,
     message: `${pageNames.join(', ')} (${assignmentSource}, ${(llmResult.pages[0].confidence * 100).toFixed(0)}%)`,
+  };
+}
+
+// ─── PR7 Materialized Page Processing (C5) ────────────────────────────────────
+
+/**
+ * PR7 C5 (issue #30): materialize the member's DURABLE parent page output
+ * into the existing `category_page` proposal shape. Active cohort mode ONLY —
+ * `context.coordinatedPages` (set by `ensureCohortPagesCoordinated` before the
+ * member loop) carries every member's stored `coordinated_page` result; the
+ * child stage NEVER calls the Page LLM and NEVER invents an assignment.
+ *
+ * - `assigned` → one `buildCategoryPageProposal` per STORED page
+ *   (`pageId`/`pageName`/`confidence` FROM THE STORED ROW, verified identity
+ *   only when the pageId is in the frozen verified snapshot records,
+ *   `evidenceIds` from the SAME deterministic restricted page-evidence packet
+ *   the legacy path builds — pure, no LLM — and `modelCallIds` = the stored
+ *   audited parent `model_call_id`);
+ * - `abstained` → `{proposals: [], message: <stored reason>}` (the stage
+ *   abstains — no LLM, no fallback invention);
+ * - a missing row for a member that should have one, or a corrupt stored
+ *   payload → deterministic abstain + `console.warn` (pages NEVER invent an
+ *   assignment).
+ */
+export async function materializeCoordinatedPages(
+  _target: ResolvedTarget,
+  input: StageInput,
+  context: StageContext,
+): Promise<TargetProcessResult> {
+  const snapshotHash = context.snapshot?.snapshotHash ?? null;
+
+  // Look up the member's durable parent output. A missing row for a member
+  // that should have one is a parent-op contract violation — deterministic
+  // fail-closed abstain + warning (never an LLM, never an invented page).
+  const stored = context.coordinatedPages?.get(input.sku) as
+    | CoordinatedPageMemberValue
+    | undefined;
+  if (!stored) {
+    console.warn(
+      `[CurationTargetProcessor] Member ${input.sku} has no parent page output row in active cohort mode — deterministic abstain (pages never invent an assignment).`,
+    );
+    return { proposals: [], message: 'missing parent page output' };
+  }
+
+  // Fail-closed parse: a corrupt stored payload never yields proposals.
+  const parsed = CohortPageOutputSchema.safeParse(stored.output);
+  if (!parsed.success) {
+    console.warn(
+      `[CurationTargetProcessor] Member ${input.sku} has a corrupt parent page output payload — deterministic abstain (pages never invent an assignment).`,
+    );
+    return { proposals: [], message: 'missing parent page output' };
+  }
+  const output = parsed.data;
+
+  // Durable parent abstention (policy denied / model unavailable / unsafe or
+  // invalid response): the stage abstains with the STORED reason. No LLM, no
+  // fallback invention.
+  if (output.status === 'abstained') {
+    return { proposals: [], message: output.reason };
+  }
+
+  // `assigned` with an empty page list cannot be produced by any writer (the
+  // coordinator abstains instead) — fail closed defensively.
+  if (output.pages.length === 0) {
+    console.warn(
+      `[CurationTargetProcessor] Member ${input.sku} has an assigned parent page output with no pages — deterministic abstain.`,
+    );
+    return { proposals: [], message: 'missing parent page output' };
+  }
+
+  // ── Restricted page-evidence packet (the SAME deterministic packet the
+  // legacy path builds) — pure, no LLM. Only identity/species/type/category
+  // records enter; the reviewed species value (never first evidence) drives
+  // cross-species contradiction labeling.
+  const speciesValue = reviewedSpeciesValue(context);
+  const pagePacket = buildPageEvidencePacket(input.evidence, {
+    pageContextSourceFields: PAGE_CONTEXT_SOURCE_FIELDS,
+    pageContextAttributeIds: PAGE_CONTEXT_ATTRIBUTE_IDS,
+    sourceField: null,
+    speciesValue,
+  });
+
+  // Verified identity from the FROZEN verified snapshot records (never a
+  // mutable DB read) — the parent only passed verified pages, so every stored
+  // pageId is verified by construction.
+  const verifiedPageIdSet = new Set(
+    context.snapshot?.pages.state === 'verified'
+      ? context.snapshot.pages.records.map(record => record.pageId)
+      : [],
+  );
+  const modelCallIds = stored.modelCallId ? [stored.modelCallId] : undefined;
+  const proposals = output.pages.map(page =>
+    buildCategoryPageProposal({
+      runId: context.runId,
+      sku: input.sku,
+      pageId: page.pageId,
+      pageName: page.pageName,
+      confidence: page.confidence,
+      evidenceIds: pagePacket.evidenceIds,
+      ...(pagePacket.contradictingEvidenceIds.length
+        ? { contradictingEvidenceIds: pagePacket.contradictingEvidenceIds }
+        : {}),
+      verifiedPageIdentity: verifiedPageIdSet.has(page.pageId),
+      snapshotHash,
+      ...(modelCallIds?.length ? { modelCallIds } : {}),
+    }),
+  );
+
+  const pageNames = output.pages.map(page => page.pageName);
+  return {
+    proposals,
+    message: `${pageNames.join(', ')} (Cohort page assignment materialized from parent coordination (cohort LLM), ${(output.pages[0].confidence * 100).toFixed(0)}%)`,
   };
 }
 

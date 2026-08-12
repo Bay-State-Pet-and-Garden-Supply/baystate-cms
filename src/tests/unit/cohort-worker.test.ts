@@ -73,6 +73,9 @@ import {
   getCohortTitleOutputsByRun,
   insertCohortTitleOutputsOnce,
   countCohortTitleOutputs,
+  getCohortPageOutputsByRun,
+  insertCohortPageOutputsOnce,
+  countCohortPageOutputs,
 } from '../../db/repositories/classification-cohort-output-repo';
 import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
 import * as llmClient from '../../onboarding/llm-client';
@@ -2542,6 +2545,104 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
       'SELECT COUNT(*) AS cnt FROM classification_cohort_outputs WHERE workspace_id = ?',
     ).get(workspaceId) as { cnt: number };
     expect(Number(outputRows.cnt)).toBe(0);
+  });
+
+  // ─── PR7 C4/C5 (issue #30): durable parent PAGE outputs over the v1
+  // harness (page target DISABLED in V1_CONFIG → the parent page op is
+  // EXPECTED-EMPTY per DECISION-C: no verified pages / target disabled is NOT
+  // an output; the child stage stays succeeded-empty with ZERO Page calls).
+
+  it('PR7 C4: active cohort with the page target disabled is expected-empty — zero page rows, zero page calls, members complete with zero category_page proposals', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items } = await freezeTwoMemberCohort();
+    const projection = loadFrozenProjection(workspaceId, run);
+    // v1 snapshots carry no frozen model-execution plan → seed the durable
+    // title set FIRST so the title op reuses it with zero transport (the page
+    // op does NOT require a plan for the expected-empty path).
+    seedCohortTitleOutputs(workspaceId, run, expectedTitleInputHash(workspaceId, run, projection));
+
+    const titleCallSpy = vi.spyOn(llmClient, 'callLlmForTask');
+    try {
+      const summary = await processCohort(run, wsPath, workspaceId);
+      expect(summary.parentStatus).toBe('completed');
+      expect(summary.completedMembers).toBe(2);
+    } finally {
+      titleCallSpy.mockRestore();
+    }
+
+    // DECISION-C: config-level absence is NOT an output — zero page rows.
+    expect(countCohortPageOutputs(run.id)).toBe(0);
+    expect(getCohortPageOutputsByRun(run.id)).toEqual([]);
+    // No audited page transport rows (no group / singleton page call ran).
+    const pageAuditRows = getDb().query(
+      "SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE operation IN ('cohort_page_assignment', 'page_assignment')",
+    ).get() as { cnt: number };
+    expect(Number(pageAuditRows.cnt)).toBe(0);
+    // Members completed with the persisted titles and NO category_page
+    // proposals (the disabled target returns succeeded-empty).
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('completed');
+      expect(stored.curationData!.titleSource).toBe('llm_cohort');
+      const pageProposals = stored.curationData!.classificationProposals.filter(
+        proposal => proposal.proposalType === 'category_page',
+      );
+      expect(pageProposals).toHaveLength(0);
+    }
+  });
+
+  it('PR7 C4 hardening: a committed page set under config-level absence is write-once corruption — the parent op throws CohortPageAuthorityDrift and the run is SUPERSEDED (no re-coordination, no page calls)', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items } = await freezeTwoMemberCohort();
+    const projection = loadFrozenProjection(workspaceId, run);
+    seedCohortTitleOutputs(workspaceId, run, expectedTitleInputHash(workspaceId, run, projection));
+
+    // Seed `coordinated_page` rows even though the page target is disabled —
+    // the expected-empty rule fails closed on ANY persisted rows (write-once
+    // corruption, never silently ignored).
+    const seededOutputs = projection.members
+      .map(member => ({
+        productSku: member.productSku ?? '',
+        output: { status: 'abstained' as const, reason: 'seeded stale page output' },
+      }))
+      .filter(output => output.productSku.length > 0);
+    insertCohortPageOutputsOnce({
+      workspaceId,
+      runId: run.id,
+      inputHash: 'a'.repeat(64), // stale authority hash
+      outputs: seededOutputs,
+    });
+    expect(countCohortPageOutputs(run.id)).toBe(2);
+
+    const childrenBefore = getDb().query(
+      'SELECT id, status FROM classification_runs WHERE cohort_run_id = ?',
+    ).all(run.id) as Array<{ id: string; status: string }>;
+    expect(childrenBefore.length).toBeGreaterThan(0);
+
+    await expect(processCohort(run, wsPath, workspaceId)).rejects.toThrow(/CohortPageAuthorityDrift/);
+
+    // The parent is SUPERSEDED (not failed) via the EXISTING drift primitive;
+    // every running child is terminalized; no member writes happened.
+    const terminal = getCohortRunById(run.id)!;
+    expect(terminal.status).toBe('superseded');
+    expect(terminal.errorMessage).toContain('write-once');
+    expect(terminal.errorMessage).toContain(run.id);
+    for (const child of childrenBefore) {
+      const after = getDb().query(
+        'SELECT status FROM classification_runs WHERE id = ?',
+      ).get(child.id) as { status: string };
+      expect(after.status).toBe('failed');
+    }
+    for (const item of items) {
+      const stored = findItemById(item.id)!;
+      expect(stored.stageStatus).toBe('pending');
+      expect(stored.curationData).toBeNull();
+    }
+    // The committed page set is untouched (immutable historical truth).
+    expect(getCohortPageOutputsByRun(run.id)).toHaveLength(2);
+    // No audited page transport rows ran during the drift path.
+    const pageAuditRows = getDb().query(
+      "SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE operation IN ('cohort_page_assignment', 'page_assignment')",
+    ).get() as { cnt: number };
+    expect(Number(pageAuditRows.cnt)).toBe(0);
   });
 
   it('missing member output: prepared member with an empty coordinatedTitles map falls back deterministically with a warning and completes', async () => {

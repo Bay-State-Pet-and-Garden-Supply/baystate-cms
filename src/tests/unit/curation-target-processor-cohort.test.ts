@@ -26,7 +26,7 @@ vi.mock('../../classification/page-assignment-llm', () => ({
 }));
 
 vi.mock('../../classification/runtime-snapshot', () => ({ buildModelCallContext: vi.fn(() => null) }));
-import { processPageTarget } from '../../classification/curation-target-processor';
+import { processPageTarget, materializeCoordinatedPages } from '../../classification/curation-target-processor';
 
 const products = [
   { sku: 'SKU1', name: 'Acme Cat Pate Chicken', webTitle: null, brand: 'Acme', description: '', species: ['Cat'], flavor: 'Chicken', lifeStage: null, productForm: 'Pate', healthConcern: [] },
@@ -78,6 +78,135 @@ describe('grouped page target processing', () => {
     const result = await processPageTarget(target as any, input, context);
     expect(result.proposals).toEqual([]);
     expect(result.message).toContain('Cohort page coordination abstained');
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+});
+
+// ─── PR7 C5 (issue #30): the child materializer ───────────────────────────────
+// The durable parent page outputs (`coordinatedPages` on the stage context)
+// turn `category_page_proposals` into a MATERIALIZER: assigned → proposals
+// from the STORED row, abstained → the stored reason, missing/corrupt rows →
+// deterministic abstain + warn. NEVER a Page LLM call, never an invented
+// assignment; legacy behavior is unchanged when `coordinatedPages` is absent.
+
+const verifiedSnapshot = {
+  snapshotHash: 'snap-hash-1',
+  pages: {
+    state: 'verified',
+    records: [
+      {
+        pageId: 'cat-wet',
+        pageName: 'Cat Food Wet',
+        parentPageId: null,
+        parentPageName: null,
+        verified: true,
+        identityKind: 'page_id',
+        identityKey: 'cat-wet',
+        sourceHash: 'import-hash',
+      },
+    ],
+  },
+} as any;
+
+const materializedContext: StageContext = {
+  workspacePath: '/tmp/workspace',
+  workspaceId: 'workspace',
+  runId: 'run-SKU1',
+  configSnapshotRef: { id: 'snapshot', hash: 'hash', sourceCommit: null, createdAt: '' },
+  snapshot: verifiedSnapshot,
+  productLineContext: {
+    groupId: 'group-acme-pate',
+    groupLabel: 'Acme Pate',
+    siblingNames: ['Acme Cat Pate Chicken'],
+    siblingWebTitles: [],
+    siblingOcrTitles: [],
+    siblingSkus: ['SKU1'],
+  },
+  coordinatedPages: new Map([
+    ['SKU1', {
+      output: {
+        status: 'assigned',
+        pages: [{ pageId: 'cat-wet', pageName: 'Cat Food Wet', confidence: 0.8 }],
+        source: 'llm_cohort',
+      },
+      modelCallId: 'parent-call-1',
+    }],
+  ]),
+};
+
+describe('PR7 C5 — materializeCoordinatedPages (durable parent outputs, zero Page LLM)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('assigned: builds proposals from the STORED row (pageId/pageName/confidence, verified identity, stored modelCallIds, packet evidence) with zero Page LLM calls', async () => {
+    const result = await materializeCoordinatedPages(target as any, input, materializedContext);
+    expect(result.proposals).toHaveLength(1);
+    const proposal = result.proposals[0];
+    expect(proposal.proposalType).toBe('category_page');
+    expect(proposal.productSku).toBe('SKU1');
+    expect(proposal.targetId).toBe('cat-wet');
+    expect(proposal.confidence).toBe(0.8);
+    expect((proposal.proposedValue as any).pageId).toBe('cat-wet');
+    expect((proposal.proposedValue as any).pageName).toBe('Cat Food Wet');
+    expect((proposal.proposedValue as any).identityVerified).toBe(true);
+    expect(proposal.modelCallIds).toEqual(['parent-call-1']);
+    expect(proposal.snapshotHash).toBe('snap-hash-1');
+    expect(proposal.evidenceIds).toEqual([]);
+    expect(result.message).toContain('Cohort page assignment materialized from parent coordination (cohort LLM)');
+    expect(mocks.coordinate).not.toHaveBeenCalled();
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+
+  it('abstained: returns the STORED reason with zero proposals and zero Page LLM calls', async () => {
+    const context: StageContext = {
+      ...materializedContext,
+      coordinatedPages: new Map([
+        ['SKU1', { output: { status: 'abstained', reason: 'Cohort page LLM policy denied.' }, modelCallId: null }],
+      ]),
+    };
+    const result = await materializeCoordinatedPages(target as any, input, context);
+    expect(result.proposals).toEqual([]);
+    expect(result.message).toBe('Cohort page LLM policy denied.');
+    expect(mocks.coordinate).not.toHaveBeenCalled();
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+
+  it('missing row: deterministic abstain + console.warn, zero Page LLM calls', async () => {
+    const warns: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: any[]) => {
+      warns.push(args.map(String).join(' '));
+    });
+    try {
+      const context: StageContext = { ...materializedContext, coordinatedPages: new Map() };
+      const result = await materializeCoordinatedPages(target as any, input, context);
+      expect(result.proposals).toEqual([]);
+      expect(result.message).toBe('missing parent page output');
+      expect(warns.some(line => line.includes('no parent page output row'))).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(mocks.coordinate).not.toHaveBeenCalled();
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+
+  it('corrupt row: fail-closed schema parse → deterministic abstain, zero Page LLM calls', async () => {
+    const context: StageContext = {
+      ...materializedContext,
+      coordinatedPages: new Map([
+        ['SKU1', { output: { status: 'assigned', pages: [{ pageId: 42 }] }, modelCallId: 'x' } as any],
+      ]),
+    };
+    const result = await materializeCoordinatedPages(target as any, input, context);
+    expect(result.proposals).toEqual([]);
+    expect(result.message).toBe('missing parent page output');
+    expect(mocks.coordinate).not.toHaveBeenCalled();
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+
+  it('singleton member in cohort mode: exactly ONE proposal from its single stored row, zero Page LLM calls', async () => {
+    const result = await materializeCoordinatedPages(target as any, input, materializedContext);
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0].productSku).toBe('SKU1');
+    expect(mocks.coordinate).not.toHaveBeenCalled();
     expect(mocks.perItem).not.toHaveBeenCalled();
   });
 });
