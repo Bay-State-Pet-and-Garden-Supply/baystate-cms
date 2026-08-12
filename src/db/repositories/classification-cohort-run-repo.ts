@@ -750,14 +750,17 @@ export function rerunIdleCohortRevision(
         throw new CohortRerunStageConflictError(member.onboarding_item_id, member.stage);
       }
     }
-    // 2. Idle-parent CAS (the concurrency guard).
+    // 2. Idle-parent CAS (the concurrency guard). SELF-AUTHENTICATING: the
+    // CAS binds the parent to BOTH arguments (id + cohort_id) — a mismatched
+    // (cohortId, currentRunId) pair can never supersede a run of another
+    // cohort (PR10-close P2 hardening).
     const result = db.run(
       `UPDATE classification_cohort_runs
        SET status = 'superseded', superseded_at = ?, error_message = ?
-       WHERE id = ?
+       WHERE id = ? AND cohort_id = ?
          AND status != 'superseded'
          AND (status NOT IN ('freezing','running') OR claimed_by IS NULL)`,
-      [now(), reason ?? null, currentRunId],
+      [now(), reason ?? null, currentRunId, cohortId],
     );
     if (result.changes === 0) {
       throw new CohortRerunBusyError(currentRunId);

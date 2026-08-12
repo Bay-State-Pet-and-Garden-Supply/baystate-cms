@@ -1004,6 +1004,9 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     const bMembers = getCohortMembers(cohortB.id).map(m => m.onboardingItemId);
     expect(bMembers.length).toBeGreaterThan(0);
     const [runA] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    // Tie the claimed run to the selected cohort explicitly — the test can
+    // never mask a mismatched (cohortId, currentRunId) invocation.
+    expect(runA.cohortId).toBe(cohortA.id);
     expect(freezeAuthorities(runA.id, 'worker-a')).toBe(true);
     expect(transitionCohortRunToRunning(runA.id, 'worker-a')).toBe(true);
     expect(completeCohortRun(runA.id, 'completed_with_member_failures', 'blocked', { ownerGuard: { workerId: 'worker-a' } })).toBe(true);
@@ -1085,6 +1088,34 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     const promoted = getDb().query('SELECT stage, stage_status FROM onboarding_items WHERE id = ?').get(memberIds[0]) as { stage: string; stage_status: string };
     expect(promoted.stage).toBe('promotion');
     expect(promoted.stage_status).toBe('completed');
+  });
+
+  it('rerunIdleCohortRevision: SELF-AUTHENTICATING CAS — a mismatched (cohortId, currentRunId) pair can never supersede a run of another cohort (PR10-close P2)', () => {
+    const wsId = newWorkspace();
+    const { cohorts } = setupFamilyBatch(wsId);
+    const cohortA = cohorts[0];
+    const cohortB = cohorts.find(c => c !== cohortA)!;
+    const [runA] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(runA.cohortId).toBe(cohortA.id);
+    expect(freezeAuthorities(runA.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(runA.id, 'worker-a')).toBe(true);
+    expect(completeCohortRun(runA.id, 'completed_with_member_failures', 'blocked', { ownerGuard: { workerId: 'worker-a' } })).toBe(true);
+    // Members of BOTH cohorts in review (so the member-stage validation
+    // passes and the CAS is the guard under test).
+    for (const id of [...getCohortMembers(cohortA.id).map(m => m.onboardingItemId), ...getCohortMembers(cohortB.id).map(m => m.onboardingItemId)]) {
+      getDb().run("UPDATE onboarding_items SET stage = 'review', stage_status = 'completed' WHERE id = ?", [id]);
+    }
+
+    // Passing cohortB's id with runA's id: the CAS must NOT match (runA
+    // belongs to cohortA) — CohortRerunBusyError, ZERO mutation.
+    expect(() => rerunIdleCohortRevision(cohortB.id, runA.id, 'reviewer')).toThrow(CohortRerunBusyError);
+    expect(getCohortRunById(runA.id)!.status).toBe('completed_with_member_failures');
+    expect(getCohortRunById(runA.id)!.supersededAt).toBeNull();
+
+    // The correct pair still succeeds.
+    const outcome = rerunIdleCohortRevision(cohortA.id, runA.id, 'reviewer');
+    expect(outcome.superseded).toBe(true);
+    expect(getCohortRunById(runA.id)!.status).toBe('superseded');
   });
 
   it('insertProposalDependency is workspace-scoped and FK fail-closed; listDependenciesForProposal round-trips', () => {
