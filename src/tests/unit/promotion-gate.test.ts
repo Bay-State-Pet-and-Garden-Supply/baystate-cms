@@ -542,6 +542,27 @@ describe('PR11 C1 — resolvePromotionEffectiveTypeId (reviewed-first, PR11 revi
     ).toBe('dry-dog-food');
   });
 
+  it('R3: an EXPLICIT in-run CLEAR (hasRevisedTargetId=true, revisedTargetId=null) SUPPRESSES the snapshot fallback — the old reviewed authority is never resurrected', () => {
+    const snapshot = snapshotWithReviewedFact('dry-dog-food');
+    // The in-run decision is present by presence, its effective identity is
+    // explicitly null (a reviewer clearing the type). The resolver must
+    // return null — NOT the frozen fact.
+    expect(
+      resolvePromotionEffectiveTypeId(cohortRun(), [
+        proposal({
+          proposalType: 'primary_product_type',
+          targetId: 'dry-dog-food',
+          hasRevisedTargetId: true,
+          revisedTargetId: null,
+        }),
+      ], snapshot),
+    ).toBeNull();
+    // No in-run decision at all + snapshot fact => still the snapshot fact.
+    expect(
+      resolvePromotionEffectiveTypeId(cohortRun(), [], snapshot),
+    ).toBe('dry-dog-food');
+  });
+
   it('non-cohort member: the live accepted primary_product_type proposal target is the reviewed truth', () => {
     expect(
       resolvePromotionEffectiveTypeId(null, [

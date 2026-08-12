@@ -113,22 +113,30 @@ function firstFindingMessage(semanticValidation: Record<string, unknown>): strin
  *      Curation; Reviewed is catalog truth). The gate refuses active cohort
  *      children with `reviewed_product_type_required`; a present
  *      type-dependency against a null reviewed type is itself stale.
+ *
+ * PRESENCE vs VALUE (PR11 review R3): an in-run accepted `primary_product_type`
+ * decision is authoritative BY PRESENCE — including an explicit null target
+ * (a reviewer clearing the type canonicalizes to `hasRevisedTargetId: true,
+ * revisedTargetId: null`). An explicit clear therefore SUPPRESSES the frozen
+ * snapshot fallback: the old reviewed authority must never be resurrected;
+ * the resolver returns null and the gate refuses
+ * `reviewed_product_type_required`. The snapshot fact is consulted ONLY when
+ * no in-run accepted type decision exists at all.
  */
 export function resolvePromotionEffectiveTypeId(
   parentRun: CohortRun | null,
   acceptedProposals: ClassificationProposal[],
   snapshot?: RuntimeClassificationSnapshot | null,
 ): string | null {
+  let inRunReviewedDecisionPresent = false;
   let reviewedTypeId: string | null = null;
   for (const proposal of acceptedProposals) {
     if (proposal.proposalType !== 'primary_product_type') continue;
-    const targetId = getEffectivePrimaryProductTypeId(proposal);
-    if (targetId) {
-      reviewedTypeId = targetId;
-      break;
-    }
+    inRunReviewedDecisionPresent = true;
+    reviewedTypeId = getEffectivePrimaryProductTypeId(proposal);
+    break;
   }
-  if (reviewedTypeId === null) {
+  if (!inRunReviewedDecisionPresent) {
     reviewedTypeId = getReviewedTypeFromSnapshot(snapshot ?? undefined);
   }
   return resolveEffectiveCurationType(reviewedTypeId, null).effectiveTypeId;

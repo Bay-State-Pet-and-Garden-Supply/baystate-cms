@@ -54,6 +54,7 @@ import {
   resetCohortCurationFlagsOverride,
 } from '../../classification/flags';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { listChangeSetItems } from '../../db/repositories/change-set-repo';
 import { canonicalJsonFileString, sha256Hex, hashCanonicalJson } from '../../shared/stable-id';
 import {
@@ -976,6 +977,78 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
       expect(failure.error).toContain('stale');
       expect(failure.error).toContain('execution_product_type');
       expect(failure.error).toContain('dog-food-wet');
+    }
+    expect(result.changeSetId).toBeNull();
+  });
+
+  it('R3 E2E: an EXPLICIT in-run REVIEW CLEAR (submitProposalDecisions revisedTargetId=null) suppresses the frozen reviewed fact — reviewed_product_type_required, zero drafts', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const prepared = prepareActiveV2Workspace(workspaceId, wsPath, COHERENT_PROMOTABLE);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    expect(run.executionProductTypeId).toBe('dog-food-dry');
+    await processCohort(run, wsPath, workspaceId);
+    const items = prepared.items;
+
+    for (const item of items) {
+      const member = findItemById(item.id)!;
+      const runId = member.curationData!.classificationRunId!;
+      // 1. Inject the OLD frozen reviewed fact (dry) into the child's runtime
+      //    snapshot — the authority an in-run clear must suppress.
+      const child = getDb().query(
+        'SELECT config_snapshot_hash FROM classification_runs WHERE id = ?',
+      ).get(runId) as { config_snapshot_hash: string | null };
+      const row = getDb().query(
+        'SELECT config_json FROM classification_config_snapshots WHERE workspace_id = ? AND snapshot_hash = ?',
+      ).get(workspaceId, child.config_snapshot_hash) as { config_json: string };
+      const snapshot = JSON.parse(row.config_json) as Record<string, unknown>;
+      snapshot.reviewedFacts = [{
+        proposalId: `old-pt-${runId}`,
+        decisionId: `old-dec-${runId}`,
+        runId,
+        workspaceId,
+        productSku: member.upc,
+        proposalType: 'primary_product_type',
+        targetId: 'dog-food-dry',
+        value: { productTypeId: 'dog-food-dry' },
+      }];
+      getDb().run(
+        'UPDATE classification_config_snapshots SET config_json = ? WHERE workspace_id = ? AND snapshot_hash = ?',
+        [JSON.stringify(snapshot), workspaceId, child.config_snapshot_hash],
+      );
+      // 2. Accept every proposal (incl. the PT) via the normal path, then
+      //    submit the REAL Review representation of an explicit clear: an
+      //    accepted PT decision with revisedTargetId = null. The clear is the
+      //    latest live decision and its PRESENCE is authoritative — the old
+      //    frozen fact must NOT be resurrected.
+      decideAllProposals(member);
+      const ptProposal = getDb().query(
+        "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'primary_product_type'",
+      ).get(runId) as { id: string };
+      const existingDecision = getDb().query(
+        'SELECT id FROM classification_proposal_decisions WHERE proposal_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+      ).get(ptProposal.id) as { id: string } | undefined;
+      const cleared = submitProposalDecisions({
+        workspaceId,
+        productSku: member.upc,
+        onboardingItemId: member.id,
+        runId,
+        sourceKind: 'onboarding',
+        decisions: [{
+          proposalId: ptProposal.id,
+          decision: 'accepted',
+          revisedTargetId: null,
+          expectedRevisionId: existingDecision?.id ?? null,
+        }],
+      });
+      expect(cleared.ok).toBe(true);
+    }
+    placeInPromotion(items.map(item => findItemById(item.id)!));
+
+    const result = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
+    expect(result.count).toBe(0);
+    expect(result.failures).toHaveLength(3);
+    for (const failure of result.failures) {
+      expect(failure.error).toContain('Reviewed Product Type');
     }
     expect(result.changeSetId).toBeNull();
   });
