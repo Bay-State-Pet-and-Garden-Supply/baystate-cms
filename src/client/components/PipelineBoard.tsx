@@ -15,6 +15,7 @@ import {
   getClassificationReadiness,
   type CurationTargetsResponse,
   type ConsistencyWarning,
+  type SemanticValidationPayload,
 } from '../onboarding-api';
 import type {
   OnboardingItem,
@@ -208,6 +209,10 @@ export function PipelineBoard({
   // proposal id; part of the queued decision action and exact retry equality.
   const [citationSelections, setCitationSelections] = useState<Record<string, string[]>>({});
   const [consistencyWarnings, setConsistencyWarnings] = useState<ConsistencyWarning[]>([]);
+  // PR10 (issue #30, DECISION-A): the first-class active-cohort semantic
+  // validation surface threaded from the hydrated item detail into the
+  // review drawer (null in legacy mode — the legacy warnings box stays).
+  const [semanticValidation, setSemanticValidation] = useState<SemanticValidationPayload | null>(null);
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [manualUrlInput, setManualUrlInput] = useState('');
   const [manualImageUrl, setManualImageUrl] = useState('');
@@ -433,6 +438,7 @@ export function PipelineBoard({
         if (res.item?.curationData) setCurationFields(res.item.curationData);
         installCanonicalDecisionState(res.item);
         setConsistencyWarnings(res.consistencyWarnings ?? []);
+        setSemanticValidation(res.semanticValidation ?? null);
       } catch (err) {
         console.warn('Failed to process SSE item:status event:', err);
       }
@@ -681,6 +687,7 @@ export function PipelineBoard({
     setSaveStatus('idle');
     setSaveError(null);
     setConsistencyWarnings([]);
+    setSemanticValidation(null);
     const site = cachedBrandSites.find(
       b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim(),
     );
@@ -707,6 +714,7 @@ export function PipelineBoard({
       setReviewSources(res.sources);
       setReviewEvidenceAttempts(res.evidenceAttempts ?? []);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
+      setSemanticValidation(res.semanticValidation ?? null);
       // Prefer extraction from the dedicated extractions table, then fall
       // back to extraction_data_json stored on the item itself so the
       // drawer shows data even when the extractions table row is missing.
@@ -765,6 +773,7 @@ export function PipelineBoard({
     setClassificationProposals([]);
     setClassificationEvidence([]);
     setConsistencyWarnings([]);
+    setSemanticValidation(null);
     setSaveStatus('idle');
     setSaveError(null);
     setPageSearchQuery('');
@@ -817,6 +826,7 @@ export function PipelineBoard({
       )) return;
       setReviewItem(res.item);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
+      setSemanticValidation(res.semanticValidation ?? null);
       const extractionData = res.extraction ?? res.item?.extractionData ?? null;
       if (extractionData) {
         setReviewExtraction(extractionData);
@@ -965,6 +975,7 @@ export function PipelineBoard({
       setReviewItem(res.item);
       installCanonicalDecisionState(res.item, { force: true });
       setConsistencyWarnings(res.consistencyWarnings ?? []);
+      setSemanticValidation(res.semanticValidation ?? null);
       setSaveStatus('error');
       setSaveError(`${conflictMessage} Canonical decisions were refreshed; reapply your edit.`);
     } catch (refreshError) {
@@ -1417,6 +1428,25 @@ export function PipelineBoard({
                 </span>
               </div>
             )}
+            {/* PR10 (issue #30, DECISION-B): a blocked active-cohort member's
+                committed semanticValidation projects to a red card badge so
+                blocked members are visible from the board before opening the
+                drawer (the committed payload is only written by processCohort
+                for active members; legacy items never carry the key). */}
+            {item.curationData?.semanticValidation?.status === 'blocked' && (
+              <span style={{
+                marginTop: 4,
+                display: 'inline-block',
+                padding: '1px 6px',
+                fontSize: 10,
+                fontWeight: 600,
+                borderRadius: 8,
+                background: '#fee2e2',
+                color: '#991b1b',
+              }}>
+                ⛔ Semantic blocked
+              </span>
+            )}
             {isReviewStage && (
               <span style={{
                 marginTop: 4,
@@ -1806,6 +1836,7 @@ export function PipelineBoard({
           onClose={closeReview}
           onOpenProfileBuilder={onOpenProfileBuilder}
           consistencyWarnings={consistencyWarnings}
+          semanticValidation={semanticValidation}
           handleResetSingle={handleResetSingle}
           saveStatus={saveStatus}
           saveError={saveError}

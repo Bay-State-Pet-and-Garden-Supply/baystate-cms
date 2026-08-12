@@ -175,10 +175,26 @@ export async function moveToPreviousStage(
 }
 
 export async function completeReviewStage(itemIds: string[]): Promise<{ success: boolean; count: number; legacyCount?: number; classifiedCount?: number }> {
-  return request<{ success: boolean; count: number; legacyCount?: number; classifiedCount?: number }>('/items/review-complete', {
+  const res = await fetch(`${API_BASE}/items/review-complete`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ itemIds }),
   });
+  const data = await res.json() as Record<string, unknown>;
+  if (!res.ok) {
+    // PR10 (issue #30, DECISION-B): surface the per-item gate reasons inline
+    // so a `semantic_validation_blocked` failure shows the EXACT finding
+    // reason (the gate's `reason` is the first finding message) in the
+    // drawer's existing error display — never just the generic batch error.
+    const failures = Array.isArray(data?.failures) ? data.failures as Array<{ reason?: unknown }> : [];
+    const reasons = failures
+      .map(failure => (typeof failure?.reason === 'string' ? failure.reason : null))
+      .filter((reason): reason is string => reason !== null);
+    const baseMsg = typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`;
+    const message = reasons.length > 0 ? `${baseMsg} ${reasons.join(' ')}` : baseMsg;
+    throw new OnboardingApiError(message, res.status, typeof data?.code === 'string' ? data.code : null);
+  }
+  return data as { success: boolean; count: number; legacyCount?: number; classifiedCount?: number };
 }
 
 export async function getBatchItems(
