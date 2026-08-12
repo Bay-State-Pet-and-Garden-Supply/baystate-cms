@@ -75,7 +75,7 @@ import {
 } from '../../classification/runtime-snapshot';
 import { modelPolicyViewFromConfig } from '../../onboarding/model-policy-snapshot';
 import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
-import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError } from '../../onboarding/cohort-title-coordinator';
+import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError, CohortTitleOutputCorruptError } from '../../onboarding/cohort-title-coordinator';
 import {
   freezeCohortForExecution,
   buildFrozenProductLineContext,
@@ -661,6 +661,96 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(titleCallCount).toBe(1);
     expect([...second.entries()].sort()).toEqual([...first.entries()].sort());
     expect(countCohortTitleOutputs(fixture.run.id)).toBe(2);
+  });
+
+  it('PR8 review R1 (BLOCKER 1): a corrupt persisted curated_title row throws CohortTitleOutputCorruptError with the run id, per-SKU failures + original causes, and the usable parsed rows — zero re-coordination', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const first = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(first.size).toBe(2);
+    expect(titleCallCount).toBe(1);
+
+    // Corrupt ONE persisted row (bad JSON — a real corrupt storage write).
+    getDb().run(
+      "UPDATE classification_cohort_outputs SET output_value_json = '{corrupt' WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000001'",
+      [fixture.run.id],
+    );
+
+    let thrown: unknown;
+    try {
+      await ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      });
+      expect.unreachable('expected CohortTitleOutputCorruptError');
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CohortTitleOutputCorruptError);
+    const corrupt = thrown as CohortTitleOutputCorruptError;
+    expect(corrupt.runId).toBe(fixture.run.id);
+    expect(corrupt.failures).toHaveLength(1);
+    expect(corrupt.failures[0].sku).toBe('100000000001');
+    expect(corrupt.failures[0].cause).toContain('JSON Parse error');
+    expect(corrupt.message).toContain(fixture.run.id);
+    expect(corrupt.message).toContain('100000000001');
+    // The unaffected row stays usable for the parent to continue.
+    expect(corrupt.usableOutputs.get('100000000002')).toEqual({
+      title: 'Purina Pro Plan Dog Food Beef 10 lb',
+      source: 'llm_cohort',
+    });
+    expect(corrupt.usableOutputs.has('100000000001')).toBe(false);
+    // ZERO re-coordination — the corrupt row never triggers a new title call.
+    expect(titleCallCount).toBe(1);
+  });
+
+  it('PR8 review R1 (BLOCKER 2): an EMPTY persisted title row throws CohortTitleOutputCorruptError with a schema-violation cause — the tightened schema turns a pre-tightening empty row into a member failure', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    // Hand-seed an EMPTY title at the DB level (pre-tightening corruption).
+    getDb().run(
+      "UPDATE classification_cohort_outputs SET output_value_json = ? WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000001'",
+      [JSON.stringify({ title: '', source: 'llm_cohort' }), fixture.run.id],
+    );
+    let thrown: unknown;
+    try {
+      await ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+      });
+      expect.unreachable('expected CohortTitleOutputCorruptError');
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(CohortTitleOutputCorruptError);
+    const corrupt = thrown as CohortTitleOutputCorruptError;
+    expect(corrupt.failures[0].sku).toBe('100000000001');
+    expect(corrupt.failures[0].cause).toContain('title');
   });
 
   it('hash mismatch: a nonempty committed set under a stale input_hash FAILS CLOSED — CohortTitleAuthorityDriftError, existing set untouched, zero new model calls', async () => {

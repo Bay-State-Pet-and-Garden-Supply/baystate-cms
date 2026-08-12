@@ -203,6 +203,30 @@ describe('PR7 C5 — materializeCoordinatedPages (durable parent outputs, zero P
     expect(mocks.perItem).not.toHaveBeenCalled();
   });
 
+  it('PR8 review R1 (BLOCKER 2c): an ASSIGNED row with an EMPTY page list THROWS — the member fails closed, never a deterministic abstention / partial no-page draft', async () => {
+    const context: StageContext = {
+      ...materializedContext,
+      coordinatedPages: new Map([
+        ['SKU1', { output: { status: 'assigned', pages: [], source: 'llm_cohort' }, modelCallId: 'x' } as any],
+      ]),
+    };
+    // The tightened `CohortPageOutputSchema` (pages.min(1)) rejects
+    // assigned-empty at parse time, so the deterministic fail-closed throw is
+    // the schema-violation message — the member FAILS either way (never the
+    // old deterministic-abstention conversion).
+    await expect(materializeCoordinatedPages(target as any, input, context)).rejects.toThrow(
+      /corrupt parent page output payload/,
+    );
+    await expect(materializeCoordinatedPages(target as any, input, context)).rejects.toThrow(
+      /SKU1/,
+    );
+    await expect(materializeCoordinatedPages(target as any, input, context)).rejects.toThrow(
+      /run-SKU1/,
+    );
+    expect(mocks.coordinate).not.toHaveBeenCalled();
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+
   it('PR8 DECISION-B: missing row WITH the pageCoordinationAbsent expected-empty marker => clean deterministic abstain (unchanged PR7 R2 F3.3 semantics)', async () => {
     const context: StageContext = {
       ...materializedContext,

@@ -429,6 +429,29 @@ describe('nameConsolidationStage — distributor signal collection', () => {
     expect(consolidateProductTitle).not.toHaveBeenCalled();
   });
 
+  it('PR8 review R1 (BLOCKER 2b): an EMPTY preComputedTitle THROWS a deterministic member error — it never falls through to per-item synthesis (no invented title)', async () => {
+    await expect(
+      nameConsolidationStage.execute(
+        makeInput({ sku: 'SKU-EMPTY-TITLE', evidence: [] }),
+        makeContext({ runId: 'run-parent-42', preComputedTitle: '   ', preComputedTitleSource: 'llm_cohort' }),
+      ),
+    ).rejects.toThrow(/SKU-EMPTY-TITLE/);
+    await expect(
+      nameConsolidationStage.execute(
+        makeInput({ sku: 'SKU-EMPTY-TITLE', evidence: [] }),
+        makeContext({ runId: 'run-parent-42', preComputedTitle: '' }),
+      ),
+    ).rejects.toThrow(/run-parent-42/);
+    await expect(
+      nameConsolidationStage.execute(
+        makeInput({ sku: 'SKU-EMPTY-TITLE', evidence: [] }),
+        makeContext({ runId: 'run-parent-42', preComputedTitle: '' }),
+      ),
+    ).rejects.toThrow(/EMPTY coordinated title/);
+    // The per-item LLM path was NEVER consulted for the empty coordinated title.
+    expect(consolidateProductTitle).not.toHaveBeenCalled();
+  });
+
   it('includes distributor titles in the fallback chain (error path)', async () => {
     asMock(consolidateProductTitle).mockRejectedValue(new Error('LLM error'));
 

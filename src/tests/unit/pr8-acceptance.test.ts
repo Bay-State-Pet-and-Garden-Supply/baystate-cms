@@ -18,15 +18,18 @@
  *     expiry, new worker) → processCohort #2 under the SAME parent run: ZERO
  *     title/Page coordination calls (spies on `coordinateCohortItemsOnce`,
  *     `coordinateCohortPagesOnce`, `coordinateCohortPagesCore`,
- *     `llmAssignCategoryPages`), member 1 re-executes and its curationData is
- *     BYTE-IDENTICAL (curatedTitle, titleSource, suggestedPages,
- *     searchKeywords, curatedDescription, normalized classificationProposals,
- *     draft-projection metadata title.value/source); remaining members commit;
+ *     `llmAssignCategoryPages`, reinstalled immediately before the retry
+ *     window), member 1 re-executes and its CANONICAL DRAFT SIGNATURE
+ *     (hashCanonicalJson of the deterministic draft fields + projection
+ *     metadata, audit identity/time excluded) is BYTE-EQUAL;
  *  3. negative tests (DECISION-B): missing title row fails the member (no
- *     partial draft, no fallback); corrupt page JSON fails; missing page row
+ *     partial draft, no fallback); corrupt PAGE JSON fails; missing page row
  *     fails; abstained page row succeeds with no pages; an attribute-stage
  *     failure (unresolvable effective type) fails the member via the pipeline
- *     throw;
+ *     throw; PR8 review R1 adds corrupt/empty-title/assigned-empty-page
+ *     DURABLE-row cases re-entering processCohort (the affected member fails
+ *     closed with the deterministic message — child failed, no curationData,
+ *     zero re-coordination, parent completes with member failures);
  *  4. legacy flag OFF: byte-identical path — no cohort runs/outputs, per-item
  *     pipeline emits the draft as today, the projection metadata carries the
  *     consolidated title (DECISION-A additive in legacy too).
@@ -95,6 +98,7 @@ import {
   resetCohortCurationFlagsOverride,
   getCohortCurationFlags,
 } from '../../classification/flags';
+import type { ModelCallContext } from '../../classification/model-operation-registry';
 import { canonicalJsonFileString, sha256Hex, hashCanonicalJson } from '../../shared/stable-id';
 import {
   ClassificationManifestV2Schema,
@@ -159,29 +163,31 @@ function mockGetLlmConfigForTask(): Record<string, any> {
 /** Simulate the audited transport's durable started + success rows. The
  *  returned call id must be a real `classification_model_calls.id` (the
  *  materialized proposals link to it). PR7 review R2 (F2d): the row is
- *  manufactured per PRODUCTION semantics — operation + prompt/rule versions
- *  come from the ModelCall context (`options.modelCall`), NEVER from the
- *  transport's protectedOperation routing hint. */
-function writeAuditPair(
-  ctx: { runId: string; snapshotHash: string | null; operation: string; promptTemplateVersion: string; ruleVersion: string },
-  callId: string,
-): void {
+ *  manufactured per PRODUCTION semantics — operation, stage_name, AND
+ *  attempt all come from the ModelCall context (`options.modelCall`), NEVER
+ *  from the transport's protectedOperation routing hint or hardcoded values
+ *  (PR8 review R1 SHOULD-FIX: the title op's rows carry stage
+ *  'name_consolidation' and the page op's rows 'category_page_proposals' —
+ *  exactly what production writes via OPERATION_TO_STAGE). */
+function writeAuditPair(ctx: ModelCallContext, callId: string): void {
   const now = new Date().toISOString();
+  const stageName = ctx.stage ?? 'name_consolidation';
+  const attempt = ctx.attempt;
   getDb().run(
     `INSERT INTO classification_model_calls
        (id, run_id, stage_name, operation, attempt, provider, model, locality, snapshot_hash,
         prompt_template_version, rule_version, system_prompt_hash, user_prompt_hash, started_at,
         ended_at, status, created_at)
-     VALUES (?, ?, 'category_page_proposals', ?, 1, 'ollama', 'qwen2.5vl:latest', 'local', ?, ?, ?, ?, ?, ?, ?, 'started', ?)`,
-    [`${callId}-started`, ctx.runId, ctx.operation, ctx.snapshotHash, ctx.promptTemplateVersion, ctx.ruleVersion, 'sys-hash', 'user-hash', now, null, now],
+     VALUES (?, ?, ?, ?, ?, 'ollama', 'qwen2.5vl:latest', 'local', ?, ?, ?, ?, ?, ?, ?, 'started', ?)`,
+    [`${callId}-started`, ctx.runId, stageName, ctx.operation, attempt, ctx.snapshotHash, ctx.promptTemplateVersion, ctx.ruleVersion, 'sys-hash', 'user-hash', now, null, now],
   );
   getDb().run(
     `INSERT INTO classification_model_calls
        (id, run_id, stage_name, operation, attempt, provider, model, locality, snapshot_hash,
         prompt_template_version, rule_version, system_prompt_hash, user_prompt_hash, started_at,
         ended_at, status, created_at)
-     VALUES (?, ?, 'category_page_proposals', ?, 1, 'ollama', 'qwen2.5vl:latest', 'local', ?, ?, ?, ?, ?, ?, ?, 'success', ?)`,
-    [callId, ctx.runId, ctx.operation, ctx.snapshotHash, ctx.promptTemplateVersion, ctx.ruleVersion, 'sys-hash', 'user-hash', now, now, now],
+     VALUES (?, ?, ?, ?, ?, 'ollama', 'qwen2.5vl:latest', 'local', ?, ?, ?, ?, ?, ?, ?, 'success', ?)`,
+    [callId, ctx.runId, stageName, ctx.operation, attempt, ctx.snapshotHash, ctx.promptTemplateVersion, ctx.ruleVersion, 'sys-hash', 'user-hash', now, now, now],
   );
 }
 
@@ -200,7 +206,7 @@ function mockCallLlmForTaskWithProvenance(
     titleCallCount++;
     if (options.modelCall) {
       auditedPageCallCount++;
-      writeAuditPair(options.modelCall, callId);
+      writeAuditPair(options.modelCall as unknown as ModelCallContext, callId);
     }
     return null;
   }
@@ -212,7 +218,7 @@ function mockCallLlmForTaskWithProvenance(
     else singletonPageCallCount++;
     if (options.modelCall) {
       auditedPageCallCount++;
-      writeAuditPair(options.modelCall, callId);
+      writeAuditPair(options.modelCall as unknown as ModelCallContext, callId);
     }
     return {
       content: cannedGroupResponse(prompt),
@@ -639,6 +645,75 @@ function projectionTitleFromHistory(curationData: CurationData): { value: string
   return { value: title.value, source: title.source ?? '' };
 }
 
+// ─── PR8 review R1 — canonical draft artifact (DECISION-E contract) ──────────
+
+/** The draft-projection stage metadata from the member's classificationHistory
+ *  (the stage result output_json) — the projection metadata the canonical
+ *  draft signature consumes. */
+function projectionMetadataFromHistory(curationData: CurationData): {
+  fieldAssignments: Record<string, unknown>;
+  pageAssignments: string[];
+  title: { value: string; source: string } | null;
+} | null {
+  const entry = curationData.classificationHistory.find(
+    history => history.eventType === 'stage_product_draft_projection',
+  );
+  if (!entry) return null;
+  const parsed = JSON.parse(entry.eventJson.output as string) as {
+    metadata?: {
+      projection?: {
+        fieldAssignments?: Record<string, unknown>;
+        pageAssignments?: string[];
+        title?: { value?: string; source?: string } | null;
+      };
+    };
+  };
+  const projection = parsed.metadata?.projection;
+  if (!projection) return null;
+  const title = projection.title;
+  return {
+    fieldAssignments: projection.fieldAssignments ?? {},
+    pageAssignments: projection.pageAssignments ?? [],
+    title:
+      title && typeof title.value === 'string' && title.value.length > 0
+        ? { value: title.value, source: title.source ?? '' }
+        : null,
+  };
+}
+
+/**
+ * The CANONICAL draft artifact whose byte equality defines "byte-identical
+ * curationData" across retry (PR8 review R1 BLOCKER 3 / DECISION-E).
+ * `hashCanonicalJson` of the deterministic DRAFT object (curatedTitle,
+ * titleSource, suggestedPages, searchKeywords, curatedDescription,
+ * curatedWeight, suggestedProductType, packagingOcrTitle, and the draft
+ * projection's fieldAssignments/pageAssignments/title). Audit identity and
+ * time fields — curatedAt, classificationRunId, classificationHistory,
+ * proposal/evidence ids — are EXPLICITLY EXCLUDED by this contract (a retried
+ * member runs against a NEW child run with fresh run-scoped ids and
+ * timestamps; the DRAFT must still reproduce byte-identically).
+ */
+function canonicalDraftSignature(curationData: CurationData): string {
+  const projection = projectionMetadataFromHistory(curationData);
+  return hashCanonicalJson({
+    curatedTitle: curationData.curatedTitle ?? null,
+    titleSource: curationData.titleSource,
+    suggestedPages: curationData.suggestedPages ?? [],
+    searchKeywords: curationData.searchKeywords,
+    curatedDescription: curationData.curatedDescription,
+    curatedWeight: curationData.curatedWeight,
+    suggestedProductType: curationData.suggestedProductType,
+    packagingOcrTitle: curationData.packagingOcrTitle,
+    projection: projection
+      ? {
+          fieldAssignments: projection.fieldAssignments,
+          pageAssignments: projection.pageAssignments,
+          title: projection.title,
+        }
+      : null,
+  });
+}
+
 // ─── Spies on every coordination entry point (zero-call proof) ────────────────
 
 function installCoordinationSpies() {
@@ -708,6 +783,29 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     // singleton) — the mock manufactures audit rows per PRODUCTION semantics.
     expect(countsAfterFirst.audited).toBe(3);
 
+    // PR8 review R1 (SHOULD-FIX): the audit rows carry the CONTEXT-DERIVED
+    // stage and attempt — title rows stage 'name_consolidation', page rows
+    // stage 'category_page_proposals' — plus their context-derived operations
+    // (never a hardcoded stage/attempt).
+    const titleAuditRows = getDb().query(
+      "SELECT * FROM classification_model_calls WHERE operation = 'cohort_title_consolidation'",
+    ).all() as Array<Record<string, any>>;
+    expect(titleAuditRows.length).toBe(2); // one started + one success pair
+    for (const row of titleAuditRows) {
+      expect(row.stage_name).toBe('name_consolidation');
+      expect(row.attempt).toBe(1);
+      expect(row.operation).toBe('cohort_title_consolidation');
+    }
+    const pageAuditRows = getDb().query(
+      "SELECT * FROM classification_model_calls WHERE operation = 'cohort_page_assignment_parent'",
+    ).all() as Array<Record<string, any>>;
+    expect(pageAuditRows.length).toBe(4); // group + singleton, started + success each
+    for (const row of pageAuditRows) {
+      expect(row.stage_name).toBe('category_page_proposals');
+      expect(row.attempt).toBe(1);
+      expect(row.operation).toBe('cohort_page_assignment_parent');
+    }
+
     // ── crash/reclaim: expire the lease, reclaim with a NEW worker id →
     // resume the SAME parent run (frozen match).
     getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', finalized.id]);
@@ -725,23 +823,37 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     // ── reset member 1 (simulated crash-recovery retry) + processCohort #2.
     updateItemStageStatus(items[0].id, 'pending');
     updateItemCurationData(items[0].id, '');
-    const summary2 = await processCohort(resumed, wsPath, workspaceId);
-    expect(summary2.parentStatus).not.toBe('failed');
-
-    // ZERO title/Page coordination calls across the retry.
-    const countsAfterSecond = spyCounts();
-    expect(countsAfterSecond.title).toBe(countsAfterFirst.title);
-    expect(countsAfterSecond.groupPages).toBe(countsAfterFirst.groupPages);
-    expect(countsAfterSecond.singletonPages).toBe(countsAfterFirst.singletonPages);
-    expect(countsAfterSecond.audited).toBe(countsAfterFirst.audited);
-    expect(countsAfterSecond.itemsOnce).toBe(0);
-    expect(countsAfterSecond.pagesOnce).toBe(0);
-    expect(countsAfterSecond.pagesCore).toBe(countsAfterFirst.pagesCore);
-    expect(countsAfterSecond.llmAssign).toBe(0);
+    // PR8 review R1 (review-tests PARTIAL b): clear/reinstall all four
+    // coordination spies IMMEDIATELY BEFORE the retry window and assert each
+    // retry-window call count is EXACTLY 0 (the pre-retry history is
+    // irrelevant to the retry-window proof).
     spies.coordinateCohortItemsOnce.mockRestore();
     spies.coordinateCohortPagesOnce.mockRestore();
     spies.coordinateCohortPagesCore.mockRestore();
     spies.llmAssignCategoryPages.mockRestore();
+    const retrySpies = installCoordinationSpies();
+    const titleCallsBeforeRetry = titleCallCount;
+    const groupPageCallsBeforeRetry = groupPageCallCount;
+    const singletonPageCallsBeforeRetry = singletonPageCallCount;
+    const auditedCallsBeforeRetry = auditedPageCallCount;
+    const summary2 = await processCohort(resumed, wsPath, workspaceId);
+    expect(summary2.parentStatus).not.toBe('failed');
+
+    // ZERO title/Page coordination calls across the retry window — four
+    // explicit zero-count assertions on the fresh retry-window spies, plus
+    // flat transport counters (the parent ops reused the durable sets).
+    expect(retrySpies.coordinateCohortItemsOnce.mock.calls.length).toBe(0);
+    expect(retrySpies.coordinateCohortPagesOnce.mock.calls.length).toBe(0);
+    expect(retrySpies.coordinateCohortPagesCore.mock.calls.length).toBe(0);
+    expect(retrySpies.llmAssignCategoryPages.mock.calls.length).toBe(0);
+    expect(titleCallCount).toBe(titleCallsBeforeRetry);
+    expect(groupPageCallCount).toBe(groupPageCallsBeforeRetry);
+    expect(singletonPageCallCount).toBe(singletonPageCallsBeforeRetry);
+    expect(auditedPageCallCount).toBe(auditedCallsBeforeRetry);
+    retrySpies.coordinateCohortItemsOnce.mockRestore();
+    retrySpies.coordinateCohortPagesOnce.mockRestore();
+    retrySpies.coordinateCohortPagesCore.mockRestore();
+    retrySpies.llmAssignCategoryPages.mockRestore();
 
     // ── member 1's re-executed draft is BYTE-IDENTICAL on the listed fields.
     const memberOneRetried = findItemById(items[0].id)!;
@@ -753,6 +865,15 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     expect(secondCurationData.searchKeywords).toEqual(firstCurationData.searchKeywords);
     expect(secondCurationData.curatedDescription).toEqual(firstCurationData.curatedDescription);
     expect(normalizedProposalTuples(secondCurationData)).toEqual(normalizedProposalTuples(firstCurationData));
+    // PR8 review R1 (BLOCKER 3 / DECISION-E): the CANONICAL draft artifact is
+    // BYTE-IDENTICAL across retry — hashCanonicalJson equality of the
+    // canonical object ({curatedTitle, titleSource, suggestedPages,
+    // searchKeywords, curatedDescription, curatedWeight,
+    // suggestedProductType, packagingOcrTitle, projection:{fieldAssignments,
+    // pageAssignments, title}}). Audit identity/time fields (curatedAt,
+    // classificationRunId, classificationHistory, proposal/evidence ids) are
+    // explicitly excluded by the canonical-draft contract.
+    expect(canonicalDraftSignature(secondCurationData)).toBe(canonicalDraftSignature(firstCurationData));
     const firstProjectionTitle = projectionTitleFromHistory(firstCurationData);
     const secondProjectionTitle = projectionTitleFromHistory(secondCurationData);
     expect(firstProjectionTitle).not.toBeNull();
@@ -841,6 +962,163 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     ).rejects.toThrow(/missing from the frozen runtime snapshot/);
   });
 
+  // ─── PR8 review R1 (BLOCKER 1): corrupt DURABLE rows fail the member ───────
+  // The negative tests above inject hand-built maps directly into
+  // `curateItemWithPipeline`; these tests corrupt actual persisted
+  // `classification_cohort_outputs` rows and RE-ENTER `processCohort` — the
+  // production parent-row parser path. The affected member fails with the
+  // deterministic message (child failed, item NOT completed, NO curationData),
+  // the OTHER members commit normally, zero re-coordination happens, and the
+  // parent completes with member failures (never a parent abort / retry loop).
+
+  it('review-R1-1 (BLOCKER 1): a corrupt persisted curated_title row FAILS the affected member — child failed, no curationData, other members commit, zero re-coordination, parent completes with member failures', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items } = await freezeAndScaffold();
+    const spies = installCoordinationSpies();
+    // First entry: crash after member 2's pipeline (member 1 COMMITS; members
+    // 2 and 3 stay unexecuted — their children stay `running`).
+    let pipelineCount = 0;
+    await expect(processCohort(run, wsPath, workspaceId, {
+      afterMemberPipeline: () => {
+        pipelineCount++;
+        if (pipelineCount === 2) throw new MemberCommitCrashSimulationError('simulated kill');
+      },
+    })).rejects.toThrow('simulated kill');
+    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
+    expect(countCohortPageOutputs(run.id)).toBe(3);
+
+    // Corrupt ONE durable curated_title row (member 2's).
+    getDb().run(
+      "UPDATE classification_cohort_outputs SET output_value_json = '{corrupt' WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000002'",
+      [run.id],
+    );
+
+    // PR8 review R1 (review-tests PARTIAL b): clear/reinstall all four spies
+    // immediately BEFORE the re-entry window and assert each window call count
+    // is exactly 0 — zero re-coordination on the corrupt-row re-entry.
+    spies.coordinateCohortItemsOnce.mockRestore();
+    spies.coordinateCohortPagesOnce.mockRestore();
+    spies.coordinateCohortPagesCore.mockRestore();
+    spies.llmAssignCategoryPages.mockRestore();
+    const reentrySpies = installCoordinationSpies();
+
+    // Re-enter processCohort: the parent title op's REUSE path parses the row,
+    // fails closed, and the corrupt row becomes a MEMBER failure — not a
+    // parent abort.
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.memberFailures).toHaveLength(1);
+    expect(summary.memberFailures[0].productSku).toBe('100000000002');
+    expect(summary.memberFailures[0].ok).toBe(false);
+
+    // The affected member: deterministic message (run id + SKU + cause), item
+    // NOT completed, NO curationData (no partial draft).
+    const failed = findItemById(items[1].id)!;
+    expect(failed.stageStatus).toBe('failed');
+    expect(failed.curationData).toBeNull();
+    expect(failed.errorMessage).toContain('100000000002');
+    expect(failed.errorMessage).toContain(run.id);
+    expect(failed.errorMessage).toContain('corrupt');
+
+    // The affected child run terminalized failed.
+    const child = getDb().query(
+      'SELECT id, status FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
+    ).get(run.id, items[1].id) as { id: string; status: string };
+    expect(child.status).toBe('failed');
+
+    // The OTHER members committed normally (member 1's projection already
+    // committed; member 3 executes now from the usable parsed rows).
+    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
+    const memberThree = findItemById(items[2].id)!;
+    expect(memberThree.stageStatus).toBe('completed');
+    expect(memberThree.curationData).not.toBeNull();
+    expect(memberThree.curationData!.curatedTitle).not.toBeNull();
+
+    // ZERO re-coordination: every coordination entry point stayed untouched in
+    // the re-entry window.
+    expect(reentrySpies.coordinateCohortItemsOnce.mock.calls.length).toBe(0);
+    expect(reentrySpies.coordinateCohortPagesOnce.mock.calls.length).toBe(0);
+    expect(reentrySpies.coordinateCohortPagesCore.mock.calls.length).toBe(0);
+    expect(reentrySpies.llmAssignCategoryPages.mock.calls.length).toBe(0);
+
+    // The parent completed with member failures — NOT failed/superseded (no
+    // job-queue retry loop re-hitting the corrupt row).
+    const finalRun = getCohortRunById(run.id)!;
+    expect(finalRun.status).toBe('completed_with_member_failures');
+    reentrySpies.coordinateCohortItemsOnce.mockRestore();
+    reentrySpies.coordinateCohortPagesOnce.mockRestore();
+    reentrySpies.coordinateCohortPagesCore.mockRestore();
+    reentrySpies.llmAssignCategoryPages.mockRestore();
+  });
+
+  it('review-R1-2 (BLOCKER 2): an EMPTY persisted curated_title row FAILS the member — no fallback title in curationData', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items } = await freezeAndScaffold();
+    let pipelineCount = 0;
+    await expect(processCohort(run, wsPath, workspaceId, {
+      afterMemberPipeline: () => {
+        pipelineCount++;
+        if (pipelineCount === 2) throw new MemberCommitCrashSimulationError('simulated kill');
+      },
+    })).rejects.toThrow('simulated kill');
+
+    // Hand-seed an EMPTY title row at the DB level (simulates a pre-tightening
+    // row — the schema now rejects empty titles via trim().min(1), so the
+    // parent reuse path fails the parse and fails the member closed).
+    getDb().run(
+      "UPDATE classification_cohort_outputs SET output_value_json = ? WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000002'",
+      [JSON.stringify({ title: '', source: 'llm_cohort' }), run.id],
+    );
+
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.memberFailures).toHaveLength(1);
+    expect(summary.memberFailures[0].productSku).toBe('100000000002');
+
+    const failed = findItemById(items[1].id)!;
+    expect(failed.stageStatus).toBe('failed');
+    // NO curationData at all — the member never fell through to per-item
+    // synthesis and no fallback title was invented.
+    expect(failed.curationData).toBeNull();
+    expect(failed.errorMessage).toContain('100000000002');
+    expect(failed.errorMessage).toContain(run.id);
+
+    // The other members commit normally.
+    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
+    expect(findItemById(items[2].id)!.stageStatus).toBe('completed');
+  });
+
+  it('review-R1-3 (BLOCKER 2c): an assigned persisted coordinated_page row with EMPTY pages FAILS the member — no partial draft', async () => {
+    const { workspaceId, workspacePath: wsPath, run, items } = await freezeAndScaffold();
+    let pipelineCount = 0;
+    await expect(processCohort(run, wsPath, workspaceId, {
+      afterMemberPipeline: () => {
+        pipelineCount++;
+        if (pipelineCount === 2) throw new MemberCommitCrashSimulationError('simulated kill');
+      },
+    })).rejects.toThrow('simulated kill');
+
+    // Seed an assigned row with an EMPTY page list (pre-tightening corruption
+    // — the schema now rejects assigned-empty via pages.min(1)).
+    getDb().run(
+      "UPDATE classification_cohort_outputs SET output_value_json = ? WHERE cohort_run_id = ? AND output_kind = 'coordinated_page' AND product_sku = '100000000003'",
+      [JSON.stringify({ status: 'assigned', pages: [], source: 'llm_cohort' }), run.id],
+    );
+
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    expect(summary.memberFailures).toHaveLength(1);
+    expect(summary.memberFailures[0].productSku).toBe('100000000003');
+
+    const failed = findItemById(items[2].id)!;
+    expect(failed.stageStatus).toBe('failed');
+    expect(failed.curationData).toBeNull();
+    expect(failed.errorMessage).toContain('100000000003');
+    expect(failed.errorMessage).toContain(run.id);
+
+    // Members 1 and 2 commit normally.
+    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
+    expect(findItemById(items[1].id)!.stageStatus).toBe('completed');
+  });
+
   it('4: legacy flag OFF — byte-identical path (no cohort runs/outputs, per-item draft emitted, projection metadata carries the consolidated title)', async () => {
     // NOTE: no freeze — the flag-OFF path must run the per-item worker path
     // byte-identically (flag defaults OFF; a freeze would force the flags ON).
@@ -867,6 +1145,7 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
        WHERE b.workspace_id = ?`,
     ).all(workspaceId) as Array<{ id: string }>;
     expect(items.length).toBe(3);
+    const legacyNormalized = new Map<string, Record<string, unknown>>();
     for (const row of items) {
       const stored = findItemById(row.id)!;
       expect(stored.stageStatus).toBe('completed');
@@ -880,6 +1159,44 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
       expect(projectionTitle).not.toBeNull();
       expect(projectionTitle!.value).toBe(curatedTitle);
       expect(projectionTitle!.source).toBe(stored.curationData!.titleSource);
+      legacyNormalized.set(stored.upc, {
+        title: curatedTitle,
+        source: stored.curationData!.titleSource,
+        pages: stored.curationData!.suggestedPages,
+        keywords: stored.curationData!.searchKeywords ?? '',
+      });
     }
+    // PR8 review R1 (review-tests PARTIAL c): the legacy run's normalized
+    // output is compared against an explicit FROZEN pre-PR8 baseline literal
+    // (expected title/source/pages/keywords), excluding the additive
+    // projection-title metadata where applicable (asserted separately above —
+    // DECISION-A is additive in legacy mode, so the baseline covers only the
+    // DRAFT the pre-PR8 pipeline emitted).
+    //
+    // FROZEN on the deterministic fixtures + fixed test llm-client mock
+    // (captured before the review-R1 edits): members 1+2 are grouped and get
+    // the legacy coordinator's deterministic fallback (cohort_fallback); the
+    // singleton keeps the per-item spreadsheet title (source web).
+    const FROZEN_LEGACY_BASELINE = {
+      '100000000001': {
+        title: 'Acme Purina Pro Plan Dry Dog Food Chicken 5 lb',
+        source: 'cohort_fallback',
+        pages: [],
+        keywords: 'Acme Purina Pro Plan Dry Dog Food Chicken 5 lb, dog-food-dry, Original, description',
+      },
+      '100000000002': {
+        title: 'Acme Purina Pro Plan Dry Dog Food Beef 10 lb',
+        source: 'cohort_fallback',
+        pages: [],
+        keywords: 'Acme Purina Pro Plan Dry Dog Food Beef 10 lb, dog-food-dry, Original, description',
+      },
+      '100000000003': {
+        title: 'Purina Pro Plan Adult Dog Food Salmon 5 lb',
+        source: 'web',
+        pages: [],
+        keywords: 'Purina Pro Plan Adult Dog Food Salmon 5 lb, Acme, Original, description',
+      },
+    };
+    expect(Object.fromEntries(legacyNormalized)).toEqual(FROZEN_LEGACY_BASELINE);
   });
 });
