@@ -314,6 +314,34 @@ export type ApproveDistributorImageRequest = z.infer<typeof ApproveDistributorIm
 
 // ─── Curation Data (Refined taxonomy and packaging mapping) ─────────────────────
 
+/**
+ * PR9 (issue #30, DECISION-A): the member's cohort semantic validation
+ * payload shape — `{status, findings}` where a 'blocked' status means the
+ * member is NOT review-ready (`semantic_validation_blocked` gate) while the
+ * curationData + proposals stay intact (blocked-not-destroyed).
+ *
+ * Exported so the review completion gate (R2-A) parses the committed payload
+ * against the EXACT same schema the curator writes — missing or malformed
+ * semantic data fails closed (never review-ready).
+ */
+export const CohortSemanticValidationSchema = z.object({
+  status: z.enum(['passed', 'blocked']),
+  findings: z.array(z.object({
+    code: z.enum([
+      'family_product_type',
+      'family_brand',
+      'coordinated_title',
+      'coordinated_page',
+      'member_attribute_applicability',
+      'member_cardinality',
+    ]),
+    memberSku: z.string(),
+    message: z.string(),
+  })),
+});
+
+export type CohortSemanticValidation = z.infer<typeof CohortSemanticValidationSchema>;
+
 export const CurationDataSchema = z.object({
   curatedTitle: z.string().nullable().default(null),
   /** Search keywords synthesized by the curator from curated title, brand, attributes, and page names. */
@@ -365,21 +393,7 @@ export const CurationDataSchema = z.object({
    * refuses it with code 'semantic_validation_blocked') while curationData
    * + proposals stay intact for the Review UX (blocked-not-destroyed).
    */
-  semanticValidation: z.object({
-    status: z.enum(['passed', 'blocked']),
-    findings: z.array(z.object({
-      code: z.enum([
-        'family_product_type',
-        'family_brand',
-        'coordinated_title',
-        'coordinated_page',
-        'member_attribute_applicability',
-        'member_cardinality',
-      ]),
-      memberSku: z.string(),
-      message: z.string(),
-    })),
-  }).nullable().optional(),
+  semanticValidation: CohortSemanticValidationSchema.nullable().optional(),
 });
 
 export type CurationData = z.infer<typeof CurationDataSchema>;
