@@ -57,6 +57,7 @@ import {
   supersedeOwnedCohortRunForOutputDrift,
   insertProposalDependency,
   getCohortMemberRunForTitleAudit,
+  writeCohortBrandSemanticUpdates,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
 import {
@@ -118,7 +119,9 @@ import {
   validateMemberSemantics,
   validateMemberLocalAttributes,
   validateCohortBrandCoherence,
+  mergeSemanticFindings,
 } from '../classification/cohort-semantic-validator';
+import type { CohortSemanticFinding } from '../classification/cohort-semantic-validator';
 import { buildEvidenceTargetPacket } from '../classification/evidence-targeting';
 import { llmRankOptions } from '../classification/curation-target-ranker';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
@@ -2089,6 +2092,13 @@ export async function processCohort(
      *  re-enters and re-runs the brand check). Production callers never pass
      *  it. */
     afterMemberCommit?: () => void;
+    /** Test-only seam (PR9 review R1, T1): fires after the member pipeline
+     *  completes and ownership is re-asserted, IMMEDIATELY BEFORE the
+     *  per-member semantic validation — lets tests inject a persisted
+     *  pipeline proposal set into `curationData.classificationProposals`
+     *  (the semantic validator consumes the in-memory curation data).
+     *  Production callers never pass it. */
+    beforeSemanticValidation?: (curationData: CurationData) => void;
   },
 ): Promise<CohortExecutionSummary> {
   if (run.status !== 'running') {
@@ -2350,6 +2360,22 @@ export async function processCohort(
       completedMembers++;
       committedMemberSkus.add(item.upc ?? item.id);
       if (childRow.status === 'completed_with_abstentions') hasAbstentions = true;
+      // PR9 review R1 (B3): the resume guard skips re-execution, but it must
+      // NOT lose an already-committed semantic block — a crash after a
+      // committed PT/member-local blocked projection used to drop that member
+      // from the parent failure summary (and complete the parent with an
+      // incorrect status). Restore ONE deduplicated memberFailures entry from
+      // the committed curation data before continuing (per member, one entry).
+      if (item.curationData?.semanticValidation?.status === 'blocked') {
+        const firstFinding = item.curationData.semanticValidation.findings[0];
+        memberFailures.push({
+          itemId: item.id,
+          productSku: item.upc ?? null,
+          ok: false,
+          error: `Semantic validation blocked (run ${run.id}, member ${item.upc ?? item.id}): ` +
+            `${firstFinding?.message ?? 'hard cohort semantic finding'}`,
+        });
+      }
       console.log(`[CohortCurator] Member ${item.upc ?? item.id} projection already committed under run ${run.id} (child ${childRow.id}) — resume guard skips re-execution.`);
       continue;
     }
@@ -2454,9 +2480,15 @@ export async function processCohort(
           : undefined;
         if (!memberSnapshotForSemantic || !childRun.configSnapshotHash) {
           throw new Error(
-            `processCohort: member ${item.id} frozen runtime snapshot ${childRun.configSnapshotHash ?? 'null'} not found for semantic validation.`,
+            `processCohort: run ${run.id} member ${item.id} (SKU ${item.upc ?? 'n/a'}) frozen runtime snapshot ` +
+            `${childRun.configSnapshotHash ?? 'null'} not found for semantic validation.`,
           );
         }
+        // Test-only seam (PR9 review R1, T1): inject a persisted pipeline
+        // proposal set IMMEDIATELY before semantic validation runs — the
+        // validator consumes the in-memory curation data. Production callers
+        // never pass it.
+        hooks?.beforeSemanticValidation?.(curationData);
         const memberSkuForSemantic = item.upc ?? item.id;
         const executionTypeIdForSemantic = prepared.cohortExecutionType?.id ?? null;
         const executionTypeLabelForSemantic = executionTypeIdForSemantic
@@ -2517,6 +2549,14 @@ export async function processCohort(
           universalAttributeIds: universalAttributeIdsForSemantic,
           profileAttributeIds: profileAttributeIdsForSemantic,
           cardinalityByAttributeId: cardinalityByAttributeForSemantic,
+          // PR9 review R1 (B4): the full FROZEN profile entries (carry each
+          // attribute's applicabilityConditions) + the member's FROZEN/reviewed
+          // facts from the immutable runtime snapshot — conditional
+          // applicability is REVALIDATED with the established evaluator.
+          profileEntriesByAttributeId: effectiveProfileForSemantic
+            ? new Map(effectiveProfileForSemantic.attributes.map(entry => [entry.attributeId, entry]))
+            : null,
+          reviewedFacts: memberSnapshotForSemantic.reviewedFacts,
         });
         const semanticFindings = [
           ...memberSemanticsResult.findings,
@@ -2705,13 +2745,15 @@ export async function processCohort(
       // review-ready (the review gate enforces it) — while the committed
       // curationData + proposals stay intact (blocked-not-destroyed). The
       // parent completes with member failures, consistent with the existing
-      // member-failure summary.
+      // member-failure summary. PR9 review R1 (SHOULD-FIX a): the failure
+      // string carries run + member identity for concurrent/retried runs.
       if (semanticValidation?.status === 'blocked') {
         memberFailures.push({
           itemId: item.id,
           productSku: item.upc ?? null,
           ok: false,
-          error: `Semantic validation blocked: ${semanticValidation.findings[0]?.message ?? 'hard cohort semantic finding'}`,
+          error: `Semantic validation blocked (run ${run.id}, member ${item.upc ?? item.id}): ` +
+            `${semanticValidation.findings[0]?.message ?? 'hard cohort semantic finding'}`,
         });
       }
 
@@ -2774,6 +2816,17 @@ export async function processCohort(
   // (blocked-not-destroyed). The check re-runs on every reclaim re-entry
   // (committed members are skipped by the resume guard, the post-loop check
   // still runs) — the UPDATE is idempotent per member.
+  //
+  // PR9 review R1 (B2/B7): all affected members' writes are applied in ONE
+  // cohort-atomic transaction whose FIRST statement is the parent lease/
+  // ownership CAS (see `writeCohortBrandSemanticUpdates`) — a stale owner can
+  // never write items after the claim moved, and a crash mid-loop can never
+  // persist a subset. Brand findings are grouped by member SKU, each member
+  // is read ONCE, and the findings are MERGED with the member's already
+  // committed `semanticValidation.findings` (deterministic dedupe by
+  // code+content) — a member already blocked for Product Type / title /
+  // applicability / cardinality keeps those diagnostics, and at most ONE
+  // parent `memberFailures` entry is recorded per member.
   const brandCoherenceResult = validateCohortBrandCoherence(
     orderedMembers
       .filter(member => committedMemberSkus.has(member.productSku ?? member.onboardingItemId))
@@ -2783,34 +2836,66 @@ export async function processCohort(
       })),
   );
   if (brandCoherenceResult.status === 'blocked') {
+    // Group Brand findings by member SKU (deterministic insertion order).
+    const findingsBySku = new Map<string, CohortSemanticFinding[]>();
     for (const finding of brandCoherenceResult.findings) {
+      if (!findingsBySku.has(finding.memberSku)) findingsBySku.set(finding.memberSku, []);
+      findingsBySku.get(finding.memberSku)!.push(finding);
+    }
+    const updates: Array<{ itemId: string; curationDataJson: string }> = [];
+    for (const [sku, brandFindings] of findingsBySku) {
       const affectedMember = orderedMembers.find(
-        member => (member.productSku ?? member.onboardingItemId) === finding.memberSku,
+        member => (member.productSku ?? member.onboardingItemId) === sku,
       );
       if (!affectedMember) continue;
       const affectedItem = itemsById.get(affectedMember.onboardingItemId);
       if (!affectedItem) continue;
-      // Owner-guarded per-member UPDATE: read the committed curation data,
-      // replace semanticValidation with the blocked result + findings, write
-      // back atomically (single SQL UPDATE).
+      // Read the member ONCE, MERGE with the committed findings (dedupe by
+      // code+content), preserve blocked status + all other curation fields.
       const storedItem = findItemById(affectedItem.id);
       const existing = storedItem?.curationData ?? null;
-      updateItemCurationData(
-        affectedItem.id,
-        JSON.stringify({
-          ...(existing ?? {}),
-          semanticValidation: {
-            status: 'blocked',
-            findings: [finding],
-          },
-        }),
+      const mergedFindings = mergeSemanticFindings(
+        existing?.semanticValidation?.findings ?? [],
+        brandFindings,
       );
-      memberFailures.push({
+      const finalCurationData: CurationData = {
+        ...(existing ?? ({} as CurationData)),
+        semanticValidation: { status: 'blocked', findings: mergedFindings },
+      };
+      updates.push({
         itemId: affectedItem.id,
-        productSku: affectedItem.upc ?? null,
-        ok: false,
-        error: `Semantic validation blocked: ${finding.message}`,
+        curationDataJson: JSON.stringify(finalCurationData),
       });
+      // At most ONE parent member-failure entry per member (a member already
+      // recorded in the loop keeps its earlier entry).
+      if (!memberFailures.some(failure => (failure.productSku ?? failure.itemId) === sku)) {
+        memberFailures.push({
+          itemId: affectedItem.id,
+          productSku: affectedItem.upc ?? null,
+          ok: false,
+          error: `Semantic validation blocked (run ${run.id}, member ${sku}): ` +
+            `${brandFindings[0].message}`,
+        });
+      }
+    }
+    if (updates.length > 0) {
+      // Cohort-atomic + owner-guarded: one transaction, lease CAS first;
+      // `changes === 0` throws HeartbeatLostError and rolls the whole set
+      // back (no terminal write — the reclaiming worker re-enters).
+      writeCohortBrandSemanticUpdates(run.id, workerId, COHORT_LEASE_TTL_MS, updates);
+      // PR9 review R1 (B7): the member-completed SSE event was emitted BEFORE
+      // this post-loop Brand check — a client could have observed
+      // `semanticValidation.status='passed'` and never learned the member was
+      // subsequently blocked. Emit a follow-up item-status update for every
+      // affected member carrying the FINAL semanticValidation.
+      for (const update of updates) {
+        const finalCuration = JSON.parse(update.curationDataJson) as CurationData;
+        onboardingEvents.emitItemStatus(cohort.batchId, update.itemId, 'completed', {
+          stage: 'curation',
+          cohortRunId: run.id,
+          curationData: finalCuration,
+        });
+      }
     }
   }
 

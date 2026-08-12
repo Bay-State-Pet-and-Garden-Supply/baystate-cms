@@ -34,6 +34,8 @@
  * for the Review UX (PR10).
  */
 import { normalizeBrand } from '../onboarding/product-line-grouper';
+import { evaluateConditions } from './applicability-evaluator';
+import type { ReviewedFact } from './reviewed-facts';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -133,20 +135,31 @@ export function validateMemberSemantics(
 
   // ── family_invariant: Primary Product Type vs the parent authority ───────
   // The cohort Execution Product Type is the family authority; a member whose
-  // suggested type disagrees is a hard semantic failure. A member with NO
-  // suggested type abstains on the family invariant (the pipeline's type
-  // stage may legitimately abstain when the member's extraction evidence is
-  // inconclusive — the freeze resolver sees the spreadsheet name, the member
-  // pipeline only the extraction evidence) — an abstention is never a
-  // conflict. When the parent has no execution type (abstained/conflicted
-  // run), there is no family authority to enforce against.
-  if (
-    input.parentExecutionType.id !== null &&
-    input.parentExecutionType.id.length > 0 &&
-    input.suggestedProductType !== null &&
-    input.suggestedProductType.length > 0
-  ) {
-    if (input.suggestedProductType !== input.parentExecutionType.id) {
+  // suggested type disagrees is a hard semantic failure. When the parent has
+  // no execution type (abstained/conflicted run), there is no family
+  // authority to enforce against. A member with NO suggested type while the
+  // parent authority EXISTS is ALSO a hard failure (PR9 review R1, B1): the
+  // claimed evidence-boundary rationale is false — the frozen member evidence
+  // includes the spreadsheet identity name (evidence-extraction.ts) and the
+  // member target processor runs the same deterministic matching family
+  // (curation-target-processor.ts), so a null suggestion is a missing/
+  // inconsistent proposal, never a distinct, approved abstention.
+  const hasParentAuthority =
+    input.parentExecutionType.id !== null && input.parentExecutionType.id.length > 0;
+  if (hasParentAuthority) {
+    if (input.suggestedProductType === null || input.suggestedProductType.length === 0) {
+      const label = input.parentExecutionType.label
+        ? ` (${input.parentExecutionType.label})`
+        : '';
+      findings.push({
+        code: 'family_product_type',
+        memberSku,
+        message:
+          `Primary Product Type suggestion is missing (abstained) but the cohort ` +
+          `Execution Product Type "${input.parentExecutionType.id}"${label} is the family ` +
+          'authority; every projected member must resolve a matching suggestion.',
+      });
+    } else if (input.suggestedProductType !== input.parentExecutionType.id) {
       const label = input.parentExecutionType.label
         ? ` (${input.parentExecutionType.label})`
         : '';
@@ -237,6 +250,13 @@ export interface MemberLocalProposal {
   hasRevisedValue?: boolean;
 }
 
+export interface MemberLocalProfileEntry {
+  attributeId: string;
+  cardinality?: 'single' | 'multiple';
+  /** v1/v2 free-form profile applicability conditions (frozen). */
+  applicabilityConditions?: unknown[];
+}
+
 export interface MemberLocalAttributesInput {
   memberSku: string;
   /** field_assignment proposals ONLY (the caller filters). */
@@ -260,6 +280,20 @@ export interface MemberLocalAttributesInput {
    * attributes outside the profile are never assumed single.
    */
   cardinalityByAttributeId?: Map<string, 'single' | 'multiple'>;
+  /**
+   * PR9 review R1 (B4): the effective profile's FULL frozen entries keyed by
+   * attribute id — carries each attribute's `applicabilityConditions` (the
+   * profile membership check above only proves the attribute is IN the
+   * profile; a conditionally inapplicable profile member must still be
+   * blocked). null/undefined when there is no effective profile.
+   */
+  profileEntriesByAttributeId?: Map<string, MemberLocalProfileEntry> | null;
+  /**
+   * PR9 review R1 (B4): the member's FROZEN/reviewed facts (from the
+   * immutable runtime snapshot) used to evaluate conditional applicability.
+   * Missing facts make a condition UNRESOLVED — fail closed.
+   */
+  reviewedFacts?: ReviewedFact[];
 }
 
 /**
@@ -293,16 +327,37 @@ export function validateMemberLocalAttributes(
   // attempts on the same child run — those are an audit artifact, never a
   // semantic breach. Two DIFFERENT values for a single-cardinality attribute
   // are the breach this defense-in-depth check is here to catch.
+  // PR9 review R1 (B5): an array-valued proposal is NOT one canonical value —
+  // its internal cardinality counts too. For a single-cardinality target,
+  // ['Chicken','Beef'] (or a revised multi-value array) is a breach even
+  // though it arrives in ONE proposal record.
   const canonicalValueOf = (proposal: MemberLocalProposal): unknown =>
     proposal.hasRevisedValue ? proposal.revisedValue : proposal.proposedValue;
+  const distinctValueMembersOf = (value: unknown): string[] => {
+    if (Array.isArray(value)) {
+      return [
+        ...new Set(
+          value
+            .filter(member => member !== null && member !== undefined)
+            .map(member => String(member).trim())
+            .filter(member => member.length > 0),
+        ),
+      ];
+    }
+    if (value === null || value === undefined) return [];
+    const text = String(value).trim();
+    return text.length > 0 ? [text] : [];
+  };
   const distinctValuesByTarget = new Map<string, Set<string>>();
   for (const proposal of input.proposals) {
     if (!proposal.targetId) continue;
-    const valueKey = JSON.stringify(canonicalValueOf(proposal));
     if (!distinctValuesByTarget.has(proposal.targetId)) {
       distinctValuesByTarget.set(proposal.targetId, new Set());
     }
-    distinctValuesByTarget.get(proposal.targetId)!.add(valueKey);
+    const targetSet = distinctValuesByTarget.get(proposal.targetId)!;
+    for (const member of distinctValueMembersOf(canonicalValueOf(proposal))) {
+      targetSet.add(member);
+    }
   }
 
   for (const proposal of input.proposals) {
@@ -337,6 +392,32 @@ export function validateMemberLocalAttributes(
           `Field assignment targets "${proposal.targetId}" which is not profile-applicable under ` +
           `the effective Curation Product Type "${effectiveTypeId}".`,
       });
+    } else {
+      // PR9 review R1 (B4): profile membership is NOT enough — a profile
+      // entry with `applicabilityConditions` must be re-evaluated against
+      // the member's FROZEN/reviewed facts using the ESTABLISHED
+      // applicability evaluator (`evaluateConditions` — the same condition
+      // semantics the pipeline's applicability stage applies). Fail closed:
+      // `not_applicable` AND unresolved/unknown outcomes both block.
+      const profileEntry = input.profileEntriesByAttributeId?.get(proposal.targetId);
+      const conditions = profileEntry?.applicabilityConditions;
+      if (Array.isArray(conditions) && conditions.length > 0) {
+        const state = evaluateConditions(conditions, input.reviewedFacts ?? []);
+        if (state !== 'applicable') {
+          findings.push({
+            code: 'member_attribute_applicability',
+            memberSku,
+            message:
+              state === 'not_applicable'
+                ? `Field assignment targets "${proposal.targetId}" whose profile applicability ` +
+                  `condition is NOT satisfied by the member's frozen/reviewed facts under the ` +
+                  `effective Curation Product Type "${effectiveTypeId}".`
+                : `Field assignment targets "${proposal.targetId}" whose profile applicability ` +
+                  `condition cannot be resolved from the member's frozen/reviewed facts under the ` +
+                  `effective Curation Product Type "${effectiveTypeId}".`,
+          });
+        }
+      }
     }
   }
 
@@ -411,10 +492,12 @@ export function validateCohortBrandCoherence(
   const distinctBrands = [...counts.keys()];
   if (distinctBrands.length === 0) return passed();
 
-  // Stable ordering so the tie list is deterministic.
+  // Stable ordering so the tie list is deterministic (PR9 review R1
+  // SHOULD-FIX b: an explicit code-point comparator — never ambient locale
+  // collation, which varies across deployments/ICU versions).
   const sortedByCount = [...distinctBrands].sort((a, b) => {
     const diff = (counts.get(b) ?? 0) - (counts.get(a) ?? 0);
-    return diff !== 0 ? diff : a.localeCompare(b);
+    return diff !== 0 ? diff : a < b ? -1 : a > b ? 1 : 0;
   });
   const topCount = counts.get(sortedByCount[0]) ?? 0;
   const tiedBrands = sortedByCount.filter(brand => (counts.get(brand) ?? 0) === topCount);
@@ -453,4 +536,27 @@ export function validateCohortBrandCoherence(
   }
 
   return toFindings(findings);
+}
+
+/**
+ * PR9 review R1 (B7): deterministic merge of semantic findings — the incoming
+ * set (e.g. post-loop Brand findings) is appended to the member's already
+ * committed findings with dedupe by (code, memberSku, message) so a member
+ * blocked for Product Type / title / applicability / cardinality never loses
+ * those diagnostics when Brand coherence is applied post-loop, and a repeated
+ * identical finding never duplicates. Order-preserving (existing first).
+ */
+export function mergeSemanticFindings(
+  existing: CohortSemanticFinding[] | undefined | null,
+  incoming: CohortSemanticFinding[],
+): CohortSemanticFinding[] {
+  const seen = new Set<string>();
+  const merged: CohortSemanticFinding[] = [];
+  for (const finding of [...(existing ?? []), ...incoming]) {
+    const key = `${finding.code}\u0000${finding.memberSku}\u0000${finding.message}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(finding);
+  }
+  return merged;
 }

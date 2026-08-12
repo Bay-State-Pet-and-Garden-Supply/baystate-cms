@@ -10,6 +10,7 @@
  * auto-correct them.
  */
 import { getDb } from '../db/connection';
+import { findBatchById } from '../db/repositories/onboarding-batch-repo';
 import { normalizeBrand, extractNameStem } from '../onboarding/product-line-grouper';
 import { getCohortCurationFlags } from './flags';
 
@@ -35,41 +36,102 @@ export interface CohortSemanticFindingsPayload {
 }
 
 /**
- * PR9 C3 (issue #30, DECISION-C): the item's ACTIVE-cohort semantic findings,
- * or null when the item is NOT an active-cohort member. Active cohort mode is
- * flag ON + !shadowOnly AND the item's active run is a cohort child — only
- * then do the SSE/routes surfaces surface the NEW validator's findings instead
- * of the legacy `validateSiblingConsistency` warnings. Legacy/shadow items
- * (and flag OFF) keep the legacy surface byte-identical.
+ * PR9 review R1 (B6): the item's ACTIVE-cohort surface decision. Discriminated
+ * so the callers can NEVER fall back to the legacy `validateSiblingConsistency`
+ * (live regrouping) once active membership is established:
+ *
+ * - `{ mode: 'legacy' }` — the item is NOT an active-cohort member (flag
+ *   OFF/shadow, no run pointer, or the run fails the full ownership check).
+ *   The legacy surface applies byte-identical.
+ * - `{ mode: 'active', semanticValidation }` — the item IS an active-cohort
+ *   child; the NEW validator's findings surface instead of the legacy
+ *   warnings. Missing or MALFORMED semantic data NEVER downgrades to the
+ *   legacy validator — it fails closed with a blocked surface payload (the
+ *   item cannot be review-ready; `processCohort` always writes
+ *   semanticValidation at the member commit, so absence means data loss or
+ *   corruption).
+ *
+ * Active membership is established with the SAME ownership dimensions
+ * `getValidatedOnboardingRun` uses (workspace + onboarding-item + SKU,
+ * `source_kind='onboarding'`) PLUS `cohort_run_id IS NOT NULL` — a foreign or
+ * forged child-run pointer never switches the surface.
+ */
+export type ActiveCohortSurfaceResult =
+  | { mode: 'legacy' }
+  | { mode: 'active'; semanticValidation: CohortSemanticFindingsPayload };
+
+/** Fail-closed blocked payload for an active member with missing/malformed data. */
+function failClosedBlockedPayload(memberSku: string, message: string): CohortSemanticFindingsPayload {
+  return {
+    status: 'blocked',
+    findings: [{ code: 'semantic_validation_unavailable', memberSku, message }],
+  };
+}
+
+/**
+ * PR9 C3 (issue #30, DECISION-C): the item's ACTIVE-cohort semantic surface.
+ * See `ActiveCohortSurfaceResult` — active mode is flag ON + !shadowOnly AND
+ * the item's active run is a cohort child under full ownership; only then do
+ * the SSE/routes surfaces surface the NEW validator's findings instead of the
+ * legacy `validateSiblingConsistency` warnings. Legacy/shadow items (and flag
+ * OFF) keep the legacy surface byte-identical.
  */
 export function activeCohortSemanticFindingsForItem(item: {
+  id: string;
+  batchId: string;
+  upc: string;
   curationData?: { classificationRunId?: string | null; semanticValidation?: unknown } | null;
-}): CohortSemanticFindingsPayload | null {
+}): ActiveCohortSurfaceResult {
   const flags = getCohortCurationFlags();
-  if (!(flags.cohortCurationV2Enabled && !flags.cohortShadowOnly)) return null;
+  if (!(flags.cohortCurationV2Enabled && !flags.cohortShadowOnly)) return { mode: 'legacy' };
   const runId = item.curationData?.classificationRunId;
-  if (!runId) return null;
+  if (!runId) return { mode: 'legacy' };
+  const batch = findBatchById(item.batchId);
+  if (!batch) return { mode: 'legacy' };
   const cohortChild = getDb().query(
-    'SELECT 1 FROM classification_runs WHERE id = ? AND cohort_run_id IS NOT NULL LIMIT 1',
-  ).get(runId);
-  if (!cohortChild) return null;
+    `SELECT 1 FROM classification_runs
+     WHERE id = ? AND workspace_id = ? AND onboarding_item_id = ?
+       AND product_sku = ? AND source_kind = 'onboarding'
+       AND cohort_run_id IS NOT NULL
+     LIMIT 1`,
+  ).get(runId, batch.workspaceId, item.id, item.upc);
+  if (!cohortChild) return { mode: 'legacy' };
 
   const semanticValidation = item.curationData?.semanticValidation;
-  if (!semanticValidation || typeof semanticValidation !== 'object') return null;
+  if (!semanticValidation || typeof semanticValidation !== 'object') {
+    return {
+      mode: 'active',
+      semanticValidation: failClosedBlockedPayload(
+        item.upc,
+        'Active-cohort semantic validation data is missing; the item cannot be review-ready.',
+      ),
+    };
+  }
   const status = (semanticValidation as { status?: unknown }).status;
-  if (status !== 'passed' && status !== 'blocked') return null;
+  if (status !== 'passed' && status !== 'blocked') {
+    return {
+      mode: 'active',
+      semanticValidation: failClosedBlockedPayload(
+        item.upc,
+        'Active-cohort semantic validation data is malformed; the item cannot be review-ready.',
+      ),
+    };
+  }
   const findings = (semanticValidation as { findings?: unknown }).findings;
   return {
-    status,
-    findings: Array.isArray(findings)
-      ? findings
-          .filter(finding => finding && typeof finding === 'object')
-          .map(finding => ({
-            code: String((finding as { code?: unknown }).code ?? ''),
-            memberSku: String((finding as { memberSku?: unknown }).memberSku ?? ''),
-            message: String((finding as { message?: unknown }).message ?? ''),
-          }))
-      : [],
+    mode: 'active',
+    semanticValidation: {
+      status,
+      findings: Array.isArray(findings)
+        ? findings
+            .filter(finding => finding && typeof finding === 'object')
+            .map(finding => ({
+              code: String((finding as { code?: unknown }).code ?? ''),
+              memberSku: String((finding as { memberSku?: unknown }).memberSku ?? ''),
+              message: String((finding as { message?: unknown }).message ?? ''),
+            }))
+        : [],
+    },
   };
 }
 

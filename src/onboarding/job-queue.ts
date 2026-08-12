@@ -849,13 +849,14 @@ export class OnboardingWorker {
       // instead of the legacy `validateSiblingConsistency` warnings
       // (legacy/shadow keep the legacy warnings byte-identical — the
       // defensive branch below is unreachable in practice because active mode
-      // curates cohorts exclusively).
-      const semanticFindings = activeCohortSemanticFindingsForItem(item);
+      // curates cohorts exclusively). PR9 review R1 (B6): the discriminated
+      // surface never falls back to legacy live-regrouping in active mode.
+      const semanticSurface = activeCohortSemanticFindingsForItem(item);
       // Run cross-sibling consistency check and include warnings in SSE event
       let consistencyWarnings: Array<{ field: string; message: string }> = [];
       try {
-        if (semanticFindings) {
-          consistencyWarnings = semanticFindings.findings.map(finding => ({
+        if (semanticSurface.mode === 'active') {
+          consistencyWarnings = semanticSurface.semanticValidation.findings.map(finding => ({
             field: finding.code,
             message: finding.message,
           }));
@@ -879,7 +880,7 @@ export class OnboardingWorker {
         stage: 'curation',
         curationData,
         consistencyWarnings: consistencyWarnings.length > 0 ? consistencyWarnings : undefined,
-        semanticValidation: semanticFindings ?? undefined,
+        semanticValidation: semanticSurface.mode === 'active' ? semanticSurface.semanticValidation : undefined,
       });
 
       console.log(

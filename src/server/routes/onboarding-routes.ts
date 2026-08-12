@@ -877,9 +877,12 @@ route.get('/onboarding/items/:id', async (c) => {
   // PR9 C3 (issue #30, DECISION-C): an ACTIVE-cohort member's semantic
   // validation findings surface INSTEAD of the legacy
   // `validateSiblingConsistency` warnings; legacy/shadow keep the legacy
-  // surface byte-identical.
-  const semanticFindings = activeCohortSemanticFindingsForItem(item);
-  const consistencyWarnings = semanticFindings
+  // surface byte-identical. PR9 review R1 (B6): the discriminated surface
+  // NEVER falls back to legacy live-regrouping once active membership is
+  // established — missing/malformed semantic data fails closed (blocked
+  // payload), not to the legacy warnings.
+  const semanticSurface = activeCohortSemanticFindingsForItem(item);
+  const consistencyWarnings = semanticSurface.mode === 'active'
     ? []
     : item.curationData
       ? validateSiblingConsistency(item.batchId).filter(warning =>
@@ -916,7 +919,7 @@ route.get('/onboarding/items/:id', async (c) => {
     extraction: extractionData,
     evidenceAttempts,
     consistencyWarnings,
-    semanticValidation: semanticFindings ?? undefined,
+    semanticValidation: semanticSurface.mode === 'active' ? semanticSurface.semanticValidation : undefined,
   });
 });
 

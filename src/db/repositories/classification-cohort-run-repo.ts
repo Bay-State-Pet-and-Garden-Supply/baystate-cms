@@ -34,6 +34,7 @@
 import { getDb } from '../connection';
 import { createRun, getRun } from './classification-run-repo';
 import { randomUUID } from 'node:crypto';
+import { HeartbeatLostError } from '../../classification/heartbeat-errors';
 import type { ClassificationRunRow } from './classification-run-repo';
 import type { CohortRun, ProposalDependency, ExecutionProductTypeOutcome } from '../../shared/schemas/cohorts';
 
@@ -687,6 +688,50 @@ export function heartbeatCohortRun(runId: string, workerId: string, leaseTtlMs: 
     [leaseExpiresAt, runId, workerId],
   );
   return result.changes > 0;
+}
+
+/**
+ * PR9 review R1 (B2/B7): cohort-atomic, owner-guarded post-loop semantic
+ * update. ALL affected members' `curation_data_json` writes happen in ONE
+ * transaction whose FIRST statement is the parent cohort run's lease/
+ * ownership CAS — the EXACT heartbeat predicate (`claimed_by = ? AND status
+ * IN ('freezing','running')`). A rejected CAS (`changes === 0`) throws
+ * `HeartbeatLostError` and the WHOLE transaction rolls back: a stale owner
+ * (claim reclaimed by a sibling) can never write member items after
+ * ownership moved, and a crash mid-loop can never persist a subset of the
+ * cohort's Brand blocking. `updates` carries the already-merged FINAL
+ * curation JSON per affected member (the caller reads each member once and
+ * merges its findings before calling).
+ */
+export function writeCohortBrandSemanticUpdates(
+  runId: string,
+  workerId: string,
+  leaseTtlMs: number,
+  updates: Array<{ itemId: string; curationDataJson: string }>,
+): void {
+  const db = getDb();
+  db.transaction(() => {
+    const leaseExpiresAt = new Date(Date.now() + leaseTtlMs).toISOString();
+    const result = db.run(
+      `UPDATE classification_cohort_runs
+       SET lease_expires_at = ?
+       WHERE id = ? AND claimed_by = ? AND status IN ('freezing','running')`,
+      [leaseExpiresAt, runId, workerId],
+    );
+    if (result.changes === 0) {
+      throw new HeartbeatLostError(
+        `processCohort lost claim ownership of run ${runId} during post-loop semantic updates ` +
+          `(run is no longer claimed by ${workerId} / no longer freezing or running); no member ` +
+          'curation-data update was applied.',
+      );
+    }
+    const updatedAt = now();
+    for (const update of updates) {
+      db.query(
+        'UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?',
+      ).run(update.curationDataJson, updatedAt, update.itemId);
+    }
+  })();
 }
 
 // ─── Reclaim (lease expiry) ───────────────────────────────────────────────────
