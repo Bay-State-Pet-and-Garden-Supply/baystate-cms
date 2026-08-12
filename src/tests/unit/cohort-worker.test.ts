@@ -69,6 +69,7 @@ import type { CurationCohort, CohortRun, ExecutionEvidenceProjectionV1 } from '.
 import { CurationCohortViewSchema } from '../../shared/schemas/cohorts';
 import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
 import {
+  buildCohortPageAuthorityBundle,
   computeCohortPageInputHash,
   pageModelAuthorityFromConfig,
   type CohortPagePlanAuthority,
@@ -2784,17 +2785,60 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
       selectionMode,
       maxPages,
     };
-    return computeCohortPageInputHash({ run, projection, pagePlan, executionTypeAuthority, pageModelAuthority });
+    return computeCohortPageInputHash(
+      buildCohortPageAuthorityBundle({ run, projection, pagePlan, executionTypeAuthority, pageModelAuthority }),
+    );
+  }
+
+  /** Create a REAL terminal-success `classification_model_calls` row bound to
+   *  the ORDINAL-0 member child run (PR7 review R1, T4): the parent op's
+   *  audited Page calls bind to the ordinal-0 child (DECISION-N), so the
+   *  persisted `coordinated_page` rows carry a genuinely resolvable call id.
+   *  The materialized proposals therefore link to a real durable success row —
+   *  and for member 2+ (whose own child run differs from the call row's
+   *  ordinal-0 run) the linkage check exercises the C6b cohort-coordinated
+   *  output exemption.
+   *  Returns the durable call id. */
+  function seedAuditedPageCallRow(
+    run: CohortRun,
+    projection: ExecutionEvidenceProjectionV1,
+  ): string {
+    const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
+    const childRun = getDb().query(
+      'SELECT id, config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+    ).get(run.id, ordered[0]?.onboardingItemId ?? '') as { id: string; config_snapshot_hash: string } | undefined;
+    if (!childRun || !childRun.config_snapshot_hash) {
+      throw new Error('ordinal-0 member child run missing for the audited page call fixture');
+    }
+    const callId = `c6-audited-page-call-${run.id}`;
+    const now = new Date().toISOString();
+    getDb().run(
+      `INSERT INTO classification_model_calls
+         (id, run_id, stage_name, operation, attempt, provider, model, locality, snapshot_hash,
+          prompt_template_version, rule_version, system_prompt_hash, user_prompt_hash, started_at,
+          ended_at, status, created_at)
+       VALUES (?, ?, 'category_page_proposals', 'cohort_page_assignment', 1, 'ollama', 'qwen2.5vl:latest',
+               'local', ?, 'page-assignment-prompt-v1', 'page-assignment-rules-v1', 'sys-hash', 'user-hash',
+               ?, ?, 'success', ?)`,
+      [callId, childRun.id, childRun.config_snapshot_hash, now, now, now],
+    );
+    return callId;
   }
 
   /** Seed `coordinated_page` outputs exactly as a prior processCohort entry
    *  would have persisted them (`llm_cohort` + the canonical P-hash), so the
-   *  parent op REUSES with zero transport and members materialize proposals. */
+   *  parent op REUSES with zero transport and members materialize proposals.
+   *  `modelCallId` (PR7 review R1, T4) is a REAL terminal-success
+   *  `classification_model_calls` row bound to the ordinal-0 member child run
+   *  (see `seedAuditedPageCallRow`) — persisted on every row so the
+   *  materialized proposals link genuine audit provenance and the linkage
+   *  validator runs (member 2+ through the C6b exemption). */
   function seedCohortPageOutputs(
     wsId: string,
     run: CohortRun,
     inputHash: string,
     pageBySku: Map<string, { pageId: string; pageName: string }>,
+    modelCallId: string | null,
   ): void {
     insertCohortPageOutputsOnce({
       workspaceId: wsId,
@@ -2807,10 +2851,7 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
           pages: [{ pageId: page.pageId, pageName: page.pageName, confidence: 0.85 }],
           source: 'llm_cohort' as const,
         },
-        // NULL model_call_id: a v1 harness has no real audited transport rows,
-        // so the materializer links no call ids (the linkage validator never
-        // runs) — the dependency-stamping behavior is what this suite proves.
-        modelCallId: null,
+        modelCallId,
       })),
     });
   }
@@ -2831,13 +2872,32 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
     expect(finalized.executionProductTypeId).toBe('dry-dog-food');
 
     // Seed BOTH durable sets (v1 harness: no frozen plan → reuse, zero calls).
+    // PR7 review R1 (T4): the page output rows carry a REAL terminal-success
+    // `classification_model_calls` row bound to the ORDINAL-0 member child
+    // run, so the materialized proposals link genuine audit provenance and
+    // the linkage validator runs for real.
     const projection = loadFrozenProjectionForRun(workspaceId, finalized);
+    const auditedPageCallId = seedAuditedPageCallRow(finalized, projection);
     seedV1TitleOutputs(workspaceId, finalized);
     seedCohortPageOutputs(workspaceId, finalized, expectedPageInputHash(workspaceId, wsPath, finalized, projection), new Map([
       ['100000000001', { pageId: pageIds.get('dog-food-dry')!, pageName: 'Dog Food Dry' }],
       ['100000000002', { pageId: pageIds.get('dog-treats')!, pageName: 'Dog Treats' }],
-    ]));
+    ]), auditedPageCallId);
     expect(countCohortPageOutputs(finalized.id)).toBe(2);
+
+    // PR7 review R1 (T4): the audited call row EXISTS, is terminal-success,
+    // and binds to the ORDINAL-0 member child run + its config snapshot hash.
+    const auditedRow = getDb().query(
+      'SELECT run_id, snapshot_hash, status FROM classification_model_calls WHERE id = ?',
+    ).get(auditedPageCallId) as { run_id: string; snapshot_hash: string; status: string };
+    expect(auditedRow).toBeTruthy();
+    expect(auditedRow.status).toBe('success');
+    const orderedMembers = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
+    const ordinalZeroChild = getDb().query(
+      'SELECT id, config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+    ).get(finalized.id, orderedMembers[0].onboardingItemId) as { id: string; config_snapshot_hash: string };
+    expect(auditedRow.run_id).toBe(ordinalZeroChild.id);
+    expect(auditedRow.snapshot_hash).toBe(ordinalZeroChild.config_snapshot_hash);
 
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
@@ -2864,6 +2924,22 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
         expect(deps[0].dependencyValueHash).toBe(expectedHash);
         expect(deps[0].workspaceId).toBe(workspaceId);
         expect(deps[0].proposalId).toBe(proposal.id);
+      }
+      // PR7 review R1 (T4): every materialized proposal carries the REAL
+      // ordinal-0-bound audited call id in modelCallIds.
+      for (const proposal of pageProposals) {
+        expect(proposal.modelCallIds).toEqual([auditedPageCallId]);
+      }
+      // The member-2 child run differs from the ordinal-0 run, so ITS
+      // proposals resolve through the C6b cohort-coordinated output linkage
+      // exemption (the run/snapshot mismatch is exempted because the call id
+      // resolves to a durable `coordinated_page` row of the same cohort run +
+      // SKU). The member still completes — proof the exemption path works.
+      const memberChild = getDb().query(
+        'SELECT id FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
+      ).get(finalized.id, item.id) as { id: string };
+      if (item.upc === items[1].upc) {
+        expect(memberChild.id).not.toBe(ordinalZeroChild.id);
       }
       // field_assignment behavior unchanged (one execution_product_type row
       // each, same value hash).
@@ -2902,11 +2978,12 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
     expect(finalized.executionProductTypeId).toBe('dry-dog-food');
 
     const projection = loadFrozenProjectionForRun(workspaceId, finalized);
+    const auditedPageCallId = seedAuditedPageCallRow(finalized, projection);
     seedV1TitleOutputs(workspaceId, finalized);
     seedCohortPageOutputs(workspaceId, finalized, expectedPageInputHash(workspaceId, wsPath, finalized, projection), new Map([
       ['100000000001', { pageId: pageIds.get('dog-food-dry')!, pageName: 'Dog Food Dry' }],
       ['100000000002', { pageId: pageIds.get('dog-treats')!, pageName: 'Dog Treats' }],
-    ]));
+    ]), auditedPageCallId);
 
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
