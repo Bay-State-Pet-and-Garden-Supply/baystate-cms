@@ -2236,9 +2236,10 @@ export async function processCohort(
   // persisted `classification_cohort_outputs` (kind `coordinated_page`) when
   // the complete P-set + hash match (ZERO FURTHER calls after commit);
   // otherwise coordinates ONCE (only when the set is empty) under a scoped
-  // lease keeper — multi-item groups via the UNCACHED page core
-  // (`coordinateCohortPagesCore`) and singletons via the single-item path
-  // (`llmAssignCategoryPages` over the frozen-derived member context,
+  // lease keeper — multi-item groups AND parent singletons via ONE-MEMBER
+  // invocations of the UNCACHED page core (`coordinateCohortPagesCore` with
+  // `allowSingleProduct`, PR7 review R2 F2; the legacy
+  // `llmAssignCategoryPages` singleton path is gone from the parent op,
   // DECISION-A: pages cover ALL members) — and persists EVERY member's result
   // (assigned or abstained) all-or-nothing and WRITE-ONCE. Prepared members
   // then materialize these outputs at the `coordinatedPages` seam (PR7 C5);
