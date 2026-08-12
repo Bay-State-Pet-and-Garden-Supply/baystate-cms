@@ -71,6 +71,7 @@ import { upsertConfigSnapshot } from '../../db/repositories/classification-confi
 import {
   getCohortTitleOutputsByRun,
   getCohortPageOutputsByRun,
+  countCohortTitleOutputs,
   countCohortPageOutputs,
 } from '../../db/repositories/classification-cohort-output-repo';
 import { generateCandidate, buildFocusedFiles } from '../../classification/config-generator';
@@ -962,20 +963,18 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     ).rejects.toThrow(/missing from the frozen runtime snapshot/);
   });
 
-  // ─── PR8 review R1 (BLOCKER 1): corrupt DURABLE rows fail the member ───────
-  // The negative tests above inject hand-built maps directly into
-  // `curateItemWithPipeline`; these tests corrupt actual persisted
-  // `classification_cohort_outputs` rows and RE-ENTER `processCohort` — the
-  // production parent-row parser path. The affected member fails with the
-  // deterministic message (child failed, item NOT completed, NO curationData),
-  // the OTHER members commit normally, zero re-coordination happens, and the
-  // parent completes with member failures (never a parent abort / retry loop).
+  // ─── PR8 review R1 (BLOCKER 1) + review round 2 (P1): corrupt DURABLE rows
+  //      SUPERSEDE the parent (never a member failure) ────────────────────
+  // Corruption of a WRITE-ONCE PARENT-OWNED shared semantic artifact must
+  // route through the supersession lifecycle (the same primitive as authority
+  // drift): the old parent is superseded, every running child terminalizes
+  // atomically, the old rows stay immutable, the claim slot reopens, and a
+  // NEW parent revision can commit a fresh complete set. A member failure
+  // would strand the revision forever (write-once rows + terminal-current
+  // parent + no new claim).
 
-  it('review-R1-1 (BLOCKER 1): a corrupt persisted curated_title row FAILS the affected member — child failed, no curationData, other members commit, zero re-coordination, parent completes with member failures', async () => {
+  it('review-R2-1 (P1): a corrupt persisted curated_title row SUPERSEDES the parent — children terminalized, old rows immutable, new run immediately claimable, zero re-coordination', async () => {
     const { workspaceId, workspacePath: wsPath, run, items } = await freezeAndScaffold();
-    const spies = installCoordinationSpies();
-    // First entry: crash after member 2's pipeline (member 1 COMMITS; members
-    // 2 and 3 stay unexecuted — their children stay `running`).
     let pipelineCount = 0;
     await expect(processCohort(run, wsPath, workspaceId, {
       afterMemberPipeline: () => {
@@ -986,71 +985,78 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
     expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
     expect(countCohortPageOutputs(run.id)).toBe(3);
 
+    // Capture every running child before corruption.
+    const childrenBefore = getDb().query(
+      'SELECT id, status FROM classification_runs WHERE cohort_run_id = ? AND status = \'running\'',
+    ).all(run.id) as Array<{ id: string; status: string }>;
+
     // Corrupt ONE durable curated_title row (member 2's).
     getDb().run(
       "UPDATE classification_cohort_outputs SET output_value_json = '{corrupt' WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000002'",
       [run.id],
     );
+    // Immutability baseline: capture AFTER the test's corruption write — the
+    // assertion is that SUPERSESSION leaves every row (including the corrupt
+    // one) exactly as found.
+    const outputsBefore = getCohortTitleOutputsByRun(run.id);
 
-    // PR8 review R1 (review-tests PARTIAL b): clear/reinstall all four spies
-    // immediately BEFORE the re-entry window and assert each window call count
-    // is exactly 0 — zero re-coordination on the corrupt-row re-entry.
-    spies.coordinateCohortItemsOnce.mockRestore();
-    spies.coordinateCohortPagesOnce.mockRestore();
-    spies.coordinateCohortPagesCore.mockRestore();
-    spies.llmAssignCategoryPages.mockRestore();
+    // Clear/reinstall all four spies immediately before the re-entry window.
     const reentrySpies = installCoordinationSpies();
 
     // Re-enter processCohort: the parent title op's REUSE path parses the row,
-    // fails closed, and the corrupt row becomes a MEMBER failure — not a
-    // parent abort.
-    const summary = await processCohort(run, wsPath, workspaceId);
-    expect(summary.parentStatus).toBe('completed_with_member_failures');
-    expect(summary.memberFailures).toHaveLength(1);
-    expect(summary.memberFailures[0].productSku).toBe('100000000002');
-    expect(summary.memberFailures[0].ok).toBe(false);
+    // fails closed, and the parent is SUPERSEDED (not a member failure).
+    await expect(processCohort(run, wsPath, workspaceId)).rejects.toThrow(/corrupt/i);
 
-    // The affected member: deterministic message (run id + SKU + cause), item
-    // NOT completed, NO curationData (no partial draft).
-    const failed = findItemById(items[1].id)!;
-    expect(failed.stageStatus).toBe('failed');
-    expect(failed.curationData).toBeNull();
-    expect(failed.errorMessage).toContain('100000000002');
-    expect(failed.errorMessage).toContain(run.id);
-    expect(failed.errorMessage).toContain('corrupt');
+    // Parent SUPERSEDED with the deterministic message (run id + SKU + cause).
+    const terminal = getCohortRunById(run.id)!;
+    expect(terminal.status).toBe('superseded');
+    expect(terminal.supersededAt).not.toBeNull();
+    expect(terminal.errorMessage).toContain('100000000002');
+    expect(terminal.errorMessage).toContain(run.id);
+    expect(terminal.errorMessage).toMatch(/corrupt/i);
 
-    // The affected child run terminalized failed.
-    const child = getDb().query(
-      'SELECT id, status FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
-    ).get(run.id, items[1].id) as { id: string; status: string };
-    expect(child.status).toBe('failed');
+    // EVERY formerly-running child terminalized atomically.
+    for (const child of childrenBefore) {
+      const after = getDb().query(
+        'SELECT status, error_message FROM classification_runs WHERE id = ?',
+      ).get(child.id) as { status: string; error_message: string | null };
+      expect(after.status).toBe('failed');
+      expect(after.error_message).toBe('Cohort output authority drift superseded parent run');
+    }
 
-    // The OTHER members committed normally (member 1's projection already
-    // committed; member 3 executes now from the usable parsed rows).
-    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
-    const memberThree = findItemById(items[2].id)!;
-    expect(memberThree.stageStatus).toBe('completed');
-    expect(memberThree.curationData).not.toBeNull();
-    expect(memberThree.curationData!.curatedTitle).not.toBeNull();
+    // Old output rows byte-identical (never replaced, never extended).
+    expect(getCohortTitleOutputsByRun(run.id)).toEqual(outputsBefore);
 
-    // ZERO re-coordination: every coordination entry point stayed untouched in
-    // the re-entry window.
+    // No member materialized corrupted data: members 1/2/3 have no NEW curation
+    // writes under the superseded run (member 1's earlier commit is historical).
+    expect(findItemById(items[1].id)!.stageStatus).not.toBe('completed');
+    expect(findItemById(items[2].id)!.stageStatus).not.toBe('completed');
+
+    // ZERO re-coordination in the re-entry window.
     expect(reentrySpies.coordinateCohortItemsOnce.mock.calls.length).toBe(0);
     expect(reentrySpies.coordinateCohortPagesOnce.mock.calls.length).toBe(0);
     expect(reentrySpies.coordinateCohortPagesCore.mock.calls.length).toBe(0);
     expect(reentrySpies.llmAssignCategoryPages.mock.calls.length).toBe(0);
 
-    // The parent completed with member failures — NOT failed/superseded (no
-    // job-queue retry loop re-hitting the corrupt row).
-    const finalRun = getCohortRunById(run.id)!;
-    expect(finalRun.status).toBe('completed_with_member_failures');
+    // The claim slot REOPENED: a NEW parent revision is immediately claimable,
+    // freezes, and executes — a FRESH complete set under the new run id.
+    const newRevision = await freezeActiveCohort(workspaceId, wsPath);
+    expect(newRevision.id).not.toBe(run.id);
+    const freshSummary = await processCohort(newRevision, wsPath, workspaceId);
+    // Same completion semantics as the first revision: the title transport mock
+    // returns empty -> durable cohort_fallback rows, pages assigned; members
+    // commit. Not failed, and a FULL fresh output set exists under the new id.
+    expect(freshSummary.parentStatus).not.toBe('failed');
+    expect(freshSummary.parentStatus).not.toBe('completed_with_member_failures');
+    expect(countCohortTitleOutputs(newRevision.id)).toBe(2); // multi-item group members only (DECISION-O)
+    expect(countCohortPageOutputs(newRevision.id)).toBe(3); // pages cover ALL members (DECISION-A)
     reentrySpies.coordinateCohortItemsOnce.mockRestore();
     reentrySpies.coordinateCohortPagesOnce.mockRestore();
     reentrySpies.coordinateCohortPagesCore.mockRestore();
     reentrySpies.llmAssignCategoryPages.mockRestore();
   });
 
-  it('review-R1-2 (BLOCKER 2): an EMPTY persisted curated_title row FAILS the member — no fallback title in curationData', async () => {
+  it('review-R2-2 (P1): an EMPTY persisted curated_title row (pre-tightening) SUPERSEDES the parent — no fallback title is ever invented', async () => {
     const { workspaceId, workspacePath: wsPath, run, items } = await freezeAndScaffold();
     let pipelineCount = 0;
     await expect(processCohort(run, wsPath, workspaceId, {
@@ -1060,33 +1066,32 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
       },
     })).rejects.toThrow('simulated kill');
 
-    // Hand-seed an EMPTY title row at the DB level (simulates a pre-tightening
-    // row — the schema now rejects empty titles via trim().min(1), so the
-    // parent reuse path fails the parse and fails the member closed).
+    // Hand-seed an EMPTY title row at the DB level (pre-tightening corruption
+    // — the schema now rejects empty titles via trim().min(1), so the parent
+    // reuse path fails the parse and SUPERSEDES).
     getDb().run(
       "UPDATE classification_cohort_outputs SET output_value_json = ? WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000002'",
       [JSON.stringify({ title: '', source: 'llm_cohort' }), run.id],
     );
 
-    const summary = await processCohort(run, wsPath, workspaceId);
-    expect(summary.parentStatus).toBe('completed_with_member_failures');
-    expect(summary.memberFailures).toHaveLength(1);
-    expect(summary.memberFailures[0].productSku).toBe('100000000002');
+    await expect(processCohort(run, wsPath, workspaceId)).rejects.toThrow(/corrupt/i);
 
-    const failed = findItemById(items[1].id)!;
-    expect(failed.stageStatus).toBe('failed');
-    // NO curationData at all — the member never fell through to per-item
-    // synthesis and no fallback title was invented.
-    expect(failed.curationData).toBeNull();
-    expect(failed.errorMessage).toContain('100000000002');
-    expect(failed.errorMessage).toContain(run.id);
+    const terminal = getCohortRunById(run.id)!;
+    expect(terminal.status).toBe('superseded');
+    expect(terminal.errorMessage).toContain('100000000002');
+    expect(terminal.errorMessage).toContain(run.id);
 
-    // The other members commit normally.
-    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
-    expect(findItemById(items[2].id)!.stageStatus).toBe('completed');
+    // No member invented a fallback title: members 2/3 never ran under the
+    // superseded run.
+    expect(findItemById(items[1].id)!.curationData).toBeNull();
+    expect(findItemById(items[2].id)!.curationData).toBeNull();
+
+    const nextRun = claimReadyCurationCohorts(workspaceId, 10, 'worker-next', COHORT_LEASE_TTL_MS);
+    expect(nextRun.length).toBe(1);
+    expect(nextRun[0].id).not.toBe(run.id);
   });
 
-  it('review-R1-3 (BLOCKER 2c): an assigned persisted coordinated_page row with EMPTY pages FAILS the member — no partial draft', async () => {
+  it('review-R2-3 (P1): an assigned persisted coordinated_page row with EMPTY pages SUPERSEDES the parent — no partial draft', async () => {
     const { workspaceId, workspacePath: wsPath, run, items } = await freezeAndScaffold();
     let pipelineCount = 0;
     await expect(processCohort(run, wsPath, workspaceId, {
@@ -1103,20 +1108,19 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
       [JSON.stringify({ status: 'assigned', pages: [], source: 'llm_cohort' }), run.id],
     );
 
-    const summary = await processCohort(run, wsPath, workspaceId);
-    expect(summary.parentStatus).toBe('completed_with_member_failures');
-    expect(summary.memberFailures).toHaveLength(1);
-    expect(summary.memberFailures[0].productSku).toBe('100000000003');
+    await expect(processCohort(run, wsPath, workspaceId)).rejects.toThrow(/corrupt/i);
 
-    const failed = findItemById(items[2].id)!;
-    expect(failed.stageStatus).toBe('failed');
-    expect(failed.curationData).toBeNull();
-    expect(failed.errorMessage).toContain('100000000003');
-    expect(failed.errorMessage).toContain(run.id);
+    const terminal = getCohortRunById(run.id)!;
+    expect(terminal.status).toBe('superseded');
+    expect(terminal.errorMessage).toContain('100000000003');
+    expect(terminal.errorMessage).toContain(run.id);
 
-    // Members 1 and 2 commit normally.
-    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
-    expect(findItemById(items[1].id)!.stageStatus).toBe('completed');
+    // No member materialized a partial draft under the superseded run.
+    expect(findItemById(items[2].id)!.curationData).toBeNull();
+
+    const nextRun = claimReadyCurationCohorts(workspaceId, 10, 'worker-next', COHORT_LEASE_TTL_MS);
+    expect(nextRun.length).toBe(1);
+    expect(nextRun[0].id).not.toBe(run.id);
   });
 
   it('4: legacy flag OFF — byte-identical path (no cohort runs/outputs, per-item draft emitted, projection metadata carries the consolidated title)', async () => {

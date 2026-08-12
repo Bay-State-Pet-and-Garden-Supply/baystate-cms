@@ -175,9 +175,12 @@ function toMemberValue(result: CohortPageMemberResult): CoordinatedPageMemberVal
  * stored JSON, or a schema violation such as an assigned row with no pages).
  * Carries the parent run id, the affected product SKUs with their original
  * causes, and the USABLE parsed outputs for the unaffected rows so
- * `processCohort` can record an owner-guarded member failure for EACH
- * affected SKU (child terminalized failed, no curation data) and continue
- * the remaining members.
+ * Supersession diagnostic (PR8 review R1 + review round 2 P1): a persisted
+ * `coordinated_page` row that fails to parse is corruption of the WRITE-ONCE
+ * PARENT-OWNED shared semantic artifact — the parent is SUPERSEDED via
+ * `supersedeOwnedCohortRunForOutputDrift` (never a member failure: a member
+ * failure would strand the revision). The class retains per-SKU failures + the
+ * usable parsed map as DIAGNOSTICS only.
  */
 export class CohortPageOutputCorruptError extends Error {
   readonly runId: string;
@@ -192,7 +195,7 @@ export class CohortPageOutputCorruptError extends Error {
     super(
       `[CohortPageOutputCorrupt] Persisted coordinated_page outputs for run ${runId} failed to parse: ` +
         failures.map(f => `${f.sku} (${f.cause})`).join('; ') +
-        ' — the affected member(s) fail closed with no page assignment; unaffected members continue from the parsed rows.',
+        ' — the shared page set is no longer coherent; the parent run must be superseded so a NEW revision can commit a fresh set.',
     );
     this.name = 'CohortPageOutputCorruptError';
     this.runId = runId;

@@ -122,8 +122,13 @@ function parseTitleRow(row: CohortTitleOutputRow): CohortTitleOutput {
  * JSON, or a schema violation such as an empty title). Carries the parent
  * run id, the affected product SKUs with their original causes, and the
  * USABLE parsed outputs for the unaffected rows so `processCohort` can
- * record an owner-guarded member failure for EACH affected SKU (child
- * terminalized failed, no curation data) and continue the remaining members.
+ * Supersession diagnostic (PR8 review R1 + review round 2 P1): a persisted
+ * `curated_title` row that fails to parse is corruption of the WRITE-ONCE
+ * PARENT-OWNED shared semantic artifact — the parent is SUPERSEDED via
+ * `supersedeOwnedCohortRunForOutputDrift` (never a member failure: a member
+ * failure would strand the revision — write-once rows stay immutable under a
+ * terminal-current parent, and no new revision could be claimed). The class
+ * retains per-SKU failures + the usable parsed map as DIAGNOSTICS only.
  */
 export class CohortTitleOutputCorruptError extends Error {
   readonly runId: string;
@@ -138,7 +143,7 @@ export class CohortTitleOutputCorruptError extends Error {
     super(
       `[CohortTitleOutputCorrupt] Persisted curated_title outputs for run ${runId} failed to parse: ` +
         failures.map(f => `${f.sku} (${f.cause})`).join('; ') +
-        ' — the affected member(s) fail closed with no title; unaffected members continue from the parsed rows.',
+        ' — the shared title set is no longer coherent; the parent run must be superseded so a NEW revision can commit a fresh set.',
     );
     this.name = 'CohortTitleOutputCorruptError';
     this.runId = runId;
