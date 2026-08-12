@@ -1040,6 +1040,20 @@ describe('PR8 acceptance — draft projection ordering + fail-closed member draf
 
     // The claim slot REOPENED: a NEW parent revision is immediately claimable,
     // freezes, and executes — a FRESH complete set under the new run id.
+    // PR9 review R1 (B1): a null Primary-Product-Type suggestion is now a HARD
+    // family_product_type finding whenever the parent Execution Product Type
+    // exists — the singleton member 3's original evidence ('Adult Dog Food
+    // Salmon') abstains on the family invariant. Give member 3's extraction
+    // TITLE type keywords so the fresh revision resolves a non-null
+    // suggestion; its `_name` stays 'Adult Dog Food Salmon' (separate group),
+    // so DECISION-O title rows (2) and the singleton page call (1) are
+    // unchanged, and the legacy flag-OFF frozen baseline (test 4) is untouched.
+    const memberThreeForRevision = findItemById(items[2].id)!;
+    const memberThreeExt = memberThreeForRevision.extractionData as Record<string, any> | null;
+    updateItemExtractionData(memberThreeForRevision.id, JSON.stringify({
+      ...(memberThreeExt ?? {}),
+      title: 'Purina Pro Plan Dry Dog Food Salmon 5 lb',
+    }));
     const newRevision = await freezeActiveCohort(workspaceId, wsPath);
     expect(newRevision.id).not.toBe(run.id);
     const freshSummary = await processCohort(newRevision, wsPath, workspaceId);

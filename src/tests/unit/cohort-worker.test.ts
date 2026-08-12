@@ -86,6 +86,8 @@ import {
   countCohortPageOutputs,
 } from '../../db/repositories/classification-cohort-output-repo';
 import { getRuntimeSnapshotByHash } from '../../classification/runtime-snapshot';
+import { onboardingEvents } from '../../onboarding/sse-emitter';
+import type { OnboardingEvent } from '../../onboarding/sse-emitter';
 import * as llmClient from '../../onboarding/llm-client';
 import * as cohortNameCoordinator from '../../onboarding/cohort-name-coordinator';
 
@@ -3224,6 +3226,119 @@ describe('PR9 C2 — per-member semantic validation + post-loop brand coherence 
     expect(sv.status).toBe('blocked');
     expect(sv.findings.some(f => f.code === 'family_brand')).toBe(true);
   });
+
+  it('B3 (PR9 review R1): a crash after a committed PT block → reclaim → the resume guard restores the committed member failure', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTwoTypesConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    getDb().run(
+      'UPDATE classification_cohort_runs SET execution_product_type_id = ? WHERE id = ?',
+      ['dog-treats', finalized.id],
+    );
+    const mutatedRun = getCohortRunById(finalized.id)!;
+    seedV1TitleOutputs(workspaceId, mutatedRun);
+
+    // Crash AFTER member 1's projection commit — its BLOCKED semanticValidation
+    // commits, the parent stays `running`.
+    let commitCount = 0;
+    await expect(processCohort(mutatedRun, wsPath, workspaceId, {
+      afterMemberCommit: () => {
+        commitCount++;
+        if (commitCount === 1) throw new MemberCommitCrashSimulationError('simulated crash after member 1 commit');
+      },
+    })).rejects.toThrow('simulated crash after member 1 commit');
+    expect(findItemById(items[0].id)!.stageStatus).toBe('completed');
+    expect(findItemById(items[0].id)!.curationData!.semanticValidation!.status).toBe('blocked');
+    expect(getCohortRunById(finalized.id)!.status).toBe('running');
+
+    // Reclaim + re-enter: member 1 is skipped by the resume guard, but its
+    // committed semantic block MUST be reconstructed in the parent summary.
+    getDb().run('UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?', ['2000-01-01T00:00:00.000Z', finalized.id]);
+    const reclaim = reclaimExpiredCohortRuns(
+      workspaceId,
+      new Date().toISOString(),
+      () => verifyCohortRunFrozen(getCohortRunById(finalized.id)!, wsPath, workspaceId) ? 'match' : 'drift',
+      'worker-b',
+      COHORT_LEASE_TTL_MS,
+    );
+    expect(reclaim.resumed.length).toBe(1);
+    const resumed = getCohortRunById(finalized.id)!;
+    const summary = await processCohort(resumed, wsPath, workspaceId);
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    // BOTH members appear in the failure summary — the committed block was
+    // restored (deduplicated to ONE entry per member).
+    const skuCounts = new Map<string, number>();
+    for (const failure of summary.memberFailures) {
+      skuCounts.set(failure.productSku ?? '', (skuCounts.get(failure.productSku ?? '') ?? 0) + 1);
+    }
+    expect(skuCounts.get('100000000001')).toBe(1);
+    expect(skuCounts.get('100000000002')).toBe(1);
+    expect(summary.memberFailures.map(f => f.productSku).sort()).toEqual(['100000000001', '100000000002']);
+  });
+
+  it('B7 (PR9 review R1): member with BOTH a per-member hard finding and a post-loop Brand finding keeps BOTH, one parent failure, and a follow-up SSE event carries the FINAL semanticValidation', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTwoTypesConfig(workspaceId, wsPath);
+    const { items, batchId } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Acme', brand: 'Generic' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.executionProductTypeId).toBe('dry-dog-food');
+    // Force the parent authority to a DIFFERENT type: the members' own
+    // proposals say dry-dog-food → per-member family_product_type findings.
+    getDb().run(
+      'UPDATE classification_cohort_runs SET execution_product_type_id = ? WHERE id = ?',
+      ['dog-treats', finalized.id],
+    );
+    const mutatedRun = getCohortRunById(finalized.id)!;
+    seedV1TitleOutputs(workspaceId, mutatedRun);
+
+    const events: OnboardingEvent[] = [];
+    const unsubscribe = onboardingEvents.subscribe(batchId, event => {
+      events.push(event);
+    });
+    const summary = await processCohort(mutatedRun, wsPath, workspaceId);
+    unsubscribe();
+
+    expect(summary.parentStatus).toBe('completed_with_member_failures');
+    // Exactly ONE parent member-failure entry per member.
+    const skuCounts = new Map<string, number>();
+    for (const failure of summary.memberFailures) {
+      skuCounts.set(failure.productSku ?? '', (skuCounts.get(failure.productSku ?? '') ?? 0) + 1);
+    }
+    expect(skuCounts.get('100000000001')).toBe(1);
+    expect(skuCounts.get('100000000002')).toBe(1);
+
+    // BOTH findings survive: the post-loop Brand write MERGED (never
+    // replaced) the member's committed family_product_type finding.
+    const memberTwo = findItemById(items[1].id)!;
+    const sv = memberTwo.curationData!.semanticValidation!;
+    expect(sv.status).toBe('blocked');
+    expect(sv.findings.filter(f => f.code === 'family_product_type')).toHaveLength(1);
+    expect(sv.findings.filter(f => f.code === 'family_brand')).toHaveLength(1);
+
+    // SSE: the member-completed event was emitted before the post-loop Brand
+    // check — the follow-up event for the affected member carries the FINAL
+    // semanticValidation (both codes), truthfully surfacing the block.
+    const memberTwoEvents = events.filter(
+      e => e.itemId === items[1].id && (e.data as { curationData?: { semanticValidation?: unknown } })?.curationData?.semanticValidation,
+    );
+    expect(memberTwoEvents.length).toBeGreaterThanOrEqual(2);
+    const finalEvent = memberTwoEvents[memberTwoEvents.length - 1];
+    const finalSv = (finalEvent.data as { curationData: { semanticValidation: { status: string; findings: Array<{ code: string }> } } }).curationData.semanticValidation;
+    expect(finalSv.status).toBe('blocked');
+    expect(finalSv.findings.map(f => f.code).sort()).toEqual(['family_brand', 'family_product_type']);
+  });
 });
 
 // Reference the exported execution types so the module graph is exercised.
@@ -3266,21 +3381,24 @@ describe('PR9 C3 — active-cohort semantic surface (issue #30, DECISION-C)', ()
     );
 
     const stored = findItemById(items[0].id)!;
-    const payload = activeCohortSemanticFindingsForItem(stored);
-    expect(payload).not.toBeNull();
-    expect(payload!.status).toBe('blocked');
-    expect(payload!.findings[0].code).toBe('family_brand');
-    expect(payload!.findings[0].message).toBe('Brand conflict.');
+    const surface = activeCohortSemanticFindingsForItem(stored);
+    expect(surface.mode).toBe('active');
+    if (surface.mode === 'active') {
+      expect(surface.semanticValidation.status).toBe('blocked');
+      expect(surface.semanticValidation.findings[0].code).toBe('family_brand');
+      expect(surface.semanticValidation.findings[0].message).toBe('Brand conflict.');
+    }
 
-    // Legacy surface byte-identical: flag OFF and shadow both return null.
+    // Legacy surface byte-identical: flag OFF and shadow both return legacy
+    // mode (never the active surface, never a blocked payload).
     resetCohortCurationFlagsOverride();
-    expect(activeCohortSemanticFindingsForItem(stored)).toBeNull();
+    expect(activeCohortSemanticFindingsForItem(stored)).toEqual({ mode: 'legacy' });
     overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
-    expect(activeCohortSemanticFindingsForItem(stored)).toBeNull();
+    expect(activeCohortSemanticFindingsForItem(stored)).toEqual({ mode: 'legacy' });
     resetCohortCurationFlagsOverride();
 
-    // A NON-cohort item (run without a cohort_run_id) in active mode returns
-    // null too — only cohort children switch the surface.
+    // A NON-cohort item (run without a cohort_run_id) in active mode stays
+    // legacy too — only cohort children switch the surface.
     overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
     getDb().run(
       `INSERT INTO classification_runs
@@ -3297,6 +3415,96 @@ describe('PR9 C3 — active-cohort semantic surface (issue #30, DECISION-C)', ()
       }), items[1].id],
     );
     const legacyItem = findItemById(items[1].id)!;
-    expect(activeCohortSemanticFindingsForItem(legacyItem)).toBeNull();
+    expect(activeCohortSemanticFindingsForItem(legacyItem)).toEqual({ mode: 'legacy' });
+  });
+
+  it('B6: an active-cohort child with MISSING semantic data fails closed with a blocked surface (never the legacy validator)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+
+    // Owned cohort child run, but curation data WITHOUT the semanticValidation
+    // key (data loss / never validated).
+    getDb().run(
+      `UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?`,
+      [JSON.stringify({ curatedTitle: 'Title', classificationRunId: 'child-missing' }), items[0].id],
+    );
+    getDb().run(
+      `INSERT INTO classification_runs
+         (id, workspace_id, onboarding_item_id, product_sku, cohort_run_id, status, started_at)
+       VALUES ('child-missing', ?, ?, ?, ?, 'completed', ?)`,
+      [workspaceId, items[0].id, '100000000001', finalized.id, new Date().toISOString()],
+    );
+
+    const surface = activeCohortSemanticFindingsForItem(findItemById(items[0].id)!);
+    expect(surface.mode).toBe('active');
+    if (surface.mode === 'active') {
+      expect(surface.semanticValidation.status).toBe('blocked');
+      expect(surface.semanticValidation.findings[0].code).toBe('semantic_validation_unavailable');
+    }
+  });
+
+  it('B6: an active-cohort child with MALFORMED semantic data fails closed with a blocked surface (never the legacy validator)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+
+    getDb().run(
+      `UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?`,
+      [JSON.stringify({ curatedTitle: 'Title', classificationRunId: 'child-malformed', semanticValidation: { status: 'weird-status', findings: 'not-an-array' } }), items[0].id],
+    );
+    getDb().run(
+      `INSERT INTO classification_runs
+         (id, workspace_id, onboarding_item_id, product_sku, cohort_run_id, status, started_at)
+       VALUES ('child-malformed', ?, ?, ?, ?, 'completed', ?)`,
+      [workspaceId, items[0].id, '100000000001', finalized.id, new Date().toISOString()],
+    );
+
+    const surface = activeCohortSemanticFindingsForItem(findItemById(items[0].id)!);
+    expect(surface.mode).toBe('active');
+    if (surface.mode === 'active') {
+      expect(surface.semanticValidation.status).toBe('blocked');
+      expect(surface.semanticValidation.findings[0].code).toBe('semantic_validation_unavailable');
+    }
+  });
+
+  it('B6: a FOREIGN child-run pointer never switches the surface (ownership dimensions must match)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+
+    // The run pointer belongs to ANOTHER onboarding item (foreign ownership) —
+    // the item's curation data points at it, but the ownership dimensions do
+    // not agree, so the surface stays legacy.
+    getDb().run(
+      `UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?`,
+      [JSON.stringify({ curatedTitle: 'Title', classificationRunId: 'foreign-child' }), items[0].id],
+    );
+    getDb().run(
+      `INSERT INTO classification_runs
+         (id, workspace_id, onboarding_item_id, product_sku, cohort_run_id, status, started_at)
+       VALUES ('foreign-child', ?, ?, ?, ?, 'completed', ?)`,
+      [workspaceId, items[1].id, '100000000002', finalized.id, new Date().toISOString()],
+    );
+
+    expect(activeCohortSemanticFindingsForItem(findItemById(items[0].id)!)).toEqual({ mode: 'legacy' });
   });
 });

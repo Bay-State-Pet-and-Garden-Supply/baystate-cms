@@ -55,13 +55,22 @@ describe('validateMemberSemantics — family_invariant Product Type', () => {
     expect(finding.message).toContain('dog-treats');
   });
 
-  it('passes a member with no suggested PT (the type stage abstained) — an abstention is never a conflict', () => {
-    // The member pipeline's type stage may legitimately abstain (extraction
-    // evidence inconclusive) while the freeze resolver saw the spreadsheet
-    // name — a null suggested type is an abstention on the family invariant,
-    // not a conflict.
-    const result = validateMemberSemantics(coherentMember({ suggestedProductType: null }));
-    expect(result.status).toBe('passed');
+  it('blocks a member with no suggested PT when the parent authority exists — a null/empty abstention is a HARD family_product_type finding (PR9 review R1, B1)', () => {
+    // The claimed evidence-boundary rationale is false: the frozen member
+    // evidence includes the spreadsheet identity name and the member target
+    // processor runs the same deterministic matching family — a null
+    // suggestion is a missing/inconsistent proposal, never a distinct,
+    // approved abstention.
+    const nullResult = validateMemberSemantics(coherentMember({ suggestedProductType: null }));
+    expect(nullResult.status).toBe('blocked');
+    const nullFinding = nullResult.findings.find(f => f.code === 'family_product_type')!;
+    expect(nullFinding.memberSku).toBe('100000000001');
+    expect(nullFinding.message).toContain('missing (abstained)');
+    expect(nullFinding.message).toContain('dry-dog-food');
+
+    const emptyResult = validateMemberSemantics(coherentMember({ suggestedProductType: '' }));
+    expect(emptyResult.status).toBe('blocked');
+    expect(emptyResult.findings.some(f => f.code === 'family_product_type')).toBe(true);
   });
 
   it('enforces nothing when the parent has no execution type (abstained/conflicted)', () => {
@@ -238,6 +247,23 @@ function localInput(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** Minimal frozen ReviewedFact for conditional-applicability tests. */
+function makeReviewedFact(targetId: string, value: unknown) {
+  return {
+    proposalId: 'fact-proposal',
+    decisionId: 'fact-decision',
+    runId: 'fact-run',
+    workspaceId: 'ws-test',
+    productSku: '100000000001',
+    proposalType: 'field_assignment',
+    targetId,
+    value,
+    configSnapshotHash: null,
+    sourceHash: null,
+    createdAt: '2026-08-01T00:00:00.000Z',
+  };
+}
+
 describe('validateMemberLocalAttributes — profile applicability', () => {
   it('passes a profile-applicable non-universal proposal', () => {
     const result = validateMemberLocalAttributes(localInput());
@@ -280,6 +306,49 @@ describe('validateMemberLocalAttributes — profile applicability', () => {
     expect(result.findings.some(f => f.code === 'member_attribute_applicability')).toBe(true);
   });
 
+  // ── PR9 review R1 (B4): conditional applicability re-validation ──────────
+
+  it('blocks a profile-member attribute whose applicability condition is FALSE', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [{ targetId: 'flavor', proposedValue: 'Chicken' }],
+      profileEntriesByAttributeId: new Map([[
+        'flavor',
+        { attributeId: 'flavor', cardinality: 'single', applicabilityConditions: [{ operator: 'equals', attributeId: 'species', value: 'cat' }] },
+      ]]),
+      reviewedFacts: [makeReviewedFact('species', 'dog')],
+    }));
+    expect(result.status).toBe('blocked');
+    const finding = result.findings.find(f => f.code === 'member_attribute_applicability')!;
+    expect(finding.message).toContain('flavor');
+    expect(finding.message).toContain('NOT satisfied');
+  });
+
+  it('blocks a profile-member attribute whose applicability condition is UNRESOLVABLE (missing frozen fact — fail closed)', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [{ targetId: 'flavor', proposedValue: 'Chicken' }],
+      profileEntriesByAttributeId: new Map([[
+        'flavor',
+        { attributeId: 'flavor', cardinality: 'single', applicabilityConditions: [{ operator: 'equals', attributeId: 'species', value: 'cat' }] },
+      ]]),
+      reviewedFacts: [],
+    }));
+    expect(result.status).toBe('blocked');
+    const finding = result.findings.find(f => f.code === 'member_attribute_applicability')!;
+    expect(finding.message).toContain('cannot be resolved');
+  });
+
+  it('passes a profile-member attribute whose applicability condition is SATISFIED', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [{ targetId: 'flavor', proposedValue: 'Chicken' }],
+      profileEntriesByAttributeId: new Map([[
+        'flavor',
+        { attributeId: 'flavor', cardinality: 'single', applicabilityConditions: [{ operator: 'equals', attributeId: 'species', value: 'dog' }] },
+      ]]),
+      reviewedFacts: [makeReviewedFact('species', 'dog')],
+    }));
+    expect(result.status).toBe('passed');
+  });
+
   it('records a cardinality finding for a single-cardinality attribute with >1 distinct values', () => {
     const result = validateMemberLocalAttributes(localInput({
       proposals: [
@@ -312,6 +381,42 @@ describe('validateMemberLocalAttributes — profile applicability', () => {
         { targetId: 'flavor', proposedValue: 'Chicken' },
         { targetId: 'flavor', proposedValue: 'Beef' },
       ],
+      cardinalityByAttributeId: new Map<string, 'single' | 'multiple'>([['flavor', 'multiple']]),
+    }));
+    expect(result.status).toBe('passed');
+  });
+
+  // ── PR9 review R1 (B5): multi-value array cardinality ──────────────────────
+
+  it('blocks a single-cardinality attribute carrying a MULTI-VALUE array in ONE proposal', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [{ targetId: 'flavor', proposedValue: ['Chicken', 'Beef'] }],
+    }));
+    expect(result.status).toBe('blocked');
+    const finding = result.findings.find(f => f.code === 'member_cardinality')!;
+    expect(finding.message).toContain('flavor');
+    expect(finding.message).toContain('2');
+  });
+
+  it('passes duplicate array members (identical values are never a breach)', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [{ targetId: 'flavor', proposedValue: ['Chicken', 'Chicken', ''] }],
+    }));
+    expect(result.status).toBe('passed');
+  });
+
+  it('blocks a REVISED multi-value array on a single-cardinality attribute', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [{ targetId: 'flavor', proposedValue: 'Chicken', revisedValue: ['Chicken', 'Beef'], hasRevisedValue: true }],
+    }));
+    expect(result.status).toBe('blocked');
+    const finding = result.findings.find(f => f.code === 'member_cardinality')!;
+    expect(finding.message).toContain('flavor');
+  });
+
+  it('passes a multiple-cardinality attribute carrying a multi-value array', () => {
+    const result = validateMemberLocalAttributes(localInput({
+      proposals: [{ targetId: 'flavor', proposedValue: ['Chicken', 'Beef'] }],
       cardinalityByAttributeId: new Map<string, 'single' | 'multiple'>([['flavor', 'multiple']]),
     }));
     expect(result.status).toBe('passed');
@@ -378,5 +483,19 @@ describe('validateCohortBrandCoherence — mutual Brand coherence', () => {
     ]);
     expect(result.status).toBe('blocked');
     expect(result.findings.every(f => f.code === 'family_brand')).toBe(true);
+  });
+
+  it('tie ordering uses an explicit code-point comparator (non-ASCII normalized brands, PR9 review R1 SHOULD-FIX b)', () => {
+    // é (U+00E9) sorts AFTER 'z' (U+007A) by code point but BEFORE it under
+    // locale collation in most locales — the persisted tie list must be
+    // deterministic across deployments, never ambient ICU behavior.
+    const result = validateCohortBrandCoherence([
+      { sku: '100000000001', frozenBrandEvidence: ['éclair'] },
+      { sku: '100000000002', frozenBrandEvidence: ['Zoo'] },
+    ]);
+    expect(result.status).toBe('blocked');
+    expect(result.findings).toHaveLength(2);
+    const tieList = result.findings[0].message.match(/tied canonical brands: ([^)]+)/);
+    expect(tieList![1]).toBe('zoo, éclair');
   });
 });
