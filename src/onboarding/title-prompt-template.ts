@@ -32,27 +32,65 @@ export interface CohortSiblingInput {
   webTitle: string | null;
   ocrTitle: string | null;
   brand: string | null;
+  /**
+   * PR6 hardening B (issue #30 P1-3): structured OCR weight the canonical
+   * title input hash (T-hash) claims (DECISION-Q). Absent = normal — the
+   * prompt renders no weight segment when the sibling has no OCR weight.
+   */
+  ocrWeight?: string | null;
+  /**
+   * PR6 hardening B (issue #30 P1-3): structured OCR flavor the T-hash
+   * claims. Absent = normal — flavor absence renders no flavor segment.
+   */
+  ocrFlavor?: string | null;
+}
+
+/**
+ * PR6 hardening B (issue #30 P1-3): the frozen Execution Product Type as
+ * title context — the same authority `computeCohortTitleInputHash` claims
+ * (`executionProductType.id`). `label` is the frozen product-type option's
+ * name from the member snapshot (null when the run's type id has no matching
+ * option — the prompt still renders the id so prompt authority never lags the
+ * hash authority).
+ */
+export interface CohortExecutionTypeContext {
+  id: string;
+  label: string | null;
 }
 
 /** Build a cohort coordination prompt for a group of sibling items. */
-export function buildCohortPrompt(siblings: CohortSiblingInput[]): string {
+export function buildCohortPrompt(
+  siblings: CohortSiblingInput[],
+  executionTypeContext?: CohortExecutionTypeContext | null,
+): string {
   const variantLines = siblings
     .map((s, i) => {
       const expectedName = s.expectedName ?? 'N/A';
       const webTitle = s.webTitle ?? 'N/A';
       const ocrTitle = s.ocrTitle ?? 'N/A';
       const brand = s.brand ?? 'N/A';
-      return `${i + 1}. [${s.upc}] Raw Spreadsheet: "${s.name}" | Expected: "${expectedName}" | Web: "${webTitle}" | OCR: "${ocrTitle}" | Brand: "${brand}"`;
+      // PR6 hardening B (P1-3): the structured OCR signals the T-hash claims
+      // are rendered ONLY when present — absent weight/flavor adds no segment
+      // (flavor absence is normal), so legacy callers stay byte-identical.
+      const ocrWeight = s.ocrWeight?.trim() ? ` | OCR Weight: "${s.ocrWeight}"` : '';
+      const ocrFlavor = s.ocrFlavor?.trim() ? ` | OCR Flavor: "${s.ocrFlavor}"` : '';
+      return `${i + 1}. [${s.upc}] Raw Spreadsheet: "${s.name}" | Expected: "${expectedName}" | Web: "${webTitle}" | OCR: "${ocrTitle}" | Brand: "${brand}"${ocrWeight}${ocrFlavor}`;
     })
     .join('\n');
 
   const groupLabel = siblings[0]?.name ?? 'Unknown Product Line';
+  // PR6 hardening B (P1-3): the frozen Execution Product Type as title
+  // context — rendered only when the caller supplies it (legacy/shadow
+  // callers omit it and stay byte-identical).
+  const typeContextLine = executionTypeContext
+    ? `\nProduct Type Context: "${executionTypeContext.label ?? executionTypeContext.id}"`
+    : '';
 
   return `You are a product cataloging assistant for a premium pet supply store.
 Below are ${siblings.length} variants of the same product. Assign a clean, store-ready name to EACH.
 ALL names MUST use the same format.
 
-Product Line: "${groupLabel}"
+Product Line: "${groupLabel}"${typeContextLine}
 
 ${FORMAT_RULES}
 

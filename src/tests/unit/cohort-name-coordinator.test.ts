@@ -538,6 +538,78 @@ describe('Cohort Name Coordinator', () => {
     expect(multiMember.sort()).toEqual(['U1', 'U2']);
   });
 
+  // ─── PR6 hardening B (P1-3): the prompt consumes EXACTLY the T-hash authority ─
+
+  it('renders OCR weight/flavor lines when the siblings carry them (the structured OCR signals the T-hash claims)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', extractionData: { title: 'Test', packagingOcrData: { weight: '5 lb', flavorVariety: 'Chicken' }, packagingTitle: null } }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', extractionData: { title: 'Test', packagingOcrData: { weight: '10 lb', flavorVariety: 'Beef' }, packagingTitle: null } }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items);
+    expect(result.size).toBe(2);
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    expect(prompt).toContain('OCR Weight: "5 lb"');
+    expect(prompt).toContain('OCR Flavor: "Chicken"');
+    expect(prompt).toContain('OCR Weight: "10 lb"');
+    expect(prompt).toContain('OCR Flavor: "Beef"');
+  });
+
+  it('renders NO OCR weight/flavor segments when absent — flavor absence is normal (legacy callers byte-identical)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    await coordinateCohortItems(items);
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    expect(prompt).not.toContain('OCR Weight:');
+    expect(prompt).not.toContain('OCR Flavor:');
+    expect(prompt).not.toContain('Product Type Context:');
+  });
+
+  it('renders the Execution Product Type context line with the label when provided and ABSENT when null', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items, undefined, {
+      executionTypeContext: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+    });
+    expect(result.size).toBe(2);
+    const promptWithType = (callLlmForTask as any).mock.calls[0][1] as string;
+    expect(promptWithType).toContain('Product Type Context: "Dry Dog Food"');
+    expect(promptWithType).not.toContain('Product Type Context: "dog-food-dry"');
+
+    // A null context (abstained/conflicted run) → no type line.
+    await coordinateCohortItems(items, undefined, { executionTypeContext: null });
+    const promptNullType = (callLlmForTask as any).mock.calls[1][1] as string;
+    expect(promptNullType).not.toContain('Product Type Context:');
+  });
+
+  it('renders the type id when the label is missing (prompt authority never lags the hash authority)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    await coordinateCohortItems(items, undefined, {
+      executionTypeContext: { id: 'dog-food-dry', label: null },
+    });
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    expect(prompt).toContain('Product Type Context: "dog-food-dry"');
+  });
+
+  it('legacy callers without opts build a byte-identical prompt (no P1-3 additions)', async () => {
+    const prompt = buildCohortPrompt([
+      { upc: 'PATE', name: 'INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ', webTitle: null, ocrTitle: null, brand: 'Instinct' },
+      { upc: 'FLAKE', name: 'INSTINCT CAT FLAKE TUNA SPLIT CUP 2.64OZ', webTitle: null, ocrTitle: null, brand: 'Instinct' },
+    ]);
+    expect(prompt).not.toContain('OCR Weight:');
+    expect(prompt).not.toContain('OCR Flavor:');
+    expect(prompt).not.toContain('Product Type Context:');
+    // The pre-P1-3 prompt shape is preserved exactly.
+    expect(prompt).toContain('Product Line: "INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ"');
+    expect(prompt).toContain('1. [PATE] Raw Spreadsheet: "INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ" | Expected: "N/A" | Web: "N/A" | OCR: "N/A" | Brand: "Instinct"');
+  });
+
   // ─── Deterministic fallback formatter ───────────────────────────────────
 
   describe('formatDeterministicTitle', () => {

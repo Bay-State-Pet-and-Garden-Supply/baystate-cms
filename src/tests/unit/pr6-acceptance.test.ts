@@ -1,6 +1,7 @@
 /**
- * PR6 C6 (issue #30): acceptance integration test — durable exactly-once
- * parent title coordination across the full cohort lifecycle.
+ * PR6 C6 (issue #30): acceptance integration test — durable parent title
+ * coordination, replay-safe after commit (honest contract, PR6 hardening B
+ * P1-1).
  *
  * Harness: cohort-worker.test.ts (temp DB, migrations, `createReadyCohort`)
  * + the active-v2 bundle + counting llm-client mock from
@@ -12,17 +13,22 @@
  *
  * Scenario coverage (architecture-report §11):
  *  1. freeze → run `running`, `final_membership_hash` + `execution_product_type_id` written;
- *  2. processCohort #1 → exactly ONE title call; N output rows with equal
- *     `input_hash`; every member's `curatedTitle` matches the persisted value;
+ *  2. processCohort #1 → exactly ONE title call (the set was empty); N output
+ *     rows with equal `input_hash`; every member's `curatedTitle` matches the
+ *     persisted value;
  *  3. kill/restart: clearCohortCoordinationCache + expired lease +
- *     reclaimExpiredCohortRuns(new worker) → processCohort #2 with ZERO title
- *     calls; the completed member is skipped by the resume guard; reset ONE
- *     member (stage → pending, curation data cleared) and re-run → the
- *     re-executed member's `curatedTitle` is byte-identical to the pre-kill
- *     value;
- *  4. counts: total `cohort_title_consolidation` calls === 1 for the cohort
- *     revision; `classification_model_calls` has exactly one started+success
- *     pair bound to the ordinal-0 child run;
+ *     reclaimExpiredCohortRuns(new worker) → processCohort #2 with ZERO
+ *     FURTHER title calls (the durable set already committed — replay-safe);
+ *     the completed member is skipped by the resume guard; reset ONE member
+ *     (stage → pending, curation data cleared) and re-run → the re-executed
+ *     member's `curatedTitle` is byte-identical to the pre-kill value;
+ *  4. counts: one audited started+success `classification_model_calls` pair
+ *     per invocation, bound to the ordinal-0 child run — the scenario has
+ *     exactly ONE invocation because the commit completed on the first entry;
+ *     the general guarantee is ZERO FURTHER calls AFTER COMMIT (replay-safe),
+ *     not "one call forever" (a crash between transport success and the
+ *     outputs commit may re-invoke coordination once — each invocation
+ *     audited; covered in cohort-title-coordinator.test.ts);
  *  5. flag OFF → zero output rows, the legacy coordinator + cohortCache path
  *     (byte-identical), zero parent-level title calls;
  *  6. shadow (`cohortCurationV2Enabled && cohortShadowOnly`) → the legacy
@@ -546,8 +552,8 @@ function buildPreparedContext(
   };
 }
 
-describe('PR6 acceptance — durable exactly-once parent title coordination (issue #30)', () => {
-  it('1-2-4: freeze writes the run authorities; processCohort #1 coordinates ONCE, persists 2 output rows (equal input_hash), members consume the persisted titles, one audited started+success pair on the ordinal-0 child', async () => {
+describe('PR6 acceptance — durable parent title coordination, replay-safe after commit (issue #30)', () => {
+  it('1-2-4: freeze writes the run authorities; processCohort #1 coordinates once (empty set) and persists 2 output rows (equal input_hash); members consume the persisted titles; one audited started+success pair on the ordinal-0 child', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const { items } = await prepareActiveV2Workspace(workspaceId, wsPath, TWO_MEMBER_EXTRACTIONS);
     const finalized = await freezeActiveCohort(workspaceId, wsPath);
@@ -580,8 +586,11 @@ describe('PR6 acceptance — durable exactly-once parent title coordination (iss
       expect(stored.curationData!.curatedTitle).toBe(cannedTitleForUpc(item.upc));
     }
 
-    // C6.4 — exactly one audited started+success pair bound to the ordinal-0
-    // child run.
+    // C6.4 — one audited started+success pair per invocation, bound to the
+    // ordinal-0 child run. This scenario committed on the first entry, so
+    // exactly ONE pair exists; the honest contract (PR6 hardening B) is that
+    // zero FURTHER pairs appear AFTER the durable set commits (replay-safe),
+    // not that a crash between transport and commit can never re-invoke.
     const projection = loadFrozenProjection(workspaceId, finalized);
     const childRunId = ordinal0ChildRunId(workspaceId, finalized, projection);
     const calls = getDb().query(
@@ -594,7 +603,7 @@ describe('PR6 acceptance — durable exactly-once parent title coordination (iss
     expect(rows.every(r => r.modelCallId === `title-call-${auditCallSeq}`)).toBe(true);
   });
 
-  it('3-4: kill/restart/reclaim — ZERO new title calls, completed member skipped, re-executed member byte-identical', async () => {
+  it('3-4: kill/restart/reclaim — ZERO FURTHER title calls after the durable set committed (replay-safe), completed member skipped, re-executed member byte-identical', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const THREE_MEMBER_EXTRACTIONS = {
       '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),

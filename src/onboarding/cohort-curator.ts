@@ -2129,18 +2129,27 @@ export async function processCohort(
   // visible to title/page coordination.
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
 
-  // PR6 (issue #30): the durable parent title op — exactly-once per cohort
-  // run. Computes the canonical title input hash from frozen title authority
-  // only; reuses the persisted `classification_cohort_outputs` when the
-  // complete set + hash match (ZERO LLM calls), otherwise coordinates ONCE
-  // (only when the set is empty) under a scoped lease keeper (audited
-  // `cohort_title_consolidation` call bound to the ordinal-0 member child
-  // run) and persists every group member's title all-or-nothing and
-  // WRITE-ONCE. Prepared members then consume these outputs at the
-  // `preComputedTitle` seam (PR6 C5); the coordinator + `cohortCache` are
-  // never consulted in active cohort mode. A lost claim (`HeartbeatLostError`)
-  // propagates with NO output rows — the reclaiming worker re-enters
-  // processCohort and reuses-or-coordinates.
+  // PR6 (issue #30): the durable parent title op. Computes the canonical
+  // title input hash from frozen title authority only; reuses the persisted
+  // `classification_cohort_outputs` when the complete set + hash match (ZERO
+  // FURTHER calls after commit), otherwise coordinates (only when the set is
+  // empty) under a scoped lease keeper (audited `cohort_title_consolidation`
+  // call bound to the ordinal-0 member child run) and persists every group
+  // member's title all-or-nothing and WRITE-ONCE. Prepared members then
+  // consume these outputs at the `preComputedTitle` seam (PR6 C5); the
+  // coordinator + `cohortCache` are never consulted in active cohort mode. A
+  // lost claim (`HeartbeatLostError`) propagates with NO output rows — the
+  // reclaiming worker re-enters processCohort and reuses-or-coordinates.
+  //
+  // HONEST DELIVERY CONTRACT (PR6 hardening B, P1-1): the guarantee is NOT
+  // "one LLM call per cohort revision forever". At most one ACTIVE
+  // coordination call runs at a time (lease-scoped); once the durable output
+  // set commits there are ZERO FURTHER calls (replay-safe after commit —
+  // retries/reclaims/member re-executions consume the committed set); but a
+  // crash between transport success and the outputs transaction leaves the
+  // audited call durable with NO committed rows, so a reclaim re-invokes
+  // coordination once (each invocation audited). Transport-level exactly-once
+  // would need provider idempotency keys — out of scope.
   //
   // PR6 hardening A: a committed output set that no longer matches the frozen
   // title authority (or a commit-race) is `CohortTitleAuthorityDriftError` —

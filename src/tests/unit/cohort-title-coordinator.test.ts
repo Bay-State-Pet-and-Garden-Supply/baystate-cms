@@ -56,6 +56,7 @@ import {
 import {
   claimReadyCurationCohorts,
   getCohortSnapshotByHash,
+  getCohortRunById,
   reclaimExpiredCohortRuns,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
@@ -81,6 +82,7 @@ import {
   HeartbeatLostError,
 } from '../../onboarding/cohort-curator';
 import { clearCohortCoordinationCache } from '../../onboarding/cohort-name-coordinator';
+import { overrideCohortCurationFlags, resetCohortCurationFlagsOverride } from '../../classification/flags';
 import { canonicalJsonFileString, sha256Hex, hashCanonicalJson } from '../../shared/stable-id';
 import {
   ClassificationManifestV2Schema,
@@ -117,6 +119,10 @@ let reclaimWorkspaceId: string | null = null;
  *  assertions tie rows to THEIR producing call without depending on the
  *  absolute (cross-test cumulative) call-id sequence. */
 let lastGroupCalls: Array<{ callId: string; upcs: string[] }> = [];
+/** PR6 hardening B (P1-3): every prompt the mocked transport received, so
+ *  tests can assert the prompt consumes exactly the T-hash authority (OCR
+ *  weight/flavor + Execution Product Type context). */
+let lastPrompts: string[] = [];
 
 function mockGetLlmConfigForTask(): Record<string, any> {
   return {
@@ -198,6 +204,7 @@ function mockCallLlmForTaskWithProvenance(
 ): { content: string; callId: string; provider: string; model: string; usage: Record<string, number | null> } | null {
   if (options?.protectedOperation !== 'cohort_title_consolidation') return null;
   titleCallCount++;
+  lastPrompts.push(prompt);
   if (denyNextTitleCall) {
     // PR6 review fix: the audited wrapper writes a durable policy_denied
     // terminal row BEFORE transport, then throws — the coordinator must fall
@@ -289,6 +296,7 @@ afterEach(() => {
   reclaimRunId = null;
   reclaimWorkspaceId = null;
   lastGroupCalls = [];
+  lastPrompts = [];
   clearCohortCoordinationCache();
 });
 
@@ -1145,5 +1153,172 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     }
     // Every llm_cohort row parses and carries llm_cohort source.
     expect(rows.every(r => (JSON.parse(r.outputValueJson) as { source: string }).source === 'llm_cohort')).toBe(true);
+  });
+
+  it('P1-1 honest contract: crash between transport success and output commit → reclaim re-coordinates EXACTLY once more (2 audited calls total for the revision); the SECOND attempt commits a complete consistent set; a THIRD entry reuses with zero calls', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const childRunId = ordinal0ChildRunId(fixture);
+    const inputHash = expectedInputHash(fixture);
+
+    // Attempt #1 — the audited title call SUCCEEDS (its `classification_model_calls`
+    // started+success rows are durable) but the worker dies BEFORE the outputs
+    // transaction commits. The test-only `afterCoordinatedCall` seam fires
+    // exactly between transport success and `insertCohortTitleOutputsOnce`.
+    await expect(
+      ensureCohortTitlesCoordinated({
+        run: fixture.run,
+        workspaceId: fixture.workspaceId,
+        workspacePath: fixture.workspacePath,
+        projection: fixture.projection,
+        cohort: fixture.cohort,
+        members: fixture.members,
+        frozenLineContext: fixture.frozenLineContext,
+        afterCoordinatedCall: () => {
+          throw new Error('simulated crash between transport success and output commit');
+        },
+      }),
+    ).rejects.toThrow('simulated crash between transport success and output commit');
+
+    // The crash window: the audited call is DURABLE but the committed set is
+    // EMPTY — a reclaim cannot reuse anything and must re-coordinate.
+    expect(titleCallCount).toBe(1);
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(0);
+    const firstAudit = getDb().query(
+      "SELECT * FROM classification_model_calls WHERE operation = 'cohort_title_consolidation' AND run_id = ?",
+    ).all(childRunId) as Array<Record<string, any>>;
+    expect(firstAudit).toHaveLength(2);
+    expect(firstAudit.map(c => c.status).sort()).toEqual(['started', 'success']);
+    expect(firstAudit.every(c => c.run_id === childRunId)).toBe(true);
+
+    // Reclaim: expire the lease + a NEW worker resumes the SAME run.
+    getDb().run(
+      'UPDATE classification_cohort_runs SET lease_expires_at = ? WHERE id = ?',
+      ['2000-01-01T00:00:00.000Z', fixture.run.id],
+    );
+    const reclaim = reclaimExpiredCohortRuns(
+      fixture.workspaceId,
+      new Date().toISOString(),
+      () => 'match',
+      'sibling-worker',
+      COHORT_LEASE_TTL_MS,
+    );
+    expect(reclaim.resumed.length).toBe(1);
+    expect(reclaim.resumed[0].id).toBe(fixture.run.id);
+    const resumedRun = getCohortRunById(fixture.run.id)!;
+    expect(resumedRun.claimedBy).toBe('sibling-worker');
+
+    // Attempt #2 (reclaim re-entry): the set is still EMPTY ⇒ re-coordinates
+    // EXACTLY once more. The SECOND attempt's committed set is COMPLETE +
+    // CONSISTENT: 2 rows, both share the canonical input_hash, the returned
+    // map equals the persisted rows.
+    const secondMap = await ensureCohortTitlesCoordinated({
+      run: resumedRun,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(titleCallCount).toBe(2);
+    expect(secondMap.size).toBe(2);
+    expect(secondMap.get('100000000001')).toEqual({ title: 'Purina Pro Plan Dog Food Chicken 5 lb', source: 'llm_cohort' });
+    expect(secondMap.get('100000000002')).toEqual({ title: 'Purina Pro Plan Dog Food Beef 10 lb', source: 'llm_cohort' });
+    const rows = getCohortTitleOutputsByRun(fixture.run.id);
+    expect(rows).toHaveLength(2);
+    expect(rows.every(r => r.inputHash === inputHash)).toBe(true);
+    const persisted = new Map(rows.map(r => [r.productSku, JSON.parse(r.outputValueJson)]));
+    expect(secondMap.get('100000000001')).toEqual(persisted.get('100000000001'));
+    expect(secondMap.get('100000000002')).toEqual(persisted.get('100000000002'));
+    // Both invocations were AUDITED (one started+success pair per invocation,
+    // both bound to the ordinal-0 child run).
+    const secondAudit = getDb().query(
+      "SELECT * FROM classification_model_calls WHERE operation = 'cohort_title_consolidation' AND run_id = ?",
+    ).all(childRunId) as Array<Record<string, any>>;
+    expect(secondAudit).toHaveLength(4);
+    expect(secondAudit.map(c => c.status).sort()).toEqual(['started', 'started', 'success', 'success']);
+    expect(secondAudit.every(c => c.run_id === childRunId)).toBe(true);
+
+    // Attempt #3: the committed set is complete + hash-matched ⇒ REUSE with
+    // zero calls — replay-safe after commit.
+    const thirdMap = await ensureCohortTitlesCoordinated({
+      run: resumedRun,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(titleCallCount).toBe(2);
+    expect([...thirdMap.entries()].sort()).toEqual([...secondMap.entries()].sort());
+    expect(countCohortTitleOutputs(fixture.run.id)).toBe(2);
+  });
+
+  it('P1-3: the coordinated prompt consumes EXACTLY the T-hash authority — OCR weight/flavor lines + the frozen Execution Product Type label (hash authority == prompt authority)', async () => {
+    // The Execution Product Type resolver runs ONLY in active cohort mode
+    // (PR4 C4a gate) — enable the flags for this freeze. The fixture uses the
+    // acceptance-test naming ('Dry Dog Food' in the spreadsheet name) so the
+    // deterministic keyword match clears the confidence floor and resolves
+    // `dog-food-dry` WITHOUT the LLM ranker fallback.
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    let fixture: FrozenCohortFixture;
+    try {
+      fixture = await freezeCohortFixture({
+        '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+        '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+      });
+    } finally {
+      resetCohortCurationFlagsOverride();
+    }
+    // In this harness the OCR pull-forward has no configured local VLM, so the
+    // fail-closed authority re-run clears the stored OCR (production keeps the
+    // frozen signals when the re-run succeeds). Inject the SAME structured OCR
+    // signals into the frozen projection — the single source BOTH the T-hash
+    // and the frozen sibling views read — so the integration proves the
+    // coordinator prompt consumes exactly what the hash claims.
+    const ocrInjection = {
+      productName: 'Package OCR Name',
+      brand: 'Acme',
+      species: [],
+      flavorVariety: 'Chicken',
+      weight: '5 lb',
+      confidenceByField: { productName: 0.95, weight: 0.8 },
+      metadata: null,
+    } as unknown as NonNullable<ExecutionEvidenceProjectionV1['members'][number]['extraction']['ocr']['packagingOcrData']>;
+    for (const member of fixture.projection.members) {
+      member.extraction.ocr.packagingOcrData = ocrInjection;
+    }
+    fixture.frozenLineContext = buildFrozenProductLineContext(
+      fixture.cohort,
+      fixture.members,
+      fixture.projection.members,
+    );
+    const map = await ensureCohortTitlesCoordinated({
+      run: fixture.run,
+      workspaceId: fixture.workspaceId,
+      workspacePath: fixture.workspacePath,
+      projection: fixture.projection,
+      cohort: fixture.cohort,
+      members: fixture.members,
+      frozenLineContext: fixture.frozenLineContext,
+    });
+    expect(map.size).toBe(2);
+    expect(titleCallCount).toBe(1);
+
+    // The frozen Execution Product Type: the id lives on the run, the label
+    // is the ordinal-0 member snapshot's productTypes option name.
+    expect(fixture.run.executionProductTypeId).toBe('dog-food-dry');
+    const prompt = lastPrompts[0];
+    expect(prompt).toBeTruthy();
+    // OCR weight/flavor lines — the structured OCR signals the T-hash claims
+    // (DECISION-Q) now appear in the prompt.
+    expect(prompt).toContain('OCR Weight: "5 lb"');
+    expect(prompt).toContain('OCR Flavor: "Chicken"');
+    // Execution Product Type context with the frozen option's name.
+    expect(prompt).toContain('Product Type Context: "Dry Dog Food"');
+    // The persisted input_hash still equals the T-hash over the SAME frozen
+    // authority the prompt consumed (hash authority == prompt authority).
+    expect(getCohortTitleOutputsByRun(fixture.run.id)[0].inputHash).toBe(expectedInputHash(fixture));
   });
 });

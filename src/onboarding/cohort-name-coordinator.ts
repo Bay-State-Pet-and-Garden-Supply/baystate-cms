@@ -18,6 +18,7 @@ import { getLlmConfigForTask, callLlmForTask, callLlmForTaskWithProvenance } fro
 import { redactTransportText } from '../classification/model-policy-gateway';
 import { normalizeBrand, extractNameStem } from './product-line-grouper';
 import { buildCohortPrompt, FORMAT_RULES } from './title-prompt-template';
+import type { CohortExecutionTypeContext } from './title-prompt-template';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
 import type { ModelCallContext } from '../classification/model-operation-registry';
 import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
@@ -57,6 +58,13 @@ export interface CohortCoordinationOptions {
    * rejected assertion throws `HeartbeatLostError`).
    */
   assertHeld?: () => void;
+  /**
+   * PR6 hardening B (issue #30 P1-3): the frozen Execution Product Type as
+   * title context — the same authority the canonical title input hash
+   * (T-hash) claims. Absent/null → no context line (legacy/shadow callers
+   * stay byte-identical).
+   */
+  executionTypeContext?: CohortExecutionTypeContext | null;
   /**
    * PR6: invoked with the audited model-call id and the member SKUs of the
    * group that produced it — the durable `model_call_id` provenance for
@@ -446,6 +454,12 @@ async function coordinateGroup(
     webTitle: item.extractionData?.title ?? null,
     ocrTitle: item.extractionData?.packagingOcrData?.productName ?? item.extractionData?.packagingTitle ?? null,
     brand: item.brandHint,
+    // PR6 hardening B (P1-3): the SAME structured OCR signals the T-hash
+    // claims (DECISION-Q: `ocr.packagingOcrData?.weight` / `?.flavorVariety`)
+    // — the prompt now consumes exactly the authority the hash asserts, so a
+    // weight/flavor change never re-invokes with an identical prompt.
+    ocrWeight: item.extractionData?.packagingOcrData?.weight ?? null,
+    ocrFlavor: item.extractionData?.packagingOcrData?.flavorVariety ?? null,
   }));
 
   // All items in one prompt (no cap). Individual signal strings are
@@ -456,10 +470,12 @@ async function coordinateGroup(
     expectedName: s.expectedName?.slice(0, 500) ?? null,
     webTitle: s.webTitle?.slice(0, 500) ?? null,
     ocrTitle: s.ocrTitle?.slice(0, 500) ?? null,
+    ocrWeight: s.ocrWeight?.slice(0, 500) ?? null,
+    ocrFlavor: s.ocrFlavor?.slice(0, 500) ?? null,
     brand: s.brand?.slice(0, 200) ?? null,
   }));
 
-  const prompt = buildCohortPrompt(truncatedSiblings);
+  const prompt = buildCohortPrompt(truncatedSiblings, opts?.executionTypeContext ?? null);
 
   let response: string | null;
   if (opts?.modelCall) {

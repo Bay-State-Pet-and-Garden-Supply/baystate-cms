@@ -4,7 +4,9 @@ import {
   computeCohortTitleInputHashForFormatRules,
   titleAuthorityFromProjectionMember,
 } from '../../onboarding/cohort-title-hash';
-import { FORMAT_RULES } from '../../onboarding/title-prompt-template';
+import type { CohortTitleAuthorityMember } from '../../onboarding/cohort-title-hash';
+import { buildCohortPrompt, FORMAT_RULES } from '../../onboarding/title-prompt-template';
+import type { CohortSiblingInput } from '../../onboarding/title-prompt-template';
 import { PROMPT_TEMPLATE_VERSIONS, RULE_VERSIONS } from '../../classification/model-operation-registry';
 import type { ModelExecutionPlanEntry } from '../../classification/model-operation-registry';
 import type {
@@ -171,6 +173,30 @@ function clone<T>(value: T): T {
 }
 
 const hash = (params: Parameters<typeof computeCohortTitleInputHash>[0]) => computeCohortTitleInputHash(params);
+
+/** The coordinator's sibling-input shape derived from the frozen member
+ *  authority (mirrors `coordinateGroup`'s mapping over the frozen item views,
+ *  which are built from the same projection) — so the prompt side of the
+ *  parity tests consumes exactly the authority the hash claims. */
+function siblingFromAuthority(a: CohortTitleAuthorityMember): CohortSiblingInput {
+  return {
+    upc: a.productSku ?? '',
+    name: a.spreadsheetName,
+    expectedName: a.expectedName,
+    webTitle: a.webTitle,
+    ocrTitle: a.packagingOcrTitle,
+    brand: a.brandHint,
+    ocrWeight: a.ocrWeight,
+    ocrFlavor: a.ocrFlavor,
+  };
+}
+
+/** The cohort prompt the coordinator would build for these hash params. */
+function promptForParams(params: Parameters<typeof computeCohortTitleInputHash>[0]): string {
+  const members = [...params.projection.members]
+    .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId));
+  return buildCohortPrompt(members.map(m => siblingFromAuthority(titleAuthorityFromProjectionMember(m))));
+}
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -404,6 +430,55 @@ describe('computeCohortTitleInputHash — exclusions: hash ONLY frozen title aut
     changed.projection.members[0].extraction.ocr.outcome = { status: 'succeeded', model: 'qwen2.5vl', imageCount: 1 };
     changed.projection.members[0].extraction.piEvidence = [{ runId: 'r', resultHash: 'h', importRecordId: 'i' }];
     expect(hash(changed)).toBe(hash(base));
+  });
+});
+
+describe('computeCohortTitleInputHash — PARITY: hash authority == prompt authority (PR6 hardening B / P1-3)', () => {
+  it('mutating the frozen OCR flavor changes BOTH the T-hash AND the prompt content', () => {
+    const base = makeParams();
+    const changed = clone(base);
+    changed.projection.members[0].extraction.ocr.packagingOcrData!.flavorVariety = 'Salmon';
+    expect(hash(changed)).not.toBe(hash(base));
+    const promptBase = promptForParams(base);
+    const promptChanged = promptForParams(changed);
+    expect(promptChanged).not.toBe(promptBase);
+    expect(promptBase).toContain('OCR Flavor: "Chicken"');
+    expect(promptChanged).toContain('OCR Flavor: "Salmon"');
+    expect(promptChanged).not.toContain('OCR Flavor: "Chicken"');
+  });
+
+  it('mutating the frozen OCR weight changes BOTH the T-hash AND the prompt content', () => {
+    const base = makeParams();
+    const changed = clone(base);
+    changed.projection.members[0].extraction.ocr.packagingOcrData!.weight = '10 lb';
+    expect(hash(changed)).not.toBe(hash(base));
+    expect(promptForParams(base)).toContain('OCR Weight: "5 lb"');
+    const promptChanged = promptForParams(changed);
+    expect(promptChanged).not.toBe(promptForParams(base));
+    expect(promptChanged).toContain('OCR Weight: "10 lb"');
+  });
+
+  it('mutating the execution type id changes BOTH the T-hash AND the prompt content', () => {
+    const base = makeParams();
+    const typeMutated = makeParams({ run: makeRun({ executionProductTypeId: 'type-2' }) });
+    expect(hash(typeMutated)).not.toBe(hash(base));
+    const sibling = siblingFromAuthority(titleAuthorityFromProjectionMember(base.projection.members[0]));
+    const promptBase = buildCohortPrompt([sibling], { id: 'type-1', label: 'Dry Dog Food' });
+    const promptChanged = buildCohortPrompt([sibling], { id: 'type-2', label: 'Wet Dog Food' });
+    expect(promptChanged).not.toBe(promptBase);
+    expect(promptBase).toContain('Product Type Context: "Dry Dog Food"');
+    expect(promptChanged).toContain('Product Type Context: "Wet Dog Food"');
+  });
+
+  it('absent OCR weight/flavor renders NO prompt segments while still participating in the hash (NULL vs value)', () => {
+    const noOcr = clone(makeParams());
+    noOcr.projection.members[0].extraction.ocr.packagingOcrData = null;
+    const prompt = promptForParams(noOcr);
+    expect(prompt).not.toContain('OCR Weight:');
+    expect(prompt).not.toContain('OCR Flavor:');
+    // The hash changes (NULL hashes differently from a value) and the prompt
+    // drops the segments — hash and prompt authority move together.
+    expect(hash(noOcr)).not.toBe(hash(makeParams()));
   });
 });
 

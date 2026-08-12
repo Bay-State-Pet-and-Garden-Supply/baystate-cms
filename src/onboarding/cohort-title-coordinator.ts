@@ -1,6 +1,6 @@
 /**
- * Parent cohort title coordinator (issue #30, PR6 C4) — the durable
- * exactly-once parent op.
+ * Parent cohort title coordinator (issue #30, PR6 C4) — the durable parent
+ * title op.
  *
  * `ensureCohortTitlesCoordinated` runs at `processCohort` start (the single
  * re-entrant parent entry — resume-on-match keeps the same run id, so
@@ -26,7 +26,7 @@
  *    `CohortTitleAuthorityDriftError` (run id + expected hash + stored
  *    hash(es) + row count) — it NEVER re-coordinates and NEVER replaces.
  *
- * 4. **Coordinate ONCE — only when the set is EMPTY** — under a scoped
+ * 4. **Coordinate — only when the set is EMPTY** — under a scoped
  *    `CohortLeaseKeeper`: groups the frozen sibling views, calls the
  *    coordinator's UNCACHED `coordinateCohortItems` with the audited
  *    `cohort_title_consolidation` call bound to the ORDINAL-0 MEMBER CHILD
@@ -46,6 +46,28 @@
  *
  * Never consults `cohortCache` / `coordinateCohortItemsOnce` — active cohort
  * mode treats the DB outputs as the sole "already coordinated" authority.
+ *
+ * ## HONEST DELIVERY CONTRACT (PR6 hardening B, issue #30 P1-1)
+ *
+ * The durable guarantee is NOT "one LLM call per cohort revision forever".
+ * A crash between transport success and the outputs transaction leaves the
+ * AUDITED call durable but NO committed set — a reclaim re-enters and
+ * re-coordinates (each invocation is independently audited). Transport-level
+ * exactly-once would require provider idempotency keys (out of scope). The
+ * precise contract:
+ *
+ * - at most one ACTIVE coordination call at a time (the lease keeper scopes
+ *   every in-flight call to the claim owner; a lost claim aborts with
+ *   `HeartbeatLostError` and NO rows);
+ * - zero FURTHER coordination calls once the durable output set commits —
+ *   the reuse path (complete set + T-hash match) is read-only;
+ * - replay-safe after commit: any retry, reclaim, or member re-execution
+ *   consumes the committed set with zero calls and byte-identical titles;
+ * - a crash between transport success and output commit MAY re-invoke
+ *   coordination exactly once — the second attempt commits a complete,
+ *   consistent set, and a third entry reuses with zero calls. The
+ *   test-only `afterCoordinatedCall` seam (PR6 hardening B) deterministically
+ *   simulates that window.
  *
  * PR6 review round 1 hardening: the op performs ZERO writes before the lease
  * is asserted (the ordinal-0 child run + its immutable snapshot refs are PURE
@@ -132,13 +154,26 @@ export interface EnsureCohortTitlesCoordinatedParams {
   members: CurationCohortMember[];
   /** Frozen product-line sibling context (PR3 hardening Commit B / R2). */
   frozenLineContext: FrozenProductLineContext;
+  /**
+   * Test-only crash seam (PR6 hardening B, issue #30 P1-1): fires AFTER the
+   * coordinated title call resolves (its audited `classification_model_calls`
+   * rows are durable) and AFTER the post-await ownership guard, but BEFORE
+   * the outputs transaction commits — deterministically simulating a worker
+   * crash exactly between transport success and the durable output-set
+   * commit. Mirrors `processCohort`'s `afterMemberPipeline` precedent
+   * (`MemberCommitCrashSimulationError`). Production callers never pass it.
+   */
+  afterCoordinatedCall?: () => void | Promise<void>;
 }
 
 /**
- * The durable, exactly-once parent title coordination op (PR6 C4). See the
- * module JSDoc for the reuse rule, the lease-wrapped coordinate step, the
- * all-or-nothing persistence, and the `HeartbeatLostError` propagation
- * contract.
+ * The durable parent title coordination op (PR6 C4). See the module JSDoc
+ * for the reuse rule, the lease-wrapped coordinate step, the all-or-nothing
+ * persistence, the `HeartbeatLostError` propagation contract, and the HONEST
+ * DELIVERY CONTRACT (PR6 hardening B): at most one ACTIVE coordination call
+ * at a time, zero FURTHER calls once the durable set commits, replay-safe
+ * after commit, and a crash between transport success and output commit may
+ * re-invoke coordination (each invocation audited).
  */
 export async function ensureCohortTitlesCoordinated(
   params: EnsureCohortTitlesCoordinatedParams,
@@ -274,6 +309,22 @@ export async function ensureCohortTitlesCoordinated(
           '— refusing to make a non-audited title call.',
       );
     }
+    // PR6 hardening B (P1-3): thread the frozen Execution Product Type as
+    // title context — the T-hash already claims it (id/confidence/outcome),
+    // so the prompt must consume the SAME authority. The label is the frozen
+    // product-type option's name from the ordinal-0 member snapshot (matched
+    // by id; null when the type id has no matching option — the prompt still
+    // renders the id, so prompt authority never lags the hash authority).
+    // A null run type (abstained/conflicted) passes null → no context line,
+    // mirroring the hash's `executionProductType.id: null` state.
+    const executionTypeId = run.executionProductTypeId;
+    const executionTypeContext = executionTypeId
+      ? {
+          id: executionTypeId,
+          label:
+            memberSnapshot0.productTypes.find(pt => pt.id === executionTypeId)?.name ?? null,
+        }
+      : null;
     // PR6 review SHOULD-FIX 1: per-group model-call provenance — each group's
     // producing call id is captured for ITS member SKUs, so every persisted
     // `llm_cohort` row carries the call that actually produced it.
@@ -290,6 +341,7 @@ export async function ensureCohortTitlesCoordinated(
         modelCall: modelCallContext,
         snapshot: memberSnapshot0,
         assertHeld: () => keeper.assertHeld(),
+        executionTypeContext,
         onCoordinatedCallId: (callId: string, skus: string[]) => {
           for (const sku of skus) {
             coordinatedCallIdBySku.set(sku, callId);
@@ -309,6 +361,15 @@ export async function ensureCohortTitlesCoordinated(
       modelCallId:
         ct.source === 'llm_cohort' ? (coordinatedCallIdBySku.get(productSku) ?? null) : null,
     }));
+
+    // Test-only crash seam (PR6 hardening B, P1-1): a crash EXACTLY here —
+    // after the audited call resolved (its audit rows durable) and after the
+    // ownership guard, but BEFORE the outputs transaction — leaves ZERO
+    // committed rows. A reclaim re-enters and re-coordinates once; each
+    // invocation is independently audited. Production callers never pass
+    // `afterCoordinatedCall`, so this is a no-op in production.
+    await params.afterCoordinatedCall?.();
+
     // ONE transaction — all members persist or NONE (architecture-report §5).
     // WRITE-ONCE (PR6 hardening A): the insert is guarded by
     // `insertCohortTitleOutputsOnce`'s three-way semantics — zero rows ⇒
