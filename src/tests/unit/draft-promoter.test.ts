@@ -1661,4 +1661,131 @@ describe('Draft Promoter Service', () => {
     // The verified catalog's display name IS serialized.
     expect(pagesXml ?? '').toContain('Nameless Page');
   });
+
+  it('refuses a PR9-blocked member in the promotion stage PER-ITEM and promotes its siblings (PR11 C2 promotion gate)', async () => {
+    const db = getDb();
+    const batch = createBatch({
+      workspaceId: wsId,
+      name: 'PR11 Blocked Sibling',
+      fileName: 'pr11-blocked.xlsx',
+      totalItems: 2,
+    });
+    const items = insertItems(batch.id, [
+      { upc: 'PR11-HEALTHY-001', name: 'Healthy Sibling', price: '$9.99', brandHint: 'Test Brand', rowNumber: 1 },
+      { upc: 'PR11-BLOCKED-001', name: 'Blocked Member', price: '$9.99', brandHint: 'Test Brand', rowNumber: 2 },
+    ]);
+    const [healthy, blocked] = items;
+    const extractionData: ExtractionData = ExtractionDataSchema.parse({
+      title: 'PR11 Product',
+      brand: 'Test Brand',
+      description: 'PR11 gate promotion test.',
+      bulletPoints: [],
+      primaryImage: 'products/PR11-BLOCKED-001/images/primary.jpg',
+      additionalImages: [],
+      price: '$9.99',
+      weight: null,
+      dimensions: null,
+      seoFileName: null,
+      searchKeywords: null,
+      packagingTitle: null,
+      packagingOcrData: null,
+      customFields: {},
+      sourceUrl: 'https://example.test/pr11',
+      confidence: 0.9,
+      fieldProvenance: { title: 'fixture' },
+    });
+    const curation = {
+      curatedTitle: 'PR11 Product',
+      titleSource: 'web',
+      suggestedPages: [],
+      suggestedProductType: null,
+      curatedAt: new Date().toISOString(),
+      curationMethod: 'auto',
+    };
+    for (const item of items) {
+      db.run(
+        "UPDATE onboarding_items SET extraction_data_json = ?, curation_data_json = ?, stage = 'promotion', stage_status = 'pending', status = 'ready' WHERE id = ?",
+        [JSON.stringify(extractionData), JSON.stringify(curation), item.id],
+      );
+    }
+
+    // Healthy sibling: a LEGACY item (no run pointer) with an embedded accepted
+    // page proposal — the narrow legacy path must stay byte-identical. The
+    // page import is activated LAST (each activation supersedes the prior
+    // import, and the promoted sibling's page must be in the ACTIVE one).
+
+    // Blocked member: a VALID run pointer + committed semanticValidation
+    // blocked. The accepted verified page proposal proves the refusal comes
+    // from the promotion gate, not the mandatory Pages gate.
+    const now = new Date().toISOString();
+    const runId = 'run-pr11-blocked';
+    db.run(
+      `INSERT INTO classification_runs
+       (id, workspace_id, onboarding_item_id, source_kind, product_sku, status, started_at, completed_at)
+       VALUES (?, ?, ?, 'onboarding', ?, 'completed', ?, ?)`,
+      [runId, wsId, blocked.id, blocked.upc, now, now],
+    );
+    db.run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [
+      JSON.stringify({
+        ...curation,
+        classificationRunId: runId,
+        semanticValidation: {
+          status: 'blocked',
+          findings: [{
+            code: 'family_brand',
+            memberSku: blocked.upc,
+            message: 'PR11 brand conflict: acme vs woof',
+          }],
+        },
+      }),
+      blocked.id,
+    ]);
+    seedAcceptedCategoryProposal(db, blocked.upc, 'Toys', runId);
+
+    const legacyPageId = activateVerifiedPage('Toys', 'pr11-healthy');
+    db.run('UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?', [
+      JSON.stringify({
+        ...curation,
+        classificationRunId: null,
+        classificationProposals: [{
+          id: 'pr11-healthy-page',
+          proposalType: 'category_page',
+          targetId: 'Toys',
+          proposedValue: { pageId: legacyPageId, pageName: 'Toys' },
+          status: 'accepted',
+        }],
+      }),
+      healthy.id,
+    ]);
+
+    const result = await promoteItems(wsId, tempWorkspaceDir, batch.id, [healthy.id, blocked.id]);
+
+    // Sibling promotes; the blocked member is refused per-item with the first
+    // finding as the reason (200-shape failures list, sibling not aborted).
+    expect(result.count).toBe(1);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0].itemId).toBe(blocked.id);
+    expect(result.failures[0].error).toBe('PR11 brand conflict: acme vs woof');
+
+    const blockedRow = db.query(
+      'SELECT stage_status, error_message FROM onboarding_items WHERE id = ?',
+    ).get(blocked.id) as { stage_status: string; error_message: string };
+    expect(blockedRow.stage_status).toBe('failed');
+    expect(blockedRow.error_message).toBe('PR11 brand conflict: acme vs woof');
+
+    const healthyRow = db.query(
+      'SELECT stage_status FROM onboarding_items WHERE id = ?',
+    ).get(healthy.id) as { stage_status: string };
+    expect(healthyRow.stage_status).toBe('completed');
+
+    // ZERO product draft rows for the refused member; the sibling's draft exists.
+    const blockedDrafts = db.query(
+      'SELECT COUNT(*) as c FROM change_set_items WHERE sku = ?',
+    ).get(blocked.upc) as { c: number };
+    expect(blockedDrafts.c).toBe(0);
+    const healthyDrafts = db.query(
+      'SELECT COUNT(*) as c FROM change_set_items WHERE sku = ?',
+    ).get(healthy.upc) as { c: number };
+    expect(healthyDrafts.c).toBe(1);
+  });
 });

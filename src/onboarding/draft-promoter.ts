@@ -16,6 +16,13 @@ import {
   getValidatedOnboardingRun,
   recordHistoryEvent,
 } from '../db/repositories/classification-run-repo';
+import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
+import {
+  getCohortRunById,
+  listDependenciesForProposal,
+} from '../db/repositories/classification-cohort-run-repo';
+import { validatePromotionGate, resolvePromotionEffectiveTypeId } from '../classification/promotion-gate';
+import type { CohortRun } from '../shared/schemas/cohorts';
 import { getCachedAttributeMappings, getCachedBrands } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from '../classification/brand-resolution';
 import { getPageIdentityId, pageNameFromPageValue } from '../shared/proposal-display';
@@ -329,23 +336,23 @@ export async function promoteItems(
       // compatibility using only embedded proposals whose status is exactly
       // 'accepted' (pending/rejected/deferred/stale are ignored).
       const runPointer = item.curationData?.classificationRunId ?? null;
-      let activeRunId: string | null = null;
+      let activeRun: ClassificationRunRow | null = null;
       if (runPointer) {
-        const validatedRun = getValidatedOnboardingRun(
+        activeRun = getValidatedOnboardingRun(
           runPointer,
           batch.workspaceId,
           item.id,
           item.upc,
         );
-        if (!validatedRun) {
+        if (!activeRun) {
           const errMsg = 'Invalid classification run pointer — promotion blocked';
           console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
           completePromotionStage(item.id, false, errMsg);
           failures.push({ itemId: item.id, error: errMsg });
           continue;
         }
-        activeRunId = validatedRun.id;
       }
+      const activeRunId = activeRun?.id ?? null;
       // Accepted-only: a valid run contributes only proposals whose latest live
       // decision is 'accepted' (never deferred/rejected/pending/decisionless).
       const activeProposals = activeRunId
@@ -353,6 +360,37 @@ export async function promoteItems(
         : (item.curationData?.classificationProposals || []).filter(
             (p: any) => p.status === 'accepted',
           );
+
+      // ── PR11 Promotion gate (semantic / parent-currentness / stale) ────
+      // Deterministic per-item fail-closed check AFTER the run-pointer
+      // validation and BEFORE any proposal/draft work. A blocked member, a
+      // child of a superseded/in-flight parent, or a proposal whose type
+      // dependency no longer matches the item's CURRENT effective type never
+      // reaches a CMS draft — the item's promotion stage fails with the
+      // deterministic reason while siblings promote normally. Legacy items
+      // (no run pointer) pass unchanged (byte-identical).
+      const parentRun: CohortRun | null = activeRun?.cohortRunId
+        ? getCohortRunById(activeRun.cohortRunId)
+        : null;
+      const gate = validatePromotionGate({
+        workspaceId,
+        itemId: item.id,
+        productSku: item.upc,
+        curationData: item.curationData ?? null,
+        activeRun,
+        parentRun,
+        effectiveTypeId: resolvePromotionEffectiveTypeId(parentRun, activeProposals),
+        acceptedProposals: activeProposals,
+        dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
+      });
+      if (!gate.ok) {
+        const errMsg = gate.reason;
+        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+        completePromotionStage(item.id, false, errMsg);
+        failures.push({ itemId: item.id, error: errMsg });
+        continue;
+      }
+
       // Only identities verified in the currently active Page import are
       // serializable, and the verified catalog is the DISPLAY-NAME authority:
       // a verified Page ID always resolves to the verified page's canonical
