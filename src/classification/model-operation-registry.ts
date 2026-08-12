@@ -21,7 +21,7 @@ import { SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION } from '../shopsite/built-in-o
 export type { ProtectedOperation };
 
 /** Bump ONLY when the operation→rule/prompt/parameter contract changes. */
-const MODEL_OPERATION_REGISTRY_VERSION = 1;
+const MODEL_OPERATION_REGISTRY_VERSION = 2;
 
 /**
  * Built-in ShopSite output policy version participating in runs. Single
@@ -42,6 +42,7 @@ export const PROMPT_TEMPLATE_VERSIONS: Readonly<Record<ProtectedOperation, strin
   attribute_ranking: 'attribute-ranking-prompt-v1',
   page_assignment: 'page-assignment-prompt-v1',
   cohort_page_assignment: 'cohort-page-assignment-prompt-v1',
+  cohort_page_assignment_parent: 'cohort-page-assignment-parent-prompt-v2',
   title_consolidation: 'title-consolidation-prompt-v1',
   cohort_title_consolidation: 'cohort-title-consolidation-prompt-v1',
   distributor_copy_consolidation: 'distributor-copy-consolidation-prompt-v1',
@@ -61,6 +62,7 @@ export const RULE_VERSIONS: Readonly<Record<ProtectedOperation, string>> = {
   attribute_ranking: 'attribute-ranking-rules-v1',
   page_assignment: 'page-assignment-rules-v1',
   cohort_page_assignment: 'cohort-page-assignment-rules-v1',
+  cohort_page_assignment_parent: 'cohort-page-assignment-parent-rules-v2',
   title_consolidation: 'title-consolidation-rules-v1',
   cohort_title_consolidation: 'cohort-title-consolidation-rules-v1',
   distributor_copy_consolidation: 'distributor-copy-consolidation-rules-v1',
@@ -82,6 +84,7 @@ export const OPERATION_PARAMETERS: Readonly<
   attribute_ranking: { temperature: 0.0, maxTokens: null },
   page_assignment: { temperature: 0.0, maxTokens: null },
   cohort_page_assignment: { temperature: 0.0, maxTokens: null },
+  cohort_page_assignment_parent: { temperature: 0.0, maxTokens: null },
   title_consolidation: { temperature: 0.1, maxTokens: null },
   cohort_title_consolidation: { temperature: 0.1, maxTokens: null },
   distributor_copy_consolidation: { temperature: 0.1, maxTokens: null },
@@ -101,6 +104,7 @@ export const OPERATION_TO_STAGE: Readonly<Record<ProtectedOperation, Classificat
   attribute_ranking: 'product_attribute_proposals',
   page_assignment: 'category_page_proposals',
   cohort_page_assignment: 'category_page_proposals',
+  cohort_page_assignment_parent: 'category_page_proposals',
   title_consolidation: 'name_consolidation',
   cohort_title_consolidation: 'name_consolidation',
   distributor_copy_consolidation: 'name_consolidation',

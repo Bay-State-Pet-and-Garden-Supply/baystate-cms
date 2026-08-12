@@ -16,11 +16,13 @@ import {
   authorityConfigHashMatches,
   getRuntimeSnapshotByHash,
   assertModelPlanCompatible,
+  requireModelCallContext,
 } from '../../classification/runtime-snapshot';
 import type { RuntimeSnapshotInput } from '../../classification/runtime-snapshot';
 import type { RuntimeConfigAuthority } from '../../classification/config-loader';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
-import { buildRuntimeRuleVersions } from '../../classification/model-operation-registry';
+import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../../classification/model-operation-registry';
+import { hashCanonicalJson } from '../../shared/stable-id';
 
 let workspacePath: string;
 let workspaceId: string;
@@ -208,7 +210,7 @@ describe('runtime snapshot with ACTIVE v2 config authority (Milestone 7)', () =>
   it('runtime rule versions are deterministic and versioned', () => {
     const rv = buildRuntimeRuleVersions();
     expect(rv.version).toBe(1);
-    expect(rv.registryVersion).toBe(1);
+    expect(rv.registryVersion).toBe(2);
     expect(rv.digest).toMatch(/^[a-f0-9]{64}$/);
     const rv2 = buildRuntimeRuleVersions();
     expect(rv2.digest).toBe(rv.digest);
@@ -245,5 +247,67 @@ describe('runtime snapshot with ACTIVE v2 config authority (Milestone 7)', () =>
     const tamperedRules = JSON.parse(JSON.stringify(v2));
     tamperedRules.runtimeRuleVersions.outputPolicyVersion = 'tampered-v2';
     expect(() => assertModelPlanCompatible(tamperedRules, 'attribute_ranking')).toThrow(/runtimeRuleVersions digest does not match/);
+  });
+});
+
+describe('PR7 review R2 (F1) — frozen cohort_page_assignment_parent operation (issue #30)', () => {
+  it('buildModelExecutionPlan over a v2 view yields a plan entry for the new parent operation with the v2 prompt/rule versions', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    const entry = v2.modelExecutionPlan!.entries.find(e => e.operation === 'cohort_page_assignment_parent');
+    expect(entry).toBeDefined();
+    expect(entry!.stage).toBe('category_page_proposals');
+    expect(entry!.promptTemplateVersion).toBe('cohort-page-assignment-parent-prompt-v2');
+    expect(entry!.ruleVersion).toBe('cohort-page-assignment-parent-rules-v2');
+  });
+
+  it('the registry version bump (1 → 2) is reflected in the frozen plan and rule versions', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    expect(v2.modelExecutionPlan!.registryVersion).toBe(2);
+    expect(v2.runtimeRuleVersions!.registryVersion).toBe(2);
+    expect(buildRuntimeRuleVersions().registryVersion).toBe(2);
+  });
+
+  it('the legacy cohort_page_assignment entry keeps its v1 prompt/rule versions', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    const legacyEntry = v2.modelExecutionPlan!.entries.find(e => e.operation === 'cohort_page_assignment');
+    expect(legacyEntry).toBeDefined();
+    expect(legacyEntry!.promptTemplateVersion).toBe('cohort-page-assignment-prompt-v1');
+    expect(legacyEntry!.ruleVersion).toBe('cohort-page-assignment-rules-v1');
+    // The parent and legacy child entries share the stage but carry distinct
+    // frozen versions — truthful provenance for two different prompts.
+    const parentEntry = v2.modelExecutionPlan!.entries.find(e => e.operation === 'cohort_page_assignment_parent')!;
+    expect(parentEntry.ruleVersion).not.toBe(legacyEntry!.ruleVersion);
+  });
+
+  it('requireModelCallContext FAILS CLOSED for the parent operation on a pre-change (registry-v1) snapshot with no plan entry', () => {
+    // Simulate a snapshot frozen under registry v1: its model-execution plan
+    // has NO entry for 'cohort_page_assignment_parent' (the operation did not
+    // exist then). RuntimeRuleVersions are left intact (their digest still
+    // verifies — only the missing plan entry trips the fail-closed guard).
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    const preChange = JSON.parse(JSON.stringify(v2)) as typeof v2;
+    const parentOpView = {
+      defaultProvider: 'ollama',
+      defaultModel: 'qwen2.5vl:latest',
+      providerLocalities: { ollama: 'local' },
+      stageOverrides: {},
+      imageDataSharing: 'local_only',
+      textDataSharing: 'local_only',
+      mlFeatures: {},
+    } as never;
+    // Build a registry-v1-shaped plan: same entries minus the parent op, with
+    // the digest recomputed over the reduced set (integrity passes; the
+    // missing-entry guard is what fails closed).
+    const reduced = buildModelExecutionPlan(parentOpView, null);
+    reduced.entries = reduced.entries.filter((e: { operation: string }) => e.operation !== 'cohort_page_assignment_parent');
+    preChange.modelExecutionPlan = {
+      ...reduced,
+      digest: hashCanonicalJson({ version: reduced.version, registryVersion: reduced.registryVersion, entries: reduced.entries }),
+    };
+    expect(() => requireModelCallContext(preChange, 'run-1', 'cohort_page_assignment_parent', 1)).toThrow(
+      /snapshot plan has no entry for operation "cohort_page_assignment_parent"/,
+    );
+    // Legacy operations remain compatible on the same pre-change plan.
+    expect(() => requireModelCallContext(preChange, 'run-1', 'cohort_page_assignment', 1)).not.toThrow();
   });
 });
