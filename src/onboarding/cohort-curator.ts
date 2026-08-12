@@ -2421,6 +2421,11 @@ export async function processCohort(
       // never leaves a member committed without its validation). Absent key =
       // legacy behavior.
       let semanticValidation: CurationData['semanticValidation'] = null;
+      // PR9 C2/C4: the member's FROZEN runtime snapshot (the immutable ref the
+      // member executed against) — resolved once, reused by the semantic
+      // validation AND the dependency-stamping universal-attribute skip below
+      // (never a live config read).
+      let memberSnapshotForSemantic: ReturnType<typeof getRuntimeSnapshotByHash> | undefined;
       try {
         prepared.assertOwnershipHeld = () => pipelineKeeper.assertHeld();
         const pipelinePromise = curateItemWithPipeline(item, workspacePath, workspaceId, prepared);
@@ -2445,7 +2450,7 @@ export async function processCohort(
         // review completion gate enforces it) — while curationData + proposals
         // stay intact for PR10's Review UX (blocked-not-destroyed). Soft
         // findings never block.
-        const memberSnapshotForSemantic = childRun.configSnapshotHash
+        memberSnapshotForSemantic = childRun.configSnapshotHash
           ? getRuntimeSnapshotByHash(workspaceId, childRun.configSnapshotHash)
           : undefined;
         if (!memberSnapshotForSemantic || !childRun.configSnapshotHash) {
@@ -2635,9 +2640,21 @@ export async function processCohort(
               })
             : hashCanonicalJson({ reviewedProductTypeId: dependencyTargetId });
           const fieldRows = getDb().query(
-            'SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = ?',
-          ).all(childRun.id, 'field_assignment') as Array<{ id: string }>;
+            'SELECT id, target_id FROM classification_proposals WHERE run_id = ? AND proposal_type = ?',
+          ).all(childRun.id, 'field_assignment') as Array<{ id: string; target_id: string | null }>;
+          // PR9 C4 (issue #30, DECISION-B): a `field_assignment` proposal
+          // whose target attribute is UNIVERSAL (applicability is
+          // type-independent) carries NO product-type dependency — the row
+          // would be a false causal claim (the PR11 stale-proposal Promotion
+          // gate depends on this). The attribute config is resolved from the
+          // FROZEN member runtime snapshot (never a live config read);
+          // type-dependent proposals keep the exact same value hash, and
+          // `category_page` stamping (PR7 C6) is unchanged.
           for (const proposalRow of fieldRows) {
+            const targetAttribute = proposalRow.target_id
+              ? memberSnapshotForSemantic?.attributes.find(attribute => attribute.id === proposalRow.target_id)
+              : undefined;
+            if (targetAttribute && isUniversalAttribute(targetAttribute)) continue;
             insertProposalDependency({
               workspaceId,
               proposalId: proposalRow.id,
