@@ -43,8 +43,19 @@
  *   parent page ids. `pageName` correspondence is ADVISORY-ONLY
  *   (`coordinated_page_name_mismatch`, never blocking): Category Page
  *   Identity is the stable live-store id, not the display name.
+ * - `family_brand`: with a frozen configured Brand authority (R2-C), every
+ *   member's frozen brand evidence resolves to CANONICAL brand ids via
+ *   `resolveBrand` (exact/alias/prefix); coherence is compared on canonical
+ *   ids and TWO DISTINCT ids is a HARD disagreement regardless of counts
+ *   (NO majority forcing). Unresolved raw text is diagnostic evidence only
+ *   and NEVER substitutes for canonical identity. When NO member resolves,
+ *   the validator ABSTAINS (soft/diagnostic, no hard block): the frozen
+ *   authority cannot confirm a disagreement. Absent/empty brands keep the
+ *   legacy deterministic-majority path byte-identical.
  */
 import { normalizeBrand } from '../onboarding/product-line-grouper';
+import { resolveBrand } from './brand-resolution';
+import type { BrandConfig } from '../shared/schemas/classification';
 import { evaluateConditions } from './applicability-evaluator';
 import type { ReviewedFact } from './reviewed-facts';
 
@@ -570,20 +581,122 @@ export interface CohortBrandMemberInput {
   frozenBrandEvidence: Array<string | null | undefined>;
 }
 
+export interface CohortBrandCoherenceOptions {
+  /**
+   * PR9 review R2 (C): the FROZEN configured canonical Brand identities
+   * (`ClassificationConfig['brands']` — `snapshot.brands`), passed from the
+   * call site (never a live config read). When non-empty, EVERY member's
+   * frozen brand evidence is resolved to CANONICAL brand ids via
+   * `resolveBrand` FIRST (exact/alias/prefix against the configured
+   * identities + aliases) and coherence is compared on canonical ids:
+   * two DISTINCT canonical ids across members is a HARD `family_brand`
+   * disagreement regardless of counts (NO majority forcing). Unresolved raw
+   * text (resolveBrand null) is diagnostic evidence only and NEVER
+   * substitutes for canonical identity. When NO member resolves, the
+   * validator ABSTAINS (no hard block) — the frozen authority cannot confirm
+   * a disagreement. Absent/empty → the legacy normalizeBrand
+   * deterministic-majority path (byte-identical pre-R2 behavior).
+   */
+  brands?: BrandConfig[];
+}
+
 /**
- * Cohort-level mutual Brand coherence. The canonical brand is the
- * deterministic majority over normalizeBrand of the FROZEN member brand
- * evidence; a tie (or an empty evidence set) blocks with the tie listed, and
- * every member whose evidence conflicts with the canonical brand is blocked.
- * A singleton cohort follows the same architecture: its evidence IS the
- * canonical brand, so only an internal evidence conflict blocks it.
+ * Cohort-level mutual Brand coherence.
+ *
+ * PR9 review R2 (C): when a frozen configured Brand authority is supplied,
+ * the canonical comparison happens on RESOLVED BrandConfig ids — members
+ * whose raw text resolves to the same canonical id (exact, alias, or
+ * prefix) are COHERENT even when their raw strings differ. Two DISTINCT
+ * canonical ids across the cohort is a HARD disagreement regardless of
+ * counts (no majority forcing). Unresolved raw text is diagnostic evidence
+ * only and never blocks; when NO member resolves, the validator ABSTAINS
+ * (the authority cannot confirm a disagreement).
+ *
+ * Legacy path (no brands supplied): the canonical brand is the deterministic
+ * majority over normalizeBrand of the FROZEN member brand evidence; a tie
+ * (or an empty evidence set) blocks with the tie listed, and every member
+ * whose evidence conflicts with the canonical brand is blocked. A singleton
+ * cohort follows the same architecture: its evidence IS the canonical brand,
+ * so only an internal evidence conflict blocks it.
  */
 export function validateCohortBrandCoherence(
   members: CohortBrandMemberInput[],
+  options?: CohortBrandCoherenceOptions,
 ): CohortSemanticFindings {
   const findings: CohortSemanticFinding[] = [];
 
-  // Deterministic majority over normalizeBrand of frozen evidence.
+  const brands = options?.brands;
+  if (brands && brands.length > 0) {
+    // ── PR9 review R2 (C): canonical Brand identity resolution ───────────
+    // Resolve every member's frozen evidence to canonical BrandConfig ids
+    // (exact/alias/prefix). Coherence is compared on CANONICAL ids.
+    const resolvedIdsBySku = new Map<string, Set<string>>();
+    for (const member of members) {
+      const ids = new Set<string>();
+      for (const evidence of member.frozenBrandEvidence) {
+        const resolution = resolveBrand(evidence ?? '', brands);
+        if (resolution) ids.add(resolution.brandId);
+      }
+      if (ids.size > 0) resolvedIdsBySku.set(member.sku, ids);
+    }
+
+    if (resolvedIdsBySku.size === 0) {
+      // NO member resolves to a configured canonical Brand. The frozen
+      // authority cannot confirm a disagreement — ABSTAIN (documented in the
+      // module JSDoc): unresolved raw text is diagnostic evidence only and
+      // never produces a hard block.
+      return passed();
+    }
+
+    const distinctCanonicalIds = [
+      ...new Set([...resolvedIdsBySku.values()].flatMap(ids => [...ids])),
+    ].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    if (distinctCanonicalIds.length <= 1) {
+      // Every resolved member agrees on ONE canonical Brand → coherent;
+      // unresolved members are diagnostic only and never block.
+      return passed();
+    }
+
+    // Two or more distinct canonical ids → HARD disagreement, regardless of
+    // counts (no majority forcing). The cohort consensus is the id set EVERY
+    // resolved member shares; a member carrying an id OUTSIDE that consensus
+    // (or an internally conflicting multi-id set) is the conflicted member.
+    // When nobody carries an id outside the consensus yet the cohort still
+    // has multiple distinct ids (every resolved member internally
+    // conflicted), every resolved member is flagged.
+    const consensusIds = new Set(distinctCanonicalIds);
+    for (const ids of resolvedIdsBySku.values()) {
+      for (const id of [...consensusIds]) {
+        if (!ids.has(id)) consensusIds.delete(id);
+      }
+    }
+    let flaggedSkus = new Set<string>();
+    for (const [sku, ids] of resolvedIdsBySku) {
+      if ([...ids].some(id => !consensusIds.has(id))) flaggedSkus.add(sku);
+    }
+    if (flaggedSkus.size === 0) flaggedSkus = new Set([...resolvedIdsBySku.keys()]);
+
+    for (const member of members) {
+      const ids = resolvedIdsBySku.get(member.sku);
+      if (!ids || !flaggedSkus.has(member.sku)) continue;
+      const idList = [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join(', ');
+      const distinctList = distinctCanonicalIds.join(', ');
+      findings.push({
+        code: 'family_brand',
+        memberSku: member.sku,
+        message:
+          ids.size > 1
+            ? `Member brand evidence resolves to conflicting canonical cohort Brand identities [${idList}] ` +
+              `for this SKU; the cohort's distinct canonical Brand identities are [${distinctList}].`
+            : `Member brand evidence resolves to canonical Brand "${idList}" which conflicts with the ` +
+              `cohort's distinct canonical Brand identities [${distinctList}].`,
+      });
+    }
+    return toFindings(findings);
+  }
+
+  // ── Legacy path (no frozen configured brands): deterministic majority ────
+  // (byte-identical pre-R2 behavior).
   const normalizedByMember = new Map<string, Set<string>>();
   const counts = new Map<string, number>();
   for (const member of members) {

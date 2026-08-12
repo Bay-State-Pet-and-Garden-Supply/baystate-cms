@@ -2832,6 +2832,28 @@ export async function processCohort(
   // all (the run now belongs to the reclaiming worker).
   renewHeartbeat(true);
 
+  // PR9 review R2 (C): resolve the FROZEN configured Brand identities from
+  // the immutable runtime snapshot of the FIRST committed child (all member
+  // snapshots freeze against the SAME config authority — `brands` is config
+  // data, identical across members; never a live config read). The canonical
+  // brand resolver compares RESOLVED BrandConfig ids, so the frozen authority
+  // must be passed from the call site.
+  let frozenBrandsForSemantic: RuntimeClassificationSnapshot['brands'] = [];
+  {
+    const firstCommittedChild = getDb().query(
+      `SELECT config_snapshot_hash FROM classification_runs
+       WHERE cohort_run_id = ? AND status IN ('completed', 'completed_with_abstentions')
+       ORDER BY started_at ASC LIMIT 1`,
+    ).get(run.id) as { config_snapshot_hash: string | null } | undefined;
+    if (firstCommittedChild?.config_snapshot_hash) {
+      const memberSnapshotForBrands = getRuntimeSnapshotByHash(
+        workspaceId,
+        firstCommittedChild.config_snapshot_hash,
+      );
+      if (memberSnapshotForBrands) frozenBrandsForSemantic = memberSnapshotForBrands.brands;
+    }
+  }
+
   // PR9 C2 (issue #30, DECISION-A): post-loop mutual Brand coherence over the
   // COMMITTED members' FROZEN brand evidence (projection-derived — never a
   // live batch read). Hard findings → owner-guarded UPDATE of each affected
@@ -2860,6 +2882,10 @@ export async function processCohort(
         sku: member.productSku ?? member.onboardingItemId,
         frozenBrandEvidence: [member.spreadsheetIdentity.brandHint, member.extraction.brand],
       })),
+    // PR9 review R2 (C): the frozen configured canonical Brand identities —
+    // coherence is compared on RESOLVED canonical brand ids (exact/alias/
+    // prefix), never raw-grouped text.
+    { brands: frozenBrandsForSemantic },
   );
   if (brandCoherenceResult.status === 'blocked') {
     // Group Brand findings by member SKU (deterministic insertion order).
