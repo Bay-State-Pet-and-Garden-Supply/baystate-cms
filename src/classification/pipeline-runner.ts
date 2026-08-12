@@ -142,6 +142,26 @@ function assertRunBoundary(options: {
  * Verify every model-call ID stamped on the proposals belongs to the current
  * run AND snapshot hash. A foreign call row (another run or snapshot) must
  * never be linked to a proposal — fail closed before persistence.
+ *
+ * PR7 C6b cohort-aware exemption (issue #30): a materialized proposal in an
+ * ACTIVE cohort run references the call id stored on its durable
+ * `classification_cohort_outputs` row — and the parent op's audited page/title
+ * calls are deliberately bound to the ordinal-0 member child run (DECISION-N
+ * audit binding, mirroring titles), so every group/singleton member's output
+ * row carries a call id that belongs to the ORDINAL-0 child, not the member's
+ * own child. The exemption is NARROW and preserves fail-closed safety:
+ *   - the call row must EXIST and be terminal-success BEFORE any exemption
+ *     (a missing row or a non-success status still hard-fails);
+ *   - ONLY the run_id / snapshot_hash mismatch is exempted, and ONLY when the
+ *     proposal's run is a cohort child (`classification_runs.cohort_run_id`
+ *     NOT NULL) AND a `classification_cohort_outputs` row exists with
+ *     `model_call_id = callId` for the SAME cohort run AND the SAME
+ *     `product_sku` as the proposal — the output rows are write-once
+ *     historical truth written only by the parent ops, so a resolved
+ *     reference is real audit truth, never a forged id.
+ * Any call id that does not resolve through that check fails exactly as
+ * before: non-cohort runs, foreign runs/cohorts, wrong SKU, missing output
+ * row, and non-success statuses are all unchanged hard fails.
  */
 function assertModelCallLinkage(options: {
   runId: string;
@@ -157,23 +177,67 @@ function assertModelCallLinkage(options: {
       const row = db
         .query('SELECT run_id, snapshot_hash, status FROM classification_model_calls WHERE id = ?')
         .get(callId) as { run_id: string; snapshot_hash: string | null; status: string } | undefined;
-      // The call must belong to this run/snapshot AND be terminal-success:
-      // a `started` (non-terminal) call can never be linked to a persisted
-      // proposal — no durable success means no model output reached it.
-      if (!row || row.run_id !== options.runId || row.snapshot_hash !== options.snapshotHash) {
+      // Hard-fail 1: the call row MUST exist — a nonexistent id can never be
+      // linked to a persisted proposal (no exemption).
+      if (!row) {
         throw new Error(
           `Model call linkage failed: proposal "${proposal.id}" references model call "${callId}" ` +
-            `that does not belong to run "${options.runId}" / snapshot "${options.snapshotHash}".`,
+            'that does not exist.',
         );
       }
+      // Hard-fail 2: the call MUST be terminal-success — a `started`
+      // (non-terminal) call can never be linked to a persisted proposal (no
+      // durable success means no model output reached it). No exemption.
       if (row.status !== MODEL_CALL_STATUS.success) {
         throw new Error(
           `Model call linkage failed: proposal "${proposal.id}" references model call "${callId}" ` +
             `with non-terminal/non-success status "${row.status}"; only durable success calls can be linked.`,
         );
       }
+      // PR7 C6b: ONLY the run/snapshot mismatch may be exempted, and only for
+      // a proposal whose call id resolves to a durable cohort output row of
+      // the SAME cohort run + SKU (the parent op's ordinal-0-bound audited
+      // call). Everything else fails exactly as before.
+      if (row.run_id !== options.runId || row.snapshot_hash !== options.snapshotHash) {
+        if (!cohortCoordinatedOutputLinkage(options.runId, callId, proposal.productSku)) {
+          throw new Error(
+            `Model call linkage failed: proposal "${proposal.id}" references model call "${callId}" ` +
+              `that does not belong to run "${options.runId}" / snapshot "${options.snapshotHash}".`,
+          );
+        }
+      }
     }
   }
+}
+
+/**
+ * PR7 C6b (issue #30): cohort-coordinated output linkage — the ONLY narrow
+ * exemption to the model-call run/snapshot check. Resolves true when the
+ * proposal's run is a COHORT CHILD (`classification_runs.cohort_run_id` NOT
+ * NULL) AND a durable `classification_cohort_outputs` row exists whose
+ * `model_call_id` equals the call id for the SAME cohort run AND the SAME
+ * `product_sku` as the proposal. The output rows are write-once historical
+ * truth written only by the parent ops, so a resolved reference is genuine
+ * audit provenance: the parent op's audited calls bind to the ordinal-0
+ * member child run (DECISION-N), and every member's durable row inherits that
+ * call id. Any call id that does NOT resolve through this query fails exactly
+ * as before (non-cohort runs, foreign runs/cohorts, wrong SKU, missing row).
+ */
+function cohortCoordinatedOutputLinkage(
+  runId: string,
+  callId: string,
+  productSku: string | undefined,
+): boolean {
+  if (!productSku) return false;
+  const row = getDb().query(
+    `SELECT 1
+     FROM classification_runs c
+     JOIN classification_cohort_outputs o ON o.cohort_run_id = c.cohort_run_id
+     WHERE c.id = ? AND c.cohort_run_id IS NOT NULL
+       AND o.model_call_id = ? AND o.product_sku = ?
+     LIMIT 1`,
+  ).get(runId, callId, productSku);
+  return row !== null && row !== undefined;
 }
 
 /**

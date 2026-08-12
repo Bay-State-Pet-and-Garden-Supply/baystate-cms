@@ -1495,6 +1495,361 @@ describe('Classification Pipeline Integration', () => {
     expect(persisted.c).toBe(0);
   });
 
+  // ── PR7 C6b (issue #30): cohort-coordinated model-call linkage exemption ──
+  //
+  // The parent ops bind their audited page/title calls to the ORDINAL-0 member
+  // child run (DECISION-N), and every member's durable
+  // `classification_cohort_outputs` row inherits that call id. A materialized
+  // proposal on a NON-ordinal-0 child therefore references a call that
+  // belongs to the ordinal-0 child — the ONLY narrow exemption to the
+  // run/snapshot check. The call row must still exist and be terminal-success;
+  // a resolved output row (same cohort run + same product_sku) is the ONLY
+  // way the mismatch is tolerated.
+
+  /** Seed the minimal cohort-authority chain (batch → cohort → parent cohort
+   *  run) so child runs can FK to it. Returns the created cohort id. */
+  function seedCohortAuthorityChain(wsId: string, parentRunId: string): string {
+    const now = new Date().toISOString();
+    const batchId = `c6b-batch-${randomUUID()}`;
+    const cohortId = `c6b-cohort-${randomUUID()}`;
+    getDb().run(
+      `INSERT INTO onboarding_batches (id, workspace_id, name, file_name, status, total_items, created_at, updated_at)
+       VALUES (?, ?, 'b', 'b.xlsx', 'active', 0, ?, ?)`,
+      [batchId, wsId, now, now],
+    );
+    getDb().run(
+      `INSERT INTO curation_cohorts (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'k', 'l', 'product-family-v1', 'membership-hash', 'ready', ?, ?)`,
+      [cohortId, wsId, batchId, now, now],
+    );
+    getDb().run(
+      `INSERT INTO classification_cohort_runs (id, workspace_id, cohort_id, candidate_membership_hash, status, created_at)
+       VALUES (?, ?, ?, 'candidate-hash', 'freezing', ?)`,
+      [parentRunId, wsId, cohortId, now],
+    );
+    return cohortId;
+  }
+
+  /** Seed a durable `coordinated_page` output row carrying `callId` for
+   *  `memberSku` under `parentRunId`. */
+  function seedCohortOutputRow(wsId: string, parentRunId: string, memberSku: string, callId: string): void {
+    getDb().run(
+      `INSERT INTO classification_cohort_outputs
+         (id, workspace_id, cohort_run_id, output_kind, product_sku, input_hash, output_value_json, model_call_id, created_at)
+       VALUES (?, ?, ?, 'coordinated_page', ?, ?, '{}', ?, ?)`,
+      [randomUUID(), wsId, parentRunId, memberSku, 'a'.repeat(64), callId, new Date().toISOString()],
+    );
+  }
+
+  /** Build a `category_page_proposals` stage that emits ONE proposal carrying
+   *  `callId` on `runId` for `memberSku` (the materializer shape). */
+  function cohortPageStage(runId: string, memberSku: string, snapHash: string, callId: string) {
+    return {
+      name: 'category_page_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId,
+            productSku: memberSku,
+            proposalType: 'category_page' as const,
+            targetId: 'dog-food-dry',
+            proposedValue: { pageId: 'dog-food-dry', pageName: 'Dog Food Dry' },
+            confidence: 0.85,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [callId],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+  }
+
+  /** Create a cohort parent + two children (ordinal-0 audit holder + member)
+   *  and a terminal-success audited page call on the ordinal-0 child.
+   *  Returns the member run, the ordinal-0 run, and the call id. */
+  function cohortLinkageFixture(wsId: string, parentRunId: string, memberSku: string, snapId: string, snapHash: string) {
+    seedCohortAuthorityChain(wsId, parentRunId);
+    const memberRun = createRun(wsId, memberSku, snapId, snapHash, { cohortRunId: parentRunId });
+    const ordinal0Run = createRun(wsId, `SKU-C6B-X-${randomUUID().slice(0, 6)}`, snapId, `x-${snapHash}`, { cohortRunId: parentRunId });
+    return { memberRun, ordinal0Run };
+  }
+
+  it('C6b: a cohort child member MAY reference the ordinal-0 child call id when a durable coordinated_page output row of the SAME cohort + SKU carries it (run/snapshot mismatch exempted)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-MEMBER';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, callId);
+
+    const result = await runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] });
+    expect(result.proposals).toHaveLength(1);
+    const persisted = getDb().query(
+      'SELECT model_call_ids_json FROM classification_proposals WHERE run_id = ?',
+    ).all(memberRun.id) as Array<{ model_call_ids_json: string | null }>;
+    expect(persisted).toHaveLength(1);
+    expect(JSON.parse(persisted[0].model_call_ids_json ?? '[]')).toEqual([callId]);
+  });
+
+  it('C6b: FAILS when the output row belongs to a DIFFERENT cohort run (no cross-cohort exemption)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-a-${randomUUID()}`;
+    const otherParentRunId = `c6b-parent-b-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-CROSS-COHORT';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // The output row lives on a DIFFERENT cohort run → the join cannot resolve.
+    seedCohortAuthorityChain(workspaceId, otherParentRunId);
+    seedCohortOutputRow(workspaceId, otherParentRunId, memberSku, callId);
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b: FAILS when the output row carries a DIFFERENT product_sku than the proposal', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-WRONG-SKU';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // The output row carries a DIFFERENT SKU → the exemption cannot resolve.
+    seedCohortOutputRow(workspaceId, parentRunId, 'SKU-C6B-SOMEONE-ELSE', callId);
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b: FAILS for a NON-cohort run referencing a foreign call id (unchanged hard fail, no exemption)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    // No cohort_run_id on either run — a plain foreign-call linkage failure.
+    const run = createRun(workspaceId, 'SKU-C6B-NONCOHORT', snapId, snapHash);
+    const otherRun = createRun(workspaceId, 'SKU-C6B-OTHER', snapId, `x-${snapHash}`);
+    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    const foreignCall = insertModelCallStart({
+      runId: otherRun.id,
+      stageName: 'product_attribute_proposals',
+      operation: 'attribute_ranking',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'llama3',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'attribute-ranking-prompt-v1',
+      ruleVersion: 'attribute-ranking-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: run.id,
+            productSku: 'SKU-C6B-NONCOHORT',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [foreignCall],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-C6B-NONCOHORT', evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b: FAILS when the call row exists but is NOT terminal-success — the status check runs BEFORE any exemption', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-STARTED';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    const startedCall = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    // The durable output row EXISTS and resolves — but the call is still
+    // `started`: the terminal-success hard-fail must win over the exemption.
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, startedCall);
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, startedCall)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/non-terminal\/non-success|started/);
+  });
+
+  it('C6b: FAILS when no durable output row resolves the call id (missing row — no exemption)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-NO-ROW';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // NO output row is seeded for this member/call.
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
   it('fails closed when a proposal references nonexistent or foreign-run evidence (issue #17 H)', async () => {
     const config = loadClassificationConfig(workspacePath);
     const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
