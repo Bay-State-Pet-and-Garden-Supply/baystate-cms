@@ -57,6 +57,7 @@ import {
 import { hashCanonicalJson } from '../../shared/stable-id';
 import { createHash } from 'node:crypto';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
+import { activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { activatePageImportFromRecords } from '../../shopsite/page-import-service';
 import { listVerifiedPageOptions } from '../../db/repositories/page-repo';
@@ -3223,3 +3224,75 @@ describe('PR9 C2 — per-member semantic validation + post-loop brand coherence 
 
 // Reference the exported execution types so the module graph is exercised.
 export type { OnboardingItem };
+
+// ─── PR9 C3 (issue #30, DECISION-C): active-cohort surface detection ────────
+
+describe('PR9 C3 — active-cohort semantic surface (issue #30, DECISION-C)', () => {
+  it('surfaces the semantic findings for an active-cohort child item; legacy/shadow/flag-OFF stay null (legacy surface byte-identical)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    saveTypeAndFieldEnabledConfig(workspaceId, wsPath);
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(finalized.status).toBe('running');
+
+    // A committed member item under the active cohort run carries the semantic
+    // validation — the surface must present it.
+    getDb().run(
+      `UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?`,
+      [JSON.stringify({
+        curatedTitle: 'Acme Purina Pro Plan Dry Dog Food Chicken 5 lb',
+        classificationRunId: 'child-run-xyz',
+        semanticValidation: {
+          status: 'blocked',
+          findings: [{ code: 'family_brand', memberSku: '100000000001', message: 'Brand conflict.' }],
+        },
+      }), items[0].id],
+    );
+    // The fake child run must be a cohort child for the surface to fire.
+    getDb().run(
+      `INSERT INTO classification_runs
+         (id, workspace_id, onboarding_item_id, product_sku, cohort_run_id, status, started_at)
+       VALUES ('child-run-xyz', ?, ?, ?, ?, 'completed', ?)`,
+      [workspaceId, items[0].id, '100000000001', finalized.id, new Date().toISOString()],
+    );
+
+    const stored = findItemById(items[0].id)!;
+    const payload = activeCohortSemanticFindingsForItem(stored);
+    expect(payload).not.toBeNull();
+    expect(payload!.status).toBe('blocked');
+    expect(payload!.findings[0].code).toBe('family_brand');
+    expect(payload!.findings[0].message).toBe('Brand conflict.');
+
+    // Legacy surface byte-identical: flag OFF and shadow both return null.
+    resetCohortCurationFlagsOverride();
+    expect(activeCohortSemanticFindingsForItem(stored)).toBeNull();
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
+    expect(activeCohortSemanticFindingsForItem(stored)).toBeNull();
+    resetCohortCurationFlagsOverride();
+
+    // A NON-cohort item (run without a cohort_run_id) in active mode returns
+    // null too — only cohort children switch the surface.
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    getDb().run(
+      `INSERT INTO classification_runs
+         (id, workspace_id, onboarding_item_id, product_sku, status, started_at)
+       VALUES ('legacy-run-xyz', ?, ?, ?, 'completed', ?)`,
+      [workspaceId, items[1].id, '100000000002', new Date().toISOString()],
+    );
+    getDb().run(
+      `UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?`,
+      [JSON.stringify({
+        curatedTitle: 'Acme Purina Pro Plan Dry Dog Food Beef 10 lb',
+        classificationRunId: 'legacy-run-xyz',
+        semanticValidation: { status: 'blocked', findings: [] },
+      }), items[1].id],
+    );
+    const legacyItem = findItemById(items[1].id)!;
+    expect(activeCohortSemanticFindingsForItem(legacyItem)).toBeNull();
+  });
+});

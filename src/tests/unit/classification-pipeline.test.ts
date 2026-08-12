@@ -908,6 +908,98 @@ describe('Classification Pipeline Integration', () => {
     completeRun(later.id, 'completed');
   });
 
+  // ─── PR9 C3 (issue #30, DECISION-C): the cohort semantic validation gate ──
+
+  /** Write an item's curation_data_json directly (raw SQL, no schema parse). */
+  function writeCurationData(itemId: string, curationData: Record<string, unknown>): void {
+    getDb().run(
+      'UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(curationData), new Date().toISOString(), itemId],
+    );
+  }
+
+  /** A completed run with one decided reviewable proposal (gate passes the
+   *  non-semantic checks). */
+  function completedRunWithDecision(suffix: string, itemId: string): string {
+    const item = createReviewGateItem(suffix);
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    return run.id;
+  }
+
+  it('refuses an item whose semanticValidation is blocked (code + first finding reason)', () => {
+    const item = createReviewGateItem('BLOCKED');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    writeCurationData(item.id, {
+      curatedTitle: 'Some Title',
+      classificationRunId: run.id,
+      semanticValidation: {
+        status: 'blocked',
+        findings: [
+          { code: 'family_product_type', memberSku: item.upc, message: 'Primary Product Type "dog-treats" does not match the family invariant.' },
+          { code: 'family_brand', memberSku: item.upc, message: 'Brand conflict.' },
+        ],
+      },
+    });
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.code).toBe('semantic_validation_blocked');
+      expect(gate.reason).toContain('family invariant');
+    }
+  });
+
+  it('passes an item whose semanticValidation is passed', () => {
+    const item = createReviewGateItem('PASSED-SEM');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    writeCurationData(item.id, {
+      curatedTitle: 'Some Title',
+      classificationRunId: run.id,
+      semanticValidation: { status: 'passed', findings: [] },
+    });
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(true);
+  });
+
+  it('fails closed on corrupt curation data JSON (never review-ready)', () => {
+    const item = createReviewGateItem('CORRUPT-SEM');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    getDb().run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      ['{corrupt json', item.id],
+    );
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.code).toBe('semantic_validation_blocked');
+      expect(gate.reason).toMatch(/corrupt/i);
+    }
+  });
+
+  it('passes a legacy item with curation data but no semanticValidation key', () => {
+    const item = createReviewGateItem('LEGACY-SEM');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    writeCurationData(item.id, {
+      curatedTitle: 'Some Title',
+      classificationRunId: run.id,
+    });
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(true);
+  });
+
   it('defaults isBulkAcceptable to false on all proposals even with high confidence (Issue #10)', async () => {
     const { buildCategoryPageProposal, buildFieldAssignmentProposal, buildProductTypeProposal } = await import('../../classification/curation-target-proposal');
 

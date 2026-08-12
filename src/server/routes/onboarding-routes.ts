@@ -165,7 +165,7 @@ import {
   getValidatedOnboardingRun,
   recordDecision,
 } from '../../db/repositories/classification-run-repo';
-import { validateSiblingConsistency } from '../../classification/consistency-validator';
+import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { SubmitProposalDecisionsRequestSchema } from '../../shared/schemas/classification';
@@ -874,11 +874,18 @@ route.get('/onboarding/items/:id', async (c) => {
   const extractionData = item.extractionData
     ?? (extraction ? JSON.parse(extraction.extraction_data_json) : null);
 
-  const consistencyWarnings = item.curationData
-    ? validateSiblingConsistency(item.batchId).filter(warning =>
-        Object.prototype.hasOwnProperty.call(warning.values, item.upc),
-      )
-    : [];
+  // PR9 C3 (issue #30, DECISION-C): an ACTIVE-cohort member's semantic
+  // validation findings surface INSTEAD of the legacy
+  // `validateSiblingConsistency` warnings; legacy/shadow keep the legacy
+  // surface byte-identical.
+  const semanticFindings = activeCohortSemanticFindingsForItem(item);
+  const consistencyWarnings = semanticFindings
+    ? []
+    : item.curationData
+      ? validateSiblingConsistency(item.batchId).filter(warning =>
+          Object.prototype.hasOwnProperty.call(warning.values, item.upc),
+        )
+      : [];
 
   const activeRunId = validatedItemRunId(item);
   const sanitizedCuration = item.curationData
@@ -909,6 +916,7 @@ route.get('/onboarding/items/:id', async (c) => {
     extraction: extractionData,
     evidenceAttempts,
     consistencyWarnings,
+    semanticValidation: semanticFindings ?? undefined,
   });
 });
 

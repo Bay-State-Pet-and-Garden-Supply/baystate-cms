@@ -117,6 +117,50 @@ export function validateReviewCompletionGate(
     };
   }
 
+  // PR9 C3 (issue #30, DECISION-C): cohort SEMANTIC validation gate. A
+  // member whose committed curation data carries
+  // `semanticValidation.status === 'blocked'` is NOT review-ready
+  // (blocked-not-destroyed — the curationData + proposals stay intact for the
+  // Review UX, PR10). Corrupt curation data JSON fails closed (never
+  // review-ready). Absent key ('passed' or legacy items) proceeds unchanged.
+  {
+    const curationRow = db.query(
+      'SELECT curation_data_json FROM onboarding_items WHERE id = ?',
+    ).get(input.onboardingItemId) as { curation_data_json: string | null } | undefined;
+    if (curationRow?.curation_data_json) {
+      let parsedCuration: unknown;
+      try {
+        parsedCuration = JSON.parse(String(curationRow.curation_data_json));
+      } catch {
+        return {
+          ok: false,
+          code: 'semantic_validation_blocked',
+          reason: 'Curation data is corrupt; the item cannot be review-ready.',
+        };
+      }
+      const semanticValidation =
+        parsedCuration && typeof parsedCuration === 'object'
+          ? (parsedCuration as Record<string, unknown>).semanticValidation
+          : undefined;
+      if (
+        semanticValidation &&
+        typeof semanticValidation === 'object' &&
+        (semanticValidation as { status?: unknown }).status === 'blocked'
+      ) {
+        const findings = (semanticValidation as { findings?: Array<{ message?: unknown }> }).findings;
+        const firstMessage =
+          Array.isArray(findings) && findings.length > 0 && typeof findings[0]?.message === 'string'
+            ? findings[0].message
+            : 'A hard cohort semantic validation finding blocks this item.';
+        return {
+          ok: false,
+          code: 'semantic_validation_blocked',
+          reason: firstMessage,
+        };
+      }
+    }
+  }
+
   const proposals = db.query(
     `SELECT p.id, p.status, p.proposal_type, p.target_id,
             EXISTS(

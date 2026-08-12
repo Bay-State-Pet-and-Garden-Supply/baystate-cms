@@ -43,7 +43,7 @@ import {
 import { getCohortById, listCohortsByWorkspace } from '../db/repositories/curation-cohort-repo';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import { determineProductGroup } from './product-line-grouper';
-import { validateSiblingConsistency } from '../classification/consistency-validator';
+import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../classification/consistency-validator';
 import { insertExtraction } from '../db/repositories/onboarding-extraction-repo';
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
@@ -844,18 +844,32 @@ export class OnboardingWorker {
 
       updateItemStageStatus(item.id, 'completed');
 
+      // PR9 C3 (issue #30, DECISION-C): in ACTIVE cohort mode an item whose
+      // active run is a cohort child surfaces the NEW validator's findings
+      // instead of the legacy `validateSiblingConsistency` warnings
+      // (legacy/shadow keep the legacy warnings byte-identical — the
+      // defensive branch below is unreachable in practice because active mode
+      // curates cohorts exclusively).
+      const semanticFindings = activeCohortSemanticFindingsForItem(item);
       // Run cross-sibling consistency check and include warnings in SSE event
       let consistencyWarnings: Array<{ field: string; message: string }> = [];
       try {
-        const allWarnings = validateSiblingConsistency(item.batchId);
-        consistencyWarnings = allWarnings
-          .filter(w => {
-            // w.values is Record<sku, string[]> — check if this item's SKU is a key
-            return Object.prototype.hasOwnProperty.call(w.values, item.upc);
-          })
-          .map(w => ({ field: w.field, message: w.message }));
-        if (consistencyWarnings.length > 0) {
-          console.warn(`[OnboardingWorker] Consistency warnings for ${item.upc}:`, JSON.stringify(consistencyWarnings));
+        if (semanticFindings) {
+          consistencyWarnings = semanticFindings.findings.map(finding => ({
+            field: finding.code,
+            message: finding.message,
+          }));
+        } else {
+          const allWarnings = validateSiblingConsistency(item.batchId);
+          consistencyWarnings = allWarnings
+            .filter(w => {
+              // w.values is Record<sku, string[]> — check if this item's SKU is a key
+              return Object.prototype.hasOwnProperty.call(w.values, item.upc);
+            })
+            .map(w => ({ field: w.field, message: w.message }));
+          if (consistencyWarnings.length > 0) {
+            console.warn(`[OnboardingWorker] Consistency warnings for ${item.upc}:`, JSON.stringify(consistencyWarnings));
+          }
         }
       } catch (err: any) {
         console.warn(`[OnboardingWorker] Consistency check failed (non-blocking): ${err.message}`);
@@ -865,6 +879,7 @@ export class OnboardingWorker {
         stage: 'curation',
         curationData,
         consistencyWarnings: consistencyWarnings.length > 0 ? consistencyWarnings : undefined,
+        semanticValidation: semanticFindings ?? undefined,
       });
 
       console.log(

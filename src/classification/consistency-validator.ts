@@ -11,6 +11,7 @@
  */
 import { getDb } from '../db/connection';
 import { normalizeBrand, extractNameStem } from '../onboarding/product-line-grouper';
+import { getCohortCurationFlags } from './flags';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,51 @@ export interface DivergenceWarning {
   field: 'category_page' | 'primary_product_type' | 'curated_title';
   values: Record<string, string[]>;
   message: string;
+}
+
+/** PR9 C3 (issue #30, DECISION-C): the active-cohort semantic surface payload. */
+export interface CohortSemanticFindingsPayload {
+  status: 'passed' | 'blocked';
+  findings: Array<{ code: string; memberSku: string; message: string }>;
+}
+
+/**
+ * PR9 C3 (issue #30, DECISION-C): the item's ACTIVE-cohort semantic findings,
+ * or null when the item is NOT an active-cohort member. Active cohort mode is
+ * flag ON + !shadowOnly AND the item's active run is a cohort child — only
+ * then do the SSE/routes surfaces surface the NEW validator's findings instead
+ * of the legacy `validateSiblingConsistency` warnings. Legacy/shadow items
+ * (and flag OFF) keep the legacy surface byte-identical.
+ */
+export function activeCohortSemanticFindingsForItem(item: {
+  curationData?: { classificationRunId?: string | null; semanticValidation?: unknown } | null;
+}): CohortSemanticFindingsPayload | null {
+  const flags = getCohortCurationFlags();
+  if (!(flags.cohortCurationV2Enabled && !flags.cohortShadowOnly)) return null;
+  const runId = item.curationData?.classificationRunId;
+  if (!runId) return null;
+  const cohortChild = getDb().query(
+    'SELECT 1 FROM classification_runs WHERE id = ? AND cohort_run_id IS NOT NULL LIMIT 1',
+  ).get(runId);
+  if (!cohortChild) return null;
+
+  const semanticValidation = item.curationData?.semanticValidation;
+  if (!semanticValidation || typeof semanticValidation !== 'object') return null;
+  const status = (semanticValidation as { status?: unknown }).status;
+  if (status !== 'passed' && status !== 'blocked') return null;
+  const findings = (semanticValidation as { findings?: unknown }).findings;
+  return {
+    status,
+    findings: Array.isArray(findings)
+      ? findings
+          .filter(finding => finding && typeof finding === 'object')
+          .map(finding => ({
+            code: String((finding as { code?: unknown }).code ?? ''),
+            memberSku: String((finding as { memberSku?: unknown }).memberSku ?? ''),
+            message: String((finding as { message?: unknown }).message ?? ''),
+          }))
+      : [],
+  };
 }
 
 // ─── Validator ─────────────────────────────────────────────────────────────────
