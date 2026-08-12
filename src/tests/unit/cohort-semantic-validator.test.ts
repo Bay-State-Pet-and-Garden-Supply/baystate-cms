@@ -85,9 +85,30 @@ describe('validateMemberSemantics — family_invariant Product Type', () => {
 // ─── coordinated_variant: title correspondence ────────────────────────────────
 
 describe('validateMemberSemantics — coordinated_variant title', () => {
-  it('passes when the curated title equals the durable output with a cohort source', () => {
+  it('R2 (B): a matching title with a DIFFERENT source than the durable authority is a coordinated_title finding (the fixed bug-locking test)', () => {
+    // The fixture's durable source is 'cohort_fallback'; the test used to flip
+    // the member source to 'llm_cohort' and expect a pass — exact title/source
+    // correspondence now requires BOTH to equal the durable authority.
     const result = validateMemberSemantics(coherentMember({ titleSource: 'llm_cohort' }));
-    expect(result.status).toBe('passed');
+    expect(result.status).toBe('blocked');
+    expect(result.findings.some(f => f.code === 'coordinated_title')).toBe(true);
+  });
+
+  it('R2 (B): exact title source equality in both directions', () => {
+    // Direction 1: member claims cohort_fallback while the durable authority
+    // is llm_cohort (title text matches) → finding.
+    const mismatched = validateMemberSemantics(coherentMember({
+      durableTitleOutput: { title: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', source: 'llm_cohort' as const },
+    }));
+    expect(mismatched.status).toBe('blocked');
+    expect(mismatched.findings.some(f => f.code === 'coordinated_title')).toBe(true);
+    // Direction 2: exact title AND source equality passes (both cohort
+    // sources, and the llm_cohort pair).
+    expect(validateMemberSemantics(coherentMember({ titleSource: 'cohort_fallback' })).status).toBe('passed');
+    expect(validateMemberSemantics(coherentMember({
+      titleSource: 'llm_cohort',
+      durableTitleOutput: { title: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', source: 'llm_cohort' as const },
+    })).status).toBe('passed');
   });
 
   it('blocks a curated title that differs from the durable output', () => {
@@ -179,6 +200,71 @@ describe('validateMemberSemantics — coordinated_variant pages', () => {
       suggestedPages: [],
     }));
     expect(result.status).toBe('passed');
+  });
+
+  // ── PR9 review R2 (B): STABLE PAGE ID identity correspondence ────────────
+
+  it('R2 (B): passes when the member proposal page IDs exactly set-match the durable ids', () => {
+    const result = validateMemberSemantics(coherentMember({
+      suggestedPages: ['Dog Food Dry'],
+      pageProposals: [{ pageId: 'p1', pageName: 'Dog Food Dry' }],
+    }));
+    expect(result.status).toBe('passed');
+    expect(result.findings).toEqual([]);
+  });
+
+  it('R2 (B): blocks a proposal whose STABLE PAGE ID differs while the display name matches (wrong id, same name)', () => {
+    const result = validateMemberSemantics(coherentMember({
+      suggestedPages: ['Dog Food Dry'],
+      pageProposals: [{ pageId: 'pX', pageName: 'Dog Food Dry' }],
+      durablePageOutput: { status: 'assigned' as const, pages: [{ pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 }] },
+    }));
+    expect(result.status).toBe('blocked');
+    const finding = result.findings.find(f => f.code === 'coordinated_page')!;
+    expect(finding.memberSku).toBe('100000000001');
+    expect(finding.message).toContain('pX');
+    expect(finding.message).toContain('p1');
+  });
+
+  it('R2 (B): a pageName mismatch on a MATCHED page id is an advisory diagnostic — never a review blocker', () => {
+    const result = validateMemberSemantics(coherentMember({
+      suggestedPages: ['Dog Food Dry (New)'],
+      pageProposals: [{ pageId: 'p1', pageName: 'Dog Food Dry (New)' }],
+      durablePageOutput: { status: 'assigned' as const, pages: [{ pageId: 'p1', pageName: 'Dog Food Dry', confidence: 0.9 }] },
+    }));
+    expect(result.status).toBe('passed'); // advisory-only
+    const finding = result.findings.find(f => f.code === 'coordinated_page_name_mismatch')!;
+    expect(finding.memberSku).toBe('100000000001');
+    expect(finding.message).toContain('p1');
+    expect(result.findings.some(f => f.code === 'coordinated_page')).toBe(false);
+  });
+
+  it('R2 (B): expected-empty REQUIRES zero pages AND zero category_page proposals', () => {
+    const blocked = validateMemberSemantics(coherentMember({
+      durablePageOutput: null,
+      pageOutputExpectedEmpty: true,
+      suggestedPages: ['Dog Food Dry'],
+      pageProposals: [{ pageId: 'p1', pageName: 'Dog Food Dry' }],
+    }));
+    expect(blocked.status).toBe('blocked');
+    expect(blocked.findings.some(f => f.code === 'coordinated_page')).toBe(true);
+    const passes = validateMemberSemantics(coherentMember({
+      durablePageOutput: null,
+      pageOutputExpectedEmpty: true,
+      suggestedPages: [],
+      pageProposals: [],
+    }));
+    expect(passes.status).toBe('passed');
+  });
+
+  it('R2 (B): an abstained durable row requires zero pages AND zero proposals — a proposal with the same display name but a wrong id must NOT pass', () => {
+    const result = validateMemberSemantics(coherentMember({
+      suggestedPages: [],
+      pageProposals: [{ pageId: 'pX', pageName: 'Dog Food Dry' }],
+      durablePageOutput: { status: 'abstained' as const, reason: 'policy denied' },
+    }));
+    expect(result.status).toBe('blocked');
+    expect(result.findings.some(f => f.code === 'coordinated_page')).toBe(true);
   });
 });
 
@@ -497,5 +583,83 @@ describe('validateCohortBrandCoherence — mutual Brand coherence', () => {
     expect(result.findings).toHaveLength(2);
     const tieList = result.findings[0].message.match(/tied canonical brands: ([^)]+)/);
     expect(tieList![1]).toBe('zoo, éclair');
+  });
+});
+
+// ─── family_invariant: canonical Brand identity (PR9 review R2, C) ────────────
+
+describe('validateCohortBrandCoherence — canonical Brand identity via frozen configured brands (PR9 review R2, C)', () => {
+  const HILLS_BRANDS = [
+    { id: 'hills', name: "Hill's Science Diet", aliases: ['Science Diet'], oldIdAliases: [] },
+  ];
+  const ACME_PURINA = [
+    { id: 'acme', name: 'Acme', aliases: [], oldIdAliases: [] },
+    { id: 'purina', name: 'Purina', aliases: [], oldIdAliases: [] },
+  ];
+
+  it('R2 (C): alias coherence passes — raw texts resolving to the SAME canonical id are coherent', () => {
+    const result = validateCohortBrandCoherence([
+      { sku: '100000000001', frozenBrandEvidence: ["Hill's Science Diet"] },
+      { sku: '100000000002', frozenBrandEvidence: ['Science Diet'] },
+    ], { brands: HILLS_BRANDS });
+    expect(result.status).toBe('passed');
+    expect(result.findings).toEqual([]);
+  });
+
+  it('R2 (C): prefix match coherence passes (raw text resolves to the same canonical id via longest-prefix)', () => {
+    const result = validateCohortBrandCoherence([
+      { sku: '100000000001', frozenBrandEvidence: ['Acme'] },
+      { sku: '100000000002', frozenBrandEvidence: ['Acme Dry Dog Food'] },
+    ], { brands: [{ id: 'acme', name: 'Acme', aliases: [], oldIdAliases: [] }] });
+    expect(result.status).toBe('passed');
+  });
+
+  it('R2 (C): two DISTINCT canonical ids block regardless of counts (NO majority forcing)', () => {
+    // 3× Acme, 1× Purina — a deterministic majority would forgive Purina;
+    // canonical identity does NOT.
+    const result = validateCohortBrandCoherence([
+      { sku: '100000000001', frozenBrandEvidence: ['Acme'] },
+      { sku: '100000000002', frozenBrandEvidence: ['Acme'] },
+      { sku: '100000000003', frozenBrandEvidence: ['Acme'] },
+      { sku: '100000000004', frozenBrandEvidence: ['Purina'] },
+    ], { brands: ACME_PURINA });
+    expect(result.status).toBe('blocked');
+    expect(result.findings.every(f => f.code === 'family_brand')).toBe(true);
+    expect(result.findings).toHaveLength(4);
+    expect(result.findings[0].message).toContain('acme');
+    expect(result.findings[0].message).toContain('purina');
+  });
+
+  it('R2 (C): flags ONLY the member whose evidence resolves outside the cohort consensus', () => {
+    const result = validateCohortBrandCoherence([
+      { sku: '100000000001', frozenBrandEvidence: ['Acme', 'Acme'] },
+      { sku: '100000000002', frozenBrandEvidence: ['Acme', 'Purina'] },
+      { sku: '100000000003', frozenBrandEvidence: ['Acme', 'Acme'] },
+    ], { brands: ACME_PURINA });
+    expect(result.status).toBe('blocked');
+    expect(result.findings).toHaveLength(1);
+    const finding = result.findings[0];
+    expect(finding.memberSku).toBe('100000000002');
+    expect(finding.message).toContain('acme');
+    expect(finding.message).toContain('purina');
+  });
+
+  it('R2 (C): unresolved-text members are diagnostic-only — no member resolves → the validator ABSTAINS (no hard block)', () => {
+    const result = validateCohortBrandCoherence([
+      { sku: '100000000001', frozenBrandEvidence: ['Generic', 'Mystery Brand'] },
+      { sku: '100000000002', frozenBrandEvidence: ['Unknown Co'] },
+    ], { brands: HILLS_BRANDS });
+    expect(result.status).toBe('passed');
+    expect(result.findings).toEqual([]);
+  });
+
+  it('R2 (C): unresolved members never block when the resolved cohort is coherent (diagnostic-only)', () => {
+    const result = validateCohortBrandCoherence([
+      { sku: '100000000001', frozenBrandEvidence: ['Acme'] },
+      { sku: '100000000002', frozenBrandEvidence: ['Acme'] },
+      { sku: '100000000003', frozenBrandEvidence: ['Unresolvable Brand'] },
+    ], { brands: [{ id: 'acme', name: 'Acme', aliases: [], oldIdAliases: [] }] });
+    expect(result.status).toBe('passed');
+    expect(result.findings).toEqual([]);
   });
 });
