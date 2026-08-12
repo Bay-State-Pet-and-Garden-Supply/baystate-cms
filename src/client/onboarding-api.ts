@@ -254,12 +254,28 @@ export interface ConsistencyWarning {
   message: string;
 }
 
+/**
+ * PR10 (issue #30, DECISION-A): the first-class cohort semantic validation
+ * surface carried on the hydrated item detail response. Emitted ONLY for
+ * ACTIVE-cohort members (`semanticSurface.mode === 'active'`); legacy/shadow
+ * items omit the field entirely. `blocked` means the member is NOT
+ * review-ready (the review-complete gate refuses with
+ * `semantic_validation_blocked`) while its curationData + proposals stay
+ * intact (blocked-not-destroyed).
+ */
+export interface SemanticValidationPayload {
+  status: 'passed' | 'blocked';
+  findings: Array<{ code: string; memberSku: string; message: string }>;
+}
+
 export interface ItemDetailResponse {
   item: OnboardingItem;
   sources: OnboardingSource[];
   extraction: ExtractionData | null;
   evidenceAttempts?: any[];
   consistencyWarnings: ConsistencyWarning[];
+  /** PR10: active-cohort semantic validation surface (omitted in legacy mode). */
+  semanticValidation?: SemanticValidationPayload;
 }
 
 export async function getItemDetail(itemId: string): Promise<ItemDetailResponse> {

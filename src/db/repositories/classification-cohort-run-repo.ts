@@ -668,6 +668,64 @@ export function supersedeOwnedCohortRunForOutputDrift(
   return changes > 0;
 }
 
+/**
+ * IDLE-terminal supersede variant (issue #30, PR10 DECISION-C, option 1 as
+ * approved): supersedes a non-superseded cohort run that is NOT actively
+ * held. The predicate is `status != 'superseded'` AND (the run is terminal —
+ * any status other than freezing/running — OR it is a freezing/running zombie
+ * with `claimed_by IS NULL`).
+ *
+ * `claimed_by` on `classification_cohort_runs` is NEVER cleared at completion
+ * (`completeCohortRun` writes only status/completed_at/error_message), so an
+ * idle TERMINAL parent (completed / completed_with_abstentions /
+ * completed_with_member_failures / failed / cancelled) still carries its
+ * historical `claimed_by`. That sticky owner is HISTORICAL OWNERSHIP
+ * EVIDENCE, not an active claim — it must never block the re-run lifecycle.
+ * This variant deliberately matches those runs; an ACTIVELY HELD run
+ * (`status IN ('freezing','running') AND claimed_by IS NOT NULL`) is never
+ * matched here and must go through the owner-guarded drift variant
+ * (`supersedeOwnedCohortRunForOutputDrift`, worker-side only) — callers
+ * handle the fail-closed `run_busy` outcome.
+ *
+ * On CAS success the linked RUNNING child classification runs are
+ * terminalized in the SAME transaction with the deterministic drift message
+ * (mirrors `supersedeOwnedCohortRunForOutputDrift`; a no-op for terminal
+ * parents — they have no running children). Old output rows stay untouched
+ * and the claim slot reopens: the job queue's next poll claims a NEW parent
+ * revision which re-freezes from current evidence, re-coordinates, and
+ * re-validates. Failure (already superseded, or the run became actively held
+ * since the caller's read) is a no-op returning false.
+ *
+ * The `POST /onboarding/cohorts/:id/re-run` route is the ONLY caller: a
+ * reviewer-facing re-run must never yank a live worker (it refuses
+ * actively-held parents with fail-closed `run_busy` BEFORE any mutation) and
+ * uses this variant to start a fresh revision from an idle terminal parent.
+ */
+export function supersedeIdleCohortRun(runId: string, reason: string): boolean {
+  const db = getDb();
+  let changes = 0;
+  db.transaction(() => {
+    const result = db.run(
+      `UPDATE classification_cohort_runs
+       SET status = 'superseded', superseded_at = ?, error_message = ?
+       WHERE id = ?
+         AND status != 'superseded'
+         AND (status NOT IN ('freezing','running') OR claimed_by IS NULL)`,
+      [now(), reason ?? null, runId],
+    );
+    changes = result.changes;
+    if (changes > 0) {
+      db.run(
+        `UPDATE classification_runs
+         SET status = 'failed', completed_at = ?, error_message = 'Cohort output authority drift superseded parent run'
+         WHERE cohort_run_id = ? AND status = 'running'`,
+        [now(), runId],
+      );
+    }
+  })();
+  return changes > 0;
+}
+
 // ─── Heartbeat (lease renewal) ──────────────────────────────────────────────────
 
 /**

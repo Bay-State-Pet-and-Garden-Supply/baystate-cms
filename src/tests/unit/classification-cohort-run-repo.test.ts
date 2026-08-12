@@ -33,6 +33,7 @@ import {
   writeProductTypeOutcomeOnly,
   failFrozenCohortRunForConflict,
   supersedeOwnedCohortRunForOutputDrift,
+  supersedeIdleCohortRun,
   insertProposalDependency,
   listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
@@ -903,6 +904,71 @@ describe('PR4 write-once execution product type + proposal dependencies (issue #
     // A second call (run already superseded) is a no-op — never overwritten.
     expect(supersedeOwnedCohortRunForOutputDrift(run.id, 'worker-a', 'second reason')).toBe(false);
     expect(getCohortRunById(run.id)!.errorMessage).toBe(reason);
+  });
+
+  it('supersedeIdleCohortRun: an idle TERMINAL parent (sticky claimed_by, e.g. a completed run with blocked members) is superseded; linked running children terminalized; old rows intact; second call no-ops (PR10 C1)', () => {
+    const wsId = newWorkspace();
+    const { items } = setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
+    const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
+    // The parent completes with member failures (a blocked member scenario);
+    // `claimed_by` is NEVER cleared at completion — the sticky owner is
+    // historical ownership evidence, not an active claim.
+    expect(completeCohortRun(run.id, 'completed_with_member_failures', '1 member failed', { ownerGuard: { workerId: 'worker-a' } })).toBe(true);
+    const terminal = getCohortRunById(run.id)!;
+    expect(terminal.status).toBe('completed_with_member_failures');
+    expect(terminal.claimedBy).toBe('worker-a'); // sticky historical ownership
+
+    // Idle supersede succeeds: parent superseded + superseded_at + reason; the
+    // linked running child is terminalized with the deterministic drift message.
+    expect(supersedeIdleCohortRun(run.id, 'New cohort revision requested by reviewer')).toBe(true);
+    const superseded = getCohortRunById(run.id)!;
+    expect(superseded.status).toBe('superseded');
+    expect(superseded.supersededAt).not.toBeNull();
+    expect(superseded.errorMessage).toContain('New cohort revision');
+    // Children terminal (mirrors the drift primitive's child cleanup).
+    expect(getRun(child.id)!.status).toBe('failed');
+    expect(getRun(child.id)!.errorMessage).toBe('Cohort output authority drift superseded parent run');
+    expect(getRun(child.id)!.completedAt).not.toBeNull();
+    // Old rows stay intact (historical decision never redefined): the frozen
+    // authority hash and completion data are untouched.
+    const historical = getCohortRunById(run.id)!;
+    expect(historical.evidenceSnapshotHash).toBe('e'.repeat(64));
+    expect(historical.completedAt).not.toBeNull();
+
+    // Second call (already superseded) is a no-op — never overwritten.
+    expect(supersedeIdleCohortRun(run.id, 'again')).toBe(false);
+    expect(getCohortRunById(run.id)!.errorMessage).toContain('New cohort revision');
+
+    // The claim slot reopens: the next claim creates a NEW revision.
+    const retried = claimReadyCurationCohorts(wsId, 10, 'worker-b', COHORT_LEASE_TTL_MS);
+    expect(retried.length).toBe(1);
+    expect(retried[0].cohortId).toBe(run.cohortId);
+    expect(retried[0].id).not.toBe(run.id);
+  });
+
+  it('supersedeIdleCohortRun: a CLAIMED run (running, owner set) is NEVER matched — fail-closed run_busy semantics; the owner-guarded drift variant is the worker path (PR10 C1)', () => {
+    const wsId = newWorkspace();
+    const { items } = setupFamilyBatch(wsId);
+    const [run] = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(freezeAuthorities(run.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(run.id, 'worker-a')).toBe(true);
+    const child = ensureMemberRun(run.id, items[0].id, wsId, items[0].upc ?? 'SKU-1', null, 'snap-hash');
+
+    // A reviewer-facing re-run must never yank a live worker: the idle
+    // variant no-ops on an ACTIVELY HELD running run (zero mutation).
+    expect(supersedeIdleCohortRun(run.id, 'New cohort revision requested by reviewer')).toBe(false);
+    const after = getCohortRunById(run.id)!;
+    expect(after.status).toBe('running');
+    expect(after.supersededAt).toBeNull();
+    expect(after.errorMessage).toBeNull();
+    expect(getRun(child.id)!.status).toBe('running');
+
+    // The owner-guarded drift variant (worker-side) succeeds with the owner.
+    expect(supersedeOwnedCohortRunForOutputDrift(run.id, 'worker-a', 'processCohort output drift')).toBe(true);
+    expect(getCohortRunById(run.id)!.status).toBe('superseded');
   });
 
   it('insertProposalDependency is workspace-scoped and FK fail-closed; listDependenciesForProposal round-trips', () => {
