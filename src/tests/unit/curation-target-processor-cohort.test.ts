@@ -180,34 +180,37 @@ describe('PR7 C5 — materializeCoordinatedPages (durable parent outputs, zero P
     expect(mocks.perItem).not.toHaveBeenCalled();
   });
 
-  it('missing row: deterministic abstain + console.warn, zero Page LLM calls', async () => {
-    const warns: string[] = [];
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: any[]) => {
-      warns.push(args.map(String).join(' '));
-    });
-    try {
-      const context: StageContext = { ...materializedContext, coordinatedPages: new Map() };
-      const result = await materializeCoordinatedPages(target as any, input, context);
-      expect(result.proposals).toEqual([]);
-      expect(result.message).toBe('missing parent page output');
-      expect(warns.some(line => line.includes('no parent page output row'))).toBe(true);
-    } finally {
-      warnSpy.mockRestore();
-    }
+  it('PR8 DECISION-B: missing row (no pageCoordinationAbsent marker) => THROW — the member fails closed, zero Page LLM calls', async () => {
+    const context: StageContext = { ...materializedContext, coordinatedPages: new Map() };
+    await expect(materializeCoordinatedPages(target as any, input, context)).rejects.toThrow(
+      /no parent page output row in active cohort mode/,
+    );
     expect(mocks.coordinate).not.toHaveBeenCalled();
     expect(mocks.perItem).not.toHaveBeenCalled();
   });
 
-  it('corrupt row: fail-closed schema parse → deterministic abstain, zero Page LLM calls', async () => {
+  it('PR8 DECISION-B: corrupt row => THROW — the member fails closed, zero Page LLM calls', async () => {
     const context: StageContext = {
       ...materializedContext,
       coordinatedPages: new Map([
         ['SKU1', { output: { status: 'assigned', pages: [{ pageId: 42 }] }, modelCallId: 'x' } as any],
       ]),
     };
+    await expect(materializeCoordinatedPages(target as any, input, context)).rejects.toThrow(
+      /corrupt parent page output payload/,
+    );
+    expect(mocks.coordinate).not.toHaveBeenCalled();
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+
+  it('PR8 DECISION-B: missing row WITH the pageCoordinationAbsent expected-empty marker => clean deterministic abstain (unchanged PR7 R2 F3.3 semantics)', async () => {
+    const context: StageContext = {
+      ...materializedContext,
+      coordinatedPages: new Map(),
+      pageCoordinationAbsent: true,
+    };
     const result = await materializeCoordinatedPages(target as any, input, context);
     expect(result.proposals).toEqual([]);
-    expect(result.message).toBe('missing parent page output');
     expect(mocks.coordinate).not.toHaveBeenCalled();
     expect(mocks.perItem).not.toHaveBeenCalled();
   });

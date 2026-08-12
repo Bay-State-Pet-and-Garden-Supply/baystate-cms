@@ -133,3 +133,21 @@ describe('PR8 C1 — stage ordering (name_consolidation precedes product_draft_p
     expect(productDraftProjectionStage.requires).toContain('product_attribute_proposals');
   });
 });
+
+describe('PR8 C2 — frozen-only attribute mappings (DECISION-D)', () => {
+  it('active cohort mode (cohortExecutionType present) with NO frozen snapshot => THROW (live config is never read)', async () => {
+    const context: StageContext = {
+      ...baseContext,
+      snapshot: undefined,
+      cohortExecutionType: { id: 'dog-food-dry', confidence: 0.95, outcome: 'coherent' },
+    };
+    await expect(productDraftProjectionStage.execute(baseInput, context)).rejects.toThrow(
+      /frozen runtime snapshot/,
+    );
+  });
+
+  it('legacy mode (no cohortExecutionType) with a snapshot => snapshot attribute mappings used', async () => {
+    const result = await productDraftProjectionStage.execute(baseInput, baseContext);
+    expect(result.status).toBe('succeeded');
+  });
+});

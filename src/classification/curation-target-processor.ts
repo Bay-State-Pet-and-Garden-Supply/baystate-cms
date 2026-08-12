@@ -552,9 +552,11 @@ export async function processPageTarget(
  *   audited parent `model_call_id`);
  * - `abstained` → `{proposals: [], message: <stored reason>}` (the stage
  *   abstains — no LLM, no fallback invention);
- * - a missing row for a member that should have one, or a corrupt stored
- *   payload → deterministic abstain + `console.warn` (pages NEVER invent an
- *   assignment).
+ * - a missing row for a member that should have one (no `pageCoordinationAbsent`
+ *   expected-empty marker), or a corrupt stored payload → THROW (PR8
+ *   DECISION-B: the member fails closed — pages NEVER invent an assignment;
+ *   PR7's deterministic abstain for these two cases is replaced by the
+ *   fail-closed member failure).
  */
 export async function materializeCoordinatedPages(
   _target: ResolvedTarget,
@@ -564,25 +566,33 @@ export async function materializeCoordinatedPages(
   const snapshotHash = context.snapshot?.snapshotHash ?? null;
 
   // Look up the member's durable parent output. A missing row for a member
-  // that should have one is a parent-op contract violation — deterministic
-  // fail-closed abstain + warning (never an LLM, never an invented page).
+  // that should have one is a parent-op contract violation. PR8 DECISION-B:
+  // unless the parent page op chose EXPECTED-EMPTY (pageCoordinationAbsent —
+  // the stage-level guard in `categoryPageProposalsStage` handles that case
+  // before delegating here), a missing row FAILS the member closed — PR7's
+  // deterministic abstain + warning is replaced by the fail-closed throw.
   const stored = context.coordinatedPages?.get(input.sku) as
     | CoordinatedPageMemberValue
     | undefined;
   if (!stored) {
-    console.warn(
-      `[CurationTargetProcessor] Member ${input.sku} has no parent page output row in active cohort mode — deterministic abstain (pages never invent an assignment).`,
+    if (context.pageCoordinationAbsent === true) {
+      return { proposals: [], message: 'missing parent page output' };
+    }
+    throw new Error(
+      `Member ${input.sku} has no parent page output row in active cohort mode (PR8 DECISION-B): ` +
+        'a missing durable page output fails the member closed — pages never invent an assignment.',
     );
-    return { proposals: [], message: 'missing parent page output' };
   }
 
-  // Fail-closed parse: a corrupt stored payload never yields proposals.
+  // PR8 DECISION-B: fail-closed parse — a corrupt stored payload never yields
+  // proposals; the member FAILS (PR7's deterministic abstain is replaced by
+  // the throw).
   const parsed = CohortPageOutputSchema.safeParse(stored.output);
   if (!parsed.success) {
-    console.warn(
-      `[CurationTargetProcessor] Member ${input.sku} has a corrupt parent page output payload — deterministic abstain (pages never invent an assignment).`,
+    throw new Error(
+      `Member ${input.sku} has a corrupt parent page output payload in active cohort mode (PR8 DECISION-B): ` +
+        'failing closed — pages never invent an assignment.',
     );
-    return { proposals: [], message: 'missing parent page output' };
   }
   const output = parsed.data;
 

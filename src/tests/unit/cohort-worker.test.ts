@@ -2652,19 +2652,21 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     expect(Number(pageAuditRows.cnt)).toBe(0);
   });
 
-  it('missing member output: prepared member with an empty coordinatedTitles map falls back deterministically with a warning and completes', async () => {
+  it('PR8 DECISION-B: a missing title output for a multi-item group member FAILS CLOSED — no deterministic fallback, no invented title, no per-item title LLM call', async () => {
     const { workspaceId, workspacePath: wsPath, run, items, frozenLineContext } = await freezeTwoMemberCohort();
 
     // Simulate the parent-op contract violation: the durable map is EMPTY for
     // a member that is part of a >=2-sibling group (the all-or-nothing
-    // transaction makes this unreachable in the normal flow — DECISION-R).
+    // transaction makes this unreachable in the normal flow). PR8 DECISION-B:
+    // the member fails instead of inventing a deterministic fallback title
+    // (DECISION-R fallback is parent-op-only in active cohort mode).
     const prepared = buildPreparedContext(workspaceId, run, items[0], frozenLineContext);
+    // A genuine active-cohort context carries the FROZEN per-member group
+    // sizes (processCohort attaches them) — the fail-closed guard keys on
+    // memberGroupSizes presence + group size >= 2.
+    prepared.memberGroupSizes = frozenLineContext.memberGroupSizes;
     prepared.coordinatedTitles = new Map();
 
-    const capturedWarns: string[] = [];
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: any[]) => {
-      capturedWarns.push(args.map(String).join(' '));
-    });
     // Invocation-based title-call counter: in a combined `bun test` run the
     // `cohort-name-coordinator` suite's llm-client mock can leak into this
     // file's module graph, so `spy.mock.calls` may inherit prior history.
@@ -2677,20 +2679,16 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
       return null;
     }) as any);
     try {
-      const curationData = await curateItemWithPipeline(findItemById(items[0].id)!, wsPath, workspaceId, prepared);
-      // Deterministic fallback + member pipeline completes (no throw, no
-      // per-item title LLM call). The fallback title equals the deterministic
-      // formatter's output for the frozen spreadsheet identity.
-      const live = findItemById(items[0].id)!;
-      const expectedFallback = cohortNameCoordinator.formatDeterministicTitle(live.name ?? live.upc, live.brandHint);
-      expect(curationData.curatedTitle).toBe(expectedFallback);
-      expect(curationData.titleSource).toBe('cohort_fallback');
+      await expect(
+        curateItemWithPipeline(findItemById(items[0].id)!, wsPath, workspaceId, prepared),
+      ).rejects.toThrow(/missing a persisted cohort title output in active cohort mode/);
+      // No invented fallback title and no per-item title LLM call.
       expect(titleCallsDuringTest).toBe(0);
+      const live = findItemById(items[0].id)!;
+      expect(live.curationData).toBeNull();
     } finally {
-      warnSpy.mockRestore();
       titleCallSpy.mockRestore();
     }
-    expect(capturedWarns.some(line => line.includes('missing a persisted cohort title output'))).toBe(true);
   });
 });
 

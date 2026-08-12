@@ -462,15 +462,39 @@ export async function curateItemWithPipeline(
         // `coordinateCohortItemsOnce()`. The parent title op
         // (`ensureCohortTitlesCoordinated`) already persisted every group
         // member's title into `classification_cohort_outputs` BEFORE the
-        // member loop; read it here. A missing entry is a parent-op contract
-        // violation — fall back deterministically with a warning (never a
-        // per-item LLM call; DECISION-R). The coordinator + `cohortCache` are
+        // member loop; read it here. The coordinator + `cohortCache` are
         // never consulted in active cohort mode.
+        //
+        // PR8 C2 (DECISION-B): a MISSING stored title output for a multi-item
+        // group member is a parent-op contract violation — the member FAILS
+        // with a deterministic error (no invented title). The DECISION-R
+        // warn+fallback is now parent-op-only in active cohort mode: a
+        // durable row with source 'cohort_fallback' is legitimate (the parent
+        // op wrote it), but a MISSING row (no durable output at all) can never
+        // be repaired by the child. The fail-closed throw is keyed on the
+        // FROZEN per-member group sizes (`memberGroupSizes` present AND this
+        // member's group >= 2 — the exact grouping the parent title op uses,
+        // attached by processCohort). Hand-built test contexts that omit
+        // `memberGroupSizes` (and legacy/shadow, which never reach this
+        // branch) keep the PR6 DECISION-R warn+fallback byte-identical. The
+        // title values on this map are already parsed through
+        // `CohortTitleOutputSchema` by the parent op (the map is built from
+        // parsed rows), so the child-side corrupt-title guard is STRUCTURAL —
+        // documented here, not duplicated.
         const selected = preparedCohort!.coordinatedTitles?.get(item.upc);
         if (selected) {
           preComputedTitle = selected.title;
           preComputedTitleSource = selected.source;
         } else {
+          const memberGroupSize =
+            preparedCohort!.memberGroupSizes?.get(item.upc) ??
+            (preparedCohort!.productLineContext?.siblingSkus.length ?? 0);
+          if (preparedCohort!.memberGroupSizes !== undefined && memberGroupSize >= 2) {
+            throw new Error(
+              `Member ${item.upc ?? item.id} is missing a persisted cohort title output in active cohort mode ` +
+                '(PR8 DECISION-B): the parent-op contract was violated and no title may be invented; the member fails closed.',
+            );
+          }
           console.warn(
             `[ProductCurator] Member ${item.upc} missing a persisted cohort title output — using deterministic fallback.`,
           );
