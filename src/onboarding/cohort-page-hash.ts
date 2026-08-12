@@ -55,6 +55,7 @@
 import { hashCanonicalJson } from '../shared/stable-id';
 import { getLlmConfigForTask } from './llm-client';
 import type { ModelPolicyView } from '../classification/model-policy-gateway';
+import type { ProductLineItemSnapshot } from '../classification/types';
 import {
   type ExecutionTypeTitleAuthority,
 } from './cohort-title-hash';
@@ -138,18 +139,53 @@ export interface CohortPagePlanAuthority {
   maxPages: number;
 }
 
-export interface CohortPageInputHashParams {
+/**
+ * ONE canonical cohort-Page authority bundle (PR7 review R1, B2): the SINGLE
+ * normalized object set that BOTH the P-hash and the parent v2 prompt consume.
+ * Built once per `ensureCohortPagesCoordinated` entry from the frozen inputs,
+ * then passed to `computeCohortPageInputHash` AND to the parent prompt path
+ * (`coordinateCohortPagesCore`'s `executionTypeContext` option + the
+ * bundle-derived products/pages/selection) — so hashed authority == prompted
+ * authority BY CONSTRUCTION: no duplicated truncation literals, no order
+ * dependence (members sorted by sku, pages by id, species/healthConcern
+ * arrays sorted).
+ */
+export interface CohortPageAuthorityBundle {
+  /** Canonical P-set membership + per-member normalized authority slices,
+   *  sorted by sku; species/healthConcern arrays sorted. */
+  members: CohortPageAuthorityMember[];
+  /** Frozen page list sorted by id. */
+  pages: Array<{ id: string; name: string; parentName: string | null }>;
+  /** Frozen per-target selection. */
+  selection: { selectionMode: 'single' | 'multiple'; maxPages: number };
+  /** The frozen Execution Product Type authority (id+label+confidence+outcome). */
+  executionTypeAuthority: ExecutionTypeTitleAuthority;
+  /** The frozen operation-specific Page model authority; null when unconfigured. */
+  pageModelAuthority: CohortPageModelAuthority | null;
+  /** The parent Page prompt/rule version (DECISION-F). */
+  ruleVersion: 'cohort-pages-v2';
+}
+
+export interface CohortPageAuthorityBundleParams {
   /** The cohort run (execution Product Type resolution). */
   run: CohortRun;
   /** Frozen per-member Page authority (the persisted execution-evidence-v1 payload). */
   projection: ExecutionEvidenceProjectionV1;
+  /** Frozen product-line sibling context (contract symmetry — the canonical
+   *  members are normalized from the projection via
+   *  `pageAuthorityFromProjectionMember`; the bundle output is the ONE
+   *  authority both the P-hash and the parent prompt consume). */
+  frozenLineContext?: { productLineItems: ProductLineItemSnapshot[] } | null;
+  /** Frozen verified page catalog (contract symmetry — the canonical page
+   *  list is `pagePlan.pages`, sorted by id). */
+  pageCatalog?: Array<{ id: string; name: string; parentName: string | null }> | null;
   /** Frozen page list + selection mode/maxPages (per-target config, frozen). */
   pagePlan: CohortPagePlanAuthority;
   /**
    * Frozen Execution Product Type authority (the SAME
    * `ExecutionTypeTitleAuthority` object the v2 prompt's Execution Type
-   * context renders — `titleExecutionTypeAuthorityFromRun`). Absent → a null
-   * authority is hashed (abstained/conflicted).
+   * context renders — `titleExecutionTypeAuthorityFromRun`). Absent → the
+   * run-fallback authority is built (abstained/conflicted).
    */
   executionTypeAuthority?: ExecutionTypeTitleAuthority | null;
   /**
@@ -157,6 +193,61 @@ export interface CohortPageInputHashParams {
    * unconfigured — still hashed as null.
    */
   pageModelAuthority?: CohortPageModelAuthority | null;
+}
+
+/**
+ * Build the single canonical authority bundle (PR7 review R1, B2). Both the
+ * P-hash and the parent v2 prompt consume this exact bundle: members are
+ * normalized via `pageAuthorityFromProjectionMember` and sorted by sku, pages
+ * are sorted by id, species/healthConcern arrays are sorted — so any
+ * reordering of the raw inputs changes NEITHER the hash NOR the rendered
+ * prompt.
+ */
+export function buildCohortPageAuthorityBundle(
+  params: CohortPageAuthorityBundleParams,
+): CohortPageAuthorityBundle {
+  const { run, projection, pagePlan, executionTypeAuthority, pageModelAuthority } = params;
+  const members = [...projection.members]
+    .map(pageAuthorityFromProjectionMember)
+    .sort((a, b) => a.sku.localeCompare(b.sku));
+  const pages = [...pagePlan.pages].sort((a, b) => a.id.localeCompare(b.id));
+  return {
+    members,
+    pages,
+    selection: { selectionMode: pagePlan.selectionMode, maxPages: pagePlan.maxPages },
+    executionTypeAuthority: executionTypeAuthority ?? {
+      id: run.executionProductTypeId,
+      label: null,
+      confidence: run.productTypeConfidence,
+      outcome: run.productTypeOutcome,
+    },
+    pageModelAuthority: pageModelAuthority ?? null,
+    ruleVersion: PAGE_PROMPT_RULE_VERSION,
+  };
+}
+
+/**
+ * Bridge the canonical bundle member back to the `ProductLineItemSnapshot`
+ * shape the coordinated Page prompt renders (PR7 review R1, B2). The parent
+ * path builds its core params FROM the bundle members (normalized, sorted)
+ * instead of re-deriving from the raw frozen line context, so the rendered
+ * prompt text is fully determined by the hashed objects.
+ */
+export function pageAuthorityMemberToSnapshot(
+  member: CohortPageAuthorityMember,
+): ProductLineItemSnapshot {
+  return {
+    sku: member.sku,
+    name: member.name,
+    webTitle: member.webTitle,
+    brand: member.brand,
+    description: member.description,
+    species: [...member.species],
+    flavor: member.flavor,
+    lifeStage: member.lifeStage,
+    productForm: member.productForm,
+    healthConcern: [...member.healthConcern],
+  };
 }
 
 // ─── Pure builders ────────────────────────────────────────────────────────────
@@ -220,37 +311,25 @@ export function pageModelAuthorityFromConfig(
 
 /**
  * Compute the canonical cohort Page input hash (P-hash) over the frozen Page
- * authority: sorted P-set member SKUs, the per-member normalized authority
- * slices (sorted by sku), the execution Product Type authority, the sorted
- * frozen page list + selection mode/maxPages, the prompt/rule version, and
- * the operation-specific model authority.
+ * authority bundle (PR7 review R1, B2): the sorted P-set member SKUs, the
+ * per-member normalized authority slices, the execution Product Type
+ * authority, the sorted frozen page list + selection mode/maxPages, the
+ * prompt/rule version, and the operation-specific model authority.
  *
- * Deterministic and pure — no DB access, no live item reads. Members are
- * sorted by SKU and pages by id, so the hash is independent of input order.
+ * Consumes ONLY the canonical `CohortPageAuthorityBundle` — the SAME bundle
+ * the parent v2 prompt renders — so hashed authority == prompted authority
+ * by construction. Deterministic and pure — no DB access, no live item reads.
  */
-export function computeCohortPageInputHash(params: CohortPageInputHashParams): string {
-  const { run, projection, pagePlan, executionTypeAuthority, pageModelAuthority } = params;
-  const memberSkus = projection.members
-    .map(member => member.productSku ?? '')
-    .sort((a, b) => a.localeCompare(b));
-  const members = [...projection.members]
-    .sort((a, b) => (a.productSku ?? '').localeCompare(b.productSku ?? ''))
-    .map(pageAuthorityFromProjectionMember);
-  const pages = [...pagePlan.pages].sort((a, b) => a.id.localeCompare(b.id));
+export function computeCohortPageInputHash(bundle: CohortPageAuthorityBundle): string {
   return hashCanonicalJson({
     version: 1,
     kind: 'coordinated_page',
-    membership: memberSkus,
-    members,
-    executionProductType: executionTypeAuthority ?? {
-      id: run.executionProductTypeId,
-      label: null,
-      confidence: run.productTypeConfidence,
-      outcome: run.productTypeOutcome,
-    },
-    pages,
-    selection: { selectionMode: pagePlan.selectionMode, maxPages: pagePlan.maxPages },
-    promptRuleVersion: PAGE_PROMPT_RULE_VERSION,
-    modelAuthority: pageModelAuthority ?? null,
+    membership: bundle.members.map(member => member.sku),
+    members: bundle.members,
+    executionProductType: bundle.executionTypeAuthority,
+    pages: bundle.pages,
+    selection: bundle.selection,
+    promptRuleVersion: bundle.ruleVersion,
+    modelAuthority: bundle.pageModelAuthority ?? null,
   });
 }

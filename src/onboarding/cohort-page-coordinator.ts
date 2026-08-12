@@ -75,9 +75,9 @@
  * The durable guarantee is NOT "one Page LLM call per cohort revision
  * forever". A crash between transport success and the outputs transaction
  * leaves the AUDITED call durable but NO committed set — a reclaim re-enters
- * and re-coordinates (each invocation is independently audited). Transport-
- * level exactly-once would require provider idempotency keys (out of scope).
- * The precise contract:
+ * and re-coordinates (each invocation is independently audited). Provider
+ * idempotency is out of scope (no provider idempotency keys), so a
+ * pre-commit crash MAY re-invoke the audited transport. The precise contract:
  *
  * - at most one ACTIVE page coordination call at a time (the lease keeper
  *   scopes every in-flight call to the claim owner; a lost claim aborts with
@@ -111,9 +111,10 @@ import { getCohortMemberRunForTitleAudit, COHORT_LEASE_TTL_MS } from '../db/repo
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { titleExecutionTypeAuthorityFromRun } from './cohort-title-hash';
 import {
+  buildCohortPageAuthorityBundle,
   computeCohortPageInputHash,
   pageModelAuthorityFromConfig,
-  pageAuthorityFromProjectionMember,
+  pageAuthorityMemberToSnapshot,
 } from './cohort-page-hash';
 import type { CohortPagePlanAuthority } from './cohort-page-hash';
 import { coordinateCohortPagesCore } from '../classification/cohort-page-coordinator';
@@ -300,17 +301,27 @@ export async function ensureCohortPagesCoordinated(
     selectionMode,
     maxPages,
   };
-  // The P-set (DECISION-A): ALL members — groups AND singletons — unlike the
-  // title kind's multi-item-group-only DECISION-O. Matches the hash's sorted
-  // membership exactly.
-  const pSetSkus = projection.members.map(member => member.productSku ?? '');
-  const inputHash = computeCohortPageInputHash({
+  // PR7 review R1 (B2): ONE canonical authority bundle — the SAME normalized
+  // members, pages, selection, Execution Type authority, model authority, and
+  // rule version feed BOTH the P-hash and the v2 parent prompt. The parent
+  // prompt path builds its products/pages/selection from THIS bundle (never
+  // re-deriving from the raw frozen line context), so hashed authority ==
+  // prompted authority by construction (no duplicated truncation literals, no
+  // order dependence).
+  const authorityBundle = buildCohortPageAuthorityBundle({
     run,
     projection,
+    frozenLineContext,
+    pageCatalog: pagePlan.pages,
     pagePlan,
     executionTypeAuthority,
     pageModelAuthority,
   });
+  // The P-set (DECISION-A): ALL members — groups AND singletons — unlike the
+  // title kind's multi-item-group-only DECISION-O. Matches the bundle's sorted
+  // membership exactly.
+  const pSetSkus = authorityBundle.members.map(member => member.sku);
+  const inputHash = computeCohortPageInputHash(authorityBundle);
 
   // Step 2 — persisted rows are read BEFORE any early return so the
   // expected-empty case can also fail closed on unexpected rows (PR6
@@ -408,8 +419,16 @@ export async function ensureCohortPagesCoordinated(
       );
     }
 
-    const pageHierarchy = pagePlan.pages;
-    const snapshotBySku = new Map(frozenLineContext.productLineItems.map(product => [product.sku, product]));
+    const pageHierarchy = authorityBundle.pages;
+    const selectionMode = authorityBundle.selection.selectionMode;
+    const maxPages = authorityBundle.selection.maxPages;
+    // PR7 review R1 (B2): the group prompt renders the SAME normalized member
+    // slices the P-hash consumed (bundle members — sorted, shared truncation)
+    // converted to the `ProductLineItemSnapshot` shape `buildPrompt` renders.
+    // NEVER re-derives from the mutable/raw frozen line context.
+    const snapshotBySku = new Map(
+      authorityBundle.members.map(member => [member.sku, pageAuthorityMemberToSnapshot(member)]),
+    );
     const memberValues = new Map<string, CoordinatedPageMemberValue>();
     const singletonSkus: string[] = [];
 
@@ -450,6 +469,11 @@ export async function ensureCohortPagesCoordinated(
         {
           assertHeld: () => keeper.assertHeld(),
           afterCoordinatedCall: params.afterCoordinatedCall,
+          // PR7 review R1 (B1): the parent path ALWAYS renders the v2
+          // Execution Type context block (the SAME full authority object the
+          // P-hash consumed). The legacy wrapper passes no opts → v1
+          // byte-identical.
+          executionTypeContext: authorityBundle.executionTypeAuthority,
         },
       );
       for (const sku of skus) {
@@ -471,35 +495,46 @@ export async function ensureCohortPagesCoordinated(
     // modelCall / snapshot mirroring the child's singleton construction
     // (`buildModelCallContext(..., 'page_assignment', 1)`).
     for (const sku of singletonSkus) {
-      const memberProjection = projection.members.find(member => (member.productSku ?? '') === sku);
-      if (!memberProjection) {
+      // PR7 review R1 (B2): the singleton authority comes from the SAME
+      // canonical bundle the P-hash consumed (never a re-derivation).
+      const authority = authorityBundle.members.find(member => member.sku === sku);
+      if (!authority) {
         throw new Error(
           `[CohortPageCoordinator] Singleton member ${sku} has no frozen projection member (run ${run.id}).`,
         );
       }
-      const authority = pageAuthorityFromProjectionMember(memberProjection);
       // Pre-await ownership assertion before the singleton transport.
       keeper.assertHeld();
-      const llmResult = await llmAssignCategoryPages({
-        productName: authority.name,
-        productDescription: authority.description,
-        ocrSummary: {
-          species: authority.species,
-          flavor: authority.flavor,
-          lifeStage: authority.lifeStage,
-          productForm: authority.productForm,
-          healthConcern: authority.healthConcern,
-          productName: null,
-          brand: authority.brand,
+      const llmResult = await llmAssignCategoryPages(
+        {
+          productName: authority.name,
+          productDescription: authority.description,
+          ocrSummary: {
+            species: authority.species,
+            flavor: authority.flavor,
+            lifeStage: authority.lifeStage,
+            productForm: authority.productForm,
+            healthConcern: authority.healthConcern,
+            productName: null,
+            brand: authority.brand,
+          },
+          productType: authorityBundle.executionTypeAuthority.label,
+          pages: pageHierarchy,
+          selectionMode,
+          maxPages,
+          modelPolicy: boundPolicyView,
+          modelCall: singletonModelCallContext,
+          snapshot: memberSnapshot0,
         },
-        productType: executionTypeAuthority.label,
-        pages: pageHierarchy,
-        selectionMode,
-        maxPages,
-        modelPolicy: boundPolicyView,
-        modelCall: singletonModelCallContext,
-        snapshot: memberSnapshot0,
-      });
+        {
+          // PR7 review R1 (B3): the parent-owned singleton transport is pinned
+          // to the SAME protected operation the P-hash claims
+          // ('cohort_page_assignment') so the resolved {provider, model}
+          // equals the hashed model authority — never the legacy
+          // 'page_assignment' route (which all legacy callers keep, unchanged).
+          protectedOperation: 'cohort_page_assignment',
+        },
+      );
       // Crash seam: the singleton transport resolved; simulate a pre-commit
       // crash before any output set is persisted (hardening-B pattern).
       await params.afterCoordinatedCall?.();

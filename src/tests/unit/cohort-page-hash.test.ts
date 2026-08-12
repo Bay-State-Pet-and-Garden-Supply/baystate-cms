@@ -4,12 +4,15 @@ import fs from 'fs';
 import os from 'os';
 import { randomUUID } from 'node:crypto';
 import {
+  buildCohortPageAuthorityBundle,
   computeCohortPageInputHash,
   pageAuthorityFromProjectionMember,
+  pageAuthorityMemberToSnapshot,
   pageModelAuthorityFromConfig,
   PAGE_AUTHORITY_TRUNCATION,
   normalizePageAuthorityString,
 } from '../../onboarding/cohort-page-hash';
+import { buildPrompt, coordinateCohortPagesCore } from '../../classification/cohort-page-coordinator';
 import { titleExecutionTypeAuthorityFromRun } from '../../onboarding/cohort-title-hash';
 import { initDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
@@ -35,10 +38,26 @@ const mocks = {
   getLlmConfigForTask: () => null as Record<string, string> | null,
 };
 
+/** The exact prompt strings the mocked transport received — the parent path's
+ *  transport call (`coordinateCohortPagesCore`) passes the real prompt string
+ *  it would send to the model, so the captured text is the ACTUAL transport
+ *  prompt (review R1 B2/T5). */
+let capturedTransportPrompts: string[] = [];
+
 // Scoped to THIS file; auto-restored after it completes (PR6 review round 2
 // pattern) so co-running with llm-client suites never leaks.
 mock.module('../../onboarding/llm-client', () => ({
   getLlmConfigForTask: () => mocks.getLlmConfigForTask(),
+  callLlmForTaskWithProvenance: (_task: string, prompt: string) => {
+    capturedTransportPrompts.push(prompt);
+    return Promise.resolve({
+      content: '{}',
+      callId: 'permuted-call',
+      provider: 'ollama',
+      model: 'qwen2.5vl',
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    });
+  },
 }));
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -166,9 +185,11 @@ const PAGE_PLAN = {
   maxPages: 5,
 };
 
+type BuildBundleParams = Parameters<typeof buildCohortPageAuthorityBundle>[0];
+
 function makeParams(
-  overrides: Partial<Parameters<typeof computeCohortPageInputHash>[0]> = {},
-): Parameters<typeof computeCohortPageInputHash>[0] {
+  overrides: Partial<BuildBundleParams> = {},
+): BuildBundleParams {
   return {
     run: makeRun(),
     projection: makeProjection([makeMember()]),
@@ -194,29 +215,53 @@ const LABEL_SOURCE = {
   ],
 };
 
-const hash = (params: Parameters<typeof computeCohortPageInputHash>[0]): string =>
-  computeCohortPageInputHash(params);
+// PR7 review R1 (B2): the P-hash consumes the canonical authority bundle — the
+// SAME bundle the parent v2 prompt renders.
+const hash = (params: BuildBundleParams): string =>
+  computeCohortPageInputHash(buildCohortPageAuthorityBundle(params));
 
-/**
- * The rendered authority slice the v2 prompt will produce for ONE member —
- * built through the SAME shared normalization the hash claims, so the parity
- * tests prove hashed authority == rendered authority (hardening-D
- * construction rule).
- */
-function renderAuthoritySlice(member: ExecutionEvidenceProjectionMemberV1): string {
-  const a = pageAuthorityFromProjectionMember(member);
-  return [
-    a.sku,
-    a.name,
-    a.webTitle ?? 'none',
-    a.brand ?? 'unknown',
-    a.description,
-    a.species.join(', '),
-    a.flavor ?? 'none',
-    a.lifeStage ?? 'none',
-    a.productForm ?? 'none',
-    a.healthConcern.join(', '),
-  ].join('\n');
+/** The ACTUAL v2 parent prompt (PR7 review R1 B2/T5): rendered from the
+ *  canonical authority bundle exactly the way the parent transport does —
+ *  bundle members → `ProductLineItemSnapshot[]`, bundle pages/selection, and
+ *  the bundle's Execution Type authority as the v2 type context. */
+function renderParentPrompt(params: BuildBundleParams): string {
+  const bundle = buildCohortPageAuthorityBundle(params);
+  return buildPrompt(
+    {
+      groupId: 'group-parity',
+      products: bundle.members.map(pageAuthorityMemberToSnapshot),
+      pages: bundle.pages,
+      selectionMode: bundle.selection.selectionMode,
+      maxPages: bundle.selection.maxPages,
+    },
+    { executionTypeContext: bundle.executionTypeAuthority },
+  );
+}
+
+/** Drive the ACTUAL parent transport (`coordinateCohortPagesCore`) with the
+ *  bundle-derived products + the bundle's Execution Type authority and return
+ *  the exact prompt string the transport receives. */
+async function transportPromptFor(params: BuildBundleParams): Promise<string> {
+  const bundle = buildCohortPageAuthorityBundle(params);
+  mocks.getLlmConfigForTask = () => ({
+    provider: 'ollama',
+    model: 'qwen2.5vl',
+    apiKey: 'k',
+    baseUrl: 'http://127.0.0.1:11434',
+  });
+  capturedTransportPrompts = [];
+  await coordinateCohortPagesCore(
+    {
+      groupId: 'group-permutation',
+      products: bundle.members.map(pageAuthorityMemberToSnapshot),
+      pages: bundle.pages,
+      selectionMode: bundle.selection.selectionMode,
+      maxPages: bundle.selection.maxPages,
+    },
+    { executionTypeContext: bundle.executionTypeAuthority },
+  );
+  expect(capturedTransportPrompts).toHaveLength(1);
+  return capturedTransportPrompts[0];
 }
 
 let workspacePath: string;
@@ -441,9 +486,20 @@ describe('computeCohortPageInputHash — exclusions: hash ONLY frozen page autho
   });
 });
 
-describe('computeCohortPageInputHash — PARITY: hash authority == rendered authority (PR7 C2 / hardening-D)', () => {
-  it('truncation parity: a suffix-only mutation BEYOND the 200/500/1500 cutoffs changes NEITHER the P-hash NOR the rendered slice', () => {
-    const base = makeParams();
+describe('computeCohortPageInputHash — PARITY: hash authority == rendered authority (PR7 C2 / hardening-D + review R1 B2)', () => {
+  /** A two-member bundle so the rendered parent prompt is a realistic group
+   *  prompt (the production group path always sends >= 2 products). */
+  function twoMembers(overrides: Partial<BuildBundleParams> = {}): BuildBundleParams {
+    const params = makeParams(overrides);
+    params.projection = makeProjection([
+      params.projection.members[0],
+      makeMember({ onboardingItemId: 'item-2', productSku: 'SKU-2' }),
+    ]);
+    return params;
+  }
+
+  it('truncation parity: a suffix-only mutation BEYOND the 200/500/1500 cutoffs changes NEITHER the P-hash NOR the FULL rendered v2 parent prompt', () => {
+    const base = twoMembers();
 
     // Brand cut at 200 chars.
     const longBrand = `Brand-${'x'.repeat(250)}`;
@@ -452,7 +508,7 @@ describe('computeCohortPageInputHash — PARITY: hash authority == rendered auth
     const b2 = clone(b1);
     b2.projection.members[0].spreadsheetIdentity.brandHint = `${longBrand.slice(0, 200)}-DIFFERENT-SUFFIX`;
     expect(hash(b2)).toBe(hash(b1));
-    expect(renderAuthoritySlice(b2.projection.members[0])).toBe(renderAuthoritySlice(b1.projection.members[0]));
+    expect(renderParentPrompt(b2)).toBe(renderParentPrompt(b1));
 
     // Name cut at 500 chars.
     const longName = `Name-${'y'.repeat(550)}`;
@@ -461,7 +517,7 @@ describe('computeCohortPageInputHash — PARITY: hash authority == rendered auth
     const n2 = clone(n1);
     n2.projection.members[0].spreadsheetIdentity.name = `${longName.slice(0, 500)}-DIFFERENT-SUFFIX`;
     expect(hash(n2)).toBe(hash(n1));
-    expect(renderAuthoritySlice(n2.projection.members[0])).toBe(renderAuthoritySlice(n1.projection.members[0]));
+    expect(renderParentPrompt(n2)).toBe(renderParentPrompt(n1));
 
     // Web title cut at 500 chars.
     const longWebTitle = `Web-${'z'.repeat(550)}`;
@@ -470,7 +526,7 @@ describe('computeCohortPageInputHash — PARITY: hash authority == rendered auth
     const w2 = clone(w1);
     w2.projection.members[0].extraction.title = `${longWebTitle.slice(0, 500)}-DIFFERENT-SUFFIX`;
     expect(hash(w2)).toBe(hash(w1));
-    expect(renderAuthoritySlice(w2.projection.members[0])).toBe(renderAuthoritySlice(w1.projection.members[0]));
+    expect(renderParentPrompt(w2)).toBe(renderParentPrompt(w1));
 
     // Description cut at 1500 chars.
     const longDescription = `Description-${'d'.repeat(1600)}`;
@@ -479,15 +535,50 @@ describe('computeCohortPageInputHash — PARITY: hash authority == rendered auth
     const d2 = clone(d1);
     d2.projection.members[0].extraction.description = `${longDescription.slice(0, 1500)}-DIFFERENT-SUFFIX`;
     expect(hash(d2)).toBe(hash(d1));
-    expect(renderAuthoritySlice(d2.projection.members[0])).toBe(renderAuthoritySlice(d1.projection.members[0]));
+    expect(renderParentPrompt(d2)).toBe(renderParentPrompt(d1));
   });
 
-  it('a within-cutoff mutation changes BOTH the P-hash AND the rendered slice', () => {
-    const base = makeParams();
+  it('a within-cutoff mutation changes BOTH the P-hash AND the full rendered v2 prompt', () => {
+    const base = twoMembers();
     const changed = clone(base);
     changed.projection.members[0].spreadsheetIdentity.brandHint = 'OtherBrand';
     expect(hash(changed)).not.toBe(hash(base));
-    expect(renderAuthoritySlice(changed.projection.members[0])).not.toBe(renderAuthoritySlice(base.projection.members[0]));
+    expect(renderParentPrompt(changed)).not.toBe(renderParentPrompt(base));
+  });
+
+  it('PERMUTATION parity (review R1 B2): member/page/OCR-array/species order changes NEITHER the P-hash NOR the actual transport prompt string', async () => {
+    const memberA = makeMember({ onboardingItemId: 'item-A', productSku: 'SKU-A' });
+    memberA.spreadsheetIdentity.name = 'Acme Pate Chicken';
+    memberA.extraction.title = 'Acme Pate Chicken 5.5oz';
+    memberA.extraction.description = 'Grain-free wet food for adult cats.';
+    memberA.extraction.ocr.packagingOcrData!.species = ['Cat', 'Kitten'];
+    memberA.extraction.ocr.packagingOcrData!.healthConcernFunction = ['Hairball', 'Skin'];
+    const memberB = makeMember({ onboardingItemId: 'item-B', productSku: 'SKU-B' });
+    memberB.spreadsheetIdentity.name = 'Acme Pate Salmon';
+    memberB.extraction.title = 'Acme Pate Salmon 5.5oz';
+    memberB.extraction.description = 'Salmon recipe wet food for adult cats.';
+    memberB.extraction.ocr.packagingOcrData!.species = ['Kitten', 'Cat'];
+    memberB.extraction.ocr.packagingOcrData!.healthConcernFunction = ['Skin', 'Hairball'];
+
+    const base = makeParams({ projection: makeProjection([memberA, memberB]) });
+    const baseHash = hash(base);
+    const basePrompt = await transportPromptFor(makeParams({ projection: makeProjection([memberA, memberB]) }));
+    expect(basePrompt).toContain('EXECUTION PRODUCT TYPE CONTEXT:');
+    expect(basePrompt).toContain('SKU SKU-A');
+    expect(basePrompt).toContain('SKU SKU-B');
+
+    // Permute EVERYTHING: member order, page order, species array order, OCR
+    // health-concern array order.
+    const permutedMemberA = clone(memberA);
+    permutedMemberA.extraction.ocr.packagingOcrData!.species = ['Kitten', 'Cat'];
+    permutedMemberA.extraction.ocr.packagingOcrData!.healthConcernFunction = ['Skin', 'Hairball'];
+    const permuted = makeParams({
+      projection: makeProjection([clone(memberB), permutedMemberA]),
+      pagePlan: { ...PAGE_PLAN, pages: [...PAGE_PLAN.pages].reverse() },
+    });
+    expect(hash(permuted)).toBe(baseHash);
+    const permutedPrompt = await transportPromptFor(permuted);
+    expect(permutedPrompt).toBe(basePrompt);
   });
 
   it('the shared truncation constants mirror the prompt cutoffs exactly', () => {
