@@ -7,7 +7,16 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../classification/config-loader', () => ({ loadClassificationConfig: vi.fn() }));
-vi.mock('../../classification/curation-target-resolver', () => ({ resolveEnabledTargets: vi.fn() }));
+vi.mock('../../classification/curation-target-resolver', () => ({
+  resolveEnabledTargets: vi.fn(),
+  resolveTargetsFromSnapshot: vi.fn(() => ({
+    pages: [{
+      config: { id: 'pages', kind: 'page', label: 'Pages', enabled: true, selectionMode: 'multiple' },
+      options: [],
+    }],
+    productTypes: [],
+  })),
+}));
 vi.mock('../../classification/detail-enrichment', () => ({ enrichProductDetails: vi.fn(() => []) }));
 vi.mock('../../classification/curation-target-ranker', () => ({ llmRankOptions: vi.fn() }));
 vi.mock('../../classification/cohort-page-coordinator', () => ({
@@ -27,6 +36,7 @@ vi.mock('../../classification/page-assignment-llm', () => ({
 
 vi.mock('../../classification/runtime-snapshot', () => ({ buildModelCallContext: vi.fn(() => null) }));
 import { processPageTarget, materializeCoordinatedPages } from '../../classification/curation-target-processor';
+import { categoryPageProposalsStage } from '../../classification/stages/category-page-proposals';
 
 const products = [
   { sku: 'SKU1', name: 'Acme Cat Pate Chicken', webTitle: null, brand: 'Acme', description: '', species: ['Cat'], flavor: 'Chicken', lifeStage: null, productForm: 'Pate', healthConcern: [] },
@@ -206,6 +216,34 @@ describe('PR7 C5 — materializeCoordinatedPages (durable parent outputs, zero P
     const result = await materializeCoordinatedPages(target as any, input, materializedContext);
     expect(result.proposals).toHaveLength(1);
     expect(result.proposals[0].productSku).toBe('SKU1');
+    expect(mocks.coordinate).not.toHaveBeenCalled();
+    expect(mocks.perItem).not.toHaveBeenCalled();
+  });
+
+  it('PR7 review R2 (F3.3): expected-empty (pageCoordinationAbsent) — the stage abstains with the clean legacy reason, NO console.warn, zero Page LLM calls', async () => {
+    const warns: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: any[]) => {
+      warns.push(args.map(String).join(' '));
+    });
+    try {
+      const stageContext: StageContext = {
+        ...materializedContext,
+        // The parent page op chose expected-empty (page target enabled but NO
+        // verified pages): the coordinatedPages map is empty BY DESIGN and
+        // pageCoordinationAbsent marks that — the child must NOT warn about a
+        // missing parent page output.
+        coordinatedPages: new Map(),
+        pageCoordinationAbsent: true,
+      };
+      const result = await categoryPageProposalsStage.execute(input, stageContext);
+      expect(result.status).toBe('abstained');
+      if (result.status === 'abstained') {
+        expect(result.reason).toBe('No verified store pages available. Page assignment requires a verified ShopSite Pages import.');
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(warns).toHaveLength(0);
     expect(mocks.coordinate).not.toHaveBeenCalled();
     expect(mocks.perItem).not.toHaveBeenCalled();
   });

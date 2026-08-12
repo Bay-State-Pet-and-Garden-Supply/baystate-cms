@@ -123,6 +123,16 @@ export interface StageContext {
    * result into the existing proposal shape with ZERO Page LLM calls.
    */
   coordinatedPages?: Map<string, CoordinatedPageMemberValue>;
+  /**
+   * PR7 review R2 (F3.3): true when the parent page op chose EXPECTED-EMPTY
+   * (page target enabled but NO verified pages — DECISION-C config-level
+   * absence): `coordinatedPages` is an empty map by design and the
+   * `category_page_proposals` stage abstains with the clean legacy reason
+   * ('No verified store pages available...') instead of warning about a
+   * missing parent page output. Absent for legacy/shadow and normal active
+   * cohort mode.
+   */
+  pageCoordinationAbsent?: boolean;
   /** Pre-computed coordinated title from cohort LLM call. When present,
    *  name_consolidation uses this instead of making its own LLM call.
    *  PR6 (issue #30): in prepared-cohort (active cohort) mode this comes

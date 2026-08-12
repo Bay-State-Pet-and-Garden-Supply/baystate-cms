@@ -542,6 +542,10 @@ export async function curateItemWithPipeline(
       // reviewed-Type gate and both LLM paths and MATERIALIZES the stored
       // result with ZERO Page LLM calls.
       coordinatedPages: preparedCohort?.coordinatedPages,
+      // PR7 review R2 (F3.3): expected-empty marker — the child page stage
+      // abstains with the clean legacy reason instead of warning about a
+      // missing parent page output.
+      pageCoordinationAbsent: preparedCohort?.pageCoordinationAbsent,
     };
 
     // Initial evidence starts empty — evidence_extraction stage handles

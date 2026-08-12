@@ -194,12 +194,18 @@ function assertModelCallLinkage(options: {
             `with non-terminal/non-success status "${row.status}"; only durable success calls can be linked.`,
         );
       }
-      // PR7 C6b: ONLY the run/snapshot mismatch may be exempted, and only for
-      // a proposal whose call id resolves to a durable cohort output row of
-      // the SAME cohort run + SKU (the parent op's ordinal-0-bound audited
-      // call). Everything else fails exactly as before.
+      // PR7 C6b + review R2 (F3-2): ONLY the run/snapshot mismatch may be
+      // exempted, and only for a CATEGORY_PAGE proposal whose call id
+      // resolves to a durable `coordinated_page` output row of the SAME
+      // cohort run + SKU (the parent op's ordinal-0-bound audited call). A
+      // category_page proposal carrying a curated_title call id, or a
+      // non-category_page proposal carrying a coordinated_page call id, must
+      // FAIL CLOSED exactly as before.
       if (row.run_id !== options.runId || row.snapshot_hash !== options.snapshotHash) {
-        if (!cohortCoordinatedOutputLinkage(options.runId, callId, proposal.productSku)) {
+        if (
+          proposal.proposalType !== 'category_page' ||
+          !cohortCoordinatedOutputLinkage(options.runId, callId, proposal.productSku)
+        ) {
           throw new Error(
             `Model call linkage failed: proposal "${proposal.id}" references model call "${callId}" ` +
               `that does not belong to run "${options.runId}" / snapshot "${options.snapshotHash}".`,
@@ -222,6 +228,10 @@ function assertModelCallLinkage(options: {
  * member child run (DECISION-N), and every member's durable row inherits that
  * call id. Any call id that does NOT resolve through this query fails exactly
  * as before (non-cohort runs, foreign runs/cohorts, wrong SKU, missing row).
+ * PR7 review R2 (F3-2): the resolved output row MUST be output_kind
+ * 'coordinated_page' — a curated_title row (or any other kind) never
+ * satisfies the page exemption, so a category_page proposal carrying a
+ * title-op call id fails closed.
  */
 function cohortCoordinatedOutputLinkage(
   runId: string,
@@ -234,6 +244,7 @@ function cohortCoordinatedOutputLinkage(
      FROM classification_runs c
      JOIN classification_cohort_outputs o ON o.cohort_run_id = c.cohort_run_id
      WHERE c.id = ? AND c.cohort_run_id IS NOT NULL
+       AND o.output_kind = 'coordinated_page'
        AND o.model_call_id = ? AND o.product_sku = ?
      LIMIT 1`,
   ).get(runId, callId, productSku);

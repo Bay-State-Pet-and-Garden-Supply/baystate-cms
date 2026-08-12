@@ -1530,14 +1530,20 @@ describe('Classification Pipeline Integration', () => {
     return cohortId;
   }
 
-  /** Seed a durable `coordinated_page` output row carrying `callId` for
-   *  `memberSku` under `parentRunId`. */
-  function seedCohortOutputRow(wsId: string, parentRunId: string, memberSku: string, callId: string): void {
+  /** Seed a durable cohort output row carrying `callId` for `memberSku` under
+   *  `parentRunId` with the given `outputKind` (default 'coordinated_page'). */
+  function seedCohortOutputRow(
+    wsId: string,
+    parentRunId: string,
+    memberSku: string,
+    callId: string,
+    outputKind = 'coordinated_page',
+  ): void {
     getDb().run(
       `INSERT INTO classification_cohort_outputs
          (id, workspace_id, cohort_run_id, output_kind, product_sku, input_hash, output_value_json, model_call_id, created_at)
-       VALUES (?, ?, ?, 'coordinated_page', ?, ?, '{}', ?, ?)`,
-      [randomUUID(), wsId, parentRunId, memberSku, 'a'.repeat(64), callId, new Date().toISOString()],
+       VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+      [randomUUID(), wsId, parentRunId, outputKind, memberSku, 'a'.repeat(64), callId, new Date().toISOString()],
     );
   }
 
@@ -1843,6 +1849,120 @@ describe('Classification Pipeline Integration', () => {
     // NO output row is seeded for this member/call.
 
     await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b (PR7 review R2 F3-2): FAILS when the output row is a curated_title (wrong output_kind) — even for a category_page proposal', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-TITLE-KIND';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // The only durable output row is a CURATED_TITLE row carrying the call id
+    // (a title-op call id) — the page exemption must NOT resolve through it.
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, callId, 'curated_title');
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b (PR7 review R2 F3-2): FAILS for a NON-category_page proposal even when a coordinated_page output row resolves the call id', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-FIELD-KIND';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // A durable coordinated_page row exists and resolves the call id — but
+    // the proposal is a FIELD_ASSIGNMENT, so the exemption must NOT apply.
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, callId);
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: memberRun.id,
+            productSku: memberSku,
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [callId],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
       workspacePath,
       workspaceId,
       runId: memberRun.id,

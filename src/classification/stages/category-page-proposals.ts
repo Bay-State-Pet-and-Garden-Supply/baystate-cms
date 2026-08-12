@@ -53,6 +53,17 @@ export const categoryPageProposalsStage: StageDefinition = {
     // shape with ZERO Page LLM calls. Legacy/shadow/non-cohort runs keep the
     // reviewed-Type gate + the coordinator/singleton LLM paths byte-identical.
     if (context.coordinatedPages !== undefined) {
+      // PR7 review R2 (F3.3): the parent page op chose EXPECTED-EMPTY (page
+      // target enabled but NO verified pages — DECISION-C config-level
+      // absence) and wrote no output rows. Abstain with the clean legacy
+      // reason — never a 'missing parent page output' warning, never an LLM
+      // call.
+      if (context.pageCoordinationAbsent === true) {
+        return {
+          status: 'abstained',
+          reason: 'No verified store pages available. Page assignment requires a verified ShopSite Pages import.',
+        };
+      }
       const result = await materializeCoordinatedPages(resolved.pages[0], input, context);
       if (result.proposals.length === 0) {
         return {

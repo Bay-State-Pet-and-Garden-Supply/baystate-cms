@@ -2985,16 +2985,29 @@ describe('PR7 C6 — execution_product_type dependency on materialized page prop
     const summary = await processCohort(finalized, wsPath, workspaceId);
     expect(summary.parentStatus).toBe('completed');
 
-    // Reviewed-driven member: field_assignment → reviewed_product_type rows;
-    // category_page → NO type dependency rows (pre-PR7 rule preserved).
+    // PR7 review R2 (F3-1/P1-D): the reviewed-driven member's field_assignment
+    // proposals carry reviewed_product_type rows (effective source follows
+    // reviewed — UNCHANGED), while its materialized category_page proposals
+    // now carry execution_product_type rows — the parent page decision ALWAYS
+    // consumed the Execution Product Type as page context, so the page
+    // dependency follows the parent Execution Type REGARDLESS of
+    // effectiveType.source.
     const reviewedMember = findItemById(items[0].id)!;
     expect(reviewedMember.stageStatus).toBe('completed');
     expect(reviewedMember.curationData!.effectiveProductType).toEqual({ id: 'dry-dog-food', source: 'reviewed' });
     const reviewedProposals = reviewedMember.curationData!.classificationProposals;
     const reviewedPages = reviewedProposals.filter(proposal => proposal.proposalType === 'category_page');
     expect(reviewedPages.length).toBeGreaterThan(0);
+    const pageExecutionHash = hashCanonicalJson({
+      executionProductTypeId: finalized.executionProductTypeId!,
+      productTypeConfidence: finalized.productTypeConfidence!,
+    });
     for (const proposal of reviewedPages) {
-      expect(listDependenciesForProposal(proposal.id)).toHaveLength(0);
+      const deps = listDependenciesForProposal(proposal.id);
+      expect(deps).toHaveLength(1);
+      expect(deps[0].dependencyKind).toBe('execution_product_type');
+      expect(deps[0].dependencyTargetId).toBe('dry-dog-food');
+      expect(deps[0].dependencyValueHash).toBe(pageExecutionHash);
     }
     for (const proposal of reviewedProposals.filter(proposal => proposal.proposalType === 'field_assignment')) {
       const deps = listDependenciesForProposal(proposal.id);

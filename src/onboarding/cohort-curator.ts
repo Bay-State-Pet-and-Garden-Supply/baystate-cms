@@ -1603,6 +1603,15 @@ export interface PreparedCohortContext {
    */
   coordinatedPages?: Map<string, CoordinatedPageMemberValue>;
   /**
+   * PR7 review R2 (F3.3): true when the parent page op chose EXPECTED-EMPTY
+   * (page target enabled but NO verified pages — DECISION-C config-level
+   * absence) and therefore wrote NO output rows (`coordinatedPages` is an
+   * empty map BY DESIGN). The child `category_page_proposals` stage abstains
+   * with the clean legacy reason instead of warning about a missing parent
+   * page output. Absent for legacy/shadow and normal active cohort mode.
+   */
+  pageCoordinationAbsent?: boolean;
+  /**
    * PR6 review fix (SHOULD-FIX 2): per-SKU ACTUAL frozen `groupByProductLine`
    * group sizes (the exact grouping the parent title op's coordinator uses),
    * attached from `FrozenProductLineContext`. The member materialization gates
@@ -2339,6 +2348,13 @@ export async function processCohort(
       // config-level absence). The `category_page_proposals` stage materializes
       // these with ZERO Page LLM calls.
       prepared.coordinatedPages = coordinatedPages;
+      // PR7 review R2 (F3.3): expected-empty marker — when the parent page op
+      // produced NO output rows (page target enabled but no verified pages),
+      // the child stage abstains with the clean legacy reason instead of
+      // warning about a missing parent output. The parent op's contract makes
+      // the map empty IFF it chose expected-empty (a complete set always has a
+      // row per member).
+      prepared.pageCoordinationAbsent = coordinatedPages.size === 0;
 
       // Scoped ownership-guarded lease keeper around the long-awaited member
       // pipeline (PR3 hardening A2): the parent lease is renewed on a TTL/3
@@ -2420,25 +2436,26 @@ export async function processCohort(
         //   - `field_assignment` proposals ALWAYS (the PR5 effective type
         //     drives `attribute_applicability` /
         //     `product_attribute_proposals`);
-        //   - `category_page` proposals ONLY under execution-driven active-
-        //     cohort mode (PR7 C6, DECISION-E): the parent Page op consumes
-        //     the cohort Execution Product Type as page context, so the
-        //     materialized page decision IS downstream of the type.
+        //   - `category_page` proposals ONLY under active-cohort mode WITH a
+        //     parent Execution Product Type (PR7 C6 + review R2 F3-1/P1-D):
+        //     the parent Page op consumes the cohort Execution Product Type
+        //     as page context, so the materialized page decision IS
+        //     downstream of the type — REGARDLESS of `effectiveType.source`
+        //     (a member whose compatible reviewed type won the effective
+        //     resolution still has its page decision driven by the parent
+        //     Execution Type).
         // Under each source:
         //   - source `execution` -> one `execution_product_type` row per
-        //     stamped proposal (field_assignment AND, in active cohort mode,
-        //     category_page), target = the execution type id, value hash =
-        //     hashCanonicalJson({executionProductTypeId,
+        //     field_assignment proposal, target = the execution type id,
+        //     value hash = hashCanonicalJson({executionProductTypeId,
         //     productTypeConfidence}) (unchanged PR4 tuple — the SAME hash
         //     shape for both proposal kinds);
         //   - source `reviewed` -> one `reviewed_product_type` row per
-        //     field_assignment proposal ONLY (category_page stays UNSTAMPED:
-        //     reviewed-driven runs keep today's behavior — Category Page
-        //     authority remains review-only there), target = the reviewed
-        //     type id (= the effective id — reviewed-first resolution, so the
-        //     reviewed id wins over the execution id), value hash =
+        //     field_assignment proposal ONLY (target = the reviewed type id =
+        //     the effective id — reviewed-first resolution, so the reviewed
+        //     id wins over the execution id), value hash =
         //     hashCanonicalJson({reviewedProductTypeId});
-        //   - source `none` -> no rows.
+        //   - source `none` -> no field rows.
         // `primary_product_type` / `configuration_gap` /
         // `reviewable_abstention` proposals get NO type dependency rows: the
         // primary-product-type proposal is proposed from member evidence and
@@ -2453,6 +2470,8 @@ export async function processCohort(
           effectiveType?.source === 'execution' && effectiveType.id !== null && execType !== undefined;
         const reviewedDriven = effectiveType?.source === 'reviewed' && effectiveType.id !== null;
         if (executionDriven || reviewedDriven) {
+          // `field_assignment` follows `effectiveType.source` EXACTLY as
+          // today (unchanged PR5 behavior).
           const dependencyKind: 'execution_product_type' | 'reviewed_product_type' =
             executionDriven ? 'execution_product_type' : 'reviewed_product_type';
           const dependencyTargetId = effectiveType!.id!;
@@ -2462,23 +2481,45 @@ export async function processCohort(
                 productTypeConfidence: execType!.confidence,
               })
             : hashCanonicalJson({ reviewedProductTypeId: dependencyTargetId });
-          // PR7 C6: `category_page` proposals join the stamping set ONLY when
-          // execution-driven (active cohort mode — the materializer ran); a
-          // reviewed-driven run keeps the pre-PR7 rule where Category Page
-          // proposals are never type-stamped.
-          const stampableProposalTypes: string[] = ['field_assignment'];
-          if (executionDriven) stampableProposalTypes.push('category_page');
-          const typePlaceholders = stampableProposalTypes.map(() => '?').join(', ');
-          const childStampedRows = getDb().query(
-            `SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type IN (${typePlaceholders})`,
-          ).all(childRun.id, ...stampableProposalTypes) as Array<{ id: string }>;
-          for (const proposalRow of childStampedRows) {
+          const fieldRows = getDb().query(
+            'SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = ?',
+          ).all(childRun.id, 'field_assignment') as Array<{ id: string }>;
+          for (const proposalRow of fieldRows) {
             insertProposalDependency({
               workspaceId,
               proposalId: proposalRow.id,
               dependencyKind,
               dependencyTargetId,
               dependencyValueHash,
+            });
+          }
+        }
+        // PR7 review R2 (F3-1 / P1-D): `category_page` proposals in ACTIVE
+        // COHORT mode carry the `execution_product_type` dependency whenever
+        // the parent Execution Product Type exists (`execType` non-null) AND
+        // the parent page op produced outputs (`prepared.coordinatedPages`
+        // present) — REGARDLESS of `effectiveType.source`. The effective
+        // resolver is reviewed-first; a member with a compatible reviewed
+        // type used to lose the page dependency even though the parent page
+        // decision ALWAYS consumed the Execution Type as page context. The
+        // value hash is the SAME {executionProductTypeId,
+        // productTypeConfidence} tuple field_assignment uses under an
+        // execution source.
+        if (execType !== undefined && execType.id !== null && prepared.coordinatedPages !== undefined) {
+          const pageValueHash = hashCanonicalJson({
+            executionProductTypeId: execType.id,
+            productTypeConfidence: execType.confidence,
+          });
+          const pageRows = getDb().query(
+            'SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = ?',
+          ).all(childRun.id, 'category_page') as Array<{ id: string }>;
+          for (const proposalRow of pageRows) {
+            insertProposalDependency({
+              workspaceId,
+              proposalId: proposalRow.id,
+              dependencyKind: 'execution_product_type',
+              dependencyTargetId: execType.id,
+              dependencyValueHash: pageValueHash,
             });
           }
         }
