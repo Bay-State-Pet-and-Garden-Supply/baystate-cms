@@ -718,6 +718,40 @@ describe('PR11 C4 — a blocked member in the promotion stage is refused per-ite
     // The blocked member's run pointer is untouched (blocked-not-destroyed).
     expect(findItemById(blockedMember.id)!.curationData!.classificationRunId).toBe(blockedRunId);
   });
+
+  it('P2 (R1): a blocked member produces NO image side effects — the pre-pass downloads images only for gate-passing items', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // Only the BLOCKED member carries an HTTP image URL (the promotable
+    // fixture uses relative paths that never hit fetch). Post-fix the pre-pass
+    // skips the blocked member entirely, so ZERO fetches occur; pre-fix the
+    // blocked member's URL would have been downloaded.
+    const fixture = {
+      '100000000001': promotableExtraction('100000000001', { _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Woof', title: 'Purina Pro Plan Dry Dog Food Chicken 5 lb' }),
+      '100000000002': promotableExtraction('100000000002', { _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Woof', title: 'Purina Pro Plan Dry Dog Food Beef 10 lb', brand: 'Blue Buffalo', primaryImage: 'https://img.example.com/b/primary.jpg', additionalImages: ['https://img.example.com/b/alt1.jpg'] }),
+      '100000000003': promotableExtraction('100000000003', { _name: 'Purina Pro Plan Dry Dog Food Salmon 5 lb', _brandHint: 'Woof', title: 'Purina Pro Plan Dry Dog Food Salmon 5 lb' }),
+    };
+    const prepared = prepareActiveV2Workspace(workspaceId, wsPath, fixture);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    await processCohort(run, wsPath, workspaceId);
+    const items = prepared.items;
+    for (const item of items) decideAllProposals(findItemById(item.id)!);
+    placeInPromotion(items.map(item => findItemById(item.id)!));
+
+    const fetchMock = mock(async () => { throw new Error('network blocked'); });
+    const originalFetch = globalThis.fetch;
+    (globalThis as { fetch: unknown }).fetch = fetchMock;
+    try {
+      const result = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
+      // The blocked member is refused; its HTTP image URL was NEVER fetched
+      // (the pre-pass skipped it before any download) — zero image side
+      // effects for the refused item.
+      expect(result.failures).toHaveLength(1);
+      expect(result.failures[0].itemId).toBe(findItemById(items[1].id)!.id);
+      expect(fetchMock.mock.calls.length).toBe(0);
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
 });
 
 describe('PR11 C4 — a cohort child of a SUPERSEDED parent never promotes (parent_superseded)', () => {
@@ -752,7 +786,7 @@ describe('PR11 C4 — a cohort child of a SUPERSEDED parent never promotes (pare
 });
 
 describe('PR11 C4 — stale proposals: an accepted type dependency whose target no longer matches the current effective type refuses; matching and universal proposals promote', () => {
-  it('mutated parent execution type => execution_product_type dependency mismatch refuses stale_proposal', async () => {
+  it('reviewed-first authority: parent execution-type mutation does NOT stale a member WITH a matching reviewed type — and DOES stale a member with NO reviewed type (execution fills the gap)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const prepared = prepareActiveV2Workspace(workspaceId, wsPath, COHERENT_PROMOTABLE);
     const run = await freezeActiveCohort(workspaceId, wsPath);
@@ -762,7 +796,7 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
     const items = prepared.items;
 
     // The members' proposals were stamped with execution_product_type target
-    // 'dog-food-dry'; the parent authority drifts to 'dog-food-wet'.
+    // 'dog-food-dry'. Mutate the parent authority to 'dog-food-wet'.
     getDb().run(
       'UPDATE classification_cohort_runs SET execution_product_type_id = ? WHERE id = ?',
       ['dog-food-wet', run.id],
@@ -773,25 +807,45 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
     const deps = listDependenciesForProposal(flavorProposal.id);
     expect(deps.some(d => d.dependencyKind === 'execution_product_type' && d.dependencyTargetId === 'dog-food-dry')).toBe(true);
 
+    // PART 1 — a member WITH an accepted reviewed type (dog-food-dry): the
+    // reviewed authority wins (PR11 R1 P1-A), the deps still match, promotion
+    // proceeds — the parent mutation alone is NOT a stale signal.
     for (const item of items) decideAllProposals(findItemById(item.id)!);
     placeInPromotion(items.map(item => findItemById(item.id)!));
+    const withReviewed = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
+    expect(withReviewed.failures).toHaveLength(0);
+    expect(withReviewed.count).toBe(3);
 
-    const result = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
-    expect(result.count).toBe(0);
-    expect(result.failures).toHaveLength(3);
-    for (const failure of result.failures) {
+    // PART 2 — a member with NO reviewed type (its PT proposal carries no
+    // accepted decision): the Execution Type fills the gap (first-pass
+    // semantics), so the mutated parent makes the deps STALE.
+    // Re-set the member to a fresh promotion attempt: strip the PT decision.
+    for (const item of items) {
+      const member = findItemById(item.id)!;
+      const runId = member.curationData!.classificationRunId!;
+      const ptProposal = getDb().query(
+        "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'primary_product_type'",
+      ).get(runId) as { id: string } | undefined;
+      if (ptProposal) {
+        getDb().run('DELETE FROM classification_proposal_decisions WHERE proposal_id = ?', [ptProposal.id]);
+        getDb().run("UPDATE classification_proposals SET status = 'pending' WHERE id = ?", [ptProposal.id]);
+      }
+    }
+    const retry = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
+    expect(retry.count).toBe(0);
+    expect(retry.failures).toHaveLength(3);
+    for (const failure of retry.failures) {
       expect(failure.error).toContain('stale');
       expect(failure.error).toContain('execution_product_type');
       expect(failure.error).toContain('dog-food-wet');
     }
-    expect(result.changeSetId).toBeNull();
+    expect(retry.changeSetId).toBeNull();
   });
 
   it('a coherent active-cohort member promotes (matching dependency => draft created)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const prepared = prepareActiveV2Workspace(workspaceId, wsPath, COHERENT_PROMOTABLE);
-    const run = await freezeActiveCohort(workspaceId, wsPath);
-    const summary = await processCohort(run, wsPath, workspaceId);
+    const run = await freezeActiveCohort(workspaceId, wsPath);    const summary = await processCohort(run, wsPath, workspaceId);
     expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
     const items = prepared.items;
     for (const item of items) decideAllProposals(findItemById(item.id)!);
@@ -806,6 +860,59 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
       expect(drafts).toHaveLength(1);
       expect(findItemById(item.id)!.stageStatus).toBe('completed');
     }
+  });
+
+  it('P1-A E2E (R1): a reviewer-REVISED primary_product_type beats the frozen execution type — execution-stamped deps become STALE and promotion refuses', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const prepared = prepareActiveV2Workspace(workspaceId, wsPath, COHERENT_PROMOTABLE);
+    const run = await freezeActiveCohort(workspaceId, wsPath);
+    expect(run.executionProductTypeId).toBe('dog-food-dry');
+    const summary = await processCohort(run, wsPath, workspaceId);
+    expect(['completed', 'completed_with_abstentions']).toContain(summary.parentStatus);
+    const items = prepared.items;
+    const member = findItemById(items[0].id)!;
+    const runId = member.curationData!.classificationRunId!;
+
+    // Accept every proposal, then REVISE the primary_product_type target to
+    // wet-dog-food (the latest live decision wins — paired revisedTargetId,
+    // exactly what proposal-review-service normalizes a reviewer correction
+    // into).
+    decideAllProposals(member);
+    const ptProposal = getDb().query(
+      "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'primary_product_type'",
+    ).get(runId) as { id: string } | undefined;
+    expect(ptProposal).toBeTruthy();
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions
+         (id, proposal_id, decision, decision_key, revised_target_id, has_revised_target, created_at)
+       VALUES (?, ?, 'accepted', ?, ?, 1, ?)`,
+      [`c11-pt-revised-${runId}`, ptProposal!.id, `revised-key-${ptProposal!.id}`, 'dog-food-wet', new Date().toISOString()],
+    );
+    for (const item of items.slice(1)) decideAllProposals(findItemById(item.id)!);
+    placeInPromotion(items.map(item => findItemById(item.id)!));
+
+    // The member's execution-stamped flavor dependency claims dog-food-dry
+    // while the reviewed authority is now dog-food-wet => STALE.
+    const flavorProposal = [...findItemById(items[0].id)!.curationData!.classificationProposals]
+      .find(p => p.proposalType === 'field_assignment' && p.targetId === 'flavor')!;
+    expect(listDependenciesForProposal(flavorProposal.id)
+      .some(d => d.dependencyKind === 'execution_product_type' && d.dependencyTargetId === 'dog-food-dry')).toBe(true);
+
+    const result = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
+    // The revised member refuses stale_proposal; the siblings (reviewed type
+    // dry matching their execution-stamped deps) promote.
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0].itemId).toBe(findItemById(items[0].id)!.id);
+    expect(result.failures[0].error).toContain('stale');
+    expect(result.failures[0].error).toContain('execution_product_type');
+    expect(result.failures[0].error).toContain('dog-food-dry');
+    expect(result.count).toBe(2);
+    expect(listChangeSetItems(result.changeSetId!)
+      .filter(ci => ci.sku === '100000000001')).toHaveLength(0);
+    expect(listChangeSetItems(result.changeSetId!)
+      .filter(ci => ci.sku === '100000000002')).toHaveLength(1);
+    expect(listChangeSetItems(result.changeSetId!)
+      .filter(ci => ci.sku === '100000000003')).toHaveLength(1);
   });
 
   it('a universal-attribute proposal (NO dependency row) is never stale and promotes', async () => {

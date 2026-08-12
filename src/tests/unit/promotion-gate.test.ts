@@ -373,12 +373,75 @@ describe('PR11 C1 — validatePromotionGate (pure)', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('semantic_validation_unavailable');
   });
+
+  // ── PR11 review R1 (P1-B): independent terminal authority ───────────────
+
+  it('R1: a NON-TERMINAL child run is refused (run_not_completed) even when semantic + parent checks would pass', () => {
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ status: 'running', cohortRunId: 'parent-1' }),
+      parentRun: cohortRun(),
+      curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('run_not_completed');
+      expect(result.reason).toContain('running');
+    }
+  });
+
+  it('R1: a cross-workspace parent is refused (workspace_mismatch) — never this item\'s authority', () => {
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ cohortRunId: 'parent-1' }),
+      parentRun: cohortRun({ workspaceId: 'ws-OTHER' }),
+      curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('workspace_mismatch');
+      expect(result.reason).toContain('ws-OTHER');
+    }
+  });
+
+  it('R1: a completed child with a same-workspace terminal parent still passes the authority checks (regression guard)', () => {
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ cohortRunId: 'parent-1' }),
+      parentRun: cohortRun(),
+      curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
+    }));
+    // No authority refusal — the gate continues to the stale checks.
+    expect(result.ok).toBe(true);
+  });
 });
 
-describe('PR11 C1 — resolvePromotionEffectiveTypeId', () => {
-  it('cohort child: the frozen parent Execution Product Type is the current authority', () => {
+describe('PR11 C1 — resolvePromotionEffectiveTypeId (reviewed-first, PR11 review R1 P1-A)', () => {
+  it('cohort child with NO reviewed type: the Execution Product Type fills the gap (first-pass Curation semantics)', () => {
     expect(resolvePromotionEffectiveTypeId(cohortRun(), [proposal()])).toBe('dog-food-dry');
     expect(resolvePromotionEffectiveTypeId(cohortRun({ executionProductTypeId: null }), [])).toBeNull();
+  });
+
+  it('cohort child WITH a reviewed type: REVIEWED wins even when the Execution Type differs (PR5 precedence — the flipped authority test)', () => {
+    expect(
+      resolvePromotionEffectiveTypeId(cohortRun(), [
+        proposal({ proposalType: 'primary_product_type', targetId: 'dog-food-dry' }),
+      ]),
+    ).toBe('dog-food-dry');
+    // The reviewer-revised type is the promotion authority over the frozen
+    // execution type — the exact inversion the R1 P1-A blocker described.
+    expect(
+      resolvePromotionEffectiveTypeId(cohortRun(), [
+        proposal({
+          proposalType: 'primary_product_type',
+          targetId: 'dry-dog-food',
+          hasRevisedTargetId: true,
+          revisedTargetId: 'wet-dog-food',
+        }),
+      ]),
+    ).toBe('wet-dog-food');
+    expect(
+      resolvePromotionEffectiveTypeId(cohortRun({ executionProductTypeId: 'dry-dog-food' }), [
+        proposal({ proposalType: 'primary_product_type', targetId: 'wet-dog-food' }),
+      ]),
+    ).toBe('wet-dog-food');
   });
 
   it('non-cohort member: the live accepted primary_product_type proposal target is the reviewed truth', () => {

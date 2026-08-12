@@ -40,9 +40,11 @@ export type PromotionGateResult =
       code:
         | 'semantic_validation_blocked'
         | 'semantic_validation_unavailable'
+        | 'run_not_completed'
         | 'parent_not_found'
         | 'parent_superseded'
         | 'parent_not_completed'
+        | 'workspace_mismatch'
         | 'stale_proposal';
       reason: string;
     };
@@ -93,13 +95,23 @@ function firstFindingMessage(semanticValidation: Record<string, unknown>): strin
 
 /**
  * The item's CURRENT effective Product Type id for the staleness check
- * (architecture-report §2.1):
+ * (architecture-report §2.1; PR11 review R1 P1-A):
  *
- * - cohort child (`parentRun` present): the frozen parent Execution Product
- *   Type — the parent authority is the current truth (the member's own type
- *   suggestion was validated against it at freeze time);
- * - otherwise: the live accepted `primary_product_type` proposal target
- *   (reviewed truth, reviewed-first precedence via the shared resolver).
+ * REVIEWED-FIRST for ALL classified items — the shared PR5 resolver
+ * (`resolveEffectiveCurationType`) semantics: Review and Promotion authority
+ * stay on the member's own reviewed `primary_product_type` proposals; a
+ * reviewer-revised Product Type (paired `revisedTargetId` in the live
+ * decision, materialized by `getAcceptedProposals`) is the promotion
+ * authority even when it differs from the frozen parent Execution Product
+ * Type. The Execution Type ONLY fills the gap when no reviewed type exists
+ * (first-pass Curation) — it is never treated as reviewed catalog truth over
+ * a reviewed decision.
+ *
+ * This mirrors the curation-time stamping resolution exactly: dependencies
+ * were stamped as `execution_product_type` when the member's effective type
+ * was execution-sourced and `reviewed_product_type` when reviewed-sourced,
+ * so comparing against the same reviewed-first resolution is what makes the
+ * stale check truthful (reviewed wet + execution-stamped dry => STALE).
  *
  * `null` means no effective type exists — a proposal carrying a present
  * type-dependency is then itself stale (the dependency claims a type that
@@ -109,9 +121,6 @@ export function resolvePromotionEffectiveTypeId(
   parentRun: CohortRun | null,
   acceptedProposals: ClassificationProposal[],
 ): string | null {
-  if (parentRun) {
-    return parentRun.executionProductTypeId ?? null;
-  }
   let reviewedTypeId: string | null = null;
   for (const proposal of acceptedProposals) {
     if (proposal.proposalType !== 'primary_product_type') continue;
@@ -121,7 +130,10 @@ export function resolvePromotionEffectiveTypeId(
       break;
     }
   }
-  return resolveEffectiveCurationType(reviewedTypeId, null).effectiveTypeId;
+  return resolveEffectiveCurationType(
+    reviewedTypeId,
+    parentRun?.executionProductTypeId ?? null,
+  ).effectiveTypeId;
 }
 
 /**
@@ -156,6 +168,21 @@ export function validatePromotionGate(input: PromotionGateInput): PromotionGateR
       reason:
         `Classification run pointer ${curationData.classificationRunId} did not resolve to a validated onboarding run ` +
         `for item ${itemId} (workspace ${workspaceId}); promotion blocked.`,
+    };
+  }
+
+  // PR11 review R1 (P1-B): the child run's TERMINAL authority is validated
+  // independently — `getValidatedOnboardingRun` proves workspace/item/SKU/
+  // source ownership but NOT completion. Promotion is the authoritative final
+  // gate; it must not depend on 'Review must have caught this earlier'. A
+  // non-terminal child (running/freezing/failed/… ) can never promote.
+  if (activeRun.status !== 'completed' && activeRun.status !== 'completed_with_abstentions') {
+    return {
+      ok: false,
+      code: 'run_not_completed',
+      reason:
+        `Classification run ${activeRun.id} has status "${activeRun.status}" for item ${itemId} ` +
+        `(SKU ${productSku}); only completed runs can promote.`,
     };
   }
 
@@ -205,6 +232,17 @@ export function validatePromotionGate(input: PromotionGateInput): PromotionGateR
         ok: false,
         code: 'parent_not_found',
         reason: `Cohort parent run ${activeRun.cohortRunId} not found for item ${itemId} (workspace ${workspaceId}).`,
+      };
+    }
+    // PR11 review R1 (P1-B): the parent must belong to the SAME workspace —
+    // a cross-workspace parent can never be this item's authority.
+    if (parentRun.workspaceId !== workspaceId) {
+      return {
+        ok: false,
+        code: 'workspace_mismatch',
+        reason:
+          `Cohort parent run ${parentRun.id} belongs to workspace ${parentRun.workspaceId}, not ${workspaceId}; ` +
+          'promotion blocked.',
       };
     }
     if (parentRun.status === 'superseded') {

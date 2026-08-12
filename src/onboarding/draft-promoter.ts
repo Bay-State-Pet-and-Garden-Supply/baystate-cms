@@ -23,6 +23,8 @@ import {
 } from '../db/repositories/classification-cohort-run-repo';
 import { validatePromotionGate, resolvePromotionEffectiveTypeId } from '../classification/promotion-gate';
 import type { CohortRun } from '../shared/schemas/cohorts';
+import type { OnboardingItem } from '../shared/schemas/onboarding';
+import type { ClassificationProposal } from '../shared/schemas/classification';
 import { getCachedAttributeMappings, getCachedBrands } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from '../classification/brand-resolution';
 import { getPageIdentityId, pageNameFromPageValue } from '../shared/proposal-display';
@@ -169,6 +171,65 @@ function escapeXml(str: string): string {
 }
 
 /**
+ * PR11 gate inputs for one item: run-pointer validation + the deterministic
+ * promotion gate (semantic / parent-currentness / stale-dependency). Shared by
+ * the image pre-pass (images download ONLY for gate-passing items — PR11
+ * review R1 P2) and the authoritative per-item loop (failure recording).
+ * Legacy items (no run pointer) pass with `ok: true` and empty proposals.
+ */
+function computePromotionGate(
+  item: OnboardingItem,
+  workspaceId: string,
+): {
+  ok: boolean;
+  reason: string | null;
+  activeRun: ClassificationRunRow | null;
+  activeProposals: ClassificationProposal[];
+} {
+  const runPointer = item.curationData?.classificationRunId ?? null;
+  let activeRun: ClassificationRunRow | null = null;
+  if (runPointer) {
+    activeRun = getValidatedOnboardingRun(runPointer, workspaceId, item.id, item.upc);
+    if (!activeRun) {
+      return {
+        ok: false,
+        reason: 'Invalid classification run pointer — promotion blocked',
+        activeRun: null,
+        activeProposals: [],
+      };
+    }
+  }
+  const activeRunId = activeRun?.id ?? null;
+  // Accepted-only: a valid run contributes only proposals whose latest live
+  // decision is 'accepted' (never deferred/rejected/pending/decisionless).
+  const activeProposals = activeRunId
+    ? getAcceptedProposals(item.upc, activeRunId)
+    : (item.curationData?.classificationProposals || []).filter(
+        (p: any) => p.status === 'accepted',
+      );
+  const parentRun: CohortRun | null = activeRun?.cohortRunId
+    ? getCohortRunById(activeRun.cohortRunId)
+    : null;
+  const gate = validatePromotionGate({
+    workspaceId,
+    itemId: item.id,
+    productSku: item.upc,
+    curationData: item.curationData ?? null,
+    activeRun,
+    parentRun,
+    effectiveTypeId: resolvePromotionEffectiveTypeId(parentRun, activeProposals),
+    acceptedProposals: activeProposals,
+    dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
+  });
+  return {
+    ok: gate.ok,
+    reason: gate.ok ? null : gate.reason,
+    activeRun,
+    activeProposals,
+  };
+}
+
+/**
  * Promotes approved onboarding items to the CMS change-set/approval pipeline.
  * Creates a new change set containing all promoted items.
  */
@@ -200,10 +261,17 @@ export async function promoteItems(
   const allItems = listItemsByBatch(batchId);
   const itemsToPromote = allItems.filter(item => itemIds.includes(item.id));
 
-  // Pre-download and process images asynchronously before the database transaction
+  // Pre-download and process images asynchronously before the database
+  // transaction — but ONLY for items that pass the PR11 gate (PR11 review R1
+  // P2): a semantically blocked or stale item must never create processed
+  // image files on disk, even though it can never produce a change-set row.
+  // The authoritative gate re-runs inside the loop (deterministic, cheap) and
+  // records the failure there.
   const processedImagesMap = new Map<string, ProcessedImageResult>();
   for (const item of itemsToPromote) {
     if (!item.extractionData) continue;
+    const gateInfo = computePromotionGate(item, workspaceId);
+    if (!gateInfo.ok) continue; // the loop records the refusal; no image work
     const extractionData = item.extractionData;
     const finalTitle = item.curationData?.curatedTitle || extractionData.title || item.name;
     const existingApproved = readProductFile(workspacePath, item.upc);
@@ -330,66 +398,25 @@ export async function promoteItems(
       const skippedPageRefs: Array<{ proposalId: string; pageName: string }> = [];
       let acceptedProductType: string | null = null;
 
-      // Curation JSON is only a run pointer. A PRESENT pointer must resolve to
-      // a valid, owned run or the item fails closed — it never downgrades to a
-      // legacy branch. A genuinely absent pointer keeps narrow legacy
-      // compatibility using only embedded proposals whose status is exactly
-      // 'accepted' (pending/rejected/deferred/stale are ignored).
-      const runPointer = item.curationData?.classificationRunId ?? null;
-      let activeRun: ClassificationRunRow | null = null;
-      if (runPointer) {
-        activeRun = getValidatedOnboardingRun(
-          runPointer,
-          batch.workspaceId,
-          item.id,
-          item.upc,
-        );
-        if (!activeRun) {
-          const errMsg = 'Invalid classification run pointer — promotion blocked';
-          console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
-          completePromotionStage(item.id, false, errMsg);
-          failures.push({ itemId: item.id, error: errMsg });
-          continue;
-        }
-      }
-      const activeRunId = activeRun?.id ?? null;
-      // Accepted-only: a valid run contributes only proposals whose latest live
-      // decision is 'accepted' (never deferred/rejected/pending/decisionless).
-      const activeProposals = activeRunId
-        ? getAcceptedProposals(item.upc, activeRunId)
-        : (item.curationData?.classificationProposals || []).filter(
-            (p: any) => p.status === 'accepted',
-          );
-
       // ── PR11 Promotion gate (semantic / parent-currentness / stale) ────
       // Deterministic per-item fail-closed check AFTER the run-pointer
-      // validation and BEFORE any proposal/draft work. A blocked member, a
-      // child of a superseded/in-flight parent, or a proposal whose type
-      // dependency no longer matches the item's CURRENT effective type never
-      // reaches a CMS draft — the item's promotion stage fails with the
-      // deterministic reason while siblings promote normally. Legacy items
-      // (no run pointer) pass unchanged (byte-identical).
-      const parentRun: CohortRun | null = activeRun?.cohortRunId
-        ? getCohortRunById(activeRun.cohortRunId)
-        : null;
-      const gate = validatePromotionGate({
-        workspaceId,
-        itemId: item.id,
-        productSku: item.upc,
-        curationData: item.curationData ?? null,
-        activeRun,
-        parentRun,
-        effectiveTypeId: resolvePromotionEffectiveTypeId(parentRun, activeProposals),
-        acceptedProposals: activeProposals,
-        dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
-      });
-      if (!gate.ok) {
-        const errMsg = gate.reason;
+      // validation and BEFORE any proposal/draft work (the SAME computation
+      // the image pre-pass used — re-run here as the authoritative failure
+      // record; deterministic and cheap). A blocked member, a child of a
+      // superseded/in-flight parent, a non-terminal child run, or a proposal
+      // whose type dependency no longer matches the item's CURRENT effective
+      // type never reaches a CMS draft — the item's promotion stage fails
+      // with the deterministic reason while siblings promote normally.
+      // Legacy items (no run pointer) pass unchanged (byte-identical).
+      const gateInfo = computePromotionGate(item, workspaceId);
+      if (!gateInfo.ok) {
+        const errMsg = gateInfo.reason!;
         console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
         completePromotionStage(item.id, false, errMsg);
         failures.push({ itemId: item.id, error: errMsg });
         continue;
       }
+      const activeProposals = gateInfo.activeProposals;
 
       // Only identities verified in the currently active Page import are
       // serializable, and the verified catalog is the DISPLAY-NAME authority:
