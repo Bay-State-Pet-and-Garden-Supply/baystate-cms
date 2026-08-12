@@ -69,8 +69,14 @@ export const COHORT_SYNTHESIS_REQUIRED_STAGES: ClassificationStageName[] = [
  * a `stageOutputs` entry for a succeeded stage nor a `reviewable_abstention`
  * proposal for an abstained stage) — a member must never be synthesized into
  * a partial draft from missing stage outputs.
+ *
+ * PR8 review R1 (identity): the error carries BOTH the parent/member run
+ * identity (`runId`) and the member identity (`sku`).
  */
-export function assertCohortSynthesisOrdering(result: PipelineRunResult): void {
+export function assertCohortSynthesisOrdering(
+  result: PipelineRunResult,
+  identity: { runId: string; sku: string },
+): void {
   const abstainedStages = new Set(
     result.proposals
       .filter(p => p.proposalType === 'reviewable_abstention')
@@ -80,8 +86,9 @@ export function assertCohortSynthesisOrdering(result: PipelineRunResult): void {
     if (result.stageOutputs[stageName] !== undefined) continue;
     if (abstainedStages.has(stageName)) continue;
     throw new Error(
-      `Cohort synthesis ordering guard (PR8 DECISION-C): required stage "${stageName}" produced no terminal ` +
-        'output before description/search-keyword synthesis; failing closed — no partial draft is synthesized.',
+      `Member ${identity.sku} (run ${identity.runId}) cohort synthesis ordering guard (PR8 DECISION-C): required stage ` +
+        `"${stageName}" produced no terminal output before description/search-keyword synthesis; failing closed — ` +
+        'no partial draft is synthesized.',
     );
   }
 }
@@ -527,8 +534,24 @@ export async function curateItemWithPipeline(
         // `CohortTitleOutputSchema` by the parent op (the map is built from
         // parsed rows), so the child-side corrupt-title guard is STRUCTURAL —
         // documented here, not duplicated.
+        // PR8 review R1 (identity): carry BOTH the member identity AND the
+        // parent run identity in the deterministic fail-closed error.
         const selected = preparedCohort!.coordinatedTitles?.get(item.upc);
         if (selected) {
+          // PR8 review R1 (BLOCKER 2d): a member-side defensive throw for an
+          // EMPTY title from the durable map. The parent op's writers can
+          // never emit an empty title and the reuse path fails corrupt/empty
+          // rows closed before the member loop, so this is reachable only for
+          // hand-built contexts (or a future writer bug) — the member FAILS
+          // closed instead of threading an empty title into
+          // name_consolidation (which would otherwise fall through to per-item
+          // synthesis and invent a title).
+          if (typeof selected.title !== 'string' || selected.title.trim().length === 0) {
+            throw new Error(
+              `Member ${item.upc ?? item.id} (run ${run.id}) has an EMPTY persisted cohort title output in active cohort mode ` +
+                '(PR8 review R1): failing closed — no title may be invented from a corrupt parent output.',
+            );
+          }
           preComputedTitle = selected.title;
           preComputedTitleSource = selected.source;
         } else {
@@ -537,7 +560,7 @@ export async function curateItemWithPipeline(
             (preparedCohort!.productLineContext?.siblingSkus.length ?? 0);
           if (preparedCohort!.memberGroupSizes !== undefined && memberGroupSize >= 2) {
             throw new Error(
-              `Member ${item.upc ?? item.id} is missing a persisted cohort title output in active cohort mode ` +
+              `Member ${item.upc ?? item.id} (run ${run.id}) is missing a persisted cohort title output in active cohort mode ` +
                 '(PR8 DECISION-B): the parent-op contract was violated and no title may be invented; the member fails closed.',
             );
           }
@@ -647,7 +670,7 @@ export async function curateItemWithPipeline(
     // silently-no-output stage fails the member closed — never a partial
     // draft). Legacy mode keeps the historical post-pipeline order.
     if (cohortMode) {
-      assertCohortSynthesisOrdering(result);
+      assertCohortSynthesisOrdering(result, { runId: run.id, sku: item.upc ?? item.id });
     }
 
     // Determine final status

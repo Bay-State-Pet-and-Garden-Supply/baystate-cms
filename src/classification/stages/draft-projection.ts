@@ -42,7 +42,7 @@ export const productDraftProjectionStage: StageDefinition = {
     // (no execution type) keeps the live cache fallback byte-identical.
     if (context.cohortExecutionType !== undefined && context.snapshot === undefined) {
       throw new Error(
-        'draft projection requires the frozen runtime snapshot in active cohort mode; live config is never read',
+        `Member ${input.sku} (run ${context.runId}) draft projection requires the frozen runtime snapshot in active cohort mode; live config is never read`,
       );
     }
 

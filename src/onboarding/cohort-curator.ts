@@ -56,6 +56,7 @@ import {
   failFrozenCohortRunForConflict,
   supersedeOwnedCohortRunForOutputDrift,
   insertProposalDependency,
+  getCohortMemberRunForTitleAudit,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
 import {
@@ -123,10 +124,11 @@ import type { ProductLineItemSnapshot, CoordinatedPageMemberValue } from '../cla
 import { getVlmConfig } from './vlm-client';
 import { extractPackagingOcr, mergeOcrResults } from './packaging-ocr';
 import { curateItemWithPipeline } from './product-curator';
-import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError } from './cohort-title-coordinator';
+import { ensureCohortTitlesCoordinated, CohortTitleAuthorityDriftError, CohortTitleOutputCorruptError } from './cohort-title-coordinator';
 import {
   ensureCohortPagesCoordinated,
   CohortPageAuthorityDriftError,
+  CohortPageOutputCorruptError,
 } from './cohort-page-coordinator';
 import { groupByProductLine } from './cohort-name-coordinator';
 import { hashCanonicalJson, canonicalJsonStringify } from '../shared/stable-id';
@@ -2147,6 +2149,60 @@ export async function processCohort(
   let hasAbstentions = false;
   let completedMembers = 0;
 
+  // PR8 review R1 (BLOCKER 1): per-SKU parse failures of persisted title/page
+  // rows are MEMBER failures, never a parent abort. The parent ops throw
+  // `CohortTitleOutputCorruptError` / `CohortPageOutputCorruptError` carrying
+  // the affected SKUs (with their original causes) and the USABLE parsed map;
+  // this helper records an OWNER-GUARDED member failure for each affected SKU
+  // (child run terminalized failed, item failed, NO curationData — no partial
+  // draft) BEFORE the member loop, so the unaffected members continue normally
+  // and the parent completes with member failures (no job-queue retry loop —
+  // the corrupt row can never be re-hit).
+  const preFailedSkus = new Set<string>();
+  const recordCorruptRowMemberFailures = (
+    outputKind: 'curated_title' | 'coordinated_page',
+    error: { runId: string; failures: Array<{ sku: string; cause: string }> },
+  ): void => {
+    for (const failure of error.failures) {
+      if (preFailedSkus.has(failure.sku)) continue;
+      const member = orderedMembers.find(m => m.productSku === failure.sku);
+      if (!member) continue;
+      const item = itemsById.get(member.onboardingItemId);
+      if (!item) continue;
+      // An already-committed member (the resume guard would skip it anyway) is
+      // untouched — its committed projection is complete; the corrupt row is
+      // historical and can never retroactively fail it.
+      if (item.stageStatus === 'completed' && item.curationData) continue;
+      preFailedSkus.add(failure.sku);
+      // Deterministic error: parent run id + product SKU + the original cause.
+      const errorText = redactTransportText(
+        `Member ${item.upc ?? item.id} failed (run ${error.runId}): persisted ${outputKind} output row for SKU ${failure.sku} is corrupt — ${failure.cause}`,
+      );
+      // Ownership assertion BEFORE the member-failure write: a stale worker
+      // whose claim was lost never fails the member (the reclaiming sibling
+      // owns the run now).
+      if (!heartbeatCohortRun(error.runId, workerId, COHORT_LEASE_TTL_MS)) {
+        throw new HeartbeatLostError(
+          `processCohort lost claim ownership of run ${error.runId} while recording corrupt-row member failures (heartbeat rejected: run is no longer claimed by ${workerId}).`,
+        );
+      }
+      // Child terminal write + item state (the member-failure mechanics the
+      // member loop already uses): affected children terminalize failed with
+      // NO curationData — a partial draft is never emitted.
+      const childRun = getCohortMemberRunForTitleAudit(error.runId, item.id);
+      if (childRun && childRun.status === 'running') {
+        completeRun(childRun.id, 'failed', errorText);
+      }
+      updateItemStageStatus(item.id, 'failed', errorText);
+      onboardingEvents.emitItemStatus(cohort.batchId, item.id, 'failed', {
+        stage: 'curation',
+        cohortRunId: error.runId,
+        error: errorText,
+      });
+      memberFailures.push({ itemId: item.id, productSku: item.upc ?? null, ok: false, error: errorText });
+    }
+  };
+
   // Frozen product-line sibling context (PR3 hardening, Commit B / R2): built
   // ONCE from the persisted cohort + the FULL frozen projections. Prepared
   // members use ONLY this — the live listItemsByBatch/determineProductGroup
@@ -2208,7 +2264,20 @@ export async function processCohort(
       supersedeOwnedCohortRunForOutputDrift(run.id, workerId, reason);
       throw new Error(reason, { cause: err });
     }
-    throw err;
+    // PR8 review R1 (BLOCKER 1): a persisted row that fails to parse is a
+    // per-SKU member failure, never a parent abort. Record an owner-guarded
+    // member failure for EACH affected SKU and continue the unaffected members
+    // from the usable parsed map — the parent completes with member failures
+    // and the run never re-hits the corrupt row in a retry loop.
+    if (err instanceof CohortTitleOutputCorruptError) {
+      recordCorruptRowMemberFailures('curated_title', err);
+      coordinatedTitles = err.usableOutputs;
+      console.log(
+        `[CohortCurator] Recorded ${err.failures.length} member failure(s) for corrupt curated_title rows under run ${run.id}; continuing ${err.usableOutputs.size} unaffected title member(s).`,
+      );
+    } else {
+      throw err;
+    }
   }
 
   // PR7 (issue #30): the durable parent PAGE op (architecture-report §4.1 —
@@ -2251,7 +2320,18 @@ export async function processCohort(
       supersedeOwnedCohortRunForOutputDrift(run.id, workerId, reason);
       throw new Error(reason, { cause: err });
     }
-    throw err;
+    // PR8 review R1 (BLOCKER 1): mirror the title op — a persisted page row
+    // that fails to parse fails each affected member closed; unaffected
+    // members continue from the usable parsed map.
+    if (err instanceof CohortPageOutputCorruptError) {
+      recordCorruptRowMemberFailures('coordinated_page', err);
+      coordinatedPages = err.usableOutputs;
+      console.log(
+        `[CohortCurator] Recorded ${err.failures.length} member failure(s) for corrupt coordinated_page rows under run ${run.id}; continuing ${err.usableOutputs.size} unaffected page member(s).`,
+      );
+    } else {
+      throw err;
+    }
   }
 
   // Scoped periodic heartbeat (PR3 hardening, Commit A): the lease is renewed
@@ -2281,6 +2361,17 @@ export async function processCohort(
 
   for (const memberProjection of orderedMembers) {
     const item = itemsById.get(memberProjection.onboardingItemId)!;
+
+    // PR8 review R1 (BLOCKER 1): members whose persisted title/page output
+    // row failed to parse were ALREADY failed before the loop (child
+    // terminalized failed, item failed, memberFailures recorded) — never
+    // re-execute them (a retry would re-hit the same corrupt row).
+    if (memberProjection.productSku !== null && preFailedSkus.has(memberProjection.productSku)) {
+      console.log(
+        `[CohortCurator] Member ${item.upc ?? item.id} skipped — corrupt persisted output row already failed the member under run ${run.id}.`,
+      );
+      continue;
+    }
 
     // Resume guard (crash-recovery reclaim-on-match keeps the SAME run id).
     // Recovery skip rule (PR3 hardening, Commit B / R3): a member is skipped

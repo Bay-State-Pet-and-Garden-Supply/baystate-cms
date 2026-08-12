@@ -116,6 +116,38 @@ function parseTitleRow(row: CohortTitleOutputRow): CohortTitleOutput {
 }
 
 /**
+ * Deterministic per-SKU parse-failure signal (PR8 review R1, BLOCKER 1):
+ * thrown by the REUSE path when one or more persisted `curated_title` rows
+ * for a run fail to parse through `CohortTitleOutputSchema` (corrupt stored
+ * JSON, or a schema violation such as an empty title). Carries the parent
+ * run id, the affected product SKUs with their original causes, and the
+ * USABLE parsed outputs for the unaffected rows so `processCohort` can
+ * record an owner-guarded member failure for EACH affected SKU (child
+ * terminalized failed, no curation data) and continue the remaining members.
+ */
+export class CohortTitleOutputCorruptError extends Error {
+  readonly runId: string;
+  readonly failures: Array<{ sku: string; cause: string }>;
+  readonly usableOutputs: Map<string, CohortTitleOutput>;
+
+  constructor(
+    runId: string,
+    failures: Array<{ sku: string; cause: string }>,
+    usableOutputs: Map<string, CohortTitleOutput>,
+  ) {
+    super(
+      `[CohortTitleOutputCorrupt] Persisted curated_title outputs for run ${runId} failed to parse: ` +
+        failures.map(f => `${f.sku} (${f.cause})`).join('; ') +
+        ' — the affected member(s) fail closed with no title; unaffected members continue from the parsed rows.',
+    );
+    this.name = 'CohortTitleOutputCorruptError';
+    this.runId = runId;
+    this.failures = failures;
+    this.usableOutputs = usableOutputs;
+  }
+}
+
+/**
  * Deterministic authority-drift signal (PR6 hardening A). Thrown when a
  * NONEMPTY committed `curated_title` set for a run does not match the freshly
  * computed canonical title input hash (or is incomplete). The set is
@@ -284,9 +316,26 @@ export async function ensureCohortTitlesCoordinated(
   const hashMatch = existingRows.every(row => row.inputHash === inputHash);
   if (complete && hashMatch) {
     const map = new Map<string, CohortTitleOutput>();
+    // PR8 review R1 (BLOCKER 1): per-SKU parse failures are collected, never
+    // escaped. Each corrupt row (bad JSON or a schema violation — e.g. an
+    // empty title persisted before the schema tightening) becomes a member
+    // failure; the successfully parsed rows stay usable so the parent
+    // completes the unaffected members.
+    const failures: Array<{ sku: string; cause: string }> = [];
     for (const sku of multiMemberSkus) {
       const row = rowBySku.get(sku)!;
-      map.set(sku, parseTitleRow(row));
+      try {
+        map.set(sku, parseTitleRow(row));
+      } catch (err) {
+        failures.push({ sku, cause: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    if (failures.length > 0) {
+      console.error(
+        `[CohortTitleCoordinator] ${failures.length} persisted curated_title row(s) for run ${run.id} failed to parse: ` +
+          failures.map(f => `${f.sku} (${f.cause})`).join('; '),
+      );
+      throw new CohortTitleOutputCorruptError(run.id, failures, map);
     }
     console.log(
       `[CohortTitleCoordinator] Reusing ${map.size} durable title outputs for run ${run.id} (complete set + hash match, zero LLM calls).`,

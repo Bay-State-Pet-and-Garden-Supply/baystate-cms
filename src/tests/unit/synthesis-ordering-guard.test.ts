@@ -15,6 +15,10 @@ import {
 } from '../../onboarding/product-curator';
 import type { PipelineRunResult, StageOutput } from '../../classification/types';
 
+/** Identity the production call site passes (parent run id + member SKU). */
+const IDENTITY = { runId: 'run-1', sku: 'SKU1' };
+
+
 function stageOutput(name: string): StageOutput {
   return {
     evidence: [],
@@ -36,7 +40,7 @@ function completeResult(): PipelineRunResult {
 
 describe('PR8 C3 — assertCohortSynthesisOrdering (DECISION-C)', () => {
   it('passes when every required stage produced a terminal stage output', () => {
-    expect(() => assertCohortSynthesisOrdering(completeResult())).not.toThrow();
+    expect(() => assertCohortSynthesisOrdering(completeResult(), IDENTITY)).not.toThrow();
   });
 
   it('passes when a required stage abstained (its reviewable_abstention proposal is a terminal outcome)', () => {
@@ -58,19 +62,32 @@ describe('PR8 C3 — assertCohortSynthesisOrdering (DECISION-C)', () => {
       snapshotHash: null,
       createdAt: new Date().toISOString(),
     });
-    expect(() => assertCohortSynthesisOrdering(result)).not.toThrow();
+    expect(() => assertCohortSynthesisOrdering(result, IDENTITY)).not.toThrow();
   });
 
   it('fails closed when a required stage silently produced no output (no stageOutputs entry, no abstention proposal)', () => {
     const result = completeResult();
     delete result.stageOutputs.product_attribute_proposals;
-    expect(() => assertCohortSynthesisOrdering(result)).toThrow(/product_attribute_proposals/);
-    expect(() => assertCohortSynthesisOrdering(result)).toThrow(/failing closed — no partial draft/);
+    expect(() => assertCohortSynthesisOrdering(result, IDENTITY)).toThrow(/product_attribute_proposals/);
+    expect(() => assertCohortSynthesisOrdering(result, IDENTITY)).toThrow(/failing closed — no partial draft/);
   });
 
   it('fails closed when the silent stage is the draft projection itself', () => {
     const result = completeResult();
     delete result.stageOutputs.product_draft_projection;
-    expect(() => assertCohortSynthesisOrdering(result)).toThrow(/product_draft_projection/);
+    expect(() => assertCohortSynthesisOrdering(result, IDENTITY)).toThrow(/product_draft_projection/);
+  });
+
+  it('PR8 review R1: the guard error carries BOTH the parent run identity and the member identity', () => {
+    const result = completeResult();
+    delete result.stageOutputs.evidence_extraction;
+    let message = '';
+    try {
+      assertCohortSynthesisOrdering(result, { runId: 'parent-run-77', sku: 'SKU-ALPHA' });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('SKU-ALPHA');
+    expect(message).toContain('parent-run-77');
   });
 });

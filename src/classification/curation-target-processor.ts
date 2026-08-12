@@ -579,7 +579,7 @@ export async function materializeCoordinatedPages(
       return { proposals: [], message: 'missing parent page output' };
     }
     throw new Error(
-      `Member ${input.sku} has no parent page output row in active cohort mode (PR8 DECISION-B): ` +
+      `Member ${input.sku} (run ${context.runId}) has no parent page output row in active cohort mode (PR8 DECISION-B): ` +
         'a missing durable page output fails the member closed — pages never invent an assignment.',
     );
   }
@@ -590,7 +590,7 @@ export async function materializeCoordinatedPages(
   const parsed = CohortPageOutputSchema.safeParse(stored.output);
   if (!parsed.success) {
     throw new Error(
-      `Member ${input.sku} has a corrupt parent page output payload in active cohort mode (PR8 DECISION-B): ` +
+      `Member ${input.sku} (run ${context.runId}) has a corrupt parent page output payload in active cohort mode (PR8 DECISION-B): ` +
         'failing closed — pages never invent an assignment.',
     );
   }
@@ -603,13 +603,17 @@ export async function materializeCoordinatedPages(
     return { proposals: [], message: output.reason };
   }
 
-  // `assigned` with an empty page list cannot be produced by any writer (the
-  // coordinator abstains instead) — fail closed defensively.
+  // PR8 review R1 (BLOCKER 2c): an `assigned` row with an EMPTY page list can
+  // never be produced by any writer (the coordinator abstains instead of
+  // emitting assigned-empty) — a row carrying one is corrupt. The schema also
+  // rejects it, so this defensive throw is belt-and-suspenders: FAIL the
+  // member closed, never emit a partial no-page draft. Abstained rows remain
+  // complete results (handled above).
   if (output.pages.length === 0) {
-    console.warn(
-      `[CurationTargetProcessor] Member ${input.sku} has an assigned parent page output with no pages — deterministic abstain.`,
+    throw new Error(
+      `Member ${input.sku} (run ${context.runId}) has an assigned parent page output with no pages in active cohort mode ` +
+        '(PR8 review R1): failing closed — pages never invent an assignment.',
     );
-    return { proposals: [], message: 'missing parent page output' };
   }
 
   // ── Restricted page-evidence packet (the SAME deterministic packet the

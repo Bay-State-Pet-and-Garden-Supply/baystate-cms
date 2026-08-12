@@ -387,9 +387,18 @@ export type CohortTitleSource = z.infer<typeof CohortTitleSource>;
 
 /**
  * The `output_value_json` payload of a `curated_title` output row.
+ *
+ * PR8 review R1 (BLOCKER 2a): `title` is non-empty — no writer may ever
+ * persist an empty title. The coordinator validates every LLM title to at
+ * least 2 chars post-trim (empty/invalid responses become the deterministic
+ * fallback) and `formatDeterministicTitle` always produces a non-empty
+ * string, so tightening the schema breaks no legitimate writer. A persisted
+ * empty-title row (pre-tightening corruption) now fails the schema parse at
+ * the parent reuse path and fails the affected member closed (see
+ * `CohortTitleOutputCorruptError`).
  */
 export const CohortTitleOutputSchema = z.object({
-  title: z.string(),
+  title: z.string().trim().min(1),
   source: CohortTitleSource,
 });
 
@@ -421,7 +430,14 @@ export type CohortPageAssignment = z.infer<typeof CohortPageAssignmentSchema>;
 export const CohortPageOutputSchema = z.union([
   z.object({
     status: z.literal('assigned'),
-    pages: z.array(CohortPageAssignmentSchema),
+    // PR8 review R1 (BLOCKER 2a): an `assigned` row ALWAYS carries at least
+    // one page — the coordinator abstains instead of emitting assigned-empty
+    // (`normalized.length === 0` → abstain), so no legitimate writer persists
+    // an empty page list. A persisted assigned-empty row (pre-tightening
+    // corruption) now fails the schema parse at the parent reuse path and
+    // fails the affected member closed (see `CohortPageOutputCorruptError`;
+    // `materializeCoordinatedPages` also keeps a defensive throw).
+    pages: z.array(CohortPageAssignmentSchema).min(1),
     source: z.literal('llm_cohort'),
   }),
   z.object({
