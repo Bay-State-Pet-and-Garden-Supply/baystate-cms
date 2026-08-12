@@ -139,6 +139,9 @@ export default defineConfig({
       // PR10 acceptance (bun:test imports — vitest cannot collect it; runs
       // under bun test via the test:db third invocation group)
       'src/tests/unit/pr10-acceptance.test.ts',
+      // PR11 acceptance (bun:test imports — vitest cannot collect it; runs
+      // under bun test via the test:db third invocation group)
+      'src/tests/unit/pr11-acceptance.test.ts',
       // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
       'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],

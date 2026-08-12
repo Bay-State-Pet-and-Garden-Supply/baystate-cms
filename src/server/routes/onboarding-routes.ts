@@ -651,13 +651,48 @@ route.post('/onboarding/items/advance', async (c) => {
     return c.json({ error: 'itemIds array is required' }, 400);
   }
 
-  const result = advanceItemsToNextStage(itemIds);
+  // ── PR11 C3 advance-hole guard (issue #30, DECISION-B) ────────────────
+  // A PR9 blocked member is 'completed' in the review stage, so the raw
+  // advance would move it to promotion WITHOUT review-complete (the
+  // review-complete gate refuses it, the advance route never did). The
+  // promotion gate stays authoritative; this route-level guard is
+  // defense-in-depth: blocked members never even reach the promotion stage.
+  // The item stays in review with a deterministic reason; siblings advance.
+  const advanceable: string[] = [];
+  const refused: Array<{ itemId: string; reason: string }> = [];
+  for (const id of itemIds) {
+    const item = findItemById(id);
+    // Only a completed REVIEW item advances review → promotion — the only
+    // transition this guard covers (blocked members must still reach the
+    // Review drawer, so curation → review is never refused).
+    if (!item || item.stage !== 'review' || item.stageStatus !== 'completed') {
+      advanceable.push(id);
+      continue;
+    }
+    const semanticValidation = item.curationData?.semanticValidation;
+    if (
+      semanticValidation &&
+      typeof semanticValidation === 'object' &&
+      (semanticValidation as { status?: unknown }).status === 'blocked'
+    ) {
+      const findings = (semanticValidation as { findings?: Array<{ message?: unknown }> }).findings;
+      const firstMessage =
+        Array.isArray(findings) && findings.length > 0 && typeof findings[0]?.message === 'string'
+          ? findings[0].message
+          : 'A hard cohort semantic validation finding blocks this item.';
+      refused.push({ itemId: id, reason: `semantic_validation_blocked: ${firstMessage}` });
+      continue;
+    }
+    advanceable.push(id);
+  }
+
+  const result = advanceItemsToNextStage(advanceable);
 
   // Trigger worker to pick up newly pending items
   const worker = getWorker(workspace.id, workspace.workspacePath);
   worker.poll();
 
-  return c.json(result);
+  return c.json({ ...result, refused });
 });
 
 /**
