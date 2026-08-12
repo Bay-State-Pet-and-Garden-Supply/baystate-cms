@@ -14,7 +14,12 @@
  * against a committed output set is WRITE-ONCE drift: the parent op FAILS
  * CLOSED with `CohortTitleAuthorityDriftError` — the set is never
  * re-coordinated or replaced, and the run terminates deterministically with
- * no further coordination and no further writes.
+ * no further coordination and no further writes. REPLAY CONTRACT: at most
+ * one ACTIVE coordination call at a time; a crash between transport success
+ * and the output-set commit may cause ANOTHER independently audited
+ * invocation (no retry cap — each pre-commit crash repeats this); only a
+ * successful commit makes later entries call-free (replay-safe after
+ * commit).
  *
  * HASH ONLY FROZEN TITLE AUTHORITY — explicit exclusions (DECISION-P):
  * - NO live `onboarding_items` rows, stage/status, `curation_data_json`, or
@@ -40,7 +45,11 @@
  * spreadsheet identity (name/expectedName/brandHint), web title/brand, and
  * the packaging-OCR title signals (`packagingOcrData.productName ??
  * packagingTitle`, `weight`, `flavorVariety` — DECISION-Q: weight/flavor are
- * title-format-relevant signals the FORMAT_RULES mandate).
+ * title-format-relevant signals the FORMAT_RULES mandate). The slice is
+ * PROMPT-NORMALIZED (the same truncation the coordinated prompt renders:
+ * 200 chars for brand signals, 500 for the rest) so the hashed authority
+ * equals the prompted authority by construction — a suffix-only mutation
+ * beyond the cutoffs changes neither the prompt NOR the hash.
  */
 import { hashCanonicalJson } from '../shared/stable-id';
 import { FORMAT_RULES } from './title-prompt-template';
@@ -64,12 +73,13 @@ export interface CohortTitleInputHashParams {
   /** Frozen `cohort_title_consolidation` plan entry (H5 title slice); absent → registry consts. */
   titlePlanEntry?: ModelExecutionPlanEntry;
   /**
-   * Frozen Execution Product Type label (PR6 hardening C, issue #30 P1-3): the
-   * product-type option name resolved by `titleExecutionTypeAuthorityFromRun` —
-   * the SAME authority the coordinated prompt renders. A label change changes
-   * the T-hash (the prompt would change, so re-coordination is correct).
+   * Frozen Execution Product Type authority (PR6 hardening C, issue #30
+   * P1-3): the SAME `ExecutionTypeTitleAuthority` object the coordinated
+   * prompt renders — id + label + confidence + outcome. A label change
+   * changes the T-hash (the prompt would change, so re-coordination is
+   * correct). Absent → a null authority is hashed (abstained/conflicted).
    */
-  executionTypeLabel?: string | null;
+  executionTypeAuthority?: ExecutionTypeTitleAuthority | null;
 }
 
 /**
@@ -145,20 +155,40 @@ export interface CohortTitleAuthorityMember {
  * op and by tests. Deliberately narrow: excludes every non-title projection
  * field (description, images, provenance, evidence/OCR authority hashes).
  */
+/**
+ * Prompt-normalized truncation limits for title authority strings — the SAME
+ * cutoffs the coordinated prompt renders (brand signals 200 chars, all other
+ * title signals 500). `titleAuthorityFromProjectionMember` and the
+ * coordinator's signals-ON mapping share these, so the hashed authority
+ * equals the prompted authority by construction.
+ */
+export const TITLE_AUTHORITY_TRUNCATION = {
+  brandMaxChars: 200,
+  signalMaxChars: 500,
+} as const;
+
+/** Truncate a title-authority string to `maxChars` (null-safe). */
+export function normalizeTitleAuthorityString(value: string | null, maxChars: number): string | null {
+  if (value === null) return null;
+  return value.length > maxChars ? value.slice(0, maxChars) : value;
+}
+
 export function titleAuthorityFromProjectionMember(
   member: ExecutionEvidenceProjectionMemberV1,
 ): CohortTitleAuthorityMember {
   const ocr = member.extraction.ocr.packagingOcrData;
+  const brandMax = TITLE_AUTHORITY_TRUNCATION.brandMaxChars;
+  const signalMax = TITLE_AUTHORITY_TRUNCATION.signalMaxChars;
   return {
     productSku: member.productSku,
-    spreadsheetName: member.spreadsheetIdentity.name,
-    expectedName: member.spreadsheetIdentity.expectedName,
-    brandHint: member.spreadsheetIdentity.brandHint,
-    webTitle: member.extraction.title,
-    webBrand: member.extraction.brand,
-    packagingOcrTitle: ocr?.productName ?? member.extraction.packagingTitle,
-    ocrWeight: ocr?.weight ?? null,
-    ocrFlavor: ocr?.flavorVariety ?? null,
+    spreadsheetName: normalizeTitleAuthorityString(member.spreadsheetIdentity.name, signalMax) ?? '',
+    expectedName: normalizeTitleAuthorityString(member.spreadsheetIdentity.expectedName, signalMax),
+    brandHint: normalizeTitleAuthorityString(member.spreadsheetIdentity.brandHint, brandMax),
+    webTitle: normalizeTitleAuthorityString(member.extraction.title, signalMax),
+    webBrand: normalizeTitleAuthorityString(member.extraction.brand, brandMax),
+    packagingOcrTitle: normalizeTitleAuthorityString(ocr?.productName ?? member.extraction.packagingTitle, signalMax),
+    ocrWeight: normalizeTitleAuthorityString(ocr?.weight ?? null, signalMax),
+    ocrFlavor: normalizeTitleAuthorityString(ocr?.flavorVariety ?? null, signalMax),
   };
 }
 
@@ -189,7 +219,7 @@ export function computeCohortTitleInputHashForFormatRules(
   params: CohortTitleInputHashParams,
   formatRules: string,
 ): string {
-  const { run, projection, modelPolicyDigest, titlePlanEntry, executionTypeLabel } = params;
+  const { run, projection, modelPolicyDigest, titlePlanEntry, executionTypeAuthority } = params;
   const members = [...projection.members]
     .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId))
     .map(titleAuthorityFromProjectionMember);
@@ -198,12 +228,9 @@ export function computeCohortTitleInputHashForFormatRules(
     kind: 'curated_title',
     membership: run.finalMembershipHash,
     members,
-    executionProductType: {
+    executionProductType: executionTypeAuthority ?? {
       id: run.executionProductTypeId,
-      // PR6 hardening C (P1-3): the label is part of the hashed authority — a
-      // label change (frozen product-type option rename) re-coordinates just
-      // like an id/confidence/outcome change.
-      label: executionTypeLabel ?? null,
+      label: null,
       confidence: run.productTypeConfidence,
       outcome: run.productTypeOutcome,
     },

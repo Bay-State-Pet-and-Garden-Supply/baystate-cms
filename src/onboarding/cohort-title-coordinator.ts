@@ -251,7 +251,7 @@ export async function ensureCohortTitlesCoordinated(
     projection,
     modelPolicyDigest: unboundPolicyView?.policyDigest ?? null,
     titlePlanEntry: titlePlanEntry ?? undefined,
-    executionTypeLabel: executionTypeAuthority.label,
+    executionTypeAuthority,
   });
 
   // Step 2 — persisted rows are read BEFORE any early return so the
@@ -345,9 +345,10 @@ export async function ensureCohortTitlesCoordinated(
     // confidence + outcome). With signals ON the prompt renders BOTH the id
     // and the frozen label (`"dog-food-dry (Dry Dog Food)"`); a null run type
     // (abstained/conflicted) passes null → no context line, mirroring the
-    // hash's `executionProductType.id: null` state.
+    // hash's `executionProductType.id: null` state. The SAME
+    // `ExecutionTypeTitleAuthority` object feeds the T-hash and the prompt.
     const executionTypeContext = executionTypeAuthority.id
-      ? { id: executionTypeAuthority.id, label: executionTypeAuthority.label }
+      ? executionTypeAuthority
       : null;
     // PR6 review SHOULD-FIX 1: per-group model-call provenance — each group's
     // producing call id is captured for ITS member SKUs, so every persisted

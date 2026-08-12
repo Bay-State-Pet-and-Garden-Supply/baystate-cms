@@ -61,7 +61,7 @@ export interface CohortSiblingInput {
  * authority never lags the hash authority.
  */
 export interface CohortExecutionTypeContext {
-  id: string;
+  id: string | null;
   label: string | null;
 }
 

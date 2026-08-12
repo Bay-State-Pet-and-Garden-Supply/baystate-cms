@@ -573,7 +573,7 @@ function expectedInputHash(fixture: FrozenCohortFixture): string {
     titlePlanEntry: snapshot
       ? (getModelExecutionPlanEntry(snapshot, 'cohort_title_consolidation') ?? undefined)
       : undefined,
-    executionTypeLabel: executionTypeAuthority.label,
+    executionTypeAuthority,
   });
 }
 
@@ -957,14 +957,14 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       projection: fixture.projection,
       modelPolicyDigest: unboundView!.policyDigest,
       titlePlanEntry: planEntry,
-      executionTypeLabel: executionTypeAuthority.label,
+      executionTypeAuthority,
     });
     const hashWithBound = computeCohortTitleInputHash({
       run: fixture.run,
       projection: fixture.projection,
       modelPolicyDigest: boundView!.policyDigest,
       titlePlanEntry: planEntry,
-      executionTypeLabel: executionTypeAuthority.label,
+      executionTypeAuthority,
     });
     expect(persistedHash).toBe(hashWithUnbound);
     expect(persistedHash).not.toBe(hashWithBound);
@@ -984,7 +984,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       projection: fixture.projection,
       modelPolicyDigest: mutatedUnbound!.policyDigest,
       titlePlanEntry: planEntry,
-      executionTypeLabel: executionTypeAuthority.label,
+      executionTypeAuthority,
     })).toBe(persistedHash);
 
     // (d) A TITLE-ROUTE change (name_consolidation stage override) changes the
@@ -1006,7 +1006,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       projection: fixture.projection,
       modelPolicyDigest: routeUnbound!.policyDigest,
       titlePlanEntry: planEntry,
-      executionTypeLabel: executionTypeAuthority.label,
+      executionTypeAuthority,
     })).not.toBe(persistedHash);
   });
 
@@ -1222,8 +1222,8 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     // worker re-invokes audited coordination. This single-simulated-crash
     // scenario shows ONE such re-invocation (each invocation audited); the
     // honest contract is that repeated pre-commit crashes would each cause
-    // another independently audited call — there is no retry cap. The SECOND
-    // attempt's committed set is COMPLETE + CONSISTENT: 2 rows, both share
+    // another independently audited call — there is no retry cap. The
+    // committing attempt's set is COMPLETE + CONSISTENT: 2 rows, both share
     // the canonical input_hash, the returned map equals the persisted rows.
     const secondMap = await ensureCohortTitlesCoordinated({
       run: resumedRun,

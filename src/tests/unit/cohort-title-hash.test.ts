@@ -200,12 +200,12 @@ type ParityParams = CohortTitleHashParams & {
 };
 
 /** Strip the test-only label source and resolve the T-hash's
- *  `executionTypeLabel` through the SHARED production builder (the same
+ *  `executionTypeAuthority` through the SHARED production builder (the same
  *  resolution the parent op performs). */
 function resolveParams(params: ParityParams): CohortTitleHashParams {
   const { typeLabelSource, ...rest } = params;
   const authority = titleExecutionTypeAuthorityFromRun(rest.run, typeLabelSource ?? LABEL_SOURCE);
-  return { ...rest, executionTypeLabel: authority.label };
+  return { ...rest, executionTypeAuthority: authority };
 }
 
 const hash = (params: ParityParams): string => computeCohortTitleInputHash(resolveParams(params));
@@ -350,7 +350,7 @@ describe('computeCohortTitleInputHash — membership + execution type (PR6 C2)',
     expect(hash(makeParams({ run: makeRun({ executionProductTypeId: 'type-2' }) }))).not.toBe(hash(base));
   });
 
-  it('executionTypeLabel change changes the hash (the label is part of the hashed authority — PR6 hardening C)', () => {
+  it('executionTypeAuthority label change changes the hash (the label is part of the hashed authority — PR6 hardening C)', () => {
     const base = makeParams();
     const labelChanged = clone(base);
     labelChanged.typeLabelSource = { productTypes: [{ id: 'type-1', name: 'Renamed Dry Dog Food' }] };
@@ -528,6 +528,30 @@ describe('computeCohortTitleInputHash — PARITY: hash authority == prompt autho
     expect(promptBase).toContain('Web Brand: "PawCo"');
     expect(promptChanged).toContain('Web Brand: "AnotherBrand"');
     expect(promptChanged).not.toContain('Web Brand: "PawCo"');
+  });
+
+  it('truncation parity: a suffix-only mutation BEYOND the prompt cutoffs changes NEITHER the T-hash NOR the prompt (PR6 hardening C)', () => {
+    const base = makeParams();
+    // webBrand is truncated at 200 chars in the prompt; the hash consumes the
+    // SAME normalized value (titleAuthorityFromProjectionMember applies the
+    // shared truncation) — so mutating chars 200+ must be inert for both.
+    const longBrand = `Brand-${'x'.repeat(250)}`;
+    const changed = makeParams();
+    changed.projection.members[0].extraction.brand = longBrand;
+    expect(hash(changed)).not.toBe(hash(base));
+    // Suffix-only mutation beyond the 200-char cutoff (same first 200 chars):
+    const suffixMutated = makeParams();
+    suffixMutated.projection.members[0].extraction.brand = `${longBrand.slice(0, 200)}-DIFFERENT-SUFFIX`;
+    expect(hash(suffixMutated)).toBe(hash(changed));
+    expect(promptForParams(suffixMutated)).toBe(promptForParams(changed));
+    // Same for an OCR signal (500-char cutoff):
+    const longWeight = `${'1'.repeat(600)} lb`;
+    const w1 = makeParams();
+    w1.projection.members[0].extraction.ocr.packagingOcrData!.weight = longWeight;
+    const w2 = makeParams();
+    w2.projection.members[0].extraction.ocr.packagingOcrData!.weight = `${longWeight.slice(0, 500)}-DIFFERENT`;
+    expect(hash(w2)).toBe(hash(w1));
+    expect(promptForParams(w2)).toBe(promptForParams(w1));
   });
 
   it('id-only mutation changes BOTH the T-hash AND the prompt (the prompt renders the id + its derived label)', () => {

@@ -19,6 +19,7 @@ import { redactTransportText } from '../classification/model-policy-gateway';
 import { normalizeBrand, extractNameStem } from './product-line-grouper';
 import { buildCohortPrompt, FORMAT_RULES } from './title-prompt-template';
 import type { CohortExecutionTypeContext } from './title-prompt-template';
+import { normalizeTitleAuthorityString, TITLE_AUTHORITY_TRUNCATION } from './cohort-title-hash';
 import { HeartbeatLostError } from '../classification/heartbeat-errors';
 import type { ModelCallContext } from '../classification/model-operation-registry';
 import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
@@ -160,9 +161,12 @@ function buildCacheKey(
  * PR6 (issue #30): this cached path is the LEGACY / flag-OFF / shadow
  * authority ONLY. Active cohort mode never calls it — the parent title op
  * (`ensureCohortTitlesCoordinated`, PR6 C4) persists durable
- * `classification_cohort_outputs` WRITE-ONCE (at most one ACTIVE coordination
- * call at a time; ZERO FURTHER calls once the durable set commits); the DB
- * outputs are the authority there, never this in-memory `cohortCache`.
+ * `classification_cohort_outputs` WRITE-ONCE: at most one ACTIVE
+ * coordination call at a time, ZERO FURTHER calls once the durable set
+ * commits, and every pre-commit crash (between transport success and the
+ * output-set commit) may cause another independently audited invocation —
+ * the DB outputs are the authority there, never this in-memory
+ * `cohortCache`.
  *
  * @param batchId - The onboarding batch ID.
  * @param items   - Items from the same batch.
@@ -480,21 +484,24 @@ async function coordinateGroup(
   }));
 
   // All items in one prompt (no cap). Individual signal strings are
-  // truncated at 500 characters to keep prompt size reasonable.
+  // truncated at 500 characters to keep prompt size reasonable — via the
+  // SHARED prompt-normalization helper from cohort-title-hash so the hashed
+  // authority equals the prompted authority by construction (a suffix-only
+  // mutation beyond the cutoffs changes neither the prompt NOR the T-hash).
   const truncatedSiblings = siblings.map(s => ({
     ...s,
-    name: s.name.slice(0, 500),
-    expectedName: s.expectedName?.slice(0, 500) ?? null,
-    webTitle: s.webTitle?.slice(0, 500) ?? null,
-    ocrTitle: s.ocrTitle?.slice(0, 500) ?? null,
+    name: normalizeTitleAuthorityString(s.name, TITLE_AUTHORITY_TRUNCATION.signalMaxChars) ?? '',
+    expectedName: normalizeTitleAuthorityString(s.expectedName, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+    webTitle: normalizeTitleAuthorityString(s.webTitle, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+    ocrTitle: normalizeTitleAuthorityString(s.ocrTitle, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
     ...(opts?.includeTitleHashSignals === true
       ? {
-          webBrand: s.webBrand?.slice(0, 200) ?? null,
-          ocrWeight: s.ocrWeight?.slice(0, 500) ?? null,
-          ocrFlavor: s.ocrFlavor?.slice(0, 500) ?? null,
+          webBrand: normalizeTitleAuthorityString(s.webBrand ?? null, TITLE_AUTHORITY_TRUNCATION.brandMaxChars),
+          ocrWeight: normalizeTitleAuthorityString(s.ocrWeight ?? null, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+          ocrFlavor: normalizeTitleAuthorityString(s.ocrFlavor ?? null, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
         }
       : {}),
-    brand: s.brand?.slice(0, 200) ?? null,
+    brand: normalizeTitleAuthorityString(s.brand, TITLE_AUTHORITY_TRUNCATION.brandMaxChars),
   }));
 
   // PR6 hardening C (P1-3): the Execution Product Type context is part of the

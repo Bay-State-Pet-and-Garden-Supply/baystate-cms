@@ -110,14 +110,14 @@ function loadFrozenProjectionForRun(workspaceId: string, run: CohortRun): Execut
   return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
 }
 
-/** Resolve the frozen Execution Product Type label exactly as the parent op
- *  does: the shared builder over the ordinal-0 member's frozen runtime
+/** Resolve the frozen Execution Product Type authority exactly as the parent
+ *  op does: the shared builder over the ordinal-0 member's frozen runtime
  *  snapshot (matched by the run's `executionProductTypeId`). */
-function resolvedExecutionTypeLabel(
+function resolvedExecutionTypeAuthority(
   workspaceId: string,
   run: CohortRun,
   projection: ExecutionEvidenceProjectionV1,
-): string | null {
+): ReturnType<typeof titleExecutionTypeAuthorityFromRun> {
   const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const child = getDb().query(
     'SELECT config_snapshot_hash FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
@@ -125,7 +125,7 @@ function resolvedExecutionTypeLabel(
   const snapshot = child?.config_snapshot_hash
     ? getRuntimeSnapshotByHash(workspaceId, child.config_snapshot_hash)
     : null;
-  return titleExecutionTypeAuthorityFromRun(run, snapshot).label;
+  return titleExecutionTypeAuthorityFromRun(run, snapshot);
 }
 
 function seedV1TitleOutputs(workspaceId: string, run: CohortRun): void {
@@ -139,7 +139,7 @@ function seedV1TitleOutputs(workspaceId: string, run: CohortRun): void {
     run,
     projection,
     modelPolicyDigest: null,
-    executionTypeLabel: resolvedExecutionTypeLabel(workspaceId, run, projection),
+    executionTypeAuthority: resolvedExecutionTypeAuthority(workspaceId, run, projection),
   });
   const outputs = projection.members
     .map(member => ({
@@ -2204,7 +2204,7 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
       run,
       projection,
       modelPolicyDigest: null,
-      executionTypeLabel: resolvedExecutionTypeLabel(workspaceId, run, projection),
+      executionTypeAuthority: resolvedExecutionTypeAuthority(workspaceId, run, projection),
     });
   }
 
