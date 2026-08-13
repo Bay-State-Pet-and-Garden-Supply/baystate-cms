@@ -27,7 +27,14 @@ interface CurationStagePanelProps {
   onUpdateWeight: (weight: string) => void;
   onTogglePage: (pageName: string, isAssigned: boolean) => void;
   onRemovePage: (pageName: string) => void;
-  fieldTargetForProposal: (proposal: ClassificationProposal) => { target: CurationTargetConfig | null; values: string[]; label: string };
+  fieldTargetForProposal: (proposal: ClassificationProposal) => {
+    target: CurationTargetConfig | null;
+    values: string[];
+    label: string;
+    valueMode: 'controlled' | 'freeText' | 'measured' | null;
+    canonicalUnit: string | null;
+    cardinality: 'single' | 'multiple';
+  };
   productTypeOptions: () => { label: string; value: string }[];
   getEffectiveProposalValue: (proposal: ClassificationProposal) => any;
   /** Canonical hydrated run evidence (issue #17 I). */
@@ -221,9 +228,9 @@ export function CurationStagePanel({
 
                   {p.proposalType === 'field_assignment' && (
                     (() => {
-                      const valueMode = (fieldMeta.target as any)?.attributeValueMode || (fieldMeta as any)?.valueMode || (fieldMeta.label.toLowerCase().includes('weight') || fieldMeta.label.toLowerCase().includes('length') || fieldMeta.label.toLowerCase().includes('diameter') ? 'measured' : 'controlled');
-                      if (valueMode === 'measured' || fieldMeta.label.toLowerCase().includes('weight') || fieldMeta.label.toLowerCase().includes('length') || fieldMeta.label.toLowerCase().includes('diameter')) {
-                        const unit = (fieldMeta.target as any)?.canonicalUnit || 'lb';
+                      const valueMode = fieldMeta.valueMode;
+                      if (valueMode === 'measured') {
+                        const unit = fieldMeta.canonicalUnit ?? '(No unit configured)';
                         return (
                           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                             <input

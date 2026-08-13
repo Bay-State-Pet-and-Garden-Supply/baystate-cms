@@ -65,14 +65,6 @@ export function deriveCurationApplicability(config: ClassificationConfig): Curat
     config.attributeProfiles.map(prof => [prof.id, prof]),
   );
 
-  // Profile lookup index by productTypeId (for profiles where id might differ or match)
-  const profileByProductTypeIdMap = new Map<string, AttributeProfileConfig>();
-  for (const prof of config.attributeProfiles) {
-    if (prof.productTypeId) {
-      profileByProductTypeIdMap.set(prof.productTypeId, prof);
-    }
-  }
-
   const mappingByCatalogField = new Map<string, AttributeMappingConfig>();
   const mappingByAttributeId = new Map<string, AttributeMappingConfig>();
   for (const mapping of config.attributeMappings) {
@@ -93,7 +85,7 @@ export function deriveCurationApplicability(config: ClassificationConfig): Curat
   // Check 1: product_type_profile_missing
   for (const productType of config.productTypes) {
     if (productType.attributeProfileId) {
-      const profile = profileMap.get(productType.attributeProfileId) ?? profileByProductTypeIdMap.get(productType.id);
+      const profile = profileMap.get(productType.attributeProfileId);
       if (!profile) {
         findings.push({
           code: 'product_type_profile_missing',
@@ -213,7 +205,7 @@ export function deriveCurationApplicability(config: ClassificationConfig): Curat
 
     for (const productType of config.productTypes) {
       if (!productType.attributeProfileId) continue;
-      const profile = profileMap.get(productType.attributeProfileId) ?? profileByProductTypeIdMap.get(productType.id);
+      const profile = profileMap.get(productType.attributeProfileId);
       if (!profile) continue; // missing profile handled by health finding
 
       const profileAttr = profile.attributes.find(a => a.attributeId === attribute.id);

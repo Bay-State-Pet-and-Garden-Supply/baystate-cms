@@ -108,6 +108,8 @@ function applyEditsToBundle(
 
   const attributeMap = new Map(bundle.attributes.map(a => [a.id, a]));
 
+  const matchedTargetIds = new Set<string>();
+
   for (const raw of rawTargets) {
     if (!raw || typeof raw !== 'object') continue;
     const input = raw as Record<string, unknown>;
@@ -126,6 +128,7 @@ function applyEditsToBundle(
 
     if (existingIndex >= 0) {
       const existing = nextTargets[existingIndex];
+      matchedTargetIds.add(existing.id);
       const targetAttrId = attributeId ?? existing.attributeId;
       const attr = targetAttrId ? attributeMap.get(targetAttrId) : null;
       const requestedSource = input.optionSource === 'live_store' ? 'live_store' : (input.optionSource === 'configured' ? 'configured' : existing.optionSource);
@@ -182,6 +185,15 @@ function applyEditsToBundle(
         );
       }
       nextTargets.push(parsed.data);
+      matchedTargetIds.add(parsed.data.id);
+    }
+  }
+
+  // Reconcile omitted targets: Any non-mandatory product_field target omitted from rawTargets is disabled.
+  for (let i = 0; i < nextTargets.length; i++) {
+    const t = nextTargets[i];
+    if (t.kind === 'product_field' && !t.mandatory && !matchedTargetIds.has(t.id)) {
+      nextTargets[i] = { ...t, enabled: false };
     }
   }
 

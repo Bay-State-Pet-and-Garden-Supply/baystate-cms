@@ -139,13 +139,65 @@ export async function processProductFieldTarget(
 ): Promise<TargetProcessResult> {
   const { config: targetConfig, options: targetOptions, attribute } = target;
   const options2 = targetOptions;
+  const selectionMode = options.cardinality ?? (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
+  const snapshotHash = context.snapshot?.snapshotHash ?? null;
 
+  // ── Handle freeText and measured attributes (no controlled options required)
+  if (attribute?.valueMode === 'freeText' || attribute?.valueMode === 'measured') {
+    const attrId = targetConfig.attributeId ?? targetConfig.id;
+    const catalogField = targetConfig.catalogField ?? null;
+    const fieldPacket = buildEvidenceTargetPacket(input.evidence, {
+      attributeId: attrId,
+      sourceField: catalogField,
+      sourceFields: catalogField ? [catalogField] : null,
+      selectionMode,
+      aliases: attribute?.valueAliases ?? [],
+      isGroundingSupport: tokenGroundingSupport,
+    });
+    const text = fieldPacket.promptText;
+    if (!text || text.trim().length === 0) {
+      return { proposals: [], message: `No evidence text for "${targetConfig.label}".` };
+    }
+
+    if (attribute.valueMode === 'freeText') {
+      const extractedValue = (fieldPacket.supporting.find(e => typeof e.value === 'string' && (e.value as string).trim().length > 0)?.value as string) ?? text;
+      const proposal = buildFieldAssignmentProposal({
+        runId: context.runId,
+        sku: input.sku,
+        attributeId: targetConfig.attributeId ?? targetConfig.id,
+        value: extractedValue,
+        confidence: 0.85,
+        evidenceIds: fieldPacket.evidenceIds,
+        supportingEvidenceIds: fieldPacket.supportingEvidenceIds,
+        contradictingEvidenceIds: fieldPacket.contradictingEvidenceIds,
+        isMultiple: selectionMode === 'multiple',
+        snapshotHash,
+      });
+      return { proposals: [proposal], message: `"${targetConfig.label}": ${extractedValue} (free-text, 85%)` };
+    }
+
+    // valueMode === 'measured'
+    const rawVal = fieldPacket.supporting.find(e => e.value !== null && e.value !== undefined)?.value ?? text;
+    const valStr = String(rawVal).trim();
+    const proposal = buildFieldAssignmentProposal({
+      runId: context.runId,
+      sku: input.sku,
+      attributeId: targetConfig.attributeId ?? targetConfig.id,
+      value: valStr,
+      confidence: 0.85,
+      evidenceIds: fieldPacket.evidenceIds,
+      supportingEvidenceIds: fieldPacket.supportingEvidenceIds,
+      contradictingEvidenceIds: fieldPacket.contradictingEvidenceIds,
+      isMultiple: false,
+      snapshotHash,
+    });
+    return { proposals: [proposal], message: `"${targetConfig.label}": ${valStr} (measured, 85%)` };
+  }
+
+  // ── Controlled attributes path (requires options list)
   if (!options2 || options2.length === 0) {
     return { proposals: [], message: `No options available for "${targetConfig.label}".` };
   }
-
-  const selectionMode = options.cardinality ?? (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
-  const snapshotHash = context.snapshot?.snapshotHash ?? null;
 
   // Brand assertions that disagreed in the shortcut pre-pass (visible conflict).
   let brandConflictEvidenceIds: string[] = [];

@@ -873,18 +873,31 @@ export function PipelineBoard({
     }
   };
 
-  const fieldTargetForProposal = (proposal: ClassificationProposal): { target: CurationTargetConfig | null; values: string[]; label: string } => {
+  const fieldTargetForProposal = (proposal: ClassificationProposal): {
+    target: CurationTargetConfig | null;
+    values: string[];
+    label: string;
+    valueMode: 'controlled' | 'freeText' | 'measured' | null;
+    canonicalUnit: string | null;
+    cardinality: 'single' | 'multiple';
+  } => {
     const effectiveTargetId = getEffectiveProposalTargetId(proposal);
     if (proposal.proposalType !== 'field_assignment' || !curationTargetState) {
-      return { target: null, values: [], label: effectiveTargetId || 'Field' };
+      return { target: null, values: [], label: effectiveTargetId || 'Field', valueMode: null, canonicalUnit: null, cardinality: 'single' };
     }
     const field = curationTargetState.candidates.productFields.find(candidate =>
       candidate.attributeId === effectiveTargetId || candidate.target?.attributeId === effectiveTargetId,
+    );
+    const appl = curationTargetState.applicability.find(a =>
+      (field && a.catalogField === field.catalogField) || (effectiveTargetId && a.attributeId === effectiveTargetId),
     );
     return {
       target: field?.target ?? null,
       values: field?.values ?? [],
       label: field ? `${field.label} (${field.catalogField})` : effectiveTargetId || 'Field',
+      valueMode: appl?.valueMode ?? null,
+      canonicalUnit: appl?.canonicalUnit ?? null,
+      cardinality: field?.target?.selectionMode ?? 'single',
     };
   };
 

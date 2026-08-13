@@ -875,9 +875,14 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                                           required: false,
                                           sortOrder: target?.sortOrder ?? curationTargetsDraft.length,
                                         });
-                                      } else {
-                                        removeCurationTarget(t => t.kind === 'product_field' && t.catalogField === field.catalogField);
-                                      }
+                                       } else if (target) {
+                                         upsertCurationTarget({
+                                           ...target,
+                                           enabled: false,
+                                         });
+                                       } else {
+                                         removeCurationTarget(t => t.kind === 'product_field' && t.catalogField === field.catalogField);
+                                       }
                                     }}
                                   />
                                 </td>

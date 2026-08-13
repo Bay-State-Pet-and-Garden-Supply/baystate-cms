@@ -3,6 +3,8 @@ import {
   resolveAttributeAllowedValues,
   applyCurationTargetsToConfig,
 } from '../../classification/curation-targets';
+import { processProductFieldTarget } from '../../classification/curation-target-processor';
+import { deriveCurationApplicability } from '../../classification/curation-applicability';
 import type { ClassificationConfig, ProductAttributeConfig, CurationTargetConfig } from '../../shared/schemas/classification';
 import { initDb, closeDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
@@ -190,5 +192,85 @@ describe('Curation Input Mode & ValueMode Enforcement Acceptance Tests', () => {
     expect(() => applyCurationTargetsToConfig(mockConfig, rawTargets, 'test-workspace')).toThrowError(
       /cannot use optionSource 'live_store' because attribute "Weight" has valueMode 'measured'/
     );
+  });
+
+  it('4. processProductFieldTarget generates proposals for measured and freeText attributes with empty options', async () => {
+    const targetMeasured = {
+      config: mockConfig.curationTargets[0],
+      options: [],
+      attribute: measuredWeightAttribute,
+    };
+
+    const targetFreeText = {
+      config: {
+        id: 'target-ingredients',
+        kind: 'product_field' as const,
+        label: 'Ingredients',
+        enabled: true,
+        mandatory: false,
+        selectionMode: 'single' as const,
+        attributeId: 'ingredients',
+        catalogField: 'ProductField25',
+        optionSource: 'configured' as const,
+        required: false,
+        sortOrder: 2,
+      },
+      options: [],
+      attribute: freeTextIngredientsAttribute,
+    };
+
+    const mockInput = {
+      sku: 'SKU123',
+      evidence: [
+        { id: 'ev1', sourceField: 'ProductField26', value: '12.5 lb', attributeId: 'weight' },
+        { id: 'ev2', sourceField: 'ProductField25', value: 'Chicken, Rice, Corn', attributeId: 'ingredients' },
+      ],
+      allProposals: [],
+    };
+
+    const mockContext = {
+      runId: 'run-1',
+      workspacePath: '/tmp',
+      workspaceId: 'ws-1',
+    };
+
+    const weightRes = await processProductFieldTarget(targetMeasured, mockInput as any, mockContext as any);
+    expect(weightRes.proposals.length).toBe(1);
+    expect(weightRes.proposals[0].proposedValue).toBe('12.5 lb');
+
+    const ingRes = await processProductFieldTarget(targetFreeText, mockInput as any, mockContext as any);
+    expect(ingRes.proposals.length).toBe(1);
+    expect(ingRes.proposals[0].proposedValue).toBe('Chicken, Rice, Corn');
+  });
+
+  it('5. deriveCurationApplicability requires exact attributeProfileId and emits product_type_profile_missing when profile is missing', () => {
+    const configWithMissingProfile: ClassificationConfig = {
+      ...mockConfig,
+      productTypes: [
+        {
+          id: 'garden-hose',
+          name: 'Garden Hose',
+          description: null,
+          attributeProfileId: 'garden-hose-v2-missing',
+          oldIdAliases: [],
+        },
+      ],
+      attributeProfiles: [
+        {
+          id: 'old-garden-hose-profile',
+          productTypeId: 'garden-hose',
+          name: 'Old Hose Profile',
+          attributes: [{ attributeId: 'weight', required: false, cardinality: 'single', applicabilityConditions: [], constraints: {}, confidenceThresholds: {}, valueAliases: [] }],
+        },
+      ],
+    };
+
+    const report = deriveCurationApplicability(configWithMissingProfile);
+    const missingFinding = report.findings.find(f => f.code === 'product_type_profile_missing');
+    expect(missingFinding).toBeDefined();
+    expect(missingFinding?.message).toContain('garden-hose-v2-missing');
+
+    const weightApplicability = report.applicability.find(a => a.catalogField === 'ProductField26');
+    expect(weightApplicability?.productTypes.length).toBe(0);
   });
 });
