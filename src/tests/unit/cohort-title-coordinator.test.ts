@@ -86,6 +86,9 @@ import {
 import { clearCohortCoordinationCache } from '../../onboarding/cohort-name-coordinator';
 import { overrideCohortCurationFlags, resetCohortCurationFlagsOverride } from '../../classification/flags';
 import { canonicalJsonFileString, sha256Hex, hashCanonicalJson } from '../../shared/stable-id';
+
+/** ISO timestamp helper for the tie test (mirrors the repo's `now()`). */
+const nowIso = () => new Date().toISOString();
 import {
   ClassificationManifestV2Schema,
   ClassificationFocusedFileNames,
@@ -1906,5 +1909,78 @@ describe('ensureCohortTitlesCoordinated — PR13 C2 cross-parent same-T-hash reu
     expect(found).not.toBeNull();
     expect(found!.id).toBe(fixture.run.id);
     expect(found!.status).toBe('superseded');
+  });
+
+  it('PR13 review R2 (P2): an exact superseded_at TIE resolves deterministically via the id tiebreaker (superseded_at DESC, id DESC)', async () => {
+    // Two superseded runs for the same cohort with IDENTICAL superseded_at:
+    // the lookup must be deterministic (secondary id DESC), never
+    // insertion-order dependent — repeated lookups agree on the SAME run.
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    await ensureCohortTitlesCoordinated(runCoordParams(fixtureA));
+    const tie = nowIso();
+    getDb().run('UPDATE classification_cohort_runs SET superseded_at = ? WHERE id = ?', [tie, fixtureA.run.id]);
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    getDb().run('UPDATE classification_cohort_runs SET superseded_at = ? WHERE id = ?', [tie, fixtureB.run.id]);
+    const first = getLatestSupersededRunForCohort(fixtureA.cohort.id)!;
+    expect([fixtureA.run.id, fixtureB.run.id]).toContain(first.id);
+    // Stable across repeated lookups (the id tiebreaker is deterministic).
+    expect(getLatestSupersededRunForCohort(fixtureA.cohort.id)!.id).toBe(first.id);
+    expect(getLatestSupersededRunForCohort(fixtureA.cohort.id)!.id).toBe(first.id);
+    expect(getLatestSupersededRunForCohort(fixtureA.cohort.id)!.id).toBe(first.id);
+  });
+
+  it('PR13 review R2 (P1): cross-parent reuse FAILS CLOSED across title parameter sets — A under P1 + B under P2 (everything else identical) ⇒ NO copy, fresh coordination', async () => {
+    // A coordinates under the P1 parameter tuple (a parameter-only release
+    // models a different deployment's OPERATION_PARAMETERS); its T-hash is
+    // H1. Supersede A. B is frozen under P2 (everything else identical —
+    // same members, same evidence, same plan entry): the freshly computed
+    // T-hash H2 ≠ H1, so the stored P1 set is NOT the same authority → no
+    // copy → fresh title coordination (one call).
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    titleCallCount = 0;
+    const mapA = await ensureCohortTitlesCoordinated({
+      ...runCoordParams(fixtureA),
+      titleOperationParameters: { temperature: 0.0, maxTokens: null }, // P1
+    });
+    expect(titleCallCount).toBe(1);
+    expect(mapA.size).toBe(2);
+    const rowsA = getCohortTitleOutputsByRun(fixtureA.run.id);
+    expect(rowsA).toHaveLength(2);
+    const hashA = rowsA[0].inputHash;
+    expect(rowsA.every(r => r.inputHash === hashA)).toBe(true);
+
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    titleCallCount = 0;
+    const mapB = await ensureCohortTitlesCoordinated({
+      ...runCoordParams(fixtureB),
+      titleOperationParameters: { temperature: 0.1, maxTokens: null }, // P2 (the registry default)
+    });
+    // Different parameter authority → the stored P1 set is NOT reusable.
+    expect(titleCallCount).toBe(1);
+    expect(mapB.size).toBe(2);
+    const rowsB = getCohortTitleOutputsByRun(fixtureB.run.id);
+    expect(rowsB).toHaveLength(2);
+    // B's rows carry a DIFFERENT hash than A's P1-era rows; A's set untouched.
+    expect(rowsB.every(r => r.inputHash !== hashA)).toBe(true);
+    expect(getCohortTitleOutputsByRun(fixtureA.run.id)).toEqual(rowsA);
+  });
+
+  it('PR13 review R2 (P1): SAME parameter authority across revisions still reuses — B under the SAME tuple as A ⇒ zero calls (the R2 regression must not break the economics)', async () => {
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    titleCallCount = 0;
+    await ensureCohortTitlesCoordinated({
+      ...runCoordParams(fixtureA),
+      titleOperationParameters: { temperature: 0.0, maxTokens: null }, // P1
+    });
+    expect(titleCallCount).toBe(1);
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    titleCallCount = 0;
+    const mapB = await ensureCohortTitlesCoordinated({
+      ...runCoordParams(fixtureB),
+      titleOperationParameters: { temperature: 0.0, maxTokens: null }, // P1 again
+    });
+    expect(titleCallCount).toBe(0);
+    expect(mapB.size).toBe(2);
+    expect(getCohortTitleOutputsByRun(fixtureB.run.id)).toHaveLength(2);
   });
 });

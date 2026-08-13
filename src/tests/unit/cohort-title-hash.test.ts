@@ -413,14 +413,51 @@ describe('computeCohortTitleInputHash — model execution authority slice (PR6 C
     expect(hash(base).length).toBe(64);
   });
 
+  it('PR13 review R2: the EXECUTED title parameter tuple participates — a temperature-only release changes the T-hash; maxTokens too', () => {
+    const base = hash(makeParams());
+    // The registry default tuple IS the executed authority (the transport
+    // applies it when the caller supplies no override): passing it explicitly
+    // must equal the default (identity of the executed authority).
+    expect(hash(makeParams({ titleOperationParameters: { temperature: 0.1, maxTokens: null } }))).toBe(base);
+    // A parameter-only release (temperature 0.1 → 0.0, prompt/rule/provider/
+    // model unchanged) changes the T-hash → cross-parent reuse fails closed.
+    expect(hash(makeParams({ titleOperationParameters: { temperature: 0.0, maxTokens: null } }))).not.toBe(base);
+    expect(hash(makeParams({ titleOperationParameters: { temperature: 0.1, maxTokens: 200 } }))).not.toBe(base);
+  });
+
+  it('PR13 review R2: a parameter change for an UNRELATED operation never changes the title T-hash (only the title tuple is hashed)', () => {
+    const base = hash(makeParams());
+    // The payload contains ONLY the title operation's tuple and the title
+    // op's frozen entry fields: a plan entry carrying a DIFFERENT operation
+    // name (whatever that op's parameter contract is, it is never read) with
+    // the SAME hashed fields leaves the title hash unchanged.
+    const foreignEntry = makePlanEntry({
+      operation: 'cohort_page_assignment_parent',
+      // Same unrouted hashed fields as the absent fallback (provider/model
+      // null via the `?? null` fallback; versions = registry consts) — only
+      // the operation NAME differs, and the entry's operation name is never
+      // hashed.
+      provider: null as any,
+      model: null as any,
+    });
+    expect(hash(makeParams({ titlePlanEntry: foreignEntry }))).toBe(base);
+    // And the title tuple stays the only parameter input: an explicit title
+    // tuple equal to the registry default is still identity-equal.
+    expect(hash(makeParams({
+      titlePlanEntry: foreignEntry,
+      titleOperationParameters: { temperature: 0.1, maxTokens: null },
+    }))).toBe(base);
+  });
+
   it('PR13 review R1 (T2): a FIXED CANONICAL T-hash baseline — the digest-free composition is frozen', () => {
     // Hardcoded value computed once from the deterministic fixture below;
     // any accidental change to the hashed composition (a field entering or
     // leaving the canonical JSON) breaks this test — exactly what a baseline
     // is for. The fixtures above are fully deterministic (fixed strings,
     // no UUIDs), so this value is stable across runs and machines.
-    expect(hash(makeParams())).toBe('5a134a9a3dc6e64247bd900336e88a4e3713ec10607cf2e0b9731610d8e0d22f');
-    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('5a134a9a3dc6e64247bd900336e88a4e3713ec10607cf2e0b9731610d8e0d22f');
+    // PR13 review R2: recomputed under the v2 payload (parameters included).
+    expect(hash(makeParams())).toBe('d1983b647952e4b556eea018d4c7a1e2d468eb3da03a89f46ea56bb2fc45c3eb');
+    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('d1983b647952e4b556eea018d4c7a1e2d468eb3da03a89f46ea56bb2fc45c3eb');
   });
 
   it('the plan entry provider/model/promptTemplateVersion/ruleVersion each participate', () => {

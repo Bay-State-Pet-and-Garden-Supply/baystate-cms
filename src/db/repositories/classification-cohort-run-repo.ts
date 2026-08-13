@@ -1011,7 +1011,7 @@ export function getLatestSupersededRunForCohort(cohortId: string): CohortRun | n
   const row = getDb().query(
     `SELECT * FROM classification_cohort_runs
      WHERE cohort_id = ? AND status = 'superseded'
-     ORDER BY superseded_at DESC LIMIT 1`,
+     ORDER BY superseded_at DESC, id DESC LIMIT 1`,
   ).get(cohortId) as Record<string, any> | undefined;
   return row ? mapCohortRunRow(row) : null;
 }

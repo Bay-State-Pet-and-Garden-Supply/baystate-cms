@@ -11,7 +11,10 @@
  *    per-member frozen title slice, the Execution Product Type resolution,
  *    the FORMAT_RULES digest, and the operation-specific H5 title slice (the
  *    frozen `cohort_title_consolidation` plan entry — provider/model/versions;
- *    the broad policy digest is deliberately NOT hashed, PR13 DECISION-C).
+ *    the broad policy digest is deliberately NOT hashed, PR13 DECISION-C;
+ *    PR13 review R2: the EXECUTED `OPERATION_PARAMETERS.cohort_title_consolidation`
+ *    tuple — temperature/maxTokens — also participates, so a parameter-only
+ *    registry release changes the hash and cross-parent reuse fails closed).
  *    Never live item rows, never the old cache fingerprint, never OCR
  *    provenance hashes.
  *
@@ -245,6 +248,14 @@ export interface EnsureCohortTitlesCoordinatedParams {
    * callers never pass it.
    */
   beforeTitleCopyInsert?: () => void | Promise<void>;
+  /**
+   * Test-only title-parameter override (PR13 review R2): models a DEPLOYMENT
+   * whose `OPERATION_PARAMETERS.cohort_title_consolidation` tuple differs
+   * (a parameter-only registry release) — the T-hash then differs and the
+   * cross-parent reuse key fails closed to fresh coordination. Production
+   * callers never pass it: the registry tuple is the executed authority.
+   */
+  titleOperationParameters?: { temperature: number; maxTokens: number | null };
 }
 
 /**
@@ -333,6 +344,11 @@ export async function ensureCohortTitlesCoordinated(
     projection,
     titlePlanEntry: titlePlanEntry ?? undefined,
     executionTypeAuthority,
+    // PR13 review R2 (test-only): production passes nothing → the registry
+    // tuple (the executed authority) participates via the hash's default.
+    ...(params.titleOperationParameters
+      ? { titleOperationParameters: params.titleOperationParameters }
+      : {}),
   });
 
   // Step 2 — persisted rows are read BEFORE any early return so the

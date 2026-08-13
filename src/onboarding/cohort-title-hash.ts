@@ -64,7 +64,11 @@
  */
 import { hashCanonicalJson } from '../shared/stable-id';
 import { FORMAT_RULES } from './title-prompt-template';
-import { PROMPT_TEMPLATE_VERSIONS, RULE_VERSIONS } from '../classification/model-operation-registry';
+import {
+  OPERATION_PARAMETERS,
+  PROMPT_TEMPLATE_VERSIONS,
+  RULE_VERSIONS,
+} from '../classification/model-operation-registry';
 import type { ModelExecutionPlanEntry } from '../classification/model-operation-registry';
 import type {
   CohortRun,
@@ -81,6 +85,18 @@ export interface CohortTitleInputHashParams {
   projection: ExecutionEvidenceProjectionV1;
   /** Frozen `cohort_title_consolidation` plan entry (H5 title slice); absent → registry consts. */
   titlePlanEntry?: ModelExecutionPlanEntry;
+  /**
+   * PR13 review R2 (issue #30): the title operation's EXECUTION PARAMETER
+   * slice — `{temperature, maxTokens}` as applied by the audited transport
+   * (llm-client reads `OPERATION_PARAMETERS[op]` when the caller supplies no
+   * override, and the title coordinator supplies none). Absent → the
+   * registry's `cohort_title_consolidation` tuple (the deployed execution
+   * authority). A parameter-only release therefore changes the T-hash, so
+   * cross-parent same-T-hash reuse can never copy a set produced under a
+   * different parameter contract. Tests pass explicit tuples to prove the
+   * participation; production callers never do.
+   */
+  titleOperationParameters?: { temperature: number; maxTokens: number | null };
   /**
    * Frozen Execution Product Type authority (PR6 hardening C, issue #30
    * P1-3): the SAME `ExecutionTypeTitleAuthority` object the coordinated
@@ -219,7 +235,6 @@ export function titleAuthorityFromProjectionMember(
 export function computeCohortTitleInputHash(params: CohortTitleInputHashParams): string {
   return computeCohortTitleInputHashForFormatRules(params, FORMAT_RULES);
 }
-
 /**
  * Parameterized internal: identical to `computeCohortTitleInputHash` but the
  * format-rules text is injectable, so tests can prove the FORMAT_RULES digest
@@ -234,8 +249,14 @@ export function computeCohortTitleInputHashForFormatRules(
   const members = [...projection.members]
     .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId))
     .map(titleAuthorityFromProjectionMember);
+  // PR13 review R2 (issue #30): the EXECUTED title parameters — the
+  // registry's `cohort_title_consolidation` tuple (the transport applies it
+  // when the caller supplies no override; the coordinator supplies none),
+  // overridable only by tests. A parameter-only release changes the T-hash.
+  const titleParameters =
+    params.titleOperationParameters ?? OPERATION_PARAMETERS['cohort_title_consolidation'];
   return hashCanonicalJson({
-    version: 1,
+    version: 2,
     kind: 'curated_title',
     membership: run.finalMembershipHash,
     members,
@@ -253,6 +274,13 @@ export function computeCohortTitleInputHashForFormatRules(
       ruleVersion: titlePlanEntry?.ruleVersion ?? RULE_VERSIONS.cohort_title_consolidation,
       provider: titlePlanEntry?.provider ?? null,
       model: titlePlanEntry?.model ?? null,
+      // PR13 review R2: the EXECUTED parameter tuple participates — a
+      // parameter-only registry release (registryVersion bumped, prompt/rule
+      // unchanged) must never reuse an old set across parents.
+      parameters: {
+        temperature: titleParameters.temperature,
+        maxTokens: titleParameters.maxTokens,
+      },
     },
   });
 }
