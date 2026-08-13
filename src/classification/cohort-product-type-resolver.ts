@@ -202,7 +202,7 @@ export function evidenceFromProjection(
     options.expectedOcrExecutionDigest !== undefined
       ? options.expectedOcrExecutionDigest !== null &&
         frozenOcr.ocrExecutionDigest === options.expectedOcrExecutionDigest
-      : frozenOcr.ocrExecutionDigest != null;
+      : frozenOcr.ocrExecutionDigest !== null;
   if (frozenOcr.packagingOcrData && ocrInputHashMatches && executionDigestBound) {
     const modelCallIds = frozenOcr.packagingOcrData.metadata?.modelCallIds;
     evidence.push(...mirrorPackagingOcrDataToEvidence(frozenOcr.packagingOcrData, {

@@ -236,6 +236,15 @@ export interface EnsureCohortTitlesCoordinatedParams {
    * (`MemberCommitCrashSimulationError`). Production callers never pass it.
    */
   afterCoordinatedCall?: () => void | Promise<void>;
+  /**
+   * Test-only race seam (PR13 C2 review R1): fires INSIDE the cross-parent
+   * copy path, after the lease-ownership assertion but BEFORE the copy
+   * `insertCohortTitleOutputsOnce` — deterministically simulating the
+   * sibling-commit race that converts the insert's
+   * `CohortOutputAlreadyCommittedError` into the drift error. Production
+   * callers never pass it.
+   */
+  beforeTitleCopyInsert?: () => void | Promise<void>;
 }
 
 /**
@@ -435,9 +444,12 @@ export async function ensureCohortTitlesCoordinated(
             productSku: sku,
             title: parsed.title,
             source: parsed.source,
-            // DECISION-B: the ORIGINAL producing call id is preserved — the
-            // C6b linkage exemption resolves the old call (terminal-success +
-            // a durable output row under the new cohort run + SKU).
+            // DECISION-B: the ORIGINAL producing call id is preserved as
+            // ROW-LEVEL AUDIT PROVENANCE. No title proposal ever references
+            // it — title proposals carry the MEMBER's own name-consolidation
+            // call ids (the C6b linkage exemption is category_page +
+            // coordinated_page ONLY and must never be extended to titles;
+            // the preserved id keeps the copied row's provenance truthful).
             modelCallId: row.modelCallId,
           });
         } catch {
@@ -446,24 +458,43 @@ export async function ensureCohortTitlesCoordinated(
         }
       }
       if (!sourceCorrupt) {
+        // PR13 review S1 (P1): the copy WRITES — a stale pre-reclaim worker
+        // must never commit rows into a run it no longer owns. The lease
+        // keeper asserts ownership exactly like the coordinate path (Step 5)
+        // does before its insert; a lost claim aborts here with NO copied rows.
+        const copyWorkerId = run.claimedBy;
+        if (!copyWorkerId) {
+          throw new Error(`ensureCohortTitlesCoordinated: run ${run.id} has no claim owner (cross-parent reuse).`);
+        }
+        const copyKeeper = new CohortLeaseKeeper(run.id, copyWorkerId, COHORT_LEASE_TTL_MS).start();
         try {
-          insertCohortTitleOutputsOnce({
-            workspaceId,
-            runId: run.id,
-            inputHash,
-            outputs: copyRows,
-          });
-        } catch (err) {
-          if (err instanceof CohortOutputAlreadyCommittedError) {
-            // Copy-race: a sibling committed a set for this run between our
-            // pure-read check and this insert — the set is write-once and can
-            // never be silently split or double-written; convert to the same
-            // deterministic drift error the coordinate path uses.
-            const committed = getCohortTitleOutputsByRun(run.id);
-            const storedHashes = [...new Set(committed.map(row => row.inputHash))];
-            throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, committed.length);
+          try {
+            copyKeeper.assertHeld();
+            // Test-only race seam (PR13 C2 review R1): fires after the
+            // ownership assertion but before the copy insert — the racing
+            // sibling's rows become visible HERE, converting the insert's
+            // write-once throw into the deterministic drift error below.
+            await params.beforeTitleCopyInsert?.();
+            insertCohortTitleOutputsOnce({
+              workspaceId,
+              runId: run.id,
+              inputHash,
+              outputs: copyRows,
+            });
+          } catch (err) {
+            if (err instanceof CohortOutputAlreadyCommittedError) {
+              // Copy-race: a sibling committed a set for this run between our
+              // pure-read check and this insert — the set is write-once and can
+              // never be silently split or double-written; convert to the same
+              // deterministic drift error the coordinate path uses.
+              const committed = getCohortTitleOutputsByRun(run.id);
+              const storedHashes = [...new Set(committed.map(row => row.inputHash))];
+              throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, committed.length);
+            }
+            throw err;
           }
-          throw err;
+        } finally {
+          copyKeeper.stop();
         }
         const map = new Map<string, CohortTitleOutput>();
         for (const copy of copyRows) {
