@@ -1001,7 +1001,9 @@ export function getCohortRunById(id: string): CohortRun | null {
 /**
  * The LATEST superseded run for a cohort (PR13 C2, issue #30) — the
  * cross-parent title-reuse candidate: `SELECT ... WHERE cohort_id = ? AND
- * status = 'superseded' ORDER BY superseded_at DESC LIMIT 1`. A superseded
+ * status = 'superseded' ORDER BY superseded_at DESC, id DESC LIMIT 1` (the
+ * `id DESC` secondary tiebreaker makes an exact `superseded_at` timestamp
+ * tie deterministic — PR13 review R2 P2). A superseded
  * parent's committed output rows are immutable historical truth; the title
  * coordinator may COPY them into a NEW revision when the frozen title
  * authority is byte-identical (T-hash match) — zero LLM calls. Returns null
