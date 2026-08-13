@@ -707,10 +707,21 @@ export interface FreezeMemberResult {
  * carries the reviewed type id when present and the header lists every
  * reviewed type involved. Never majority-forced; no type is written on
  * conflict.
+ *
+ * PR13 (issue #30, DECISION-D): the distinct/reviewed SUMMARIES render the
+ * configured LABEL beside the deterministic id (`dry-dog-food (Dry Dog
+ * Food)`) — resolved from the FROZEN member snapshot's `productTypes`
+ * (`{id, name}`; unknown ids render id-only). The member DETAIL lines keep
+ * the RAW ids unchanged (the deterministic machine-readable contract).
  */
 function buildCohortProductTypeConflictReason(
   resolution: Extract<CohortProductTypeResolution, { outcome: 'conflicted' }>,
+  productTypes: ReadonlyArray<{ id: string; name: string }>,
 ): string {
+  const labelFor = (id: string): string => {
+    const name = productTypes.find(pt => pt.id === id)?.name;
+    return name ? `${id} (${name})` : id;
+  };
   const confident = resolution.perMember.filter(
     (m): m is ConfidentMemberProductTypeResult => !m.isAbstention,
   );
@@ -734,9 +745,9 @@ function buildCohortProductTypeConflictReason(
     })
     .join('; ');
   const reviewedNote = reviewedIds.length > 0
-    ? `; reviewed types: ${reviewedIds.join(', ')}`
+    ? `; reviewed types: ${reviewedIds.map(labelFor).join(', ')}`
     : '';
-  return `cohort_product_type_conflict: ${distinctIds.length} distinct confident Product Types (${distinctIds.join(', ')}); members: ${detail}${reviewedNote}; no execution type written (family conflict, never majority-forced).`;
+  return `cohort_product_type_conflict: ${distinctIds.length} distinct confident Product Types (${distinctIds.map(labelFor).join(', ')}); members: ${detail}${reviewedNote}; no execution type written (family conflict, never majority-forced).`;
 }
 
 /**
@@ -1319,7 +1330,16 @@ export async function freezeCohortForExecution(
         const conflicted = failFrozenCohortRunForConflict(
           run.id,
           workerId,
-          buildCohortProductTypeConflictReason(typeResolution),
+          // PR13 (issue #30, DECISION-D): the conflict reason renders the
+          // configured LABELS beside the deterministic ids in its distinct/
+          // reviewed SUMMARIES — resolved from the ordinal-0 member's FROZEN
+          // snapshot `productTypes` (all members froze under the same config
+          // authority; unknown ids render id-only; member detail lines keep
+          // the raw ids).
+          buildCohortProductTypeConflictReason(
+            typeResolution,
+            frozenMembers[0]?.snapshot.productTypes ?? [],
+          ),
         );
         if (!conflicted) {
           throw new CohortFreezeOwnershipError(
