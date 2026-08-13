@@ -1624,7 +1624,7 @@ export function PipelineBoard({
             <span style={{ color: '#7c2d12' }}> (Findings: {readinessView.findingCodes.join(', ')})</span>
           )}
           {' '}
-          <a href="/?view=settings" style={{ color: '#9a3412', fontWeight: 600 }}>Open Curation Targets settings →</a>
+          <a href="/?view=onboarding&settingsTab=curation" style={{ color: '#9a3412', fontWeight: 600 }}>Open Curation Targets settings →</a>
         </div>
       )}
       {/* Header */}

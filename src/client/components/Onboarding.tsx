@@ -34,6 +34,19 @@ import { matchExistingBrand } from '../../shared/brand-matcher';
 
 export function Onboarding() {
   const [showSettings, setShowSettings] = useState(false);
+  // Deep-linked settings tab (`?view=onboarding&settingsTab=curation` — the
+  // "Open Curation Targets settings" banner links land here, not on the
+  // generic ?view=settings page). Read once at mount: the banner anchors are
+  // full-page navigations, so a fresh mount always sees the param.
+  const settingsDeepLinkTab = (() => {
+    const tab = new URLSearchParams(window.location.search).get('settingsTab');
+    return tab === 'general' || tab === 'llm' || tab === 'curation' || tab === 'profiles' ? tab : null;
+  })();
+  useEffect(() => {
+    if (settingsDeepLinkTab) {
+      setShowSettings(true);
+    }
+  }, [settingsDeepLinkTab]);
   const [showWeeklyReportModal, setShowWeeklyReportModal] = useState(false);
   const [batches, setBatches] = useState<OnboardingBatch[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
@@ -843,7 +856,7 @@ export function Onboarding() {
   };
 
   if (showSettings) {
-    return <OnboardingSettings onBack={() => setShowSettings(false)} />;
+    return <OnboardingSettings onBack={() => setShowSettings(false)} initialTab={settingsDeepLinkTab ?? undefined} />;
   }
 
   // ─── VIEW 1: BATCHES LIST ─────────────────────────────────────────────────────

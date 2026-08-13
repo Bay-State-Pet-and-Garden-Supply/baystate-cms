@@ -21,8 +21,12 @@ import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
 
+type OnboardingSettingsTab = 'general' | 'llm' | 'curation' | 'profiles';
+
 interface OnboardingSettingsProps {
   onBack: () => void;
+  /** Initial tab to open (deep-linked, e.g. `?view=onboarding&settingsTab=curation`). */
+  initialTab?: OnboardingSettingsTab;
 }
 
 function targetSlug(value: string): string {
@@ -30,7 +34,7 @@ function targetSlug(value: string): string {
   return /^[a-z]/.test(slug) ? slug : `target-${slug || 'field'}`;
 }
 
-export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
+export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsProps) {
   const [keys, setKeys] = useState<ApiKeyDisplay[]>([]);
   const [_loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -72,7 +76,7 @@ export function OnboardingSettings({ onBack }: OnboardingSettingsProps) {
   const [workspaceDomain, setWorkspaceDomain] = useState<string | null>(null);
 
   const [localDomain, setLocalDomain] = useState('');
-  const [settingsTab, setSettingsTab] = useState<'general' | 'llm' | 'curation' | 'profiles'>('general');
+  const [settingsTab, setSettingsTab] = useState<OnboardingSettingsTab>(initialTab ?? 'general');
 
   // ─── Model fetchers ─────────────────────────────────────────────────────
 
