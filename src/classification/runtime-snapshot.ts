@@ -36,6 +36,7 @@ import { getVlmConfig } from '../onboarding/vlm-client';
 import {
   buildModelExecutionPlan,
   buildRuntimeRuleVersions,
+  MODEL_OPERATION_REGISTRY_VERSION,
   OPERATION_TO_STAGE,
   PROMPT_TEMPLATE_VERSIONS,
   RULE_VERSIONS,
@@ -505,11 +506,15 @@ export function getRuntimeSnapshotByHash(workspaceId: string, hash: string): Run
  * Fail closed when a protected model call would run against a snapshot
  * without a compatible frozen model-execution plan entry: legacy schema-v1
  * snapshots (no plan), a plan whose content digest does not match its stored
- * digest, missing runtimeRuleVersions or a digest mismatch, a plan that does
- * not cover the operation with the current registry's prompt-template/rule
- * versions, or a supplied ModelCallContext whose prompt/rule versions differ
- * from the frozen plan entry. A snapshot without a compatible plan can never
- * route a new model call.
+ * digest, missing runtimeRuleVersions or a digest mismatch, a plan whose
+ * frozen `registryVersion` differs from the EXECUTING
+ * `MODEL_OPERATION_REGISTRY_VERSION` (PR12 C4, registry_version_mismatch — a
+ * snapshot frozen under an older/newer operation registry never executes
+ * run-bound calls), a plan that does not cover the operation with the
+ * current registry's prompt-template/rule versions, or a supplied
+ * ModelCallContext whose prompt/rule versions differ from the frozen plan
+ * entry. A snapshot without a compatible plan can never route a new model
+ * call.
  */
 export function assertModelPlanCompatible(
   snapshot: RuntimeClassificationSnapshot | null | undefined,
@@ -542,6 +547,20 @@ export function assertModelPlanCompatible(
   if (!verifyRuntimeRuleVersionsIntegrity(snapshot.runtimeRuleVersions)) {
     throw new Error(
       `Model plan incompatible: snapshot runtimeRuleVersions digest does not match its fields (operation "${operation}").`,
+    );
+  }
+  // PR12 C4 (DECISION-B): the frozen operation-registry version is part of
+  // the parameter contract. A v2 snapshot frozen under a DIFFERENT registry
+  // version than the EXECUTING one refuses run-bound calls deterministically
+  // (registry_version_mismatch) — a plan frozen under an older (or newer)
+  // operation registry never executes. schema-v1 legacy snapshots (no plan)
+  // keep their existing behavior (the no-plan fail-closed guard above).
+  if (snapshot.modelExecutionPlan.registryVersion !== MODEL_OPERATION_REGISTRY_VERSION) {
+    throw new Error(
+      `Model plan incompatible: snapshot model-execution plan registry version ` +
+        `${snapshot.modelExecutionPlan.registryVersion} differs from the executing registry version ` +
+        `${MODEL_OPERATION_REGISTRY_VERSION} (registry_version_mismatch); the run is frozen under a ` +
+        `different operation-registry contract and its run-bound calls refuse.`,
     );
   }
   const stage = OPERATION_TO_STAGE[operation];

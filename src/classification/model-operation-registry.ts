@@ -21,7 +21,7 @@ import { SHOP_SITE_BUILT_IN_OUTPUT_POLICY_VERSION } from '../shopsite/built-in-o
 export type { ProtectedOperation };
 
 /** Bump ONLY when the operation→rule/prompt/parameter contract changes. */
-const MODEL_OPERATION_REGISTRY_VERSION = 2;
+export const MODEL_OPERATION_REGISTRY_VERSION = 2;
 
 /**
  * Built-in ShopSite output policy version participating in runs. Single

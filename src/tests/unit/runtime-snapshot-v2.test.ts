@@ -21,7 +21,7 @@ import {
 import type { RuntimeSnapshotInput } from '../../classification/runtime-snapshot';
 import type { RuntimeConfigAuthority } from '../../classification/config-loader';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
-import { buildModelExecutionPlan, buildRuntimeRuleVersions } from '../../classification/model-operation-registry';
+import { buildModelExecutionPlan, buildRuntimeRuleVersions, MODEL_OPERATION_REGISTRY_VERSION } from '../../classification/model-operation-registry';
 import { hashCanonicalJson } from '../../shared/stable-id';
 
 let workspacePath: string;
@@ -309,5 +309,42 @@ describe('PR7 review R2 (F1) — frozen cohort_page_assignment_parent operation 
     );
     // Legacy operations remain compatible on the same pre-change plan.
     expect(() => requireModelCallContext(preChange, 'run-1', 'cohort_page_assignment', 1)).not.toThrow();
+  });
+});
+
+describe('PR12 C4 — registry-version fail-closed (issue #30, DECISION-B)', () => {
+  it('a plan frozen under registry version 1 with the executing version 2 refuses run-bound calls (registry_version_mismatch)', () => {
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    // Simulate a snapshot frozen under an OLDER operation registry: flip the
+    // frozen plan's registryVersion to 1 and recompute its digest so the
+    // integrity check still passes — the registry-version guard is the only
+    // thing that trips.
+    const stalePlan = JSON.parse(JSON.stringify(v2.modelExecutionPlan));
+    stalePlan.registryVersion = 1;
+    stalePlan.digest = hashCanonicalJson({
+      version: stalePlan.version,
+      registryVersion: stalePlan.registryVersion,
+      entries: stalePlan.entries,
+    });
+    const stale = JSON.parse(JSON.stringify(v2)) as typeof v2;
+    stale.modelExecutionPlan = stalePlan;
+    expect(() => assertModelPlanCompatible(stale, 'attribute_ranking')).toThrow(/registry_version_mismatch/);
+    expect(() => requireModelCallContext(stale, 'run-1', 'attribute_ranking', 1)).toThrow(/registry_version_mismatch/);
+    expect(() => requireModelCallContext(stale, 'run-1', 'evidence_extraction', 1)).toThrow(/registry_version_mismatch/);
+  });
+
+  it('current-registry-version snapshots pass and schema-v1 legacy snapshots are unaffected (never registry_version_mismatch)', () => {
+    expect(MODEL_OPERATION_REGISTRY_VERSION).toBe(2);
+    const v2 = buildRuntimeSnapshot(buildV2Input());
+    expect(v2.modelExecutionPlan!.registryVersion).toBe(MODEL_OPERATION_REGISTRY_VERSION);
+    expect(() => assertModelPlanCompatible(v2, 'product_type_ranking')).not.toThrow();
+    expect(() => requireModelCallContext(v2, 'run-1', 'product_type_ranking', 1)).not.toThrow();
+    // schema-v1 (no plan) keeps the EXISTING fail-closed-on-missing-plan
+    // behavior — never a registry_version_mismatch.
+    const v1 = JSON.parse(JSON.stringify(v2));
+    v1.schemaVersion = 1;
+    delete v1.modelExecutionPlan;
+    delete v1.runtimeRuleVersions;
+    expect(() => assertModelPlanCompatible(v1, 'product_type_ranking')).toThrow(/no frozen model-execution plan/);
   });
 });
