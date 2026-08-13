@@ -211,10 +211,12 @@ export function listCurationTargetCandidates(
       const target = (config.curationTargets ?? []).find(t =>
         t.kind === 'product_field' && (t.catalogField === entry.xmlField || (mapping && t.attributeId === mapping.attributeId)),
       ) ?? null;
-      const liveValues = listCatalogFieldOptions(entry.xmlField);
-      const sampleValues = parseSampleValues(entry.sampleValuesJson);
-      const configuredValues = mapping
-        ? config.attributes.find(a => a.id === mapping.attributeId)?.allowedValues ?? []
+      const attribute = mapping ? config.attributes.find(a => a.id === mapping.attributeId) ?? null : null;
+      const isControlled = attribute ? attribute.valueMode === 'controlled' : true;
+      const liveValues = isControlled ? listCatalogFieldOptions(entry.xmlField) : [];
+      const sampleValues = isControlled ? parseSampleValues(entry.sampleValuesJson) : [];
+      const configuredValues = (isControlled && attribute)
+        ? attribute.allowedValues ?? []
         : [];
 
       return {
@@ -232,9 +234,11 @@ export function listCurationTargetCandidates(
       const target = (config.curationTargets ?? []).find(t =>
         t.kind === 'product_field' && (t.catalogField === fieldName || (mapping && t.attributeId === mapping.attributeId)),
       ) ?? null;
-      const liveValues = listCatalogFieldOptions(fieldName);
-      const configuredValues = mapping
-        ? config.attributes.find(a => a.id === mapping.attributeId)?.allowedValues ?? []
+      const attribute = mapping ? config.attributes.find(a => a.id === mapping.attributeId) ?? null : null;
+      const isControlled = attribute ? attribute.valueMode === 'controlled' : true;
+      const liveValues = isControlled ? listCatalogFieldOptions(fieldName) : [];
+      const configuredValues = (isControlled && attribute)
+        ? attribute.allowedValues ?? []
         : [];
 
       return {
@@ -319,13 +323,23 @@ export function applyCurationTargetsToConfig(
     const registryEntry = registry.find(entry => entry.xmlField === parsed.catalogField);
     const label = parsed.label || registryEntry?.label || parsed.catalogField;
     const attributeId = resolveMappedAttributeId(config, parsed, label);
+    const targetAttribute = config.attributes.find(a => a.id === attributeId);
+    let optionSource = parsed.optionSource;
+    if (targetAttribute && targetAttribute.valueMode !== 'controlled') {
+      if (input.optionSource === 'live_store') {
+        throw new Error(
+          `Curation target "${label}" (${parsed.catalogField}) cannot use optionSource 'live_store' because attribute "${targetAttribute.name}" has valueMode '${targetAttribute.valueMode}'.`,
+        );
+      }
+      optionSource = 'configured';
+    }
 
     return {
       ...parsed,
       label,
       attributeId,
       catalogField: parsed.catalogField,
-      optionSource: parsed.optionSource,
+      optionSource,
     };
   });
 

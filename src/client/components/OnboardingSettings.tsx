@@ -851,6 +851,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                           const checked = !!target?.enabled;
                           const appl = curationTargetState.applicability?.find(a => a.catalogField === field.catalogField);
                           const isInspected = inspectedCatalogField === field.catalogField;
+                          const isControlled = appl?.valueMode === 'controlled';
 
                           return (
                             <React.Fragment key={field.catalogField}>
@@ -861,7 +862,6 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                                     checked={checked}
                                     onChange={(e) => {
                                       if (e.target.checked) {
-                                        const isControlled = appl?.valueMode === 'controlled';
                                         upsertCurationTarget({
                                           id: target?.id ?? targetSlug(`target-${field.catalogField}`),
                                           kind: 'product_field',
@@ -871,7 +871,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
                                           selectionMode: target?.selectionMode ?? 'single',
                                           attributeId: target?.attributeId ?? field.attributeId ?? targetSlug(`field-${field.catalogField}`),
                                           catalogField: field.catalogField,
-                                          optionSource: target?.optionSource ?? (isControlled ? 'live_store' : 'configured'),
+                                          optionSource: isControlled ? (target?.optionSource ?? 'live_store') : 'configured',
                                           required: false,
                                           sortOrder: target?.sortOrder ?? curationTargetsDraft.length,
                                         });
