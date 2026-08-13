@@ -1499,6 +1499,22 @@ export interface CohortShadowObservation {
  * the CURRENT world read-only; an OCR result produced under shadow flags
  * therefore can never be reused as an execution authority by a later freeze.
  *
+ * PR13 C4 (issue #30, documented nuance): the v1 synthetic-snapshot
+ * FALSE-NEGATIVE. For v1 (legacy) member snapshots `computeOcrExecutionDigest`
+ * binds the digest to the snapshot's CONTENT IDENTITY
+ * (`hashCanonicalJson({authorityKind:'v1', snapshotHash})`). The shadow
+ * observer builds its member snapshots IN-MEMORY via `buildRuntimeSnapshot`
+ * with placeholder config refs, so the synthetic snapshot's hash — and thus
+ * its expected OCR digest — differs from the snapshot hash the stored OCR
+ * was actually verified against. The PR12 R1 predicate therefore REJECTS
+ * otherwise-CURRENT v1 OCR from the shadow evidence: a conservative
+ * FALSE NEGATIVE (shadow under-reports OCR participation), NEVER a
+ * stale-authority FALSE POSITIVE (shadow never blesses stale OCR). The
+ * freeze path is unaffected (it re-verifies against the real snapshot refs).
+ * Belongs with future shadow-observability work (a shadow authority that
+ * reproduces the frozen digest instead of the synthetic one); documented
+ * here as conservative safety by design.
+ *
  * The caller (worker poll leg) invokes this ONLY under
  * `cohortCurationV2Enabled && cohortShadowOnly`; flag OFF / active mode stay
  * byte-identical (this function is simply not called). Returns the

@@ -74,9 +74,12 @@ export interface EvidenceFromProjectionOptions {
    * `ocrExecutionDigest` EXACTLY equals it — a stored digest computed under
    * a DIFFERENT authority (stale OCR) is rejected even though it is non-null
    * and its input hash matches. `null` (a snapshot whose digest cannot be
-   * computed) rejects OCR entirely — fail closed. Absent (the freeze path,
-   * whose pull-forward already re-ran OCR under the current authority)
-   * keeps the pre-PR12 non-null check byte-identically.
+   * computed) rejects OCR ENTIRELY — fail closed, and the PR13 C4 literal
+   * contract means an explicitly-supplied `null` NEVER matches a stored
+   * `null` (no digest comparison can bless OCR without an expected
+   * authority). Absent (the freeze path, whose pull-forward already re-ran
+   * OCR under the current authority) keeps the pre-PR12 non-null check
+   * byte-identically.
    */
   expectedOcrExecutionDigest?: string | null;
 }
@@ -190,9 +193,15 @@ export function evidenceFromProjection(
   // PR12 review R1: when an EXPECTED digest is supplied, the stored digest
   // must EXACTLY equal the CURRENT authority's digest — stale persisted OCR
   // (non-null but computed under an older authority) is rejected read-only.
+  // PR13 C4 (the literal contract): `expected !== undefined ?
+  // expected !== null && stored === expected : stored !== null` — an
+  // explicitly supplied `null` expected digest rejects OCR ENTIRELY and can
+  // NEVER match a stored `null` (a digest comparison under no expected
+  // authority would bless unverifiable OCR).
   const executionDigestBound =
     options.expectedOcrExecutionDigest !== undefined
-      ? frozenOcr.ocrExecutionDigest === options.expectedOcrExecutionDigest
+      ? options.expectedOcrExecutionDigest !== null &&
+        frozenOcr.ocrExecutionDigest === options.expectedOcrExecutionDigest
       : frozenOcr.ocrExecutionDigest != null;
   if (frozenOcr.packagingOcrData && ocrInputHashMatches && executionDigestBound) {
     const modelCallIds = frozenOcr.packagingOcrData.metadata?.modelCallIds;

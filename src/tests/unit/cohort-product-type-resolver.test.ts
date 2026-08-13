@@ -302,6 +302,26 @@ describe('evidenceFromProjection', () => {
     const unboundEvidence = evidenceFromProjection(unbound);
     expect(unboundEvidence.some(e => (e.metadata as Record<string, unknown> | null)?.provenance === 'packaging_ocr')).toBe(false);
   });
+
+  it('PR13 C4: the expected-OCR-digest predicate is the literal contract — an explicitly supplied NULL expected digest rejects OCR entirely (never matches a stored null)', () => {
+    const hasOcr = (evidence: ReturnType<typeof evidenceFromProjection>): boolean =>
+      evidence.some(e => (e.metadata as Record<string, unknown> | null)?.provenance === 'packaging_ocr');
+    // Stored digest null + expected null → REJECTED (the old predicate matched
+    // null === null and blessed unverifiable OCR; the literal contract never does).
+    const storedNull = withSettledOcr(makeMemberProjection(), { productName: 'Package Dog Food' }, { ocrExecutionDigest: null });
+    expect(hasOcr(evidenceFromProjection(storedNull, { expectedOcrExecutionDigest: null }))).toBe(false);
+    // Stored non-null + expected null → REJECTED (null never equals a digest).
+    const storedDigest = withSettledOcr(makeMemberProjection(), { productName: 'Package Dog Food' }); // default 'd'.repeat(64)
+    expect(hasOcr(evidenceFromProjection(storedDigest, { expectedOcrExecutionDigest: null }))).toBe(false);
+    // expected === stored → ACCEPTED (read-only participation under the matching authority).
+    expect(hasOcr(evidenceFromProjection(storedDigest, { expectedOcrExecutionDigest: 'd'.repeat(64) }))).toBe(true);
+    // A stale stored digest under an EXPECTED digest → REJECTED (PR12 R1 unchanged).
+    expect(hasOcr(evidenceFromProjection(storedDigest, { expectedOcrExecutionDigest: 'other-digest' }))).toBe(false);
+    // expected ABSENT → the pre-PR12 non-null check is byte-identical: a
+    // non-null stored digest materializes, a stored null does not.
+    expect(hasOcr(evidenceFromProjection(storedDigest))).toBe(true);
+    expect(hasOcr(evidenceFromProjection(storedNull))).toBe(false);
+  });
 });
 
 // ─── C3a: matchMemberDeterministically ───────────────────────────────────────
