@@ -132,9 +132,14 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
   });
 
-  const totalThreadCost = messages.reduce((sum, msg: any) => {
-    if (msg.usage && typeof msg.usage.cost === 'number') {
-      return sum + msg.usage.cost;
+  // Session cost is derived exclusively from server-attached message metadata
+  // (epic #42, #37): the durable model-call row id, resolved provider/model,
+  // aggregate tokens, and honest cost basis. Client-supplied `usage` is never
+  // accepted.
+  const totalThreadCost = messages.reduce((sum: number, msg: any) => {
+    const meta = msg?.metadata;
+    if (meta && typeof meta.estimatedCostUsd === 'number') {
+      return sum + meta.estimatedCostUsd;
     }
     return sum;
   }, 0);

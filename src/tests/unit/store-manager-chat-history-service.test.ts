@@ -11,6 +11,12 @@ import {
   clearChatHistory,
   pruneOldChatHistory,
 } from '../../server/services/store-manager-chat-history-service';
+import {
+  sanitizeChatMessagesForPersistence,
+  beginStoreManagerCall,
+  terminalizeStoreManagerCall,
+} from '../../server/services/store-manager-telemetry';
+import type { ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
 import type { UIMessage } from 'ai';
 
 describe('Store Manager Chat History Service', () => {
@@ -107,5 +113,78 @@ describe('Store Manager Chat History Service', () => {
     const history = getChatHistory(workspaceId, tId);
     expect(history.length).toBe(1);
     expect(history[0].id).toBe(idNew);
+  });
+
+  it('hydrates assistant-message telemetry from the durable, workspace-owned model-call row (restart-safe)', () => {
+    const resolved: ResolvedAiSdkModel = {
+      modelInstance: {} as ResolvedAiSdkModel['modelInstance'],
+      provider: 'deepseek',
+      modelId: 'deepseek-v4-flash',
+      locality: 'cloud',
+      resolutionReason: 'explicit',
+    };
+    const callId = beginStoreManagerCall(workspaceId, resolved);
+    terminalizeStoreManagerCall(callId, resolved, 'success', {
+      promptTokens: 55,
+      completionTokens: 22,
+    });
+
+    // The client only needs to carry the server-attached call id; everything
+    // else is reconstructed from the durable row (no in-memory map needed).
+    const sanitized = sanitizeChatMessagesForPersistence(workspaceId, [
+      {
+        id: 'assistant-telemetry',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'done' }],
+        usage: { promptTokens: 1, completionTokens: 1, provider: 'forged', model: 'forged' },
+        metadata: { modelCallId: callId, provider: 'deepseek', model: 'deepseek-v4-flash', resolutionReason: 'explicit' },
+      },
+    ]);
+
+    expect(sanitized.length).toBe(1);
+    const msg = sanitized[0] as Record<string, unknown>;
+    expect(msg.usage).toBeUndefined();
+    const meta = msg.metadata as Record<string, unknown>;
+    expect(meta.modelCallId).toBe(callId);
+    expect(meta.provider).toBe('deepseek');
+    expect(meta.model).toBe('deepseek-v4-flash');
+    expect(meta.promptTokens).toBe(55);
+    expect(meta.completionTokens).toBe(22);
+    expect(meta.estimatedCostUsd).not.toBeNull();
+    expect(meta.costBasis).toBe('published_rate');
+  });
+
+  it('rejects telemetry metadata from another workspace and unknown call ids', () => {
+    const resolved: ResolvedAiSdkModel = {
+      modelInstance: {} as ResolvedAiSdkModel['modelInstance'],
+      provider: 'deepseek',
+      modelId: 'deepseek-v4-flash',
+      locality: 'cloud',
+      resolutionReason: 'explicit',
+    };
+    // Row owned by a different workspace than the one saving the thread.
+    const foreignCallId = beginStoreManagerCall('other-workspace', resolved);
+    terminalizeStoreManagerCall(foreignCallId, resolved, 'success', { promptTokens: 7, completionTokens: 3 });
+
+    const sanitized = sanitizeChatMessagesForPersistence(workspaceId, [
+      {
+        id: 'assistant-foreign',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'x' }],
+        metadata: { modelCallId: foreignCallId },
+      },
+      {
+        id: 'assistant-unknown',
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'y' }],
+        metadata: { modelCallId: 'no-such-call' },
+      },
+    ]);
+
+    const foreignMeta = sanitized[0].metadata as Record<string, unknown>;
+    const unknownMeta = sanitized[1].metadata as Record<string, unknown>;
+    expect(foreignMeta.modelCallId).toBeUndefined();
+    expect(foreignMeta.provider).toBeUndefined();
+    expect(unknownMeta.modelCallId).toBeUndefined();
   });
 });

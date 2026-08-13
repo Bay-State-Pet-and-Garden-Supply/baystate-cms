@@ -64,6 +64,9 @@ Confidence should be a decimal between 0.1 and 0.99 (depending on how sure you a
 
   const response = await callLlmForTask('product_field_refactor', prompt, systemPrompt, {
     allowFallback: true,
+    // Real workspace identity so the general callLlmForTask path creates and
+    // terminalizes an ai_model_calls row for this workspace (epic #42, #37).
+    workspaceId,
   });
 
   if (!response) {
@@ -173,6 +176,9 @@ Summarize what steps should be taken next to achieve 100% catalog health. Highli
 
   const reportText = await callLlmForTask('store_manager_assistant', prompt, systemPrompt, {
     allowFallback: true,
+    // Real workspace identity so report narrative model calls are audited in
+    // ai_model_calls for this workspace (epic #42, #37).
+    workspaceId,
   });
 
   return {

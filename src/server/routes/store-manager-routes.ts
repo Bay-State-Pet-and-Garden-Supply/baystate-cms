@@ -19,7 +19,7 @@ import { createStoreManagerTools } from '../services/store-manager-tools';
 import { buildToolApprovalConfig } from '../services/store-manager-tool-policy';
 import { STORE_MANAGER_AGENT_SYSTEM_PROMPT } from '../services/store-manager-agent-prompt';
 import { buildAttachedProductContext, injectAttachedContext, selectedSkusSchema } from '../services/store-manager-context';
-import { streamText, convertToModelMessages, toUIMessageStream, createUIMessageStreamResponse, isStepCount } from 'ai';
+import { streamText, convertToModelMessages, toUIMessageStream, createUIMessageStreamResponse, isStepCount, type UIMessage } from 'ai';
 import {
   saveChatMessage,
   getChatHistory,
@@ -27,13 +27,15 @@ import {
   clearChatHistory,
   pruneOldChatHistory,
 } from '../services/store-manager-chat-history-service';
-
-import { computeApiCost } from '../../ai/model-pricing';
+import {
+  beginStoreManagerCall,
+  terminalizeStoreManagerCall,
+  buildStoreManagerMessageMetadata,
+  insertStoreManagerUnavailableCall,
+  sanitizeChatMessagesForPersistence,
+} from '../services/store-manager-telemetry';
 
 const route = new Hono();
-
-// Global map to track the latest usage tokens for active streaming chats
-const lastStreamUsage = new Map<string, { promptTokens: number; completionTokens: number; provider: string; model: string; locality: 'local' | 'cloud' }>();
 
 /**
  * HMAC secret for tool-approval signatures (epic #42, #34).
@@ -89,19 +91,33 @@ route.post('/store-manager/chat', async (c) => {
     return c.json({ error: 'Invalid request: messages array is required.' }, 400);
   }
 
+  let resolvedModel: ResolvedAiSdkModel | null = null;
+  let modelCallId: string | null = null;
   try {
-    let resolvedModel: ResolvedAiSdkModel;
     try {
       resolvedModel = resolveAiSdkModel(selectedModel);
     } catch (err) {
       if (err instanceof ModelUnavailableError) {
         // Explicit unavailability fails before streaming and names the
-        // corrective setting without exposing secrets. No transport attempt.
+        // corrective setting without exposing secrets. No transport attempt:
+        // record a single terminal `unavailable` telemetry row, never a
+        // fallback row.
+        insertStoreManagerUnavailableCall(
+          workspace.id,
+          typeof selectedModel === 'string' ? selectedModel : undefined,
+        );
         return c.json({ error: err.message, errorCode: 'model_unavailable' }, 400);
       }
       throw err;
     }
-    const model = resolvedModel.modelInstance;
+    // Non-null local captured after resolution so stream callbacks can close
+    // over it without re-checking nullability.
+    const resolved = resolvedModel;
+    const model = resolved.modelInstance;
+    // Durable telemetry row before the first transport attempt; terminalized
+    // exactly once on success/failure/cancel paths below.
+    modelCallId = beginStoreManagerCall(workspace.id, resolved);
+    const callId = modelCallId;
     // Per-chat execution context: approvals are bound to this turn and expire.
     const executionId = randomUUID();
     const approvalExpiresAt = Date.now() + APPROVAL_WINDOW_MS;
@@ -141,31 +157,72 @@ route.post('/store-manager/chat', async (c) => {
       // immediately before execution.
       toolApproval: buildToolApprovalConfig(tools),
       experimental_toolApprovalSecret: toolApprovalSecret,
+      // Client disconnect must abort the generation so the `started` row is
+      // terminalized as `cancelled` instead of lingering.
+      abortSignal: c.req.raw.signal,
       stopWhen: isStepCount(10),
-      onFinish: ({ usage }) => {
-        if (usage && threadId) {
-          lastStreamUsage.set(threadId, {
-            promptTokens: usage.inputTokens || 0,
-            completionTokens: usage.outputTokens || 0,
-            // Telemetry reflects the model that actually executed, taken from
-            // the single authoritative resolved-model struct.
-            provider: resolvedModel.provider,
-            model: resolvedModel.modelId,
-            locality: resolvedModel.locality,
+      // #37: onEnd/onFinish usage in AI SDK 7 is the combined usage of all
+      // steps (verified by store-manager-chat-runtime.test.ts), so the
+      // durable row holds aggregate totals, never final-step-only usage.
+      onEnd: ({ usage }) => {
+        if (modelCallId) {
+          terminalizeStoreManagerCall(modelCallId, resolved, 'success', {
+            promptTokens: usage?.inputTokens ?? null,
+            completionTokens: usage?.outputTokens ?? null,
           });
         }
-      }
+      },
+      onError: (error) => {
+        if (modelCallId) {
+          terminalizeStoreManagerCall(modelCallId, resolved, 'failed', {
+            errorCode: error instanceof Error ? error.name : 'STREAM_ERROR',
+          });
+        }
+      },
+      onAbort: () => {
+        if (modelCallId) {
+          terminalizeStoreManagerCall(modelCallId, resolved, 'cancelled');
+        }
+      },
     });
 
     const uiMessageStream = toUIMessageStream({
       stream: result.stream,
       tools,
+      // Attach server-owned telemetry metadata to the response message: the
+      // durable call id plus the exact resolved provider/model/locality and
+      // aggregate usage/cost. The chat-save path re-hydrates from the row.
+      messageMetadata: ({ part }) => {
+        if (part.type === 'start') {
+          return {
+            modelCallId: callId,
+            provider: resolved.provider,
+            model: resolved.modelId,
+            locality: resolved.locality,
+            resolutionReason: resolved.resolutionReason,
+          };
+        }
+        if (part.type === 'finish') {
+          return buildStoreManagerMessageMetadata(resolved, callId, {
+            inputTokens: part.totalUsage?.inputTokens,
+            outputTokens: part.totalUsage?.outputTokens,
+          });
+        }
+        return undefined;
+      },
     });
 
     return createUIMessageStreamResponse({
       stream: uiMessageStream,
     });
   } catch (err) {
+    // Synchronous failures between the `started` insert and stream creation
+    // (e.g. message conversion) must not leave an unresolved `started` row.
+    if (modelCallId && resolvedModel) {
+      terminalizeStoreManagerCall(modelCallId, resolvedModel, 'failed', {
+        errorCode: err instanceof Error ? err.name : 'STREAM_ERROR',
+      });
+    }
     console.error('[StoreManagerChat] Error during streaming:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
@@ -361,36 +418,25 @@ route.post('/store-manager/chat/:threadId/save', async (c) => {
   const threadId = c.req.param('threadId');
   try {
     const { messages, threadTitle } = await c.req.json().catch(() => ({ messages: [], threadTitle: '' }));
-    
-    // Attach usage metadata to the last message if available
-    const usageInfo = lastStreamUsage.get(threadId);
-    if (usageInfo && messages.length > 0) {
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.usage) {
-        const { estimatedApiCostUsd, costBasis } = computeApiCost(
-          usageInfo.provider,
-          usageInfo.model,
-          usageInfo.locality,
-          usageInfo.promptTokens,
-          usageInfo.completionTokens,
-        );
-        lastMsg.usage = {
-          promptTokens: usageInfo.promptTokens,
-          completionTokens: usageInfo.completionTokens,
-          provider: usageInfo.provider,
-          model: usageInfo.model,
-          cost: estimatedApiCostUsd,
-          costBasis,
-        };
-        lastStreamUsage.delete(threadId);
-      }
-    }
+
+    // Server-side telemetry reconstruction: the client is never trusted with
+    // usage totals/provider/model. Assistant-message metadata is re-hydrated
+    // from the workspace-owned ai_model_calls row by call id; forged, stale,
+    // or foreign call ids are stripped.
+    const sanitized = sanitizeChatMessagesForPersistence(workspace.id, messages);
 
     clearChatHistory(workspace.id, threadId);
-    for (const msg of messages) {
-      saveChatMessage(workspace.id, threadId, threadTitle, msg.id, msg.role, msg);
+    for (const msg of sanitized) {
+      saveChatMessage(
+        workspace.id,
+        threadId,
+        threadTitle,
+        String(msg.id),
+        msg.role as 'user' | 'assistant',
+        msg as unknown as UIMessage,
+      );
     }
-    return c.json({ success: true });
+    return c.json({ success: true, saved: sanitized.length });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }

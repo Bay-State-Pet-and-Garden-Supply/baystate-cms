@@ -186,3 +186,18 @@ export function getAiModelCallById(callId: string): GeneralModelCallRow | null {
     .get(callId) as Record<string, unknown> | undefined;
   return row ? (row as unknown as GeneralModelCallRow) : null;
 }
+
+/**
+ * Fetch a telemetry row scoped to one workspace. Foreign/unknown ids return
+ * null so chat-history hydration never trusts a client-supplied call id from
+ * another workspace.
+ */
+export function getAiModelCallByWorkspaceAndId(
+  workspaceId: string,
+  callId: string,
+): GeneralModelCallRow | null {
+  const row = getDb()
+    .query('SELECT * FROM ai_model_calls WHERE id = ? AND workspace_id = ?')
+    .get(callId, workspaceId) as Record<string, unknown> | undefined;
+  return row ? (row as unknown as GeneralModelCallRow) : null;
+}

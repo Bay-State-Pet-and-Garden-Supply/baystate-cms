@@ -1,6 +1,6 @@
-import { describe, test, expect, beforeAll, afterAll } from 'vitest';
+import { describe, test, expect, beforeAll, afterAll, vi } from 'vitest';
 import { unlinkSync } from 'node:fs';
-import { initDb, closeDb, resetDb } from '../../db/connection';
+import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { computeApiCost, getModelPricing, assertPublishedPricingRegistered } from '../../ai/model-pricing';
 import {
@@ -9,12 +9,20 @@ import {
   insertTerminalAiModelCall,
   getAiModelCallsByWorkspace,
   getAiModelCallById,
+  getAiModelCallByWorkspaceAndId,
 } from '../../db/repositories/ai-model-call-repo';
 import {
   upsertLlmTaskConfig,
   getLlmTaskConfig,
   deleteLlmTaskConfig,
 } from '../../db/repositories/llm-task-config-repo';
+import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import { callLlmForTask } from '../../onboarding/llm-client';
+import {
+  insertStoreManagerUnavailableCall,
+  terminalizeStoreManagerCall,
+  STORE_MANAGER_TASK,
+} from '../../server/services/store-manager-telemetry';
 
 describe('Pricing & Telemetry Repository (PR 3)', () => {
   const testDbPath = 'src/tests/unit/pricing-telemetry-test.db';
@@ -131,6 +139,121 @@ describe('Pricing & Telemetry Repository (PR 3)', () => {
     test('getAiModelCallsByWorkspace lists records for workspace', () => {
       const list = getAiModelCallsByWorkspace('ws-101');
       expect(list.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  describe('Store Manager telemetry (epic #42, #37)', () => {
+    test('workspace-scoped row lookup returns null for a foreign workspace id', () => {
+      const callId = insertAiModelCallStart({
+        workspaceId: 'ws-owned',
+        task: STORE_MANAGER_TASK,
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        locality: 'cloud',
+      });
+      expect(getAiModelCallByWorkspaceAndId('ws-owned', callId)).not.toBeNull();
+      expect(getAiModelCallByWorkspaceAndId('ws-other', callId)).toBeNull();
+    });
+
+    test('explicit unavailable selection writes exactly one terminal unavailable row', () => {
+      insertStoreManagerUnavailableCall('ws-101', 'deepseek-v4-flash');
+      const calls = getAiModelCallsByWorkspace('ws-101');
+      const unavailable = calls.filter((c) => c.status === 'unavailable');
+      const row = unavailable[unavailable.length - 1];
+      expect(row).toBeDefined();
+      expect(row.error_code).toBe('model_unavailable');
+      expect(row.task).toBe(STORE_MANAGER_TASK);
+      // Registered selection maps to the registry profile.
+      expect(row.model).toBe('deepseek-v4-flash');
+      expect(row.provider).toBe('deepseek');
+      expect(row.ended_at).not.toBeNull();
+    });
+
+    test('aggregate cost uses resolved provider/model/locality and full token totals', () => {
+      // Two tool-loop steps: 300 prompt + 150 completion tokens total.
+      // deepseek-v4-flash $0.14/1M in, $0.28/1M out.
+      const cost = computeApiCost('deepseek', 'deepseek-v4-flash', 'cloud', 300, 150);
+      expect(cost.estimatedApiCostUsd).toBeCloseTo(0.000084, 10);
+      expect(cost.costBasis).toBe('published_rate');
+
+      // Local zero stays zero regardless of token totals.
+      const local = computeApiCost('ollama', 'gemma4:12b-mlx', 'local', 999999, 999999);
+      expect(local.estimatedApiCostUsd).toBe(0);
+      expect(local.costBasis).toBe('local_zero');
+    });
+
+    test('general Store Manager tasks write ai_model_calls only, never classification_model_calls', async () => {
+      upsertApiKey('deepseek', 'sk-store-manager-test', 'http://127.0.0.1:59997/v1', 'deepseek-v4-flash');
+      upsertLlmTaskConfig({
+        task: 'product_field_refactor',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+      });
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+        if (url.includes('59997')) {
+          return new Response(
+            JSON.stringify({
+              choices: [{ message: { content: '{"proposals":[]}' } }],
+              usage: { prompt_tokens: 30, completion_tokens: 10 },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      }) as unknown as typeof fetch;
+
+      const db = getDb();
+      const before = (db.query('SELECT COUNT(*) as n FROM classification_model_calls').get() as { n: number }).n;
+      const ws = 'ws-store-manager-general';
+
+      try {
+        const output = await callLlmForTask('product_field_refactor', 'Refactor field', undefined, {
+          workspaceId: ws,
+        });
+        expect(output).toBe('{"proposals":[]}');
+
+        const calls = getAiModelCallsByWorkspace(ws);
+        expect(calls.length).toBe(1);
+        expect(calls[0].task).toBe('product_field_refactor');
+        expect(calls[0].status).toBe('success');
+        expect(calls[0].provider).toBe('deepseek');
+        expect(calls[0].model).toBe('deepseek-v4-flash');
+        expect(calls[0].prompt_tokens).toBe(30);
+        expect(calls[0].completion_tokens).toBe(10);
+
+        const after = (db.query('SELECT COUNT(*) as n FROM classification_model_calls').get() as { n: number }).n;
+        expect(after).toBe(before);
+      } finally {
+        globalThis.fetch = originalFetch;
+        deleteLlmTaskConfig('product_field_refactor');
+      }
+    });
+
+    test('terminalizeStoreManagerCall computes cost from the exact resolved metadata', () => {
+      const callId = insertAiModelCallStart({
+        workspaceId: 'ws-101',
+        task: STORE_MANAGER_TASK,
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        locality: 'cloud',
+      });
+      terminalizeStoreManagerCall(
+        callId,
+        {
+          modelInstance: {} as never,
+          provider: 'deepseek',
+          modelId: 'deepseek-v4-flash',
+          locality: 'cloud',
+          resolutionReason: 'explicit',
+        },
+        'success',
+        { promptTokens: 1000000, completionTokens: 1000000 },
+      );
+      const row = getAiModelCallById(callId);
+      expect(row?.estimated_api_cost_usd).toBe(0.42);
+      expect(row?.cost_basis).toBe('published_rate');
     });
   });
 
