@@ -1528,7 +1528,13 @@ export function observeCohortShadowTypeResolution(
           configSnapshotRef: { id: '', hash: '', sourceCommit: null, createdAt: '' },
           sourceProductHash: '',
         });
-        memberInputs.push({ projection: memberProjection, memberSnapshot: snapshot });
+        // PR12 review R1: the CURRENT OCR execution-authority digest for this
+        // in-memory snapshot — the observer is READ-ONLY: persisted OCR whose
+        // stored `ocrExecutionDigest` was computed under an OLDER authority is
+        // rejected from the shadow evidence (never re-run, never written). A
+        // matching digest may participate read-only.
+        const expectedOcrExecutionDigest = computeOcrExecutionDigest(snapshot);
+        memberInputs.push({ projection: memberProjection, memberSnapshot: snapshot, expectedOcrExecutionDigest });
       }
       if (memberInputs.length === 0) continue;
 

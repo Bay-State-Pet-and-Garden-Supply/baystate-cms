@@ -67,6 +67,18 @@ export interface EvidenceFromProjectionOptions {
   runId?: string;
   /** Product SKU stamped on the produced records (default: the projection's productSku). */
   productSku?: string;
+  /**
+   * PR12 review R1: the EXPECTED OCR execution-authority digest for the
+   * snapshot the evidence is being built under. When supplied (`!==
+   * undefined`), OCR materializes ONLY when the projection's frozen
+   * `ocrExecutionDigest` EXACTLY equals it — a stored digest computed under
+   * a DIFFERENT authority (stale OCR) is rejected even though it is non-null
+   * and its input hash matches. `null` (a snapshot whose digest cannot be
+   * computed) rejects OCR entirely — fail closed. Absent (the freeze path,
+   * whose pull-forward already re-ran OCR under the current authority)
+   * keeps the pre-PR12 non-null check byte-identically.
+   */
+  expectedOcrExecutionDigest?: string | null;
 }
 
 export interface DeterministicTypeMatchResult {
@@ -175,7 +187,13 @@ export function evidenceFromProjection(
   // the member snapshot's plan/rule digest and persisted the digest into the
   // content-addressed projection. A projection without a digest predates the
   // binding (PR3 hardening) and is never materialized (fail-closed mirror).
-  const executionDigestBound = frozenOcr.ocrExecutionDigest != null;
+  // PR12 review R1: when an EXPECTED digest is supplied, the stored digest
+  // must EXACTLY equal the CURRENT authority's digest — stale persisted OCR
+  // (non-null but computed under an older authority) is rejected read-only.
+  const executionDigestBound =
+    options.expectedOcrExecutionDigest !== undefined
+      ? frozenOcr.ocrExecutionDigest === options.expectedOcrExecutionDigest
+      : frozenOcr.ocrExecutionDigest != null;
   if (frozenOcr.packagingOcrData && ocrInputHashMatches && executionDigestBound) {
     const modelCallIds = frozenOcr.packagingOcrData.metadata?.modelCallIds;
     evidence.push(...mirrorPackagingOcrDataToEvidence(frozenOcr.packagingOcrData, {
@@ -376,6 +394,15 @@ export interface CohortMemberInput {
    * needed here.
    */
   reviewedTypeId?: string | null;
+  /**
+   * PR12 review R1: the CURRENT OCR execution-authority digest for the
+   * member's snapshot, supplied by READ-ONLY callers (the shadow observer)
+   * so persisted OCR is materialized ONLY when its stored
+   * `ocrExecutionDigest` exactly equals the current authority — stale OCR is
+   * rejected read-only, never re-run, never written. Absent for the freeze
+   * (whose pull-forward already re-ran OCR under the current authority).
+   */
+  expectedOcrExecutionDigest?: string | null;
 }
 
 /**
@@ -725,7 +752,9 @@ function resolveMemberResolution(
   confidenceFloor: number,
   llmResult?: MemberLlmRankResult | null,
 ): MemberResolution {
-  const evidence = evidenceFromProjection(member.projection);
+  const evidence = evidenceFromProjection(member.projection, {
+    expectedOcrExecutionDigest: member.expectedOcrExecutionDigest,
+  });
   const options = resolveProductTypeOptions(member.memberSnapshot);
   const { match, packet } = scoreTypeMatch(evidence, options);
   // LLM ranker fallback (PR4 C4a freeze integration, DECISION-A): applied ONLY

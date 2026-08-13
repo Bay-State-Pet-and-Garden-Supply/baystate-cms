@@ -34,7 +34,7 @@ import {
   listDependenciesForProposal,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
-import { saveClassificationConfig, loadClassificationConfig } from '../../classification/config-loader';
+import { saveClassificationConfig, loadClassificationConfig, loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
 import { syncConfigToCache, createConfigSnapshot } from '../../db/repositories/classification-config-repo';
 import { OnboardingWorker } from '../../onboarding/job-queue';
 import {
@@ -45,8 +45,10 @@ import {
   MemberCommitCrashSimulationError,
   observeCohortShadowTypeResolution,
   buildFrozenProductLineContext,
+  computeOcrExecutionDigest,
 } from '../../onboarding/cohort-curator';
 import type { PreparedCohortContext } from '../../onboarding/cohort-curator';
+import { buildRuntimeSnapshot } from '../../classification/runtime-snapshot';
 import { listCandidateCohortViews } from '../../onboarding/curation-cohort-service';
 import { getRun, completeRun } from '../../db/repositories/classification-run-repo';
 import {
@@ -1924,6 +1926,84 @@ describe('PR4 C5 — shadow mode + additive view fields (issue #30)', () => {
     expect(dependencyRowCount(workspaceId)).toBe(0);
     const modelCalls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
     expect(Number(modelCalls.cnt)).toBe(0);
+  });
+
+  it('PR12 R1: shadow REJECTS stale persisted OCR — a non-null OLD execution digest never influences the shadow resolution (read-only, byte-equivalent extraction); a MATCHING digest may participate read-only', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    // Config with BOTH dog + cat types so OCR species can change the outcome.
+    const twoTypeConfig: ClassificationConfig = {
+      ...V1_CONFIG,
+      productTypes: [
+        { id: 'dry-dog-food', name: 'Dry Dog Food', description: null, attributeProfileId: 'dry-dog-food-profile', oldIdAliases: [] },
+        { id: 'dry-cat-food', name: 'Dry Cat Food', description: null, attributeProfileId: 'dry-dog-food-profile', oldIdAliases: [] },
+      ],
+      curationTargets: V1_CONFIG.curationTargets.map(target =>
+        target.id === 'test-product-type' ? { ...target, enabled: true } : target,
+      ),
+    };
+    saveClassificationConfig(wsPath, twoTypeConfig);
+    syncConfigToCache(workspaceId, loadClassificationConfig(wsPath));
+
+    // Member name implies DOG; its persisted OCR species ['cat'] implies CAT
+    // — but the OCR carries a NON-NULL STALE execution digest (computed under
+    // an older authority). `createReadyCohort` auto-fills `ocrInputHash` to
+    // match the current images, so the ONLY thing standing between this OCR
+    // and the shadow evidence is the execution-authority digest.
+    const { items } = createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({
+        _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb',
+        packagingOcrData: {
+          ...settledExtraction().packagingOcrData,
+          productName: 'Purina Cat Chow',
+          species: ['cat'],
+        },
+        ocrExecutionDigest: 'old-authority-digest',
+      }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: true });
+
+    const before = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
+    const observations = observeCohortShadowTypeResolution(workspaceId, wsPath);
+
+    // The stale OCR must NOT influence the shadow resolution: the member's
+    // non-OCR evidence (name 'Dry Dog Food') resolves DOG.
+    expect(observations.length).toBeGreaterThan(0);
+    const memberObs = observations[0].perMember.find(m => m.onboardingItemId === items[0].id)!;
+    expect(memberObs.productTypeId).toBe('dry-dog-food');
+
+    // READ-ONLY: extraction_data_json byte-equivalent; zero model calls.
+    const after = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
+    expect(after.extraction_data_json).toBe(before.extraction_data_json);
+    const modelCalls = getDb().query('SELECT COUNT(*) AS cnt FROM classification_model_calls').get() as { cnt: number };
+    expect(Number(modelCalls.cnt)).toBe(0);
+
+    // CONTROL: the SAME OCR with a MATCHING execution digest may participate
+    // READ-ONLY — the shadow resolution then sees the cat OCR evidence.
+    const activationContext = createRuntimeActivationContext(wsPath, workspaceId);
+    const authority = loadRuntimeConfigAuthority(wsPath, activationContext);
+    const snapshot = buildRuntimeSnapshot({
+      workspaceId,
+      workspacePath: wsPath,
+      productSku: items[0].upc ?? '',
+      authority,
+      configSnapshotRef: { id: '', hash: '', sourceCommit: null, createdAt: '' },
+      sourceProductHash: '',
+    });
+    const currentDigest = computeOcrExecutionDigest(snapshot);
+    expect(currentDigest).not.toBeNull();
+    expect(currentDigest).not.toBe('old-authority-digest');
+    const parsed = JSON.parse(before.extraction_data_json) as Record<string, unknown>;
+    parsed.ocrExecutionDigest = currentDigest;
+    getDb().run('UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?', [JSON.stringify(parsed), items[0].id]);
+
+    const withMatching = observeCohortShadowTypeResolution(workspaceId, wsPath);
+    const memberWithOcr = withMatching[0].perMember.find(m => m.onboardingItemId === items[0].id)!;
+    // With the OCR evidence present the species token 'cat' drives the match
+    // away from dog (either cat or an abstention — never dog-only coherence).
+    expect(memberWithOcr.productTypeId).not.toBe('dry-dog-food');
+    // Still read-only: extraction byte-equivalent to the seeded control state.
+    const afterControl = getDb().query('SELECT extraction_data_json FROM onboarding_items WHERE id = ?').get(items[0].id) as { extraction_data_json: string };
+    expect(afterControl.extraction_data_json).toBe(JSON.stringify(parsed));
   });
 
   it('cohort views carry additive Execution Product Type fields: null-safe without a run, populated from the current run (schema backward compatible)', async () => {
