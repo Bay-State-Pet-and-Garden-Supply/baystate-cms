@@ -1,11 +1,19 @@
 import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { unlinkSync } from 'node:fs';
-import { initDb, closeDb, resetDb } from '../../db/connection';
+import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import {
+  upsertLlmTaskConfig,
+  deleteLlmTaskConfig,
+} from '../../db/repositories/llm-task-config-repo';
 import { getProviderDefinition, listProviderDefinitions } from '../../ai/provider-registry';
 import { getModelProfile, getModelCapabilities, listModelProfiles } from '../../ai/model-registry';
-import { resolveAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
+import {
+  resolveAiSdkModel,
+  isModelToolCapable,
+  ModelUnavailableError,
+} from '../../server/services/ai-sdk-model-resolver';
 
 describe('AI Infrastructure — Provider & Model Registry (PR 1)', () => {
   const testDbPath = 'src/tests/unit/provider-model-registry-test.db';
@@ -90,26 +98,98 @@ describe('AI Infrastructure — Provider & Model Registry (PR 1)', () => {
     });
   });
 
-  describe('resolveAiSdkModel Refactor', () => {
-    test('resolves model using explicit provider and model object options', () => {
-      const model = resolveAiSdkModel({ provider: 'ollama', model: 'gemma4:12b-mlx' });
-      expect(model).toBeDefined();
-      expect(model.modelId).toBe('gemma4:12b-mlx');
-      expect(model.provider).toBe('openai.chat'); // AI SDK OpenAI-compatible wrapper identifier
+  describe('resolveAiSdkModel — resolved-model struct', () => {
+    test('explicit provider+model object returns authoritative struct', () => {
+      const resolved = resolveAiSdkModel({ provider: 'ollama', model: 'gemma4:12b-mlx' });
+      expect(resolved).toBeDefined();
+      expect(resolved.modelInstance).toBeDefined();
+      expect(resolved.modelId).toBe('gemma4:12b-mlx');
+      expect(resolved.provider).toBe('ollama');
+      expect(resolved.locality).toBe('local');
+      expect(resolved.resolutionReason).toBe('explicit');
     });
 
-    test('resolves model using registered model name string via profile lookup', () => {
-      const model = resolveAiSdkModel('gemma4:12b-mlx');
-      expect(model).toBeDefined();
-      expect(model.modelId).toBe('gemma4:12b-mlx');
+    test('explicit registered model string resolves via profile lookup', () => {
+      const resolved = resolveAiSdkModel('gemma4:12b-mlx');
+      expect(resolved.modelInstance).toBeDefined();
+      expect(resolved.modelId).toBe('gemma4:12b-mlx');
+      expect(resolved.provider).toBe('ollama');
+      expect(resolved.resolutionReason).toBe('explicit');
     });
 
-    test('resolves cloud baseline models explicitly', () => {
+    test('explicit cloud baseline models resolve with cloud locality', () => {
       const deepseekModel = resolveAiSdkModel({ provider: 'deepseek', model: 'deepseek-v4-flash' });
       expect(deepseekModel.modelId).toBe('deepseek-v4-flash');
+      expect(deepseekModel.provider).toBe('deepseek');
+      expect(deepseekModel.locality).toBe('cloud');
+      expect(deepseekModel.resolutionReason).toBe('explicit');
 
       const openaiModel = resolveAiSdkModel('gpt-4o-mini');
       expect(openaiModel.modelId).toBe('gpt-4o-mini');
+      expect(openaiModel.provider).toBe('openai');
+      expect(openaiModel.locality).toBe('cloud');
+    });
+
+    test('explicit unknown model throws ModelUnavailableError without fallback', () => {
+      // Stale hard-coded picker ids are gone: these are not registered.
+      expect(() => resolveAiSdkModel('deepseek-chat')).toThrow(ModelUnavailableError);
+      expect(() => resolveAiSdkModel('gpt-4o')).toThrow(ModelUnavailableError);
+      expect(() => resolveAiSdkModel('llama3')).toThrow(ModelUnavailableError);
+    });
+
+    test('explicit provider/model mismatch throws', () => {
+      expect(() => resolveAiSdkModel({ provider: 'deepseek', model: 'gemma4:12b-mlx' })).toThrow(
+        ModelUnavailableError,
+      );
+    });
+
+    test('explicit masked credential throws ModelUnavailableError', () => {
+      const db = getDb();
+      db.query('UPDATE api_keys SET api_key = ? WHERE service = ?').run('••••sk-deepseek', 'deepseek');
+      try {
+        expect(() => resolveAiSdkModel('deepseek-v4-flash')).toThrow(ModelUnavailableError);
+      } finally {
+        db.query('UPDATE api_keys SET api_key = ? WHERE service = ?').run('sk-deepseek-test', 'deepseek');
+      }
+    });
+
+    test('omitted input resolves the global default configuration', () => {
+      const resolved = resolveAiSdkModel();
+      expect(resolved.modelId).toBe('deepseek-v4-flash');
+      expect(resolved.provider).toBe('deepseek');
+      expect(resolved.resolutionReason).toBe('global_default');
+    });
+
+    test('omitted input with task config resolves the task_config route', () => {
+      upsertLlmTaskConfig({ task: 'store_manager_assistant', provider: 'ollama', model: 'gemma4:12b-mlx' });
+      try {
+        const resolved = resolveAiSdkModel();
+        expect(resolved.modelId).toBe('gemma4:12b-mlx');
+        expect(resolved.provider).toBe('ollama');
+        expect(resolved.resolutionReason).toBe('task_config');
+      } finally {
+        deleteLlmTaskConfig('store_manager_assistant');
+      }
+    });
+
+    test('explicit selection never falls back even when a default exists', () => {
+      upsertLlmTaskConfig({ task: 'store_manager_assistant', provider: 'ollama', model: 'gemma4:12b-mlx' });
+      try {
+        const explicit = resolveAiSdkModel('deepseek-v4-flash');
+        expect(explicit.resolutionReason).toBe('explicit');
+        expect(explicit.modelId).toBe('deepseek-v4-flash');
+        // Explicit unavailability still fails even though a default exists.
+        expect(() => resolveAiSdkModel('deepseek-chat')).toThrow(ModelUnavailableError);
+      } finally {
+        deleteLlmTaskConfig('store_manager_assistant');
+      }
+    });
+
+    test('isModelToolCapable accepts registered tool models and rejects unknowns', () => {
+      expect(isModelToolCapable('gemma4:12b-mlx')).toBe(true);
+      expect(isModelToolCapable('deepseek-v4-flash')).toBe(true);
+      expect(isModelToolCapable('gpt-4o-mini')).toBe(true);
+      expect(isModelToolCapable('not-a-registered-model')).toBe(false);
     });
   });
 });

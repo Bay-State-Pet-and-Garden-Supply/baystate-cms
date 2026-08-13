@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, afterAll } from 'vitest';
 import { unlinkSync } from 'node:fs';
 import { initDb, closeDb, resetDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
-import { computeApiCost, getModelPricing } from '../../ai/model-pricing';
+import { computeApiCost, getModelPricing, assertPublishedPricingRegistered } from '../../ai/model-pricing';
 import {
   insertAiModelCallStart,
   completeAiModelCall,
@@ -62,6 +62,17 @@ describe('Pricing & Telemetry Repository (PR 3)', () => {
 
       const mini = getModelPricing('gpt-4o-mini');
       expect(mini?.outputPerMillion).toBe(0.60);
+    });
+
+    test('obsolete pricing aliases are removed (deepseek-chat / gpt-4o)', () => {
+      expect(getModelPricing('deepseek-chat')).toBeNull();
+      expect(getModelPricing('gpt-4o')).toBeNull();
+    });
+
+    test('every published pricing key is a registered model profile (drift invariant)', () => {
+      // The pricing table and the model registry are one catalog; a non-empty
+      // result means the lists drifted and the aliases must be reconciled.
+      expect(assertPublishedPricingRegistered()).toEqual([]);
     });
   });
 

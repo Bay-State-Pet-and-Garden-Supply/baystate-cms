@@ -5,7 +5,14 @@
  * - Local routes (`locality === 'local'` or provider `'ollama'`): `estimatedApiCostUsd = 0`, `costBasis = 'local_zero'`.
  * - Known cloud pricing: `estimatedApiCostUsd = calculated`, `costBasis = 'published_rate'`.
  * - Unknown cloud pricing: `estimatedApiCostUsd = null`, `costBasis = 'unknown'`.
+ *
+ * Drift invariant: every published-price key must be a registered model
+ * profile (`assertPublishedPricingRegistered()` returns only unregistered
+ * keys, i.e. [] when healthy). Obsolete aliases for models that no longer
+ * exist in the registry are removed rather than silently retained.
  */
+
+import { getModelProfile } from './model-registry';
 
 export type CostBasis = 'local_zero' | 'published_rate' | 'unknown';
 
@@ -22,11 +29,18 @@ export interface ApiCostResult {
 
 const PUBLISHED_PRICING: Record<string, ModelPricing> = {
   'deepseek-v4-flash': { inputPerMillion: 0.14, outputPerMillion: 0.28, effectiveAt: '2026-01-01' },
-  'deepseek-chat': { inputPerMillion: 0.14, outputPerMillion: 0.28, effectiveAt: '2026-01-01' },
   'deepseek-v4-pro': { inputPerMillion: 0.435, outputPerMillion: 0.87, effectiveAt: '2026-01-01' },
   'gpt-4o-mini': { inputPerMillion: 0.15, outputPerMillion: 0.60, effectiveAt: '2026-01-01' },
-  'gpt-4o': { inputPerMillion: 2.50, outputPerMillion: 10.00, effectiveAt: '2026-01-01' },
 };
+
+/**
+ * Return the published-price keys that are NOT registered model profiles.
+ * The pricing table and the model registry are a single catalog; a non-empty
+ * result means the lists have drifted and must be reconciled.
+ */
+export function assertPublishedPricingRegistered(): string[] {
+  return Object.keys(PUBLISHED_PRICING).filter((key) => getModelProfile(key) === null);
+}
 
 /**
  * Retrieve published pricing rates for a given model.

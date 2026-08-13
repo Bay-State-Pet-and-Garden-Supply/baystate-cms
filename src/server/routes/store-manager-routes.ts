@@ -12,7 +12,7 @@ import {
   generateAiProposals,
   generateStoreManagerReport,
 } from '../services/store-manager-assistant-service';
-import { resolveAiSdkModel } from '../services/ai-sdk-model-resolver';
+import { resolveAiSdkModel, listUsableStoreManagerModels, ModelUnavailableError, type ResolvedAiSdkModel } from '../services/ai-sdk-model-resolver';
 import { createStoreManagerTools } from '../services/store-manager-tools';
 import { STORE_MANAGER_AGENT_SYSTEM_PROMPT } from '../services/store-manager-agent-prompt';
 import { streamText, convertToModelMessages, toUIMessageStream, createUIMessageStreamResponse, isStepCount } from 'ai';
@@ -25,16 +25,27 @@ import {
 } from '../services/store-manager-chat-history-service';
 
 import { getProductWithDraft } from '../services/product-service';
-import { getLlmConfigForTask } from '../../onboarding/llm-client';
 
 import { computeApiCost } from '../../ai/model-pricing';
-import { getModelProfile } from '../../ai/model-registry';
 
 const route = new Hono();
 
 // Global map to track the latest usage tokens for active streaming chats
 const lastStreamUsage = new Map<string, { promptTokens: number; completionTokens: number; provider: string; model: string; locality: 'local' | 'cloud' }>();
 
+
+/**
+ * GET /api/store-manager/models
+ * Server-owned descriptor list of usable Store Manager models. The picker
+ * must render exactly this list; credentials/base URLs are never returned.
+ */
+route.get('/store-manager/models', (c) => {
+  try {
+    return c.json(listUsableStoreManagerModels());
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
 
 /**
  * POST /api/store-manager/chat
@@ -57,7 +68,18 @@ route.post('/store-manager/chat', async (c) => {
   }
 
   try {
-    const model = resolveAiSdkModel(selectedModel);
+    let resolvedModel: ResolvedAiSdkModel;
+    try {
+      resolvedModel = resolveAiSdkModel(selectedModel);
+    } catch (err) {
+      if (err instanceof ModelUnavailableError) {
+        // Explicit unavailability fails before streaming and names the
+        // corrective setting without exposing secrets. No transport attempt.
+        return c.json({ error: err.message, errorCode: 'model_unavailable' }, 400);
+      }
+      throw err;
+    }
+    const model = resolvedModel.modelInstance;
     const tools = createStoreManagerTools({
       workspaceId: workspace.id,
       workspacePath: workspace.workspacePath,
@@ -100,19 +122,14 @@ route.post('/store-manager/chat', async (c) => {
       stopWhen: isStepCount(10),
       onFinish: ({ usage }) => {
         if (usage && threadId) {
-          const taskConfig = getLlmConfigForTask('store_manager_assistant', { allowFallback: true });
-          const fallbackModel = taskConfig?.model || 'deepseek-v4-flash';
-          const resolvedModelName = selectedModel || fallbackModel;
-          const profile = getModelProfile(resolvedModelName);
-          const resolvedProvider = profile?.provider ?? taskConfig?.provider ?? (selectedModel ? 'ollama' : 'deepseek');
-          const locality = resolvedProvider === 'ollama' ? 'local' : 'cloud';
-
           lastStreamUsage.set(threadId, {
             promptTokens: usage.inputTokens || 0,
             completionTokens: usage.outputTokens || 0,
-            provider: resolvedProvider,
-            model: resolvedModelName,
-            locality,
+            // Telemetry reflects the model that actually executed, taken from
+            // the single authoritative resolved-model struct.
+            provider: resolvedModel.provider,
+            model: resolvedModel.modelId,
+            locality: resolvedModel.locality,
           });
         }
       }

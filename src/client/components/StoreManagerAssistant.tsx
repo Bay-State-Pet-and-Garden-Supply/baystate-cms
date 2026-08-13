@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport, type UIMessage } from 'ai';
+import {
+  fetchStoreManagerModels,
+  formatModelPricing,
+  type StoreManagerModelDescriptor,
+} from '../store-manager-api';
 
 interface StoreManagerAssistantProps {
   onSelectProduct?: (sku: string) => void;
@@ -18,45 +23,6 @@ interface SelectedProduct {
   primaryImage?: string | null;
 }
 
-interface ModelOption {
-  id: string;
-  name: string;
-  provider: string;
-  pricing: string;
-  desc: string;
-}
-
-const MODEL_OPTIONS: ModelOption[] = [
-  {
-    id: 'deepseek-chat',
-    name: 'DeepSeek-V4 Flash',
-    provider: 'DeepSeek',
-    pricing: '$0.14 / 1M Input, $0.28 / 1M Output',
-    desc: 'Extremely fast, cheap, and capable standard assistant model.',
-  },
-  {
-    id: 'gpt-4o-mini',
-    name: 'GPT-4o Mini',
-    provider: 'OpenAI',
-    pricing: '$0.15 / 1M Input, $0.60 / 1M Output',
-    desc: 'Very fast, low-cost model with high quality across common tasks.',
-  },
-  {
-    id: 'gpt-4o',
-    name: 'GPT-4o',
-    provider: 'OpenAI',
-    pricing: '$2.50 / 1M Input, $10.00 / 1M Output',
-    desc: 'Highly capable reasoning model for complex structuring and logic.',
-  },
-  {
-    id: 'llama3',
-    name: 'Llama 3 (Local)',
-    provider: 'Ollama',
-    pricing: 'Free (Local)',
-    desc: 'Runs entirely on your computer. Requires local Ollama service.',
-  },
-];
-
 const generateUuid = () =>
   typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
@@ -68,11 +34,12 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [input, setInput] = useState('');
   
-  // Model selection state
-  const [selectedModel, setSelectedModel] = useState<string>(() => {
-    // Default to the first option
-    return MODEL_OPTIONS[0].id;
-  });
+  // Model selection state — populated from the server-owned descriptor
+  // endpoint; there is no hard-coded client model catalog.
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<StoreManagerModelDescriptor[]>([]);
+  const [modelSetupMessage, setModelSetupMessage] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(true);
 
   // Product context attachment states
   const [selectedProducts, setSelectedProducts] = useState<SelectedProduct[]>([]);
@@ -96,6 +63,38 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   useEffect(() => {
     selectedModelRef.current = selectedModel;
   }, [selectedModel]);
+
+  // Load the server-owned model descriptor list on mount.
+  useEffect(() => {
+    let cancelled = false;
+    fetchStoreManagerModels()
+      .then(data => {
+        if (cancelled) return;
+        setModelOptions(data.models);
+        setModelSetupMessage(data.setupMessage ?? null);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setModelOptions([]);
+        setModelSetupMessage(err instanceof Error ? err.message : 'Failed to load available models.');
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Keep the selection valid across refresh/config changes: never keep an
+  // unavailable stale value selected.
+  useEffect(() => {
+    setSelectedModel(prev => {
+      if (prev && modelOptions.some(m => m.id === prev)) return prev;
+      const preferred = modelOptions.find(m => m.isDefault) ?? modelOptions[0] ?? null;
+      return preferred?.id ?? null;
+    });
+  }, [modelOptions]);
 
   const currentThreadIdRef = useRef(currentThreadId);
   useEffect(() => {
@@ -276,6 +275,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || status === 'submitted' || status === 'streaming') return;
+    if (!selectedModel) return; // no usable model configured
     sendMessage({ text: input.trim() });
     setInput('');
   };
@@ -1005,15 +1005,15 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             </p>
           </div>
 
-          {/* Model selection dropdown with clear pricing */}
+          {/* Model selection dropdown — server-driven model list with clear pricing */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <label style={{ fontSize: '12px', fontWeight: 700, color: '#4b5563' }}>AI Model:</label>
               <div style={{ position: 'relative' }}>
                 <select
-                  value={selectedModel}
-                  onChange={e => setSelectedModel(e.target.value)}
-                  disabled={status === 'streaming' || status === 'submitted'}
+                  value={selectedModel ?? ''}
+                  onChange={e => setSelectedModel(e.target.value || null)}
+                  disabled={status === 'streaming' || status === 'submitted' || modelsLoading || modelOptions.length === 0}
                   style={{
                     background: '#ffffff',
                     border: '1px solid #d1d5db',
@@ -1022,16 +1022,22 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     fontSize: '13px',
                     color: '#374151',
                     fontWeight: 600,
-                    cursor: (status === 'streaming' || status === 'submitted') ? 'not-allowed' : 'pointer',
+                    cursor: (status === 'streaming' || status === 'submitted' || modelOptions.length === 0) ? 'not-allowed' : 'pointer',
                     outline: 'none',
                     appearance: 'none',
                   }}
                 >
-                  {MODEL_OPTIONS.map(opt => (
-                    <option key={opt.id} value={opt.id} title={opt.desc}>
-                      {opt.name} ({opt.pricing})
-                    </option>
-                  ))}
+                  {modelsLoading ? (
+                    <option value="">Loading models…</option>
+                  ) : modelOptions.length === 0 ? (
+                    <option value="">No models available</option>
+                  ) : (
+                    modelOptions.map(opt => (
+                      <option key={opt.id} value={opt.id} title={opt.capabilitySummary}>
+                        {opt.providerLabel} · {opt.id} ({formatModelPricing(opt)})
+                      </option>
+                    ))
+                  )}
                 </select>
                 <div
                   style={{
@@ -1048,6 +1054,23 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 </div>
               </div>
             </div>
+            {modelSetupMessage && !modelsLoading && modelOptions.length === 0 && (
+              <div
+                style={{
+                  fontSize: '11px',
+                  fontWeight: 600,
+                  color: '#b45309',
+                  background: '#fef3c7',
+                  border: '1px solid #fde68a',
+                  borderRadius: 6,
+                  padding: '4px 8px',
+                  maxWidth: 320,
+                  textAlign: 'right',
+                }}
+              >
+                ⚠️ {modelSetupMessage}
+              </div>
+            )}
             <div style={{ fontSize: '11px', fontWeight: 700, color: '#16a34a', display: 'flex', alignItems: 'center', gap: 4 }}>
               <span>💵 Session Cost:</span>
               <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{formattedCost}</span>
@@ -1599,11 +1622,13 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             value={input}
             onChange={e => setInput(e.target.value)}
             placeholder={
-              selectedProducts.length > 0
-                ? "Ask a question about the attached product(s)..."
-                : "Ask about your catalog, product fields, health, or proposals..."
+              !selectedModel
+                ? 'No usable AI model configured. Check Settings → LLM Providers.'
+                : selectedProducts.length > 0
+                  ? "Ask a question about the attached product(s)..."
+                  : "Ask about your catalog, product fields, health, or proposals..."
             }
-            disabled={status === 'submitted' || status === 'streaming'}
+            disabled={status === 'submitted' || status === 'streaming' || !selectedModel}
             style={{
               flex: 1,
               background: '#f9fafb',
@@ -1620,7 +1645,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
           />
           <button
             type="submit"
-            disabled={!input.trim() || status === 'submitted' || status === 'streaming'}
+            disabled={!input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel}
             style={{
               background: '#2563eb',
               color: '#fff',
@@ -1630,8 +1655,9 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               fontSize: '14px',
               fontWeight: 600,
               cursor:
-                !input.trim() || status === 'submitted' || status === 'streaming' ? 'not-allowed' : 'pointer',
-              opacity: !input.trim() || status === 'submitted' || status === 'streaming' ? 0.6 : 1,
+                !input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel ? 'not-allowed' : 'pointer',
+              opacity:
+                !input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel ? 0.6 : 1,
               transition: 'background 0.2s',
             }}
           >

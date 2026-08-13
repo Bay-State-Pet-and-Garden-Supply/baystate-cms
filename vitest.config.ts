@@ -111,6 +111,7 @@ export default defineConfig({
       'src/tests/unit/general-task-fallback-telemetry.test.ts',
       'src/tests/unit/pricing-and-telemetry.test.ts',
       'src/tests/unit/provider-and-model-registry.test.ts',
+      'src/tests/unit/store-manager-models.test.ts',
       'src/tests/unit/zero-deployment-rollback.test.ts',
       // Issue #30 cohort curation (bun:sqlite DB tests)
       'src/tests/unit/curation-cohort-repo.test.ts',
