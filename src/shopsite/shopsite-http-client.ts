@@ -69,13 +69,13 @@ export class ShopSiteHttpClient {
     }
   }
 
-  // fallow-ignore-next-line unused-class-member
-  async fetchProductsXml(
+  private async fetchDbXml(
+    dbname: 'products' | 'pages',
     options?: { version?: string; fields?: string[] },
   ): Promise<Result<string>> {
     const params = new URLSearchParams();
     params.set('clientApp', '1');
-    params.set('dbname', 'products');
+    params.set('dbname', dbname);
     params.set('version', options?.version ?? '15.0');
     if (options?.fields && options.fields.length > 0) {
       params.set('fields', '|' + options.fields.join('|') + '|');
@@ -107,5 +107,18 @@ export class ShopSiteHttpClient {
       const message = err instanceof Error ? err.message : String(err);
       return { success: false, errors: [message], error: message };
     }
+  }
+
+  // fallow-ignore-next-line unused-class-member
+  async fetchProductsXml(
+    options?: { version?: string; fields?: string[] },
+  ): Promise<Result<string>> {
+    return this.fetchDbXml('products', options);
+  }
+
+  async fetchPagesXml(
+    options?: { version?: string; fields?: string[] },
+  ): Promise<Result<string>> {
+    return this.fetchDbXml('pages', options);
   }
 }

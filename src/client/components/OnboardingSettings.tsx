@@ -16,6 +16,7 @@ import {
   type ApiKeyDisplay,
   type CurationTargetsResponse,
 } from '../onboarding-api';
+import { downloadPagesImport, activatePagesImport } from '../api';
 import { readinessViewFromReport } from '../classification-readiness-view';
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
 import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
@@ -364,6 +365,30 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSyncingSeed(false);
+    }
+  };
+
+  const [syncingPages, setSyncingPages] = useState(false);
+
+  const handleSyncPages = async () => {
+    if (!confirm('Download the live Pages database from ShopSite and activate it as the verified page import?')) return;
+    setSyncingPages(true);
+    setError('');
+    try {
+      const res = await downloadPagesImport();
+      const preview = res.preview;
+      await activatePagesImport({
+        sourceHash: preview.sourceHash,
+        parserFormatVersion: preview.parserFormatVersion,
+        records: preview.records,
+      });
+      const warningNote = preview.warnings.length > 0 ? ` · ${preview.warnings.length} name-only excluded` : '';
+      alert(`Pages synced! ${preview.counts.verified} verified pages activated from ShopSite${warningNote}.`);
+      await loadCurationTargets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingPages(false);
     }
   };
 
@@ -856,6 +881,24 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
               <div style={styles.subsectionHeader}>
                 <span style={{ ...styles.providerBadge, background: '#7c3aed', color: '#fff' }}>Pages</span>
                 <span style={{ fontSize: 12, color: '#6b7280' }}>{curationTargetState.candidates.pages.length} synced pages</span>
+                <button
+                  type="button"
+                  disabled={syncingPages}
+                  onClick={handleSyncPages}
+                  style={{
+                    padding: '4px 10px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    border: '1px solid #d1d5db',
+                    background: '#f9fafb',
+                    color: '#374151',
+                    cursor: syncingPages ? 'not-allowed' : 'pointer',
+                    opacity: syncingPages ? 0.6 : 1,
+                  }}
+                >
+                  {syncingPages ? 'Syncing…' : 'Sync pages from ShopSite'}
+                </button>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>Always enabled · Multi-select</span>

@@ -8,7 +8,10 @@ import {
   assignProductToVerifiedPage,
 } from '../../db/repositories/page-repo';
 import { previewPageImport, activatePageImportFromRecords } from '../../shopsite/page-import-service';
+import { downloadPagesFromShopSite } from '../../shopsite/page-download-service';
+import { ShopSiteHttpClient } from '../../shopsite/shopsite-http-client';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
+import { findConnection } from '../../db/repositories/connection-repo';
 
 const router = new Hono();
 
@@ -50,6 +53,41 @@ router.post('/pages/import/preview', async (c) => {
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : 'Invalid import preview payload' }, 400);
   }
+});
+
+// Live download — pulls the Pages database from ShopSite (db_xml.cgi
+// dbname=pages) and returns an activation-ready preview. No DB writes:
+// activation still goes through /pages/import/activate.
+router.post('/pages/import/download', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace configured' }, 409);
+
+  const connection = findConnection(workspace.id);
+  if (!connection?.cgiBaseUrl || !connection.merchantId || !connection.passwordSecretRef) {
+    return c.json({ error: 'ShopSite connection is not configured. Please save and test your credentials first.' }, 400);
+  }
+
+  const client = new ShopSiteHttpClient({
+    cgiBaseUrl: connection.cgiBaseUrl,
+    merchantId: connection.merchantId,
+    password: connection.passwordSecretRef,
+  });
+
+  const result = await downloadPagesFromShopSite(client);
+  if (!result.ok) {
+    return c.json({ error: result.error }, 400);
+  }
+
+  return c.json({
+    success: true,
+    preview: {
+      sourceHash: result.sourceHash,
+      parserFormatVersion: result.parserFormatVersion,
+      counts: result.counts,
+      records: result.records,
+      warnings: result.warnings,
+    },
+  });
 });
 
 // Import activation — atomic; refuses name-only identities.

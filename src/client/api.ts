@@ -404,6 +404,42 @@ export function listPages() {
   return request<{ pages: Page[] }>('/pages');
 }
 
+// --- Page import (ShopSite Pages database sync) ---
+
+export interface PageImportRecordPayload {
+  identity: { kind: 'exported_guid' | 'exported_file_name' | 'unverified_name_only'; key: string; status: 'verified' | 'unverified' };
+  name: string;
+  parentRef: string | null;
+  availability: 'available' | 'unavailable';
+}
+
+export interface PageImportPreviewPayload {
+  sourceHash: string;
+  parserFormatVersion: string;
+  counts: { total: number; verified: number; nameOnly: number; withParent: number };
+  records: PageImportRecordPayload[];
+  warnings: string[];
+}
+
+/** Downloads the live Pages database from ShopSite (no DB writes). */
+export function downloadPagesImport() {
+  return request<{ success: boolean; preview: PageImportPreviewPayload }>('/pages/import/download', {
+    method: 'POST',
+  });
+}
+
+/** Activates a downloaded page import (atomic; refuses name-only identities). */
+export function activatePagesImport(input: {
+  sourceHash: string;
+  parserFormatVersion: string;
+  records: PageImportRecordPayload[];
+}) {
+  return request<{ success: boolean }>('/pages/import/activate', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
 // fallow-ignore-next-line unused-export — used by tests
 export function upsertPage(name: string, fileName?: string | null, parentId?: string | null) {
   return request<{ success: boolean; page: Page }>('/pages', {
