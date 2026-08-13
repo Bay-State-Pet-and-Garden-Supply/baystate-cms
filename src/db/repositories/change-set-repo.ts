@@ -73,6 +73,18 @@ export function listChangeSets(workspaceId: string): ChangeSetRow[] {
   return rows.map(mapRow);
 }
 
+export function listChangeSetCountsByState(workspaceId: string): Record<string, number> {
+  const db = getDb();
+  const rows = db.query(
+    'SELECT status, COUNT(*) as count FROM change_sets WHERE workspace_id = ? GROUP BY status',
+  ).all(...[workspaceId]) as Record<string, unknown>[];
+  const byState: Record<string, number> = {};
+  for (const row of rows) {
+    byState[String(row.status)] = Number(row.count) || 0;
+  }
+  return byState;
+}
+
 export function updateChangeSetStatus(id: string, status: string, approvedCommit?: string): void {
   const db = getDb();
   const now = new Date().toISOString();

@@ -12,8 +12,9 @@ import {
 } from '../services/product-field-refactor-service';
 import {
   generateAiProposals,
-  generateStoreManagerReport,
 } from '../services/store-manager-assistant-service';
+import { generateStoreManagerReport } from '../services/store-manager-report';
+import { StoreManagerReportRequestSchema } from '../../shared/schemas/store-manager-report';
 import { resolveAiSdkModel, listUsableStoreManagerModels, ModelUnavailableError, type ResolvedAiSdkModel } from '../services/ai-sdk-model-resolver';
 import { createStoreManagerTools } from '../services/store-manager-tools';
 import { buildToolApprovalConfig } from '../services/store-manager-tool-policy';
@@ -455,14 +456,33 @@ route.delete('/store-manager/chat/:threadId', (c) => {
   return c.json({ success: true });
 });
 
-route.get('/store-manager/report', async (c) => {
+route.get('/store-manager/report', (c) => {
+  // Report generation triggers evidence collection and possibly a billable
+  // model narrative; it is an action, not a read (epic #42, #38).
+  return c.json(
+    { error: 'Method Not Allowed: report generation is a POST action.' },
+    405,
+  );
+});
+
+route.post('/store-manager/report', async (c) => {
   const workspace = getCurrentWorkspace();
   if (!workspace) {
     return c.json({ error: 'No workspace loaded.' }, 400);
   }
 
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerReportRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'Invalid report request.', details: parsed.error.flatten() }, 400);
+  }
+
   try {
-    const report = await generateStoreManagerReport(workspace.id, workspace.workspacePath);
+    const report = await generateStoreManagerReport(
+      workspace.id,
+      workspace.workspacePath,
+      parsed.data,
+    );
     return c.json(report);
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);

@@ -1,19 +1,11 @@
-import { getDb } from '../../db/connection';
 import { callLlmForTask } from '../../onboarding/llm-client';
 import { generateProductFieldAuditReport } from './catalog-insight-service';
-import { listProducts } from '../../db/repositories/product-index-repo';
-import { listProposals, findSkusWithFieldValueCaseInsensitive, type CatalogProposal } from './product-field-refactor-service';
+import { findSkusWithFieldValueCaseInsensitive, type CatalogProposal } from './product-field-refactor-service';
 import {
   deleteGeneratedProposals,
   findDuplicateProposal,
   insertProposal,
-  countProposalsByStatus,
 } from '../../db/repositories/catalog-health-proposal-repo';
-
-export interface AssistantCleanupReport {
-  summary: string;
-  reportMarkdown: string;
-}
 
 /**
  * Generate AI-assisted suggestions for a ProductField and store them as proposals.
@@ -128,61 +120,4 @@ Confidence should be a decimal between 0.1 and 0.99 (depending on how sure you a
   }
 
   return inserted;
-}
-
-/**
- * Generate a manager-readable catalog cleanup report using LLM.
- */
-export async function generateStoreManagerReport(
-  workspaceId: string,
-  workspacePath: string
-): Promise<AssistantCleanupReport> {
-  // Gather overall health stats
-  const db = getDb();
-  
-  // Total warnings/errors from product_index
-  const issuesRow = db.query(
-    "SELECT COUNT(*) as count FROM product_index WHERE status = 'active' AND has_warnings = 1"
-  ).get() as { count: number } | undefined;
-  
-  const warningsCount = issuesRow?.count || 0;
-
-  // Active proposals count (workspace-scoped, repository-owned)
-  const proposedChangesCount = countProposalsByStatus(workspaceId, 'proposed');
-
-  // Active change sets
-  const csRow = db.query(
-    "SELECT COUNT(*) as count FROM change_sets WHERE workspace_id = ? AND status = 'active'"
-  ).get(workspaceId) as { count: number } | undefined;
-
-  const activeChangeSetCount = csRow?.count || 0;
-
-  const systemPrompt = `You are the Store Manager AI Assistant. Write a professional, executive-ready Catalog Cleanup Report.
-Organize your response using professional Markdown.
-Include sections:
-1. Executive Summary
-2. Catalog Health Insights (categorized by severity and common issues)
-3. Recommended Corrective Actions (details on field cleanup, separator normalizations)
-4. Active Change Set Status
-Provide helpful, actionable context, pointing out how cleanup improves SEO, faceted search experience, and catalog integrity.`;
-
-  const prompt = `Generate a Store Manager Cleanup Report for our Baystate CMS workspace.
-Here is the current catalog status:
-- Active products with validation issues: ${warningsCount}
-- Pending/Proposed cleanup recommendations: ${proposedChangesCount}
-- Open/Active drafts in Change Sets: ${activeChangeSetCount}
-
-Summarize what steps should be taken next to achieve 100% catalog health. Highlight the benefits of ProductField cleanup for category taxonomy, brand consistency, and separator normalization. Keep it under 400 lines, engaging and highly professional.`;
-
-  const reportText = await callLlmForTask('store_manager_assistant', prompt, systemPrompt, {
-    allowFallback: true,
-    // Real workspace identity so report narrative model calls are audited in
-    // ai_model_calls for this workspace (epic #42, #37).
-    workspaceId,
-  });
-
-  return {
-    summary: `Catalog has ${warningsCount} products with warnings, ${proposedChangesCount} proposed fixes, and ${activeChangeSetCount} active change sets.`,
-    reportMarkdown: reportText || 'Failed to generate store manager report.',
-  };
 }

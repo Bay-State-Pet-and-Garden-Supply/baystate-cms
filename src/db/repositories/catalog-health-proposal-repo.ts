@@ -198,6 +198,27 @@ export function countProposalsByStatus(workspaceId: string, status: string): num
   return Number(row?.count ?? 0);
 }
 
+/**
+ * Count proposals per field in one workspace (optionally restricted to one
+ * status), used by the evidence-grounded cleanup report (epic #42, #38).
+ */
+export function countProposalsByField(workspaceId: string, status?: string): Record<string, number> {
+  const db = getDb();
+  let sql = 'SELECT field, COUNT(*) as count FROM catalog_health_proposals WHERE workspace_id = ?';
+  const params: any[] = [workspaceId];
+  if (status) {
+    sql += ' AND status = ?';
+    params.push(status);
+  }
+  sql += ' GROUP BY field';
+  const rows = db.query(sql).all(...params) as Record<string, unknown>[];
+  const byField: Record<string, number> = {};
+  for (const row of rows) {
+    byField[String(row.field)] = Number(row.count) || 0;
+  }
+  return byField;
+}
+
 function mapRow(row: Record<string, unknown>): CatalogProposal {
   let affectedSkus: string[] = [];
   try {

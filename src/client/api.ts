@@ -1,4 +1,5 @@
 import type { FieldRegistryEntry } from '../shared/schemas/field-registry';
+import type { StoreManagerReportResponse } from '../shared/schemas/store-manager-report';
 
 const API_BASE = '/api';
 
@@ -627,9 +628,11 @@ export interface ProductFieldAuditReport {
   suspiciousValues: SuspiciousValueInfo[];
 }
 
-export interface AssistantCleanupReport {
-  summary: string;
-  reportMarkdown: string;
+export interface StoreManagerReportOptions {
+  /** Registered ProductFields to audit (capped server-side). */
+  fields?: string[];
+  /** Opt-in model narrative over the bounded evidence bundle. */
+  narrative?: boolean;
 }
 
 export function getStoreManagerInsights(field: string) {
@@ -665,8 +668,13 @@ export function dismissStoreManagerProposal(id: string) {
   });
 }
 
-export function getStoreManagerReport() {
-  return request<AssistantCleanupReport>('/store-manager/report');
+export function getStoreManagerReport(options: StoreManagerReportOptions = {}) {
+  // Report generation is an action (evidence collection + optional billable
+  // narrative): it is a POST, never a GET (epic #42, #38).
+  return request<StoreManagerReportResponse>('/store-manager/report', {
+    method: 'POST',
+    body: JSON.stringify(options),
+  });
 }
 
 // ── Catalog Schema Workbench APIs ──────────────────────────────────

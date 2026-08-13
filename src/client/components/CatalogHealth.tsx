@@ -15,9 +15,9 @@ import {
   type CatalogHealthIssue, 
   type HealthRuleConfig,
   type CatalogProposal,
-  type ProductFieldAuditReport,
-  type AssistantCleanupReport
+  type ProductFieldAuditReport
 } from '../api';
+import type { StoreManagerReportResponse } from '../../shared/schemas/store-manager-report';
 import { ViewHeader } from './common/ViewHeader';
 
 const STYLE_RULES = `
@@ -829,7 +829,7 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
   const [customFields, setCustomFields] = useState<Array<{ xmlField: string; label: string }>>([]);
   const [auditReport, setAuditReport] = useState<ProductFieldAuditReport | null>(null);
   const [proposals, setProposals] = useState<CatalogProposal[]>([]);
-  const [assistantReport, setAssistantReport] = useState<AssistantCleanupReport | null>(null);
+  const [assistantReport, setAssistantReport] = useState<StoreManagerReportResponse | null>(null);
   
   // Loading sub-states
   const [loadingAudit, setLoadingAudit] = useState(false);

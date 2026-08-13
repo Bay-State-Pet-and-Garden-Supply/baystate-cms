@@ -159,14 +159,18 @@ describe('Pricing & Telemetry Repository (PR 3)', () => {
       insertStoreManagerUnavailableCall('ws-101', 'deepseek-v4-flash');
       const calls = getAiModelCallsByWorkspace('ws-101');
       const unavailable = calls.filter((c) => c.status === 'unavailable');
-      const row = unavailable[unavailable.length - 1];
+      // The earlier MODEL_NOT_FOUND fixture row may share the same started_at
+      // timestamp; select by error_code instead of relying on tie-break order.
+      const written = unavailable.filter((c) => c.error_code === 'model_unavailable');
+      expect(written).toHaveLength(1);
+      const row = written[0];
       expect(row).toBeDefined();
-      expect(row.error_code).toBe('model_unavailable');
-      expect(row.task).toBe(STORE_MANAGER_TASK);
+      expect(row!.error_code).toBe('model_unavailable');
+      expect(row!.task).toBe(STORE_MANAGER_TASK);
       // Registered selection maps to the registry profile.
-      expect(row.model).toBe('deepseek-v4-flash');
-      expect(row.provider).toBe('deepseek');
-      expect(row.ended_at).not.toBeNull();
+      expect(row!.model).toBe('deepseek-v4-flash');
+      expect(row!.provider).toBe('deepseek');
+      expect(row!.ended_at).not.toBeNull();
     });
 
     test('aggregate cost uses resolved provider/model/locality and full token totals', () => {
