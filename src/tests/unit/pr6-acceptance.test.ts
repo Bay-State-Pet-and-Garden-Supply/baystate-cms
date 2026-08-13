@@ -796,10 +796,17 @@ describe('PR6 acceptance — durable parent title coordination, replay-safe afte
     const oldRowsStill = getCohortTitleOutputsByRun(oldRunId);
     expect(oldRowsStill.map(r => ({ sku: r.productSku, hash: r.inputHash, payload: r.outputValueJson, callId: r.modelCallId })))
       .toEqual(oldRowJson);
-    // The new run coordinated a fresh title call (new revision → new outputs).
-    expect(titleCallCount).toBe(2);
+    // PR13 C2 (DECISION-A/B): the fresh revision's frozen title authority is
+    // byte-identical to the superseded revision's, so the durable set is
+    // COPIED into the NEW run — ZERO new title calls, fresh rows with the
+    // SAME values and the ORIGINAL producing call ids (the pre-PR13
+    // expectation of a second coordinate call is superseded by the
+    // cross-parent same-T-hash reuse economics).
+    expect(titleCallCount).toBe(1);
+    expect(newRows.map(r => ({ sku: r.productSku, hash: r.inputHash, payload: r.outputValueJson, callId: r.modelCallId })))
+      .toEqual(oldRowJson);
     expect(countOutputRowsForWorkspace(workspaceId)).toBe(4);
-    // Members of the new run consume the new persisted values.
+    // Members of the new run consume the copied persisted values.
     for (const item of items) {
       const stored = findItemById(item.id)!;
       expect(stored.curationData!.curatedTitle).toBe(cannedTitleForUpc(item.upc));
