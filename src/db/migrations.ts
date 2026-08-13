@@ -2991,6 +2991,73 @@ export function runMigrations(): void {
     console.log('[Migrations] Onboarding evidence attempts table migration complete.');
   }
 
+  // ── Store Manager runtime audit tables (epic #42, #40) ────────────────────
+  //
+  // Minimal durable session/turn/event audit for the bounded agent runtime.
+  // Everything stored is redacted by construction (digests and bounded scope,
+  // never raw prompts, chain of thought, approval secrets/signatures,
+  // credentials, absolute paths, or raw tool/network payloads).
+  const storeManagerRuntimeVersion = db
+    .query("SELECT value FROM app_meta WHERE key = 'store_manager_runtime_schema_version'")
+    .get() as { value: string } | undefined;
+  if (!storeManagerRuntimeVersion) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_sessions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        thread_id TEXT,
+        turn_id TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        policy_hash TEXT NOT NULL,
+        policy_version INTEGER NOT NULL,
+        requested_model TEXT,
+        resolved_provider TEXT NOT NULL,
+        resolved_model TEXT NOT NULL,
+        resolved_locality TEXT NOT NULL CHECK (resolved_locality IN ('local', 'cloud')),
+        resolution_reason TEXT NOT NULL,
+        model_call_id TEXT,
+        status TEXT NOT NULL CHECK (status IN ('active', 'terminal')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_ws ON store_manager_sessions(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_thread ON store_manager_sessions(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_model_call ON store_manager_sessions(model_call_id);
+
+      CREATE TABLE IF NOT EXISTS store_manager_turns (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        session_id TEXT NOT NULL REFERENCES store_manager_sessions(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK (phase IN ('investigate', 'approve', 'verify')),
+        status TEXT NOT NULL CHECK (status IN ('active', 'terminal')),
+        terminal_status TEXT CHECK (terminal_status IN ('success', 'failed', 'cancelled', 'policy_denied')),
+        outcome_reason TEXT,
+        total_tool_calls INTEGER NOT NULL DEFAULT 0,
+        policy_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        ended_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_turns_ws ON store_manager_turns(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_turns_session ON store_manager_turns(session_id);
+
+      CREATE TABLE IF NOT EXISTS store_manager_events (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        event_version INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_events_ws ON store_manager_events(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_events_session ON store_manager_events(session_id, created_at);
+    `);
+    db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('store_manager_runtime_schema_version', '1');");
+    console.log('[Migrations] Store Manager runtime audit tables migration complete.');
+  }
+
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as
     | { value: string }
     | undefined;

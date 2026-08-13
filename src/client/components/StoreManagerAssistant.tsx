@@ -567,7 +567,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
         {input && Object.keys(input).length > 0 && (
           <div style={{ fontSize: 11, color: colors.mulchBrown, marginBottom: 6, fontFamily: fonts.mono }}>
-            Arguments: <code>{JSON.stringify(input)}</code>
+            Arguments: <code>{JSON.stringify(input).slice(0, 2000)}</code>
           </div>
         )}
 
@@ -904,7 +904,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     maxHeight: 200,
                   }}
                 >
-                  {JSON.stringify(output, null, 2)}
+                  {JSON.stringify(output, null, 2).slice(0, 8000)}
                 </pre>
               </details>
             )}
@@ -944,6 +944,29 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const renderApprovalRequest = (part: any, key: number) => {
     const toolName = toolNameFromPart(part);
     const approvalId: string = part.approval?.id;
+    const hasServerSignature = Boolean(part.approval?.signature);
+    // #40 change 11: unknown/stale tool parts (legacy history, unknown tool
+    // version, unsigned parts) render a read-only safe fallback — never an
+    // executable Approve/Deny control.
+    if (!hasServerSignature || !approvalId) {
+      return (
+        <div
+          key={key}
+          style={{
+            margin: '12px 0',
+            padding: '12px 16px',
+            background: '#f5f5f4',
+            border: `1px solid ${colors.cardBorder}`,
+            borderRadius: rounded.md,
+            fontSize: 12,
+            color: colors.mulchBrown,
+          }}
+        >
+          <strong>Stale or unrecognized approval request</strong> — re-run the action to receive a
+          fresh, signed approval. Tool: <code style={{ fontFamily: fonts.mono }}>{toolName}</code>
+        </div>
+      );
+    }
     const copy = approvalCardCopy(toolName, part.input || {});
     const decisionBusy = approvalDecisions[approvalId];
     const isBusy = Boolean(decisionBusy) || status === 'submitted' || status === 'streaming';

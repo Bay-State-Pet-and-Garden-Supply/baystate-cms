@@ -1552,4 +1552,40 @@ describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
     const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
     expect(version2.value).toBe('7');
   });
+
+  it('creates the Store Manager runtime audit tables idempotently (epic #42, #40)', () => {
+    const db = getDb();
+
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'store_manager_runtime_schema_version'").get()).toBeTruthy();
+
+    const sessions = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='store_manager_sessions'").get();
+    expect(sessions).toBeTruthy();
+    const turns = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='store_manager_turns'").get();
+    expect(turns).toBeTruthy();
+    const events = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='store_manager_events'").get();
+    expect(events).toBeTruthy();
+
+    for (const index of [
+      'idx_store_manager_sessions_ws',
+      'idx_store_manager_sessions_thread',
+      'idx_store_manager_sessions_model_call',
+      'idx_store_manager_turns_ws',
+      'idx_store_manager_turns_session',
+      'idx_store_manager_events_ws',
+      'idx_store_manager_events_session',
+    ]) {
+      expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name=?").get(index)).toBeTruthy();
+    }
+
+    // Constraint shape: phases/statuses/terminal statuses are CHECK-bound.
+    const turnDdl = (db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_turns'").get() as { sql: string }).sql;
+    expect(turnDdl).toMatch(/CHECK \(phase IN \('investigate', 'approve', 'verify'\)\)/);
+    expect(turnDdl).toMatch(/CHECK \(terminal_status IN \('success', 'failed', 'cancelled', 'policy_denied'\)\)/);
+    const sessionDdl = (db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_sessions'").get() as { sql: string }).sql;
+    expect(sessionDdl).toMatch(/CHECK \(resolved_locality IN \('local', 'cloud'\)\)/);
+
+    // Idempotent rerun keeps the marker and the tables.
+    expect(() => runMigrations()).not.toThrow();
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'store_manager_runtime_schema_version'").get()).toBeTruthy();
+  });
 });

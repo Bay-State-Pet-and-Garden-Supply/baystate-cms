@@ -1,11 +1,15 @@
 /**
- * Store Manager tool policy registry (epic #42, #34).
+ * Store Manager tool policy registry (epic #42, #34, renamed in #40).
  *
  * Every agent-callable tool has exactly one immutable metadata entry: risk
  * class, side effects, approval requirement, scope summary, and the exact
  * state transition the tool performs. This registry is the single source of
  * truth for `streamText.toolApproval` configuration and for the runtime
  * wrapper that re-checks risk/approval immediately before execution.
+ *
+ * Tool names encode their semantics (#40): preview_* (transient),
+ * store_*_proposals (persistent proposal write), stage_* (catalog mutation),
+ * dismiss_* (proposal write), repair_approved_* (privileged repair).
  *
  * This module is intentionally import-free so it stays pure and testable on
  * both the server and client sides.
@@ -18,7 +22,7 @@ export type ToolRiskClass =
   | 'network_filesystem_repair';
 
 export interface StoreManagerToolPolicy {
-  /** Stable tool name (must equal the key in `createStoreManagerTools`). */
+  /** Stable tool name (must equal the adapter name in the #40 registry). */
   name: string;
   /** Bump on any breaking contract change. */
   version: number;
@@ -82,8 +86,8 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
     stateTransition: 'none',
     scopeSummary: (input) => `ProductField ${String(input.field ?? '?')} audit`,
   },
-  proposeProductFieldNormalization: {
-    name: 'proposeProductFieldNormalization',
+  preview_product_field_normalization: {
+    name: 'preview_product_field_normalization',
     version: 1,
     riskClass: 'read',
     sideEffects: 'none (transient in-memory preview; nothing is persisted)',
@@ -104,16 +108,17 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
   },
   explainNextActions: {
     name: 'explainNextActions',
-    version: 1,
+    version: 2,
     riskClass: 'read',
     sideEffects: 'none',
     requiresApproval: false,
     stateTransition: 'none',
-    scopeSummary: () => 'recommended next actions',
+    scopeSummary: (input) =>
+      `next actions${typeof input.focus === 'string' ? ` focused on ${input.focus}` : ''}`,
   },
   // ---------------------------------------------------------- proposal_write --
-  generateNormalizationProposals: {
-    name: 'generateNormalizationProposals',
+  store_product_field_normalization_proposals: {
+    name: 'store_product_field_normalization_proposals',
     version: 1,
     riskClass: 'proposal_write',
     sideEffects:
@@ -122,8 +127,8 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
     stateTransition: 'stored proposal created (status: proposed); catalog unchanged',
     scopeSummary: (input) => `store normalization proposals for ${String(input.field ?? '?')}`,
   },
-  dismissNormalizationProposal: {
-    name: 'dismissNormalizationProposal',
+  dismiss_stored_proposal: {
+    name: 'dismiss_stored_proposal',
     version: 1,
     riskClass: 'proposal_write',
     sideEffects: 'marks a stored proposal dismissed (DB status change)',
@@ -132,8 +137,8 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
     scopeSummary: (input) => `dismiss stored proposal ${String(input.proposalId ?? '?')}`,
   },
   // ---------------------------------------------------------- catalog_mutation --
-  applyNormalizationProposal: {
-    name: 'applyNormalizationProposal',
+  stage_stored_proposal_in_change_set: {
+    name: 'stage_stored_proposal_in_change_set',
     version: 1,
     riskClass: 'catalog_mutation',
     sideEffects:
@@ -144,8 +149,8 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
     scopeSummary: (input) => `stage stored proposal ${String(input.proposalId ?? '?')} in a Change Set`,
   },
   // ------------------------------------------------- network_filesystem_repair --
-  repairChangeSetImages: {
-    name: 'repairChangeSetImages',
+  repair_approved_change_set_images: {
+    name: 'repair_approved_change_set_images',
     version: 1,
     riskClass: 'network_filesystem_repair',
     sideEffects:

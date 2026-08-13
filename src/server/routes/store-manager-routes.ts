@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { generateProductFieldAuditReport } from '../services/catalog-insight-service';
 import {
@@ -18,12 +18,8 @@ import {
 } from '../services/store-manager-assistant-service';
 import { generateStoreManagerReport } from '../services/store-manager-report';
 import { StoreManagerReportRequestSchema } from '../../shared/schemas/store-manager-report';
-import { resolveAiSdkModel, listUsableStoreManagerModels, ModelUnavailableError, type ResolvedAiSdkModel } from '../services/ai-sdk-model-resolver';
-import { createStoreManagerTools } from '../services/store-manager-tools';
-import { buildToolApprovalConfig } from '../services/store-manager-tool-policy';
-import { buildStoreManagerSystemPrompt } from '../services/store-manager-prompt-builder';
-import { buildAttachedProductContext, injectAttachedContext, selectedSkusSchema } from '../services/store-manager-context';
-import { streamText, convertToModelMessages, toUIMessageStream, createUIMessageStreamResponse, isStepCount, type UIMessage } from 'ai';
+import { listUsableStoreManagerModels, ModelUnavailableError } from '../services/ai-sdk-model-resolver';
+import { createUIMessageStreamResponse } from 'ai';
 import {
   saveChatMessage,
   getChatHistory,
@@ -32,12 +28,12 @@ import {
   pruneOldChatHistory,
 } from '../services/store-manager-chat-history-service';
 import {
-  beginStoreManagerCall,
-  terminalizeStoreManagerCall,
-  buildStoreManagerMessageMetadata,
   insertStoreManagerUnavailableCall,
   sanitizeChatMessagesForPersistence,
 } from '../services/store-manager-telemetry';
+import { runStoreManagerTurn, StoreManagerTurnError } from '../../store-manager/runtime/executor';
+import { StoreManagerChatRequestSchema } from '../../shared/schemas/store-manager';
+import type { UIMessage } from 'ai';
 
 const route = new Hono();
 
@@ -54,12 +50,6 @@ const route = new Hono();
  */
 const toolApprovalSecret =
   process.env.BAYSTATE_CMS_STORE_MANAGER_APPROVAL_SECRET ?? randomBytes(32).toString('hex');
-
-/**
- * How long a per-chat execution context stays valid. Generous enough to cover
- * long multi-step turns; the HMAC signature remains the primary approval gate.
- */
-const APPROVAL_WINDOW_MS = 30 * 60 * 1000;
 
 
 /**
@@ -78,6 +68,9 @@ route.get('/store-manager/models', (c) => {
 /**
  * POST /api/store-manager/chat
  * Streams AI Store Manager Assistant chat responses with tool executions.
+ * The route validates/authenticates, then delegates ALL orchestration
+ * (model resolution, message validation, prompt, tools, approval wiring,
+ * telemetry, events, terminalization) to the bounded runtime executor.
  */
 route.post('/store-manager/chat', async (c) => {
   const workspace = getCurrentWorkspace();
@@ -85,147 +78,44 @@ route.post('/store-manager/chat', async (c) => {
     return c.json({ error: 'No workspace loaded.' }, 400);
   }
 
-  const { messages, selectedSkus, selectedModel, threadId } = await c.req.json().catch(() => ({ 
-    messages: null, 
-    selectedSkus: null, 
-    selectedModel: null,
-    threadId: null
-  }));
-  if (!messages || !Array.isArray(messages)) {
-    return c.json({ error: 'Invalid request: messages array is required.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerChatRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json(
+      { error: 'Invalid chat request.', details: parsed.error.flatten() },
+      400,
+    );
   }
+  const { messages, selectedSkus, selectedModel, threadId } = parsed.data;
 
-  let resolvedModel: ResolvedAiSdkModel | null = null;
-  let modelCallId: string | null = null;
   try {
-    try {
-      resolvedModel = resolveAiSdkModel(selectedModel);
-    } catch (err) {
-      if (err instanceof ModelUnavailableError) {
-        // Explicit unavailability fails before streaming and names the
-        // corrective setting without exposing secrets. No transport attempt:
-        // record a single terminal `unavailable` telemetry row, never a
-        // fallback row.
-        insertStoreManagerUnavailableCall(
-          workspace.id,
-          typeof selectedModel === 'string' ? selectedModel : undefined,
-        );
-        return c.json({ error: err.message, errorCode: 'model_unavailable' }, 400);
-      }
-      throw err;
-    }
-    // Non-null local captured after resolution so stream callbacks can close
-    // over it without re-checking nullability.
-    const resolved = resolvedModel;
-    const model = resolved.modelInstance;
-    // Durable telemetry row before the first transport attempt; terminalized
-    // exactly once on success/failure/cancel paths below.
-    modelCallId = beginStoreManagerCall(workspace.id, resolved);
-    const callId = modelCallId;
-    // Per-chat execution context: approvals are bound to this turn and expire.
-    const executionId = randomUUID();
-    const approvalExpiresAt = Date.now() + APPROVAL_WINDOW_MS;
-    const tools = createStoreManagerTools({
+    const result = await runStoreManagerTurn({
       workspaceId: workspace.id,
       workspacePath: workspace.workspacePath,
-      executionId,
-      approvalExpiresAt,
-    });
-
-    // Attached product context is injected below `system` as a bounded,
-    // server-owned low-trust data message. The system prompt is never
-    // concatenated with request/product content.
-    let chatMessages: any[] = messages;
-    if (selectedSkus && Array.isArray(selectedSkus) && selectedSkus.length > 0) {
-      const parsed = selectedSkusSchema.safeParse({ selectedSkus });
-      if (!parsed.success) {
-        return c.json({ error: 'Invalid attached product selection: at most 10 unique SKUs of bounded length are allowed.' }, 400);
-      }
-      const context = buildAttachedProductContext(
-        workspace.id,
-        workspace.workspacePath,
-        parsed.data.selectedSkus,
-      );
-      chatMessages = injectAttachedContext(messages, context.serialized);
-    }
-
-    const modelMessages = await convertToModelMessages(chatMessages);
-
-    const result = streamText({
-      model,
-      system: buildStoreManagerSystemPrompt(),
-      messages: modelMessages,
-      tools,
-      // #34: read tools run autonomously; every persistent class pauses for a
-      // signed operator approval. The tool wrappers re-check risk/approval
-      // immediately before execution.
-      toolApproval: buildToolApprovalConfig(tools),
-      experimental_toolApprovalSecret: toolApprovalSecret,
-      // Client disconnect must abort the generation so the `started` row is
-      // terminalized as `cancelled` instead of lingering.
+      threadId: threadId ?? null,
+      messages,
+      selectedSkus,
+      selectedModel,
       abortSignal: c.req.raw.signal,
-      stopWhen: isStepCount(10),
-      // #37: onEnd/onFinish usage in AI SDK 7 is the combined usage of all
-      // steps (verified by store-manager-chat-runtime.test.ts), so the
-      // durable row holds aggregate totals, never final-step-only usage.
-      onEnd: ({ usage }) => {
-        if (modelCallId) {
-          terminalizeStoreManagerCall(modelCallId, resolved, 'success', {
-            promptTokens: usage?.inputTokens ?? null,
-            completionTokens: usage?.outputTokens ?? null,
-          });
-        }
-      },
-      onError: (error) => {
-        if (modelCallId) {
-          terminalizeStoreManagerCall(modelCallId, resolved, 'failed', {
-            errorCode: error instanceof Error ? error.name : 'STREAM_ERROR',
-          });
-        }
-      },
-      onAbort: () => {
-        if (modelCallId) {
-          terminalizeStoreManagerCall(modelCallId, resolved, 'cancelled');
-        }
-      },
+      toolApprovalSecret,
     });
-
-    const uiMessageStream = toUIMessageStream({
-      stream: result.stream,
-      tools,
-      // Attach server-owned telemetry metadata to the response message: the
-      // durable call id plus the exact resolved provider/model/locality and
-      // aggregate usage/cost. The chat-save path re-hydrates from the row.
-      messageMetadata: ({ part }) => {
-        if (part.type === 'start') {
-          return {
-            modelCallId: callId,
-            provider: resolved.provider,
-            model: resolved.modelId,
-            locality: resolved.locality,
-            resolutionReason: resolved.resolutionReason,
-          };
-        }
-        if (part.type === 'finish') {
-          return buildStoreManagerMessageMetadata(resolved, callId, {
-            inputTokens: part.totalUsage?.inputTokens,
-            outputTokens: part.totalUsage?.outputTokens,
-          });
-        }
-        return undefined;
-      },
-    });
-
     return createUIMessageStreamResponse({
-      stream: uiMessageStream,
+      stream: result.uiMessageStream,
     });
   } catch (err) {
-    // Synchronous failures between the `started` insert and stream creation
-    // (e.g. message conversion) must not leave an unresolved `started` row.
-    if (modelCallId && resolvedModel) {
-      terminalizeStoreManagerCall(modelCallId, resolvedModel, 'failed', {
-        errorCode: err instanceof Error ? err.name : 'STREAM_ERROR',
-      });
+    if (err instanceof ModelUnavailableError) {
+      // Explicit unavailability fails before streaming and names the
+      // corrective setting without exposing secrets. No transport attempt:
+      // record a single terminal `unavailable` telemetry row, never a
+      // fallback row.
+      insertStoreManagerUnavailableCall(
+        workspace.id,
+        typeof selectedModel === 'string' ? selectedModel : undefined,
+      );
+      return c.json({ error: err.message, errorCode: 'model_unavailable' }, 400);
+    }
+    if (err instanceof StoreManagerTurnError) {
+      return c.json({ error: err.message, errorCode: err.code }, 400);
     }
     console.error('[StoreManagerChat] Error during streaming:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
