@@ -4,7 +4,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
-import { createStoreManagerTools } from '../../server/services/store-manager-tools';
+import { createStoreManagerTools, ApprovalGateError } from '../../server/services/store-manager-tools';
 import type { DashboardStatsData } from '../../server/services/dashboard-service';
 import type { ProductFieldAuditResult, NormalizationProposalResult } from '../../server/services/product-field-audit-service';
 
@@ -54,6 +54,8 @@ describe('Store Manager Tools', () => {
     const tools = createStoreManagerTools({
       workspaceId,
       workspacePath,
+      executionId: 'exec-tools-1',
+      approvalExpiresAt: Date.now() + 60_000,
     });
 
     expect(tools.getDashboardStats).toBeDefined();
@@ -79,6 +81,8 @@ describe('Store Manager Tools', () => {
     const tools = createStoreManagerTools({
       workspaceId,
       workspacePath,
+      executionId: 'exec-tools-2',
+      approvalExpiresAt: Date.now() + 60_000,
     });
 
     const auditResult = (await tools.getProductFieldAudit.execute({ field: 'ProductField24', limit: 100 }, {} as any)) as ProductFieldAuditResult;
@@ -93,8 +97,30 @@ describe('Store Manager Tools', () => {
     expect(propResult.field).toBe('ProductField24');
     expect(propResult.proposals).toBeDefined();
 
-    // Test new database-backed proposal tools execution
-    const genResult = (await tools.generateNormalizationProposals.execute({ field: 'ProductField24' }, {} as any)) as { success: boolean; proposalCount: number };
+    // Test new database-backed proposal tools execution (with a valid approval
+    // for the persistent tool, mirroring the runtime approval flow).
+    const approvedMessages = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'call-gen',
+            toolName: 'generateNormalizationProposals',
+            input: { field: 'ProductField24' },
+          },
+          { type: 'tool-approval-request', approvalId: 'ap-gen', toolCallId: 'call-gen' },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-approval-response', approvalId: 'ap-gen', approved: true }],
+      },
+    ];
+    const genResult = (await tools.generateNormalizationProposals.execute(
+      { field: 'ProductField24' },
+      { toolCallId: 'call-gen', messages: approvedMessages } as any,
+    )) as { success: boolean; proposalCount: number };
     expect(genResult.success).toBe(true);
 
     const listResult = (await tools.listStoredProposals.execute({ field: 'ProductField24' }, {} as any)) as any[];
@@ -105,21 +131,44 @@ describe('Store Manager Tools', () => {
     const tools = createStoreManagerTools({
       workspaceId,
       workspacePath,
+      executionId: 'exec-1',
+      approvalExpiresAt: Date.now() + 60_000,
     });
+
+    // A valid signed approval for the foreign id passes the approval gate;
+    // the workspace-scoped service still denies the foreign proposal.
+    const approvedMessages = [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: 'call-1',
+            toolName: 'applyNormalizationProposal',
+            input: { proposalId: 'foreign-proposal-id' },
+          },
+          { type: 'tool-approval-request', approvalId: 'ap-1', toolCallId: 'call-1' },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-approval-response', approvalId: 'ap-1', approved: true }],
+      },
+    ];
 
     const beforeChangeSetCount = (getDb().query('SELECT COUNT(*) as count FROM change_sets').get() as { count: number }).count;
 
     // Unknown/foreign id — no proposal exists in this workspace.
     const applyResult = (await tools.applyNormalizationProposal.execute(
       { proposalId: 'foreign-proposal-id' },
-      {} as any,
+      { toolCallId: 'call-1', messages: approvedMessages } as any,
     )) as { success: boolean; error?: string };
     expect(applyResult.success).toBe(false);
     expect(applyResult.error).toContain('not found');
 
     const dismissResult = (await tools.dismissNormalizationProposal.execute(
       { proposalId: 'foreign-proposal-id' },
-      {} as any,
+      { toolCallId: 'call-1', messages: approvedMessages } as any,
     )) as { success: boolean; error?: string };
     expect(dismissResult.success).toBe(false);
     expect(dismissResult.error).toContain('not found');
@@ -127,5 +176,21 @@ describe('Store Manager Tools', () => {
     // No change set or draft mutation occurred.
     const afterChangeSetCount = (getDb().query('SELECT COUNT(*) as count FROM change_sets').get() as { count: number }).count;
     expect(afterChangeSetCount).toBe(beforeChangeSetCount);
+  });
+
+  it('persistent tools refuse to execute without an approval response', async () => {
+    const tools = createStoreManagerTools({
+      workspaceId,
+      workspacePath,
+      executionId: 'exec-1',
+      approvalExpiresAt: Date.now() + 60_000,
+    });
+
+    await expect(
+      tools.generateNormalizationProposals.execute({ field: 'ProductField24' }, {} as any),
+    ).rejects.toMatchObject({ code: 'approval_missing' });
+    await expect(
+      tools.applyNormalizationProposal.execute({ proposalId: 'x' }, {} as any),
+    ).rejects.toMatchObject({ code: 'approval_missing' });
   });
 });

@@ -51,6 +51,7 @@ export default defineConfig({
       'src/tests/unit/product-field-audit-service.test.ts',
       'src/tests/unit/store-manager-tools.test.ts',
       'src/tests/unit/store-manager.test.ts',
+      'src/tests/unit/store-manager-approval.test.ts',
       'src/tests/unit/store-manager-chat-history-service.test.ts',
       'src/tests/unit/store-manager-context.test.ts',
       'src/tests/unit/name-consolidation-guard.test.ts',

@@ -124,8 +124,12 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     })
   );
 
-  const { messages, sendMessage, status, error, setMessages } = useChat({
+  const { messages, sendMessage, status, error, setMessages, addToolApprovalResponse } = useChat({
     transport: transport.current,
+    // #34: when the assistant message has complete tool-approval responses,
+    // resubmit automatically so the server validates the HMAC signature and
+    // executes the approved tool.
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
   });
 
   const totalThreadCost = messages.reduce((sum, msg: any) => {
@@ -135,6 +139,31 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     return sum;
   }, 0);
   const formattedCost = totalThreadCost > 0 ? `$${totalThreadCost.toFixed(5)}` : '$0.00';
+
+  // #34: per-approval decision state (blocks duplicate clicks while a decision
+  // is being submitted).
+  const [approvalDecisions, setApprovalDecisions] = useState<Record<string, 'approving' | 'denying'>>({});
+
+  const handleApprovalDecision = async (approvalId: string, approved: boolean) => {
+    if (status === 'submitted' || status === 'streaming') return;
+    if (approvalDecisions[approvalId]) return;
+    setApprovalDecisions(prev => ({ ...prev, [approvalId]: approved ? 'approving' : 'denying' }));
+    try {
+      await addToolApprovalResponse({
+        id: approvalId,
+        approved,
+        reason: approved ? undefined : 'Denied by operator.',
+      });
+    } catch (err) {
+      console.error('Failed to submit approval response:', err);
+    } finally {
+      setApprovalDecisions(prev => {
+        const next = { ...prev };
+        delete next[approvalId];
+        return next;
+      });
+    }
+  };
 
   // Autocomplete search for products in the modal
   useEffect(() => {
@@ -886,6 +915,138 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     );
   };
 
+  // -- Tool approval UI (epic #42, #34) ---------------------------------------
+
+  /** Extract the stable tool name from an AI SDK v7 tool part. */
+  const toolNameFromPart = (part: any): string => {
+    if (part.type === 'dynamic-tool') return part.toolName || 'unknown-tool';
+    if (typeof part.type === 'string' && part.type.startsWith('tool-')) return part.type.slice('tool-'.length);
+    return part.toolName || 'unknown-tool';
+  };
+
+  /** Adapt a v7 tool part into the shape the existing renderer expects. */
+  const adaptToolPart = (part: any) => ({
+    toolName: toolNameFromPart(part),
+    state: part.state,
+    output: part.output,
+    errorText: part.errorText,
+    input: part.input,
+    toolCallId: part.toolCallId,
+  });
+
+  /** Blocking approval card. The operator sees the exact action, risk, scope,
+   *  and state transition before Approve/Deny. No optimistic success claims. */
+  const renderApprovalRequest = (part: any, key: number) => {
+    const toolName = toolNameFromPart(part);
+    const approvalId: string = part.approval?.id;
+    const copy = approvalCardCopy(toolName, part.input || {});
+    const decisionBusy = approvalDecisions[approvalId];
+    const isBusy = Boolean(decisionBusy) || status === 'submitted' || status === 'streaming';
+    return (
+      <div
+        key={key}
+        style={{
+          margin: '12px 0',
+          padding: '14px 16px',
+          background: '#fef9e7',
+          border: `1px solid ${colors.mutedGold}`,
+          borderRadius: rounded.md,
+          boxShadow: '0 1px 3px rgba(33,20,20,0.06)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <span style={{ fontSize: 16 }}>🔒</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal }}>
+            Action requires approval
+          </span>
+          <span
+            style={{
+              marginLeft: 'auto',
+              fontSize: 10,
+              fontWeight: 700,
+              padding: '2px 8px',
+              borderRadius: rounded.xs,
+              background: colors.mutedGold,
+              color: colors.ledgerCharcoal,
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+            }}
+          >
+            {copy.risk}
+          </span>
+        </div>
+        <div style={{ fontSize: 13, color: colors.ledgerCharcoal }}>
+          <strong>{copy.title}</strong>
+        </div>
+        <div style={{ fontSize: 12, color: colors.mulchBrown, marginTop: 6 }}>
+          <div><strong>Scope:</strong> <code style={{ fontFamily: fonts.mono }}>{copy.scope}</code></div>
+          <div style={{ marginTop: 2 }}><strong>State transition:</strong> {copy.transition}</div>
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+          <button
+            className="btn"
+            disabled={isBusy}
+            onClick={() => handleApprovalDecision(approvalId, true)}
+            style={{
+              background: colors.seedlingGreen,
+              color: colors.feedBagCream,
+              border: 'none',
+              padding: '6px 18px',
+              borderRadius: rounded.sm,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: isBusy ? 'not-allowed' : 'pointer',
+              opacity: isBusy ? 0.6 : 1,
+            }}
+          >
+            {decisionBusy === 'approving' ? 'Approving…' : 'Approve'}
+          </button>
+          <button
+            className="btn"
+            disabled={isBusy}
+            onClick={() => handleApprovalDecision(approvalId, false)}
+            style={{
+              background: colors.whiteSurface,
+              color: colors.signetBurgundy,
+              border: `1px solid ${colors.signetBurgundy}`,
+              padding: '6px 18px',
+              borderRadius: rounded.sm,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: isBusy ? 'not-allowed' : 'pointer',
+              opacity: isBusy ? 0.6 : 1,
+            }}
+          >
+            Deny
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  /** Approval result banner: approved (awaiting execution) or denied (not executed). */
+  const renderApprovalResponded = (part: any, key: number) => {
+    const toolName = toolNameFromPart(part);
+    const approved = part.approval?.approved === true;
+    return (
+      <div
+        key={key}
+        style={{
+          margin: '12px 0',
+          padding: '12px 16px',
+          background: approved ? '#ecfdf5' : '#fef2f2',
+          border: `1px solid ${approved ? colors.seedlingGreen : colors.signetBurgundy}`,
+          borderRadius: rounded.md,
+          fontSize: 13,
+          fontWeight: 600,
+          color: approved ? colors.shadowPine : colors.signetBurgundy,
+        }}
+      >
+        {approved ? approvedAwaitingExecutionText(toolName) : deniedOutcomeText(toolName)}
+      </div>
+    );
+  };
+
   return (
     <div
       style={{
@@ -1212,6 +1373,17 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                           }
                           if (part.type === 'tool-invocation') {
                             return renderToolInvocation(part, partIdx);
+                          }
+                          if (part.type === 'dynamic-tool' || (typeof part.type === 'string' && part.type.startsWith('tool-') && part.type !== 'tool-invocation')) {
+                            // AI SDK v7 tool parts: approval request/response and execution states.
+                            const toolPart = part as any;
+                            if (toolPart.state === 'approval-requested') {
+                              return renderApprovalRequest(toolPart, partIdx);
+                            }
+                            if (toolPart.state === 'approval-responded') {
+                              return renderApprovalResponded(toolPart, partIdx);
+                            }
+                            return renderToolInvocation(adaptToolPart(toolPart), partIdx);
                           }
                           return null;
                         })

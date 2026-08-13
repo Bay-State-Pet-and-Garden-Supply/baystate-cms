@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { randomUUID, randomBytes } from 'node:crypto';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { generateProductFieldAuditReport } from '../services/catalog-insight-service';
 import {
@@ -15,6 +16,7 @@ import {
 } from '../services/store-manager-assistant-service';
 import { resolveAiSdkModel, listUsableStoreManagerModels, ModelUnavailableError, type ResolvedAiSdkModel } from '../services/ai-sdk-model-resolver';
 import { createStoreManagerTools } from '../services/store-manager-tools';
+import { buildToolApprovalConfig } from '../services/store-manager-tool-policy';
 import { STORE_MANAGER_AGENT_SYSTEM_PROMPT } from '../services/store-manager-agent-prompt';
 import { buildAttachedProductContext, injectAttachedContext, selectedSkusSchema } from '../services/store-manager-context';
 import { streamText, convertToModelMessages, toUIMessageStream, createUIMessageStreamResponse, isStepCount } from 'ai';
@@ -32,6 +34,26 @@ const route = new Hono();
 
 // Global map to track the latest usage tokens for active streaming chats
 const lastStreamUsage = new Map<string, { promptTokens: number; completionTokens: number; provider: string; model: string; locality: 'local' | 'cloud' }>();
+
+/**
+ * HMAC secret for tool-approval signatures (epic #42, #34).
+ *
+ * A process-random secret is generated once at startup unless the operator
+ * pins one via BAYSTATE_CMS_STORE_MANAGER_APPROVAL_SECRET. The AI SDK signs
+ * each approval request with this secret and verifies the signature when the
+ * client resubmits the approval response, so a client-forged or replayed
+ * approval fails closed. A restart rotates the secret, which invalidates any
+ * pending approvals (the operator simply re-sends the message). The secret is
+ * never logged, sent to the client, or persisted.
+ */
+const toolApprovalSecret =
+  process.env.BAYSTATE_CMS_STORE_MANAGER_APPROVAL_SECRET ?? randomBytes(32).toString('hex');
+
+/**
+ * How long a per-chat execution context stays valid. Generous enough to cover
+ * long multi-step turns; the HMAC signature remains the primary approval gate.
+ */
+const APPROVAL_WINDOW_MS = 30 * 60 * 1000;
 
 
 /**
@@ -80,9 +102,14 @@ route.post('/store-manager/chat', async (c) => {
       throw err;
     }
     const model = resolvedModel.modelInstance;
+    // Per-chat execution context: approvals are bound to this turn and expire.
+    const executionId = randomUUID();
+    const approvalExpiresAt = Date.now() + APPROVAL_WINDOW_MS;
     const tools = createStoreManagerTools({
       workspaceId: workspace.id,
       workspacePath: workspace.workspacePath,
+      executionId,
+      approvalExpiresAt,
     });
 
     // Attached product context is injected below `system` as a bounded,
@@ -109,6 +136,11 @@ route.post('/store-manager/chat', async (c) => {
       system: STORE_MANAGER_AGENT_SYSTEM_PROMPT,
       messages: modelMessages,
       tools,
+      // #34: read tools run autonomously; every persistent class pauses for a
+      // signed operator approval. The tool wrappers re-check risk/approval
+      // immediately before execution.
+      toolApproval: buildToolApprovalConfig(tools),
+      experimental_toolApprovalSecret: toolApprovalSecret,
       stopWhen: isStepCount(10),
       onFinish: ({ usage }) => {
         if (usage && threadId) {
