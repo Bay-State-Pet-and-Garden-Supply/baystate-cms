@@ -15,6 +15,7 @@ import {
 import { resolveAiSdkModel, listUsableStoreManagerModels, ModelUnavailableError, type ResolvedAiSdkModel } from '../services/ai-sdk-model-resolver';
 import { createStoreManagerTools } from '../services/store-manager-tools';
 import { STORE_MANAGER_AGENT_SYSTEM_PROMPT } from '../services/store-manager-agent-prompt';
+import { buildAttachedProductContext, injectAttachedContext, selectedSkusSchema } from '../services/store-manager-context';
 import { streamText, convertToModelMessages, toUIMessageStream, createUIMessageStreamResponse, isStepCount } from 'ai';
 import {
   saveChatMessage,
@@ -23,8 +24,6 @@ import {
   clearChatHistory,
   pruneOldChatHistory,
 } from '../services/store-manager-chat-history-service';
-
-import { getProductWithDraft } from '../services/product-service';
 
 import { computeApiCost } from '../../ai/model-pricing';
 
@@ -85,38 +84,28 @@ route.post('/store-manager/chat', async (c) => {
       workspacePath: workspace.workspacePath,
     });
 
-    const modelMessages = await convertToModelMessages(messages);
-
-    // Build product context block if user has selected specific products
-    let systemPrompt = STORE_MANAGER_AGENT_SYSTEM_PROMPT;
+    // Attached product context is injected below `system` as a bounded,
+    // server-owned low-trust data message. The system prompt is never
+    // concatenated with request/product content.
+    let chatMessages: any[] = messages;
     if (selectedSkus && Array.isArray(selectedSkus) && selectedSkus.length > 0) {
-      systemPrompt += '\n\n=== ATTACHED PRODUCT CONTEXT ===\nThe user has attached specific product(s) as context for this conversation. Use this product context to guide your answers:\n';
-      for (const sku of selectedSkus) {
-        try {
-          const detail = getProductWithDraft(workspace.id, workspace.workspacePath, sku);
-          const p = detail.merged || detail.approved;
-          if (p) {
-            systemPrompt += `\nProduct SKU: ${p.sku}\nTitle: ${p.core?.name || 'Untitled'}\nStatus: ${p.status}\nPrice: ${p.core?.price || '0.00'}\n`;
-            if (p.core?.inventory?.quantityOnHand !== undefined && p.core?.inventory?.quantityOnHand !== null) {
-              systemPrompt += `Inventory Quantity: ${p.core.inventory.quantityOnHand}\n`;
-            }
-            if (p.customFields) {
-              systemPrompt += `Custom Fields: ${JSON.stringify(p.customFields)}\n`;
-            }
-            if (p.core?.description) {
-              systemPrompt += `Description: ${p.core.description.substring(0, 300)}${p.core.description.length > 300 ? '...' : ''}\n`;
-            }
-            systemPrompt += `------------------------------------\n`;
-          }
-        } catch (e) {
-          // ignore
-        }
+      const parsed = selectedSkusSchema.safeParse({ selectedSkus });
+      if (!parsed.success) {
+        return c.json({ error: 'Invalid attached product selection: at most 10 unique SKUs of bounded length are allowed.' }, 400);
       }
+      const context = buildAttachedProductContext(
+        workspace.id,
+        workspace.workspacePath,
+        parsed.data.selectedSkus,
+      );
+      chatMessages = injectAttachedContext(messages, context.serialized);
     }
+
+    const modelMessages = await convertToModelMessages(chatMessages);
 
     const result = streamText({
       model,
-      system: systemPrompt,
+      system: STORE_MANAGER_AGENT_SYSTEM_PROMPT,
       messages: modelMessages,
       tools,
       stopWhen: isStepCount(10),

@@ -23,6 +23,9 @@ interface SelectedProduct {
   primaryImage?: string | null;
 }
 
+/** Server-enforced attachment limit (mirrors MAX_ATTACHED_SKUS in store-manager-context.ts). */
+const MAX_ATTACHED_PRODUCTS = 10;
+
 const generateUuid = () =>
   typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
@@ -43,6 +46,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
   // Product context attachment states
   const [selectedProducts, setSelectedProducts] = useState<SelectedProduct[]>([]);
+  const [attachmentLimitReached, setAttachmentLimitReached] = useState(false);
   const [showAttachModal, setShowAttachModal] = useState(false);
   const [modalSearchQuery, setModalSearchQuery] = useState('');
   const [modalProducts, setModalProducts] = useState<SelectedProduct[]>([]);
@@ -207,12 +211,15 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     setCurrentThreadTitle('');
     setMessages([]);
     setSelectedProducts([]);
+    setAttachmentLimitReached(false);
   };
 
-  // Attach/Toggle a product context
+  // Attach/Toggle a product context (dedupe by SKU; enforce the attachment cap)
   const toggleProductContext = (product: SelectedProduct) => {
     if (selectedProducts.some(p => p.sku === product.sku)) {
       setSelectedProducts(selectedProducts.filter(p => p.sku !== product.sku));
+    } else if (selectedProducts.length >= MAX_ATTACHED_PRODUCTS) {
+      setAttachmentLimitReached(true);
     } else {
       setSelectedProducts([...selectedProducts, product]);
     }
@@ -221,6 +228,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   // Remove an attached product context
   const removeProductContext = (sku: string) => {
     setSelectedProducts(selectedProducts.filter(p => p.sku !== sku));
+    setAttachmentLimitReached(false);
   };
 
   // Resolve image URL
@@ -1532,8 +1540,13 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             }}
           >
             <span style={{ fontSize: '10px', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Context ({selectedProducts.length}):
+              Context ({selectedProducts.length}/{MAX_ATTACHED_PRODUCTS}):
             </span>
+            {attachmentLimitReached && (
+              <span style={{ fontSize: '10px', fontWeight: 700, color: '#b45309' }}>
+                ⚠ Attachment limit reached ({MAX_ATTACHED_PRODUCTS} max). Remove one before attaching more.
+              </span>
+            )}
             {selectedProducts.map(p => (
               <span
                 key={p.sku}
