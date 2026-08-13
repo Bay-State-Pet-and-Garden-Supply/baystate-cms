@@ -413,6 +413,16 @@ describe('computeCohortTitleInputHash — model execution authority slice (PR6 C
     expect(hash(base).length).toBe(64);
   });
 
+  it('PR13 review R1 (T2): a FIXED CANONICAL T-hash baseline — the digest-free composition is frozen', () => {
+    // Hardcoded value computed once from the deterministic fixture below;
+    // any accidental change to the hashed composition (a field entering or
+    // leaving the canonical JSON) breaks this test — exactly what a baseline
+    // is for. The fixtures above are fully deterministic (fixed strings,
+    // no UUIDs), so this value is stable across runs and machines.
+    expect(hash(makeParams())).toBe('5a134a9a3dc6e64247bd900336e88a4e3713ec10607cf2e0b9731610d8e0d22f');
+    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe('5a134a9a3dc6e64247bd900336e88a4e3713ec10607cf2e0b9731610d8e0d22f');
+  });
+
   it('the plan entry provider/model/promptTemplateVersion/ruleVersion each participate', () => {
     const base = makeParams();
     expect(hash(makeParams({ titlePlanEntry: makePlanEntry({ provider: 'openai' }) }))).not.toBe(hash(base));

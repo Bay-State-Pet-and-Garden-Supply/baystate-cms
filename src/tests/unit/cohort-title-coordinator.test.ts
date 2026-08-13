@@ -57,6 +57,7 @@ import {
   claimReadyCurationCohorts,
   getCohortSnapshotByHash,
   getCohortRunById,
+  getLatestSupersededRunForCohort,
   reclaimExpiredCohortRuns,
   supersedeOwnedCohortRunForOutputDrift,
   COHORT_LEASE_TTL_MS,
@@ -1827,5 +1828,83 @@ describe('ensureCohortTitlesCoordinated — PR13 C2 cross-parent same-T-hash reu
     const rowsB = getCohortTitleOutputsByRun(fixtureB.run.id);
     expect(rowsB).toHaveLength(2);
     expect(rowsB.every(r => r.inputHash === 'a'.repeat(64))).toBe(true);
+  });
+
+  it('the copy-race (sibling commits BETWEEN the pure reads and the copy insert) → CohortTitleAuthorityDriftError via the beforeTitleCopyInsert seam, zero calls, sibling rows intact', async () => {
+    // Run A: one call + durable rows; superseded; revision B frozen. B's own
+    // set is empty, A's superseded set matches the fresh T-hash → the copy
+    // path engages. The seam fires INSIDE the copy path after the
+    // lease-ownership assertion and before the insert — the racing sibling's
+    // rows become visible exactly there, so the insert's write-once throw is
+    // converted to the deterministic drift error (never a silent overwrite).
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    await ensureCohortTitlesCoordinated(runCoordParams(fixtureA));
+    expect(titleCallCount).toBe(1);
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    const { insertCohortTitleOutputsOnce } = await import('../../db/repositories/classification-cohort-output-repo');
+
+    titleCallCount = 0;
+    await expect(
+      ensureCohortTitlesCoordinated({
+        ...runCoordParams(fixtureB),
+        beforeTitleCopyInsert: () => {
+          insertCohortTitleOutputsOnce({
+            workspaceId: fixtureB.workspaceId,
+            runId: fixtureB.run.id,
+            inputHash: 'b'.repeat(64),
+            outputs: [
+              { productSku: '100000000001', title: 'Sibling Chicken Title', source: 'cohort_fallback' },
+              { productSku: '100000000002', title: 'Sibling Beef Title', source: 'cohort_fallback' },
+            ],
+          });
+        },
+      }),
+    ).rejects.toBeInstanceOf(CohortTitleAuthorityDriftError);
+    expect(titleCallCount).toBe(0);
+    // The racing sibling's set won write-once — the copy never overwrote it.
+    const raced = getCohortTitleOutputsByRun(fixtureB.run.id);
+    expect(raced).toHaveLength(2);
+    expect(raced.every(r => r.inputHash === 'b'.repeat(64))).toBe(true);
+    expect(raced.every(r => r.outputValueJson.includes('Sibling Chicken Title') || r.outputValueJson.includes('Sibling Beef Title'))).toBe(true);
+  });
+
+  it('ONLY the LATEST superseded run is a reuse candidate: an OLDER superseded run with a complete matching set is never consulted when the latest superseded set is incomplete (fresh coordinate)', async () => {
+    // A coord → supersede A → B coord (reuses A: zero calls) → supersede B →
+    // delete one of B's rows (incomplete latest) → C coord: the lookup finds
+    // B (latest superseded) incomplete → NO reuse — and A (older, complete,
+    // matching) must NOT be consulted → fresh coordinate (one call).
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    await ensureCohortTitlesCoordinated(runCoordParams(fixtureA));
+    expect(titleCallCount).toBe(1);
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    titleCallCount = 0;
+    const mapB = await ensureCohortTitlesCoordinated(runCoordParams(fixtureB));
+    expect(titleCallCount).toBe(0);
+    expect(mapB.size).toBe(2);
+    // Make the LATEST superseded (B) incomplete.
+    getDb().run(
+      "DELETE FROM classification_cohort_outputs WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000001'",
+      [fixtureB.run.id],
+    );
+    const fixtureC = await supersedeAndRefreeze(fixtureB);
+    titleCallCount = 0;
+    const mapC = await ensureCohortTitlesCoordinated(runCoordParams(fixtureC));
+    // Latest superseded incomplete → no reuse; the older matching set (A) is
+    // NOT a candidate → fresh coordinate.
+    expect(titleCallCount).toBe(1);
+    expect(mapC.size).toBe(2);
+    expect(getCohortTitleOutputsByRun(fixtureC.run.id)).toHaveLength(2);
+  });
+
+  it('getLatestSupersededRunForCohort NEVER returns a non-superseded run (running sibling is not a candidate, per the unique current-run index)', async () => {
+    const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    // A is 'running' (never superseded): the lookup must be empty.
+    expect(getLatestSupersededRunForCohort(fixture.cohort.id)).toBeNull();
+    // After supersession the SAME run is the candidate.
+    expect(supersedeOwnedCohortRunForOutputDrift(fixture.run.id, 'worker-a', 'PR13 C2 sibling test')).toBe(true);
+    const found = getLatestSupersededRunForCohort(fixture.cohort.id);
+    expect(found).not.toBeNull();
+    expect(found!.id).toBe(fixture.run.id);
+    expect(found!.status).toBe('superseded');
   });
 });

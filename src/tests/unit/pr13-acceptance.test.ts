@@ -572,9 +572,17 @@ describe('PR13 C5 — title authority scoping (issue #30, DECISION-C)', () => {
       titlePlanEntry: planEntry,
       executionTypeAuthority,
     });
-    // The broad policy digest is NOT part of the hash — recomputing with the
-    // same (digest-free) inputs is identical by construction, and the full
-    // authority matrix proves each operation-specific field participates.
+    // The pipeline-built authority participates: mutating the SAME
+    // execution-type authority object's LABEL (the canonical title authority
+    // source) changes the hash — the composition is live, not inert.
+    expect(computeCohortTitleInputHash({
+      run,
+      projection,
+      titlePlanEntry: planEntry,
+      executionTypeAuthority: { ...executionTypeAuthority, label: 'Different Label' },
+    })).not.toBe(base);
+    // Replay determinism: the SAME frozen authority recomputed yields the
+    // identical hash (the coordinator's reuse check depends on this).
     expect(computeCohortTitleInputHash({
       run,
       projection,
@@ -631,10 +639,22 @@ describe('PR13 C5 — cross-parent same-T-hash reuse E2E (issue #30, DECISION-A/
     const finalizedB = await freezeCohortForExecution(runB, wsPath, workspaceId);
     expect(finalizedB.status).toBe('running');
     titleCallCount = 0;
+    // PR13 review R1 (T1): ZERO title-op calls is proven at the TABLE level
+    // too — the mock transport counter could be bypassed, the audit rows
+    // cannot. Member-level consolidation calls ARE expected (each member
+    // still runs its own name-consolidation with the coordinated title as
+    // context); the PARENT `cohort_title_consolidation` op must not fire.
+    const titleOpsBeforeB = getDb().query(
+      "SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE operation = 'cohort_title_consolidation'",
+    ).get() as { cnt: number };
     const summaryB = await processCohort(finalizedB, wsPath, workspaceId);
     expect(['completed', 'completed_with_abstentions']).toContain(summaryB.parentStatus);
     // Cross-parent same-T-hash reuse: ZERO title calls.
     expect(titleCallCount).toBe(0);
+    const titleOpsAfterB = getDb().query(
+      "SELECT COUNT(*) AS cnt FROM classification_model_calls WHERE operation = 'cohort_title_consolidation'",
+    ).get() as { cnt: number };
+    expect(Number(titleOpsAfterB.cnt)).toBe(Number(titleOpsBeforeB.cnt));
     // DECISION-A: titles only — pages are NOT cross-parent-reused, so revision
     // B coordinates its own fresh page set (one additional page call).
     expect(pageCallCount).toBe(2);
@@ -775,6 +795,28 @@ describe('PR13 C5 — H4 conflict-reason labels (issue #30, DECISION-D)', () => 
     expect(finalized.errorMessage).not.toContain('mystery-type (');
     // The configured id still renders its label.
     expect(finalized.errorMessage).toContain('dog-food-dry (Dry Dog Food)');
+  });
+
+  it('a re-freeze of the SAME cohort revision repeats the conflict reason BYTE-IDENTICALLY (deterministic wording, PR13 review R1)', async () => {
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const prepared = prepareActiveV2Workspace(workspaceId, wsPath, {
+      '100000000001': promotableExtraction('100000000001', { _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Acme' }),
+      '100000000002': promotableExtraction('100000000002', { _name: 'Purina Pro Plan Wet Dog Food Beef 10 lb', _brandHint: 'Acme' }),
+    });
+    overrideCohortCurationFlags({ cohortCurationV2Enabled: true, cohortShadowOnly: false });
+    const [run] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const first = await freezeCohortForExecution(run, wsPath, workspaceId);
+    expect(first.status).toBe('failed');
+    expect(first.productTypeOutcome).toBe('conflicted');
+    // Same cohort + same frozen authority → the NEW revision repeats the
+    // reason text exactly (same member item ids, same resolved types).
+    rerunIdleCohortRevision(prepared.cohorts[0].id, first.id, 'PR13 C5 determinism re-run');
+    const [run2] = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    const second = await freezeCohortForExecution(run2, wsPath, workspaceId);
+    expect(second.status).toBe('failed');
+    expect(second.productTypeOutcome).toBe('conflicted');
+    expect(second.errorMessage).toBe(first.errorMessage);
+    expect(second.errorMessage).toContain('dog-food-dry (Dry Dog Food)');
   });
 });
 
