@@ -65,6 +65,8 @@ export interface StoreManagerTurnDeps {
   /** Injectable clock for tests. */
   now?: () => Date;
   registry?: StoreManagerToolRegistry;
+  /** Server-owned policy narrowing (test seams / operator config); never request-derived. */
+  policyOverrides?: NonNullable<Parameters<typeof createStoreManagerPolicy>[0]>['overrides'];
 }
 
 export interface StoreManagerTurnResult {
@@ -103,7 +105,7 @@ export async function runStoreManagerTurn(
   const turnId = randomUUID();
   const sessionId = randomUUID();
   const policy = createStoreManagerPolicy(
-    { workspaceId: input.workspaceId, sessionId, turnId },
+    { workspaceId: input.workspaceId, sessionId, turnId, overrides: deps.policyOverrides },
     registry.allowlist(),
   );
 
@@ -152,17 +154,46 @@ export async function runStoreManagerTurn(
 
   const deadlineAt = now().getTime() + policy.deadlineMs;
 
+  // Whole-turn deadline enforced OUTSIDE the model: a server-owned controller
+  // fires at deadlineAt and is composed with the caller's abort signal so a
+  // model that never calls a tool (or an in-flight tool call) is aborted too.
+  // `deadlineHit` distinguishes this from a client abort for terminalization.
+  const deadlineController = new AbortController();
+  let deadlineHit = false;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const modelSignal = input.abortSignal
+    ? AbortSignal.any([input.abortSignal, deadlineController.signal])
+    : deadlineController.signal;
+  // Arm the deadline after the durable session/turn rows exist but before any
+  // transport; a fired deadline aborts the composed signal (and any in-flight
+  // tool call). `unref` keeps the timer from holding the process open in tests.
+  const armDeadline = () => {
+    if (deadlineTimer !== undefined) return;
+    const remaining = Math.max(0, deadlineAt - now().getTime());
+    deadlineTimer = setTimeout(() => {
+      deadlineHit = true;
+      deadlineController.abort(new Error('store_manager_turn_deadline'));
+    }, remaining);
+    if (typeof (deadlineTimer as { unref?: () => void }).unref === 'function') {
+      (deadlineTimer as { unref: () => void }).unref();
+    }
+  };
+
   // Terminalization state + helper declared before any early-return path so
   // validation failures can terminalize the durable turn/session correctly.
   let modelCallId: string | null = null;
   let didTerminalize = false;
   function terminalizeTurn(
-    status: 'success' | 'failed' | 'cancelled' | 'policy_denied',
+    status: 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded',
     reason: string | undefined,
     totalToolCalls: number,
     detail?: string,
   ): void {
     if (didTerminalize) return;
+    if (deadlineTimer !== undefined) {
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+    }
     didTerminalize = true;
     terminalizeStoreManagerTurn(input.workspaceId, turnId, status, reason ?? null, totalToolCalls);
     terminalizeStoreManagerSession(input.workspaceId, sessionId);
@@ -214,7 +245,7 @@ export async function runStoreManagerTurn(
     emit,
     now: () => now().getTime(),
     deadlineAt,
-    callerSignal: input.abortSignal,
+    callerSignal: modelSignal,
   });
 
   // --- inbound message validation BEFORE model conversion/execution ---
@@ -253,6 +284,7 @@ export async function runStoreManagerTurn(
   const modelMessages = await convertToModelMessages(chatMessages as UIMessage[]);
   modelCallId = beginStoreManagerCall(input.workspaceId, resolved);
   updateStoreManagerSessionModelCall(input.workspaceId, sessionId, modelCallId);
+  armDeadline();
 
   const result = streamText({
     model,
@@ -261,7 +293,8 @@ export async function runStoreManagerTurn(
     tools: aiSdkTools,
     toolApproval: buildRegistryApprovalConfig(registry.all()),
     experimental_toolApprovalSecret: input.toolApprovalSecret,
-    abortSignal: input.abortSignal,
+    // Whole-turn deadline + caller cancellation, composed server-side.
+    abortSignal: modelSignal,
     stopWhen: isStepCount(policy.maxToolCalls),
     onEnd: ({ usage }) => {
       const promptTokens = usage?.inputTokens ?? null;
@@ -281,12 +314,22 @@ export async function runStoreManagerTurn(
       );
     },
     onError: (error) => {
+      if (deadlineHit) {
+        terminalizeStoreManagerCall(modelCallId, resolved, 'deadline_exceeded');
+        terminalizeTurn('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
+        return;
+      }
       terminalizeStoreManagerCall(modelCallId, resolved, 'failed', {
         errorCode: error instanceof Error ? error.name : 'STREAM_ERROR',
       });
       terminalizeTurn('failed', 'stream_error', sessionState.toolCalls);
     },
     onAbort: () => {
+      if (deadlineHit) {
+        terminalizeStoreManagerCall(modelCallId, resolved, 'deadline_exceeded');
+        terminalizeTurn('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
+        return;
+      }
       terminalizeStoreManagerCall(modelCallId, resolved, 'cancelled');
       terminalizeTurn('cancelled', 'client_abort', sessionState.toolCalls);
     },

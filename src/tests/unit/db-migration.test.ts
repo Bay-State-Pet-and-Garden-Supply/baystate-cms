@@ -1580,9 +1580,29 @@ describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
     // Constraint shape: phases/statuses/terminal statuses are CHECK-bound.
     const turnDdl = (db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_turns'").get() as { sql: string }).sql;
     expect(turnDdl).toMatch(/CHECK \(phase IN \('investigate', 'approve', 'verify'\)\)/);
-    expect(turnDdl).toMatch(/CHECK \(terminal_status IN \('success', 'failed', 'cancelled', 'policy_denied'\)\)/);
+    expect(turnDdl).toMatch(/CHECK \(terminal_status IN \('success', 'failed', 'cancelled', 'policy_denied', 'deadline_exceeded'\)\)/);
     const sessionDdl = (db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_sessions'").get() as { sql: string }).sql;
     expect(sessionDdl).toMatch(/CHECK \(resolved_locality IN \('local', 'cloud'\)\)/);
+
+    // Upgrade path: a turns table created with the pre-deadline CHECK is
+    // rebuilt in place (data preserved) by the next migration run.
+    db.exec(
+      "ALTER TABLE store_manager_turns RENAME TO store_manager_turns_old; " +
+        "CREATE TABLE store_manager_turns (" +
+        "  id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, " +
+        "  session_id TEXT NOT NULL REFERENCES store_manager_sessions(id) ON DELETE CASCADE, " +
+        "  turn_id TEXT NOT NULL, " +
+        "  phase TEXT NOT NULL CHECK (phase IN ('investigate', 'approve', 'verify')), " +
+        "  status TEXT NOT NULL CHECK (status IN ('active', 'terminal')), " +
+        "  terminal_status TEXT CHECK (terminal_status IN ('success', 'failed', 'cancelled', 'policy_denied')), " +
+        "  outcome_reason TEXT, total_tool_calls INTEGER NOT NULL DEFAULT 0, policy_hash TEXT NOT NULL, " +
+        "  created_at TEXT NOT NULL, updated_at TEXT NOT NULL" +
+        "); ",
+    );
+    db.exec('DROP TABLE store_manager_turns_old');
+    expect(() => runMigrations()).not.toThrow();
+    const rebuiltTurnDdl = (db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_turns'").get() as { sql: string }).sql;
+    expect(rebuiltTurnDdl).toMatch(/deadline_exceeded/);
 
     // Idempotent rerun keeps the marker and the tables.
     expect(() => runMigrations()).not.toThrow();

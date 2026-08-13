@@ -17,7 +17,7 @@ import type { StoreManagerRuntimeEvent } from '../../store-manager/runtime/event
 
 export type StoreManagerSessionStatus = 'active' | 'terminal';
 export type StoreManagerTurnStatus = 'active' | 'terminal';
-export type StoreManagerTerminalStatus = 'success' | 'failed' | 'cancelled' | 'policy_denied';
+export type StoreManagerTerminalStatus = 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded';
 
 export interface CreateStoreManagerSessionInput {
   /** Optional explicit id; defaults to a fresh uuid. */

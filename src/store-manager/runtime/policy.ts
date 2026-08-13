@@ -14,6 +14,12 @@ export interface StoreManagerPolicyInput {
   workspaceId: string;
   sessionId: string;
   turnId: string;
+  /**
+   * Server-owned per-turn narrowing of the immutable defaults. Only the
+   * executor/route may pass these (test seams and operator configuration);
+   * a request or model message can never widen them.
+   */
+  overrides?: Partial<Pick<StoreManagerRuntimePolicy, 'deadlineMs' | 'maxToolCalls' | 'maxOutputBytes' | 'maxModelCostUsd' | 'perCallTimeoutMs'>>;
 }
 
 export interface StoreManagerRuntimePolicy {
@@ -51,6 +57,7 @@ export const STORE_MANAGER_POLICY_DEFAULTS = {
 } as const;
 
 function effectivePolicy(input: StoreManagerPolicyInput, allowedToolNames: readonly string[]) {
+  const o = input.overrides ?? {};
   return {
     version: 1 as const,
     workspaceId: input.workspaceId,
@@ -58,11 +65,11 @@ function effectivePolicy(input: StoreManagerPolicyInput, allowedToolNames: reado
     turnId: input.turnId,
     allowedToolNames,
     allowedPhases: ['investigate', 'approve', 'verify'] as const,
-    maxToolCalls: STORE_MANAGER_POLICY_DEFAULTS.maxToolCalls,
-    maxOutputBytes: STORE_MANAGER_POLICY_DEFAULTS.maxOutputBytes,
-    maxModelCostUsd: STORE_MANAGER_POLICY_DEFAULTS.maxModelCostUsd,
-    deadlineMs: STORE_MANAGER_POLICY_DEFAULTS.deadlineMs,
-    perCallTimeoutMs: STORE_MANAGER_POLICY_DEFAULTS.perCallTimeoutMs,
+    maxToolCalls: o.maxToolCalls ?? STORE_MANAGER_POLICY_DEFAULTS.maxToolCalls,
+    maxOutputBytes: o.maxOutputBytes ?? STORE_MANAGER_POLICY_DEFAULTS.maxOutputBytes,
+    maxModelCostUsd: o.maxModelCostUsd ?? STORE_MANAGER_POLICY_DEFAULTS.maxModelCostUsd,
+    deadlineMs: o.deadlineMs ?? STORE_MANAGER_POLICY_DEFAULTS.deadlineMs,
+    perCallTimeoutMs: o.perCallTimeoutMs ?? STORE_MANAGER_POLICY_DEFAULTS.perCallTimeoutMs,
     approvalPolicy: 'required_for_persistent' as const,
   };
 }

@@ -169,7 +169,7 @@ export type StoreManagerRuntimeEvent =
     })
   | (StoreManagerRuntimeEventBase & {
       type: 'turn_terminal';
-      status: 'success' | 'failed' | 'cancelled' | 'policy_denied';
+      status: 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded';
       reason?: string;
       modelCallId: string | null;
       totalToolCalls: number;

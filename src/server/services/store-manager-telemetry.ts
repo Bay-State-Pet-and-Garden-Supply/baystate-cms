@@ -69,7 +69,7 @@ export function beginStoreManagerCall(
 export function terminalizeStoreManagerCall(
   callId: string,
   resolved: ResolvedAiSdkModel,
-  status: Extract<GeneralModelCallStatus, 'success' | 'failed' | 'cancelled' | 'policy_denied'>,
+  status: Extract<GeneralModelCallStatus, 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded'>,
   opts: {
     promptTokens?: number | null;
     completionTokens?: number | null;

@@ -448,7 +448,7 @@ CREATE TABLE IF NOT EXISTS store_manager_turns (
   turn_id TEXT NOT NULL,
   phase TEXT NOT NULL CHECK (phase IN ('investigate', 'approve', 'verify')),
   status TEXT NOT NULL CHECK (status IN ('active', 'terminal')),
-  terminal_status TEXT CHECK (terminal_status IN ('success', 'failed', 'cancelled', 'policy_denied')),
+  terminal_status TEXT CHECK (terminal_status IN ('success', 'failed', 'cancelled', 'policy_denied', 'deadline_exceeded')),
   outcome_reason TEXT,
   total_tool_calls INTEGER NOT NULL DEFAULT 0,
   policy_hash TEXT NOT NULL,

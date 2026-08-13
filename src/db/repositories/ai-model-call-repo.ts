@@ -20,6 +20,7 @@ export type GeneralModelCallStatus =
   | 'failed'
   | 'cancelled'
   | 'policy_denied'
+  | 'deadline_exceeded'
   | 'unavailable';
 
 export interface GeneralModelCallStartInput {

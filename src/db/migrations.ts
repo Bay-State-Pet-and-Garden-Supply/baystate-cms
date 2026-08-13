@@ -496,7 +496,7 @@ export function runMigrations(): void {
         duration_ms INTEGER,
         prompt_tokens INTEGER,
         completion_tokens INTEGER,
-        status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed', 'cancelled', 'policy_denied', 'unavailable')),
+        status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed', 'cancelled', 'policy_denied', 'deadline_exceeded', 'unavailable')),
         fallback_from_call_id TEXT,
         retry_count INTEGER NOT NULL DEFAULT 0,
         estimated_api_cost_usd REAL,
@@ -514,6 +514,86 @@ export function runMigrations(): void {
     `);
   } catch (e) {
     console.error('[Migrations] Failed to create ai_model_calls table:', e);
+  }
+
+  // Self-heal: older ai_model_calls tables lack the 'deadline_exceeded' status
+  // in their CHECK constraint (epic #42, #40 whole-turn deadline). SQLite
+  // cannot ALTER a CHECK, so rebuild the table when the stored DDL is stale.
+  try {
+    const modelCallsDdl = db
+      .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ai_model_calls'")
+      .get() as { sql?: string } | undefined;
+    if (modelCallsDdl?.sql && !modelCallsDdl.sql.includes('deadline_exceeded')) {
+      db.exec('ALTER TABLE ai_model_calls RENAME TO ai_model_calls_legacy');
+      db.exec(`
+        CREATE TABLE ai_model_calls (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          task TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          locality TEXT NOT NULL CHECK (locality IN ('local', 'cloud')),
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          duration_ms INTEGER,
+          prompt_tokens INTEGER,
+          completion_tokens INTEGER,
+          status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed', 'cancelled', 'policy_denied', 'deadline_exceeded', 'unavailable')),
+          fallback_from_call_id TEXT,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          estimated_api_cost_usd REAL,
+          cost_basis TEXT NOT NULL CHECK (cost_basis IN ('local_zero', 'published_rate', 'unknown')),
+          prompt_template_version TEXT,
+          error_code TEXT,
+          created_at TEXT NOT NULL
+        );
+      `);
+      db.exec(
+        'INSERT INTO ai_model_calls SELECT * FROM ai_model_calls_legacy',
+      );
+      db.exec('DROP TABLE ai_model_calls_legacy');
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_ai_model_calls_ws_task ON ai_model_calls(workspace_id, task)',
+      );
+      db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_ai_model_calls_started ON ai_model_calls(started_at)',
+      );
+      console.log('[Migrations] Rebuilt ai_model_calls with deadline_exceeded status.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to refresh ai_model_calls status CHECK:', e);
+  }
+
+  // Self-heal: store_manager_turns created before the epic #42 deadline status
+  // lacks 'deadline_exceeded' in its terminal_status CHECK. Rebuild when stale.
+  try {
+    const turnsDdl = db
+      .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'store_manager_turns'")
+      .get() as { sql?: string } | undefined;
+    if (turnsDdl?.sql && !turnsDdl.sql.includes('deadline_exceeded')) {
+      db.exec('ALTER TABLE store_manager_turns RENAME TO store_manager_turns_legacy');
+      db.exec(`
+        CREATE TABLE store_manager_turns (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          session_id TEXT NOT NULL REFERENCES store_manager_sessions(id) ON DELETE CASCADE,
+          turn_id TEXT NOT NULL,
+          phase TEXT NOT NULL CHECK (phase IN ('investigate', 'approve', 'verify')),
+          status TEXT NOT NULL CHECK (status IN ('active', 'terminal')),
+          terminal_status TEXT CHECK (terminal_status IN ('success', 'failed', 'cancelled', 'policy_denied', 'deadline_exceeded')),
+          outcome_reason TEXT,
+          total_tool_calls INTEGER NOT NULL DEFAULT 0,
+          policy_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          ended_at TEXT
+        );
+      `);
+      db.exec('INSERT INTO store_manager_turns SELECT * FROM store_manager_turns_legacy');
+      db.exec('DROP TABLE store_manager_turns_legacy');
+      console.log('[Migrations] Rebuilt store_manager_turns with deadline_exceeded status.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to refresh store_manager_turns status CHECK:', e);
   }
 
 
@@ -3031,7 +3111,7 @@ export function runMigrations(): void {
         turn_id TEXT NOT NULL,
         phase TEXT NOT NULL CHECK (phase IN ('investigate', 'approve', 'verify')),
         status TEXT NOT NULL CHECK (status IN ('active', 'terminal')),
-        terminal_status TEXT CHECK (terminal_status IN ('success', 'failed', 'cancelled', 'policy_denied')),
+        terminal_status TEXT CHECK (terminal_status IN ('success', 'failed', 'cancelled', 'policy_denied', 'deadline_exceeded')),
         outcome_reason TEXT,
         total_tool_calls INTEGER NOT NULL DEFAULT 0,
         policy_hash TEXT NOT NULL,

@@ -117,6 +117,38 @@ function twoStepToolModel() {
   return { model, getStreamCalls: () => streamCalls };
 }
 
+/** Never-finishing model: streams text deltas forever until the signal aborts. */
+function neverFinishingModel() {
+  const model: LanguageModelV3 = {
+    specificationVersion: 'v3',
+    provider: 'fake-provider',
+    modelId: 'fake-model',
+    supportedUrls: {},
+    async doGenerate() {
+      throw new Error('doGenerate not exercised');
+    },
+    async doStream(options: LanguageModelV3CallOptions) {
+      return {
+        stream: new ReadableStream<LanguageModelV3StreamPart>({
+          start(controller) {
+            controller.enqueue({ type: 'stream-start', warnings: [] });
+            controller.enqueue({ type: 'text-start', id: 't1' });
+            controller.enqueue({ type: 'text-delta', id: 't1', delta: 'still thinking...' });
+            const timer = setInterval(() => {
+              controller.enqueue({ type: 'text-delta', id: 't1', delta: '.' });
+            }, 10);
+            (options as LanguageModelV3CallOptions & { abortSignal?: AbortSignal }).abortSignal?.addEventListener('abort', () => {
+              clearInterval(timer);
+              controller.error(new DOMException('aborted', 'AbortError'));
+            });
+          },
+        }),
+      };
+    },
+  };
+  return model;
+}
+
 /** Abortable model: streams text-start then waits for caller abort to error. */
 function abortableModel() {
   const model: LanguageModelV3 = {
@@ -304,5 +336,42 @@ describe('Store Manager turn executor (epic #42, #40)', () => {
     expect(turn!.terminal_status).toBe('cancelled');
     expect(session!.status).toBe('terminal');
     expect(row!.status).toBe('cancelled');
+  });
+
+  it('terminalizes as deadline_exceeded when the whole-turn deadline fires mid-stream (no tool calls)', async () => {
+    readCalls = [];
+    const result = await runStoreManagerTurn(
+      {
+        workspaceId,
+        workspacePath: './ws',
+        threadId: 'thread-deadline',
+        messages: userMessage('think forever'),
+        toolApprovalSecret: 'secret',
+      },
+      {
+        registry: testRegistry(),
+        resolveModel: () => ({ ...resolvedFake, modelInstance: neverFinishingModel() as unknown as ResolvedAiSdkModel['modelInstance'] }),
+        policyOverrides: { deadlineMs: 50 },
+      },
+    );
+
+    // Consume the stream until the server-side deadline aborts it.
+    const consume = (async () => {
+      for await (const _chunk of result.uiMessageStream as unknown as AsyncIterable<unknown>) {
+        // drain
+      }
+    })().catch(() => undefined);
+    await consume;
+
+    const turn = getStoreManagerTurn(workspaceId, result.turnId);
+    const session = getStoreManagerSession(workspaceId, result.sessionId);
+    const calls = getAiModelCallsByWorkspace(workspaceId);
+    const row = calls.find((c) => c.id === result.modelCallId);
+    const events = getStoreManagerEvents(workspaceId, result.sessionId);
+
+    expect(turn!.terminal_status).toBe('deadline_exceeded');
+    expect(session!.status).toBe('terminal');
+    expect(row!.status).toBe('deadline_exceeded');
+    expect(events.some((e) => e.type === 'turn_terminal' && e.status === 'deadline_exceeded')).toBe(true);
   });
 });
