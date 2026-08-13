@@ -14,10 +14,15 @@
  * sibling gets a deterministic fallback (source: 'cohort_fallback').
  * Singletons are never coordinated and return absent.
  */
-import { getLlmConfigForTask, callLlmForTask } from './llm-client';
+import { getLlmConfigForTask, callLlmForTask, callLlmForTaskWithProvenance } from './llm-client';
 import { redactTransportText } from '../classification/model-policy-gateway';
 import { normalizeBrand, extractNameStem } from './product-line-grouper';
 import { buildCohortPrompt, FORMAT_RULES } from './title-prompt-template';
+import type { CohortExecutionTypeContext } from './title-prompt-template';
+import { normalizeTitleAuthorityString, TITLE_AUTHORITY_TRUNCATION } from './cohort-title-hash';
+import { HeartbeatLostError } from '../classification/heartbeat-errors';
+import type { ModelCallContext } from '../classification/model-operation-registry';
+import type { RuntimeClassificationSnapshot } from '../classification/runtime-snapshot';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -27,6 +32,58 @@ export interface CoordinatedTitle {
   title: string;
   /** How the title was produced. */
   source: 'llm_cohort' | 'cohort_fallback';
+}
+
+/**
+ * Additive audit/ownership options for the uncached cohort title call (PR6
+ * C3, issue #30). Absent → today's non-audited, non-lease-scoped call — the
+ * legacy per-item and shadow paths stay byte-identical.
+ */
+export interface CohortCoordinationOptions {
+  /**
+   * Durable model-call audit context (issue #17 work item E). When present
+   * the group call is audited through `classification_model_calls` (started
+   * → terminal on every path) and the returned callId is surfaced via
+   * `onCoordinatedCallId` for durable output-row provenance.
+   */
+  modelCall?: ModelCallContext;
+  /**
+   * Immutable runtime snapshot the audited call is bound to. Plan
+   * compatibility fails closed when the snapshot's frozen plan lacks the
+   * operation.
+   */
+  snapshot?: RuntimeClassificationSnapshot | null;
+  /**
+   * Ownership assertion forwarded to the audited transport (lease-scoped
+   * callers re-assert the cohort claim before every run-scoped audit write; a
+   * rejected assertion throws `HeartbeatLostError`).
+   */
+  assertHeld?: () => void;
+  /**
+   * PR6 hardening B/C (issue #30 P1-3): the frozen Execution Product Type as
+   * title context — the same authority the canonical title input hash
+   * (T-hash) claims. Rendered ONLY when `includeTitleHashSignals` is true;
+   * absent/null → no context line (legacy/shadow/no-opts callers stay
+   * byte-identical).
+   */
+  executionTypeContext?: CohortExecutionTypeContext | null;
+  /**
+   * PR6: invoked with the audited model-call id and the member SKUs of the
+   * group that produced it — the durable `model_call_id` provenance for
+   * persisted output rows. Called once per GROUP call that returned a result
+   * (multi-item groups only), so a two-group cohort surfaces two distinct
+   * call ids and each output row can be persisted with ITS producing call.
+   */
+  onCoordinatedCallId?: (callId: string, skus: string[]) => void;
+  /**
+   * PR6 hardening C (issue #30 P1-3): explicit opt-in to the T-hash-only
+   * prompt signals — `webBrand`, `ocrWeight`, `ocrFlavor`, and the Execution
+   * Product Type context. Set ONLY by `ensureCohortTitlesCoordinated` (the
+   * active parent op). When absent/false the sibling mapping and prompt are
+   * the EXACT pre-hardening shape (byte-identical legacy/shadow/no-opts
+   * calls), even when the items carry OCR/web data.
+   */
+  includeTitleHashSignals?: boolean;
 }
 
 /** Stable fingerprint inputs for cache. Excludes volatile fields. */
@@ -100,6 +157,16 @@ function buildCacheKey(
  * Concurrent calls for the same batch with the same stable inputs share
  * one promise/LLM pass. The resolved map is reused until the stable
  * fingerprint changes (name, brandHint, expectedName, or web title).
+ *
+ * PR6 (issue #30): this cached path is the LEGACY / flag-OFF / shadow
+ * authority ONLY. Active cohort mode never calls it — the parent title op
+ * (`ensureCohortTitlesCoordinated`, PR6 C4) persists durable
+ * `classification_cohort_outputs` WRITE-ONCE: at most one ACTIVE
+ * coordination call at a time, ZERO FURTHER calls once the durable set
+ * commits, and every pre-commit crash (between transport success and the
+ * output-set commit) may cause another independently audited invocation —
+ * the DB outputs are the authority there, never this in-memory
+ * `cohortCache`.
  *
  * @param batchId - The onboarding batch ID.
  * @param items   - Items from the same batch.
@@ -282,6 +349,8 @@ function validateCohortResponse(
  * Coordinate cohort names for a set of onboarding items.
  *
  * @param items - Items from the same batch (any stage)
+ * @param opts  - Optional audit/ownership threading (PR6 C3). Absent → the
+ *   legacy non-audited call (byte-identical legacy/shadow behavior).
  * @returns Map of UPC → CoordinatedTitle. Only includes items
  *   from multi-item groups. Missing entries fall back to per-item.
  */
@@ -289,6 +358,7 @@ function validateCohortResponse(
 export async function coordinateCohortItems(
   items: OnboardingItem[],
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  opts?: CohortCoordinationOptions,
 ): Promise<Map<string, CoordinatedTitle>> {
   const result = new Map<string, CoordinatedTitle>();
 
@@ -300,11 +370,20 @@ export async function coordinateCohortItems(
     if (groupItems.length <= 1) continue;
 
     try {
-      const groupResult = await coordinateGroup(groupItems, modelPolicy);
+      const groupResult = await coordinateGroup(groupItems, modelPolicy, opts);
       for (const [upc, ct] of groupResult) {
         result.set(upc, ct);
       }
     } catch (err: any) {
+      // PR6 C3: ownership loss is NEVER converted into an 'LLM unavailable →
+      // fallback' outcome. `HeartbeatLostError` (a sibling worker reclaimed
+      // the cohort run) rethrows unchanged so the stale owner aborts
+      // deterministically with NO output rows — the run belongs to the
+      // reclaiming worker, which re-enters the parent op and coordinates only
+      // if no complete durable output set exists yet.
+      if (err instanceof HeartbeatLostError) {
+        throw err;
+      }
       console.warn(
         `[CohortCoordinator] Coordination failed for group, using fallbacks: ${redactTransportText(err.message)}`,
       );
@@ -323,8 +402,13 @@ export async function coordinateCohortItems(
 
 /**
  * Group items by product line using normalizeBrand + extractNameStem.
+ *
+ * PR6 C4 (issue #30): exported so the parent title op
+ * (`ensureCohortTitlesCoordinated`) can compute the exact multi-item-group
+ * member set over the FROZEN sibling views for its completeness/reuse check
+ * with the SAME grouping the coordinator uses — single source of truth.
  */
-function groupByProductLine(
+export function groupByProductLine(
   items: OnboardingItem[],
 ): Map<string, OnboardingItem[]> {
   const groups = new Map<string, OnboardingItem[]>();
@@ -349,18 +433,33 @@ function groupByProductLine(
 /**
  * Make ONE LLM call for a group of sibling items.
  * Throws on any failure so the caller provides all-or-nothing fallback.
+ *
+ * PR6 C3: when `opts.modelCall` is present the group call is AUDITED — the
+ * audit context + snapshot + ownership assertion are threaded into the
+ * audited transport (`callLlmForTaskWithProvenance`) so the
+ * `classification_model_calls` started/terminal rows are written on every
+ * path and the durable callId is surfaced via `opts.onCoordinatedCallId`.
+ * Absent opts → the legacy non-audited `callLlmForTask` call, byte-identical.
  */
 async function coordinateGroup(
   items: OnboardingItem[],
   modelPolicy?: import('../classification/model-policy-gateway').ModelPolicyView | null,
+  opts?: CohortCoordinationOptions,
 ): Promise<Map<string, CoordinatedTitle>> {
-  const llmConfig = getLlmConfigForTask('product_curation', {
-    allowFallback: true,
-    modelPolicy,
-    protectedOperation: 'cohort_title_consolidation',
-  });
-  if (!llmConfig) {
-    throw new Error('No LLM configured for product_curation');
+  // PR6 review fix: the legacy preflight MUST NOT run for audited calls —
+  // `callLlmForTaskWithProvenance` resolves the config itself and writes the
+  // durable `policy_denied` / `unavailable` terminal `classification_model_calls`
+  // rows on those paths. A preflight throw here would exit before the audited
+  // wrapper, silently persisting a fallback with NO audited terminal row.
+  if (!opts?.modelCall) {
+    const llmConfig = getLlmConfigForTask('product_curation', {
+      allowFallback: true,
+      modelPolicy,
+      protectedOperation: 'cohort_title_consolidation',
+    });
+    if (!llmConfig) {
+      throw new Error('No LLM configured for product_curation');
+    }
   }
 
   const siblings = items.map(item => ({
@@ -370,31 +469,86 @@ async function coordinateGroup(
     webTitle: item.extractionData?.title ?? null,
     ocrTitle: item.extractionData?.packagingOcrData?.productName ?? item.extractionData?.packagingTitle ?? null,
     brand: item.brandHint,
+    // PR6 hardening C (P1-3): the T-hash-claimed signals (webBrand + the
+    // structured OCR weight/flavor) are added to the sibling mapping ONLY when
+    // the ACTIVE parent op opts in (`includeTitleHashSignals`). Without the
+    // opt-in the mapping is the EXACT pre-hardening shape — legacy/shadow/
+    // no-opts prompts stay byte-identical even when items carry OCR/web data.
+    ...(opts?.includeTitleHashSignals === true
+      ? {
+          webBrand: item.extractionData?.brand ?? null,
+          ocrWeight: item.extractionData?.packagingOcrData?.weight ?? null,
+          ocrFlavor: item.extractionData?.packagingOcrData?.flavorVariety ?? null,
+        }
+      : {}),
   }));
 
   // All items in one prompt (no cap). Individual signal strings are
-  // truncated at 500 characters to keep prompt size reasonable.
+  // truncated at 500 characters to keep prompt size reasonable — via the
+  // SHARED prompt-normalization helper from cohort-title-hash so the hashed
+  // authority equals the prompted authority by construction (a suffix-only
+  // mutation beyond the cutoffs changes neither the prompt NOR the T-hash).
   const truncatedSiblings = siblings.map(s => ({
     ...s,
-    name: s.name.slice(0, 500),
-    expectedName: s.expectedName?.slice(0, 500) ?? null,
-    webTitle: s.webTitle?.slice(0, 500) ?? null,
-    ocrTitle: s.ocrTitle?.slice(0, 500) ?? null,
-    brand: s.brand?.slice(0, 200) ?? null,
+    name: normalizeTitleAuthorityString(s.name, TITLE_AUTHORITY_TRUNCATION.signalMaxChars) ?? '',
+    expectedName: normalizeTitleAuthorityString(s.expectedName, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+    webTitle: normalizeTitleAuthorityString(s.webTitle, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+    ocrTitle: normalizeTitleAuthorityString(s.ocrTitle, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+    ...(opts?.includeTitleHashSignals === true
+      ? {
+          webBrand: normalizeTitleAuthorityString(s.webBrand ?? null, TITLE_AUTHORITY_TRUNCATION.brandMaxChars),
+          ocrWeight: normalizeTitleAuthorityString(s.ocrWeight ?? null, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+          ocrFlavor: normalizeTitleAuthorityString(s.ocrFlavor ?? null, TITLE_AUTHORITY_TRUNCATION.signalMaxChars),
+        }
+      : {}),
+    brand: normalizeTitleAuthorityString(s.brand, TITLE_AUTHORITY_TRUNCATION.brandMaxChars),
   }));
 
-  const prompt = buildCohortPrompt(truncatedSiblings);
+  // PR6 hardening C (P1-3): the Execution Product Type context is part of the
+  // T-hash-only prompt signals — it renders ONLY when the active parent op
+  // opted in (absent opt-in ⇒ the EXACT pre-hardening prompt builds).
+  const effectiveTypeContext =
+    opts?.includeTitleHashSignals === true ? (opts?.executionTypeContext ?? null) : null;
+  const prompt = buildCohortPrompt(truncatedSiblings, effectiveTypeContext);
 
-  const response = await callLlmForTask(
-    'product_curation',
-    prompt,
-    'You are a clean product taxonomy assistant.',
-    {
-      allowFallback: true,
-      modelPolicy,
-      protectedOperation: 'cohort_title_consolidation',
-    },
-  );
+  let response: string | null;
+  if (opts?.modelCall) {
+    // Audited path (PR6 C3): the started → terminal `classification_model_calls`
+    // rows are written by the transport on every path, the model output is
+    // returned only after the terminal row is durable, and the returned
+    // callId is surfaced for durable output-row provenance.
+    const result = await callLlmForTaskWithProvenance(
+      'product_curation',
+      prompt,
+      'You are a clean product taxonomy assistant.',
+      {
+        allowFallback: true,
+        modelPolicy,
+        protectedOperation: 'cohort_title_consolidation',
+        modelCall: opts.modelCall,
+        snapshot: opts.snapshot ?? null,
+        assertHeld: opts.assertHeld,
+      },
+    );
+    response = result?.content ?? null;
+    if (result) {
+      // PR6 review SHOULD-FIX 1: surface the producing call id WITH the group
+      // member SKUs so the parent op can persist each row with its own call.
+      opts.onCoordinatedCallId?.(result.callId, items.map(i => i.upc));
+    }
+  } else {
+    // Legacy / shadow byte-identical path: non-audited transport.
+    response = await callLlmForTask(
+      'product_curation',
+      prompt,
+      'You are a clean product taxonomy assistant.',
+      {
+        allowFallback: true,
+        modelPolicy,
+        protectedOperation: 'cohort_title_consolidation',
+      },
+    );
+  }
 
   if (!response || response.length < 2) {
     throw new Error('LLM returned empty response');

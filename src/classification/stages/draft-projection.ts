@@ -15,6 +15,13 @@ import { getPageDisplayName } from '../../shared/proposal-display';
  * This is the final classification stage before product draft creation.
  * No actual product files are modified — this is a preview only.
  *
+ * PR8 C1 (DECISION-A): the curated title is a DECLARED projection input —
+ * `name_consolidation` runs before this stage and the projection metadata
+ * carries the SAME title the curationData assembly reads
+ * (`input.stageOutputs.name_consolidation.metadata`, never a re-derivation).
+ * In active cohort mode that output is the parent-coordinated title; in
+ * legacy mode it is the per-member consolidated title.
+ *
  * IMPORTANT: This stage does NOT persist proposals. The projection is
  * returned as stage output metadata and consumed by the Review UI.
  * The downstream `draft-promoter.ts` reads accepted proposals directly
@@ -22,11 +29,39 @@ import { getPageDisplayName } from '../../shared/proposal-display';
  */
 export const productDraftProjectionStage: StageDefinition = {
   name: 'product_draft_projection',
-  requires: ['category_page_proposals', 'product_attribute_proposals'],
+  requires: ['name_consolidation', 'category_page_proposals', 'product_attribute_proposals'],
   evidenceFrom: [],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
     const accepted = input.acceptedProposals;
     const allProposals = input.allProposals;
+
+    // PR8 C2 (DECISION-D): frozen-only attribute mappings. Active cohort mode
+    // (an execution type present) requires the frozen runtime snapshot — the
+    // live config cache is never read with an execution type. Mirrors the
+    // attribute-applicability guard (attribute-applicability.ts:92). Legacy
+    // (no execution type) keeps the live cache fallback byte-identical.
+    if (context.cohortExecutionType !== undefined && context.snapshot === undefined) {
+      throw new Error(
+        `Member ${input.sku} (run ${context.runId}) draft projection requires the frozen runtime snapshot in active cohort mode; live config is never read`,
+      );
+    }
+
+    // PR8 C1 (DECISION-A): the coordinated/consolidated title + its source
+    // from the `name_consolidation` stage output — the SAME source the
+    // curationData assembly reads. Absent output (a stage invoked in
+    // isolation, or a non-standard pipeline) yields `title: null`, never a
+    // crash.
+    const nameMeta = input.stageOutputs?.name_consolidation?.metadata as
+      | Record<string, unknown>
+      | undefined;
+    const projectedTitle =
+      typeof nameMeta?.curatedTitle === 'string' && nameMeta.curatedTitle.length > 0
+        ? {
+            value: nameMeta.curatedTitle,
+            source: (typeof nameMeta.titleSource === 'string' ? nameMeta.titleSource : 'web') as string,
+          }
+        : null;
+
     const mappings = context.snapshot
       ? context.snapshot.attributeMappings
       : getCachedAttributeMappings(context.workspaceId);
@@ -107,7 +142,8 @@ export const productDraftProjectionStage: StageDefinition = {
         abstained: false,
         message: `${Object.keys(fieldAssignments).length} field assignments, ${
           pendingPageAssignments.length > 0 ? pendingPageAssignments.length : pageAssignments.length
-        } page assignments projected.`,
+        } page assignments projected.` +
+          (projectedTitle ? ` Title source: ${projectedTitle.source}.` : ''),
         metadata: {
           projection: {
             fieldAssignments,
@@ -121,6 +157,11 @@ export const productDraftProjectionStage: StageDefinition = {
             selectionMode:
               accepted.length > 0 ? 'accepted' : 'provisional_preview',
             pendingSupplement,
+            // PR8 C1 (DECISION-A): the curated title the final product draft
+            // will carry, sourced from the `name_consolidation` stage output
+            // ({value, source}). Null when no name_consolidation output is
+            // present.
+            title: projectedTitle,
           },
         },
       },

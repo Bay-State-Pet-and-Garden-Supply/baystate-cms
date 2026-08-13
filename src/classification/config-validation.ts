@@ -95,11 +95,17 @@ export function computeMigrationFindingsDigest(
 export function computeClassificationBundleHash(
   manifest: Omit<ClassificationManifestV2, 'bundleHash'> | ClassificationManifestV2,
 ): string {
+  // Issue #31 D6: the bundle hash covers only SEMANTIC authority fields.
+  // `updatedAt` is audit/timeline metadata, never drift content — an
+  // identical effective config written at different times must produce the
+  // SAME bundleHash so a no-op touch cannot masquerade as config drift.
+  // `bundleHash` itself is excluded too (the recompute in the validator feeds
+  // the full manifest, and a self-referential hash could never verify). The
+  // explicit field list is deterministic under the strict manifest schema.
   const {
     schemaVersion,
     compatibilityVersion,
     createdAt,
-    updatedAt,
     activeRevision,
     lifecycle,
     hasUnresolvedSafetyFindings,
@@ -112,7 +118,6 @@ export function computeClassificationBundleHash(
     schemaVersion,
     compatibilityVersion,
     createdAt,
-    updatedAt,
     activeRevision,
     lifecycle,
     hasUnresolvedSafetyFindings,
@@ -1021,6 +1026,15 @@ export function validateClassificationConfigBundle(
         });
       }
       if (target.attributeId) {
+        const attrEntry = attributes.get(target.attributeId)?.entry;
+        if (attrEntry && target.optionSource === 'live_store' && attrEntry.valueMode !== 'controlled') {
+          findings.push({
+            severity: 'error',
+            code: 'invalid_option_source_for_value_mode',
+            path: `${basePath}.optionSource`,
+            message: `Curation target "${target.label}" (${target.catalogField}) cannot use optionSource 'live_store' because attribute "${attrEntry.name}" has valueMode '${attrEntry.valueMode}'.`,
+          });
+        }
         const mappingIndex = mappedAttributes.get(target.attributeId);
         const mapping = mappingIndex === undefined ? undefined : config.attributeMappings[mappingIndex];
         if (!mapping) {

@@ -7,10 +7,10 @@
  * Unlike full regeneration (`config-store` preview/activate), this editor
  * changes only `mappings.json` (and, when needed, `curation-targets.json`) of
  * the active bundle, re-validates under the fail-closed active contract,
- * re-binds manifest fileVersions/bundleHash, refreshes the derived SQLite
- * cache (mirror tables + snapshots), updates `field_registry` labels, and
- * commits the scoped `store/classification/**` change. It never touches any
- * other file and never writes approved catalog/ShopSite state.
+ * re-binds manifest fileVersions/bundleHash, and refreshes the derived SQLite
+ * cache (mirror tables + snapshots). It never touches any other file, never
+ * writes approved catalog/ShopSite state, and never edits field metadata
+ * (labels are owned exclusively by the field-metadata service).
  *
  * Invariants maintained here (mirrors of the generator/validator contract):
  * - one attribute maps to at most one Catalog Field, and vice versa;
@@ -23,7 +23,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import {
   ClassificationFocusedFileNames,
   ClassificationManifestV2Schema,
@@ -50,10 +50,6 @@ import {
   syncConfigToCache,
   upsertConfigSnapshot,
 } from '../db/repositories/classification-config-repo';
-import {
-  listRegistry,
-  upsertRegistryEntry,
-} from '../db/repositories/field-registry-repo';
 
 export class FieldMappingEditError extends Error {
   constructor(
@@ -62,6 +58,7 @@ export class FieldMappingEditError extends Error {
       | 'invalid_edit'
       | 'unknown_attribute'
       | 'attribute_already_mapped'
+      | 'collision'
       | 'validation_failed'
       | 'write_error',
     message: string,
@@ -72,23 +69,21 @@ export class FieldMappingEditError extends Error {
 }
 
 /** One row edit from the CMS Extra Fields mirror UI. */
-export interface FieldMappingEdit {
+export const FieldMappingEditSchema = z.object({
   /** e.g. `ProductField24`. */
-  catalogField: string;
+  catalogField: z.string().min(1),
   /** Configured attribute id, or null to unmap the field. */
-  attributeId: string | null;
-  /** Optional ShopSite-side label (mirrored into field_registry). */
-  label?: string | null;
+  attributeId: z.string().min(1).nullable(),
   /** Optional serialization override; defaults to scalar when omitted. */
-  serialization?: SerializationConfigV2 | null;
-}
+  serialization: SerializationConfigV2Schema.nullable().optional(),
+}).strict();
+export type FieldMappingEdit = z.infer<typeof FieldMappingEditSchema>;
 
 export interface FieldMappingEditResult {
   bundleHash: string;
   commitHash: string | null;
   appliedFields: string[];
   removedFields: string[];
-  labelsUpdated: number;
 }
 
 const DEFAULT_SERIALIZATION: SerializationConfigV2 = { kind: 'scalar', prefix: '', suffix: '' };
@@ -129,8 +124,20 @@ function applyEditsToBundle(
       commitHash: null,
       appliedFields: [],
       removedFields: [],
-      labelsUpdated: 0,
     };
+  }
+
+  // Structural validation: edits are strict — there is no label field (the
+  // canonical field-metadata service is the only writer of field labels;
+  // issue #31 I3). A payload carrying extra keys such as `label` is rejected.
+  const parsedEdits = z.array(FieldMappingEditSchema).safeParse(edits);
+  if (!parsedEdits.success) {
+    throw new FieldMappingEditError(
+      'invalid_edit',
+      `Invalid mapping edit payload: ${parsedEdits.error.issues
+        .map(issue => `${issue.path.join('.')}: ${issue.message}`)
+        .join('; ')}`,
+    );
   }
 
   const attributeIds = new Set(bundle.attributes.map(attribute => attribute.id));
@@ -167,6 +174,32 @@ function applyEditsToBundle(
 
   const mappingByField = new Map(nextMappings.map(mapping => [mapping.catalogField, mapping]));
   const mappingByAttribute = new Map(nextMappings.map(mapping => [mapping.attributeId, mapping]));
+
+  // ── D3 collision pre-check (issue #31 D3) ────────────────────────────────
+  // Before any mutation, reject a map-edit whose destination Catalog Field is
+  // occupied by a DIFFERENT attribute that is NOT explicitly unmapped within
+  // THIS batch of edits. Silently re-pointing a field over a live occupant
+  // would destroy the displaced attribute's mapping AND its curation targets;
+  // the caller must explicitly unmap the occupant in the same batch (the
+  // existing in-batch move semantics) before a field can change owners.
+  const unmappedAttributesInBatch = new Set<string>();
+  for (const edit of edits) {
+    if (edit.attributeId === null || edit.attributeId === undefined) {
+      const occupant = mappingByField.get(edit.catalogField);
+      if (occupant) unmappedAttributesInBatch.add(occupant.attributeId);
+    }
+  }
+  for (const edit of edits) {
+    if (edit.attributeId === null || edit.attributeId === undefined) continue;
+    const occupant = mappingByField.get(edit.catalogField);
+    if (occupant && occupant.attributeId !== edit.attributeId && !unmappedAttributesInBatch.has(occupant.attributeId)) {
+      throw new FieldMappingEditError(
+        'collision',
+        `Cannot map ${edit.catalogField} to "${edit.attributeId}": the field is already mapped to attribute "${occupant.attributeId}". ` +
+          `Unmap "${occupant.attributeId}" in the same edit batch to move it off ${edit.catalogField}, or choose a different Catalog Field.`,
+      );
+    }
+  }
 
   for (const edit of edits) {
     const existing = mappingByField.get(edit.catalogField);
@@ -326,31 +359,6 @@ function applyEditsToBundle(
   // canonical file bytes (syncConfigToCache stores compact-JSON hashes).
   upsertConfigSnapshot(workspaceId, newBundle, manifest.sourceCatalogCommit);
 
-  // ── Field registry labels (the app-side mirror of ShopSite field names) ──
-  let labelsUpdated = 0;
-  const labelEdits = edits.filter(edit => typeof edit.label === 'string' && edit.label.trim() !== '');
-  if (labelEdits.length > 0) {
-    const registry = listRegistry(workspaceId);
-    for (const edit of labelEdits) {
-      const existing = registry.find(entry => entry.xmlField === edit.catalogField);
-      upsertRegistryEntry({
-        id: existing?.id ?? randomUUID(),
-        workspaceId,
-        xmlField: edit.catalogField,
-        label: edit.label!.trim(),
-        kind: existing?.kind ?? 'custom',
-        dataType: existing?.dataType ?? 'string',
-        editable: existing?.editable ?? true,
-        required: existing?.required ?? false,
-        uiGroup: existing?.uiGroup ?? null,
-        sampleValuesJson: existing?.sampleValuesJson ?? null,
-        createdAt: existing?.createdAt ?? new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
-      labelsUpdated += 1;
-    }
-  }
-
   // ── Scoped Git commit (same narrow scope as activation) ──────────────────
   let commitHash: string | null = null;
   if (options.gitEnabled !== false) {
@@ -366,7 +374,7 @@ function applyEditsToBundle(
     }
   }
 
-  return { bundleHash: manifest.bundleHash, commitHash, appliedFields, removedFields, labelsUpdated };
+  return { bundleHash: manifest.bundleHash, commitHash, appliedFields, removedFields };
 }
 
 function removeMapping(

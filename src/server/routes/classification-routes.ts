@@ -1,10 +1,16 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext, loadRuntimeConfigAuthority } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
-import { applyFieldMappingEdits, FieldMappingEditError } from '../../classification/field-mapping-editor';
+import { syncSeedToWorkspace } from '../../classification/seed-sync';
+import { applyFieldMappingEdits, FieldMappingEditError, FieldMappingEditSchema } from '../../classification/field-mapping-editor';
+import { applyAttributeProfileEdits, AttributeProfileEditError, AttributeProfileEditsPayloadSchema } from '../../classification/attribute-profile-editor';
+import { applyCurationTargetEdits, CurationTargetEditError } from '../../classification/curation-target-editor';
+import { applyAttributeEdits, AttributeEditError } from '../../classification/attribute-editor';
 import { processRefreshQueue } from '../../classification/refresh-queue-processor';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
+import { deriveCurationApplicability } from '../../classification/curation-applicability';
 import {
   applyCurationTargetsToConfig,
   listCurationTargetCandidates,
@@ -115,6 +121,27 @@ router.put('/classification/config', async (c) => {
       return c.json({ error: 'Missing configuration payload' }, 400);
     }
 
+    // Issue #31 D5: v2 workspaces have exactly one canonical mutation seam
+    // (the mapping editor + the preview/activate workflow). A full-config
+    // overwrite cannot bypass it — today this endpoint 500s on v2 workspaces
+    // (loadClassificationConfig throws unsupported_version); the gate turns
+    // that into an intentional 400. Unconfigured/legacy workspaces (no active
+    // authority) keep the transitional v1 save path.
+    try {
+      const authority = loadRuntimeConfigAuthority(
+        ws.workspacePath,
+        createRuntimeActivationContext(ws.workspacePath, ws.id),
+      );
+      if (authority.kind === 'v2') {
+        return c.json({
+          error: 'unsupported_in_v2',
+          message: 'Full config replacement is not supported in v2 workspaces. Use the mapping editor or the preview/activate workflow.',
+        }, 400);
+      }
+    } catch {
+      // No active classification config yet: fall through to the v1 path.
+    }
+
     saveClassificationConfig(ws.workspacePath, config);
     syncConfigToCache(ws.id, config);
 
@@ -128,9 +155,10 @@ router.put('/classification/config', async (c) => {
 /**
  * PUT /api/classification/mappings
  * Applies ShopSite field mapping edits to the ACTIVE v2 bundle (the CMS
- * mirror of ShopSite's Extra Fields configuration). Also updates
- * field_registry labels for edited fields. Fails closed on invalid edits or
- * when the edited bundle fails active validation.
+ * mirror of ShopSite's Extra Fields configuration). Mapping/serialization
+ * only — field labels are owned exclusively by the field-metadata service
+ * (issue #31 I3), so an edit payload carrying `label` is rejected. Fails
+ * closed on invalid edits or when the edited bundle fails active validation.
  */
 router.put('/classification/mappings', async (c) => {
   const ws = getCurrentWorkspace();
@@ -140,12 +168,17 @@ router.put('/classification/mappings', async (c) => {
 
   try {
     const body = await c.req.json();
-    const edits = Array.isArray(body?.edits) ? body.edits : null;
-    if (!edits) {
-      return c.json({ error: 'Missing edits payload (expected { edits: [...] })' }, 400);
+    const parsed = z.array(FieldMappingEditSchema).safeParse(body?.edits);
+    if (!parsed.success) {
+      return c.json({
+        error: `Invalid edits payload: ${parsed.error.issues
+          .map(issue => `${issue.path.join('.')}: ${issue.message}`)
+          .join('; ')}`,
+        code: 'invalid_edit',
+      }, 400);
     }
 
-    const result = applyFieldMappingEdits(ws.workspacePath, ws.id, edits as never);
+    const result = applyFieldMappingEdits(ws.workspacePath, ws.id, parsed.data);
 
     // Rebuild the mappings view the same way /catalog/mappings does.
     const config = loadRuntimeConfig(ws.workspacePath, ws.id);
@@ -181,6 +214,41 @@ router.put('/classification/mappings', async (c) => {
 });
 
 /**
+ * PUT /api/classification/attribute-profiles/:productTypeId
+ * Surgical edits to a Product Type's attribute profile in the active v2 bundle.
+ */
+router.put('/classification/attribute-profiles/:productTypeId', async (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+  const productTypeId = c.req.param('productTypeId');
+
+  try {
+    const body = await c.req.json();
+    const parsed = AttributeProfileEditsPayloadSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        {
+          error: `Invalid payload: ${parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+          code: 'invalid_edit',
+        },
+        400,
+      );
+    }
+
+    const result = applyAttributeProfileEdits(ws.workspacePath, ws.id, productTypeId, parsed.data.edits);
+    return c.json({ success: true, ...result });
+  } catch (err) {
+    if (err instanceof AttributeProfileEditError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    console.error('[ClassificationRoutes] Edit attribute profile failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
  * GET /api/classification/curation-targets
  * Returns manager-selected curation targets plus live-store candidates.
  */
@@ -193,7 +261,8 @@ router.get('/classification/curation-targets', (c) => {
   try {
     const config = loadRuntimeConfig(ws.workspacePath, ws.id);
     const candidates = listCurationTargetCandidates(ws.id, config);
-    return c.json({ targets: config.curationTargets ?? [], candidates });
+    const { applicability, findings } = deriveCurationApplicability(config);
+    return c.json({ targets: config.curationTargets ?? [], candidates, applicability, findings });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
@@ -212,17 +281,78 @@ router.put('/classification/curation-targets', async (c) => {
   try {
     const body = await c.req.json();
     const targets = Array.isArray(body?.targets) ? body.targets : [];
+
+    try {
+      const authority = loadRuntimeConfigAuthority(
+        ws.workspacePath,
+        createRuntimeActivationContext(ws.workspacePath, ws.id),
+      );
+      if (authority.kind === 'v2') {
+        applyCurationTargetEdits(ws.workspacePath, ws.id, targets);
+        const updatedConfig = loadRuntimeConfig(ws.workspacePath, ws.id);
+        const { applicability, findings } = deriveCurationApplicability(updatedConfig);
+        return c.json({
+          success: true,
+          targets: updatedConfig.curationTargets,
+          candidates: listCurationTargetCandidates(ws.id, updatedConfig),
+          applicability,
+          findings,
+        });
+      }
+    } catch (err) {
+      if (err instanceof CurationTargetEditError) {
+        return c.json({ error: err.message, code: err.code }, 400);
+      }
+      // No active v2 configuration yet: fall through to v1 path
+    }
+
     const currentConfig = loadClassificationConfig(ws.workspacePath);
     const nextConfig = applyCurationTargetsToConfig(currentConfig, targets, ws.id);
     saveClassificationConfig(ws.workspacePath, nextConfig);
     syncConfigToCache(ws.id, nextConfig);
+    const { applicability, findings } = deriveCurationApplicability(nextConfig);
     return c.json({
       success: true,
       targets: nextConfig.curationTargets,
       candidates: listCurationTargetCandidates(ws.id, nextConfig),
+      applicability,
+      findings,
     });
   } catch (err) {
+    if (err instanceof CurationTargetEditError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
     console.error('[ClassificationRoutes] Save curation targets failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * Updates attribute configuration (e.g. isUniversal) in active v2 bundle.
+ */
+router.put('/classification/attributes/:attributeId', async (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  const attributeId = c.req.param('attributeId');
+  try {
+    const body = await c.req.json();
+    const result = applyAttributeEdits(ws.workspacePath, ws.id, attributeId, body);
+    const updatedConfig = loadRuntimeConfig(ws.workspacePath, ws.id);
+    const { applicability, findings } = deriveCurationApplicability(updatedConfig);
+    return c.json({
+      success: true,
+      attribute: result.attribute,
+      applicability,
+      findings,
+    });
+  } catch (err) {
+    if (err instanceof AttributeEditError) {
+      return c.json({ error: err.message, code: err.code }, 400);
+    }
+    console.error('[ClassificationRoutes] Update attribute failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
@@ -255,6 +385,40 @@ router.post('/classification/migrate-legacy', (c) => {
     });
   } catch (err) {
     console.error('[ClassificationRoutes] Migration failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * POST /api/classification/sync-seed
+ * Synchronizes the approved seed taxonomy (BayStatePetGardenSeed) into the active
+ * workspace's store/classification/ bundle directory and updates the SQLite runtime cache.
+ */
+router.post('/classification/sync-seed', async (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  try {
+    const config = await syncSeedToWorkspace(ws.workspacePath, ws.id);
+    const { applicability, findings } = deriveCurationApplicability(config);
+    const candidates = listCurationTargetCandidates(ws.id, config);
+
+    return c.json({
+      success: true,
+      summary: {
+        productTypes: config.productTypes.length,
+        attributes: config.attributes.length,
+        attributeProfiles: config.attributeProfiles.length,
+        attributeMappings: config.attributeMappings.length,
+      },
+      candidates,
+      applicability,
+      findings,
+    });
+  } catch (err) {
+    console.error('[ClassificationRoutes] Seed sync failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });

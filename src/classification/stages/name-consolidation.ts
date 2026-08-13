@@ -180,23 +180,41 @@ export const nameConsolidationStage: StageDefinition = {
     // The title was already validated and normalized by the coordinator,
     // including deterministic fallback on LLM failure.
     // A grouped item must never fall through to independent per-item LLM.
-    if (context.preComputedTitle) {
-      const source = context.preComputedTitleSource ?? 'llm_cohort';
-      return {
-        status: 'succeeded',
-        output: {
-          evidence: [],
-          proposals: [],
-          abstained: false,
-          message: `Using pre-computed coordinated title (${source}): "${context.preComputedTitle}"`,
-          metadata: {
-            curatedTitle: context.preComputedTitle,
-            titleSource: source,
-            packagingOcrTitle: null,
-            signalsUsed: { source: 'cohort_coordination', sourceType: source },
+    //
+    // PR8 review R1 (BLOCKER 2b): an EMPTY/whitespace `preComputedTitle` is a
+    // corrupt coordinated title — NEVER a signal to re-enter per-item
+    // synthesis (that would invent a child title). The check is an explicit
+    // non-empty string test (truthiness would treat `''` as absent).
+    if (typeof context.preComputedTitle === 'string') {
+      const preComputedTitle = context.preComputedTitle.trim();
+      if (preComputedTitle.length > 0) {
+        const source = context.preComputedTitleSource ?? 'llm_cohort';
+        return {
+          status: 'succeeded',
+          output: {
+            evidence: [],
+            proposals: [],
+            abstained: false,
+            message: `Using pre-computed coordinated title (${source}): "${preComputedTitle}"`,
+            metadata: {
+              curatedTitle: preComputedTitle,
+              titleSource: source,
+              packagingOcrTitle: null,
+              signalsUsed: { source: 'cohort_coordination', sourceType: source },
+            },
           },
-        },
-      };
+        };
+      }
+      // An empty coordinated title can never legitimately reach a member (the
+      // parent op's writers always emit non-empty titles and the reuse path
+      // fails corrupt/empty rows closed). A hand-built or pre-tightening
+      // context carrying one must fail the member — never fall through to
+      // per-item synthesis, which would invent a title for a corrupt parent
+      // result.
+      throw new Error(
+        `Member ${input.sku} (run ${context.runId}) has an EMPTY coordinated title output in active cohort mode ` +
+          '(PR8 review R1): failing closed — the member never synthesizes a replacement title.',
+      );
     }
 
     // Gather title signals from accumulated evidence

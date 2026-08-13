@@ -3,21 +3,21 @@
     "id": "species",
     "name": "Target Species",
     "type": "enum",
-    "allowedValues": ["dog", "cat", "bird", "fish", "reptile", "small_animal", "horse", "wildlife"],
+    "allowedValues": ["dog", "cat", "bird", "fish", "reptile", "small_animal", "horse", "poultry", "cattle", "goat", "sheep", "swine", "wildlife"],
     "description": "Primary species targeted by the product."
   },
   {
     "id": "life_stage",
     "name": "Life Stage",
     "type": "enum",
-    "allowedValues": ["puppy", "kitten", "adult", "senior", "all_life_stages"],
+    "allowedValues": ["puppy", "kitten", "adult", "senior", "all_life_stages", "starter", "grower", "layer"],
     "description": "Target animal lifestage."
   },
   {
     "id": "food_form",
     "name": "Food Form",
     "type": "enum",
-    "allowedValues": ["dry", "wet", "freeze_dried", "raw", "dehydrated", "treat", "chew", "liquid", "granule"],
+    "allowedValues": ["dry", "wet", "freeze_dried", "raw", "dehydrated", "treat", "chew", "liquid", "granule", "pellet", "crumble", "mash", "sweet_feed", "block", "tub"],
     "description": "Physical form of food, treat, or chemical product."
   },
   {
@@ -30,12 +30,63 @@
     "id": "package_weight",
     "name": "Package Weight / Volume",
     "type": "string",
-    "description": "Standardized package size (e.g. 4 lb, 30 lb, 12.5 oz, 1 gal)."
+    "description": "Standardized package size (e.g. 4 lb, 30 lb, 50 lb, 12.5 oz, 1 gal)."
   },
   {
     "id": "organic_status",
     "name": "Organic / Natural Status",
     "type": "boolean",
     "description": "Indicates if the product is certified organic or all-natural."
+  },
+  {
+    "id": "npk_ratio",
+    "name": "N-P-K Ratio",
+    "type": "string",
+    "description": "Nitrogen-Phosphorus-Potassium fertilizer ratio (e.g. 10-10-10, 24-0-11)."
+  },
+  {
+    "id": "protein_pct",
+    "name": "Protein Percentage",
+    "type": "string",
+    "description": "Crude protein percentage for livestock feeds (e.g. 16%, 20%)."
+  },
+  {
+    "id": "joule_rating",
+    "name": "Joule Rating",
+    "type": "string",
+    "description": "Output energy rating in Joules for electric fence energizers."
+  },
+  {
+    "id": "btu_rating",
+    "name": "BTU Rating",
+    "type": "string",
+    "description": "Heating output capacity in BTUs for heaters and stoves."
+  },
+  {
+    "id": "fuel_type",
+    "name": "Fuel Type",
+    "type": "enum",
+    "allowedValues": ["wood_pellets", "propane", "kerosene", "electric", "gasoline", "natural_gas", "firewood", "battery"],
+    "description": "Fuel or power source for heaters, splitters, and power equipment."
+  },
+  {
+    "id": "towing_capacity_lbs",
+    "name": "Towing Capacity",
+    "type": "string",
+    "description": "Maximum towing capacity rating in pounds."
+  },
+  {
+    "id": "safety_toe_type",
+    "name": "Safety Toe Type",
+    "type": "enum",
+    "allowedValues": ["steel_toe", "composite_toe", "soft_toe", "alloy_toe"],
+    "description": "Work boot safety toe classification."
+  },
+  {
+    "id": "hose_length",
+    "name": "Hose Length",
+    "type": "enum",
+    "allowedValues": ["25_ft", "50_ft", "75_ft", "100_ft"],
+    "description": "Garden or air hose length."
   }
 ]

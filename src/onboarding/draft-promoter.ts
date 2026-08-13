@@ -16,6 +16,15 @@ import {
   getValidatedOnboardingRun,
   recordHistoryEvent,
 } from '../db/repositories/classification-run-repo';
+import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
+import { getCohortRunById,
+  listDependenciesForProposal,
+} from '../db/repositories/classification-cohort-run-repo';
+import { getRuntimeSnapshotByHash } from '../classification/runtime-snapshot';
+import { validatePromotionGate, resolvePromotionEffectiveTypeId, computeExecutionAuthorityHash, computeReviewedAuthorityHash } from '../classification/promotion-gate';
+import type { CohortRun } from '../shared/schemas/cohorts';
+import type { OnboardingItem } from '../shared/schemas/onboarding';
+import type { ClassificationProposal } from '../shared/schemas/classification';
 import { getCachedAttributeMappings, getCachedBrands } from '../db/repositories/classification-config-repo';
 import { resolveBrand } from '../classification/brand-resolution';
 import { getPageIdentityId, pageNameFromPageValue } from '../shared/proposal-display';
@@ -162,6 +171,95 @@ function escapeXml(str: string): string {
 }
 
 /**
+ * PR11/PR12 gate inputs for one item: run-pointer validation + the
+ * deterministic promotion gate (semantic / parent-currentness /
+ * stale-dependency incl. the PR12 value-hash dimension). Used by the
+ * promoteItems 3-phase flow (PR12 C3): phase (a) sync pre-pass collects the
+ * passed set (images download ONLY for gate-passing items — PR11 review R1
+ * P2, preserved), and phase (c) re-runs the same computation inside the
+ * transaction as the FINAL authority (failure recording). Deterministic and
+ * cheap — the DB state is re-read on every invocation.
+ * Legacy items (no run pointer) pass with `ok: true` and empty proposals.
+ */
+function computePromotionGate(
+  item: OnboardingItem,
+  workspaceId: string,
+): {
+  ok: boolean;
+  reason: string | null;
+  activeRun: ClassificationRunRow | null;
+  activeProposals: ClassificationProposal[];
+} {
+  const runPointer = item.curationData?.classificationRunId ?? null;
+  let activeRun: ClassificationRunRow | null = null;
+  if (runPointer) {
+    activeRun = getValidatedOnboardingRun(runPointer, workspaceId, item.id, item.upc);
+    if (!activeRun) {
+      return {
+        ok: false,
+        reason: 'Invalid classification run pointer — promotion blocked',
+        activeRun: null,
+        activeProposals: [],
+      };
+    }
+  }
+  const activeRunId = activeRun?.id ?? null;
+  // Accepted-only: a valid run contributes only proposals whose latest live
+  // decision is 'accepted' (never deferred/rejected/pending/decisionless).
+  const activeProposals = activeRunId
+    ? getAcceptedProposals(item.upc, activeRunId)
+    : (item.curationData?.classificationProposals || []).filter(
+        (p: any) => p.status === 'accepted',
+      );
+  const parentRun: CohortRun | null = activeRun?.cohortRunId
+    ? getCohortRunById(activeRun.cohortRunId)
+    : null;
+  // PR11 review R2 (P1): the frozen runtime snapshot of the child run carries
+  // provenance-compatible REVIEWED facts — the second reviewed-authority
+  // source (the cohort executor's `getEffectiveCurationTypeForSnapshot` uses
+  // the same facts for member-local Curation). Loaded by the caller; the gate
+  // stays pure.
+  const snapshot =
+    activeRun && activeRun.configSnapshotHash
+      ? getRuntimeSnapshotByHash(workspaceId, activeRun.configSnapshotHash)
+      : null;
+  const effectiveTypeId = resolvePromotionEffectiveTypeId(parentRun, activeProposals, snapshot);
+  // PR12 C2 (DECISION-A): the CURRENT authority value-hashes recomputed from
+  // the SAME inputs the target comparison uses — the parent run's current
+  // execution type id + confidence (the `getCohortRunById` row carries
+  // `productTypeConfidence`) for the execution kind, and the reviewed
+  // resolution for the reviewed kind. A stamped dependency value hash that
+  // differs (e.g. a confidence drift under the same target id, or a
+  // re-resolved reviewed authority) stales the proposal even when the target
+  // id still matches.
+  const currentAuthorityHashes = {
+    execution: computeExecutionAuthorityHash(
+      parentRun?.executionProductTypeId ?? null,
+      parentRun?.productTypeConfidence ?? null,
+    ),
+    reviewed: computeReviewedAuthorityHash(effectiveTypeId),
+  };
+  const gate = validatePromotionGate({
+    workspaceId,
+    itemId: item.id,
+    productSku: item.upc,
+    curationData: item.curationData ?? null,
+    activeRun,
+    parentRun,
+    effectiveTypeId,
+    acceptedProposals: activeProposals,
+    dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
+    currentAuthorityHashes,
+  });
+  return {
+    ok: gate.ok,
+    reason: gate.ok ? null : gate.reason,
+    activeRun,
+    activeProposals,
+  };
+}
+
+/**
  * Promotes approved onboarding items to the CMS change-set/approval pipeline.
  * Creates a new change set containing all promoted items.
  */
@@ -193,11 +291,48 @@ export async function promoteItems(
   const allItems = listItemsByBatch(batchId);
   const itemsToPromote = allItems.filter(item => itemIds.includes(item.id));
 
-  // Pre-download and process images asynchronously before the database transaction
-  const processedImagesMap = new Map<string, ProcessedImageResult>();
+  // ── PR12 C3 (DECISION-C): 3-phase promotion hygiene ──────────────────
+  // (a) SYNC gate pass over every selected item: refusals are recorded
+  //     immediately (completePromotionStage + failures.push) and the PASSED
+  //     set is collected. No image work happens here.
+  // (b) ASYNC image downloads ONLY for the passed set — an item the gate
+  //     refuses at the most recent evaluation never triggers image side
+  //     effects (PR11 review R1 P2 preserved: zero fetches for refused items).
+  // (c) ONE transaction: per passed item, RE-RUN the gate as the FINAL
+  //     authority (state may have moved since (a)) — a refusal records the
+  //     failure and skips the draft (the item still never produces a
+  //     change-set row); then the existing draft building + change-set
+  //     writes using the images downloaded in (b).
+  // Residual single-item race between (b) and (c) is irreducible without
+  // holding a lock and is documented: images may be downloaded for an item
+  // the final gate then refuses, but that item NEVER drafts.
+  const passedItems: OnboardingItem[] = [];
   for (const item of itemsToPromote) {
-    if (!item.extractionData) continue;
+    if (!item.extractionData) {
+      const errMsg = 'Missing extraction data';
+      console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+      completePromotionStage(item.id, false, errMsg);
+      failures.push({ itemId: item.id, error: errMsg });
+      continue;
+    }
+    const gateInfo = computePromotionGate(item, workspaceId);
+    if (!gateInfo.ok) {
+      const errMsg = gateInfo.reason!;
+      console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+      completePromotionStage(item.id, false, errMsg);
+      failures.push({ itemId: item.id, error: errMsg });
+      continue;
+    }
+    passedItems.push(item);
+  }
+
+  // (b) ASYNC image downloads ONLY for the passed set.
+  const processedImagesMap = new Map<string, ProcessedImageResult>();
+  for (const item of passedItems) {
     const extractionData = item.extractionData;
+    // Defensive narrowing: passedItems only ever contains items with
+    // extraction data (phase (a) filtered + recorded the rest); never hit.
+    if (!extractionData) continue;
     const finalTitle = item.curationData?.curatedTitle || extractionData.title || item.name;
     const existingApproved = readProductFile(workspacePath, item.upc);
 
@@ -248,16 +383,18 @@ export async function promoteItems(
     }
   }
 
+  // (c) ONE transaction: per passed item, RE-RUN the gate as the final
+  // authority, then build the draft + write the change set. The gate is
+  // deterministic and cheap; a refusal records the failure and skips the
+  // draft (an item refused here never produces a change-set row even when
+  // its images were already downloaded in (b)).
   db.transaction(() => {
-    for (const item of itemsToPromote) {
-      if (!item.extractionData) {
-        const errMsg = 'Missing extraction data';
-        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
-        completePromotionStage(item.id, false, errMsg);
-        failures.push({ itemId: item.id, error: errMsg });
-        continue;
-      }
+    for (const item of passedItems) {
       const extractionData = item.extractionData;
+      // Defensive narrowing: phase (a) already filtered out items without
+      // extraction data (recorded as failures); this guard is never hit and
+      // only keeps the type narrow.
+      if (!extractionData) continue;
 
       // ── Imported Agent Lab result gate (PI-8) ─────────────────────────
       // An item whose extraction data carries imported PI evidence is only
@@ -323,36 +460,26 @@ export async function promoteItems(
       const skippedPageRefs: Array<{ proposalId: string; pageName: string }> = [];
       let acceptedProductType: string | null = null;
 
-      // Curation JSON is only a run pointer. A PRESENT pointer must resolve to
-      // a valid, owned run or the item fails closed — it never downgrades to a
-      // legacy branch. A genuinely absent pointer keeps narrow legacy
-      // compatibility using only embedded proposals whose status is exactly
-      // 'accepted' (pending/rejected/deferred/stale are ignored).
-      const runPointer = item.curationData?.classificationRunId ?? null;
-      let activeRunId: string | null = null;
-      if (runPointer) {
-        const validatedRun = getValidatedOnboardingRun(
-          runPointer,
-          batch.workspaceId,
-          item.id,
-          item.upc,
-        );
-        if (!validatedRun) {
-          const errMsg = 'Invalid classification run pointer — promotion blocked';
-          console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
-          completePromotionStage(item.id, false, errMsg);
-          failures.push({ itemId: item.id, error: errMsg });
-          continue;
-        }
-        activeRunId = validatedRun.id;
+      // ── PR11 Promotion gate (semantic / parent-currentness / stale) ────
+      // Deterministic per-item fail-closed check AFTER the run-pointer
+      // validation and BEFORE any proposal/draft work (the SAME computation
+      // the image pre-pass used — re-run here as the authoritative failure
+      // record; deterministic and cheap). A blocked member, a child of a
+      // superseded/in-flight parent, a non-terminal child run, or a proposal
+      // whose type dependency no longer matches the item's CURRENT effective
+      // type never reaches a CMS draft — the item's promotion stage fails
+      // with the deterministic reason while siblings promote normally.
+      // Legacy items (no run pointer) pass unchanged (byte-identical).
+      const gateInfo = computePromotionGate(item, workspaceId);
+      if (!gateInfo.ok) {
+        const errMsg = gateInfo.reason!;
+        console.warn(`[DraftPromoter] Skipping item ${item.name} (${item.upc}) - ${errMsg}`);
+        completePromotionStage(item.id, false, errMsg);
+        failures.push({ itemId: item.id, error: errMsg });
+        continue;
       }
-      // Accepted-only: a valid run contributes only proposals whose latest live
-      // decision is 'accepted' (never deferred/rejected/pending/decisionless).
-      const activeProposals = activeRunId
-        ? getAcceptedProposals(item.upc, activeRunId)
-        : (item.curationData?.classificationProposals || []).filter(
-            (p: any) => p.status === 'accepted',
-          );
+      const activeProposals = gateInfo.activeProposals;
+
       // Only identities verified in the currently active Page import are
       // serializable, and the verified catalog is the DISPLAY-NAME authority:
       // a verified Page ID always resolves to the verified page's canonical

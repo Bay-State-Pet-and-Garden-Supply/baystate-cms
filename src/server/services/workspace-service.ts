@@ -1,11 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import path from 'path';
-import { getDb } from '../../db/connection';
 import { findWorkspace, updateWorkspacePaths } from '../../db/repositories/workspace-repo';
 import { loadRuntimeConfigAuthority, createRuntimeActivationContext, ClassificationConfigLoadError, ClassificationConfigNotConfiguredError } from '../../classification/config-loader';
 import { syncConfigToCache } from '../../db/repositories/classification-config-repo';
-import { upsertRegistryEntry, listRegistry } from '../../db/repositories/field-registry-repo';
 import { migrateLegacyWorkspaceIfNeeded, getStoreCatalogPath } from './migration-service';
+import { syncRegistryFromProductIndex } from './field-metadata-service';
 import type { Workspace } from '../../shared/types';
 
 /**
@@ -81,53 +79,17 @@ export function loadWorkspace(workspacePath?: string): Workspace | null {
 
 /**
  * Ensures the field_registry has an entry for every ProductField key present
- * in product_index.custom_fields. Runs on catalog load so the
- * registry stays 1:1 with the live catalog.
+ * in product_index.custom_fields. Runs on catalog load so the registry stays
+ * 1:1 with the live catalog. Additive-only and routed through the canonical
+ * field-metadata service so the R2 attestation (store/field-registry.json) is
+ * always refreshed alongside R1 (fixes C2). Existing rows are never overwritten.
  */
-export function syncFieldRegistryFromProductIndex(workspaceId: string): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-
-  const rows = db
-    .query("SELECT custom_fields FROM product_index WHERE custom_fields IS NOT NULL AND custom_fields != '' AND custom_fields != '{}' LIMIT 5000")
-    .all() as Array<{ custom_fields: string | null }>;
-
-  const allKeys = new Set<string>();
-  for (const row of rows) {
-    if (!row.custom_fields) continue;
-    try {
-      const customFields = JSON.parse(String(row.custom_fields)) as Record<string, unknown>;
-      for (const key of Object.keys(customFields)) {
-        if (key.startsWith('ProductField')) allKeys.add(key);
-      }
-    } catch { /* skip malformed */ }
-  }
-
-  if (allKeys.size === 0) return;
-
-  const existing = listRegistry(workspaceId);
-  const existingNames = new Set(existing.map(entry => entry.xmlField));
-
-  let newCount = 0;
-  for (const key of allKeys) {
-    if (existingNames.has(key)) continue;
-    upsertRegistryEntry({
-      id: randomUUID(),
-      workspaceId,
-      xmlField: key,
-      label: key,
-      kind: 'custom',
-      dataType: 'string',
-      editable: true,
-      required: false,
-      uiGroup: 'Custom Fields',
-      sampleValuesJson: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-    newCount++;
-  }
-  if (newCount > 0) {
-    console.log(`[WorkspaceService] Synced ${newCount} missing field_registry entries from product_index.`);
+export function syncFieldRegistryFromProductIndex(workspaceId: string, workspacePath?: string): void {
+  const added = syncRegistryFromProductIndex({
+    id: workspaceId,
+    workspacePath: workspacePath ?? getStoreCatalogPath(),
+  });
+  if (added > 0) {
+    console.log(`[WorkspaceService] Synced ${added} missing field_registry entries from product_index.`);
   }
 }

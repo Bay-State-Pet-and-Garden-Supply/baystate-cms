@@ -234,7 +234,7 @@ export const ExtractionDataSchema = z.object({
    * every entry's originating run + result hash.
    */
   productIntelligenceEvidence: z.array(ProductIntelligenceImportEvidenceSchema).default(() => []),
-});
+}).passthrough();
 
 
 
@@ -314,6 +314,40 @@ export type ApproveDistributorImageRequest = z.infer<typeof ApproveDistributorIm
 
 // ─── Curation Data (Refined taxonomy and packaging mapping) ─────────────────────
 
+/**
+ * PR9 (issue #30, DECISION-A): the member's cohort semantic validation
+ * payload shape — `{status, findings}` where a 'blocked' status means the
+ * member is NOT review-ready (`semantic_validation_blocked` gate) while the
+ * curationData + proposals stay intact (blocked-not-destroyed).
+ *
+ * Exported so the review completion gate (R2-A) parses the committed payload
+ * against the EXACT same schema the curator writes — missing or malformed
+ * semantic data fails closed (never review-ready).
+ *
+ * PR9 review R2 (B): `coordinated_page_name_mismatch` is an ADVISORY-only
+ * finding code — the BLOCKING page correspondence is the stable Page ID
+ * set-match (`coordinated_page`); a pageName mismatch for a matched id is a
+ * diagnostic (stale/renamed store page), never a review blocker.
+ */
+export const CohortSemanticValidationSchema = z.object({
+  status: z.enum(['passed', 'blocked']),
+  findings: z.array(z.object({
+    code: z.enum([
+      'family_product_type',
+      'family_brand',
+      'coordinated_title',
+      'coordinated_page',
+      'coordinated_page_name_mismatch',
+      'member_attribute_applicability',
+      'member_cardinality',
+    ]),
+    memberSku: z.string(),
+    message: z.string(),
+  })),
+});
+
+export type CohortSemanticValidation = z.infer<typeof CohortSemanticValidationSchema>;
+
 export const CurationDataSchema = z.object({
   curatedTitle: z.string().nullable().default(null),
   /** Search keywords synthesized by the curator from curated title, brand, attributes, and page names. */
@@ -342,6 +376,30 @@ export const CurationDataSchema = z.object({
   classificationProposals: z.array(ClassificationProposalSchema).default(() => []),
   classificationDecisions: z.array(ClassificationProposalDecisionSchema).default(() => []),
   classificationHistory: z.array(ClassificationHistoryEventSchema).default(() => []),
+  /**
+   * PR5 (issue #30, DECISION-J): the member's effective Curation Product Type
+   * in prepared-cohort mode — the reviewed (accepted) Primary Product Type
+   * first, the frozen cohort Execution Product Type as fallback, else none.
+   * Read-only observability: the Review UI ignores unknown keys, Promotion
+   * never consumes it (the Execution Type is never reviewed truth), and
+   * legacy (non-cohort) runs never carry the key.
+   */
+  effectiveProductType: z.object({
+    id: z.string().nullable(),
+    source: z.enum(['reviewed', 'execution', 'none']),
+  }).nullable().optional(),
+  /**
+   * PR9 (issue #30, DECISION-A): the member's cohort semantic validation
+   * result — computed from FROZEN authority at the member-projection commit
+   * (family_invariant Product Type/Brand, coordinated_variant title/page
+   * correspondence to the parent durable outputs, member_local profile
+   * applicability) and re-evaluated for mutual Brand coherence after the
+   * member loop. Additive key: absent in legacy/shadow runs (byte-identical).
+   * A 'blocked' status is NOT review-ready (the review completion gate
+   * refuses it with code 'semantic_validation_blocked') while curationData
+   * + proposals stay intact for the Review UX (blocked-not-destroyed).
+   */
+  semanticValidation: CohortSemanticValidationSchema.nullable().optional(),
 });
 
 export type CurationData = z.infer<typeof CurationDataSchema>;

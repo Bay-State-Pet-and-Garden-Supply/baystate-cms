@@ -27,7 +27,14 @@ interface CurationStagePanelProps {
   onUpdateWeight: (weight: string) => void;
   onTogglePage: (pageName: string, isAssigned: boolean) => void;
   onRemovePage: (pageName: string) => void;
-  fieldTargetForProposal: (proposal: ClassificationProposal) => { target: CurationTargetConfig | null; values: string[]; label: string };
+  fieldTargetForProposal: (proposal: ClassificationProposal) => {
+    target: CurationTargetConfig | null;
+    values: string[];
+    label: string;
+    valueMode: 'controlled' | 'freeText' | 'measured' | null;
+    canonicalUnit: string | null;
+    cardinality: 'single' | 'multiple';
+  };
   productTypeOptions: () => { label: string; value: string }[];
   getEffectiveProposalValue: (proposal: ClassificationProposal) => any;
   /** Canonical hydrated run evidence (issue #17 I). */
@@ -142,23 +149,28 @@ export function CurationStagePanel({
         <label style={{ fontSize: 13, fontWeight: 700, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
           ⚖️ Product Weight
         </label>
-        <input
-          type="text"
-          value={curatedWeight}
-          onChange={(e) => onUpdateWeight(e.target.value)}
-          placeholder="e.g. 15 lbs, 500g"
-          style={{
-            width: '100%',
-            padding: '10px 12px',
-            border: '1px solid #d1d5db',
-            borderRadius: 8,
-            fontSize: 14,
-            fontWeight: 500,
-            background: '#fff',
-            boxSizing: 'border-box',
-            minHeight: 40,
-          }}
-        />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            type="text"
+            value={curatedWeight}
+            onChange={(e) => onUpdateWeight(e.target.value)}
+            placeholder="e.g. 12.5"
+            style={{
+              flex: 1,
+              padding: '10px 12px',
+              border: '1px solid #d1d5db',
+              borderRadius: 8,
+              fontSize: 14,
+              fontWeight: 500,
+              background: '#fff',
+              boxSizing: 'border-box',
+              minHeight: 40,
+            }}
+          />
+          <span style={{ padding: '8px 14px', background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 8, fontSize: 13, fontWeight: 700 }}>
+            lb
+          </span>
+        </div>
       </div>
 
       {/* Suggested Product Type */}
@@ -214,83 +226,110 @@ export function CurationStagePanel({
                     </span>
                   </div>
 
-                  {p.proposalType === 'field_assignment' && fieldMeta.values.length > 0 && (
-                    fieldMeta.target?.selectionMode === 'multiple' ? (
-                      <select
-                        multiple
-                        disabled={proposalControlsDisabled}
-                        value={proposedValues}
-                        onChange={(e) => {
-                          const values = Array.from(e.currentTarget.selectedOptions).map((option) => option.value);
-                          const reviewed = withReviewedProposalValue(p, values);
-                          updateProposal(p.id, {
-                            revisedValue: reviewed.revisedValue,
-                            hasRevisedValue: reviewed.hasRevisedValue,
-                            status: values.length > 0 ? 'accepted' : p.status,
-                          });
-                        }}
-                        style={{ width: '100%', minHeight: 90, border: '1px solid #c4b5fd', borderRadius: 6, padding: 6, fontSize: 12, background: '#fff' }}
-                      >
-                        {fieldMeta.values.map((value) => <option key={value} value={value}>{value}</option>)}
-                      </select>
-                    ) : (
-                      <select
-                        disabled={proposalControlsDisabled}
-                        value={proposedValues[0] ?? ''}
-                        onChange={(e) => {
-                          const reviewed = withReviewedProposalValue(p, e.target.value);
-                          updateProposal(p.id, {
-                            revisedValue: reviewed.revisedValue,
-                            hasRevisedValue: reviewed.hasRevisedValue,
-                            status: e.target.value ? 'accepted' : p.status,
-                          });
-                        }}
-                        style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, background: '#fff', minHeight: 36 }}
-                      >
-                        <option value="">Choose a value…</option>
-                        {fieldMeta.values.map((value) => <option key={value} value={value}>{value}</option>)}
-                      </select>
-                    )
-                  )}
+                  {p.proposalType === 'field_assignment' && (
+                    (() => {
+                      const valueMode = fieldMeta.valueMode;
+                      if (valueMode === 'measured') {
+                        const unit = fieldMeta.canonicalUnit ?? '(No unit configured)';
+                        return (
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <input
+                              type="text"
+                              disabled={proposalControlsDisabled}
+                              value={proposedValues.join(', ')}
+                              onChange={(e) => {
+                                const reviewed = withReviewedProposalValue(p, e.target.value);
+                                updateProposal(p.id, {
+                                  revisedValue: reviewed.revisedValue,
+                                  hasRevisedValue: reviewed.hasRevisedValue,
+                                  status: e.target.value ? 'accepted' : p.status,
+                                });
+                              }}
+                              placeholder="e.g. 12.5"
+                              style={{ flex: 1, border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, background: '#fff', minHeight: 36 }}
+                            />
+                            <span style={{ padding: '6px 12px', background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 6, fontSize: 12, fontWeight: 700 }}>
+                              {unit}
+                            </span>
+                          </div>
+                        );
+                      }
 
-                  {p.proposalType === 'primary_product_type' && typeOptions.length > 0 && (
-                    <select
-                      disabled={proposalControlsDisabled}
-                      value={getEffectiveProductTypeId(p) ?? ''}
-                      onChange={(e) => {
-                        const productTypeId = e.target.value || null;
-                        const reviewed = withReviewedProductTypeId(p, productTypeId);
-                        updateProposal(p.id, {
-                          revisedValue: reviewed.revisedValue,
-                          hasRevisedValue: reviewed.hasRevisedValue,
-                          revisedTargetId: reviewed.revisedTargetId,
-                          hasRevisedTargetId: reviewed.hasRevisedTargetId,
-                          status: productTypeId ? 'accepted' : 'deferred',
-                        });
-                      }}
-                      style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, background: '#fff', minHeight: 36 }}
-                    >
-                      <option value="">Choose a product type…</option>
-                      {typeOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                    </select>
-                  )}
+                      if (valueMode === 'freeText') {
+                        return (
+                          <input
+                            type="text"
+                            disabled={proposalControlsDisabled}
+                            value={proposedValues.join(', ')}
+                            onChange={(e) => {
+                              const reviewed = withReviewedProposalValue(p, e.target.value);
+                              updateProposal(p.id, {
+                                revisedValue: reviewed.revisedValue,
+                                hasRevisedValue: reviewed.hasRevisedValue,
+                                status: e.target.value ? 'accepted' : p.status,
+                              });
+                            }}
+                            placeholder="Enter reviewed free text"
+                            style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, boxSizing: 'border-box', minHeight: 36 }}
+                          />
+                        );
+                      }
 
-                  {p.proposalType === 'field_assignment' && fieldMeta.values.length === 0 && (
-                    <input
-                      type="text"
-                      disabled={proposalControlsDisabled}
-                      value={proposedValues.join(', ')}
-                      onChange={(e) => {
-                        const reviewed = withReviewedProposalValue(p, e.target.value);
-                        updateProposal(p.id, {
-                          revisedValue: reviewed.revisedValue,
-                          hasRevisedValue: reviewed.hasRevisedValue,
-                          status: e.target.value ? 'accepted' : p.status,
-                        });
-                      }}
-                      placeholder="Enter reviewed value"
-                      style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, boxSizing: 'border-box', minHeight: 36 }}
-                    />
+                      return fieldMeta.values.length > 0 ? (
+                        fieldMeta.target?.selectionMode === 'multiple' ? (
+                          <select
+                            multiple
+                            disabled={proposalControlsDisabled}
+                            value={proposedValues}
+                            onChange={(e) => {
+                              const values = Array.from(e.currentTarget.selectedOptions).map((option) => option.value);
+                              const reviewed = withReviewedProposalValue(p, values);
+                              updateProposal(p.id, {
+                                revisedValue: reviewed.revisedValue,
+                                hasRevisedValue: reviewed.hasRevisedValue,
+                                status: values.length > 0 ? 'accepted' : p.status,
+                              });
+                            }}
+                            style={{ width: '100%', minHeight: 90, border: '1px solid #c4b5fd', borderRadius: 6, padding: 6, fontSize: 12, background: '#fff' }}
+                          >
+                            {fieldMeta.values.map((value) => <option key={value} value={value}>{value}</option>)}
+                          </select>
+                        ) : (
+                          <select
+                            disabled={proposalControlsDisabled}
+                            value={proposedValues[0] ?? ''}
+                            onChange={(e) => {
+                              const reviewed = withReviewedProposalValue(p, e.target.value);
+                              updateProposal(p.id, {
+                                revisedValue: reviewed.revisedValue,
+                                hasRevisedValue: reviewed.hasRevisedValue,
+                                status: e.target.value ? 'accepted' : p.status,
+                              });
+                            }}
+                            style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, background: '#fff', minHeight: 36 }}
+                          >
+                            <option value="">Choose a value…</option>
+                            {fieldMeta.values.map((value) => <option key={value} value={value}>{value}</option>)}
+                          </select>
+                        )
+                      ) : (
+                        <input
+                          type="text"
+                          disabled={proposalControlsDisabled}
+                          value={proposedValues.join(', ')}
+                          onChange={(e) => {
+                            const reviewed = withReviewedProposalValue(p, e.target.value);
+                            updateProposal(p.id, {
+                              revisedValue: reviewed.revisedValue,
+                              hasRevisedValue: reviewed.hasRevisedValue,
+                              status: e.target.value ? 'accepted' : p.status,
+                            });
+                          }}
+                          placeholder="Enter reviewed value"
+                          style={{ width: '100%', border: '1px solid #c4b5fd', borderRadius: 6, padding: 8, fontSize: 12, boxSizing: 'border-box', minHeight: 36 }}
+                        />
+                      );
+                    })()
                   )}
 
                   {/* Issue #17 I: proposal-linked evidence with reviewer citation selection. */}

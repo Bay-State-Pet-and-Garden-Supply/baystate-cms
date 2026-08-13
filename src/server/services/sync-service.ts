@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { parseProductsXml, type ParsedProductList } from '../../shopsite/product-parser';
 import { normalizeProduct } from '../../shopsite/product-normalizer';
 import { sanitizeXml } from '../../shopsite/xml-sanitizer';
@@ -7,8 +6,14 @@ import { skuToProductFilePath } from '../../git/product-file-path';
 import { hashJson } from '../../git/deterministic-json';
 import { createSyncJob, completeSyncJob, addSyncJobEvent } from '../../db/repositories/sync-job-repo';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
-import { clearRegistry, listRegistry, upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
 import { indexProductPageAssignments } from '../../db/repositories/page-repo';
+import { bootstrapSyncRegistry } from './field-metadata-service';
+import { upsertMappingValidityFinding } from '../../db/repositories/mapping-validity-repo';
+import {
+  loadRuntimeConfigAuthority,
+  createRuntimeActivationContext,
+  type RuntimeConfigAuthority,
+} from '../../classification/config-loader';
 import { updateBootstrapStatus } from '../../db/repositories/workspace-repo';
 import { GitClient } from '../../git/git-client';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
@@ -23,6 +28,42 @@ interface BootstrapResult {
   commitHash?: string;
   errors: string[];
   warnings: string[];
+}
+
+/**
+ * D4 (issue #31 commit 3): mapping-validity findings.
+ *
+ * After the registry merge, compare the incoming xmlField set against the
+ * active bundle's attributeMappings and record one finding per mapped field:
+ * `field_present = 1` when the Catalog Field appeared in the pull, `0` when it
+ * did not. Sync writes findings ONLY — it never writes `isStale` on
+ * attributeMappings (isStale is mapping-authority state). A future canonical
+ * classification-config reconciliation operation reads these findings and
+ * writes isStale through the mapping-editor/activation path.
+ */
+function emitMappingValidityFindings(workspace: Workspace, entries: Array<Omit<FieldRegistryEntry, 'id'>>): void {
+  let authority: RuntimeConfigAuthority;
+  try {
+    authority = loadRuntimeConfigAuthority(
+      workspace.workspacePath,
+      createRuntimeActivationContext(workspace.workspacePath, workspace.id),
+    );
+  } catch {
+    // No active classification configuration yet — there are no mappings to
+    // attest, so there is nothing to compare against.
+    return;
+  }
+  const mappings = authority.kind === 'v2' ? authority.bundle.attributeMappings : authority.config.attributeMappings;
+  const incomingFields = new Set(entries.map(entry => entry.xmlField));
+  const detectedAt = new Date().toISOString();
+  for (const mapping of mappings) {
+    upsertMappingValidityFinding({
+      workspaceId: workspace.id,
+      catalogField: mapping.catalogField,
+      fieldPresent: incomingFields.has(mapping.catalogField) ? 1 : 0,
+      detectedAt,
+    });
+  }
 }
 
 /**
@@ -103,35 +144,27 @@ export function bootstrapFromXml(
       return true;
     });
 
-    // Preserve curated ShopSite-side field names (e.g. "Facet - Category")
-    // across a fresh pull: the exporter cannot carry the store's Extra Fields
-    // configuration, so ProductFieldN entries arrive with bare tag labels
-    // ("ProductField24"). A previously curated label wins over that default.
-    const existingLabels = new Map(
-      listRegistry(workspaceId).map(entry => [entry.xmlField, entry.label] as const),
-    );
-    const resolvedLabel = (entry: { xmlField: string; label: string }): string =>
-      entry.label === entry.xmlField
-        ? existingLabels.get(entry.xmlField) ?? entry.label
-        : entry.label;
-
     // Write product files
     for (const product of products) {
       writeProductFile(workspacePath, product);
     }
 
-    // Write store configs
-    writeStoreConfig(workspacePath, 'field-registry.json', {
-      schemaVersion: 1,
-      entries: uniqueRegistry.map(e => ({
-        ...e,
-        label: resolvedLabel(e),
-        id: randomUUID(),
-        createdAt: now,
-        updatedAt: now,
-      })),
-    });
+    // Field registry: D2 property-level merge through the canonical
+    // field-metadata service. Curated metadata (per curated_fields_json)
+    // survives the pull, sampleValuesJson is refreshed from the observation,
+    // fields absent from the pull are kept (no clearRegistry), and the R2
+    // attestation is rewritten from R1.
+    bootstrapSyncRegistry({ id: workspaceId, workspacePath }, uniqueRegistry);
 
+    // D4: mapping-validity findings (findings only — never isStale). Best
+    // effort: a failure here must not fail the bootstrap.
+    try {
+      emitMappingValidityFindings(workspace, uniqueRegistry);
+    } catch (err) {
+      console.warn('[SyncService] mapping-validity findings emission failed (non-fatal):', err);
+    }
+
+    // Write store configs
     writeStoreConfig(workspacePath, 'manifest.json', {
       workspaceName: workspace.name,
       workspaceId,
@@ -142,29 +175,9 @@ export function bootstrapFromXml(
       baselineCommit: null,
     });
 
-    // Seed product index, field registry, and product page assignments in SQLite
-    clearRegistry(workspaceId);
+    // Seed product index and product page assignments in SQLite
     getDb().run('DELETE FROM product_index');
     getDb().run('DELETE FROM product_pages');
-
-    for (const entry of uniqueRegistry) {
-      if (entry.workspaceId === workspaceId) {
-        upsertRegistryEntry({
-          id: randomUUID(),
-          workspaceId: entry.workspaceId,
-          xmlField: entry.xmlField,
-          label: resolvedLabel(entry),
-          kind: entry.kind,
-          dataType: entry.dataType,
-          editable: entry.editable,
-          required: entry.required,
-          uiGroup: entry.uiGroup,
-          sampleValuesJson: entry.sampleValuesJson,
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-    }
 
     for (const product of products) {
       const productHash = hashJson(product);

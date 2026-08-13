@@ -1,6 +1,7 @@
 import { getDb } from '../db/connection';
 import { getRuntimeSnapshotByHash } from './runtime-snapshot';
 import { isUniversalAttribute } from './applicability-evaluator';
+import { CohortSemanticValidationSchema } from '../shared/schemas/onboarding';
 
 export type ReviewCompletionGateResult =
   | { ok: true; proposalCount: number }
@@ -82,7 +83,7 @@ export function validateReviewCompletionGate(
 ): ReviewCompletionGateResult {
   const db = getDb();
   const run = db.query(
-    `SELECT status, workspace_id, onboarding_item_id, product_sku, config_snapshot_hash
+    `SELECT status, workspace_id, onboarding_item_id, product_sku, config_snapshot_hash, cohort_run_id
      FROM classification_runs
      WHERE id = ?`,
   ).get(input.activeRunId) as {
@@ -91,6 +92,7 @@ export function validateReviewCompletionGate(
     onboarding_item_id: string | null;
     product_sku: string;
     config_snapshot_hash: string | null;
+    cohort_run_id: string | null;
   } | undefined;
 
   if (!run) {
@@ -115,6 +117,178 @@ export function validateReviewCompletionGate(
       code: 'run_not_completed',
       reason: `Classification run has status "${run.status}". Only completed runs can be reviewed.`,
     };
+  }
+
+  // PR9 C3 (issue #30, DECISION-C) + review round 2 (R2-A): the cohort
+  // SEMANTIC validation gate. Two distinct paths:
+  //
+  // 1. ACTIVE COHORT CHILD (`cohort_run_id` non-null) — STRICT gate. A child
+  //    can be reviewed ONLY when (b) the committed projection references
+  //    THIS child run, (c) the parent run exists in the same workspace, (d)
+  //    the parent is NOT superseded (a superseded parent's children are
+  //    historical — never reviewable), (e) the parent is in a terminal
+  //    reviewable state (completed / completed_with_abstentions /
+  //    completed_with_member_failures — a running/freezing parent means the
+  //    post-loop Brand validation has not finished, so the child is never
+  //    reviewable while the parent is in flight), and (f/g) the committed
+  //    `semanticValidation` parses against the EXACT shared schema and is
+  //    `passed` (blocked → refuse with the first finding; MISSING or
+  //    malformed → fail closed, never review-ready — the surface helper's
+  //    documented contract treats missing/malformed as corruption).
+  //
+  // 2. LEGACY (`cohort_run_id` null) — EXACTLY today's behavior: an absent
+  //    semanticValidation key proceeds, a `blocked` status refuses, and
+  //    corrupt curation JSON fails closed (byte-identical).
+  if (run.cohort_run_id === null) {
+    // ── Legacy path (byte-identical pre-R2 behavior) ──
+    {
+      const curationRow = db.query(
+        'SELECT curation_data_json FROM onboarding_items WHERE id = ?',
+      ).get(input.onboardingItemId) as { curation_data_json: string | null } | undefined;
+      if (curationRow?.curation_data_json) {
+        let parsedCuration: unknown;
+        try {
+          parsedCuration = JSON.parse(String(curationRow.curation_data_json));
+        } catch {
+          return {
+            ok: false,
+            code: 'semantic_validation_blocked',
+            reason: 'Curation data is corrupt; the item cannot be review-ready.',
+          };
+        }
+        const semanticValidation =
+          parsedCuration && typeof parsedCuration === 'object'
+            ? (parsedCuration as Record<string, unknown>).semanticValidation
+            : undefined;
+        if (
+          semanticValidation &&
+          typeof semanticValidation === 'object' &&
+          (semanticValidation as { status?: unknown }).status === 'blocked'
+        ) {
+          const findings = (semanticValidation as { findings?: Array<{ message?: unknown }> }).findings;
+          const firstMessage =
+            Array.isArray(findings) && findings.length > 0 && typeof findings[0]?.message === 'string'
+              ? findings[0].message
+              : 'A hard cohort semantic validation finding blocks this item.';
+          return {
+            ok: false,
+            code: 'semantic_validation_blocked',
+            reason: firstMessage,
+          };
+        }
+      }
+    }
+  } else {
+    // ── Active cohort child: strict R2-A gate ──
+
+    // (b) The committed projection must reference THIS child run.
+    const curationRow = db.query(
+      'SELECT curation_data_json FROM onboarding_items WHERE id = ?',
+    ).get(input.onboardingItemId) as { curation_data_json: string | null } | undefined;
+    let parsedCuration: Record<string, unknown> | null = null;
+    if (curationRow?.curation_data_json) {
+      try {
+        const parsed = JSON.parse(String(curationRow.curation_data_json));
+        if (parsed && typeof parsed === 'object') parsedCuration = parsed as Record<string, unknown>;
+      } catch {
+        return {
+          ok: false,
+          code: 'semantic_validation_blocked',
+          reason: 'Curation data is corrupt; the committed cohort semantic validation payload cannot be read.',
+        };
+      }
+    }
+    const committedRunId =
+      typeof parsedCuration?.classificationRunId === 'string' ? parsedCuration.classificationRunId : null;
+    if (committedRunId !== input.activeRunId) {
+      return {
+        ok: false,
+        code: 'semantic_validation_blocked',
+        reason:
+          committedRunId === null
+            ? 'Committed curation data carries no classification run reference; the cohort child projection is unavailable.'
+            : `Committed curation data references classification run ${committedRunId}, not this run ` +
+              `${input.activeRunId}; the cohort child projection is inconsistent.`,
+      };
+    }
+
+    // (c) The parent run must exist and belong to the same workspace.
+    const parentRun = db.query(
+      'SELECT id, status, workspace_id FROM classification_cohort_runs WHERE id = ?',
+    ).get(run.cohort_run_id) as { id: string; status: string; workspace_id: string } | undefined;
+    if (!parentRun) {
+      return {
+        ok: false,
+        code: 'parent_not_found',
+        reason: `Cohort parent run ${run.cohort_run_id} not found.`,
+      };
+    }
+    if (parentRun.workspace_id !== input.workspaceId) {
+      return {
+        ok: false,
+        code: 'workspace_mismatch',
+        reason: `Cohort parent run ${parentRun.id} belongs to a different workspace.`,
+      };
+    }
+
+    // (d) A superseded parent's completed children are historical — never
+    // reviewable (the parent's outputs are no longer the live revision).
+    if (parentRun.status === 'superseded') {
+      return {
+        ok: false,
+        code: 'parent_superseded',
+        reason:
+          `Cohort parent run ${parentRun.id} was superseded; its completed children are historical ` +
+          'and cannot be reviewed.',
+      };
+    }
+
+    // (e) A running/freezing parent is in flight (post-loop Brand validation
+    // happens AFTER member completion) — a child is never reviewable until
+    // the parent reaches a terminal reviewable state.
+    const PARENT_REVIEWABLE_STATUSES = new Set([
+      'completed',
+      'completed_with_abstentions',
+      'completed_with_member_failures',
+    ]);
+    if (!PARENT_REVIEWABLE_STATUSES.has(parentRun.status)) {
+      return {
+        ok: false,
+        code: 'parent_not_completed',
+        reason:
+          `Cohort parent run ${parentRun.id} has status "${parentRun.status}"; a child cannot be ` +
+          'reviewed while its parent is in flight.',
+      };
+    }
+
+    // (f/g) The committed semanticValidation must parse against the EXACT
+    // shared schema; missing or malformed data fails closed (never
+    // review-ready — corruption, not a pass-through).
+    const semanticValidation = parsedCuration?.semanticValidation;
+    if (semanticValidation === undefined || semanticValidation === null) {
+      return {
+        ok: false,
+        code: 'semantic_validation_blocked',
+        reason: 'Committed cohort semantic validation payload is missing; the item cannot be review-ready.',
+      };
+    }
+    const parsedSemantic = CohortSemanticValidationSchema.safeParse(semanticValidation);
+    if (!parsedSemantic.success) {
+      return {
+        ok: false,
+        code: 'semantic_validation_blocked',
+        reason: 'Committed cohort semantic validation payload is malformed; the item cannot be review-ready.',
+      };
+    }
+    if (parsedSemantic.data.status === 'blocked') {
+      const firstMessage =
+        parsedSemantic.data.findings.length > 0 ? parsedSemantic.data.findings[0].message : undefined;
+      return {
+        ok: false,
+        code: 'semantic_validation_blocked',
+        reason: firstMessage ?? 'A hard cohort semantic validation finding blocks this item.',
+      };
+    }
   }
 
   const proposals = db.query(

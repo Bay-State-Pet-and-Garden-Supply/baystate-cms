@@ -131,4 +131,71 @@ describe('catalog evidence scan', () => {
     expect(evidence.pages).toEqual([]);
     expect(evidence.fieldRegistry.entryCount).toBe(0);
   });
+
+  it('C8: the evidence hash derives from the canonical xmlField projection, not raw file bytes', async () => {
+    const root = tempWorkspace();
+    writeProduct(root, 'a.json', {
+      sku: 'SKU-A',
+      customFields: { ProductField16: 'Kong', ProductField24: 'Dog Food' },
+    });
+    writeProduct(root, 'b.json', {
+      sku: 'SKU-B',
+      customFields: { ProductField16: 'Blue', ProductField24: 'Cat Food' },
+    });
+
+    // Baseline: an incidental registry shape (labels, formatting, extra
+    // display metadata, extra keys, indentation).
+    fs.writeFileSync(
+      path.join(root, 'store', 'field-registry.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        entries: [
+          { xmlField: 'ProductField16', label: 'Brand', kind: 'custom' },
+          { xmlField: 'ProductField24', label: 'Department' },
+        ],
+      }, null, 4),
+      'utf-8',
+    );
+    const baseline = await scanCatalogEvidence(root);
+
+    // Same xmlField set, completely different labels/formatting/key order and
+    // a new curatedFields entry — the evidence hash must be unchanged (C8:
+    // incidental JSON formatting / labels / curatedFieldsJson never enter it).
+    fs.writeFileSync(
+      path.join(root, 'store', 'field-registry.json'),
+      JSON.stringify({
+        entries: [
+          { curatedFieldsJson: '["label"]', uiGroup: 'Custom Fields', label: 'Renamed Brand Label', xmlField: 'ProductField16' },
+          { xmlField: 'ProductField24', label: 'Department Renamed' },
+        ],
+      }, null, 2) + '\n',
+      'utf-8',
+    );
+    const cosmetic = await scanCatalogEvidence(root);
+    expect(cosmetic.sourceTreeHash).toBe(baseline.sourceTreeHash);
+    expect(renderCatalogEvidence(cosmetic)).toBe(renderCatalogEvidence(baseline));
+
+    // Adding a Catalog Field changes the projection hash (set membership).
+    fs.writeFileSync(
+      path.join(root, 'store', 'field-registry.json'),
+      JSON.stringify({ entries: [
+        { xmlField: 'ProductField16', label: 'Brand' },
+        { xmlField: 'ProductField24', label: 'Department' },
+        { xmlField: 'ProductField25', label: 'New Field' },
+      ] }),
+      'utf-8',
+    );
+    const added = await scanCatalogEvidence(root);
+    expect(added.sourceTreeHash).not.toBe(baseline.sourceTreeHash);
+
+    // Removing a field changes the projection hash again.
+    fs.writeFileSync(
+      path.join(root, 'store', 'field-registry.json'),
+      JSON.stringify({ entries: [{ xmlField: 'ProductField16', label: 'Brand' }] }),
+      'utf-8',
+    );
+    const removed = await scanCatalogEvidence(root);
+    expect(removed.sourceTreeHash).not.toBe(baseline.sourceTreeHash);
+    expect(removed.sourceTreeHash).not.toBe(added.sourceTreeHash);
+  });
 });

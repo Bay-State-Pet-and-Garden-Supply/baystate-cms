@@ -213,7 +213,9 @@ describe('field mapping editor (active v2 bundle)', () => {
     try {
       applyFieldMappingEdits(root, workspaceId, [
         { catalogField: 'ProductField16', attributeId: 'brand' }, // already mapped to 16 — no-op
-        { catalogField: 'ProductField25', attributeId: 'brand' }, // second field for brand
+        // ProductField31 is unoccupied (no D3 collision), so the second field
+        // for brand triggers the one-attribute-one-field rule.
+        { catalogField: 'ProductField31', attributeId: 'brand' }, // second field for brand
       ], { gitEnabled: false });
     } catch (error) {
       expect((error as FieldMappingEditError).code).toBe('attribute_already_mapped');
@@ -222,14 +224,29 @@ describe('field mapping editor (active v2 bundle)', () => {
     throw new Error('expected attribute_already_mapped error');
   });
 
-  it('updates the field registry label and persists it to the DB', () => {
+  it('I3.1: a mapping-only edit leaves the field registry unchanged', () => {
+    const registryBefore = listRegistry(workspaceId);
+
     applyFieldMappingEdits(root, workspaceId, [
-      { catalogField: 'ProductField24', attributeId: 'category', label: 'Facet - Category (renamed)' },
+      { catalogField: 'ProductField24', attributeId: 'category' },
     ], { gitEnabled: false });
 
-    const registry = listRegistry(workspaceId);
-    const row = registry.find(entry => entry.xmlField === 'ProductField24');
-    expect(row?.label).toBe('Facet - Category (renamed)');
+    // The mapping editor no longer writes field metadata — the registry
+    // (including curated labels) is owned exclusively by the canonical
+    // field-metadata service.
+    expect(listRegistry(workspaceId)).toEqual(registryBefore);
+  });
+
+  it('I3.2: a label in the edit payload is rejected (no alternate label authority)', () => {
+    try {
+      applyFieldMappingEdits(root, workspaceId, [
+        { catalogField: 'ProductField24', attributeId: 'category', label: 'Should not apply' },
+      ] as never, { gitEnabled: false });
+    } catch (error) {
+      expect((error as FieldMappingEditError).code).toBe('invalid_edit');
+      return;
+    }
+    throw new Error('expected invalid_edit error for a label-bearing edit payload');
   });
 
   it('fails closed when the edited bundle cannot pass active validation', () => {
@@ -265,5 +282,53 @@ describe('field mapping editor (active v2 bundle)', () => {
       .query('SELECT value FROM app_meta WHERE key = ?')
       .get(`active_classification_config_hash:${workspaceId}`) as { value: string } | undefined;
     expect(stored?.value).toBe(bundle.manifest.bundleHash);
+  });
+
+  it('D3: rejects a remap onto a field occupied by a different attribute that is not unmapped in the batch, and writes nothing', () => {
+    // ProductField17 is held by species; brand is remapped onto it without
+    // unmapping species in the same batch — fail closed. This test performs
+    // its own caught throw and then asserts the bundle state is unchanged
+    // directly (bundleHash + mappings), so it never depends on the ordering
+    // or the throw of any other test.
+    const before = activeBundle();
+    expect(before.attributeMappings.find(m => m.attributeId === 'species')?.catalogField).toBe('ProductField17');
+    expect(before.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField16');
+    try {
+      applyFieldMappingEdits(root, workspaceId, [
+        { catalogField: 'ProductField17', attributeId: 'brand' },
+      ], { gitEnabled: false });
+    } catch (error) {
+      expect((error as FieldMappingEditError).code).toBe('collision');
+      expect((error as FieldMappingEditError).message).toContain('species');
+      expect((error as FieldMappingEditError).message).toContain('ProductField17');
+    }
+
+    // Nothing was written: mappings, bundleHash, and mappings.json are all
+    // byte-identical to the pre-edit state.
+    const after = activeBundle();
+    expect(after.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField16');
+    expect(after.attributeMappings.find(m => m.attributeId === 'species')?.catalogField).toBe('ProductField17');
+    expect(after.attributeMappings.some(m => m.attributeId === 'species')).toBe(true);
+    expect(after.manifest.bundleHash).toBe(before.manifest.bundleHash);
+    expect(after.manifest.fileVersions['mappings.json']).toBe(before.manifest.fileVersions['mappings.json']);
+  });
+
+  it('D3: allows the move when the destination occupant IS unmapped in the same batch', () => {
+    // Move brand from ProductField16 onto ProductField17, explicitly unmapping
+    // the occupant (species) in the same batch — the existing move semantics.
+    applyFieldMappingEdits(root, workspaceId, [
+      { catalogField: 'ProductField16', attributeId: null },
+      { catalogField: 'ProductField17', attributeId: null },
+      { catalogField: 'ProductField17', attributeId: 'brand' },
+    ], { gitEnabled: false });
+
+    const after = activeBundle();
+    expect(after.attributeMappings.find(m => m.attributeId === 'brand')?.catalogField).toBe('ProductField17');
+    expect(after.attributeMappings.some(m => m.attributeId === 'species')).toBe(false);
+    expect(after.attributeMappings.some(m => m.catalogField === 'ProductField16')).toBe(false);
+    // The displaced attribute's curation target is removed with its mapping;
+    // the moved attribute's target follows the new field.
+    expect(after.curationTargets.some(t => t.kind === 'product_field' && t.attributeId === 'species')).toBe(false);
+    expect(after.curationTargets.find(t => t.kind === 'product_field' && t.attributeId === 'brand')?.catalogField).toBe('ProductField17');
   });
 });

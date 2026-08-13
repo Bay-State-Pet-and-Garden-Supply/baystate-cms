@@ -8,6 +8,7 @@ const SCHEMA_PATH = path.resolve(import.meta.dirname, 'schema.sql');
 const ONBOARDING_MIGRATION_PATH = path.resolve(import.meta.dirname, 'onboarding-migration.sql');
 const CLASSIFICATION_MIGRATION_PATH = path.resolve(import.meta.dirname, 'classification-migration.sql');
 const STAGE_PIPELINE_MIGRATION_PATH = path.resolve(import.meta.dirname, 'stage-pipeline-migration.sql');
+const COHORT_MIGRATION_PATH = path.resolve(import.meta.dirname, 'cohort-migration.sql');
 
 export function runMigrations(): void {
   const db = getDb();
@@ -36,6 +37,45 @@ export function runMigrations(): void {
     const onboardingSql = fs.readFileSync(ONBOARDING_MIGRATION_PATH, 'utf-8');
     db.exec(onboardingSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_schema_version', '1');");
+  }
+
+  // Ensure field_registry has curated_fields_json column (issue #31 commit 1).
+  // Records which properties were curated by an operator through the canonical
+  // field-metadata service (e.g. ["label","uiGroup"]). Sync merges
+  // per-property and never clobbers curated metadata. NULL = never curated
+  // (sync defaults apply). Outside the version gate: new nullable column, safe
+  // for existing databases, PRAGMA table_info guarded for idempotency.
+  try {
+    const frCols = db.query('PRAGMA table_info(field_registry)').all() as Array<{ name: string }>;
+    if (frCols.length > 0 && !frCols.some(col => col.name === 'curated_fields_json')) {
+      db.exec('ALTER TABLE field_registry ADD COLUMN curated_fields_json TEXT;');
+      console.log('[Migrations] Added curated_fields_json column to field_registry.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add curated_fields_json column:', e);
+  }
+
+  // ── D4 (issue #31 commit 3): mapping-validity findings ───────────────────
+  //
+  // Sync (catalog pulls) records per-mapping Catalog Field presence here. The
+  // sync writer is intentionally limited to findings and NEVER writes isStale
+  // on attributeMappings — isStale is mapping-authority state. A future
+  // canonical classification-config reconciliation operation (mapping
+  // editor/activation path) reads these findings and writes isStale through
+  // the same authority path as every other mapping mutation. Outside the
+  // version gate: new table, safe for existing databases, idempotent.
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS mapping_validity_findings (
+        workspace_id TEXT NOT NULL,
+        catalog_field TEXT NOT NULL,
+        field_present INTEGER NOT NULL,
+        detected_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, catalog_field)
+      );
+    `);
+  } catch (e) {
+    console.error('[Migrations] Failed to create mapping_validity_findings table:', e);
   }
 
   // Ensure product_index has parent_sku and search columns (migration support for existing databases)
@@ -652,6 +692,376 @@ export function runMigrations(): void {
     const stagePipelineSql = fs.readFileSync(STAGE_PIPELINE_MIGRATION_PATH, 'utf-8');
     db.exec(stagePipelineSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('stage_pipeline_schema_version', '1');");
+  }
+
+  // Run cohort migration if not already applied (issue #30 PR1; candidate
+  // schema v4 = FINAL from issue #31 cleanup F3, plus PR3 M1 v5 run table and
+  // PR4 C1 v6 outcome/dependency columns). One-shot SQL file gated by an
+  // app_meta marker. cohort-migration.sql now carries the FINAL v7 shape (v4
+  // candidate tables + the v5 `classification_cohort_runs` parent run table
+  // with the PR4 C1 `product_type_outcome` column + the v6
+  // `classification_proposal_dependencies` table + the PR6 C1 v7
+  // `classification_cohort_outputs` table), so a FRESH install
+  // executes the SQL and writes marker '7' directly. Existing databases
+  // advance through the hops below: marker '1' runs the v1→v2 rebuild (CASCADE
+  // FK, v2-era wide CHECK) → writes '2', then the v2→v3 rebuild narrows the
+  // CHECK → writes '3', then the v3→v4 rebuild drops the execution-metadata
+  // columns → writes '4', then the v4→v5 hop execs the idempotent cohort SQL
+  // (creating classification_cohort_runs + indexes) → writes '5', then the
+  // v5→v6 hop execs the idempotent cohort SQL (creating
+  // classification_proposal_dependencies + indexes; the run table already
+  // exists so its CREATE TABLE is a no-op) → writes '6', then the v6→v7 hop
+  // execs the idempotent cohort SQL (creating classification_cohort_outputs +
+  // its index) → writes '7'; marker '2' runs the v2→v3, v3→v4, v4→v5, v5→v6
+  // and v6→v7 hops; marker '3' runs the v3→v4, v4→v5, v5→v6 and v6→v7 hops;
+  // marker '4' runs the v4→v5, v5→v6 and v6→v7 hops; marker '5' runs the
+  // v5→v6 and v6→v7 hops; marker '6' runs the v6→v7 hop; marker '7' skips
+  // everything. The PRAGMA-guarded
+  // `product_type_outcome` ALTER (pre-C1 '5' databases) lives OUTSIDE the
+  // gate below.
+  const cohortVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (!cohortVersion) {
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '7');");
+  }
+
+  // ── Curation cohorts v1 → v2: batch deletion must cascade ────────────────
+  //
+  // v1 created `curation_cohorts.batch_id` with a plain REFERENCES clause, so
+  // deleting an onboarding batch would leave orphaned cohort rows. SQLite
+  // cannot alter a foreign key in place, so existing v1 databases are rebuilt
+  // with the ON DELETE CASCADE FK — the same table-rebuild precedent as the
+  // classification_evidence CHECK expansion: PRAGMA foreign_keys OFF around
+  // the swap, create `_new`, copy, drop, rename, recreate indexes, then a
+  // `PRAGMA foreign_key_check` and restoring FK enforcement in `finally`.
+  // This block runs ONLY for a marker-'1' database and writes marker '2',
+  // which the v2→v3 hop below then consumes; fresh installs already carry
+  // marker '5'.
+  const cohortV1 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV1 && cohortV1.value === '1') {
+    console.log('[Migrations] Rebuilding curation_cohorts with ON DELETE CASCADE on batch_id (v1 → v2)...');
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE curation_cohorts_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','running','completed','failed','conflicted','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+          )
+        `);
+        db.exec('INSERT INTO curation_cohorts_new SELECT * FROM curation_cohorts');
+        db.exec('DROP TABLE curation_cohorts');
+        db.exec('ALTER TABLE curation_cohorts_new RENAME TO curation_cohorts');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohorts_batch ON curation_cohorts(batch_id, status)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohort_members_item ON curation_cohort_members(onboarding_item_id)');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_cohorts_active_group
+          ON curation_cohorts(batch_id, group_key, grouping_version) WHERE status != 'superseded'`);
+      })();
+    } finally {
+      // Always restore foreign key enforcement, even if the rebuild fails.
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+    const cohortFkViolations = db.query("PRAGMA foreign_key_check('curation_cohorts')").all();
+    if (cohortFkViolations.length > 0) {
+      console.warn(`[Migrations] ${cohortFkViolations.length} FK violations in curation_cohorts after v2 rebuild (pre-existing):`, cohortFkViolations.slice(0, 5));
+    }
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 2.');
+  }
+
+  // ── Curation cohorts v2 → v3: narrow the status CHECK (D7) ──────────────
+  //
+  // The cohort row is a candidate-family record only; execution/lifecycle
+  // states (`running`/`completed`/`failed`/`conflicted`) never belong on it
+  // (cohort RUN state is owned by the cohort run, PR3+). SQLite cannot alter a
+  // CHECK in place, so the table is rebuilt — same swap precedent as v1→v2:
+  // PRAGMA foreign_keys OFF around the swap, create `_new` with the narrowed
+  // CHECK, copy, drop, rename, recreate the 3 indexes, then `PRAGMA
+  // foreign_key_check` and restoring FK enforcement in `finally`. Legacy
+  // execution statuses found in existing data are deterministically mapped to
+  // `ready` (dropping the never-durable run state leaves the candidate family
+  // a stable candidate); the four candidate/superseded statuses are preserved
+  // verbatim. The v3 shape still carries `started_at`/`completed_at` (the
+  // v3→v4 hop drops them). Runs for marker-'2' databases (and marker-'1'
+  // databases that the hop above just advanced to '2'); marker '4' skips.
+  const cohortV2 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV2 && cohortV2.value === '2') {
+    console.log('[Migrations] Rebuilding curation_cohorts with the narrowed v3 status CHECK (v2 → v3)...');
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE curation_cohorts_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+          )
+        `);
+        db.exec(`
+          INSERT INTO curation_cohorts_new
+            (id, workspace_id, batch_id, group_key, group_label, grouping_version,
+             membership_hash, status, blocked_reason, created_at, updated_at,
+             started_at, completed_at, superseded_at)
+          SELECT
+            id, workspace_id, batch_id, group_key, group_label, grouping_version,
+            membership_hash,
+            CASE WHEN status IN ('running','completed','failed','conflicted') THEN 'ready' ELSE status END,
+            blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at
+          FROM curation_cohorts
+        `);
+        db.exec('DROP TABLE curation_cohorts');
+        db.exec('ALTER TABLE curation_cohorts_new RENAME TO curation_cohorts');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohorts_batch ON curation_cohorts(batch_id, status)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohort_members_item ON curation_cohort_members(onboarding_item_id)');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_cohorts_active_group
+          ON curation_cohorts(batch_id, group_key, grouping_version) WHERE status != 'superseded'`);
+      })();
+    } finally {
+      // Always restore foreign key enforcement, even if the rebuild fails.
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+    const cohortFkViolations = db.query("PRAGMA foreign_key_check('curation_cohorts')").all();
+    if (cohortFkViolations.length > 0) {
+      console.warn(`[Migrations] ${cohortFkViolations.length} FK violations in curation_cohorts after v3 rebuild (pre-existing):`, cohortFkViolations.slice(0, 5));
+    }
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '3') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 3.');
+  }
+
+  // ── Curation cohorts v3 → v4: drop execution metadata (issue #31 F3) ───
+  //
+  // v3 still carries `started_at`/`completed_at`; once `classification_cohort_runs`
+  // owns execution state, candidate cohorts must not hold a second authority
+  // for execution timestamps. SQLite cannot drop columns in place, so the
+  // table is rebuilt — same swap precedent as v1→v2/v2→v3: PRAGMA foreign_keys
+  // OFF around the swap, create `_new` WITHOUT the two columns, copy, drop,
+  // rename, recreate the 3 indexes, then `PRAGMA foreign_key_check` and
+  // restoring FK enforcement in `finally`. Existing values are simply dropped
+  // (they were never consumed as authority). Runs for marker-'3' databases
+  // (and marker-'1'/'2' databases advanced by the hops above); marker '4'
+  // skips.
+  const cohortV3 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV3 && cohortV3.value === '3') {
+    console.log('[Migrations] Rebuilding curation_cohorts without execution metadata columns (v3 → v4)...');
+    db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE curation_cohorts_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            superseded_at TEXT
+          )
+        `);
+        db.exec(`
+          INSERT INTO curation_cohorts_new
+            (id, workspace_id, batch_id, group_key, group_label, grouping_version,
+             membership_hash, status, blocked_reason, created_at, updated_at, superseded_at)
+          SELECT
+            id, workspace_id, batch_id, group_key, group_label, grouping_version,
+            membership_hash, status, blocked_reason, created_at, updated_at, superseded_at
+          FROM curation_cohorts
+        `);
+        db.exec('DROP TABLE curation_cohorts');
+        db.exec('ALTER TABLE curation_cohorts_new RENAME TO curation_cohorts');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohorts_batch ON curation_cohorts(batch_id, status)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_curation_cohort_members_item ON curation_cohort_members(onboarding_item_id)');
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_cohorts_active_group
+          ON curation_cohorts(batch_id, group_key, grouping_version) WHERE status != 'superseded'`);
+      })();
+    } finally {
+      // Always restore foreign key enforcement, even if the rebuild fails.
+      db.exec('PRAGMA foreign_keys = ON');
+    }
+    const cohortFkViolations = db.query("PRAGMA foreign_key_check('curation_cohorts')").all();
+    if (cohortFkViolations.length > 0) {
+      console.warn(`[Migrations] ${cohortFkViolations.length} FK violations in curation_cohorts after v4 rebuild (pre-existing):`, cohortFkViolations.slice(0, 5));
+    }
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '4') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 4.');
+  }
+
+  // ── Curation cohorts v4 → v5: classification_cohort_runs (issue #30 PR3 M1) ─
+  //
+  // v5 adds the parent cohort-run table `classification_cohort_runs` (execution
+  // lifecycle + claim lease) and its indexes to cohort-migration.sql. Purely
+  // additive — the file is the FINAL v5 shape, so the hop is `db.exec(cohortSql)`
+  // (idempotent via CREATE TABLE/INDEX IF NOT EXISTS) plus the marker bump,
+  // mirroring the fresh-install path. Runs for marker-'4' databases (and
+  // marker-'1'/'2'/'3' databases advanced by the hops above); marker '5' skips.
+  const cohortV4 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV4 && cohortV4.value === '4') {
+    console.log('[Migrations] Adding classification_cohort_runs (cohort schema v4 → v5)...');
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '5') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 5.');
+  }
+
+  // ── Curation cohorts v5 → v6: PR4 C1 outcome column + dependencies ──
+  //
+  // v6 is additive: `classification_proposal_dependencies` (+ 2 indexes) and
+  // the nullable `product_type_outcome` CHECK column on
+  // `classification_cohort_runs`. The cohort SQL file is the FINAL v6 shape,
+  // so the hop is `db.exec(cohortSql)` (idempotent — creates the dependency
+  // table and its indexes; the run-table CREATE is a no-op because the table
+  // already exists) plus the marker bump, mirroring the fresh-install path.
+  // The `product_type_outcome` COLUMN for a pre-C1 '5' database is added by
+  // the PRAGMA-guarded ALTER block OUTSIDE the gate below (SQLite cannot add
+  // the column via the idempotent CREATE TABLE IF NOT EXISTS). Runs for
+  // marker-'5' databases (and marker-'1'/'2'/'3'/'4' databases advanced by
+  // the hops above); marker '6' skips.
+  const cohortV5 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV5 && cohortV5.value === '5') {
+    console.log('[Migrations] Adding classification_proposal_dependencies + product_type_outcome (cohort schema v5 → v6)...');
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '6') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 6.');
+  }
+
+  // ── Curation cohorts v6 → v7: classification_cohort_outputs (issue #30 PR6 C1) ─
+  //
+  // v7 adds the durable cohort-output table `classification_cohort_outputs`
+  // (+ supporting index) to cohort-migration.sql. Purely additive — the file
+  // is the FINAL v7 shape, so the hop is `db.exec(cohortSql)` (idempotent via
+  // CREATE TABLE/INDEX IF NOT EXISTS) plus the marker bump, mirroring the
+  // fresh-install path. Runs for marker-'6' databases (and marker-'1'/'2'/
+  // '3'/'4'/'5' databases advanced by the hops above); marker '7' skips.
+  const cohortV6 = db.query('SELECT value FROM app_meta WHERE key = ?').get('curation_cohort_schema_version') as
+    | { value: string }
+    | undefined;
+  if (cohortV6 && cohortV6.value === '6') {
+    console.log('[Migrations] Adding classification_cohort_outputs (cohort schema v6 → v7)...');
+    const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+    db.exec(cohortSql);
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '7') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    console.log('[Migrations] curation_cohort_schema_version bumped to 7.');
+  }
+
+  // classification_runs.cohort_run_id (issue #30, PR3 M1) — child per-SKU runs
+  // link to their parent cohort run. ON DELETE SET NULL per the epic; plain FK
+  // (mirrors classification_runs.onboarding_item_id). PRAGMA-guarded and
+  // OUTSIDE the version gate so databases already at marker '5' still receive
+  // the column; placed after the cohort block so the FK target table
+  // (classification_cohort_runs) always exists first. Legacy rows keep NULL.
+  try {
+    const runCols = db.query('PRAGMA table_info(classification_runs)').all() as Array<{ name: string }>;
+    if (runCols.length > 0 && !runCols.some(col => col.name === 'cohort_run_id')) {
+      db.exec('ALTER TABLE classification_runs ADD COLUMN cohort_run_id TEXT REFERENCES classification_cohort_runs(id) ON DELETE SET NULL;');
+      console.log('[Migrations] Added classification_runs.cohort_run_id.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add cohort_run_id to classification_runs:', e);
+  }
+  // Supporting FK lookup index, outside the version gate (precedent
+  // idx_classification_runs_one_running_item, migrations.ts:1049-1056).
+  db.exec('CREATE INDEX IF NOT EXISTS idx_classification_runs_cohort_run_id ON classification_runs(cohort_run_id);');
+
+  // ── classification_cohort_snapshots + evidence_snapshot_id (issue #30 PR3 M2) ─
+  //
+  // M2 adds the content-addressed execution-evidence snapshot table and links
+  // each cohort run row to its persisted snapshot. Both are additive and run
+  // OUTSIDE the version gate: a marker-'5' database created before M2 (which
+  // already has classification_cohort_runs from the M1 file) still needs the
+  // snapshots table, and the fresh-install/version-gated path (cohort SQL
+  // file) already creates both — so this block is a no-op there. The table
+  // creation is idempotent (the cohort SQL file uses CREATE TABLE IF NOT
+  // EXISTS); the ALTER is PRAGMA-guarded. The run row must reference the
+  // persisted snapshot, so the snapshots table is guaranteed to exist first.
+  try {
+    const hasSnapshotsTable = db.query(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'classification_cohort_snapshots'",
+    ).get();
+    if (!hasSnapshotsTable) {
+      const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+      db.exec(cohortSql);
+      console.log('[Migrations] Added classification_cohort_snapshots (PR3 M2).');
+    }
+    const cohortRunCols = db.query('PRAGMA table_info(classification_cohort_runs)').all() as Array<{ name: string }>;
+    if (cohortRunCols.length > 0 && !cohortRunCols.some(col => col.name === 'evidence_snapshot_id')) {
+      db.exec('ALTER TABLE classification_cohort_runs ADD COLUMN evidence_snapshot_id TEXT REFERENCES classification_cohort_snapshots(id);');
+      console.log('[Migrations] Added classification_cohort_runs.evidence_snapshot_id.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add classification_cohort_snapshots / evidence_snapshot_id:', e);
+  }
+
+  // ── classification_proposal_dependencies + product_type_outcome (issue #30 PR4 C1) ─
+  //
+  // PR4 C1 adds the v6 dependency table and the nullable `product_type_outcome`
+  // CHECK column on classification_cohort_runs. Both are additive and run
+  // OUTSIDE the version gate: a pre-C1 marker-'5' database (created from the
+  // PR3 file before C1) still needs the column — the idempotent cohort SQL
+  // exec in the v5→v6 hop creates the dependency table + indexes but CANNOT
+  // add the column (CREATE TABLE IF NOT EXISTS is a no-op for the existing
+  // run table) — and the fresh-install/version-gated path (cohort SQL file)
+  // already creates both, so this block is a no-op there. Table creation is
+  // idempotent (cohort SQL file uses CREATE TABLE/INDEX IF NOT EXISTS); the
+  // column ALTER is PRAGMA-guarded (precedent: evidence_snapshot_id above).
+  // Existing rows keep NULL outcome — no backfill (historical runs predate
+  // execution types).
+  try {
+    const hasDependencyTable = db.query(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'classification_proposal_dependencies'",
+    ).get();
+    if (!hasDependencyTable) {
+      const cohortSql = fs.readFileSync(COHORT_MIGRATION_PATH, 'utf-8');
+      db.exec(cohortSql);
+      console.log('[Migrations] Added classification_proposal_dependencies (PR4 C1).');
+    }
+    const cohortRunColsV6 = db.query('PRAGMA table_info(classification_cohort_runs)').all() as Array<{ name: string }>;
+    if (cohortRunColsV6.length > 0 && !cohortRunColsV6.some(col => col.name === 'product_type_outcome')) {
+      db.exec("ALTER TABLE classification_cohort_runs ADD COLUMN product_type_outcome TEXT CHECK (product_type_outcome IS NULL OR product_type_outcome IN ('coherent','coherent_with_abstentions','conflicted','abstained'));");
+      console.log('[Migrations] Added classification_cohort_runs.product_type_outcome.');
+    }
+  } catch (e) {
+    console.error('[Migrations] Failed to add classification_proposal_dependencies / product_type_outcome:', e);
   }
   // ── Clean up product_draft_projection noise proposals ───────────────────
   //

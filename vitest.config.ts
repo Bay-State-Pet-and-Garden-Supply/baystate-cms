@@ -112,6 +112,38 @@ export default defineConfig({
       'src/tests/unit/pricing-and-telemetry.test.ts',
       'src/tests/unit/provider-and-model-registry.test.ts',
       'src/tests/unit/zero-deployment-rollback.test.ts',
+      // Issue #30 cohort curation (bun:sqlite DB tests)
+      'src/tests/unit/curation-cohort-repo.test.ts',
+      'src/tests/unit/curation-cohort-service.test.ts',
+      'src/tests/unit/cohort-freeze.test.ts',
+      'src/tests/unit/cohort-worker.test.ts',
+      'src/tests/unit/classification-cohort-run-repo.test.ts',
+      'src/tests/unit/cohort-v6-migration.test.ts',
+      // PR6 C1/C2/C4/C6 Bun-only suites (bun:test imports — vitest cannot collect them)
+      'src/tests/unit/cohort-output-repo.test.ts',
+      'src/tests/unit/cohort-title-hash.test.ts',
+      'src/tests/unit/cohort-v7-migration.test.ts',
+      'src/tests/unit/cohort-title-coordinator.test.ts',
+      'src/tests/unit/pr6-acceptance.test.ts',
+      // PR4 C3 pure resolver (bun:test imports — vitest cannot collect it)
+      'src/tests/unit/cohort-product-type-resolver.test.ts',
+      // PR5 effective-curation-type suites (bun:test imports — vitest cannot collect them)
+      'src/tests/unit/effective-curation-type.test.ts',
+      'src/tests/unit/effective-curation-stages.test.ts',
+      // PR8 draft-projection stage suite (bun:test imports — vitest cannot collect it)
+      'src/tests/unit/draft-projection.test.ts',
+      // PR8 synthesis-ordering guard suite (bun:test imports — vitest cannot collect it)
+      'src/tests/unit/synthesis-ordering-guard.test.ts',
+      // PR8 acceptance (bun:test imports — vitest cannot collect it)
+      'src/tests/unit/pr8-acceptance.test.ts',
+      // PR10 acceptance (bun:test imports — vitest cannot collect it; runs
+      // under bun test via the test:db third invocation group)
+      'src/tests/unit/pr10-acceptance.test.ts',
+      // PR11 acceptance (bun:test imports — vitest cannot collect it; runs
+      // under bun test via the test:db third invocation group)
+      'src/tests/unit/pr11-acceptance.test.ts',
+      // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
+      'src/tests/unit/catalog-evidence-freshness.test.ts',
     ],
   },
 });

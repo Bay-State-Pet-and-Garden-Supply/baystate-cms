@@ -161,7 +161,7 @@ export function CatalogClassificationPanel({ sku, onDraftCreated }: Props) {
           {readiness.capabilities.page.reason && (
             <div style={{ color: '#7c2d12', marginTop: 2 }}>Category Pages: {readiness.capabilities.page.reason}</div>
           )}
-          <a href="/?view=settings" style={{ color: '#9a3412', fontWeight: 600, marginTop: 6, display: 'inline-block' }}>
+          <a href="/?view=onboarding&settingsTab=curation" style={{ color: '#9a3412', fontWeight: 600, marginTop: 6, display: 'inline-block' }}>
             Open Curation Targets settings →
           </a>
         </div>

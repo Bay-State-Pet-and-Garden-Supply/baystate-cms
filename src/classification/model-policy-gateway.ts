@@ -30,6 +30,7 @@ export type ProtectedOperation =
   | 'attribute_ranking'
   | 'page_assignment'
   | 'cohort_page_assignment'
+  | 'cohort_page_assignment_parent'
   | 'title_consolidation'
   | 'cohort_title_consolidation'
   | 'distributor_copy_consolidation'
@@ -48,6 +49,7 @@ const PROTECTED_OPERATION_STAGE: Readonly<Record<ProtectedOperation, string | nu
   attribute_ranking: 'product_attribute_proposals',
   page_assignment: 'category_page_proposals',
   cohort_page_assignment: 'category_page_proposals',
+  cohort_page_assignment_parent: 'category_page_proposals',
   title_consolidation: 'name_consolidation',
   cohort_title_consolidation: 'name_consolidation',
   distributor_copy_consolidation: 'name_consolidation',

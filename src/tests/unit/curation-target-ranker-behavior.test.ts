@@ -24,6 +24,7 @@ vi.mock('../../db/repositories/classification-model-call-repo', () => ({
 }));
 
 import { llmRankOptions } from '../../classification/curation-target-ranker';
+import { HeartbeatLostError } from '../../classification/heartbeat-errors';
 
 const baseParams = {
   targetLabel: 'Flavor',
@@ -119,5 +120,58 @@ describe('curation target ranker response handling', () => {
     });
     expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
     expect(mocks.callLlmForTask).not.toHaveBeenCalled();
+  });
+
+  it('P1-1: a healthy assertHeld is invoked around the transport (before + after the await) and the call still succeeds', async () => {
+    const assertHeld = vi.fn();
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Salmon"],"confidence":0.7}', callId: 'c3', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions({ ...baseParams, assertHeld })).resolves.toEqual({
+      values: ['Salmon'],
+      confidence: 0.7,
+      modelCallIds: ['c3'],
+    });
+    // Exactly one pre-await + one post-await assertion (no retry).
+    expect(assertHeld).toHaveBeenCalledTimes(2);
+    expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+  });
+
+  it('P1-1: assertHeld runs BEFORE the no-policy terminal preflight row (a stale owner never writes it)', async () => {
+    const assertHeld = vi.fn();
+    const { targetLabel, options, selectionMode, evidenceText } = baseParams;
+    await expect(
+      llmRankOptions({ targetLabel, options, selectionMode, evidenceText, assertHeld }),
+    ).resolves.toBeNull();
+    expect(assertHeld).toHaveBeenCalledTimes(1);
+    expect(mocks.callLlmForTaskWithProvenance).not.toHaveBeenCalled();
+  });
+
+  it('P1-1: ownership lost mid-transport (post-await assertion throws) aborts with HeartbeatLostError — never an abstain, no retry', async () => {
+    let calls = 0;
+    const assertHeld = vi.fn(() => {
+      calls++;
+      if (calls > 1) throw new HeartbeatLostError('Claim ownership lost during a long-running operation (run r1 is no longer claimed by worker-a).');
+    });
+    mocks.callLlmForTaskWithProvenance.mockResolvedValueOnce(
+      { content: '{"values":["Chicken"],"confidence":0.8}', callId: 'c1', provider: 'openai', model: 'test-model', usage: { promptTokens: null, completionTokens: null, totalTokens: null } },
+    );
+
+    await expect(llmRankOptions({ ...baseParams, assertHeld })).rejects.toBeInstanceOf(HeartbeatLostError);
+    // The pre-await assertion passed, the post-await one rejected — and the
+    // ownership-loss exception was NOT swallowed into a null/abstain result.
+    expect(calls).toBe(2);
+    expect(mocks.callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+  });
+
+  it('P1-1: ownership lost BEFORE the transport (pre-await assertion throws) aborts with HeartbeatLostError and never starts a transport', async () => {
+    const assertHeld = vi.fn(() => {
+      throw new HeartbeatLostError('Claim ownership already lost at operation start (run r1 is no longer claimed by worker-a).');
+    });
+
+    await expect(llmRankOptions({ ...baseParams, assertHeld })).rejects.toBeInstanceOf(HeartbeatLostError);
+    expect(assertHeld).toHaveBeenCalledTimes(1);
+    expect(mocks.callLlmForTaskWithProvenance).not.toHaveBeenCalled();
   });
 });

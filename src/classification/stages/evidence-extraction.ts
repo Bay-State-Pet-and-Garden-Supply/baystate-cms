@@ -1,10 +1,163 @@
 import type { StageDefinition, StageContext, StageInput, StageResult } from '../types';
 import { getDb } from '../../db/connection';
-import { extractProductEvidence } from '../product-evidence-extractor';
+import { extractProductEvidence, packagingOcrDataToEvidence } from '../product-evidence-extractor';
 import type { NormalizedEvidenceInput, EvidenceInputField } from '../product-evidence-extractor';
+import { resolveBrand } from '../brand-resolution';
+import { CanonicalBrandEvidenceValueSchema } from '../../shared/schemas/classification';
+import { hashCanonicalJson } from '../../shared/stable-id';
+import { computeOcrExecutionDigest } from '../runtime-snapshot';
+import type { ExecutionEvidenceProjectionMemberV1 } from '../../shared/schemas/cohorts';
+import type { ClassificationEvidence } from '../../shared/types';
 import * as crypto from 'node:crypto';
 
 const now = () => new Date().toISOString();
+
+/**
+ * Prepared-cohort (frozen) evidence extraction (issue #30 PR3 M2, amendment 4).
+ *
+ * When `StageContext` carries the member's frozen execution-evidence
+ * projection (`cohortFrozenEvidence`), this stage builds evidence ONLY from
+ * the projection's `spreadsheetIdentity` + `extraction` fields — it must NOT
+ * query `onboarding_items` for semantic evidence, and it materializes
+ * `classification_evidence` from the FROZEN stored packaging OCR via
+ * `packagingOcrDataToEvidence` WITHOUT a model call. The OCR is trusted only
+ * when its recorded `ocrInputHash` still matches the projection's own input
+ * set (source/image set the attempt was started against) — a mismatch means
+ * the stored OCR belongs to different inputs and is never materialized.
+ */
+function executeFrozenEvidenceExtraction(
+  input: StageInput,
+  context: StageContext,
+  frozen: ExecutionEvidenceProjectionMemberV1,
+): StageResult {
+  const evidence: ClassificationEvidence[] = [];
+  const sku = input.sku;
+  const sourceUrl = frozen.sourceUrl;
+  const ext = frozen.extraction;
+  const identity = frozen.spreadsheetIdentity;
+
+  const push = (entry: Omit<ClassificationEvidence, 'id' | 'runId' | 'stageName' | 'productSku' | 'capturedAt'>): void => {
+    evidence.push({
+      ...entry,
+      id: crypto.randomUUID(),
+      runId: context.runId,
+      stageName: 'evidence_extraction',
+      productSku: sku,
+      capturedAt: now(),
+    } as ClassificationEvidence);
+  };
+
+  // ── Spreadsheet identity (frozen spreadsheet hints) ────────────────────
+  push({ attributeId: null, source: 'spreadsheet', reliability: 'medium', sourceUrl: null, sourceField: 'name', snippet: identity.name.slice(0, 300), value: identity.name, metadata: { provenance: 'spreadsheet_import' } });
+  if (identity.expectedName && identity.expectedName !== identity.name) {
+    push({ attributeId: null, source: 'spreadsheet', reliability: 'medium', sourceUrl: null, sourceField: 'expected_name', snippet: identity.expectedName.slice(0, 300), value: identity.expectedName, metadata: { provenance: 'spreadsheet_import', refinement: 'discovery_consolidation' } });
+  }
+  if (identity.brandHint) {
+    push({ attributeId: null, source: 'spreadsheet', reliability: 'medium', sourceUrl: null, sourceField: 'brand', snippet: identity.brandHint.slice(0, 300), value: identity.brandHint, metadata: { provenance: 'spreadsheet_import' } });
+  }
+
+  // ── Normalized extraction fields (official product page) ───────────────
+  const pageSource: ClassificationEvidence['source'] = 'official_product_page';
+  if (ext.title && ext.title.trim()) {
+    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'name', snippet: ext.title.slice(0, 300), value: ext.title, metadata: { provenance: 'official_product_page' } });
+  }
+  if (ext.brand && ext.brand.trim()) {
+    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'brand', snippet: ext.brand.slice(0, 300), value: ext.brand, metadata: { provenance: 'official_product_page' } });
+  }
+  if (ext.weight && ext.weight.trim()) {
+    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'weight', snippet: ext.weight.slice(0, 300), value: ext.weight, metadata: { provenance: 'official_product_page' } });
+  }
+  if (ext.description && ext.description.trim()) {
+    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'description', snippet: ext.description.slice(0, 500), value: ext.description, metadata: { provenance: 'official_product_page' } });
+  }
+  for (const bullet of ext.bulletPoints) {
+    if (!bullet || !bullet.trim()) continue;
+    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: 'bullet_point', snippet: String(bullet).slice(0, 300), value: String(bullet), metadata: { provenance: 'official_product_page' } });
+  }
+  if (ext.searchKeywords && ext.searchKeywords.trim()) {
+    push({ attributeId: null, source: pageSource, reliability: 'low', sourceUrl, sourceField: 'search_keywords', snippet: ext.searchKeywords.slice(0, 300), value: ext.searchKeywords, metadata: { provenance: 'product_data' } });
+  }
+  for (const [key, rawVal] of Object.entries(ext.customFields)) {
+    const value = String(rawVal ?? '').trim();
+    if (!value) continue;
+    push({ attributeId: null, source: pageSource, reliability: 'medium', sourceUrl, sourceField: key, snippet: value.slice(0, 300), value, metadata: { provenance: 'product_data' } });
+  }
+
+  // ── Canonical brand resolution from the FROZEN snapshot brands (parity
+  //    with the non-cohort path; never a DB read). ────────────────────────
+  const brandToResolve = ext.brand ?? identity.brandHint ?? null;
+  if (brandToResolve && context.snapshot) {
+    try {
+      const resolved = resolveBrand(brandToResolve, context.snapshot.brands);
+      if (resolved) {
+        const brandValue = CanonicalBrandEvidenceValueSchema.parse({
+          brandId: resolved.brandId,
+          brandName: resolved.brandName,
+          confidence: resolved.confidence,
+          matchedBy: resolved.matchedBy,
+        });
+        push({ attributeId: null, source: 'catalog_manager_guidance', reliability: 'high', sourceUrl: null, sourceField: 'resolved_brand', snippet: resolved.brandName.slice(0, 300), value: brandValue, metadata: { provenance: 'brand_resolution', matchedBy: resolved.matchedBy } });
+      }
+    } catch (err) {
+      console.warn(`[EvidenceExtraction] Frozen brand resolution failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // ── FROZEN packaging OCR materialization (NO model call) ────────────────
+  // The stored OCR is trusted only when its recorded ocrInputHash matches the
+  // projection's own input set (recomputed from frozen fields — never a live
+  // onboarding_items read) AND its execution-authority digest is non-null AND
+  // equals the member runtime snapshot's plan/rule digest (PR3 hardening C / R4
+  // fail-closed): a stored OCR executed under a DIFFERENT authority (model
+  // policy / local-VLM route) is never materialized even when the input hash
+  // matches — provenance always follows the authority that produced it.
+  const frozenOcr = ext.ocr;
+  const ocrInputHashMatches =
+    frozenOcr.packagingOcrData != null &&
+    hashCanonicalJson({
+      sourceUrl: frozen.sourceUrl,
+      extractionSourceUrl: frozen.extractionSourceUrl,
+      primaryImage: ext.primaryImage,
+      additionalImages: ext.additionalImages,
+    }) === frozenOcr.ocrInputHash;
+  const executionDigestMatches =
+    frozenOcr.ocrExecutionDigest != null &&
+    context.snapshot != null &&
+    computeOcrExecutionDigest(context.snapshot) === frozenOcr.ocrExecutionDigest;
+  if (frozenOcr.packagingOcrData && ocrInputHashMatches && executionDigestMatches) {
+    const modelCallIds = frozenOcr.packagingOcrData.metadata?.modelCallIds;
+    const visualEvidence = packagingOcrDataToEvidence(frozenOcr.packagingOcrData, {
+      runId: context.runId,
+      sku,
+      model: frozenOcr.outcome?.model ?? 'unknown',
+      ...(Array.isArray(modelCallIds) && modelCallIds.length > 0 ? { modelCallIds } : {}),
+    });
+    evidence.push(...visualEvidence);
+  }
+
+  if (evidence.length === 0) {
+    return {
+      status: 'abstained',
+      reason: 'No new evidence extracted from the frozen cohort projection.',
+      output: {
+        evidence: [],
+        proposals: [],
+        abstained: true,
+        metadata: { ocrOutcome: frozenOcr.outcome, frozenProjection: true },
+      },
+    };
+  }
+
+  return {
+    status: 'succeeded',
+    output: {
+      evidence,
+      proposals: [],
+      abstained: false,
+      metadata: { ocrOutcome: frozenOcr.outcome, frozenProjection: true },
+    },
+  };
+}
 
 /**
  * Evidence Extraction Stage
@@ -13,15 +166,24 @@ const now = () => new Date().toISOString();
  * Adapted to use the shared extractor from product-evidence-extractor.ts.
  *
  * Onboarding-specific behavior preserved:
- * - Reads from onboarding_items table
+ * - Reads from onboarding_items table (NON-cohort mode only)
  * - Uses 'spreadsheet' source for import fields
- * - Persists VLM/cloud OCR results back to extraction_data_json
+ * - Persists VLM/cloud OCR results back to extraction_data_json (NON-cohort
+ *   mode only)
+ *
+ * Prepared-cohort (frozen) mode (PR3 M2): when `context.cohortFrozenEvidence`
+ * is present the stage builds evidence ONLY from the frozen projection (see
+ * `executeFrozenEvidenceExtraction`) — no onboarding_items read, no model
+ * calls, no write-back.
  */
 export const evidenceExtractionStage: StageDefinition = {
   name: 'evidence_extraction',
   requires: [],
   evidenceFrom: [],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
+    if (context.cohortFrozenEvidence) {
+      return executeFrozenEvidenceExtraction(input, context, context.cohortFrozenEvidence);
+    }
     const db = getDb();
 
     // Read the onboarding item's extraction data

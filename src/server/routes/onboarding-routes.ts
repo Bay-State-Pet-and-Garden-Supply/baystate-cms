@@ -153,6 +153,8 @@ import { fetchAndParseSitemap } from '../../onboarding/sitemap-fetcher';
 import { listAllSitemapCaches, insertSitemapCache } from '../../db/repositories/sitemap-cache-repo';
 import { HTTP_EXTRACTION_HEADERS } from '../../onboarding/page-extractor';
 import { promoteItems } from '../../onboarding/draft-promoter';
+import { listCandidateCohortViews } from '../../onboarding/curation-cohort-service';
+import { CohortListResponseSchema } from '../../shared/schemas/cohorts';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
@@ -163,11 +165,18 @@ import {
   getValidatedOnboardingRun,
   recordDecision,
 } from '../../db/repositories/classification-run-repo';
-import { validateSiblingConsistency } from '../../classification/consistency-validator';
+import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../../classification/consistency-validator';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { submitProposalDecisions } from '../../classification/proposal-review-service';
 import { SubmitProposalDecisionsRequestSchema } from '../../shared/schemas/classification';
 import { getDb } from '../../db/connection';
+import { getCohortById } from '../../db/repositories/curation-cohort-repo';
+import {
+  getCurrentCohortRun,
+  rerunIdleCohortRevision,
+  CohortRerunBusyError,
+  CohortRerunStageConflictError,
+} from '../../db/repositories/classification-cohort-run-repo';
 
 const route = new Hono();
 
@@ -517,6 +526,115 @@ route.get('/onboarding/batches/:id/staged', (c) => {
 });
 
 /**
+ * GET /api/onboarding/batches/:id/cohorts
+ * Returns the batch's ACTIVE candidate curation cohorts (issue #30, PR2) with
+ * per-member extraction readiness and derived waiting state. Derived state
+ * only — no cohort execution exists yet (PR3+).
+ */
+route.get('/onboarding/batches/:id/cohorts', async (c) => {
+  const batchId = c.req.param('id');
+  const batch = findBatchById(batchId);
+  if (!batch) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
+  const payload = CohortListResponseSchema.parse({ cohorts: listCandidateCohortViews(batchId) });
+  return c.json(payload);
+});
+
+/**
+ * POST /api/onboarding/cohorts/:id/re-run
+ * Start a NEW cohort revision (issue #30, PR10 DECISION-C).
+ *
+ * Resolution semantics for a blocked review member: fix the underlying cause
+ * FIRST (member evidence, config, or a transient model issue) — the fresh
+ * revision then re-freezes from CURRENT extraction evidence, re-coordinates
+ * the family outputs, and re-validates every member. The gate is NEVER
+ * weakened: there is NO manual override anywhere; a still-conflicted member
+ * blocks again with fresh findings.
+ *
+ * Lifecycle: ONE cohort-atomic operation (`rerunIdleCohortRevision`) —
+ * validates EVERY cohort member is in review/curation (fail closed BEFORE any
+ * mutation), CAS-supersedes the current non-superseded parent run
+ * (idle-terminal supersede), terminalizes linked running children, and resets
+ * the EXACT `curation_cohort_members` to curation/pending with
+ * `curation_data_json` cleared — all in ONE transaction, so the claim slot
+ * opens ONLY when the member reset becomes visible (PR10 review R1: never
+ * batch-wide, never two transactions).
+ *
+ * Fail-closed guards:
+ * - Unknown cohort (or a cohort outside the active workspace) => 404.
+ * - No current non-superseded run (incl. an already-superseded parent) =>
+ *   400 `no_active_run`.
+ * - ACTIVELY HELD parent (`status IN ('freezing','running') AND claimed_by IS
+ *   NOT NULL`) => 400 `run_busy` with ZERO mutation — a reviewer-facing
+ *   re-run never yanks a live worker (the owner-guarded drift primitive is
+ *   the worker's own supersede path inside `processCohort`; this route never
+ *   calls it).
+ * - A cohort member outside review/curation (e.g. already in promotion) =>
+ *   400 `member_stage_conflict`, ZERO mutation (the re-run contract never
+ *   silently skips a member nor destroys downstream state).
+ * - The idle-supersede CAS failing (superseded concurrently) => 400
+ *   `run_busy`, zero mutation (the whole transaction rolled back).
+ *
+ * Legacy/shadow cohorts have no cohort runs at all => `no_active_run` (400).
+ */
+route.post('/onboarding/cohorts/:id/re-run', async (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const cohortId = c.req.param('id');
+  const cohort = getCohortById(cohortId);
+  if (!cohort || cohort.workspaceId !== workspace.id) {
+    return c.json({ error: 'Cohort not found' }, 404);
+  }
+
+  const currentRun = getCurrentCohortRun(cohortId);
+  if (!currentRun) {
+    return c.json({ error: 'No active cohort run to supersede.', code: 'no_active_run' }, 400);
+  }
+
+  // Fail-closed on actively-held runs: a reviewer re-run must never race an
+  // in-flight freeze/execution (zero mutation on this path).
+  const activelyHeld =
+    (currentRun.status === 'freezing' || currentRun.status === 'running') &&
+    currentRun.claimedBy !== null;
+  if (activelyHeld) {
+    return c.json({
+      error: `Cohort run ${currentRun.id} is actively ${currentRun.status}; wait for it to finish before starting a new revision.`,
+      code: 'run_busy',
+    }, 400);
+  }
+
+  const reason = 'New cohort revision requested by reviewer';
+  // ONE cohort-atomic operation: stage validation + parent CAS + child
+  // terminalization + EXACT-member reset in a single transaction (PR10 review
+  // R1). Any failure rolls back EVERYTHING — the parent is never superseded
+  // without the member reset becoming visible.
+  try {
+    rerunIdleCohortRevision(cohort.id, currentRun.id, reason);
+  } catch (err) {
+    if (err instanceof CohortRerunStageConflictError) {
+      return c.json({
+        error: err.message,
+        code: 'member_stage_conflict',
+        memberItemId: err.memberItemId,
+      }, 400);
+    }
+    if (err instanceof CohortRerunBusyError) {
+      return c.json({
+        error: err.message,
+        code: 'run_busy',
+      }, 400);
+    }
+    throw err;
+  }
+
+  return c.json({ superseded: true, cohortId });
+});
+
+/**
  * POST /api/onboarding/items/advance
  * Advances selected items to the next pipeline stage.
  * Body: { itemIds: string[] }
@@ -533,13 +651,48 @@ route.post('/onboarding/items/advance', async (c) => {
     return c.json({ error: 'itemIds array is required' }, 400);
   }
 
-  const result = advanceItemsToNextStage(itemIds);
+  // ── PR11 C3 advance-hole guard (issue #30, DECISION-B) ────────────────
+  // A PR9 blocked member is 'completed' in the review stage, so the raw
+  // advance would move it to promotion WITHOUT review-complete (the
+  // review-complete gate refuses it, the advance route never did). The
+  // promotion gate stays authoritative; this route-level guard is
+  // defense-in-depth: blocked members never even reach the promotion stage.
+  // The item stays in review with a deterministic reason; siblings advance.
+  const advanceable: string[] = [];
+  const refused: Array<{ itemId: string; reason: string }> = [];
+  for (const id of itemIds) {
+    const item = findItemById(id);
+    // Only a completed REVIEW item advances review → promotion — the only
+    // transition this guard covers (blocked members must still reach the
+    // Review drawer, so curation → review is never refused).
+    if (!item || item.stage !== 'review' || item.stageStatus !== 'completed') {
+      advanceable.push(id);
+      continue;
+    }
+    const semanticValidation = item.curationData?.semanticValidation;
+    if (
+      semanticValidation &&
+      typeof semanticValidation === 'object' &&
+      (semanticValidation as { status?: unknown }).status === 'blocked'
+    ) {
+      const findings = (semanticValidation as { findings?: Array<{ message?: unknown }> }).findings;
+      const firstMessage =
+        Array.isArray(findings) && findings.length > 0 && typeof findings[0]?.message === 'string'
+          ? findings[0].message
+          : 'A hard cohort semantic validation finding blocks this item.';
+      refused.push({ itemId: id, reason: `semantic_validation_blocked: ${firstMessage}` });
+      continue;
+    }
+    advanceable.push(id);
+  }
+
+  const result = advanceItemsToNextStage(advanceable);
 
   // Trigger worker to pick up newly pending items
   const worker = getWorker(workspace.id, workspace.workspacePath);
   worker.poll();
 
-  return c.json(result);
+  return c.json({ ...result, refused });
 });
 
 /**
@@ -580,7 +733,7 @@ route.post('/onboarding/items/reset-to-stage', async (c) => {
   if (!targetStage || typeof targetStage !== 'string') {
     return c.json({ error: 'targetStage string is required' }, 400);
   }
-  const validStages = ['discovery', 'extraction', 'curation', 'review', 'promotion'];
+  const validStages = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
   if (!validStages.includes(targetStage)) {
     return c.json({ error: `Invalid stage: ${targetStage}` }, 400);
   }
@@ -856,11 +1009,21 @@ route.get('/onboarding/items/:id', async (c) => {
   const extractionData = item.extractionData
     ?? (extraction ? JSON.parse(extraction.extraction_data_json) : null);
 
-  const consistencyWarnings = item.curationData
-    ? validateSiblingConsistency(item.batchId).filter(warning =>
-        Object.prototype.hasOwnProperty.call(warning.values, item.upc),
-      )
-    : [];
+  // PR9 C3 (issue #30, DECISION-C): an ACTIVE-cohort member's semantic
+  // validation findings surface INSTEAD of the legacy
+  // `validateSiblingConsistency` warnings; legacy/shadow keep the legacy
+  // surface byte-identical. PR9 review R1 (B6): the discriminated surface
+  // NEVER falls back to legacy live-regrouping once active membership is
+  // established — missing/malformed semantic data fails closed (blocked
+  // payload), not to the legacy warnings.
+  const semanticSurface = activeCohortSemanticFindingsForItem(item);
+  const consistencyWarnings = semanticSurface.mode === 'active'
+    ? []
+    : item.curationData
+      ? validateSiblingConsistency(item.batchId).filter(warning =>
+          Object.prototype.hasOwnProperty.call(warning.values, item.upc),
+        )
+      : [];
 
   const activeRunId = validatedItemRunId(item);
   const sanitizedCuration = item.curationData
@@ -891,6 +1054,7 @@ route.get('/onboarding/items/:id', async (c) => {
     extraction: extractionData,
     evidenceAttempts,
     consistencyWarnings,
+    semanticValidation: semanticSurface.mode === 'active' ? semanticSurface.semanticValidation : undefined,
   });
 });
 

@@ -6,8 +6,9 @@
  * delegate to, so stage files contain orchestration only — no duplication
  * of matching, ranking, or proposal construction logic.
  */
-import type { StageContext, StageInput } from './types';
+import type { StageContext, StageInput, CoordinatedPageMemberValue } from './types';
 import { type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
+import { CohortPageOutputSchema } from '../shared/schemas/cohorts';
 import { loadClassificationConfig } from './config-loader';
 import {
   resolveEnabledTargets,
@@ -138,13 +139,65 @@ export async function processProductFieldTarget(
 ): Promise<TargetProcessResult> {
   const { config: targetConfig, options: targetOptions, attribute } = target;
   const options2 = targetOptions;
+  const selectionMode = options.cardinality ?? (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
+  const snapshotHash = context.snapshot?.snapshotHash ?? null;
 
+  // ── Handle freeText and measured attributes (no controlled options required)
+  if (attribute?.valueMode === 'freeText' || attribute?.valueMode === 'measured') {
+    const attrId = targetConfig.attributeId ?? targetConfig.id;
+    const catalogField = targetConfig.catalogField ?? null;
+    const fieldPacket = buildEvidenceTargetPacket(input.evidence, {
+      attributeId: attrId,
+      sourceField: catalogField,
+      sourceFields: catalogField ? [catalogField] : null,
+      selectionMode,
+      aliases: attribute?.valueAliases ?? [],
+      isGroundingSupport: tokenGroundingSupport,
+    });
+    const text = fieldPacket.promptText;
+    if (!text || text.trim().length === 0) {
+      return { proposals: [], message: `No evidence text for "${targetConfig.label}".` };
+    }
+
+    if (attribute.valueMode === 'freeText') {
+      const extractedValue = (fieldPacket.supporting.find(e => typeof e.value === 'string' && (e.value as string).trim().length > 0)?.value as string) ?? text;
+      const proposal = buildFieldAssignmentProposal({
+        runId: context.runId,
+        sku: input.sku,
+        attributeId: targetConfig.attributeId ?? targetConfig.id,
+        value: extractedValue,
+        confidence: 0.85,
+        evidenceIds: fieldPacket.evidenceIds,
+        supportingEvidenceIds: fieldPacket.supportingEvidenceIds,
+        contradictingEvidenceIds: fieldPacket.contradictingEvidenceIds,
+        isMultiple: selectionMode === 'multiple',
+        snapshotHash,
+      });
+      return { proposals: [proposal], message: `"${targetConfig.label}": ${extractedValue} (free-text, 85%)` };
+    }
+
+    // valueMode === 'measured'
+    const rawVal = fieldPacket.supporting.find(e => e.value !== null && e.value !== undefined)?.value ?? text;
+    const valStr = String(rawVal).trim();
+    const proposal = buildFieldAssignmentProposal({
+      runId: context.runId,
+      sku: input.sku,
+      attributeId: targetConfig.attributeId ?? targetConfig.id,
+      value: valStr,
+      confidence: 0.85,
+      evidenceIds: fieldPacket.evidenceIds,
+      supportingEvidenceIds: fieldPacket.supportingEvidenceIds,
+      contradictingEvidenceIds: fieldPacket.contradictingEvidenceIds,
+      isMultiple: false,
+      snapshotHash,
+    });
+    return { proposals: [proposal], message: `"${targetConfig.label}": ${valStr} (measured, 85%)` };
+  }
+
+  // ── Controlled attributes path (requires options list)
   if (!options2 || options2.length === 0) {
     return { proposals: [], message: `No options available for "${targetConfig.label}".` };
   }
-
-  const selectionMode = options.cardinality ?? (targetConfig.selectionMode ?? 'single') as 'single' | 'multiple';
-  const snapshotHash = context.snapshot?.snapshotHash ?? null;
 
   // Brand assertions that disagreed in the shortcut pre-pass (visible conflict).
   let brandConflictEvidenceIds: string[] = [];
@@ -531,6 +584,132 @@ export async function processPageTarget(
   return {
     proposals,
     message: `${pageNames.join(', ')} (${assignmentSource}, ${(llmResult.pages[0].confidence * 100).toFixed(0)}%)`,
+  };
+}
+
+// ─── PR7 Materialized Page Processing (C5) ────────────────────────────────────
+
+/**
+ * PR7 C5 (issue #30): materialize the member's DURABLE parent page output
+ * into the existing `category_page` proposal shape. Active cohort mode ONLY —
+ * `context.coordinatedPages` (set by `ensureCohortPagesCoordinated` before the
+ * member loop) carries every member's stored `coordinated_page` result; the
+ * child stage NEVER calls the Page LLM and NEVER invents an assignment.
+ *
+ * - `assigned` → one `buildCategoryPageProposal` per STORED page
+ *   (`pageId`/`pageName`/`confidence` FROM THE STORED ROW, verified identity
+ *   only when the pageId is in the frozen verified snapshot records,
+ *   `evidenceIds` from the SAME deterministic restricted page-evidence packet
+ *   the legacy path builds — pure, no LLM — and `modelCallIds` = the stored
+ *   audited parent `model_call_id`);
+ * - `abstained` → `{proposals: [], message: <stored reason>}` (the stage
+ *   abstains — no LLM, no fallback invention);
+ * - a missing row for a member that should have one (no `pageCoordinationAbsent`
+ *   expected-empty marker), or a corrupt stored payload → THROW (PR8
+ *   DECISION-B: the member fails closed — pages NEVER invent an assignment;
+ *   PR7's deterministic abstain for these two cases is replaced by the
+ *   fail-closed member failure).
+ */
+export async function materializeCoordinatedPages(
+  _target: ResolvedTarget,
+  input: StageInput,
+  context: StageContext,
+): Promise<TargetProcessResult> {
+  const snapshotHash = context.snapshot?.snapshotHash ?? null;
+
+  // Look up the member's durable parent output. A missing row for a member
+  // that should have one is a parent-op contract violation. PR8 DECISION-B:
+  // unless the parent page op chose EXPECTED-EMPTY (pageCoordinationAbsent —
+  // the stage-level guard in `categoryPageProposalsStage` handles that case
+  // before delegating here), a missing row FAILS the member closed — PR7's
+  // deterministic abstain + warning is replaced by the fail-closed throw.
+  const stored = context.coordinatedPages?.get(input.sku) as
+    | CoordinatedPageMemberValue
+    | undefined;
+  if (!stored) {
+    if (context.pageCoordinationAbsent === true) {
+      return { proposals: [], message: 'missing parent page output' };
+    }
+    throw new Error(
+      `Member ${input.sku} (run ${context.runId}) has no parent page output row in active cohort mode (PR8 DECISION-B): ` +
+        'a missing durable page output fails the member closed — pages never invent an assignment.',
+    );
+  }
+
+  // PR8 DECISION-B: fail-closed parse — a corrupt stored payload never yields
+  // proposals; the member FAILS (PR7's deterministic abstain is replaced by
+  // the throw).
+  const parsed = CohortPageOutputSchema.safeParse(stored.output);
+  if (!parsed.success) {
+    throw new Error(
+      `Member ${input.sku} (run ${context.runId}) has a corrupt parent page output payload in active cohort mode (PR8 DECISION-B): ` +
+        'failing closed — pages never invent an assignment.',
+    );
+  }
+  const output = parsed.data;
+
+  // Durable parent abstention (policy denied / model unavailable / unsafe or
+  // invalid response): the stage abstains with the STORED reason. No LLM, no
+  // fallback invention.
+  if (output.status === 'abstained') {
+    return { proposals: [], message: output.reason };
+  }
+
+  // PR8 review R1 (BLOCKER 2c): an `assigned` row with an EMPTY page list can
+  // never be produced by any writer (the coordinator abstains instead of
+  // emitting assigned-empty) — a row carrying one is corrupt. The schema also
+  // rejects it, so this defensive throw is belt-and-suspenders: FAIL the
+  // member closed, never emit a partial no-page draft. Abstained rows remain
+  // complete results (handled above).
+  if (output.pages.length === 0) {
+    throw new Error(
+      `Member ${input.sku} (run ${context.runId}) has an assigned parent page output with no pages in active cohort mode ` +
+        '(PR8 review R1): failing closed — pages never invent an assignment.',
+    );
+  }
+
+  // ── Restricted page-evidence packet (the SAME deterministic packet the
+  // legacy path builds) — pure, no LLM. Only identity/species/type/category
+  // records enter; the reviewed species value (never first evidence) drives
+  // cross-species contradiction labeling.
+  const speciesValue = reviewedSpeciesValue(context);
+  const pagePacket = buildPageEvidencePacket(input.evidence, {
+    pageContextSourceFields: PAGE_CONTEXT_SOURCE_FIELDS,
+    pageContextAttributeIds: PAGE_CONTEXT_ATTRIBUTE_IDS,
+    sourceField: null,
+    speciesValue,
+  });
+
+  // Verified identity from the FROZEN verified snapshot records (never a
+  // mutable DB read) — the parent only passed verified pages, so every stored
+  // pageId is verified by construction.
+  const verifiedPageIdSet = new Set(
+    context.snapshot?.pages.state === 'verified'
+      ? context.snapshot.pages.records.map(record => record.pageId)
+      : [],
+  );
+  const modelCallIds = stored.modelCallId ? [stored.modelCallId] : undefined;
+  const proposals = output.pages.map(page =>
+    buildCategoryPageProposal({
+      runId: context.runId,
+      sku: input.sku,
+      pageId: page.pageId,
+      pageName: page.pageName,
+      confidence: page.confidence,
+      evidenceIds: pagePacket.evidenceIds,
+      ...(pagePacket.contradictingEvidenceIds.length
+        ? { contradictingEvidenceIds: pagePacket.contradictingEvidenceIds }
+        : {}),
+      verifiedPageIdentity: verifiedPageIdSet.has(page.pageId),
+      snapshotHash,
+      ...(modelCallIds?.length ? { modelCallIds } : {}),
+    }),
+  );
+
+  const pageNames = output.pages.map(page => page.pageName);
+  return {
+    proposals,
+    message: `${pageNames.join(', ')} (Cohort page assignment materialized from parent coordination (cohort LLM), ${(output.pages[0].confidence * 100).toFixed(0)}%)`,
   };
 }
 

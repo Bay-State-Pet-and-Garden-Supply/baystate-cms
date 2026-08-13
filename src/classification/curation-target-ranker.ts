@@ -23,6 +23,7 @@ import type { ModelCallContext } from './model-operation-registry';
 import { MODEL_CALL_STATUS } from './model-operation-registry';
 import { recordTerminalPreflight } from '../db/repositories/classification-model-call-repo';
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
+import { HeartbeatLostError } from './heartbeat-errors';
 
 export interface LlmRankOptionsParams {
   /** Human-readable label for the target kind (e.g. "product type", "flavor", "category page") */
@@ -52,6 +53,23 @@ export interface LlmRankOptionsParams {
   modelCall?: ModelCallContext | null;
   /** Runtime snapshot the call is bound to (plan compatibility). */
   snapshot?: RuntimeClassificationSnapshot | null;
+  /**
+   * Optional ownership assertion injected by the cohort freeze executor (PR4
+   * re-review fix, P1-1). When present, the ranker invokes it IMMEDIATELY
+   * BEFORE every durable terminal-preflight row and immediately BEFORE and
+   * AFTER every awaited transport call — a rejected assertion (the cohort
+   * run's claim was lost to a reclaiming sibling) throws
+   * `HeartbeatLostError` and the ranker aborts with NO further side effects
+   * (no preflight rows, no retry, no returned values). The seam is also
+   * threaded into the audited transport (`callLlmForTaskWithProvenance`,
+   * src/onboarding/llm-client.ts) via the options object, so the transport
+   * re-asserts ownership immediately before its `started` model-call row
+   * insert and before every terminal `classification_model_calls` update —
+   * a stale owner never begins new audit provenance and never terminalizes
+   * an in-flight row. Absent in legacy/non-cohort invocations — zero
+   * behavior change.
+   */
+  assertHeld?: () => void;
 }
 
 export interface LlmRankResult {
@@ -71,7 +89,7 @@ export interface LlmRankResult {
  * - The evidence text is too short (< 8 chars)
  */
 export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmRankResult | null> {
-  const { targetLabel, options, selectionMode, evidenceText, maxValues } = params;
+  const { targetLabel, options, selectionMode, evidenceText, maxValues, assertHeld } = params;
   const taskName = params.task ?? 'category_classification';
 
   if (options.length === 0 || evidenceText.trim().length < 8) return null;
@@ -87,6 +105,9 @@ export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmR
     // abstain, but still observable — a durable `unavailable` terminal row so
     // the attempted call never silently disappears from provenance.
     if (operation && params.modelPolicy === undefined) {
+      // Ownership assertion BEFORE the durable preflight row: a stale owner
+      // must not write a terminal model-call row after the claim moved.
+      assertHeld?.();
       recordTerminalPreflight(
         params.modelCall,
         '',
@@ -103,6 +124,9 @@ export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmR
     });
   } catch (err) {
     if (err instanceof ModelPolicyDeniedError) {
+      // Ownership assertion BEFORE the durable policy-denied row (a stale
+      // owner must not write it); the denial itself is then recorded.
+      assertHeld?.();
       recordTerminalPreflight(
         params.modelCall,
         params.modelPolicy?.policyDigest ?? '',
@@ -114,6 +138,9 @@ export async function llmRankOptions(params: LlmRankOptionsParams): Promise<LlmR
     throw err;
   }
   if (!llmConfig) {
+    // Ownership assertion BEFORE the durable `unavailable` row (a stale owner
+    // must not write it).
+    assertHeld?.();
     recordTerminalPreflight(
       params.modelCall,
       params.modelPolicy?.policyDigest ?? '',
@@ -141,6 +168,10 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     const auditedCall = params.modelCall
       ? { modelCall: params.modelCall, snapshot: params.snapshot }
       : {};
+    // Ownership assertion IMMEDIATELY BEFORE the awaited transport call: a
+    // stale owner must never START a new transport (no new side effects begin
+    // after ownership loss).
+    assertHeld?.();
     const response = await callLlmForTaskWithProvenance(
       taskName as any,
       prompt,
@@ -150,8 +181,15 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
         modelPolicy: params.modelPolicy,
         ...(operation ? { protectedOperation: operation } : {}),
         ...auditedCall,
+        // PR4 P1-1: thread the caller's ownership assertion INTO the audited
+        // transport so it re-asserts before its own durable audit writes.
+        assertHeld,
       },
     );
+    // Ownership assertion IMMEDIATELY AFTER the transport returns and BEFORE
+    // any further write/retry: a sibling reclaim mid-transport is caught
+    // here (the transport itself is deliberately untouched).
+    assertHeld?.();
 
     if (!response) return null;
 
@@ -171,6 +209,10 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
         const retryModelCall = params.modelCall
           ? { ...params.modelCall, attempt: retryAttempt }
           : undefined;
+        // Ownership assertion before the retry transport (no new side effect
+        // after ownership loss) and again after it returns (before the retry
+        // output is accepted).
+        assertHeld?.();
         const retryResponse = await callLlmForTaskWithProvenance(
           taskName as any,
           `The previous response was not valid JSON. Fix the JSON format:\n\n${response.content.slice(0, 1000)}\n\nReturn ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"confidence":0.0}. If none fit, return {"values":[],"confidence":0}. Do not invent options.`,
@@ -182,13 +224,19 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
             ...(retryModelCall && params.snapshot
               ? { modelCall: retryModelCall, snapshot: params.snapshot }
               : {}),
+            // PR4 P1-1: the retry transport re-asserts ownership before its
+            // own durable audit writes exactly like the primary call.
+            assertHeld,
           },
         );
+        assertHeld?.();
         if (retryResponse) {
           parsed = parseRankerResponse(retryResponse.content);
           if (retryResponse.callId) influencingCallIds.push(retryResponse.callId);
         }
-      } catch {
+      } catch (err) {
+        // Ownership loss during the retry is NEVER swallowed into an abstain.
+        if (err instanceof HeartbeatLostError) throw err;
         // Retry also failed - fall through to null return below
       }
     }
@@ -209,6 +257,10 @@ Return ONLY valid JSON in this exact shape: {"values":["exact allowed option"],"
     // any retry whose response was embedded in the accepted output).
     return { values, confidence, modelCallIds: influencingCallIds };
   } catch (err: any) {
+    // Ownership-loss exceptions must NOT be converted into an 'LLM unavailable
+    // -> abstain' outcome: a stale owner aborts with NO further side effects,
+    // and the cohort freeze propagates the HeartbeatLostError.
+    if (err instanceof HeartbeatLostError) throw err;
     console.warn(`[CurationTargetRanker] LLM ranking failed for "${targetLabel}": ${redactTransportText(err.message)}`);
     return null;
   }

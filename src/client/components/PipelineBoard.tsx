@@ -15,6 +15,7 @@ import {
   getClassificationReadiness,
   type CurationTargetsResponse,
   type ConsistencyWarning,
+  type SemanticValidationPayload,
 } from '../onboarding-api';
 import type {
   OnboardingItem,
@@ -58,6 +59,7 @@ import { CurationStagePanel } from './pipeline-drawer/CurationStagePanel';
 import { SourcingStagePanel } from './pipeline-drawer/SourcingStagePanel';
 import { SourcingIdentitySummary } from './pipeline-drawer/SourcingIdentitySummary';
 import { readinessViewFromReport } from '../classification-readiness-view';
+import { useCohortFamilyState, type CohortFamilyStateByItem } from '../hooks/useCohortFamilyState';
 
 const STAGES: PipelineStage[] = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
 
@@ -90,6 +92,31 @@ const STAGE_STATUS_STYLE: Record<StageStatus, { bg: string; text: string; icon: 
 
 function createDecisionActionToken(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Per-member family badge text/colors for the curation column (issue #30,
+ * PR2 + round-2 F7 + round-3 R2). Wording is stage-neutral and follows a
+ * fixed precedence: (1) this member itself failed → deterministic blocked
+ * text; (2) the family is blocked by a sibling failure → family-blocked;
+ * (3) this member's own extraction is still completing (it IS the blocker);
+ * (4) the member is waiting on N siblings; (5) the family is ready.
+ */
+function familyBadgeFor(familyState: CohortFamilyStateByItem[string]): { text: string; background: string; color: string } {
+  const { state, cohortState, waitingOnCount, readyCount, memberCount } = familyState;
+  if (state === 'blocked') {
+    return { text: 'This item failed — retry required', background: '#fee2e2', color: '#991b1b' };
+  }
+  if (cohortState === 'blocked') {
+    return { text: 'Family blocked — sibling retry required', background: '#fee2e2', color: '#991b1b' };
+  }
+  if (state === 'waiting' && waitingOnCount === 0) {
+    return { text: 'Your extraction is still completing', background: '#ffedd5', color: '#c2410c' };
+  }
+  if (waitingOnCount > 0) {
+    return { text: `Waiting for ${waitingOnCount} sibling${waitingOnCount === 1 ? '' : 's'}`, background: '#ffedd5', color: '#c2410c' };
+  }
+  return { text: `Family: Ready ${readyCount}/${memberCount}`, background: '#ecfdf5', color: '#047857' };
 }
 
 interface ItemSaveAction {
@@ -158,6 +185,10 @@ export function PipelineBoard({
     review: [],
     promotion: [],
   });
+
+  // Candidate family state for the curation-stage family indicator (issue #30, PR2).
+  const { byItem: cohortFamilyByItem, refresh: refreshCohortFamilyState } = useCohortFamilyState(batchId);
+
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -178,6 +209,10 @@ export function PipelineBoard({
   // proposal id; part of the queued decision action and exact retry equality.
   const [citationSelections, setCitationSelections] = useState<Record<string, string[]>>({});
   const [consistencyWarnings, setConsistencyWarnings] = useState<ConsistencyWarning[]>([]);
+  // PR10 (issue #30, DECISION-A): the first-class active-cohort semantic
+  // validation surface threaded from the hydrated item detail into the
+  // review drawer (null in legacy mode — the legacy warnings box stays).
+  const [semanticValidation, setSemanticValidation] = useState<SemanticValidationPayload | null>(null);
   const [curationTargetState, setCurationTargetState] = useState<CurationTargetsResponse | null>(null);
   const [manualUrlInput, setManualUrlInput] = useState('');
   const [manualImageUrl, setManualImageUrl] = useState('');
@@ -370,6 +405,7 @@ export function PipelineBoard({
 
     sse.addEventListener('item:status', async (e: MessageEvent) => {
       fetchStaged();
+      refreshCohortFamilyState();
       try {
         const event = JSON.parse(e.data);
         const itemId = typeof event?.itemId === 'string' ? event.itemId : null;
@@ -402,6 +438,7 @@ export function PipelineBoard({
         if (res.item?.curationData) setCurationFields(res.item.curationData);
         installCanonicalDecisionState(res.item);
         setConsistencyWarnings(res.consistencyWarnings ?? []);
+        setSemanticValidation(res.semanticValidation ?? null);
       } catch (err) {
         console.warn('Failed to process SSE item:status event:', err);
       }
@@ -409,12 +446,13 @@ export function PipelineBoard({
 
     sse.addEventListener('batch:progress', () => {
       fetchStaged();
+      refreshCohortFamilyState();
     });
 
     return () => {
       sse.close();
     };
-  }, [batchId, fetchStaged, loadStorePages, loadCurationTargets]);
+  }, [batchId, fetchStaged, loadStorePages, loadCurationTargets, refreshCohortFamilyState]);
 
 
 
@@ -504,9 +542,9 @@ export function PipelineBoard({
 
   const handleSendBackSelected = async () => {
     const selectedItems = getSelectedItems();
-    const eligibleItems = selectedItems.filter(item => item.stage !== 'discovery');
+    const eligibleItems = selectedItems.filter(item => item.stage !== 'sourcing');
     if (eligibleItems.length === 0) {
-      alert('Selected products in the Discovery stage cannot be sent back.');
+      alert('Selected products in the Sourcing stage cannot be sent back.');
       return;
     }
 
@@ -649,6 +687,7 @@ export function PipelineBoard({
     setSaveStatus('idle');
     setSaveError(null);
     setConsistencyWarnings([]);
+    setSemanticValidation(null);
     const site = cachedBrandSites.find(
       b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim(),
     );
@@ -675,6 +714,7 @@ export function PipelineBoard({
       setReviewSources(res.sources);
       setReviewEvidenceAttempts(res.evidenceAttempts ?? []);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
+      setSemanticValidation(res.semanticValidation ?? null);
       // Prefer extraction from the dedicated extractions table, then fall
       // back to extraction_data_json stored on the item itself so the
       // drawer shows data even when the extractions table row is missing.
@@ -733,6 +773,7 @@ export function PipelineBoard({
     setClassificationProposals([]);
     setClassificationEvidence([]);
     setConsistencyWarnings([]);
+    setSemanticValidation(null);
     setSaveStatus('idle');
     setSaveError(null);
     setPageSearchQuery('');
@@ -785,6 +826,7 @@ export function PipelineBoard({
       )) return;
       setReviewItem(res.item);
       setConsistencyWarnings(res.consistencyWarnings ?? []);
+      setSemanticValidation(res.semanticValidation ?? null);
       const extractionData = res.extraction ?? res.item?.extractionData ?? null;
       if (extractionData) {
         setReviewExtraction(extractionData);
@@ -831,18 +873,31 @@ export function PipelineBoard({
     }
   };
 
-  const fieldTargetForProposal = (proposal: ClassificationProposal): { target: CurationTargetConfig | null; values: string[]; label: string } => {
+  const fieldTargetForProposal = (proposal: ClassificationProposal): {
+    target: CurationTargetConfig | null;
+    values: string[];
+    label: string;
+    valueMode: 'controlled' | 'freeText' | 'measured' | null;
+    canonicalUnit: string | null;
+    cardinality: 'single' | 'multiple';
+  } => {
     const effectiveTargetId = getEffectiveProposalTargetId(proposal);
     if (proposal.proposalType !== 'field_assignment' || !curationTargetState) {
-      return { target: null, values: [], label: effectiveTargetId || 'Field' };
+      return { target: null, values: [], label: effectiveTargetId || 'Field', valueMode: null, canonicalUnit: null, cardinality: 'single' };
     }
     const field = curationTargetState.candidates.productFields.find(candidate =>
       candidate.attributeId === effectiveTargetId || candidate.target?.attributeId === effectiveTargetId,
+    );
+    const appl = curationTargetState.applicability.find(a =>
+      (field && a.catalogField === field.catalogField) || (effectiveTargetId && a.attributeId === effectiveTargetId),
     );
     return {
       target: field?.target ?? null,
       values: field?.values ?? [],
       label: field ? `${field.label} (${field.catalogField})` : effectiveTargetId || 'Field',
+      valueMode: appl?.valueMode ?? null,
+      canonicalUnit: appl?.canonicalUnit ?? null,
+      cardinality: field?.target?.selectionMode ?? 'single',
     };
   };
 
@@ -933,6 +988,7 @@ export function PipelineBoard({
       setReviewItem(res.item);
       installCanonicalDecisionState(res.item, { force: true });
       setConsistencyWarnings(res.consistencyWarnings ?? []);
+      setSemanticValidation(res.semanticValidation ?? null);
       setSaveStatus('error');
       setSaveError(`${conflictMessage} Canonical decisions were refreshed; reapply your edit.`);
     } catch (refreshError) {
@@ -1217,6 +1273,10 @@ export function PipelineBoard({
     const isSelected = selectedIds.has(item.id);
     const isAutomatedStage = ['discovery', 'extraction', 'curation'].includes(item.stage);
     const isReviewStage = item.stage === 'review';
+    // Family indicator state for the curation column (issue #30, PR2).
+    const familyState = item.stage === 'curation' ? cohortFamilyByItem[item.id] : undefined;
+    // Per-member badge wording (round-2 F7); hidden for singletons.
+    const familyBadge = familyState && familyState.memberCount >= 2 ? familyBadgeFor(familyState) : null;
 
     return (
       <div
@@ -1362,6 +1422,43 @@ export function PipelineBoard({
                   );
                 })()}
               </div>
+            )}
+            {item.stage === 'curation' && familyBadge && (
+              <div style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{
+                  display: 'inline-block',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  padding: '1px 6px',
+                  borderRadius: 8,
+                  background: familyBadge.background,
+                  color: familyBadge.color,
+                }}>
+                  {familyBadge.text}
+                </span>
+                <span style={{ fontSize: 10, color: '#6b7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>
+                  {familyState!.groupLabel}
+                </span>
+              </div>
+            )}
+            {/* PR10 (issue #30, DECISION-B): a blocked active-cohort member's
+                committed semanticValidation projects to a red card badge so
+                blocked members are visible from the board before opening the
+                drawer (the committed payload is only written by processCohort
+                for active members; legacy items never carry the key). */}
+            {item.curationData?.semanticValidation?.status === 'blocked' && (
+              <span style={{
+                marginTop: 4,
+                display: 'inline-block',
+                padding: '1px 6px',
+                fontSize: 10,
+                fontWeight: 600,
+                borderRadius: 8,
+                background: '#fee2e2',
+                color: '#991b1b',
+              }}>
+                ⛔ Semantic blocked
+              </span>
             )}
             {isReviewStage && (
               <span style={{
@@ -1515,7 +1612,7 @@ export function PipelineBoard({
   }, [reviewItem]);
 
   const selectedItems = getSelectedItems();
-  const hasSendBackEligible = selectedItems.some(item => item.stage !== 'discovery');
+  const hasSendBackEligible = selectedItems.some(item => item.stage !== 'sourcing');
   const hasResetEligible = selectedItems.length > 0;
   const hasSkipEligible = selectedItems.some(item => item.stage !== 'promotion');
   const hasAdvanceEligible = selectedItems.some(item => item.stage !== 'promotion');
@@ -1540,7 +1637,7 @@ export function PipelineBoard({
             <span style={{ color: '#7c2d12' }}> (Findings: {readinessView.findingCodes.join(', ')})</span>
           )}
           {' '}
-          <a href="/?view=settings" style={{ color: '#9a3412', fontWeight: 600 }}>Open Curation Targets settings →</a>
+          <a href="/?view=onboarding&settingsTab=curation" style={{ color: '#9a3412', fontWeight: 600 }}>Open Curation Targets settings →</a>
         </div>
       )}
       {/* Header */}
@@ -1752,6 +1849,7 @@ export function PipelineBoard({
           onClose={closeReview}
           onOpenProfileBuilder={onOpenProfileBuilder}
           consistencyWarnings={consistencyWarnings}
+          semanticValidation={semanticValidation}
           handleResetSingle={handleResetSingle}
           saveStatus={saveStatus}
           saveError={saveError}

@@ -17,14 +17,16 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
-import { callLlmForTask, getLlmConfigForTask } from '../../onboarding/llm-client';
+import { callLlmForTask, callLlmForTaskWithProvenance, getLlmConfigForTask } from '../../onboarding/llm-client';
 import {
   coordinateCohortItems,
   coordinateCohortItemsOnce,
   clearCohortCoordinationCache,
   formatDeterministicTitle,
+  groupByProductLine,
 } from '../../onboarding/cohort-name-coordinator';
 import { buildCohortPrompt } from '../../onboarding/title-prompt-template';
+import { HeartbeatLostError } from '../../classification/heartbeat-errors';
 
 vi.mock('../../onboarding/llm-client', () => ({
   getLlmConfigForTask: vi.fn(() => ({
@@ -39,6 +41,18 @@ vi.mock('../../onboarding/llm-client', () => ({
         'U1': 'Woof Pupsicle Small',
         'U2': 'Woof Pupsicle Large',
       }),
+  ),
+  callLlmForTaskWithProvenance: vi.fn(
+    async (_task: string, _prompt: string, _systemPrompt: string, _options: Record<string, any>) => ({
+      content: JSON.stringify({
+        'U1': 'Woof Pupsicle Small',
+        'U2': 'Woof Pupsicle Large',
+      }),
+      callId: 'mock-call-1',
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    }),
   ),
 }));
 
@@ -388,6 +402,281 @@ describe('Cohort Name Coordinator', () => {
     await coordinateCohortItemsOnce('batch-inval-web', items1);
     await coordinateCohortItemsOnce('batch-inval-web', items2);
     expect(callLlmForTask).toHaveBeenCalledTimes(2);
+  });
+
+  // ─── PR6 C3: additive audit/ownership threading ────────────────────────
+
+  const AUDIT_OPTS = {
+    modelCall: {
+      runId: 'run-1',
+      snapshotHash: 'snap-1',
+      stage: 'name_consolidation' as const,
+      operation: 'cohort_title_consolidation' as const,
+      attempt: 1,
+      promptTemplateVersion: 'cohort-title-consolidation-prompt-v1',
+      ruleVersion: 'cohort-title-consolidation-rules-v1',
+    },
+    snapshot: {
+      schemaVersion: 2,
+      snapshotHash: 'snap-1',
+      modelExecutionPlan: {
+        entries: [{ operation: 'cohort_title_consolidation', stage: 'name_consolidation' }],
+      },
+    } as any,
+  };
+
+  it('audited path threads modelCall/snapshot/assertHeld into the transport with the right operation', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const assertHeld = vi.fn();
+    const result = await coordinateCohortItems(items, undefined, {
+      modelCall: AUDIT_OPTS.modelCall,
+      snapshot: AUDIT_OPTS.snapshot,
+      assertHeld,
+    });
+
+    // The audited transport received the threaded options + right operation.
+    expect(callLlmForTaskWithProvenance).toHaveBeenCalledTimes(1);
+    const options = (callLlmForTaskWithProvenance as any).mock.calls[0][3];
+    expect(options.modelCall).toEqual(AUDIT_OPTS.modelCall);
+    expect(options.snapshot).toBe(AUDIT_OPTS.snapshot);
+    expect(options.assertHeld).toBe(assertHeld);
+    expect(options.protectedOperation).toBe('cohort_title_consolidation');
+    // The legacy non-audited transport was NOT used.
+    expect(callLlmForTask).not.toHaveBeenCalled();
+    // The response content still parses through the coordinator.
+    expect(result.get('U1')).toEqual({ title: 'Woof Pupsicle Small', source: 'llm_cohort' });
+    expect(result.get('U2')).toEqual({ title: 'Woof Pupsicle Large', source: 'llm_cohort' });
+  });
+
+  it('absent opts keeps the legacy non-audited call byte-identical (options.modelCall undefined)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items);
+    expect(callLlmForTask).toHaveBeenCalledTimes(1);
+    expect(callLlmForTaskWithProvenance).not.toHaveBeenCalled();
+    const options = (callLlmForTask as any).mock.calls[0][3];
+    expect(options.modelCall).toBeUndefined();
+    expect(options.snapshot).toBeUndefined();
+    expect(options.assertHeld).toBeUndefined();
+    expect(options.protectedOperation).toBe('cohort_title_consolidation');
+    expect(result.get('U1')!.source).toBe('llm_cohort');
+  });
+
+  it('onCoordinatedCallId fires with the audited call id and its group SKUs', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const calls: Array<{ callId: string; skus: string[] }> = [];
+    const result = await coordinateCohortItems(items, undefined, {
+      modelCall: AUDIT_OPTS.modelCall,
+      snapshot: AUDIT_OPTS.snapshot,
+      onCoordinatedCallId: (callId: string, skus: string[]) => calls.push({ callId, skus }),
+    });
+    expect(calls).toEqual([{ callId: 'mock-call-1', skus: ['U1', 'U2'] }]);
+    expect(result.size).toBe(2);
+  });
+
+  it('HeartbeatLostError from the transport propagates out of coordinateCohortItems — never converted to fallback', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    (callLlmForTaskWithProvenance as any).mockRejectedValueOnce(new HeartbeatLostError('claim ownership lost'));
+
+    await expect(
+      coordinateCohortItems(items, undefined, {
+        modelCall: AUDIT_OPTS.modelCall,
+        snapshot: AUDIT_OPTS.snapshot,
+      }),
+    ).rejects.toBeInstanceOf(HeartbeatLostError);
+    // Distinguishable from a generic transport error: the generic throw still
+    // produces the group-wide deterministic fallback map.
+    (callLlmForTaskWithProvenance as any).mockRejectedValueOnce(new Error('transport down'));
+    const fallback = await coordinateCohortItems(items, undefined, {
+      modelCall: AUDIT_OPTS.modelCall,
+      snapshot: AUDIT_OPTS.snapshot,
+    });
+    expect(fallback.size).toBe(2);
+    for (const entry of fallback.values()) {
+      expect(entry.source).toBe('cohort_fallback');
+    }
+  });
+
+  it('HeartbeatLostError from a non-audited call also propagates (generic throw still falls back)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    (callLlmForTask as any).mockRejectedValueOnce(new HeartbeatLostError('claim ownership lost'));
+    await expect(coordinateCohortItems(items)).rejects.toBeInstanceOf(HeartbeatLostError);
+
+    (callLlmForTask as any).mockRejectedValueOnce(new Error('transport down'));
+    const fallback = await coordinateCohortItems(items);
+    expect(fallback.size).toBe(2);
+    for (const entry of fallback.values()) {
+      expect(entry.source).toBe('cohort_fallback');
+    }
+  });
+
+  it('groupByProductLine (PR6 C4) is deterministic over the same items the coordinator coordinates', () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', brandHint: 'Woof' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', brandHint: 'Woof' }),
+      makeItem({ upc: 'U3', name: 'UNRELATED PRODUCT', brandHint: 'Other' }),
+    ] as OnboardingItem[];
+    const groups = groupByProductLine(items);
+    const multiMember: string[] = [];
+    for (const groupItems of groups.values()) {
+      if (groupItems.length > 1) multiMember.push(...groupItems.map(i => i.upc));
+    }
+    expect(multiMember.sort()).toEqual(['U1', 'U2']);
+  });
+
+  // ─── PR6 hardening B (P1-3): the prompt consumes EXACTLY the T-hash authority ─
+
+  it('LEGACY no-opts calls with populated OCR data build the EXACT pre-hardening prompt (byte-identical frozen baseline)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', extractionData: { title: 'Test', packagingOcrData: { weight: '5 lb', flavorVariety: 'Chicken' }, packagingTitle: null } }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', extractionData: { title: 'Test', packagingOcrData: { weight: '10 lb', flavorVariety: 'Beef' }, packagingTitle: null } }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items);
+    expect(result.size).toBe(2);
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    // Frozen pre-hardening baseline: the ENTIRE prompt, byte-for-byte, even
+    // though the items carry OCR weight/flavor data. `toBe` (never
+    // `toContain`) — any future unconditional signal (webBrand / OCR weight /
+    // OCR flavor / Product Type Context) breaks this exact equality.
+    expect(prompt).toBe(
+`You are a product cataloging assistant for a premium pet supply store.
+Below are 2 variants of the same product. Assign a clean, store-ready name to EACH.
+ALL names MUST use the same format.
+
+Product Line: "WOOF PUPSICLE SM"
+
+- NEVER use parentheses around variants, sizes, flavors, or any other attribute.
+- Order: Brand -> Product Line/Product -> Form/Species -> Flavor/Color -> Size/Count
+- Every numeric quantity (size, weight, count) from the original spreadsheet name is MANDATORY in the output title. You MUST include them exactly as they appear in the spreadsheet name input. Never omit a known measurement.
+- Convert attached quantities: 2.64OZ->2.64 oz, 6OZ->6 oz, 16OZ->16 oz, 5CT->5-Count, 6PK->6-Pack. The number AND unit must both appear.
+- When all siblings share the same size/weight (e.g., all are 2.64 oz), include it on every sibling. When sizes differ, each variant gets its own.
+- Position: size/weight/count MUST be the final token(s) in the title, after all descriptive text.
+- Expand abbreviations: SM->Small, MD->Medium, LG->Large, XL->X-Large, XXL->XX-Large, CHKN/CKN->Chicken, SLMN->Salmon, TRKY->Turkey, DNTL->Dental
+- Normalize quantities and units: 5CT->5-Count, 6PK->6-Pack, OZ->oz, LB->lb
+- Clean casing: title case for normal words, preserve configured brand/trademark capitalization
+- Include ALL identity-bearing tokens evidenced by the inputs: brand, product line, product form, species, flavor, color, size, count
+- Include the brand exactly once
+- Never invent a brand, product line, form, species, flavor, color, size, count, or claim not present in the inputs
+- Format must be consistent across ALL siblings in a product line (same order, same skeleton)
+- Each sibling must get a unique name reflecting its specific variant attributes
+- Do not include prices, UPCs, distributor codes, marketing fluff, or promotional text
+- No parentheses, no quotes, no markdown in the final titles
+
+Variants:
+1. [U1] Raw Spreadsheet: "WOOF PUPSICLE SM" | Expected: "N/A" | Web: "Test" | OCR: "N/A" | Brand: "TestBrand"
+2. [U2] Raw Spreadsheet: "WOOF PUPSICLE LG" | Expected: "N/A" | Web: "Test" | OCR: "N/A" | Brand: "TestBrand"
+
+Return ONLY valid JSON: {"UPC1": "name1", "UPC2": "name2", ...}`,
+    );
+    // Belt-and-braces: none of the T-hash-only signals leaked into the legacy
+    // prompt even though the items carried OCR data.
+    expect(prompt).not.toContain('OCR Weight:');
+    expect(prompt).not.toContain('OCR Flavor:');
+    expect(prompt).not.toContain('Web Brand:');
+    expect(prompt).not.toContain('Product Type Context:');
+  });
+
+  it('renders NO OCR weight/flavor segments when absent — flavor absence is normal (legacy callers byte-identical)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    await coordinateCohortItems(items);
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    expect(prompt).not.toContain('OCR Weight:');
+    expect(prompt).not.toContain('OCR Flavor:');
+    expect(prompt).not.toContain('Product Type Context:');
+  });
+
+  it('renders the Execution Product Type context line with BOTH id and label when signals are ON, and ABSENT when the opt-in/null context is absent', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items, undefined, {
+      includeTitleHashSignals: true,
+      executionTypeContext: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+    });
+    expect(result.size).toBe(2);
+    const promptWithType = (callLlmForTask as any).mock.calls[0][1] as string;
+    // PR6 hardening C: the prompt renders BOTH the frozen id AND the label so
+    // the prompted authority equals the hashed authority (id + label).
+    expect(promptWithType).toContain('Product Type Context: "dog-food-dry (Dry Dog Food)"');
+    expect(promptWithType).not.toContain('Product Type Context: "Dry Dog Food"');
+
+    // A null context (abstained/conflicted run) → no type line.
+    await coordinateCohortItems(items, undefined, { includeTitleHashSignals: true, executionTypeContext: null });
+    const promptNullType = (callLlmForTask as any).mock.calls[1][1] as string;
+    expect(promptNullType).not.toContain('Product Type Context:');
+
+    // The opt-in is required: the SAME context supplied WITHOUT
+    // includeTitleHashSignals renders nothing (legacy callers byte-identical).
+    await coordinateCohortItems(items, undefined, {
+      executionTypeContext: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+    });
+    const promptNoOptIn = (callLlmForTask as any).mock.calls[2][1] as string;
+    expect(promptNoOptIn).not.toContain('Product Type Context:');
+  });
+
+  it('renders the type id alone when the label is missing (signals ON — prompt authority never lags the hash authority)', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM' }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG' }),
+    ] as OnboardingItem[];
+    await coordinateCohortItems(items, undefined, {
+      includeTitleHashSignals: true,
+      executionTypeContext: { id: 'dog-food-dry', label: null },
+    });
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    expect(prompt).toContain('Product Type Context: "dog-food-dry"');
+  });
+
+  it('signals ON: renders webBrand + OCR weight/flavor + the id-and-label type context — the full T-hash authority', async () => {
+    const items = [
+      makeItem({ upc: 'U1', name: 'WOOF PUPSICLE SM', extractionData: { title: 'Test', brand: 'PawCo', packagingOcrData: { weight: '5 lb', flavorVariety: 'Chicken' }, packagingTitle: null } }),
+      makeItem({ upc: 'U2', name: 'WOOF PUPSICLE LG', extractionData: { title: 'Test', brand: 'PawCo', packagingOcrData: { weight: '10 lb', flavorVariety: 'Beef' }, packagingTitle: null } }),
+    ] as OnboardingItem[];
+    const result = await coordinateCohortItems(items, undefined, {
+      includeTitleHashSignals: true,
+      executionTypeContext: { id: 'dog-food-dry', label: 'Dry Dog Food' },
+    });
+    expect(result.size).toBe(2);
+    const prompt = (callLlmForTask as any).mock.calls[0][1] as string;
+    // webBrand parity (P1-3): the T-hash includes extraction.brand — with
+    // signals ON the prompt renders it too.
+    expect(prompt).toContain('Web Brand: "PawCo"');
+    expect(prompt).toContain('OCR Weight: "5 lb"');
+    expect(prompt).toContain('OCR Flavor: "Chicken"');
+    expect(prompt).toContain('OCR Weight: "10 lb"');
+    expect(prompt).toContain('OCR Flavor: "Beef"');
+    expect(prompt).toContain('Product Type Context: "dog-food-dry (Dry Dog Food)"');
+  });
+
+  it('legacy callers without opts build a byte-identical prompt (no P1-3 additions)', async () => {
+    const prompt = buildCohortPrompt([
+      { upc: 'PATE', name: 'INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ', webTitle: null, ocrTitle: null, brand: 'Instinct' },
+      { upc: 'FLAKE', name: 'INSTINCT CAT FLAKE TUNA SPLIT CUP 2.64OZ', webTitle: null, ocrTitle: null, brand: 'Instinct' },
+    ]);
+    expect(prompt).not.toContain('OCR Weight:');
+    expect(prompt).not.toContain('OCR Flavor:');
+    expect(prompt).not.toContain('Product Type Context:');
+    // The pre-P1-3 prompt shape is preserved exactly.
+    expect(prompt).toContain('Product Line: "INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ"');
+    expect(prompt).toContain('1. [PATE] Raw Spreadsheet: "INSTINCT CAT PATE CHKN SPLIT CUP 2.64OZ" | Expected: "N/A" | Web: "N/A" | OCR: "N/A" | Brand: "Instinct"');
   });
 
   // ─── Deterministic fallback formatter ───────────────────────────────────

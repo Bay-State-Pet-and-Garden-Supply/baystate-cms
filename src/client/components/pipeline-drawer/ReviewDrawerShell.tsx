@@ -21,6 +21,19 @@ interface ReviewDrawerShellProps {
   onClose: () => void;
   onOpenProfileBuilder?: (domain: string, item: OnboardingItem) => void;
   consistencyWarnings?: Array<{ groupId: string; field: string; message: string }>;
+  /**
+   * PR10 (issue #30, DECISION-A/B): the first-class cohort semantic
+   * validation surface from the hydrated item payload. Present ONLY for
+   * ACTIVE-cohort members; null for legacy/shadow items (legacy rendering
+   * unchanged). When present, the semantic surface REPLACES the legacy
+   * consistency-warnings box (the server already sends `[]` warnings in
+   * active mode); `status === 'blocked'` renders the red findings banner
+   * (the member is NOT review-ready — the review-complete gate refuses it).
+   */
+  semanticValidation?: {
+    status: 'passed' | 'blocked';
+    findings: Array<{ code: string; message: string; memberSku: string | null }>;
+  } | null;
   handleResetSingle?: () => void;
   saveStatus: 'idle' | 'saving' | 'saved' | 'error';
   saveError: string | null;
@@ -43,6 +56,7 @@ export function ReviewDrawerShell({
   onClose,
   onOpenProfileBuilder,
   consistencyWarnings = [],
+  semanticValidation = null,
   handleResetSingle,
   saveStatus,
   saveError,
@@ -461,8 +475,15 @@ export function ReviewDrawerShell({
               );
             })()}
 
-            {/* Consistency Warnings */}
-            {consistencyWarnings.length > 0 && (
+            {/* PR10 (issue #30, DECISION-A/B): the active-cohort semantic
+                surface REPLACES the legacy consistency-warnings box. A
+                blocked member renders the red findings banner (NOT
+                review-ready — the review-complete gate refuses it); a
+                passed member renders nothing (the server already sends `[]`
+                legacy warnings in active mode). Legacy/shadow items
+                (semanticValidation === null) keep the amber sibling-warnings
+                box byte-identical. */}
+            {semanticValidation === null && consistencyWarnings.length > 0 && (
               <div style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #f59e0b', background: '#fffbeb', color: '#92400e', fontSize: 12 }}>
                 <strong style={{ display: 'block', marginBottom: 4 }}>Sibling consistency warning</strong>
                 {consistencyWarnings.map((w) => (
@@ -470,6 +491,20 @@ export function ReviewDrawerShell({
                     <strong>{w.field}:</strong> {w.message}
                   </div>
                 ))}
+              </div>
+            )}
+            {semanticValidation?.status === 'blocked' && (
+              <div style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #fca5a5', background: '#fef2f2', color: '#991b1b', fontSize: 12 }}>
+                <strong style={{ display: 'block', marginBottom: 2 }}>⛔ Not review-ready — cohort semantic validation blocked</strong>
+                <div style={{ marginBottom: 4 }}>Resolve the findings below (fix the member evidence or start a new cohort revision) — review completion is blocked until the fresh revision validates.</div>
+                <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
+                  {semanticValidation.findings.map((finding, idx) => (
+                    <li key={`${finding.code}:${idx}`} style={{ marginTop: 2 }}>
+                      <strong>[{finding.code}]</strong> {finding.message}
+                      {finding.memberSku ? ` (SKU ${finding.memberSku})` : ''}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 

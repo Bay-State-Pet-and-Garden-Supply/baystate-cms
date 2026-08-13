@@ -20,6 +20,8 @@ export interface ClassificationRunRow {
   startedAt: string;
   completedAt: string | null;
   errorMessage: string | null;
+  /** Parent cohort run (issue #30 PR3); NULL for legacy/non-cohort runs. */
+  cohortRunId: string | null;
 }
 
 export function createRun(
@@ -38,6 +40,8 @@ export function createRun(
     onboardingItemId?: string;
     sourceKind?: 'onboarding' | 'catalog_product';
     sourceProductHash?: string | null;
+    /** Link this child SKU run to its parent cohort run (issue #30 PR3). */
+    cohortRunId?: string;
   },
 ): ClassificationRunRow;
 export function createRun(
@@ -49,11 +53,13 @@ export function createRun(
     onboardingItemId?: string;
     sourceKind?: 'onboarding' | 'catalog_product';
     sourceProductHash?: string | null;
+    cohortRunId?: string;
   },
 ): ClassificationRunRow {
   let onboardingItemId: string | undefined;
   let sourceKind: 'onboarding' | 'catalog_product' = 'onboarding';
   let sourceProductHash: string | null = null;
+  let cohortRunId: string | undefined;
 
   if (typeof optionsOrItemId === 'string') {
     onboardingItemId = optionsOrItemId;
@@ -61,6 +67,7 @@ export function createRun(
     onboardingItemId = optionsOrItemId.onboardingItemId;
     sourceKind = optionsOrItemId.sourceKind ?? (optionsOrItemId.onboardingItemId ? 'onboarding' : 'catalog_product');
     sourceProductHash = optionsOrItemId.sourceProductHash ?? null;
+    cohortRunId = optionsOrItemId.cohortRunId;
   }
 
   const id = randomUUID();
@@ -68,11 +75,11 @@ export function createRun(
   db.run(
     `INSERT INTO classification_runs
      (id, workspace_id, onboarding_item_id, source_kind, source_product_hash,
-      product_sku, config_snapshot_id, config_snapshot_hash, status, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`,
-    [id, workspaceId, onboardingItemId ?? null, sourceKind, sourceProductHash, sku, configSnapshotId, configSnapshotHash, now()],
+      product_sku, config_snapshot_id, config_snapshot_hash, status, started_at, cohort_run_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+    [id, workspaceId, onboardingItemId ?? null, sourceKind, sourceProductHash, sku, configSnapshotId, configSnapshotHash, now(), cohortRunId ?? null],
   );
-  return { id, workspaceId, onboardingItemId: onboardingItemId ?? null, sourceKind, sourceProductHash, productSku: sku, configSnapshotId, configSnapshotHash, status: 'running', startedAt: now(), completedAt: null, errorMessage: null };
+  return { id, workspaceId, onboardingItemId: onboardingItemId ?? null, sourceKind, sourceProductHash, productSku: sku, configSnapshotId, configSnapshotHash, status: 'running', startedAt: now(), completedAt: null, errorMessage: null, cohortRunId: cohortRunId ?? null };
 }
 
 export function completeRun(
@@ -621,6 +628,7 @@ function mapRun(row: Record<string, any>): ClassificationRunRow {
     startedAt: String(row.started_at),
     completedAt: row.completed_at ? String(row.completed_at) : null,
     errorMessage: row.error_message ? String(row.error_message) : null,
+    cohortRunId: row.cohort_run_id ? String(row.cohort_run_id) : null,
   };
 }
 

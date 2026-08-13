@@ -9,9 +9,18 @@
  * - A pending (unreviewed) Primary Product Type guess produces NO
  *   decision-eligible type-gated attribute proposals.
  * - Universal attributes proceed without a Product Type.
- * - Profile attributes require a reviewed (accepted) Product Type and
- *   membership in that type's profile.
+ * - Profile attributes require an effective Product Type (the reviewed
+ *   accepted type first, the frozen cohort Execution Product Type as fallback)
+ *   and membership in that type's profile (PR5).
  * - When no product_type target is enabled, attributes are un-gated.
+ *
+ * The profile is resolved from the frozen runtime snapshot only — never from
+ * the live config cache when a cohort execution type is present (fail-closed
+ * guard). A Product Type with `attributeProfileId: null` is a legitimately
+ * EMPTY profile: universal attributes may proceed, every non-universal
+ * type-gated attribute is `not_applicable` — never "all fields" (PR5 P1-1).
+ * Flag OFF / legacy runs carry no execution type and gate exactly as
+ * today.
  *
  * Per-Product-Type cardinality comes from the accepted type's profile
  * (not a global target selectionMode) and is passed to the shared
@@ -24,7 +33,7 @@ import type { StageDefinition, StageContext, StageInput, StageResult } from '../
 import { loadClassificationConfig } from '../config-loader';
 import { resolveEnabledTargets, resolveTargetsFromSnapshot } from '../curation-target-resolver';
 import { processProductFieldTarget } from '../curation-target-processor';
-import { getReviewedPrimaryProductTypeId } from '../proposal-selection';
+import { getEffectiveCurationProductType, resolveEffectiveTypeProfile } from '../effective-curation-type';
 import { getCachedAttributeProfiles } from '../../db/repositories/classification-config-repo';
 import { evaluateAttributeApplicability } from './attribute-applicability';
 
@@ -33,6 +42,16 @@ export const productAttributeProposalsStage: StageDefinition = {
   requires: ['attribute_applicability'],
   evidenceFrom: ['evidence_extraction'],
   execute: async (input: StageInput, context: StageContext): Promise<StageResult> => {
+    // PR5 fail-closed guard (architecture pillar 2): the effective-type path
+    // resolves profiles/targets EXCLUSIVELY from the frozen runtime snapshot.
+    // An execution type with a missing snapshot would silently fall back to
+    // the live config cache — never allowed.
+    if (context.cohortExecutionType !== undefined && context.snapshot === undefined) {
+      throw new Error(
+        'effective-type path requires the frozen runtime snapshot; live config is never read with an execution type',
+      );
+    }
+
     const resolved = context.snapshot
       ? resolveTargetsFromSnapshot(context.snapshot)
       : resolveEnabledTargets(loadClassificationConfig(context.workspacePath), context.workspaceId);
@@ -51,14 +70,22 @@ export const productAttributeProposalsStage: StageDefinition = {
     }
 
     const typeTargetEnabled = resolved.productTypes.length > 0;
-    const acceptedTypeId = getReviewedPrimaryProductTypeId(input, context.snapshot);
+    const { effectiveTypeId, source } = getEffectiveCurationProductType(input, context);
 
     const profiles = context.snapshot
       ? context.snapshot.attributeProfiles
       : getCachedAttributeProfiles(context.workspaceId);
-    const profile = acceptedTypeId
-      ? profiles.find(p => p.productTypeId === acceptedTypeId)
-      : null;
+    // PR5 P1-1: the effective path resolves the profile in the AUTHORITATIVE
+    // direction (frozen Product Type -> attributeProfileId -> profile.id) and
+    // fails closed on a missing declared profile; attributeProfileId: null is
+    // a legitimately EMPTY profile (universal-only, never 'all fields'). The
+    // legacy path (no cohort execution type) stays byte-identical.
+    const profile = resolveEffectiveTypeProfile(
+      effectiveTypeId,
+      profiles,
+      context.cohortExecutionType !== undefined,
+      context.snapshot,
+    );
     const profileAttributeIds = profile
       ? new Set(profile.attributes.map(entry => entry.attributeId))
       : null;
@@ -76,7 +103,7 @@ export const productAttributeProposalsStage: StageDefinition = {
         attribute,
         profileAttributeIds,
         conditions: profileEntry?.applicabilityConditions ?? [],
-        acceptedTypeId,
+        acceptedTypeId: effectiveTypeId,
         typeTargetEnabled,
         reviewedFacts: context.snapshot?.reviewedFacts ?? [],
       });
@@ -89,9 +116,15 @@ export const productAttributeProposalsStage: StageDefinition = {
     }
 
     if (gated.length === 0) {
-      const blockedReason = acceptedTypeId === null && typeTargetEnabled
-        ? 'No reviewed Primary Product Type; type-gated attribute proposals are withheld until the type is accepted.'
-        : 'No applicable product-field targets for the accepted Product Type.';
+      // Byte-identical legacy messages for `none`/reviewed sources; a
+      // source-aware suffix is appended ONLY when the effective type came from
+      // the cohort execution type (additive, flag-OFF runs never see it).
+      const sourceSuffix =
+        source === 'execution' ? ' (driven by cohort execution Product Type.)' : '';
+      const blockedReason =
+        effectiveTypeId === null && typeTargetEnabled
+          ? 'No reviewed Primary Product Type; type-gated attribute proposals are withheld until the type is accepted.'
+          : `No applicable product-field targets for the accepted Product Type.${sourceSuffix}`;
       return {
         status: 'succeeded',
         output: {
@@ -99,7 +132,13 @@ export const productAttributeProposalsStage: StageDefinition = {
           proposals: [],
           abstained: false,
           message: blockedReason,
-          metadata: { gated: true, acceptedTypeId, typeTargetEnabled },
+          metadata: {
+            gated: true,
+            acceptedTypeId: effectiveTypeId,
+            typeTargetEnabled,
+            effectiveTypeId,
+            effectiveTypeSource: source,
+          },
         },
       };
     }

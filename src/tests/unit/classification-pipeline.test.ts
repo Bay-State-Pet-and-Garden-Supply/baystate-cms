@@ -32,6 +32,7 @@ import { evidenceExtractionStage, nameConsolidationStage, categoryPageProposalsS
 import { processProductFieldTarget } from '../../classification/curation-target-processor';
 import { upsertPage } from '../../db/repositories/page-repo';
 import { upsertRegistryEntry } from '../../db/repositories/field-registry-repo';
+import { updateFieldMetadata } from '../../server/services/field-metadata-service';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
 import { buildRuntimeSnapshot, persistRuntimeSnapshot } from '../../classification/runtime-snapshot';
 import { captureVerifiedPageSnapshot, toPageSnapshotState } from '../../classification/page-snapshot';
@@ -44,6 +45,16 @@ import { validateReviewCompletionGate } from '../../classification/review-comple
 import catalogClassificationRoutes from '../../server/routes/catalog-classification-routes';
 import { applyCatalogClassification } from '../../classification/catalog-product-application';
 import { writeProductFile } from '../../git/workspace-files';
+import { GitClient } from '../../git/git-client';
+import { previewCandidate, activateBundle } from '../../classification/config-store';
+import { generateCandidate } from '../../classification/config-generator';
+import { BayStatePetGardenSeed } from '../../classification/config-seeds/bay-state-pet-garden-v1';
+import { applyFieldMappingEdits } from '../../classification/field-mapping-editor';
+import { loadRuntimeConfigAuthority, createRuntimeActivationContext } from '../../classification/config-loader';
+import { authorityConfigHashMatches, runtimeSnapshotHashMatchesConfig } from '../../classification/runtime-snapshot';
+import { sha256Hex } from '../../shared/stable-id';
+import type { CatalogEvidence } from '../../classification/catalog-evidence';
+import type { RuntimeConfigAuthority } from '../../classification/config-loader';
 
 describe('Classification Pipeline Integration', () => {
   let workspacePath: string;
@@ -897,6 +908,88 @@ describe('Classification Pipeline Integration', () => {
     completeRun(later.id, 'completed');
   });
 
+  // ─── PR9 C3 (issue #30, DECISION-C): the cohort semantic validation gate ──
+
+  /** Write an item's curation_data_json directly (raw SQL, no schema parse). */
+  function writeCurationData(itemId: string, curationData: Record<string, unknown>): void {
+    getDb().run(
+      'UPDATE onboarding_items SET curation_data_json = ?, updated_at = ? WHERE id = ?',
+      [JSON.stringify(curationData), new Date().toISOString(), itemId],
+    );
+  }
+
+  it('refuses an item whose semanticValidation is blocked (code + first finding reason)', () => {
+    const item = createReviewGateItem('BLOCKED');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    writeCurationData(item.id, {
+      curatedTitle: 'Some Title',
+      classificationRunId: run.id,
+      semanticValidation: {
+        status: 'blocked',
+        findings: [
+          { code: 'family_product_type', memberSku: item.upc, message: 'Primary Product Type "dog-treats" does not match the family invariant.' },
+          { code: 'family_brand', memberSku: item.upc, message: 'Brand conflict.' },
+        ],
+      },
+    });
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.code).toBe('semantic_validation_blocked');
+      expect(gate.reason).toContain('family invariant');
+    }
+  });
+
+  it('passes an item whose semanticValidation is passed', () => {
+    const item = createReviewGateItem('PASSED-SEM');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    writeCurationData(item.id, {
+      curatedTitle: 'Some Title',
+      classificationRunId: run.id,
+      semanticValidation: { status: 'passed', findings: [] },
+    });
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(true);
+  });
+
+  it('fails closed on corrupt curation data JSON (never review-ready)', () => {
+    const item = createReviewGateItem('CORRUPT-SEM');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    getDb().run(
+      'UPDATE onboarding_items SET curation_data_json = ? WHERE id = ?',
+      ['{corrupt json', item.id],
+    );
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) {
+      expect(gate.code).toBe('semantic_validation_blocked');
+      expect(gate.reason).toMatch(/corrupt/i);
+    }
+  });
+
+  it('passes a legacy item with curation data but no semanticValidation key', () => {
+    const item = createReviewGateItem('LEGACY-SEM');
+    const run = createRun(workspaceId, item.upc, null, null, item.id);
+    completeRun(run.id, 'completed');
+    decide(seedReviewProposal(run.id, item.upc), 'accepted');
+    writeCurationData(item.id, {
+      curatedTitle: 'Some Title',
+      classificationRunId: run.id,
+    });
+
+    const gate = validateReviewCompletionGate({ workspaceId, onboardingItemId: item.id, productSku: item.upc, activeRunId: run.id });
+    expect(gate.ok).toBe(true);
+  });
+
   it('defaults isBulkAcceptable to false on all proposals even with high confidence (Issue #10)', async () => {
     const { buildCategoryPageProposal, buildFieldAssignmentProposal, buildProductTypeProposal } = await import('../../classification/curation-target-proposal');
 
@@ -1484,6 +1577,481 @@ describe('Classification Pipeline Integration', () => {
     expect(persisted.c).toBe(0);
   });
 
+  // ── PR7 C6b (issue #30): cohort-coordinated model-call linkage exemption ──
+  //
+  // The parent ops bind their audited page/title calls to the ORDINAL-0 member
+  // child run (DECISION-N), and every member's durable
+  // `classification_cohort_outputs` row inherits that call id. A materialized
+  // proposal on a NON-ordinal-0 child therefore references a call that
+  // belongs to the ordinal-0 child — the ONLY narrow exemption to the
+  // run/snapshot check. The call row must still exist and be terminal-success;
+  // a resolved output row (same cohort run + same product_sku) is the ONLY
+  // way the mismatch is tolerated.
+
+  /** Seed the minimal cohort-authority chain (batch → cohort → parent cohort
+   *  run) so child runs can FK to it. Returns the created cohort id. */
+  function seedCohortAuthorityChain(wsId: string, parentRunId: string): string {
+    const now = new Date().toISOString();
+    const batchId = `c6b-batch-${randomUUID()}`;
+    const cohortId = `c6b-cohort-${randomUUID()}`;
+    getDb().run(
+      `INSERT INTO onboarding_batches (id, workspace_id, name, file_name, status, total_items, created_at, updated_at)
+       VALUES (?, ?, 'b', 'b.xlsx', 'active', 0, ?, ?)`,
+      [batchId, wsId, now, now],
+    );
+    getDb().run(
+      `INSERT INTO curation_cohorts (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'k', 'l', 'product-family-v1', 'membership-hash', 'ready', ?, ?)`,
+      [cohortId, wsId, batchId, now, now],
+    );
+    getDb().run(
+      `INSERT INTO classification_cohort_runs (id, workspace_id, cohort_id, candidate_membership_hash, status, created_at)
+       VALUES (?, ?, ?, 'candidate-hash', 'freezing', ?)`,
+      [parentRunId, wsId, cohortId, now],
+    );
+    return cohortId;
+  }
+
+  /** Seed a durable cohort output row carrying `callId` for `memberSku` under
+   *  `parentRunId` with the given `outputKind` (default 'coordinated_page'). */
+  function seedCohortOutputRow(
+    wsId: string,
+    parentRunId: string,
+    memberSku: string,
+    callId: string,
+    outputKind = 'coordinated_page',
+  ): void {
+    getDb().run(
+      `INSERT INTO classification_cohort_outputs
+         (id, workspace_id, cohort_run_id, output_kind, product_sku, input_hash, output_value_json, model_call_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?)`,
+      [randomUUID(), wsId, parentRunId, outputKind, memberSku, 'a'.repeat(64), callId, new Date().toISOString()],
+    );
+  }
+
+  /** Build a `category_page_proposals` stage that emits ONE proposal carrying
+   *  `callId` on `runId` for `memberSku` (the materializer shape). */
+  function cohortPageStage(runId: string, memberSku: string, snapHash: string, callId: string) {
+    return {
+      name: 'category_page_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId,
+            productSku: memberSku,
+            proposalType: 'category_page' as const,
+            targetId: 'dog-food-dry',
+            proposedValue: { pageId: 'dog-food-dry', pageName: 'Dog Food Dry' },
+            confidence: 0.85,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [callId],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+  }
+
+  /** Create a cohort parent + two children (ordinal-0 audit holder + member)
+   *  and a terminal-success audited page call on the ordinal-0 child.
+   *  Returns the member run, the ordinal-0 run, and the call id. */
+  function cohortLinkageFixture(wsId: string, parentRunId: string, memberSku: string, snapId: string, snapHash: string) {
+    seedCohortAuthorityChain(wsId, parentRunId);
+    const memberRun = createRun(wsId, memberSku, snapId, snapHash, { cohortRunId: parentRunId });
+    const ordinal0Run = createRun(wsId, `SKU-C6B-X-${randomUUID().slice(0, 6)}`, snapId, `x-${snapHash}`, { cohortRunId: parentRunId });
+    return { memberRun, ordinal0Run };
+  }
+
+  it('C6b: a cohort child member MAY reference the ordinal-0 child call id when a durable coordinated_page output row of the SAME cohort + SKU carries it (run/snapshot mismatch exempted)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-MEMBER';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, callId);
+
+    const result = await runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] });
+    expect(result.proposals).toHaveLength(1);
+    const persisted = getDb().query(
+      'SELECT model_call_ids_json FROM classification_proposals WHERE run_id = ?',
+    ).all(memberRun.id) as Array<{ model_call_ids_json: string | null }>;
+    expect(persisted).toHaveLength(1);
+    expect(JSON.parse(persisted[0].model_call_ids_json ?? '[]')).toEqual([callId]);
+  });
+
+  it('C6b: FAILS when the output row belongs to a DIFFERENT cohort run (no cross-cohort exemption)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-a-${randomUUID()}`;
+    const otherParentRunId = `c6b-parent-b-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-CROSS-COHORT';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // The output row lives on a DIFFERENT cohort run → the join cannot resolve.
+    seedCohortAuthorityChain(workspaceId, otherParentRunId);
+    seedCohortOutputRow(workspaceId, otherParentRunId, memberSku, callId);
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b: FAILS when the output row carries a DIFFERENT product_sku than the proposal', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-WRONG-SKU';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // The output row carries a DIFFERENT SKU → the exemption cannot resolve.
+    seedCohortOutputRow(workspaceId, parentRunId, 'SKU-C6B-SOMEONE-ELSE', callId);
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b: FAILS for a NON-cohort run referencing a foreign call id (unchanged hard fail, no exemption)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    // No cohort_run_id on either run — a plain foreign-call linkage failure.
+    const run = createRun(workspaceId, 'SKU-C6B-NONCOHORT', snapId, snapHash);
+    const otherRun = createRun(workspaceId, 'SKU-C6B-OTHER', snapId, `x-${snapHash}`);
+    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    const foreignCall = insertModelCallStart({
+      runId: otherRun.id,
+      stageName: 'product_attribute_proposals',
+      operation: 'attribute_ranking',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'llama3',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'attribute-ranking-prompt-v1',
+      ruleVersion: 'attribute-ranking-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: run.id,
+            productSku: 'SKU-C6B-NONCOHORT',
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [foreignCall],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: run.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: 'SKU-C6B-NONCOHORT', evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b: FAILS when the call row exists but is NOT terminal-success — the status check runs BEFORE any exemption', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-STARTED';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart } = await import('../../db/repositories/classification-model-call-repo');
+    const startedCall = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    // The durable output row EXISTS and resolves — but the call is still
+    // `started`: the terminal-success hard-fail must win over the exemption.
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, startedCall);
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, startedCall)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/non-terminal\/non-success|started/);
+  });
+
+  it('C6b: FAILS when no durable output row resolves the call id (missing row — no exemption)', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-NO-ROW';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // NO output row is seeded for this member/call.
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b (PR7 review R2 F3-2): FAILS when the output row is a curated_title (wrong output_kind) — even for a category_page proposal', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-TITLE-KIND';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // The only durable output row is a CURATED_TITLE row carrying the call id
+    // (a title-op call id) — the page exemption must NOT resolve through it.
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, callId, 'curated_title');
+
+    await expect(runPipeline([cohortPageStage(memberRun.id, memberSku, snapHash, callId)], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
+  it('C6b (PR7 review R2 F3-2): FAILS for a NON-category_page proposal even when a coordinated_page output row resolves the call id', async () => {
+    const config = loadClassificationConfig(workspacePath);
+    const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
+    const parentRunId = `c6b-parent-${randomUUID()}`;
+    const memberSku = 'SKU-C6B-FIELD-KIND';
+    const { memberRun, ordinal0Run } = cohortLinkageFixture(workspaceId, parentRunId, memberSku, snapId, snapHash);
+    const { insertModelCallStart, completeModelCall } = await import('../../db/repositories/classification-model-call-repo');
+    const callId = insertModelCallStart({
+      runId: ordinal0Run.id,
+      stageName: 'category_page_proposals',
+      operation: 'cohort_page_assignment',
+      attempt: 1,
+      provider: 'ollama',
+      model: 'qwen2.5vl:latest',
+      locality: 'local',
+      snapshotHash: `x-${snapHash}`,
+      modelPolicyDigest: 'd'.repeat(64),
+      promptTemplateVersion: 'cohort-page-assignment-prompt-v1',
+      ruleVersion: 'cohort-page-assignment-rules-v1',
+      systemPromptHash: 's'.repeat(64),
+      userPromptHash: 'u'.repeat(64),
+    });
+    expect(completeModelCall(callId, {
+      status: 'success',
+      durationMs: 5,
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: 0,
+      costBasis: 'local_zero',
+    })).toBe(true);
+    // A durable coordinated_page row exists and resolves the call id — but
+    // the proposal is a FIELD_ASSIGNMENT, so the exemption must NOT apply.
+    seedCohortOutputRow(workspaceId, parentRunId, memberSku, callId);
+
+    const stage = {
+      name: 'product_attribute_proposals' as const,
+      requires: [] as ClassificationStageName[],
+      evidenceFrom: [] as ClassificationStageName[],
+      execute: async () => ({
+        status: 'succeeded' as const,
+        output: {
+          evidence: [],
+          proposals: [{
+            id: randomUUID(),
+            runId: memberRun.id,
+            productSku: memberSku,
+            proposalType: 'field_assignment' as const,
+            targetId: 'flavor',
+            proposedValue: 'Chicken',
+            confidence: 0.8,
+            evidenceIds: [],
+            status: 'pending' as const,
+            isBulkAcceptable: false,
+            isStale: false,
+            stalenessReason: null,
+            snapshotHash: snapHash,
+            modelCallIds: [callId],
+            createdAt: new Date().toISOString(),
+          }],
+          abstained: false,
+        },
+      }),
+    };
+
+    await expect(runPipeline([stage], {
+      workspacePath,
+      workspaceId,
+      runId: memberRun.id,
+      configSnapshotRef: { id: snapId, hash: snapHash, sourceCommit: null, createdAt: new Date().toISOString() },
+    }, { sku: memberSku, evidence: [], acceptedProposals: [], allProposals: [] })).rejects.toThrow(/Model call linkage failed/);
+  });
+
   it('fails closed when a proposal references nonexistent or foreign-run evidence (issue #17 H)', async () => {
     const config = loadClassificationConfig(workspacePath);
     const { id: snapId, hash: snapHash } = createConfigSnapshot(workspaceId, config);
@@ -1799,5 +2367,298 @@ describe('Classification Pipeline Integration', () => {
       { evidence_id: 'brand-ev-one', relation: 'contradicting' },
       { evidence_id: 'brand-ev-two', relation: 'contradicting' },
     ]);
+  });
+
+  it('I7: a mapping move through the editor makes an earlier run config-drifted', async () => {
+    // The mapping editor operates only on an ACTIVE v2 bundle, but this
+    // suite's shared workspace is v1, so this test builds its own v2
+    // workspace (same shared DB; workspace-scoped reads keep it isolated).
+    // The drift signal is computed exactly as GET /api/classification/runs/:id
+    // computes it: authority-bundle-hash match OR persisted runtime-snapshot
+    // match; neither → configDrift (fail closed).
+    const I7_FIELDS = [
+      'ProductField4', 'ProductField8', 'ProductField16', 'ProductField17',
+      'ProductField18', 'ProductField19', 'ProductField20', 'ProductField21',
+      'ProductField22', 'ProductField23', 'ProductField24', 'ProductField25',
+      'ProductField26', 'ProductField27', 'ProductField28', 'ProductField29',
+      'ProductField30', 'ProductField32',
+    ];
+    const artifactContent = JSON.stringify({
+      schemaVersion: 1,
+      sourceTreeHash: 'i7'.repeat(32),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I7_FIELDS.length, xmlFields: [...I7_FIELDS].sort() },
+      fields: [],
+      pages: [],
+    });
+    const evidenceHash = sha256Hex(artifactContent);
+    const evidence: CatalogEvidence = {
+      schemaVersion: 1,
+      sourceTreeHash: '0'.repeat(64),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I7_FIELDS.length, xmlFields: [...I7_FIELDS].sort() },
+      fields: [...I7_FIELDS].sort().map(xmlField => ({
+        xmlField,
+        recordCount: 1,
+        nonEmptyCount: 1,
+        distinctValueCount: 1,
+        distinctValueHash: '0'.repeat(64),
+        delimiterEvidence: [],
+      })),
+      pages: [],
+    };
+
+    const v2WorkspaceId = randomUUID();
+    const v2Path = path.join(os.tmpdir(), `baystate-cms-class-v2-${v2WorkspaceId.slice(0, 8)}`);
+    fs.mkdirSync(path.join(v2Path, 'store', 'classification'), { recursive: true });
+    fs.mkdirSync(path.join(v2Path, 'products'), { recursive: true });
+    insertWorkspace({
+      id: v2WorkspaceId,
+      name: 'test-v2',
+      workspacePath: v2Path,
+      gitPath: path.join(v2Path, '.git'),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+
+    const git = new GitClient(v2Path);
+    git.init();
+    fs.writeFileSync(path.join(v2Path, 'store', 'manifest.json'), JSON.stringify({ schemaVersion: 1 }), 'utf-8');
+    fs.writeFileSync(
+      path.join(v2Path, 'store', 'field-registry.json'),
+      JSON.stringify({ entries: [...I7_FIELDS].sort().map(xmlField => ({ xmlField })) }),
+      'utf-8',
+    );
+    git.add(['store/manifest.json', 'store/field-registry.json']);
+    git.commit('seed catalog manifest');
+    const sourceCatalogCommit = git.getHeadHash();
+
+    const candidate = generateCandidate(BayStatePetGardenSeed, evidence);
+    const preview = previewCandidate(candidate.bundle, v2Path, { catalogEvidence: artifactContent });
+    if (!preview.hash) {
+      throw new Error(`preview failed: ${preview.report.findings.map(f => f.code).join(', ')}`);
+    }
+    await activateBundle(preview.hash, null, {
+      workspacePath: v2Path,
+      workspaceId: v2WorkspaceId,
+      activationContext: {
+        catalogFields: I7_FIELDS,
+        verifiedPageIds: ['page-i7-1'],
+        verifyCatalogEvidence: (input: { catalogEvidenceHash: string; sourceCatalogCommit: string }) => ({
+          verified: input.catalogEvidenceHash === evidenceHash && input.sourceCatalogCommit === sourceCatalogCommit,
+          reason: 'test verifier',
+        }),
+      } as never,
+      catalogEvidenceHash: evidenceHash,
+      gitEnabled: true,
+    });
+
+    // A run bound to the freshly activated v2 bundle.
+    const initialAuthority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(initialAuthority.kind).toBe('v2');
+    const run = createRun(v2WorkspaceId, 'I7-SKU', null, (initialAuthority as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle.manifest.bundleHash, { sourceKind: 'catalog_product' });
+
+    // Mirror of the run-detail route's config-drift computation.
+    const configDrift = (): boolean => {
+      try {
+        const authority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+        const matches = authorityConfigHashMatches(authority, run.configSnapshotHash!) ||
+          runtimeSnapshotHashMatchesConfig(
+            v2WorkspaceId,
+            run.configSnapshotHash!,
+            authority.kind === 'v2' ? authority.bundle : authority.config,
+          );
+        return !matches;
+      } catch {
+        return true;
+      }
+    };
+    expect(configDrift()).toBe(false);
+
+    // Apply a legal mapping move via the mapping editor (in-batch unmap + map;
+    // ProductField4 is free so no D3 collision).
+    applyFieldMappingEdits(v2Path, v2WorkspaceId, [
+      { catalogField: 'ProductField26', attributeId: null },
+      { catalogField: 'ProductField4', attributeId: 'product-feature' },
+    ], { gitEnabled: false });
+
+    // The prior run's config snapshot no longer matches the active authority.
+    expect(configDrift()).toBe(true);
+  });
+
+  it('I8: a registry-only label edit does not masquerade as a mapping change (configDrift stays false)', async () => {
+    // Same fresh-v2-workspace pattern as I7: the canonical field-metadata
+    // service mutates R1 (`field_registry` DB) + its R2 projection
+    // (`store/field-registry.json`) while this suite's shared workspace is
+    // v1, so this test builds its own v2 workspace (same shared DB;
+    // workspace-scoped reads keep it isolated). The drift signal is computed
+    // exactly as GET /api/classification/runs/:id computes it: authority-
+    // bundle-hash match OR persisted runtime-snapshot match; neither →
+    // configDrift (fail closed).
+    const I8_FIELDS = [
+      'ProductField4', 'ProductField8', 'ProductField16', 'ProductField17',
+      'ProductField18', 'ProductField19', 'ProductField20', 'ProductField21',
+      'ProductField22', 'ProductField23', 'ProductField24', 'ProductField25',
+      'ProductField26', 'ProductField27', 'ProductField28', 'ProductField29',
+      'ProductField30', 'ProductField32',
+    ];
+    const artifactContent = JSON.stringify({
+      schemaVersion: 1,
+      sourceTreeHash: 'i8'.repeat(32),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I8_FIELDS.length, xmlFields: [...I8_FIELDS].sort() },
+      fields: [],
+      pages: [],
+    });
+    const evidenceHash = sha256Hex(artifactContent);
+    const evidence: CatalogEvidence = {
+      schemaVersion: 1,
+      sourceTreeHash: '0'.repeat(64),
+      productFileCount: 0,
+      parseFailureCount: 0,
+      parseFailures: [],
+      fieldRegistry: { entryCount: I8_FIELDS.length, xmlFields: [...I8_FIELDS].sort() },
+      fields: [...I8_FIELDS].sort().map(xmlField => ({
+        xmlField,
+        recordCount: 1,
+        nonEmptyCount: 1,
+        distinctValueCount: 1,
+        distinctValueHash: '0'.repeat(64),
+        delimiterEvidence: [],
+      })),
+      pages: [],
+    };
+
+    const v2WorkspaceId = randomUUID();
+    const v2Path = path.join(os.tmpdir(), `baystate-cms-class-v2-${v2WorkspaceId.slice(0, 8)}`);
+    fs.mkdirSync(path.join(v2Path, 'store', 'classification'), { recursive: true });
+    fs.mkdirSync(path.join(v2Path, 'products'), { recursive: true });
+    insertWorkspace({
+      id: v2WorkspaceId,
+      name: 'test-v2',
+      workspacePath: v2Path,
+      gitPath: path.join(v2Path, '.git'),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+
+    const git = new GitClient(v2Path);
+    git.init();
+    fs.writeFileSync(path.join(v2Path, 'store', 'manifest.json'), JSON.stringify({ schemaVersion: 1 }), 'utf-8');
+    fs.writeFileSync(
+      path.join(v2Path, 'store', 'field-registry.json'),
+      JSON.stringify({ entries: [...I8_FIELDS].sort().map(xmlField => ({ xmlField })) }),
+      'utf-8',
+    );
+    git.add(['store/manifest.json', 'store/field-registry.json']);
+    git.commit('seed catalog manifest');
+    const sourceCatalogCommit = git.getHeadHash();
+
+    const candidate = generateCandidate(BayStatePetGardenSeed, evidence);
+    const preview = previewCandidate(candidate.bundle, v2Path, { catalogEvidence: artifactContent });
+    if (!preview.hash) {
+      throw new Error(`preview failed: ${preview.report.findings.map(f => f.code).join(', ')}`);
+    }
+    await activateBundle(preview.hash, null, {
+      workspacePath: v2Path,
+      workspaceId: v2WorkspaceId,
+      activationContext: {
+        catalogFields: I8_FIELDS,
+        verifiedPageIds: ['page-i8-1'],
+        verifyCatalogEvidence: (input: { catalogEvidenceHash: string; sourceCatalogCommit: string }) => ({
+          verified: input.catalogEvidenceHash === evidenceHash && input.sourceCatalogCommit === sourceCatalogCommit,
+          reason: 'test verifier',
+        }),
+      } as never,
+      catalogEvidenceHash: evidenceHash,
+      gitEnabled: true,
+    });
+
+    // A run bound to the freshly activated v2 bundle.
+    const initialAuthority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(initialAuthority.kind).toBe('v2');
+    const run = createRun(v2WorkspaceId, 'I8-SKU', null, (initialAuthority as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle.manifest.bundleHash, { sourceKind: 'catalog_product' });
+
+    // Mirror of the run-detail route's config-drift computation (same as I7).
+    const configDrift = (): boolean => {
+      try {
+        const authority = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+        const matches = authorityConfigHashMatches(authority, run.configSnapshotHash!) ||
+          runtimeSnapshotHashMatchesConfig(
+            v2WorkspaceId,
+            run.configSnapshotHash!,
+            authority.kind === 'v2' ? authority.bundle : authority.config,
+          );
+        return !matches;
+      } catch {
+        return true;
+      }
+    };
+    expect(configDrift()).toBe(false);
+
+    // Populate the canonical R1 field-registry rows for this workspace (the
+    // seeded store/field-registry.json is a projection of R1; the active
+    // loader re-attests mapped fields against this set), then snapshot the
+    // active bundle's mapping fingerprint + hash BEFORE the label edit.
+    for (const xmlField of [...I8_FIELDS].sort()) {
+      upsertRegistryEntry({
+        id: randomUUID(),
+        workspaceId: v2WorkspaceId,
+        xmlField,
+        label: xmlField,
+        kind: 'custom',
+        dataType: 'string',
+        editable: true,
+        required: false,
+        uiGroup: 'Custom Fields',
+        sampleValuesJson: null,
+        curatedFieldsJson: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    const authorityBeforeEdit = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(authorityBeforeEdit.kind).toBe('v2');
+    const bundleBeforeEdit = (authorityBeforeEdit as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle;
+    const beforeMappingsVersion = bundleBeforeEdit.manifest.fileVersions['mappings.json'];
+    const beforeBundleHash = bundleBeforeEdit.manifest.bundleHash;
+
+    // Registry-only LABEL edit through the canonical field-metadata service
+    // (the function behind PUT /api/field-registry/:id). It mutates R1 and
+    // rewrites store/field-registry.json — never store/classification/**.
+    const updatedRow = updateFieldMetadata(
+      { id: v2WorkspaceId, workspacePath: v2Path },
+      'ProductField4',
+      { label: 'Edited Field Label' },
+    );
+    expect(updatedRow.label).toBe('Edited Field Label');
+
+    // (a) The prior run's config snapshot still matches the active bundle
+    // hash — a display-only change must not masquerade as a config change.
+    expect(configDrift()).toBe(false);
+
+    // (b) The active bundle manifest's mappings.json fingerprint is untouched.
+    const authorityAfterEdit = loadRuntimeConfigAuthority(v2Path, createRuntimeActivationContext(v2Path, v2WorkspaceId));
+    expect(authorityAfterEdit.kind).toBe('v2');
+    const bundleAfterEdit = (authorityAfterEdit as Extract<RuntimeConfigAuthority, { kind: 'v2' }>).bundle;
+    expect(bundleAfterEdit.manifest.fileVersions['mappings.json']).toBe(beforeMappingsVersion);
+
+    // (c) The bundle hash itself is unchanged.
+    expect(bundleAfterEdit.manifest.bundleHash).toBe(beforeBundleHash);
+
+    // Positive control (covered by I7 above, not duplicated here): a real
+    // MAPPING edit through applyFieldMappingEdits flips this same run's
+    // configDrift to true. A registry-only label edit must never masquerade
+    // as that mapping/classification change.
   });
 });

@@ -11,6 +11,7 @@
 import { type ClassificationEvidence, type ClassificationProposal, CanonicalBrandEvidenceValueSchema } from '../shared/schemas/classification';
 import { callLlmForTaskWithProvenance } from '../onboarding/llm-client';
 import { redactTransportText } from './model-policy-gateway';
+import type { ProtectedOperation } from './model-operation-registry';
 import type { PageSnapshotRecord } from './runtime-snapshot';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -53,6 +54,18 @@ export interface PageAssignmentResult {
   pages: Array<{ pageId: string; pageName: string; confidence: number; isBrandShortcut?: boolean }>;
   /** Durable model-call IDs that produced this assignment (issue #17 E). */
   modelCallIds?: string[];
+}
+
+/**
+ * PR7 review R1 (B3): parent-path-only operation override for the single-item
+ * Page transport. The parent-owned singleton path pins `protectedOperation` to
+ * 'cohort_page_assignment' so the resolved `{provider, model}` equals the
+ * operation-specific model authority the P-hash claims (DECISION-B) — never
+ * the legacy 'page_assignment' route. Legacy callers omit the options object
+ * → byte-identical behavior ('page_assignment').
+ */
+export interface LlmAssignCategoryPagesOptions {
+  protectedOperation?: ProtectedOperation;
 }
 
 // ─── Page Hierarchy Builder ──────────────────────────────────────────────────
@@ -572,6 +585,7 @@ export function normalizePageAssignments(
  */
 export async function llmAssignCategoryPages(
   params: PageAssignmentParams,
+  options?: LlmAssignCategoryPagesOptions,
 ): Promise<PageAssignmentResult | null> {
   const { productName, productDescription, ocrSummary, productType, pages, maxPages, selectionMode, siblingProducts } = params;
 
@@ -671,7 +685,10 @@ Use the page's ID for the "pageId" field and its exact name for "pageName".`;
       {
         allowFallback: true,
         modelPolicy: params.modelPolicy,
-        protectedOperation: 'page_assignment',
+        // PR7 review R1 (B3): the parent singleton path pins the protected
+        // operation to 'cohort_page_assignment' (the P-hash authority); all
+        // legacy callers omit the options → 'page_assignment' unchanged.
+        protectedOperation: options?.protectedOperation ?? 'page_assignment',
         ...auditedCall,
       },
     );

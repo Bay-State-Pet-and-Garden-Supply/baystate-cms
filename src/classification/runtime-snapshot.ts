@@ -36,6 +36,7 @@ import { getVlmConfig } from '../onboarding/vlm-client';
 import {
   buildModelExecutionPlan,
   buildRuntimeRuleVersions,
+  MODEL_OPERATION_REGISTRY_VERSION,
   OPERATION_TO_STAGE,
   PROMPT_TEMPLATE_VERSIONS,
   RULE_VERSIONS,
@@ -102,6 +103,14 @@ export interface RuntimeSnapshotInput {
   productPageNames?: string[];
   pageImportId?: string | null;
   pageImportHash?: string | null;
+  /**
+   * Pre-resolved product-field option lists, frozen ONCE at cohort freeze
+   * (issue #30 PR3 M2, D7) and injected into every member's runtime snapshot
+   * so the per-member snapshots share the exact same field options. When
+   * absent (legacy path) the options are computed from the config at build
+   * time.
+   */
+  fieldOptions?: Record<string, ResolvedTargetOption[]>;
   createdAt?: string;
 }
 
@@ -174,8 +183,10 @@ function listEffectiveCurationTargets(config: ClassificationConfig): CurationTar
 /**
  * Pre-resolve product-field option lists at snapshot build time. This is the
  * only point where live-store values are read; stages consume the frozen lists.
+ * Exported so the cohort freeze engine can resolve the options ONCE and inject
+ * them into every member's runtime snapshot (PR3 M2 D7).
  */
-function computeSnapshotFieldOptions(config: ClassificationConfig): Record<string, ResolvedTargetOption[]> {
+export function computeSnapshotFieldOptions(config: ClassificationConfig): Record<string, ResolvedTargetOption[]> {
   const result: Record<string, ResolvedTargetOption[]> = {};
   for (const target of listEffectiveCurationTargets(config)) {
     if (target.kind !== 'product_field') continue;
@@ -245,9 +256,11 @@ function resolveAuthorityFields(authority: RuntimeConfigAuthority): {
  * Returns null when the VLM is unconfigured/disabled so the plan entry
  * carries no frozen route and run-bound local VLM calls fail closed. The
  * captured base URL/model are the ONLY endpoint a run-bound local VLM call
- * may use — never mutable settings read mid-run.
+ * may use — never mutable settings read mid-run. Exported so the cohort
+ * freeze engine can compute the shared model-execution digest (H5) from the
+ * same frozen inputs.
  */
-function captureLocalVlmConfig(): { baseUrl: string; model: string } | null {
+export function captureLocalVlmConfig(): { baseUrl: string; model: string } | null {
   try {
     const config = getVlmConfig();
     if (!config || !config.enabled) return null;
@@ -291,7 +304,7 @@ export function buildRuntimeSnapshot(input: RuntimeSnapshotInput): RuntimeClassi
     modelPolicy: fields.modelPolicy,
     dataSharing: fields.dataSharing,
     curationTargets: fields.curationTargets,
-    fieldOptions: computeSnapshotFieldOptions(config),
+    fieldOptions: input.fieldOptions ?? computeSnapshotFieldOptions(config),
     reviewedFacts: collectCompatibleReviewedFacts({
       workspaceId: input.workspaceId,
       productSku: input.productSku,
@@ -493,11 +506,15 @@ export function getRuntimeSnapshotByHash(workspaceId: string, hash: string): Run
  * Fail closed when a protected model call would run against a snapshot
  * without a compatible frozen model-execution plan entry: legacy schema-v1
  * snapshots (no plan), a plan whose content digest does not match its stored
- * digest, missing runtimeRuleVersions or a digest mismatch, a plan that does
- * not cover the operation with the current registry's prompt-template/rule
- * versions, or a supplied ModelCallContext whose prompt/rule versions differ
- * from the frozen plan entry. A snapshot without a compatible plan can never
- * route a new model call.
+ * digest, missing runtimeRuleVersions or a digest mismatch, a plan whose
+ * frozen `registryVersion` differs from the EXECUTING
+ * `MODEL_OPERATION_REGISTRY_VERSION` (PR12 C4, registry_version_mismatch — a
+ * snapshot frozen under an older/newer operation registry never executes
+ * run-bound calls), a plan that does not cover the operation with the
+ * current registry's prompt-template/rule versions, or a supplied
+ * ModelCallContext whose prompt/rule versions differ from the frozen plan
+ * entry. A snapshot without a compatible plan can never route a new model
+ * call.
  */
 export function assertModelPlanCompatible(
   snapshot: RuntimeClassificationSnapshot | null | undefined,
@@ -530,6 +547,20 @@ export function assertModelPlanCompatible(
   if (!verifyRuntimeRuleVersionsIntegrity(snapshot.runtimeRuleVersions)) {
     throw new Error(
       `Model plan incompatible: snapshot runtimeRuleVersions digest does not match its fields (operation "${operation}").`,
+    );
+  }
+  // PR12 C4 (DECISION-B): the frozen operation-registry version is part of
+  // the parameter contract. A v2 snapshot frozen under a DIFFERENT registry
+  // version than the EXECUTING one refuses run-bound calls deterministically
+  // (registry_version_mismatch) — a plan frozen under an older (or newer)
+  // operation registry never executes. schema-v1 legacy snapshots (no plan)
+  // keep their existing behavior (the no-plan fail-closed guard above).
+  if (snapshot.modelExecutionPlan.registryVersion !== MODEL_OPERATION_REGISTRY_VERSION) {
+    throw new Error(
+      `Model plan incompatible: snapshot model-execution plan registry version ` +
+        `${snapshot.modelExecutionPlan.registryVersion} differs from the executing registry version ` +
+        `${MODEL_OPERATION_REGISTRY_VERSION} (registry_version_mismatch); the run is frozen under a ` +
+        `different operation-registry contract and its run-bound calls refuse.`,
     );
   }
   const stage = OPERATION_TO_STAGE[operation];
@@ -581,6 +612,62 @@ export function getModelExecutionPlanEntry(
 ): ModelExecutionPlanEntry | null {
   if (!snapshot || snapshot.schemaVersion !== 2 || !snapshot.modelExecutionPlan) return null;
   return snapshot.modelExecutionPlan.entries.find(e => e.operation === operation) ?? null;
+}
+
+/** Strip URL credentials before hashing — an OCR authority digest never bakes
+ *  credentials into even a digest. Deterministic for identical authorities. */
+function sanitizeUrlForDigest(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    // Not a URL — hash the raw string (still a digest, no plaintext leak).
+    return url;
+  }
+}
+
+/**
+ * OCR execution-authority digest (PR3 hardening, Commit A / R4 + A2):
+ * - v2 snapshots: `hashCanonicalJson({planDigest, ruleVersionsDigest})` over
+ *   the member snapshot's `evidence_extraction` model-execution-plan entry
+ *   (provider, model, locality, prompt/rule versions, frozen local-VLM route
+ *   WITHOUT credentials) plus `runtimeRuleVersions.digest`. The stored OCR is
+ *   only reusable when this digest matches the CURRENT snapshot's authority —
+ *   a model-policy / local-VLM-route change re-runs OCR under the new
+ *   authority.
+ * - v1 (legacy) snapshots: a deterministic legacy-authority digest,
+ *   `hashCanonicalJson({authorityKind:'v1', snapshotHash})`, bound to the
+ *   snapshot's content identity. A changed v1 config/evidence set changes the
+ *   snapshot hash and therefore the digest — legacy OCR is NEVER "unbound":
+ *   it is always executed under SOME authority digest (Commit A2 fail-closed).
+ * Returns null only for an impossible v2 snapshot with a missing plan/rules
+ * (the freeze fails closed on that); callers treat null as "never reuse".
+ */
+export function computeOcrExecutionDigest(snapshot: RuntimeClassificationSnapshot): string | null {
+  if (snapshot.schemaVersion !== 2) {
+    return hashCanonicalJson({ authorityKind: 'v1', snapshotHash: snapshot.snapshotHash });
+  }
+  const plan = snapshot.modelExecutionPlan;
+  const rules = snapshot.runtimeRuleVersions;
+  if (!plan || !rules) return null;
+  const entry = plan.entries.find(e => e.operation === 'evidence_extraction');
+  if (!entry) return null;
+  const planDigest = hashCanonicalJson({
+    operation: entry.operation,
+    stage: entry.stage,
+    provider: entry.provider,
+    model: entry.model,
+    locality: entry.locality,
+    fromOverride: entry.fromOverride,
+    promptTemplateVersion: entry.promptTemplateVersion,
+    ruleVersion: entry.ruleVersion,
+    localVlmBaseUrl: sanitizeUrlForDigest(entry.localVlmBaseUrl),
+    localVlmModel: entry.localVlmModel ?? null,
+  });
+  return hashCanonicalJson({ planDigest, ruleVersionsDigest: rules.digest });
 }
 
 /**

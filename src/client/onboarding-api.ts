@@ -37,6 +37,7 @@ import type {
   ProposalDecisionInput,
 } from '../shared/schemas/classification';
 import type { GenerateSelectorsResponse, GenerateSelectorsRequest } from '../shared/schemas/selector-generation';
+import type { CohortListResponse } from '../shared/schemas/cohorts';
 
 const API_BASE = '/api/onboarding';
 
@@ -135,6 +136,14 @@ export async function getBatchStagedItems(
   return request<{ staged: Record<PipelineStage, OnboardingItem[]> }>(`/batches/${batchId}/staged`);
 }
 
+/**
+ * Active candidate curation cohorts for a batch with per-member extraction
+ * readiness and derived waiting state (issue #30, PR2).
+ */
+export async function getBatchCohorts(batchId: string): Promise<CohortListResponse> {
+  return request<CohortListResponse>(`/batches/${batchId}/cohorts`);
+}
+
 export async function advanceItems(itemIds: string[]): Promise<{ advanced: number; skipped: number }> {
   return request<{ advanced: number; skipped: number }>('/items/advance', {
     method: 'POST',
@@ -166,10 +175,26 @@ export async function moveToPreviousStage(
 }
 
 export async function completeReviewStage(itemIds: string[]): Promise<{ success: boolean; count: number; legacyCount?: number; classifiedCount?: number }> {
-  return request<{ success: boolean; count: number; legacyCount?: number; classifiedCount?: number }>('/items/review-complete', {
+  const res = await fetch(`${API_BASE}/items/review-complete`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ itemIds }),
   });
+  const data = await res.json() as Record<string, unknown>;
+  if (!res.ok) {
+    // PR10 (issue #30, DECISION-B): surface the per-item gate reasons inline
+    // so a `semantic_validation_blocked` failure shows the EXACT finding
+    // reason (the gate's `reason` is the first finding message) in the
+    // drawer's existing error display — never just the generic batch error.
+    const failures = Array.isArray(data?.failures) ? data.failures as Array<{ reason?: unknown }> : [];
+    const reasons = failures
+      .map(failure => (typeof failure?.reason === 'string' ? failure.reason : null))
+      .filter((reason): reason is string => reason !== null);
+    const baseMsg = typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`;
+    const message = reasons.length > 0 ? `${baseMsg} ${reasons.join(' ')}` : baseMsg;
+    throw new OnboardingApiError(message, res.status, typeof data?.code === 'string' ? data.code : null);
+  }
+  return data as { success: boolean; count: number; legacyCount?: number; classifiedCount?: number };
 }
 
 export async function getBatchItems(
@@ -245,12 +270,28 @@ export interface ConsistencyWarning {
   message: string;
 }
 
+/**
+ * PR10 (issue #30, DECISION-A): the first-class cohort semantic validation
+ * surface carried on the hydrated item detail response. Emitted ONLY for
+ * ACTIVE-cohort members (`semanticSurface.mode === 'active'`); legacy/shadow
+ * items omit the field entirely. `blocked` means the member is NOT
+ * review-ready (the review-complete gate refuses with
+ * `semantic_validation_blocked`) while its curationData + proposals stay
+ * intact (blocked-not-destroyed).
+ */
+export interface SemanticValidationPayload {
+  status: 'passed' | 'blocked';
+  findings: Array<{ code: string; memberSku: string; message: string }>;
+}
+
 export interface ItemDetailResponse {
   item: OnboardingItem;
   sources: OnboardingSource[];
   extraction: ExtractionData | null;
   evidenceAttempts?: any[];
   consistencyWarnings: ConsistencyWarning[];
+  /** PR10: active-cohort semantic validation surface (omitted in legacy mode). */
+  semanticValidation?: SemanticValidationPayload;
 }
 
 export async function getItemDetail(itemId: string): Promise<ItemDetailResponse> {
@@ -505,9 +546,16 @@ export interface CurationTargetCandidates {
   pages: CurationTargetOption[];
 }
 
+import type {
+  CurationApplicabilitySummary,
+  CurationHealthFinding,
+} from '../classification/curation-applicability';
+
 export interface CurationTargetsResponse {
   targets: CurationTargetConfig[];
   candidates: CurationTargetCandidates;
+  applicability: CurationApplicabilitySummary[];
+  findings: CurationHealthFinding[];
 }
 
 async function classificationRequest<T>(path: string, options?: RequestInit): Promise<T> {
@@ -520,7 +568,12 @@ async function classificationRequest<T>(path: string, options?: RequestInit): Pr
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error((data as any).error || `HTTP ${res.status}`);
+    const errorObj = (data as any).error;
+    const msg = (data as any).message || (typeof errorObj === 'string' ? errorObj : errorObj?.message) || `HTTP ${res.status}`;
+    const err = new Error(msg);
+    (err as any).code = typeof errorObj === 'string' ? errorObj : (data as any).code || null;
+    (err as any).status = res.status;
+    throw err;
   }
   return data as T;
 }
@@ -555,6 +608,39 @@ export async function saveCurationTargets(
   return classificationRequest<CurationTargetsResponse & { success: boolean }>('/curation-targets', {
     method: 'PUT',
     body: JSON.stringify({ targets }),
+  });
+}
+
+export async function syncClassificationSeed(): Promise<CurationTargetsResponse & { success: boolean }> {
+  return classificationRequest<CurationTargetsResponse & { success: boolean }>('/sync-seed', {
+    method: 'POST',
+  });
+}
+
+export interface AttributeProfileEditInput {
+  attributeId: string;
+  included: boolean;
+  required?: boolean;
+  cardinality?: 'single' | 'multiple';
+}
+
+export async function updateAttributeProfile(
+  productTypeId: string,
+  edits: AttributeProfileEditInput[],
+): Promise<{ success: boolean; bundleHash: string; commitHash: string | null; productTypeId: string; profileId: string; updatedAttributeIds: string[] }> {
+  return classificationRequest<{ success: boolean; bundleHash: string; commitHash: string | null; productTypeId: string; profileId: string; updatedAttributeIds: string[] }>(`/attribute-profiles/${productTypeId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ edits }),
+  });
+}
+
+export async function updateClassificationAttribute(
+  attributeId: string,
+  updates: { isUniversal?: boolean; name?: string; description?: string | null },
+): Promise<{ success: boolean; attribute: any }> {
+  return classificationRequest<{ success: boolean; attribute: any }>(`/attributes/${attributeId}`, {
+    method: 'PUT',
+    body: JSON.stringify(updates),
   });
 }
 

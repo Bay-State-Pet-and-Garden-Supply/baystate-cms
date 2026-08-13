@@ -14,6 +14,9 @@ import {
   getProductPageAssignments,
   clearProductPages,
 } from '../../db/repositories/page-repo';
+import { createBatch, deleteBatch } from '../../db/repositories/onboarding-batch-repo';
+import { insertItems } from '../../db/repositories/onboarding-item-repo';
+import { insertWorkspace } from '../../db/repositories/workspace-repo';
 
 describe('SQLite Migration', () => {
   const testDbPath = '/tmp/baystate-cms-test.db';
@@ -915,4 +918,638 @@ describe('SQLite Migration', () => {
     expect(row.relation).toBe('legacy');
   });
 
+  it('rebuilds v1 curation_cohorts with an ON DELETE CASCADE batch FK (v1 → v2 → v3 → v4 → v5 → v6)', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Create a workspace + batch + REAL onboarding item to hold a v1 cohort row
+    // (and a real member child row) that must survive the rebuild (round-3 R3).
+    const wsId = randomUUID();
+    insertWorkspace({
+      id: wsId,
+      name: 'Cohort Mig WS',
+      workspacePath: '/tmp/cohort-mig',
+      gitPath: '',
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const batchId = createBatch({ workspaceId: wsId, name: 'Cohort Mig Batch', fileName: 'cohort.xlsx', totalItems: 1 }).id;
+    const itemId = insertItems(batchId, [{ upc: 'MIG-FAM-1', name: 'Mig Family Product 1', rowNumber: 1 }])[0].id;
+
+    // Simulate a v1 database: v1-shaped tables (batch_id without CASCADE) and
+    // the v1 marker. FK enforcement is off during the table swap.
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    const cohortId = randomUUID();
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec('DROP TABLE IF EXISTS curation_cohort_members');
+        db.exec('DROP TABLE IF EXISTS curation_cohorts');
+        db.exec(`
+          CREATE TABLE curation_cohorts (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id),
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','running','completed','failed','conflicted','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+          )
+        `);
+        db.exec(`
+          CREATE TABLE curation_cohort_members (
+            cohort_id TEXT NOT NULL REFERENCES curation_cohorts(id) ON DELETE CASCADE,
+            onboarding_item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+            product_sku TEXT,
+            normalized_brand TEXT NOT NULL,
+            normalized_name_stem TEXT NOT NULL,
+            membership_reason_json TEXT,
+            extraction_hash TEXT,
+            ordinal INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (cohort_id, onboarding_item_id)
+          )
+        `);
+        db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '1')");
+        db.exec(
+          `INSERT INTO curation_cohorts
+             (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+              status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
+           VALUES (?, ?, ?, 'mig-key', 'Mig Family', 'product-family-v1', ?, 'waiting', 'Waiting for 1 family member', ?, ?, NULL, NULL, NULL)`,
+          [cohortId, wsId, batchId, 'f'.repeat(64), now, now],
+        );
+        // A REAL child member row referencing the real onboarding item + the v1 cohort.
+        db.exec(
+          `INSERT INTO curation_cohort_members
+             (cohort_id, onboarding_item_id, product_sku, normalized_brand, normalized_name_stem,
+              membership_reason_json, extraction_hash, ordinal, created_at)
+           VALUES (?, ?, 'MIG-FAM-1', 'mig-brand', 'mig family product', NULL, NULL, 0, ?)`,
+          [cohortId, itemId, now],
+        );
+      })();
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+
+    expect(() => runMigrations()).not.toThrow();
+
+    // Marker advanced all the way to v7 (the v1→v2 hop feeds the v2→v3 hop,
+    // which feeds the v3→v4 hop that drops the execution-metadata columns,
+    // which feeds the v4→v5 hop that adds classification_cohort_runs, which
+    // feeds the v5→v6 hop that adds PR4 C1's dependency table, which feeds
+    // the v6→v7 hop that adds PR6 C1's outputs table).
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('7');
+
+    const fks = db.query("PRAGMA foreign_key_list('curation_cohorts')").all() as Array<{ from: string; table: string; on_delete: string }>;
+    const batchFk = fks.find(f => f.from === 'batch_id');
+    expect(batchFk).toBeTruthy();
+    expect(batchFk!.table).toBe('onboarding_batches');
+    expect(batchFk!.on_delete).toBe('CASCADE');
+
+    // The v2→v3 hop also narrowed the status CHECK to the candidate-family set,
+    // and the v3→v4 hop dropped the execution-metadata columns entirely.
+    const tableSql = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='curation_cohorts'").get() as { sql: string };
+    expect(tableSql.sql).toContain("status IN ('forming','waiting','ready','superseded')");
+    expect(tableSql.sql).not.toContain('started_at');
+    expect(tableSql.sql).not.toContain('completed_at');
+
+    // Data survived the rebuild.
+    const rows = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
+    expect(rows.c).toBe(1);
+
+    // The REAL member row survived — direct keyed query on the members table
+    // (no subquery through parent rows).
+    const memberCount = db.query(
+      'SELECT COUNT(*) as c FROM curation_cohort_members WHERE cohort_id = ? AND onboarding_item_id = ?',
+    ).get(cohortId, itemId) as { c: number };
+    expect(memberCount.c).toBe(1);
+
+    // Both tables are FK-clean after the rebuild.
+    expect(db.query("PRAGMA foreign_key_check('curation_cohorts')").all()).toHaveLength(0);
+    expect(db.query("PRAGMA foreign_key_check('curation_cohort_members')").all()).toHaveLength(0);
+
+    // Idempotent: a second run keeps the marker and the v7 shape.
+    expect(() => runMigrations()).not.toThrow();
+    const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version2.value).toBe('7');
+
+    // End-to-end: the real deleteBatch now cascades to the cohort AND member rows.
+    expect(deleteBatch(batchId)).toBe(true);
+    const afterDelete = db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number };
+    expect(afterDelete.c).toBe(0);
+    const afterDeleteMembers = db.query(
+      'SELECT COUNT(*) as c FROM curation_cohort_members WHERE cohort_id = ? AND onboarding_item_id = ?',
+    ).get(cohortId, itemId) as { c: number };
+    expect(afterDeleteMembers.c).toBe(0);
+
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+
+});
+
+describe('Cohort schema v4 migration (F3, issue #31 cleanup)', () => {
+  const dbPath = `/tmp/baystate-cms-cohort-v4-${randomUUID()}.db`;
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(dbPath);
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(dbPath); } catch { /* ok */ }
+  });
+
+  it('fresh install: marker absent -> v7 directly with the narrowed status CHECK, CASCADE FK, and no execution-metadata columns', () => {
+    const db = getDb();
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('7');
+
+    // cohort-migration.sql is the FINAL schema: narrowed CHECK + CASCADE FK +
+    // NO started_at/completed_at (execution metadata belongs to cohort runs),
+    // plus the v5 classification_cohort_runs table and the v7
+    // classification_cohort_outputs table.
+    const tableSql = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='curation_cohorts'").get() as { sql: string };
+    expect(tableSql.sql).toContain("status IN ('forming','waiting','ready','superseded')");
+    expect(tableSql.sql).toContain('ON DELETE CASCADE');
+    expect(tableSql.sql).not.toContain('\'running\'');
+    expect(tableSql.sql).not.toContain('\'conflicted\'');
+    expect(tableSql.sql).not.toContain('started_at');
+    expect(tableSql.sql).not.toContain('completed_at');
+
+    // Idempotent: a second run keeps marker '7'.
+    expect(() => runMigrations()).not.toThrow();
+    const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version2.value).toBe('7');
+  });
+
+  it('marker-2 DB: v2 -> v3 -> v4 -> v5 rebuild preserves data, maps legacy execution statuses, narrows the CHECK, drops execution columns, and keeps cascade', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Workspace + batch + REAL onboarding item (FK-clean cohort row).
+    const wsId = randomUUID();
+    insertWorkspace({
+      id: wsId,
+      name: 'Cohort V3 WS',
+      workspacePath: '/tmp/cohort-v3',
+      gitPath: '',
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const batchId = createBatch({ workspaceId: wsId, name: 'Cohort V3 Batch', fileName: 'cohort-v3.xlsx', totalItems: 1 }).id;
+    const itemId = insertItems(batchId, [{ upc: 'V3-FAM-1', name: 'V3 Family Product', rowNumber: 1 }])[0].id;
+
+    // Simulate a marker-'2' database: v2-shaped tables (wide CHECK, CASCADE
+    // FK) with a cohort row stuck in the execution state 'running'.
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    const cohortId = randomUUID();
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec('DROP TABLE IF EXISTS curation_cohort_members');
+        db.exec('DROP TABLE IF EXISTS curation_cohorts');
+        db.exec(`
+          CREATE TABLE curation_cohorts (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','running','completed','failed','conflicted','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+          )
+        `);
+        db.exec(`
+          CREATE TABLE curation_cohort_members (
+            cohort_id TEXT NOT NULL REFERENCES curation_cohorts(id) ON DELETE CASCADE,
+            onboarding_item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+            product_sku TEXT,
+            normalized_brand TEXT NOT NULL,
+            normalized_name_stem TEXT NOT NULL,
+            membership_reason_json TEXT,
+            extraction_hash TEXT,
+            ordinal INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (cohort_id, onboarding_item_id)
+          )
+        `);
+        db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '2')");
+        db.exec(
+          `INSERT INTO curation_cohorts
+             (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+              status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
+           VALUES (?, ?, ?, 'v3-key', 'V3 Family', 'product-family-v1', ?, 'running', NULL, ?, ?, NULL, NULL, NULL)`,
+          [cohortId, wsId, batchId, 'f'.repeat(64), now, now],
+        );
+        db.exec(
+          `INSERT INTO curation_cohort_members
+             (cohort_id, onboarding_item_id, product_sku, normalized_brand, normalized_name_stem,
+              membership_reason_json, extraction_hash, ordinal, created_at)
+           VALUES (?, ?, 'V3-FAM-1', 'v3-brand', 'v3 family product', NULL, NULL, 0, ?)`,
+          [cohortId, itemId, now],
+        );
+      })();
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+
+    expect(() => runMigrations()).not.toThrow();
+
+    // Marker advanced to v7 (v2 → v3 → v4 → v5 → v6 → v7 hops).
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('7');
+
+    // Data preserved: the 'running' row survived and was deterministically
+    // mapped to 'ready' (dropping the never-durable execution state leaves a
+    // stable candidate); the member row survived.
+    const row = db.query('SELECT status, batch_id FROM curation_cohorts WHERE id = ?').get(cohortId) as { status: string; batch_id: string };
+    expect(row.status).toBe('ready');
+    expect(row.batch_id).toBe(batchId);
+    const memberCount = db.query(
+      'SELECT COUNT(*) as c FROM curation_cohort_members WHERE cohort_id = ? AND onboarding_item_id = ?',
+    ).get(cohortId, itemId) as { c: number };
+    expect(memberCount.c).toBe(1);
+
+    // CHECK narrowed: inserting/updating 'running' is now REJECTED.
+    expect(() => db.run("UPDATE curation_cohorts SET status = 'running' WHERE id = ?", [cohortId])).toThrow();
+    // 'ready' remains accepted. The v4 shape has no execution-metadata columns.
+    const readyId = randomUUID();
+    expect(() => {
+      db.run(
+        `INSERT INTO curation_cohorts
+           (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+            status, blocked_reason, created_at, updated_at, superseded_at)
+         VALUES (?, ?, ?, 'v4-ready', 'V4 Ready', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL)`,
+        [readyId, wsId, batchId, 'g'.repeat(64), now, now],
+      );
+    }).not.toThrow();
+    // The dropped columns are GONE: an INSERT naming started_at now fails.
+    expect(() => {
+      db.run(
+        `INSERT INTO curation_cohorts
+           (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+            status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
+         VALUES (?, ?, ?, 'v4-started', 'V4 Started', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL, NULL, NULL)`,
+        [randomUUID(), wsId, batchId, 'h'.repeat(64), now, now],
+      );
+    }).toThrow(/no column named/i);
+
+    // FK-clean after the swap, and cascade still works end-to-end.
+    expect(db.query("PRAGMA foreign_key_check('curation_cohorts')").all()).toHaveLength(0);
+    expect(db.query("PRAGMA foreign_key_check('curation_cohort_members')").all()).toHaveLength(0);
+    expect(deleteBatch(batchId)).toBe(true);
+    expect(db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number }).toEqual({ c: 0 });
+
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+
+  it('marker-3 DB: v3 -> v4 -> v5 rebuild drops started_at/completed_at, preserves data, and keeps cascade', () => {
+    const db = getDb();
+    const now = new Date().toISOString();
+
+    // Workspace + batch + REAL onboarding item (FK-clean v3 cohort row).
+    const wsId = randomUUID();
+    insertWorkspace({
+      id: wsId,
+      name: 'Cohort V4 WS',
+      workspacePath: '/tmp/cohort-v4',
+      gitPath: '',
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const batchId = createBatch({ workspaceId: wsId, name: 'Cohort V4 Batch', fileName: 'cohort-v4.xlsx', totalItems: 1 }).id;
+    const itemId = insertItems(batchId, [{ upc: 'V4-FAM-1', name: 'V4 Family Product', rowNumber: 1 }])[0].id;
+
+    // Simulate a marker-'3' database: the v3 shape (narrowed CHECK, CASCADE
+    // FK, but STILL carrying started_at/completed_at).
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    const cohortId = randomUUID();
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec('DROP TABLE IF EXISTS curation_cohort_members');
+        db.exec('DROP TABLE IF EXISTS curation_cohorts');
+        db.exec(`
+          CREATE TABLE curation_cohorts (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            batch_id TEXT NOT NULL REFERENCES onboarding_batches(id) ON DELETE CASCADE,
+            group_key TEXT NOT NULL,
+            group_label TEXT NOT NULL,
+            grouping_version TEXT NOT NULL,
+            membership_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('forming','waiting','ready','superseded')),
+            blocked_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            superseded_at TEXT
+          )
+        `);
+        db.exec(`
+          CREATE TABLE curation_cohort_members (
+            cohort_id TEXT NOT NULL REFERENCES curation_cohorts(id) ON DELETE CASCADE,
+            onboarding_item_id TEXT NOT NULL REFERENCES onboarding_items(id) ON DELETE CASCADE,
+            product_sku TEXT,
+            normalized_brand TEXT NOT NULL,
+            normalized_name_stem TEXT NOT NULL,
+            membership_reason_json TEXT,
+            extraction_hash TEXT,
+            ordinal INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (cohort_id, onboarding_item_id)
+          )
+        `);
+        db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '3')");
+        db.exec(
+          `INSERT INTO curation_cohorts
+             (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+              status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
+           VALUES (?, ?, ?, 'v4-key', 'V4 Family', 'product-family-v1', ?, 'waiting', 'Waiting for 1 family member', ?, ?, ?, ?, NULL)`,
+          [cohortId, wsId, batchId, 'f'.repeat(64), now, now, now, now],
+        );
+        db.exec(
+          `INSERT INTO curation_cohort_members
+             (cohort_id, onboarding_item_id, product_sku, normalized_brand, normalized_name_stem,
+              membership_reason_json, extraction_hash, ordinal, created_at)
+           VALUES (?, ?, 'V4-FAM-1', 'v4-brand', 'v4 family product', NULL, NULL, 0, ?)`,
+          [cohortId, itemId, now],
+        );
+      })();
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+
+    expect(() => runMigrations()).not.toThrow();
+
+    // Marker advanced to v7 (v3 → v4 → v5 → v6 → v7 hops).
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('7');
+
+    // The execution-metadata columns are GONE.
+    const cols = db.query('PRAGMA table_info(curation_cohorts)').all() as Array<{ name: string }>;
+    const names = cols.map(col => col.name);
+    expect(names).toContain('superseded_at');
+    expect(names).not.toContain('started_at');
+    expect(names).not.toContain('completed_at');
+
+    // Data preserved (status + blocked_reason survive; the legacy execution
+    // timestamps were never authority and are simply dropped); the member row
+    // survived.
+    const row = db.query('SELECT status, batch_id, blocked_reason FROM curation_cohorts WHERE id = ?').get(cohortId) as { status: string; batch_id: string; blocked_reason: string | null };
+    expect(row.status).toBe('waiting');
+    expect(row.blocked_reason).toBe('Waiting for 1 family member');
+    expect(row.batch_id).toBe(batchId);
+    const memberCount = db.query(
+      'SELECT COUNT(*) as c FROM curation_cohort_members WHERE cohort_id = ? AND onboarding_item_id = ?',
+    ).get(cohortId, itemId) as { c: number };
+    expect(memberCount.c).toBe(1);
+
+    // An INSERT naming the dropped column fails; the v4 insert shape works.
+    expect(() => {
+      db.run(
+        `INSERT INTO curation_cohorts
+           (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+            status, blocked_reason, created_at, updated_at, started_at, completed_at, superseded_at)
+         VALUES (?, ?, ?, 'v4-bad', 'V4 Bad', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL, NULL, NULL)`,
+        [randomUUID(), wsId, batchId, 'g'.repeat(64), now, now],
+      );
+    }).toThrow(/no column named/i);
+    const v4Id = randomUUID();
+    expect(() => {
+      db.run(
+        `INSERT INTO curation_cohorts
+           (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+            status, blocked_reason, created_at, updated_at, superseded_at)
+         VALUES (?, ?, ?, 'v4-ok', 'V4 OK', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL)`,
+        [v4Id, wsId, batchId, 'h'.repeat(64), now, now],
+      );
+    }).not.toThrow();
+
+    // FK-clean after the swap, and cascade still works end-to-end.
+    expect(db.query("PRAGMA foreign_key_check('curation_cohorts')").all()).toHaveLength(0);
+    expect(db.query("PRAGMA foreign_key_check('curation_cohort_members')").all()).toHaveLength(0);
+    expect(deleteBatch(batchId)).toBe(true);
+    expect(db.query('SELECT COUNT(*) as c FROM curation_cohorts WHERE batch_id = ?').get(batchId) as { c: number }).toEqual({ c: 0 });
+
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+});
+
+describe('Cohort schema v5 migration (PR3 M1, issue #30)', () => {
+  const dbPath = `/tmp/baystate-cms-cohort-v5-${randomUUID()}.db`;
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(dbPath);
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(dbPath); } catch { /* ok */ }
+  });
+
+  it('fresh install: marker absent -> v7 directly with classification_cohort_runs, cohort_run_id, and the current-run index', () => {
+    const db = getDb();
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('7');
+
+    // The v5 parent run table exists with the PR3 M1 lifecycle CHECKs.
+    const runTable = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='classification_cohort_runs'").get() as { sql: string } | undefined;
+    expect(runTable).toBeTruthy();
+    const sql = runTable!.sql;
+    expect(sql).toContain("'freezing'");
+    expect(sql).toContain("'completed_with_member_failures'");
+    expect(sql).not.toContain("'queued'"); // queued was DROPPED in PR3
+    expect(sql).toContain("CHECK (status IN ('freezing','superseded','cancelled') OR (candidate_membership_hash IS NOT NULL AND evidence_snapshot_hash IS NOT NULL))");
+    expect(sql).toContain('lease_expires_at');
+    expect(sql).toContain('superseded_at');
+
+    // classification_runs.cohort_run_id was added OUTSIDE the version gate.
+    const runCols = db.query('PRAGMA table_info(classification_runs)').all() as Array<{ name: string }>;
+    expect(runCols.map(c => c.name)).toContain('cohort_run_id');
+
+    // Unique current-run index is present (the claim race backstop).
+    const idxSql = db.query("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_current'").get() as { sql: string } | undefined;
+    expect(idxSql?.sql ?? '').toContain('UNIQUE');
+    expect(idxSql?.sql ?? '').toContain("status != 'superseded'");
+
+    // Lease sweep + cohort/status/workspace indexes present.
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_lease'").get()).toBeTruthy();
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_workspace'").get()).toBeTruthy();
+
+    // Real CHECK behavior on a real row: 'freezing' is accepted, 'queued' is
+    // rejected, and leaving 'freezing' without the mandatory evidence hashes
+    // fails closed.
+    const now = new Date().toISOString();
+    const wsId = randomUUID();
+    insertWorkspace({
+      id: wsId,
+      name: 'Cohort V5 WS',
+      workspacePath: '/tmp/cohort-v5',
+      gitPath: '',
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
+    const batchId = createBatch({ workspaceId: wsId, name: 'Cohort V5 Batch', fileName: 'cohort-v5.xlsx', totalItems: 1 }).id;
+    const cohortId = randomUUID();
+    db.run(
+      `INSERT INTO curation_cohorts
+         (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+          status, blocked_reason, created_at, updated_at, superseded_at)
+       VALUES (?, ?, ?, 'v5-key', 'V5 Family', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL)`,
+      [cohortId, wsId, batchId, 'f'.repeat(64), now, now],
+    );
+
+    const freezingId = randomUUID();
+    expect(() => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, created_at)
+         VALUES (?, ?, ?, ?, 'freezing', 'worker-a', ?, ?, ?)`,
+        [freezingId, wsId, cohortId, 'f'.repeat(64), now, now, now],
+      );
+    }).not.toThrow();
+
+    // 'queued' was DROPPED from the enum in PR3 — the status CHECK rejects it.
+    expect(() => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, created_at)
+         VALUES (?, ?, ?, ?, 'queued', 'worker-a', ?, ?, ?)`,
+        [randomUUID(), wsId, cohortId, 'f'.repeat(64), now, now, now],
+      );
+    }).toThrow(/CHECK constraint failed/);
+
+    // Superseded/cancelled are terminal lifecycle states exempt from the hash
+    // gate: a NULL-hash freezing run (abandoned unfinalized freeze) may still
+    // be superseded or cancelled (PR3 decision, Option A). Each scenario needs
+    // its OWN cohort (the unique current-run index allows only one
+    // non-superseded run per cohort).
+    const mkCohort = (groupKey: string): string => {
+      const id = randomUUID();
+      db.run(
+        `INSERT INTO curation_cohorts
+           (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash,
+            status, blocked_reason, created_at, updated_at, superseded_at)
+         VALUES (?, ?, ?, ?, 'V5 Family', 'product-family-v1', ?, 'ready', NULL, ?, ?, NULL)`,
+        [id, wsId, batchId, groupKey, 'g'.repeat(64), now, now],
+      );
+      return id;
+    };
+    const insertFreezing = (id: string, cohort: string): void => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, created_at)
+         VALUES (?, ?, ?, ?, 'freezing', 'worker-a', ?, ?, ?)`,
+        [id, wsId, cohort, 'f'.repeat(64), now, now, now],
+      );
+    };
+    const supersedeId = randomUUID();
+    const supersedeCohortId = mkCohort('v5-key-supersede');
+    const cancelId = randomUUID();
+    const cancelCohortId = mkCohort('v5-key-cancel');
+    insertFreezing(supersedeId, supersedeCohortId);
+    insertFreezing(cancelId, cancelCohortId);
+    expect(() => db.run("UPDATE classification_cohort_runs SET status = 'superseded', superseded_at = ? WHERE id = ?", [now, supersedeId])).not.toThrow();
+    expect(() => db.run("UPDATE classification_cohort_runs SET status = 'cancelled', completed_at = ? WHERE id = ?", [now, cancelId])).not.toThrow();
+
+    // Hash-required CHECK: leaving 'freezing' for an EXECUTION state without
+    // evidence_snapshot_hash fails closed.
+    expect(() => {
+      db.run("UPDATE classification_cohort_runs SET status = 'running' WHERE id = ?", [freezingId]);
+    }).toThrow(/CHECK constraint failed/);
+    // With the mandatory hashes the transition is accepted.
+    expect(() => {
+      db.run(
+        `UPDATE classification_cohort_runs
+         SET status = 'running', started_at = ?, evidence_snapshot_hash = ?
+         WHERE id = ?`,
+        [now, 'e'.repeat(64), freezingId],
+      );
+    }).not.toThrow();
+
+    // The unique current-run index rejects a second non-superseded run for the
+    // same cohort.
+    expect(() => {
+      db.run(
+        `INSERT INTO classification_cohort_runs
+           (id, workspace_id, cohort_id, candidate_membership_hash, status, claimed_by, claimed_at,
+            lease_expires_at, evidence_snapshot_hash, created_at)
+         VALUES (?, ?, ?, ?, 'running', 'worker-b', ?, ?, ?, ?)`,
+        [randomUUID(), wsId, cohortId, 'f'.repeat(64), now, now, 'g'.repeat(64), now],
+      );
+    }).toThrow(/UNIQUE/i);
+
+    // Cleanup: batch deletion cascades the cohort + runs; workspace deletion
+    // then succeeds.
+    expect(deleteBatch(batchId)).toBe(true);
+    db.run('DELETE FROM workspace WHERE id = ?', [wsId]);
+  });
+
+  it('marker-4 DB: v4 -> v5 -> v6 -> v7 hops exec the cohort SQL and bump the marker (idempotent)', () => {
+    const db = getDb();
+    // Simulate a pre-PR3 v4 database: rewind the marker and drop the v5 table.
+    const fkRow = db.query('PRAGMA foreign_keys').get() as { foreign_keys: number };
+    const fkWasOn = Number(fkRow.foreign_keys) === 1;
+    if (fkWasOn) db.exec('PRAGMA foreign_keys = OFF');
+    try {
+      db.exec('DROP TABLE IF EXISTS classification_cohort_runs;');
+    } finally {
+      if (fkWasOn) db.exec('PRAGMA foreign_keys = ON');
+    }
+    db.exec("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('curation_cohort_schema_version', '4')");
+
+    expect(() => runMigrations()).not.toThrow();
+
+    const version = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version.value).toBe('7');
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='classification_cohort_runs'").get()).toBeTruthy();
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_current'").get()).toBeTruthy();
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_cohort_runs_lease'").get()).toBeTruthy();
+
+    // cohort_run_id survives for databases that were already migrated
+    // (the ALTER and supporting index live OUTSIDE the version gate).
+    const runCols = db.query('PRAGMA table_info(classification_runs)').all() as Array<{ name: string }>;
+    expect(runCols.map(c => c.name)).toContain('cohort_run_id');
+    expect(db.query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_classification_runs_cohort_run_id'").get()).toBeTruthy();
+
+    // Idempotent: a second run keeps the marker and the v7 shape.
+    expect(() => runMigrations()).not.toThrow();
+    const version2 = db.query("SELECT value FROM app_meta WHERE key = 'curation_cohort_schema_version'").get() as { value: string };
+    expect(version2.value).toBe('7');
+  });
 });
