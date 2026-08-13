@@ -19,6 +19,7 @@ import {
   testExtractorProfile,
   type GenerateProfileResult,
 } from '../onboarding-api';
+import { ViewHeader } from './common/ViewHeader';
 import type {
   DomainProfileGovernance,
   DomainHealthStatus,
@@ -586,54 +587,50 @@ export function ProfileBuilderWorkspace(
     return (
       <div>
         {/* Domain header */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 16,
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            marginBottom: 20,
-          }}
-        >
-          <h2 style={{ margin: 0, fontSize: 22 }}>{domain}</h2>
-          <span style={domainHealthBadgeStyle('unknown' as DomainHealthStatus)}>
-            {healthStatus}
-          </span>
-          {workerHealthLoading ? (
-            <span style={{ fontSize: 12, color: '#9ca3af' }}>
-              Worker health… loading
-            </span>
-          ) : workerHealth ? (
-            <span
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                fontSize: 12,
-                color: '#4b5563',
-              }}
-            >
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: workerHealth.ok ? '#16a34a' : '#dc2626',
-                  display: 'inline-block',
-                }}
-              />
-              Worker v{workerHealth.version}
-            </span>
-          ) : (
-            <span style={{ fontSize: 12, color: '#dc2626' }}>
-              Worker unavailable
-            </span>
-          )}
-          <span style={{ fontSize: 12, color: '#6b7280' }}>
-            {confirmedSampleCount} confirmed sample
-            {confirmedSampleCount !== 1 ? 's' : ''}
-          </span>
-        </div>
+        <ViewHeader
+          title={domain}
+          description="Visual click-to-select & automated CSS extractor profile configuration workspace."
+          badge={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={domainHealthBadgeStyle('unknown' as DomainHealthStatus)}>
+                {healthStatus}
+              </span>
+              {workerHealthLoading ? (
+                <span style={{ fontSize: 12, color: '#9ca3af' }}>
+                  Worker health… loading
+                </span>
+              ) : workerHealth ? (
+                <span
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: 12,
+                    color: '#4b5563',
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: workerHealth.ok ? '#16a34a' : '#dc2626',
+                    }}
+                  />
+                  Worker v{workerHealth.version}
+                </span>
+              ) : (
+                <span style={{ fontSize: 12, color: '#dc2626' }}>
+                  Worker unavailable
+                </span>
+              )}
+              <span style={{ fontSize: 12, color: '#6b7280' }}>
+                {confirmedSampleCount} confirmed sample
+                {confirmedSampleCount !== 1 ? 's' : ''}
+              </span>
+            </div>
+          }
+        />
 
         {/* Existing profiles list */}
         <div style={s.section}>

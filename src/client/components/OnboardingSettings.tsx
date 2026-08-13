@@ -24,6 +24,8 @@ import { LocalAiStatusPanel } from './LocalAiStatusPanel';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
+import { ViewHeader } from './common/ViewHeader';
+import { colors } from '../theme';
 
 type OnboardingSettingsTab = 'general' | 'llm' | 'curation' | 'profiles';
 
@@ -417,7 +419,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
     select: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const, background: '#fff' },
     inputRow: { display: 'flex', gap: 8 },
     buttonRow: { display: 'flex', gap: 12, marginTop: 12 },
-    primaryBtn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 },
+    primaryBtn: { background: colors.uniformGreen, color: colors.feedBagCream, border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 },
     secondaryBtn: { background: 'none', border: '1px solid #d1d5db', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontSize: 13 },
     deleteBtn: { background: 'none', border: '1px solid #dc2626', color: '#dc2626', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 },
     table: { width: '100%', borderCollapse: 'collapse' as const, marginTop: 12, fontSize: 14 },
@@ -529,10 +531,11 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
 
   return (
     <div style={styles.container}>
-      <div style={styles.header}>
-        <h1 style={styles.title}>Onboarding Pipeline Settings</h1>
-        <button style={styles.backBtn} onClick={onBack}>← Back to Batches</button>
-      </div>
+      <ViewHeader
+        title="Onboarding Pipeline Settings"
+        description="Configure discovery sources, AI model routing, curation targets, and site extractor profiles."
+        actions={<button style={styles.backBtn} onClick={onBack}>← Back to Batches</button>}
+      />
 
       {error && <div style={styles.error}>{error}</div>}
 

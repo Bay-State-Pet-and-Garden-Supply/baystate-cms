@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getDashboardStats, checkDrift, type DashboardStats } from '../api';
 import { colors, fonts, rounded, themeStyles } from '../theme';
+import { ViewHeader } from './common/ViewHeader';
 
 interface DashboardProps {
   onNavigate: (view: 'setup' | 'catalog' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding') => void;
@@ -140,29 +141,25 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   return (
     <div style={{ padding: '24px', maxWidth: 1380, margin: '0 auto', fontFamily: fonts.body }}>
       {/* Header Section */}
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, gap: 16, flexWrap: 'wrap' }}>
-        <div>
-          <h1 style={{ fontFamily: fonts.display, fontSize: 24, fontWeight: 700, color: colors.ledgerCharcoal, margin: '0 0 4px 0', letterSpacing: '-0.3px' }}>
-            Store Operations Overview
-          </h1>
-          <p style={{ margin: 0, fontSize: 13, color: colors.mulchBrown }}>
-            Bay State Pet & Garden Supply — 429 Winthrop St catalog management & ShopSite 15 sync pipeline.
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <button 
-            className="btn btn-secondary" 
-            onClick={handleDriftCheck}
-            disabled={checkingDrift || !connection}
-            title={!connection ? "Configure ShopSite connection in Setup" : "Check remote ShopSite catalog drift (Hotkey: R)"}
-          >
-            {checkingDrift ? 'Checking Drift...' : 'Check Remote Drift (R)'}
-          </button>
-          <button className="btn btn-primary" onClick={() => onNavigate('catalog')}>
-            Edit Catalog (G C)
-          </button>
-        </div>
-      </header>
+      <ViewHeader
+        title="Store Operations Overview"
+        description="Bay State Pet & Garden Supply — 429 Winthrop St catalog management & ShopSite 15 sync pipeline."
+        actions={
+          <>
+            <button 
+              className="btn btn-secondary" 
+              onClick={handleDriftCheck}
+              disabled={checkingDrift || !connection}
+              title={!connection ? "Configure ShopSite connection in Setup" : "Check remote ShopSite catalog drift (Hotkey: R)"}
+            >
+              {checkingDrift ? 'Checking Drift...' : 'Check Remote Drift (R)'}
+            </button>
+            <button className="btn btn-primary" onClick={() => onNavigate('catalog')}>
+              Edit Catalog (G C)
+            </button>
+          </>
+        }
+      />
 
       {/* Action Messages */}
       {message && (

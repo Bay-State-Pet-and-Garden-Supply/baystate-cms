@@ -143,7 +143,7 @@ const navStyles: Record<string, React.CSSProperties> = {
     backgroundColor: colors.seedlingGreen,
     boxShadow: `0 0 0 2px ${colors.uniformGreen}`,
   },
-  main: { maxWidth: 1380, margin: '0 auto', padding: '24px' },
+  main: { maxWidth: 1380, margin: '0 auto', padding: '16px 24px 24px 24px' },
   loading: { padding: 40, textAlign: 'center' as any, color: colors.ledgerCharcoal, fontFamily: fonts.body },
 };
 

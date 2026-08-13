@@ -29,6 +29,7 @@ import {
   getOllamaModels,
 } from '../onboarding-api';
 import type { LlmTask, LlmProvider, LlmTaskConfig } from '../../shared/schemas/onboarding';
+import { colors } from '../theme';
 
 const REQUIRED_TASKS: ReadonlyArray<LlmTask> = ['profile_generation', 'profile_revision'];
 
@@ -591,8 +592,8 @@ function LlmTaskConfigRow(props: LlmTaskConfigRowProps) {
           onClick={handleSave}
           disabled={busy}
           style={{
-            background: '#2563eb',
-            color: '#fff',
+            background: colors.uniformGreen,
+            color: colors.feedBagCream,
             border: 'none',
             borderRadius: 4,
             padding: '6px 14px',

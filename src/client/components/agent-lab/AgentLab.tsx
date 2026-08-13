@@ -11,6 +11,7 @@ import { AgentRunList } from './AgentRunList';
 import { AgentLabPolicies } from './AgentLabPolicies';
 import { AgentMetrics } from './AgentMetrics';
 import { AgentRunInspector } from './AgentRunInspector';
+import { ViewHeader } from '../common/ViewHeader';
 
 type SubView = 'runs' | 'policies' | 'metrics';
 
@@ -139,12 +140,11 @@ export function AgentLab() {
 
   return (
     <div style={styles.container}>
-      <div style={styles.titleRow}>
-        <h1 style={styles.title}>
-          🤖 Agent Lab
-          <span style={styles.pill}>Experimental</span>
-        </h1>
-      </div>
+      <ViewHeader
+        title="Agent Lab"
+        description="Bounded Product Intelligence research sandbox for product discovery and asset verification."
+        badge={<span style={styles.pill}>Experimental</span>}
+      />
       <div style={styles.subTabs}>
         <button
           style={subView === 'runs' ? styles.subTabActive : styles.subTab}

@@ -24,6 +24,8 @@ import {
   bulkSkipItems,
   bulkRetryItems
 } from '../onboarding-api';
+import { ViewHeader } from './common/ViewHeader';
+import { colors } from '../theme';
 import { OnboardingSettings } from './OnboardingSettings';
 import { PipelineBoard } from './PipelineBoard';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
@@ -841,8 +843,8 @@ export function Onboarding() {
     titleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
     title: { fontSize: 24, fontWeight: 600, margin: 0, color: '#111827' },
     btnRow: { display: 'flex', gap: 12 },
-    primaryBtn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 },
-    secondaryBtn: { background: '#fff', border: '1px solid #d1d5db', color: '#4b5563', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 },
+    primaryBtn: { background: colors.uniformGreen, color: colors.feedBagCream, border: `1px solid ${colors.shadowPine}`, borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 },
+    secondaryBtn: { background: colors.whiteSurface, border: `1px solid ${colors.cardBorder}`, color: colors.ledgerCharcoal, borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600 },
     table: { width: '100%', borderCollapse: 'collapse', background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' },
     th: { background: '#f9fafb', borderBottom: '2px solid #e5e7eb', textAlign: 'left', padding: '12px 16px', color: '#4b5563', fontWeight: 600, fontSize: 13 },
     td: { borderBottom: '1px solid #e5e7eb', padding: '12px 16px', fontSize: 14, color: '#374151' },
@@ -876,19 +878,22 @@ export function Onboarding() {
   if (!selectedBatchId) {
     return (
       <div style={styles.container}>
-        <div style={styles.titleRow}>
-          <h1 style={styles.title}>Product Onboarding Pipeline</h1>
-          <div style={styles.btnRow}>
-            <button
-              style={{ ...styles.secondaryBtn, background: '#eff6ff', color: '#2563eb', borderColor: '#bfdbfe' }}
-              onClick={() => setShowWeeklyReportModal(true)}
-            >
-              📊 Generate Weekly Report
-            </button>
-            <button style={styles.secondaryBtn} onClick={() => setShowSettings(true)}>⚙️ Onboarding Settings</button>
-            <button style={styles.primaryBtn} onClick={() => setShowUploadModal(true)}>+ Upload Weekly Spreadsheet</button>
-          </div>
-        </div>
+        <ViewHeader
+          title="Product Onboarding Pipeline"
+          description="Automated 5-stage product ingestion and curation pipeline for supplier catalog spreadsheets."
+          actions={
+            <>
+              <button
+                style={{ ...styles.secondaryBtn, background: colors.signetBurgundy, color: colors.feedBagCream, borderColor: colors.burgundyDark }}
+                onClick={() => setShowWeeklyReportModal(true)}
+              >
+                📊 Generate Weekly Report
+              </button>
+              <button style={styles.secondaryBtn} onClick={() => setShowSettings(true)}>⚙️ Onboarding Settings</button>
+              <button style={styles.primaryBtn} onClick={() => setShowUploadModal(true)}>+ Upload Weekly Spreadsheet</button>
+            </>
+          }
+        />
 
         {error && <div style={{ color: '#dc2626', background: '#fef2f2', padding: 12, borderRadius: 6, marginBottom: 20 }}>{error}</div>}
 

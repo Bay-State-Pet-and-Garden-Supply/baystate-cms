@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { getProduct, saveDraft, getConnection, listFieldRegistry, type ProductDetail as ProductDetailType } from '../api';
 import { CatalogClassificationPanel } from './CatalogClassificationPanel';
+import { ViewHeader } from './common/ViewHeader';
+import { colors } from '../theme';
 import type { FieldRegistryEntry } from '../../shared/schemas/field-registry';
 
 function ProductImage({ src, alt, title }: { src: string; alt: string; title: string }) {
@@ -227,7 +229,7 @@ export function ProductDetail({ sku, onBack }: Props) {
     label: { display: 'block', fontSize: 13, fontWeight: 500, color: '#374151', marginBottom: 4 },
     input: { width: '100%', padding: '8px 12px', fontSize: 14, border: '1px solid #d1d5db', borderRadius: 4, boxSizing: 'border-box' as any },
     buttonRow: { display: 'flex', gap: 8, marginTop: 24 },
-    button: { padding: '8px 20px', fontSize: 14, cursor: 'pointer', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 4 },
+    button: { padding: '8px 20px', fontSize: 14, cursor: 'pointer', background: colors.uniformGreen, color: colors.feedBagCream, border: 'none', borderRadius: 4 },
     back: { padding: '8px 20px', fontSize: 14, cursor: 'pointer', background: '#6b7280', color: '#fff', border: 'none', borderRadius: 4, marginBottom: 20 },
     error: { color: '#dc2626', padding: '8px 12px', background: '#fef2f2', borderRadius: 4, margin: '8px 0' },
     message: { color: '#16a34a', padding: '8px 12px', background: '#f0fdf4', borderRadius: 4, margin: '8px 0' },
@@ -500,85 +502,88 @@ export function ProductDetail({ sku, onBack }: Props) {
       <style dangerouslySetInnerHTML={{ __html: styleTagContent }} />
       <button style={styles.back} onClick={onBack}>← Back to Catalog</button>
       
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <h1 style={{ ...styles.title, marginBottom: 0 }}>{sku}</h1>
-        <div className="custom-checklist-container">
+      <ViewHeader
+        title={`SKU: ${sku}`}
+        description={nameVal ? `Product Draft: ${nameVal}` : 'Catalog Item Details & ShopSite Synchronization Fields'}
+        actions={
+          <div className="custom-checklist-container">
+            <button
+              onClick={() => setCustomizingFields(prev => !prev)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 12px',
+                fontSize: 13,
+                fontWeight: 500,
+                color: '#475569',
+                background: '#f1f5f9',
+                border: '1px solid #cbd5e1',
+                borderRadius: 6,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+              }}
+            >
+              ⚙️ Customize Layout
+            </button>
+          </div>
+        }
+      />
+      {customizingFields && (
+        <div className="custom-checklist-dropdown" style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', marginBottom: 12, borderBottom: '1px solid #f1f5f9', paddingBottom: 6 }}>
+            Visible Fields Setup
+          </div>
+          <div style={{ maxHeight: 240, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {registry
+              .filter(e => e.xmlField !== 'Graphic' && e.xmlField !== 'MoreInformationGraphic')
+              .map(field => {
+                const isForced = field.xmlField === 'Name' || field.xmlField === 'ProductDescription';
+                const isPinned = isForced || pinnedFields.includes(field.xmlField);
+                return (
+                  <label
+                    key={field.xmlField}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      fontSize: 13,
+                      color: isForced ? '#94a3b8' : '#334155',
+                      cursor: isForced ? 'not-allowed' : 'pointer',
+                      userSelect: 'none',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isPinned}
+                      disabled={isForced}
+                      onChange={() => toggleFieldPinned(field.xmlField)}
+                      style={{ cursor: isForced ? 'not-allowed' : 'pointer' }}
+                    />
+                    {field.label || field.xmlField} {isForced && <span style={{ fontSize: 10, color: '#94a3b8' }}>(Always)</span>}
+                  </label>
+                );
+              })}
+          </div>
           <button
-            onClick={() => setCustomizingFields(prev => !prev)}
+            onClick={() => setCustomizingFields(false)}
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              padding: '6px 12px',
-              fontSize: 13,
+              width: '100%',
+              marginTop: 12,
+              padding: '6px 0',
+              fontSize: 12,
               fontWeight: 500,
-              color: '#475569',
-              background: '#f1f5f9',
-              border: '1px solid #cbd5e1',
-              borderRadius: 6,
+              color: colors.feedBagCream,
+              background: colors.uniformGreen,
+              border: 'none',
+              borderRadius: 4,
               cursor: 'pointer',
-              transition: 'all 0.2s',
             }}
           >
-            ⚙️ Customize Fields
+            Done
           </button>
-          {customizingFields && (
-            <div className="custom-checklist-dropdown">
-              <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', marginBottom: 12, borderBottom: '1px solid #f1f5f9', paddingBottom: 6 }}>
-                Visible Fields Setup
-              </div>
-              <div style={{ maxHeight: 240, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {registry
-                  .filter(e => e.xmlField !== 'Graphic' && e.xmlField !== 'MoreInformationGraphic')
-                  .map(field => {
-                    const isForced = field.xmlField === 'Name' || field.xmlField === 'ProductDescription';
-                    const isPinned = isForced || pinnedFields.includes(field.xmlField);
-                    return (
-                      <label
-                        key={field.xmlField}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          fontSize: 13,
-                          color: isForced ? '#94a3b8' : '#334155',
-                          cursor: isForced ? 'not-allowed' : 'pointer',
-                          userSelect: 'none',
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isPinned}
-                          disabled={isForced}
-                          onChange={() => toggleFieldPinned(field.xmlField)}
-                          style={{ cursor: isForced ? 'not-allowed' : 'pointer' }}
-                        />
-                        {field.label || field.xmlField} {isForced && <span style={{ fontSize: 10, color: '#94a3b8' }}>(Always)</span>}
-                      </label>
-                    );
-                  })}
-              </div>
-              <button
-                onClick={() => setCustomizingFields(false)}
-                style={{
-                  width: '100%',
-                  marginTop: 12,
-                  padding: '6px 0',
-                  fontSize: 12,
-                  fontWeight: 500,
-                  color: '#ffffff',
-                  background: '#2563eb',
-                  border: 'none',
-                  borderRadius: 4,
-                  cursor: 'pointer',
-                }}
-              >
-                Done
-              </button>
-            </div>
-          )}
         </div>
-      </div>
+      )}
 
       <p style={styles.subtitle}>
         {data?.hasDraft ? '🖊️ Has unsaved draft' : '✓ Approved version'}

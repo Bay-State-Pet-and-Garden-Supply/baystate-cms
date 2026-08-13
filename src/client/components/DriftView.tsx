@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { checkDrift, listDrift, resolveDrift, fullReconcile, bulkResolveDrift, type DriftItem } from '../api';
+import { ViewHeader } from './common/ViewHeader';
+import { colors } from '../theme';
 
 export function DriftView() {
   const [drifts, setDrifts] = useState<DriftItem[]>([]);
@@ -106,11 +108,15 @@ export function DriftView() {
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>Drift Detection</h1>
-      <p style={{ fontSize: 13, color: '#6b7280', marginBottom: 16 }}>
-        Detects products that have changed in ShopSite since you last pulled.
-        {openCount > 0 && <span style={{ color: '#dc2626', marginLeft: 8 }}>⚠ {openCount} open drift item(s).</span>}
-      </p>
+      <ViewHeader
+        title="Drift Detection"
+        description={
+          <>
+            Detects products that have changed in ShopSite since you last pulled.
+            {openCount > 0 && <span style={{ color: '#dc2626', marginLeft: 8, fontWeight: 600 }}>⚠ {openCount} open drift item(s).</span>}
+          </>
+        }
+      />
 
       {error && <div style={styles.error}>{error}</div>}
       {result && <div style={styles.result}>{result}</div>}
@@ -127,7 +133,7 @@ export function DriftView() {
           placeholder="Paste ShopSite products XML here..."
         />
         <div style={{ marginTop: 8 }}>
-          <button style={{ ...styles.btn, background: '#2563eb', color: '#fff' }} onClick={handleCheckDrift} disabled={loading}>
+          <button style={{ ...styles.btn, background: colors.uniformGreen, color: colors.feedBagCream }} onClick={handleCheckDrift} disabled={loading}>
             {loading ? 'Checking...' : 'Check Drift'}
           </button>
         </div>
@@ -184,7 +190,7 @@ export function DriftView() {
                         <button style={{ ...styles.actionBtn, background: '#7c3aed' }} onClick={() => handleResolve(d.id, 'accept_remote')}>
                           Accept Remote
                         </button>
-                        <button style={{ ...styles.actionBtn, background: '#2563eb' }} onClick={() => handleResolve(d.id, 'create_change_set')}>
+                        <button style={{ ...styles.actionBtn, background: colors.uniformGreen }} onClick={() => handleResolve(d.id, 'create_change_set')}>
                           Reconcile
                         </button>
                       </>

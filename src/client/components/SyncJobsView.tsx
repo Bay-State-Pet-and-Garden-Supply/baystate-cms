@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { listSyncJobs, getSyncJobDetail, type SyncJob, type SyncJobDetail } from '../api';
 import { colors, fonts, rounded, themeStyles } from '../theme';
+import { ViewHeader } from './common/ViewHeader';
 
 export function SyncJobsView() {
   const [jobs, setJobs] = useState<SyncJob[]>([]);
@@ -53,12 +54,10 @@ export function SyncJobsView() {
 
   return (
     <div style={{ padding: 24, maxWidth: 1380, margin: '0 auto', fontFamily: fonts.body }}>
-      <h1 style={{ fontFamily: fonts.display, fontSize: 24, fontWeight: 700, color: colors.ledgerCharcoal, marginBottom: 6 }}>
-        Remote Sync Jobs
-      </h1>
-      <p style={{ color: colors.mulchBrown, fontSize: 13, margin: '0 0 24px 0' }}>
-        Audit history and live execution logs for ShopSite CGI synchronization operations.
-      </p>
+      <ViewHeader
+        title="Remote Sync Jobs"
+        description="Audit history and live execution logs for ShopSite CGI synchronization operations."
+      />
 
       {error && (
         <div style={{ color: colors.signetBurgundy, padding: '12px 16px', backgroundColor: '#fee2e2', borderRadius: rounded.md, border: `1px solid ${colors.signetBurgundy}`, marginBottom: 20, fontSize: 13, fontWeight: 600 }}>

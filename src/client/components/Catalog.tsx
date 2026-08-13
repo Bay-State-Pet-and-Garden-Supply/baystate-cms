@@ -7,6 +7,7 @@ import { CategoryPagesView } from './catalog-workbench/CategoryPagesView';
 import { MappingsView } from './catalog-workbench/MappingsView';
 import { SchemaHealthView } from './catalog-workbench/SchemaHealthView';
 import { WorkbenchTabs, WORKBENCH_TAB_CSS } from './catalog-workbench/WorkbenchTabs';
+import { ViewHeader } from './common/ViewHeader';
 import { WORKBENCH_TABS } from './catalog-workbench/types';
 
 interface Props {
@@ -26,20 +27,10 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
   return (
     <div style={CONTAINER_STYLE}>
       <style>{WORKBENCH_TAB_CSS}</style>
-      <h1
-        className="font-display"
-        style={{
-          fontSize: 26,
-          fontWeight: 700,
-          color: 'var(--color-uniform-green, #14532D)',
-          marginBottom: 0,
-        }}
-      >
-        Catalog Workbench
-      </h1>
-      <p style={{ fontSize: 13, color: '#525252', marginTop: 4, marginBottom: 20 }}>
-        Manage products, schema fields, attribute mappings, and store category pages
-      </p>
+      <ViewHeader
+        title="Catalog Workbench"
+        description="Manage products, schema fields, attribute mappings, and store category pages"
+      />
       <WorkbenchTabs
         tabs={WORKBENCH_TABS}
         active={activeTab}

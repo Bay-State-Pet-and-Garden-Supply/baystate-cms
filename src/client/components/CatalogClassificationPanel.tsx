@@ -13,13 +13,14 @@ import {
 } from '../classification-readiness-view';
 import { deriveEvidenceView } from '../classification-evidence-view';
 import { EvidenceCitationList } from './pipeline-drawer/EvidenceCitationList';
+import { colors } from '../theme';
 
 const buttonBase: React.CSSProperties = {
-  padding: '8px 16px',
+  padding: '8px 14px',
   borderRadius: 8,
-  border: 'none',
   fontSize: 13,
   fontWeight: 600,
+  border: 'none',
   cursor: 'pointer',
   display: 'inline-flex',
   alignItems: 'center',
@@ -28,8 +29,8 @@ const buttonBase: React.CSSProperties = {
 
 const primaryButton: React.CSSProperties = {
   ...buttonBase,
-  background: '#2563eb',
-  color: '#ffffff',
+  background: colors.uniformGreen,
+  color: colors.feedBagCream,
 };
 
 const sectionStyle: React.CSSProperties = {

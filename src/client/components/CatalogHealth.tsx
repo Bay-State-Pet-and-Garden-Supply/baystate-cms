@@ -18,6 +18,7 @@ import {
   type ProductFieldAuditReport,
   type AssistantCleanupReport
 } from '../api';
+import { ViewHeader } from './common/ViewHeader';
 
 const STYLE_RULES = `
   .store-manager-container {
@@ -1056,13 +1057,13 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
     return md.split('\n').map((line, idx) => {
       const trimmed = line.trim();
       if (trimmed.startsWith('# ')) {
-        return <h1 key={idx} style={{ fontSize: '22px', fontWeight: 800, color: '#111827', margin: '20px 0 10px', borderBottom: '1px solid #f3f4f6', paddingBottom: '6px' }}>{trimmed.substring(2)}</h1>;
+        return <h1 key={idx} className="view-title" style={{ fontSize: '1.375rem', margin: '16px 0 8px', borderBottom: '1px solid var(--color-card-border)', paddingBottom: '6px' }}>{trimmed.substring(2)}</h1>;
       }
       if (trimmed.startsWith('## ')) {
-        return <h2 key={idx} style={{ fontSize: '18px', fontWeight: 700, color: '#1f2937', margin: '16px 0 8px' }}>{trimmed.substring(3)}</h2>;
+        return <h2 key={idx} className="section-title" style={{ fontSize: '1.125rem', margin: '14px 0 6px' }}>{trimmed.substring(3)}</h2>;
       }
       if (trimmed.startsWith('### ')) {
-        return <h3 key={idx} style={{ fontSize: '15px', fontWeight: 700, color: '#374151', margin: '14px 0 6px' }}>{trimmed.substring(4)}</h3>;
+        return <h3 key={idx} className="card-title" style={{ fontSize: '1rem', margin: '12px 0 4px' }}>{trimmed.substring(4)}</h3>;
       }
       if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
         return <li key={idx} style={{ marginLeft: '20px', listStyleType: 'disc', margin: '4px 0', fontSize: '14px', color: '#4b5563' }}>{trimmed.substring(2)}</li>;
@@ -1127,68 +1128,68 @@ export function CatalogHealth({ onSelectProduct }: CatalogHealthProps) {
       <style>{STYLE_RULES}</style>
 
       {/* Header */}
-      <header className="store-manager-header">
-        <div className="title-group">
-          <h1>Store Manager AI Assistant</h1>
-          <p>Audit catalog parameters, sanitize registered ProductFields safely, and stage batch cleanups into active Change Sets.</p>
-        </div>
-        <div className="header-buttons">
-          {activeTab === 'overview' && (
-            <>
-              <button 
-                className={`btn-secondary ${showSettings ? 'active' : ''}`}
-                onClick={() => setShowSettings(!showSettings)}
-                disabled={scanning}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+      <ViewHeader
+        title="Store Manager AI Assistant"
+        description="Audit catalog parameters, sanitize registered ProductFields safely, and stage batch cleanups into active Change Sets."
+        actions={
+          <>
+            {activeTab === 'overview' && (
+              <>
+                <button 
+                  className={`btn-secondary ${showSettings ? 'active' : ''}`}
+                  onClick={() => setShowSettings(!showSettings)}
+                  disabled={scanning}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+                  </svg>
+                  Configure Rules
+                </button>
+                <button className="btn-primary" onClick={handleRunScan} disabled={scanning || savingSettings}>
+                  {scanning ? (
+                    <>
+                      <span className="spinner-ring" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                      Scanning...
+                    </>
+                  ) : (
+                    <>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                      </svg>
+                      Scan Catalog
+                    </>
+                  )}
+                </button>
+              </>
+            )}
+            {activeTab === 'cleanup' && (
+              <button className="btn-secondary" onClick={() => loadAuditReport(selectedField)} disabled={loadingAudit}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
                 </svg>
-                Configure Rules
+                Refresh Report
               </button>
-              <button className="btn-primary" onClick={handleRunScan} disabled={scanning || savingSettings}>
-                {scanning ? (
-                  <>
-                    <span className="spinner-ring" style={{ width: 14, height: 14, borderWidth: 2 }} />
-                    Scanning...
-                  </>
-                ) : (
-                  <>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
-                    </svg>
-                    Scan Catalog
-                  </>
-                )}
+            )}
+            {activeTab === 'proposals' && (
+              <button className="btn-secondary" onClick={loadProposals} disabled={loadingProposals}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                </svg>
+                Refresh Fixes
               </button>
-            </>
-          )}
-          {activeTab === 'cleanup' && (
-            <button className="btn-secondary" onClick={() => loadAuditReport(selectedField)} disabled={loadingAudit}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
-              </svg>
-              Refresh Report
-            </button>
-          )}
-          {activeTab === 'proposals' && (
-            <button className="btn-secondary" onClick={loadProposals} disabled={loadingProposals}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
-              </svg>
-              Refresh Fixes
-            </button>
-          )}
-          {activeTab === 'assistant' && (
-            <button className="btn-primary" onClick={loadAssistantReport} disabled={loadingAssistant}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
-              </svg>
-              Regenerate Report
-            </button>
-          )}
-        </div>
-      </header>
+            )}
+            {activeTab === 'assistant' && (
+              <button className="btn-primary" onClick={loadAssistantReport} disabled={loadingAssistant}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
+                </svg>
+                Regenerate Report
+              </button>
+            )}
+          </>
+        }
+      />
 
       {/* Tabs */}
       <nav className="store-manager-tabs">

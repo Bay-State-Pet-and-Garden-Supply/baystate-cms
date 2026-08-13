@@ -1,12 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useChat } from '@ai-sdk/react';
-import { DefaultChatTransport, type UIMessage } from 'ai';
+import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalResponses, type UIMessage } from 'ai';
 import {
   fetchStoreManagerModels,
   formatModelPricing,
   type StoreManagerModelDescriptor,
 } from '../store-manager-api';
+import {
+  approvalCardCopy,
+  deniedOutcomeText,
+  approvedAwaitingExecutionText,
+} from '../store-manager-logic';
 import { colors, fonts, rounded, themeStyles } from '../theme';
+import { ViewHeader } from './common/ViewHeader';
 
 interface StoreManagerAssistantProps {
   onSelectProduct?: (sku: string) => void;
@@ -996,28 +1002,27 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             borderBottom: `1px solid ${colors.cardBorder}`,
           }}
         >
-          <div>
-            <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal, display: 'flex', alignItems: 'center', gap: 10 }}>
-              Store Manager AI Assistant
-              <span
-                style={{
-                  fontSize: '10px',
-                  fontWeight: 700,
-                  padding: '2px 8px',
-                  borderRadius: rounded.full,
-                  background: status === 'streaming' ? colors.uniformGreen : status === 'submitted' ? colors.signetBurgundy : colors.seedlingGreen,
-                  color: colors.feedBagCream,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                }}
-              >
-                {status === 'streaming' ? 'Streaming...' : status === 'submitted' ? 'Submitting...' : 'Ready'}
-              </span>
-            </h2>
-            <p style={{ margin: '2px 0 0', fontSize: '12px', color: colors.mulchBrown }}>
-              {currentThreadTitle ? `Current thread: "${currentThreadTitle}"` : 'Interactive catalog auditing and refactoring advisor.'}
-            </p>
-          </div>
+        <ViewHeader
+          title="Store Manager AI Assistant"
+          description={currentThreadTitle ? `Current thread: "${currentThreadTitle}"` : 'Interactive catalog auditing and refactoring advisor.'}
+          style={{ marginBottom: 0 }}
+          badge={
+            <span
+              style={{
+                fontSize: '10px',
+                fontWeight: 700,
+                padding: '2px 8px',
+                borderRadius: rounded.full,
+                background: status === 'streaming' ? colors.uniformGreen : status === 'submitted' ? colors.signetBurgundy : colors.seedlingGreen,
+                color: colors.feedBagCream,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+              }}
+            >
+              {status === 'streaming' ? 'Streaming...' : status === 'submitted' ? 'Submitting...' : 'Ready'}
+            </span>
+          }
+        />
 
           {/* Model selection dropdown — server-driven model list with clear pricing */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>

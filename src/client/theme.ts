@@ -34,6 +34,64 @@ export const rounded = {
   full: '9999px',
 } as const;
 
+export const typography = {
+  viewTitle: {
+    fontFamily: fonts.display,
+    fontSize: '1.625rem',
+    fontWeight: 700,
+    color: colors.ledgerCharcoal,
+    lineHeight: 1.25,
+    margin: 0,
+    letterSpacing: '-0.015em',
+  },
+  viewSubtitle: {
+    fontFamily: fonts.body,
+    fontSize: '0.8125rem',
+    color: colors.mulchBrown,
+    margin: '0.25rem 0 0 0',
+    lineHeight: 1.4,
+  },
+  sectionTitle: {
+    fontFamily: fonts.display,
+    fontSize: '1.25rem',
+    fontWeight: 700,
+    color: colors.ledgerCharcoal,
+    lineHeight: 1.3,
+    margin: '0 0 0.75rem 0',
+  },
+  sectionSubtitle: {
+    fontFamily: fonts.body,
+    fontSize: '0.8125rem',
+    color: colors.mulchBrown,
+    margin: '-0.5rem 0 0.75rem 0',
+  },
+  cardTitle: {
+    fontFamily: fonts.body,
+    fontSize: '1rem',
+    fontWeight: 600,
+    color: colors.ledgerCharcoal,
+    lineHeight: 1.3,
+    margin: '0 0 0.5rem 0',
+  },
+  subsectionTitle: {
+    fontFamily: fonts.body,
+    fontSize: '0.875rem',
+    fontWeight: 600,
+    color: colors.ledgerCharcoal,
+    lineHeight: 1.35,
+    margin: '0 0 0.375rem 0',
+  },
+  microTitle: {
+    fontFamily: fonts.body,
+    fontSize: '0.75rem',
+    fontWeight: 600,
+    letterSpacing: '0.05em',
+    textTransform: 'uppercase' as const,
+    color: colors.mulchBrown,
+    margin: '0 0 0.25rem 0',
+  },
+} as const;
+
 export const themeStyles = {
   card: {
     backgroundColor: colors.whiteSurface,

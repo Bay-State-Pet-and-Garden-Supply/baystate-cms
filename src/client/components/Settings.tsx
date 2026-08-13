@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { listFieldRegistry, updateFieldRegistryEntry, getConnection, saveConnection, testConnection } from '../api';
+import { ViewHeader } from './common/ViewHeader';
+import { colors } from '../theme';
 
 export function Settings() {
   const [fieldRegistry, setFieldRegistry] = useState<any[]>([]);
@@ -75,7 +77,7 @@ export function Settings() {
     sectionTitle: { fontSize: 18, fontWeight: 600, margin: '0 0 16px 0', color: '#111827' },
     input: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const, marginBottom: 12 },
     select: { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, boxSizing: 'border-box' as const, background: '#fff' },
-    primaryBtn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
+    primaryBtn: { background: colors.uniformGreen, color: colors.feedBagCream, border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
     secondaryBtn: { background: '#4b5563', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 14 },
     table: { width: '100%', borderCollapse: 'collapse' as const, marginTop: 12, fontSize: 14 },
     th: { borderBottom: '2px solid #e5e7eb', textAlign: 'left' as const, padding: '8px 12px', color: '#4b5563', fontWeight: 600 },
@@ -88,7 +90,10 @@ export function Settings() {
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>Store Settings</h1>
+      <ViewHeader
+        title="Store Settings"
+        description="Manage ShopSite CGI API connection, merchant credentials, and catalog Field Registry definitions."
+      />
 
       {error && <div style={styles.error}>{error}</div>}
 

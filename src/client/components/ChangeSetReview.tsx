@@ -13,6 +13,7 @@ import {
   type ChangeSetItem, 
   type ValidationResult 
 } from '../api';
+import { ViewHeader } from './common/ViewHeader';
 import { colors, fonts, rounded, themeStyles } from '../theme';
 
 const STYLE_RULES = `
@@ -168,10 +169,11 @@ const STYLE_RULES = `
 
   .cs-workspace-title {
     font-family: ${fonts.display};
-    font-size: 18px;
+    font-size: 1.25rem;
     font-weight: 700;
     color: ${colors.ledgerCharcoal};
     margin: 0 0 4px 0;
+    line-height: 1.3;
   }
 
   .cs-workspace-meta {
