@@ -84,19 +84,30 @@ function deepEqual(a: unknown, b: unknown): boolean {
  * - 'pending' when a request exists but no response yet;
  * - 'missing' when no approval request references this tool call at all.
  */
-export function approvalStateForToolCall(
+/**
+ * Resolve the approval request id bound to a specific tool call, or null when
+ * no approval request references this tool call.
+ */
+export function findApprovalIdForToolCall(
   messages: ModelMessage[],
   toolCallId: string,
-): 'approved' | 'denied' | 'pending' | 'missing' {
-  let approvalId: string | null = null;
+): string | null {
   for (const message of messages) {
     if (!Array.isArray(message.content)) continue;
     for (const part of message.content as Array<{ type?: string }>) {
       if (part.type === 'tool-approval-request' && (part as Record<string, unknown>).toolCallId === toolCallId) {
-        approvalId = String((part as Record<string, unknown>).approvalId);
+        return String((part as Record<string, unknown>).approvalId);
       }
     }
   }
+  return null;
+}
+
+export function approvalStateForToolCall(
+  messages: ModelMessage[],
+  toolCallId: string,
+): 'approved' | 'denied' | 'pending' | 'missing' {
+  const approvalId = findApprovalIdForToolCall(messages, toolCallId);
   if (!approvalId) return 'missing';
 
   for (const message of messages) {
@@ -138,6 +149,44 @@ export function toolCallInputMatchesReceived(
  *    tool call and the received input must be the exact approved input.
  * Read tools execute without approval but still refuse outside a valid context.
  */
+/**
+ * Consumed-approval registry (epic #42, #34 review). The AI SDK HMAC binds an
+ * approval response to its approval request content, but the signature secret
+ * is process-wide — a client could replay an already-approved message history
+ * under a NEW execution context. This registry records which execution
+ * context consumed each approvalId; a second consumption from a different
+ * execution context is refused as `approval_replay_or_altered`. Entries are
+ * bounded (single-operator process; oldest entries drop when the cap is hit).
+ */
+const consumedApprovals = new Map<string, { executionId: string; consumedAt: number }>();
+const MAX_CONSUMED_APPROVALS = 10_000;
+
+function consumeApproval(approvalId: string, executionId: string): { ok: true } | { ok: false; reason: string } {
+  const prior = consumedApprovals.get(approvalId);
+  if (prior) {
+    if (prior.executionId !== executionId) {
+      return {
+        ok: false,
+        reason:
+          `Approval "${approvalId}" was already consumed by another execution context; ` +
+          'replayed approval refused.',
+      };
+    }
+    // Same execution context: a duplicate dispatch of the same approval is
+    // still refused (single-use per turn); the SDK never legitimately
+    // re-invokes one tool call.
+    return { ok: false, reason: `Approval "${approvalId}" was already consumed this turn.` };
+  }
+  if (consumedApprovals.size >= MAX_CONSUMED_APPROVALS) consumedApprovals.clear();
+  consumedApprovals.set(approvalId, { executionId, consumedAt: Date.now() });
+  return { ok: true };
+}
+
+/** Test seam: clear the consumed-approval registry (per-process state). */
+export function resetConsumedApprovalsForTests(): void {
+  consumedApprovals.clear();
+}
+
 export function gateToolExecution(
   policy: StoreManagerToolPolicy,
   context: StoreManagerToolContext,
@@ -166,6 +215,19 @@ export function gateToolExecution(
             'approval_replay_or_altered',
             `Tool call "${policy.name}" arguments were altered after approval; execution refused.`,
           );
+        }
+        // Bind the approval to this execution context: an approval is
+        // single-use and cannot be replayed under a different turn/context.
+        const approvalId = findApprovalIdForToolCall(messages, options.toolCallId);
+        if (!approvalId) {
+          throw new ApprovalGateError(
+            'approval_missing',
+            `Execution of "${policy.name}" has no approval id for this tool call.`,
+          );
+        }
+        const consumed = consumeApproval(approvalId, context.executionId ?? 'unknown');
+        if (!consumed.ok) {
+          throw new ApprovalGateError('approval_replay_or_altered', consumed.reason);
         }
       } else if (state === 'denied') {
         throw new ApprovalGateError(

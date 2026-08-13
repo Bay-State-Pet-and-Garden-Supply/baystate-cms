@@ -165,9 +165,10 @@ describe('Store Manager Tools (epic #42, #40 renamed contract)', () => {
     expect(applyResult.success).toBe(false);
     expect(applyResult.error).toContain('not found');
 
+    const dismissMessages = makeApprovedMessages('call-2', 'dismiss_stored_proposal', { proposalId: 'foreign-proposal-id' });
     const dismissResult = (await tools.dismiss_stored_proposal.execute(
       { proposalId: 'foreign-proposal-id' },
-      { toolCallId: 'call-1', messages: approvedMessages } as never,
+      { toolCallId: 'call-2', messages: dismissMessages } as never,
     )) as unknown as { success: boolean; error?: string };
     expect(dismissResult.success).toBe(false);
     expect(dismissResult.error).toContain('not found');
