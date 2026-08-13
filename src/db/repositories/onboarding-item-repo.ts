@@ -22,6 +22,10 @@ export interface OnboardingItemRow {
   retry_count: number;
   is_duplicate: number;
   existing_sku: string | null;
+  source_type: string | null;
+  accepted_evidence_attempt_ids_json: string | null;
+  accepted_evidence_attempt_id: string | null;
+  sourcing_decision_json: string | null;
   extraction_data_json: string | null;
   curation_data_json: string | null;
   row_number: number;
@@ -61,10 +65,12 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
     sourceUrl: row.source_url,
     expectedName: row.expected_name ?? null,
     coordinatedTitle: row.coordinated_title ?? null,
-    sourceType: (row as any).source_type ?? 'official_page',
-    acceptedEvidenceAttemptIds: (row as any).accepted_evidence_attempt_ids_json ? JSON.parse((row as any).accepted_evidence_attempt_ids_json) : [],
-    acceptedEvidenceAttemptId: (row as any).accepted_evidence_attempt_id ?? null,
-    sourcingDecision: (row as any).sourcing_decision_json ? JSON.parse((row as any).sourcing_decision_json) : null,
+    sourceType: (row.source_type ?? 'official_page') as 'official_page' | 'distributor_record',
+    acceptedEvidenceAttemptIds: row.accepted_evidence_attempt_ids_json
+      ? (JSON.parse(row.accepted_evidence_attempt_ids_json) as string[])
+      : [],
+    acceptedEvidenceAttemptId: row.accepted_evidence_attempt_id ?? null,
+    sourcingDecision: row.sourcing_decision_json ? JSON.parse(row.sourcing_decision_json) : null,
     stage: (row.stage || 'sourcing') as PipelineStage,
     stageStatus: (row.stage_status || 'pending') as StageStatus,
     status: (row.status || 'imported') as ItemStatus,
@@ -82,7 +88,11 @@ function mapRowToItem(row: OnboardingItemRow): OnboardingItem {
 
 // ─── INSERT ────────────────────────────────────────────────────────────────────
 
-export function insertItems(batchId: string, items: InsertItemData[]): OnboardingItem[] {
+export function insertItems(
+  batchId: string,
+  items: InsertItemData[],
+  entryStage: PipelineStage = 'discovery',
+): OnboardingItem[] {
   const db = getDb();
   const now = new Date().toISOString();
   const stmt = db.query(
@@ -99,7 +109,10 @@ export function insertItems(batchId: string, items: InsertItemData[]): Onboardin
     for (const item of items) {
       const id = randomUUID();
       const isDuplicateNum = item.isDuplicate ? 1 : 0;
-      const targetStage = item.stage ?? 'sourcing';
+      // The entry stage is the caller-selected effective stage (Discovery when
+      // the Sourcing engine capability is disabled). Explicit `item.stage`
+      // wins for fixtures/internal state construction only.
+      const targetStage = item.stage ?? entryStage;
       const targetStageStatus = item.stageStatus ?? 'pending';
       stmt.run(
         id,
@@ -167,14 +180,23 @@ export function findItemById(id: string): OnboardingItem | undefined {
  * item by SKU (upc). Returns null when no onboarding item has that SKU.
  * Used by privileged image-repair so callers never hand-roll onboarding SQL.
  */
-export function findExtractionDataByUpc(upc: string): {
+export function findExtractionDataByWorkspaceAndUpc(workspaceId: string, upc: string): {
   extractionDataJson: string | null;
   brandHint: string | null;
 } | null {
   const db = getDb();
+  // Workspace-scoped through the owning batch: a UPC onboarded in another
+  // workspace is invisible here (fail closed). If multiple batches in this
+  // workspace contain the SKU, newest batch first, then row order — the same
+  // deterministic tie-break every caller observes.
   const row = db.query(
-    'SELECT extraction_data_json, brand_hint FROM onboarding_items WHERE upc = ? LIMIT 1',
-  ).get(upc) as { extraction_data_json: string | null; brand_hint: string | null } | undefined;
+    `SELECT i.extraction_data_json, i.brand_hint
+     FROM onboarding_items i
+     JOIN onboarding_batches b ON b.id = i.batch_id
+     WHERE b.workspace_id = ? AND i.upc = ?
+     ORDER BY i.created_at DESC, i.row_number ASC
+     LIMIT 1`,
+  ).get(workspaceId, upc) as { extraction_data_json: string | null; brand_hint: string | null } | undefined;
   if (!row) return null;
   return { extractionDataJson: row.extraction_data_json, brandHint: row.brand_hint };
 }
@@ -390,11 +412,11 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
 
       let nextStage: PipelineStage;
       if (item.stage === 'sourcing') {
-        if (item.sourcingDecision?.route === 'bundle_to_curation') {
-          nextStage = 'curation';
-        } else {
-          nextStage = 'discovery';
-        }
+        // Sourcing advances only to adjacent Discovery. Direct Sourcing →
+        // Curation (legacy `bundle_to_curation`) is prohibited until a
+        // structured-record fallback ADR exists; legacy persisted decisions
+        // are ignored for routing.
+        nextStage = 'discovery';
       } else {
         const currentIdx = STAGE_ORDER.indexOf(item.stage);
         if (currentIdx < 0 || currentIdx >= STAGE_ORDER.length - 1) {
@@ -829,29 +851,202 @@ export function getWeeklyReportItems(startDateIso: string, endDateIso: string): 
 }
 
 /**
-  * Update an item's sourcing decision and option stage / stage_status.
-  */
+ * Update an item's sourcing decision (audit record). Sets the item to
+ * `completed` in its current stage; it does NOT transition stages.
+ *
+ * Stage transitions from Sourcing are performed exclusively through
+ * `fallbackSourcingItemsToDiscovery` (audited `fallback_to_discovery`). No
+ * generic helper may recreate the legacy Sourcing → Curation bypass.
+ */
 export function updateSourcingDecision(
   id: string,
   decision: SourcingDecision,
-  nextStage?: PipelineStage,
 ): void {
   const db = getDb();
   const now = new Date().toISOString();
   const jsonStr = JSON.stringify(decision);
 
-  if (nextStage) {
-    db.query(
-      `UPDATE onboarding_items
-       SET sourcing_decision_json = ?, stage = ?, stage_status = 'pending', error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
-       WHERE id = ?`,
-    ).run(jsonStr, nextStage, now, id);
-  } else {
-    db.query(
-      `UPDATE onboarding_items
-       SET sourcing_decision_json = ?, stage_status = 'completed', error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
-       WHERE id = ?`,
-    ).run(jsonStr, now, id);
+  db.query(
+    `UPDATE onboarding_items
+     SET sourcing_decision_json = ?, stage_status = 'completed', error_message = NULL, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ?`,
+  ).run(jsonStr, now, id);
+}
+
+/**
+ * Audit helper: build the operator-override fallback decision written when a
+ * stranded Sourcing item is moved to Discovery.
+ */
+function fallbackSourcingDecision(decidedAt: string): SourcingDecision {
+  return {
+    route: 'fallback_to_discovery',
+    origin: 'operator_override',
+    acceptedEvidenceAttemptIds: [],
+    providerIds: [],
+    conflicts: [],
+    warnings: [],
+    decidedAt,
+  };
+}
+
+/**
+ * Apply the audited fallback transition to a Sourcing row: write a fresh
+ * `fallback_to_discovery` operator-override decision and move it to
+ * `discovery/pending`, clearing error/claim/retry state. No-op (returns
+ * false) when the row is not currently in the sourcing stage.
+ */
+function applyFallbackTransition(id: string, decidedAt: string): boolean {
+  const db = getDb();
+  const result = db.query(
+    `UPDATE onboarding_items
+     SET sourcing_decision_json = ?, stage = 'discovery', stage_status = 'pending', error_message = NULL,
+         retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND stage = 'sourcing'`,
+  ).run(JSON.stringify(fallbackSourcingDecision(decidedAt)), decidedAt, id);
+  return result.changes > 0;
+}
+
+export interface SourcingFallbackResult {
+  moved: string[];
+  skipped: Array<{ id: string; reason: string }>;
+}
+
+/**
+ * Bulk repair: move stranded `sourcing/pending` items to Discovery inside one
+ * transaction, writing a fresh audited `fallback_to_discovery`
+ * operator-override decision per moved row and clearing error/claim/retry
+ * state. Only `sourcing/pending` rows are eligible (the audited stranded
+ * cohort); historical evidence rows and all other item payloads are preserved
+ * untouched. Duplicate IDs are deduplicated; missing/ineligible IDs are
+ * reported, never silently dropped.
+ */
+export function fallbackSourcingItemsToDiscovery(itemIds: string[]): SourcingFallbackResult {
+  if (itemIds.length === 0) return { moved: [], skipped: [] };
+  const now = new Date().toISOString();
+  const moved: string[] = [];
+  const skipped: Array<{ id: string; reason: string }> = [];
+
+  const db = getDb();
+  db.transaction(() => {
+    const seen = new Set<string>();
+    for (const id of itemIds) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const item = findItemById(id);
+      if (!item) {
+        skipped.push({ id, reason: 'not_found' });
+        continue;
+      }
+      if (item.stage !== 'sourcing' || item.stageStatus !== 'pending') {
+        skipped.push({ id, reason: `not_eligible:${item.stage}/${item.stageStatus}` });
+        continue;
+      }
+      if (applyFallbackTransition(id, now)) {
+        moved.push(id);
+      } else {
+        skipped.push({ id, reason: 'transition_failed' });
+      }
+    }
+  })();
+
+  return { moved, skipped };
+}
+
+export interface SingleItemFallbackResult {
+  moved: boolean;
+  reason?: string;
+}
+
+/**
+ * Single-item audited fallback for an operator resolution (any stage status:
+ * pending, failed, completed). Used by the resolve-sourcing route; the
+ * transition is identical to the bulk repair path.
+ */
+export function fallbackSourcingItemToDiscovery(id: string): SingleItemFallbackResult {
+  const item = findItemById(id);
+  if (!item) return { moved: false, reason: 'not_found' };
+  if (item.stage !== 'sourcing') {
+    return { moved: false, reason: `not_eligible:${item.stage}/${item.stageStatus}` };
   }
+  return { moved: applyFallbackTransition(id, new Date().toISOString()) };
+}
+
+export interface ResetForRetryResult {
+  /** Items moved to Discovery via the audited sourcing fallback. */
+  moved: string[];
+  /** Items reset to pending in their current stage (existing semantics). */
+  reset: string[];
+  skipped: Array<{ id: string; reason: string }>;
+}
+
+/**
+ * Capability-aware reset seam. While the Sourcing engine is DISABLED, a reset
+ * on a Sourcing item performs the audited `fallback_to_discovery` transition
+ * (never resetting in place, which would strand it at `sourcing/pending`);
+ * every other stage keeps the existing `resetItemsToPending` semantics.
+ */
+export function resetItemsForRetry(
+  itemIds: string[],
+  options: { sourcingEngineEnabled: boolean },
+): ResetForRetryResult {
+  if (itemIds.length === 0) return { moved: [], reset: [], skipped: [] };
+  const db = getDb();
+  const moved: string[] = [];
+  const reset: string[] = [];
+  const skipped: Array<{ id: string; reason: string }> = [];
+
+  // Fail any active classification runs for every requested item first
+  // (existing reset semantics) so a reset never leaves a run racing.
+  const now = new Date().toISOString();
+  db.transaction(() => {
+    for (const id of itemIds) {
+      db.query(
+        `UPDATE classification_runs
+         SET status = 'failed', completed_at = ?, error_message = 'Superseded by reset'
+         WHERE onboarding_item_id = ? AND status = 'running'`,
+      ).run(now, id);
+    }
+  })();
+
+  const seen = new Set<string>();
+  const toFallback: string[] = [];
+  const toResetInPlace: string[] = [];
+  for (const id of itemIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const item = findItemById(id);
+    if (!item) {
+      skipped.push({ id, reason: 'not_found' });
+      continue;
+    }
+    if (item.stage === 'sourcing' && !options.sourcingEngineEnabled) {
+      toFallback.push(id);
+    } else {
+      toResetInPlace.push(id);
+    }
+  }
+
+  if (toFallback.length > 0) {
+    // While the engine is disabled, resetting a Sourcing item means the
+    // audited operator-override fallback to Discovery (any stage_status —
+    // pending/failed/completed — never a stranding in-place reset).
+    db.transaction(() => {
+      for (const id of toFallback) {
+        const res = fallbackSourcingItemToDiscovery(id);
+        if (res.moved) {
+          moved.push(id);
+        } else {
+          skipped.push({ id, reason: res.reason ?? 'transition_failed' });
+        }
+      }
+    })();
+  }
+
+  if (toResetInPlace.length > 0) {
+    resetItemsToPending(toResetInPlace);
+    reset.push(...toResetInPlace);
+  }
+
+  return { moved, reset, skipped };
 }
 

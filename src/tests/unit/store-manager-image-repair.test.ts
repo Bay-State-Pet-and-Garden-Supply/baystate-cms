@@ -90,7 +90,7 @@ function createOnboardingExtraction(workspaceId: string, sku: string, extraction
     } as any,
   ]);
   // insertItems stores extraction_data_json as NULL; set it through the repo
-  // so findExtractionDataByUpc can serve it.
+  // so findExtractionDataByWorkspaceAndUpc can serve it.
   for (const item of inserted) {
     updateItemExtractionData(item.id, JSON.stringify(extractionData));
   }
@@ -542,6 +542,82 @@ describe('Store Manager image repair service (epic #42, #36)', () => {
     expect(leftovers).toEqual([]);
   });
 
+  it('scopes extraction lookups to the workspace: same UPC in two workspaces never cross-consumes', async () => {
+    // Workspace A and B both onboarded SKU-SHARED with DIFFERENT image URLs.
+    const urlA = 'https://cdn.example.com/a-shared.jpg';
+    const urlB = 'https://cdn.example.com/b-shared.jpg';
+    const csA = makeApprovedChangeSet('SKU-SHARED', { primaryImage: urlA });
+    const csB = createChangeSet({ workspaceId: workspaceIdB, title: 'B Shared CS', description: null, baseCommit: 'head' });
+    updateChangeSetStatus(csB.id, 'approved');
+    upsertChangeSetItem({
+      changeSetId: csB.id,
+      sku: 'SKU-SHARED',
+      operation: 'update',
+      draftJson: makeDraftJson('SKU-SHARED'),
+      baseJson: null,
+      draftHash: 'draft-hash-b',
+    });
+    createOnboardingExtraction(workspaceIdB, 'SKU-SHARED', { primaryImage: urlB });
+
+    const fetchedA: string[] = [];
+    const resultA = await repairChangeSetImagesForWorkspace(
+      { workspaceId, workspacePath: wsPath, changeSetId: csA },
+      {
+        resolveHostname: publicResolver,
+        fetchFn: (input) => {
+          fetchedA.push(String(input));
+          return Promise.resolve(makeResponse(200, ONE_PX_PNG));
+        },
+        decodeImage: async () => ({ ok: true as const, jpeg: Buffer.from('final-jpeg-bytes') }),
+      },
+    );
+    expect(resultA.status).toBe('ok');
+    expect(fetchedA).toEqual([urlA]); // B's URL never requested, despite the same UPC.
+
+    const fetchedB: string[] = [];
+    const resultB = await repairChangeSetImagesForWorkspace(
+      { workspaceId: workspaceIdB, workspacePath: wsPathB, changeSetId: csB.id },
+      {
+        resolveHostname: publicResolver,
+        fetchFn: (input) => {
+          fetchedB.push(String(input));
+          return Promise.resolve(makeResponse(200, ONE_PX_PNG));
+        },
+        decodeImage: async () => ({ ok: true as const, jpeg: Buffer.from('final-jpeg-bytes') }),
+      },
+    );
+    expect(resultB.status).toBe('ok');
+    expect(fetchedB).toEqual([urlB]); // A's URL never requested from B's repair.
+  });
+
+  it('enforces the total image budget BEFORE each dispatch (no side effects past the cap)', async () => {
+    const csId = makeApprovedChangeSet('SKU-BUDGET', {
+      primaryImage: 'https://cdn.example.com/b1.jpg',
+      additionalImages: ['https://cdn.example.com/b2.jpg', 'https://cdn.example.com/b3.jpg'],
+    });
+    const fetched: string[] = [];
+    const result = await repairChangeSetImagesForWorkspace(
+      { workspaceId, workspacePath: wsPath, changeSetId: csId },
+      {
+        resolveHostname: publicResolver,
+        fetchFn: (input) => {
+          fetched.push(String(input));
+          return Promise.resolve(makeResponse(200, ONE_PX_PNG));
+        },
+        decodeImage: async () => ({ ok: true as const, jpeg: Buffer.from('final-jpeg-bytes') }),
+        policy: { maxTotalImages: 2 },
+      },
+    );
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    // Exactly two downloads dispatched; the third is denied BEFORE any fetch.
+    expect(fetched).toEqual(['https://cdn.example.com/b1.jpg', 'https://cdn.example.com/b2.jpg']);
+    const skuResult = result.summary.results[0];
+    expect(skuResult.imagesDownloaded).toBe(2);
+    const statuses = skuResult.entries.map((e) => e.status);
+    expect(statuses).toEqual(['downloaded', 'downloaded', 'policy_denied']);
+  });
+
   it('reports one-of-many partial failures honestly', async () => {
     const csId = makeApprovedChangeSet('SKU-PARTIAL', {
       primaryImage: 'https://cdn.example.com/ok.jpg',
@@ -727,7 +803,7 @@ describe('Store Manager repair callers delegate to the single service', () => {
       executionId: 'exec-route-1',
       approvalExpiresAt: Date.now() + 60_000,
     });
-    const toolDef = tools.repairChangeSetImages as unknown as {
+    const toolDef = tools.repair_approved_change_set_images as unknown as {
       execute: (input: unknown, options: unknown) => Promise<unknown>;
     };
 
@@ -736,7 +812,7 @@ describe('Store Manager repair callers delegate to the single service', () => {
       {
         role: 'assistant',
         content: [
-          { type: 'tool-call', toolCallId: 'call-repair-1', toolName: 'repairChangeSetImages', input: toolCallInput },
+          { type: 'tool-call', toolCallId: 'call-repair-1', toolName: 'repair_approved_change_set_images', input: toolCallInput },
           { type: 'tool-approval-request', approvalId: 'ap-repair-1', toolCallId: 'call-repair-1' },
         ],
       },
@@ -784,7 +860,8 @@ describe('Store Manager repair callers delegate to the single service', () => {
     // The service owns those capabilities (the single seam).
     expect(serviceSource).toContain('fetchFn');
     expect(serviceSource).toContain('writeFileSync');
-    expect(serviceSource).toContain('findExtractionDataByUpc');
+    expect(serviceSource).toContain('findExtractionDataByWorkspaceAndUpc');
+    expect(serviceSource).not.toContain('findExtractionDataByUpc');
     expect(serviceSource).toContain('findChangeSetByWorkspaceId');
   });
 });

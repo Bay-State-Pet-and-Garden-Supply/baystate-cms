@@ -37,7 +37,7 @@ import { lookup } from 'node:dns/promises';
 import { classifyIp } from '../../product-intelligence/policy/policy-gateway';
 import { findChangeSetByWorkspaceId } from '../../db/repositories/change-set-repo';
 import { listChangeSetItems } from '../../db/repositories/change-set-repo';
-import { findExtractionDataByUpc } from '../../db/repositories/onboarding-item-repo';
+import { findExtractionDataByWorkspaceAndUpc } from '../../db/repositories/onboarding-item-repo';
 
 // ---------------------------------------------------------------------------
 // Immutable repair policy bounds (one place, conservative defaults)
@@ -128,6 +128,8 @@ export interface ImageRepairDeps {
   decodeImage?: DecodeImageFn;
   /** Test seam overriding request/operation timeouts (production defaults stay immutable). */
   timeouts?: { perRequestMs?: number; operationDeadlineMs?: number };
+  /** Test seam for the immutable repair bounds; production callers never pass this. */
+  policy?: { maxTotalImages?: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +420,7 @@ export async function repairChangeSetImagesForWorkspace(
   const boundary = new ImageRepairNetworkBoundary(deps);
   const results: ImageRepairSkuResult[] = [];
   let totalImages = 0;
+  const maxTotalImages = deps.policy?.maxTotalImages ?? IMAGE_REPAIR_POLICY.maxTotalImages;
 
   for (const item of items) {
     if (deadlineExceeded()) {
@@ -429,22 +432,31 @@ export async function repairChangeSetImagesForWorkspace(
       });
       continue;
     }
+    // Remaining whole-operation image budget: enforced BEFORE any fetch,
+    // decode, or write for this SKU (each dispatch decrements it).
+    const remainingImages = maxTotalImages - totalImages;
+    if (remainingImages <= 0) {
+      results.push({
+        sku: item.sku,
+        imagesDownloaded: 0,
+        entries: [{ status: 'policy_denied', imageIndex: 0, sourceUrlRedacted: '' }],
+        error: `Exceeds total image limit of ${maxTotalImages}`,
+      });
+      continue;
+    }
     const skuResult = await repairSkuForWorkspace(
-      { sku: item.sku, draftJson: item.draftJson, imagesRoot: realRoot },
+      {
+        workspaceId: input.workspaceId,
+        sku: item.sku,
+        draftJson: item.draftJson,
+        imagesRoot: realRoot,
+        maxImages: remainingImages,
+      },
       boundary,
       deps,
       input.signal,
     );
     totalImages += skuResult.imagesDownloaded;
-    if (totalImages > IMAGE_REPAIR_POLICY.maxTotalImages) {
-      results.push({
-        sku: item.sku,
-        imagesDownloaded: 0,
-        entries: [{ status: 'policy_denied', imageIndex: 0, sourceUrlRedacted: '' }],
-        error: `Exceeds total image limit of ${IMAGE_REPAIR_POLICY.maxTotalImages}`,
-      });
-      continue;
-    }
     results.push(skuResult);
   }
 
@@ -467,9 +479,12 @@ export async function repairChangeSetImagesForWorkspace(
 // ---------------------------------------------------------------------------
 
 interface RepairSkuContext {
+  workspaceId: string;
   sku: string;
   draftJson: string;
   imagesRoot: string;
+  /** Remaining image-dispatch budget for the whole operation; enforced before each side effect. */
+  maxImages: number;
 }
 
 async function repairSkuForWorkspace(
@@ -478,7 +493,7 @@ async function repairSkuForWorkspace(
   deps: ImageRepairDeps,
   parentSignal: AbortSignal | undefined,
 ): Promise<ImageRepairSkuResult> {
-  const extraction = findExtractionDataByUpc(ctx.sku);
+  const extraction = findExtractionDataByWorkspaceAndUpc(ctx.workspaceId, ctx.sku);
   if (!extraction?.extractionDataJson) {
     return {
       sku: ctx.sku,
@@ -565,6 +580,14 @@ async function repairSkuForWorkspace(
     const url = allUrls[index];
     const suffix = index === 0 ? '' : `-${index + 1}`;
     const filename = `${finalStem}${suffix}.jpg`;
+
+    // Whole-operation image budget enforced BEFORE this dispatch: once the
+    // remaining budget is exhausted no further fetch/decode/write happens.
+    if (ctx.maxImages <= 0) {
+      entries.push({ status: 'policy_denied', imageIndex: index, sourceUrlRedacted: redactUrl(url) });
+      continue;
+    }
+    ctx.maxImages -= 1;
 
     if (isHttpUrl(url)) {
       const outcome = await downloadAndWriteOne(
