@@ -787,7 +787,7 @@ describe('PR11 C4 — a cohort child of a SUPERSEDED parent never promotes (pare
 });
 
 describe('PR11 C4 — stale proposals: an accepted type dependency whose target no longer matches the current effective type refuses; matching and universal proposals promote', () => {
-  it('reviewed-first authority: parent execution-type mutation does NOT stale a member WITH a matching reviewed type — and a member with NO reviewed type is REFUSED (reviewed_product_type_required, PR11 R2)', async () => {
+  it('PR12 value-hash: a parent execution-authority mutation stales execution-stamped proposals EVEN with a matching reviewed type — and a member with NO reviewed type is REFUSED (reviewed_product_type_required, PR11 R2)', async () => {
     const { workspaceId, workspacePath: wsPath } = newWorkspace();
     const prepared = prepareActiveV2Workspace(workspaceId, wsPath, COHERENT_PROMOTABLE);
     const run = await freezeActiveCohort(workspaceId, wsPath);
@@ -808,14 +808,27 @@ describe('PR11 C4 — stale proposals: an accepted type dependency whose target 
     const deps = listDependenciesForProposal(flavorProposal.id);
     expect(deps.some(d => d.dependencyKind === 'execution_product_type' && d.dependencyTargetId === 'dog-food-dry')).toBe(true);
 
-    // PART 1 — a member WITH an accepted reviewed type (dog-food-dry): the
-    // reviewed authority wins (PR11 R1 P1-A), the deps still match, promotion
-    // proceeds — the parent mutation alone is NOT a stale signal.
+    // PART 1 — PR12 value-hash invalidation (DECISION-A): the members'
+    // execution-stamped proposals were stamped under the parent authority
+    // {executionProductTypeId:'dog-food-dry', productTypeConfidence:0.9}.
+    // The parent execution id mutated to 'dog-food-wet' — the CURRENT
+    // authority value hash (recomputed from the parent run's current id +
+    // confidence) no longer matches the stamped hash, so the proposals are
+    // STALE even though the accepted reviewed type (dog-food-dry) still
+    // matches the dependency target. The parent authority VALUE is the
+    // truthful staleness key (PR12): a drifted id (or confidence) under the
+    // same target id stales execution-stamped proposals. The reviewed-first
+    // PASS authority stays covered by the coherent-fixture test below.
     for (const item of items) decideAllProposals(findItemById(item.id)!);
     placeInPromotion(items.map(item => findItemById(item.id)!));
     const withReviewed = await promoteItems(workspaceId, wsPath, items[0].batchId, items.map(item => item.id));
-    expect(withReviewed.failures).toHaveLength(0);
-    expect(withReviewed.count).toBe(3);
+    expect(withReviewed.count).toBe(0);
+    expect(withReviewed.failures).toHaveLength(3);
+    for (const failure of withReviewed.failures) {
+      expect(failure.error).toContain('value hash');
+      expect(failure.error).toContain('execution_product_type');
+      expect(failure.error).toContain('(execution)');
+    }
 
     // PART 2 — a member with NO reviewed type (its PT proposal carries no
     // PART 2 — a member with NO reviewed type (its PT proposal carries no

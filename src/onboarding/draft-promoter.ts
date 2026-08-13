@@ -21,7 +21,7 @@ import { getCohortRunById,
   listDependenciesForProposal,
 } from '../db/repositories/classification-cohort-run-repo';
 import { getRuntimeSnapshotByHash } from '../classification/runtime-snapshot';
-import { validatePromotionGate, resolvePromotionEffectiveTypeId } from '../classification/promotion-gate';
+import { validatePromotionGate, resolvePromotionEffectiveTypeId, computeExecutionAuthorityHash, computeReviewedAuthorityHash } from '../classification/promotion-gate';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import type { OnboardingItem } from '../shared/schemas/onboarding';
 import type { ClassificationProposal } from '../shared/schemas/classification';
@@ -219,6 +219,22 @@ function computePromotionGate(
     activeRun && activeRun.configSnapshotHash
       ? getRuntimeSnapshotByHash(workspaceId, activeRun.configSnapshotHash)
       : null;
+  const effectiveTypeId = resolvePromotionEffectiveTypeId(parentRun, activeProposals, snapshot);
+  // PR12 C2 (DECISION-A): the CURRENT authority value-hashes recomputed from
+  // the SAME inputs the target comparison uses — the parent run's current
+  // execution type id + confidence (the `getCohortRunById` row carries
+  // `productTypeConfidence`) for the execution kind, and the reviewed
+  // resolution for the reviewed kind. A stamped dependency value hash that
+  // differs (e.g. a confidence drift under the same target id, or a
+  // re-resolved reviewed authority) stales the proposal even when the target
+  // id still matches.
+  const currentAuthorityHashes = {
+    execution: computeExecutionAuthorityHash(
+      parentRun?.executionProductTypeId ?? null,
+      parentRun?.productTypeConfidence ?? null,
+    ),
+    reviewed: computeReviewedAuthorityHash(effectiveTypeId),
+  };
   const gate = validatePromotionGate({
     workspaceId,
     itemId: item.id,
@@ -226,9 +242,10 @@ function computePromotionGate(
     curationData: item.curationData ?? null,
     activeRun,
     parentRun,
-    effectiveTypeId: resolvePromotionEffectiveTypeId(parentRun, activeProposals, snapshot),
+    effectiveTypeId,
     acceptedProposals: activeProposals,
     dependencyLookup: (proposalId: string) => listDependenciesForProposal(proposalId),
+    currentAuthorityHashes,
   });
   return {
     ok: gate.ok,

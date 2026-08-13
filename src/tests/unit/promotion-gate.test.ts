@@ -171,6 +171,20 @@ function gateInput(overrides: Partial<PromotionGateInput> = {}): PromotionGateIn
   };
 }
 
+/** PR12 C2: the CURRENT authority hashes a production caller supplies. */
+function authorityHashes(
+  parent: CohortRun | null,
+  effectiveTypeId: string | null,
+): { execution: string | null; reviewed: string | null } {
+  return {
+    execution: computeExecutionAuthorityHash(
+      parent?.executionProductTypeId ?? null,
+      parent?.productTypeConfidence ?? null,
+    ),
+    reviewed: computeReviewedAuthorityHash(effectiveTypeId),
+  };
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('PR11 C1 — validatePromotionGate (pure)', () => {
@@ -352,13 +366,127 @@ describe('PR11 C1 — validatePromotionGate (pure)', () => {
     if (!result.ok) expect(result.code).toBe('stale_proposal');
   });
 
+  // ── PR12 C2 (DECISION-A): value-hash staleness ─────────────────────────
+
+  it('PR12: target AND execution value-hash match => pass', () => {
+    const parent = cohortRun({ executionProductTypeId: 'dog-food-dry', productTypeConfidence: 0.9 });
+    const hashes = authorityHashes(parent, 'dog-food-dry');
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ cohortRunId: 'parent-1' }),
+      parentRun: parent,
+      curationData: curationData({ semanticValidation: passedSemanticValidation() }),
+      effectiveTypeId: 'dog-food-dry',
+      acceptedProposals: [proposal()],
+      dependencyLookup: () => [
+        {
+          dependencyKind: 'execution_product_type',
+          dependencyTargetId: 'dog-food-dry',
+          dependencyValueHash: hashes.execution!,
+        },
+      ],
+      currentAuthorityHashes: hashes,
+    }));
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('PR12: target match + execution confidence drift => stale (value hash distinguishes from target)', () => {
+    const parent = cohortRun({ executionProductTypeId: 'dog-food-dry', productTypeConfidence: 0.9 });
+    const hashes = authorityHashes(parent, 'dog-food-dry');
+    // The stamped hash was created under the OLD confidence (0.8) while the
+    // CURRENT parent run carries 0.9 — the same target id, a drifted value.
+    const stampedUnderOldConfidence = computeExecutionAuthorityHash('dog-food-dry', 0.8)!;
+    expect(stampedUnderOldConfidence).not.toBe(hashes.execution);
+    const result = validatePromotionGate(gateInput({
+      activeRun: run({ cohortRunId: 'parent-1' }),
+      parentRun: parent,
+      curationData: curationData({ semanticValidation: passedSemanticValidation() }),
+      effectiveTypeId: 'dog-food-dry',
+      acceptedProposals: [proposal()],
+      dependencyLookup: () => [
+        {
+          dependencyKind: 'execution_product_type',
+          dependencyTargetId: 'dog-food-dry',
+          dependencyValueHash: stampedUnderOldConfidence,
+        },
+      ],
+      currentAuthorityHashes: hashes,
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('stale_proposal');
+      expect(result.reason).toContain('value hash');
+      expect(result.reason).toContain('execution_product_type');
+      expect(result.reason).toContain('(execution)');
+    }
+  });
+
+  it('PR12: reviewed-kind hash mismatch (same target) => stale', () => {
+    const hashes = authorityHashes(null, 'cat-food-wet');
+    const result = validatePromotionGate(gateInput({
+      effectiveTypeId: 'cat-food-wet',
+      acceptedProposals: [proposal()],
+      dependencyLookup: () => [
+        {
+          dependencyKind: 'reviewed_product_type',
+          dependencyTargetId: 'cat-food-wet',
+          dependencyValueHash: computeReviewedAuthorityHash('dog-food-dry')!,
+        },
+      ],
+      currentAuthorityHashes: hashes,
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('stale_proposal');
+      expect(result.reason).toContain('value hash');
+      expect(result.reason).toContain('reviewed_product_type');
+      expect(result.reason).toContain('(reviewed)');
+    }
+  });
+
+  it('PR12: null authority hash => any stamped (non-null) hash is stale', () => {
+    const result = validatePromotionGate(gateInput({
+      effectiveTypeId: 'dog-food-dry',
+      acceptedProposals: [proposal()],
+      dependencyLookup: () => [
+        {
+          dependencyKind: 'execution_product_type',
+          dependencyTargetId: 'dog-food-dry',
+          dependencyValueHash: 'stamped-hash',
+        },
+      ],
+      currentAuthorityHashes: { execution: null, reviewed: computeReviewedAuthorityHash('dog-food-dry') },
+    }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('stale_proposal');
+      expect(result.reason).toContain('value hash');
+      expect(result.reason).toContain('stamped-hash');
+    }
+  });
+
+  it('PR12: absent currentAuthorityHashes keeps the pre-PR12 target-only behavior (dependency rows without a stamped hash pass on target match)', () => {
+    const result = validatePromotionGate(gateInput({
+      effectiveTypeId: 'dog-food-dry',
+      acceptedProposals: [proposal()],
+      dependencyLookup: () => [
+        { dependencyKind: 'execution_product_type', dependencyTargetId: 'dog-food-dry' },
+      ],
+    }));
+    expect(result).toEqual({ ok: true });
+  });
+
   it('reviewed-source member: MATCHING reviewed_product_type dependency passes', () => {
     const result = validatePromotionGate(gateInput({
       effectiveTypeId: 'cat-food-wet',
       acceptedProposals: [proposal()],
       dependencyLookup: () => [
-        { dependencyKind: 'reviewed_product_type', dependencyTargetId: 'cat-food-wet' },
+        {
+          dependencyKind: 'reviewed_product_type',
+          dependencyTargetId: 'cat-food-wet',
+          dependencyValueHash: computeReviewedAuthorityHash('cat-food-wet')!,
+        },
       ],
+      currentAuthorityHashes: authorityHashes(null, 'cat-food-wet'),
     }));
     expect(result).toEqual({ ok: true });
   });
@@ -466,15 +594,21 @@ describe('PR11 C1 — validatePromotionGate (pure)', () => {
   });
 
   it('R2: snapshot-reviewed wet + reviewed_product_type dependency wet => PASS', () => {
+    const parent = cohortRun({ executionProductTypeId: 'dry-dog-food' });
     const result = validatePromotionGate(gateInput({
       activeRun: run({ cohortRunId: 'parent-1' }),
-      parentRun: cohortRun({ executionProductTypeId: 'dry-dog-food' }),
+      parentRun: parent,
       curationData: curationData({ semanticValidation: { status: 'passed', findings: [] } }),
       effectiveTypeId: 'wet-dog-food', // resolved from the frozen reviewed fact
       acceptedProposals: [proposal({ proposalType: 'field_assignment', targetId: 'flavor' })],
       dependencyLookup: () => [
-        { dependencyKind: 'reviewed_product_type', dependencyTargetId: 'wet-dog-food' },
+        {
+          dependencyKind: 'reviewed_product_type',
+          dependencyTargetId: 'wet-dog-food',
+          dependencyValueHash: computeReviewedAuthorityHash('wet-dog-food')!,
+        },
       ],
+      currentAuthorityHashes: authorityHashes(parent, 'wet-dog-food'),
     }));
     expect(result.ok).toBe(true);
   });

@@ -52,10 +52,16 @@ export type PromotionGateResult =
       reason: string;
     };
 
-/** One dependency row as consumed by the gate (kind + target only). */
+/** One dependency row as consumed by the gate (kind + target + stamped hash). */
 export interface PromotionGateDependencyRow {
   dependencyKind: string;
   dependencyTargetId: string | null;
+  /**
+   * PR12 C2: the stamped `dependency_value_hash`. Optional — rows without a
+   * stamped hash (direct/synthetic callers) keep the pre-PR12 target-only
+   * staleness check for that row; the production caller always supplies it.
+   */
+  dependencyValueHash?: string | null;
 }
 
 export interface PromotionGateInput {
@@ -72,8 +78,19 @@ export interface PromotionGateInput {
   effectiveTypeId: string | null;
   /** Accepted proposals of the item's active run (decision-level staleness already filtered). */
   acceptedProposals: ClassificationProposal[];
-  /** Dependency lookup; the caller loads `classification_proposal_dependencies` rows. */
+  /**
+   * Dependency lookup; the caller loads `classification_proposal_dependencies` rows.
+   */
   dependencyLookup: (proposalId: string) => PromotionGateDependencyRow[];
+  /**
+   * PR12 C2 (DECISION-A): the CURRENT authority value-hashes, recomputed by
+   * the caller from the SAME authority inputs the target comparison uses (the
+   * parent run's current execution type id + confidence for the execution
+   * kind; the reviewed resolution for the reviewed kind). Absent = the
+   * pre-PR12 target-only behavior for direct/synthetic callers; the
+   * production caller always supplies it.
+   */
+  currentAuthorityHashes?: { execution?: string | null; reviewed?: string | null };
 }
 
 /** A cohort parent is terminal (promotion-eligible) only in these states. */
@@ -186,6 +203,7 @@ export function validatePromotionGate(input: PromotionGateInput): PromotionGateR
     effectiveTypeId,
     acceptedProposals,
     dependencyLookup,
+    currentAuthorityHashes,
   } = input;
 
   // 1. Legacy: no curation data or no classification run pointer — the narrow
@@ -337,6 +355,29 @@ export function validatePromotionGate(input: PromotionGateInput): PromotionGateR
             `Accepted proposal ${proposal.id} (SKU ${productSku}) carries a ${dep.dependencyKind} dependency targeting ` +
             `${dep.dependencyTargetId ?? '<none>'}, but the item's current effective type is ` +
             `${effectiveTypeId ?? '<none>'}; the proposal is stale and cannot promote.`,
+        };
+      }
+      // PR12 C2 (DECISION-A): the stamped value hash is the truthful
+      // staleness key — a proposal whose dependency value hash no longer
+      // matches the CURRENT authority hash (recomputed from the SAME
+      // authority inputs the target check uses) is STALE even when the
+      // target id still matches (e.g. a parent confidence drift under the
+      // same execution type id, or a re-resolved reviewed authority).
+      // Folded into `stale_proposal` (one code — the reason distinguishes
+      // target-vs-hash, DECISION-A). Both the target check and the hash
+      // check must hold; a null expected hash means any stamped hash is
+      // stale (a null authority can never match a stamped hash).
+      const hashKind =
+        dep.dependencyKind === 'execution_product_type' ? 'execution' : 'reviewed';
+      const expectedHash = currentAuthorityHashes?.[hashKind];
+      if (expectedHash !== undefined && dep.dependencyValueHash !== expectedHash) {
+        return {
+          ok: false,
+          code: 'stale_proposal',
+          reason:
+            `Accepted proposal ${proposal.id} (SKU ${productSku}) carries a ${dep.dependencyKind} dependency whose value hash ` +
+            `${dep.dependencyValueHash ?? '<none>'} does not match the current authority hash ` +
+            `${expectedHash ?? '<none>'} (${hashKind}); the proposal is stale and cannot promote.`,
         };
       }
     }
