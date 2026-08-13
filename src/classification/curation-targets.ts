@@ -1,6 +1,6 @@
 import { getDb } from '../db/connection';
 import { listRegistry } from '../db/repositories/field-registry-repo';
-import { listPages } from '../db/repositories/page-repo';
+import { listVerifiedPageOptions } from '../db/repositories/page-repo';
 import {
   CurationTargetConfigSchema,
   type ClassificationConfig,
@@ -194,7 +194,19 @@ export function listCurationTargetCandidates(
   config: ClassificationConfig,
 ): CurationTargetCandidates {
   const productTypes = config.productTypes.map(type => ({ value: type.id, label: type.name }));
-  const pages = listPages().map(page => ({ value: page.name, label: page.name }));
+  // Page candidates are ONLY pages synced from the actual ShopSite database:
+  // verified exported_guid identities from the ACTIVE page import. Provisional
+  // name-only rows (ProductOnPages fragment scan) are review context and never
+  // curation candidates. Distinct GUIDs may share a display name, so collapse
+  // name duplicates to a single picker option.
+  const seenPageNames = new Set<string>();
+  const pages = listVerifiedPageOptions(workspaceId)
+    .filter(page => {
+      if (seenPageNames.has(page.name)) return false;
+      seenPageNames.add(page.name);
+      return true;
+    })
+    .map(page => ({ value: page.name, label: page.name }));
   const registry = listRegistry(workspaceId)
     .filter(entry => entry.kind === 'custom' || entry.xmlField.startsWith('ProductField'));
 

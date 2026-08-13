@@ -464,6 +464,32 @@ describe('Classification Pipeline Integration', () => {
     expect(candidates.productFields.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('page candidates include only verified ShopSite-synced pages from the active import (name-deduped)', () => {
+    activatePageImportFromRecords({
+      workspaceId,
+      sourceHash: 'f'.repeat(64),
+      parserFormatVersion: 'shopsite-pages-xml-1',
+      records: [
+        { identity: { kind: 'exported_guid', key: 'p1', status: 'verified' }, name: '##FaceBook Store', parentRef: null, availability: 'available' },
+        { identity: { kind: 'exported_guid', key: 'p2', status: 'verified' }, name: '##FaceBook Store', parentRef: null, availability: 'available' },
+        { identity: { kind: 'exported_guid', key: 'p3', status: 'verified' }, name: 'Dog Food', parentRef: null, availability: 'available' },
+      ],
+      activatedBy: 'test',
+    });
+    // Provisional name-only row (ProductOnPages fragment scan) — review
+    // context only, must never surface as a curation candidate.
+    upsertPage({ name: 'Ghost Page', fileName: null, parentId: null, lastSyncedAt: null, pageHash: 'g'.repeat(64) });
+
+    const config = loadClassificationConfig(workspacePath);
+    const candidates = listCurationTargetCandidates(workspaceId, config);
+    const pageNames = candidates.pages.map(page => page.label);
+
+    expect(pageNames).toContain('Dog Food');
+    // Distinct GUIDs sharing a display name collapse to one option.
+    expect(pageNames.filter(name => name === '##FaceBook Store').length).toBe(1);
+    expect(pageNames).not.toContain('Ghost Page');
+  });
+
   it('migrates legacy product types to classification config', () => {
     const db = getDb();
     const ltId = randomUUID();
