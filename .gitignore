@@ -1,16 +1,20 @@
+# ── Dependencies & build ──────────────────────────────────────────────────────
 dist/
 node_modules/
 coverage/
 *.tsbuildinfo
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
 .DS_Store
+
+# ── Local data & exports ──────────────────────────────────────────────────────
 .baystate-cms/
 exports/*.zip
 exports/*.xml
 workspaces/
-workspaces/Bay State
 storage/
 
-# Local development tokens and environment files
+# ── Secrets, tokens, environment & databases (security mandate) ───────────────
 .baystate-cms-dev-token
 .shopsite-cms-dev-token
 .shopsite-cms/
@@ -23,10 +27,12 @@ storage/
 *.db-wal
 .recent-workspaces.json
 
+# ── Agent tooling artifacts & working docs ────────────────────────────────────
 .pi-subagents/
 .fallow/
 .agents/skills/impeccable/
 .codex/
 .impeccable/
 HANDOFF.md
+.handoff/
 pi-session-*.html
