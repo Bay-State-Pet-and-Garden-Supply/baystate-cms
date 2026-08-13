@@ -9,9 +9,11 @@
  * 1. **Input hash** — `computeCohortTitleInputHash` over FROZEN TITLE
  *    AUTHORITY ONLY (PR6 C2, DECISION-P/Q): the final membership hash, the
  *    per-member frozen title slice, the Execution Product Type resolution,
- *    the FORMAT_RULES digest, and the H5 title slice (policy digest + the
- *    frozen `cohort_title_consolidation` plan entry). Never live item rows,
- *    never the old cache fingerprint, never OCR provenance hashes.
+ *    the FORMAT_RULES digest, and the operation-specific H5 title slice (the
+ *    frozen `cohort_title_consolidation` plan entry — provider/model/versions;
+ *    the broad policy digest is deliberately NOT hashed, PR13 DECISION-C).
+ *    Never live item rows, never the old cache fingerprint, never OCR
+ *    provenance hashes.
  *
  * 2. **Reuse** — when `classification_cohort_outputs` already hold a
  *    COMPLETE `curated_title` set for this run (every member of every
@@ -75,10 +77,13 @@
  *
  * PR6 review round 1 hardening: the op performs ZERO writes before the lease
  * is asserted (the ordinal-0 child run + its immutable snapshot refs are PURE
- * READ; the reuse path is read-only), the T-hash uses the frozen UNBOUND H5
- * policy digest (H3/H4/evidence changes never re-coordinate titles), and a
- * missing frozen snapshot / plan entry / model-call context FAILS CLOSED
- * before any transport — a non-audited live title call is never made.
+ * READ; the reuse path is read-only), the T-hash uses the frozen
+ * OPERATION-SPECIFIC title authority (PR13 C1: the plan entry's
+ * provider/model/versions — the broad unbound policy digest is no longer
+ * hashed, so H3/H4/evidence AND non-title route changes never re-coordinate
+ * titles), and a missing frozen snapshot / plan entry / model-call context
+ * FAILS CLOSED before any transport — a non-audited live title call is never
+ * made.
  */
 import {
   getCohortTitleOutputsByRun,
@@ -245,6 +250,11 @@ export async function ensureCohortTitlesCoordinated(
   // latest refs-bearing child (running OR terminal — crash-recovery resume may
   // find the ordinal-0 child committed by a prior processCohort entry) is the
   // frozen audit authority; the reuse path performs ZERO writes.
+  // PR13 (issue #30, DECISION-C): the hashed model-execution authority is the
+  // OPERATION-SPECIFIC title slice (the frozen plan entry's provider/model/
+  // versions) — the broad UNBOUND H5 policy digest is no longer computed or
+  // hashed. The snapshot-bound view is retained ONLY for transport
+  // enforcement (`assertModelPolicyIntact` inside the audited call).
   const orderedMembers = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const member0 = orderedMembers[0];
   const childRun0 = getCohortMemberRunForTitleAudit(run.id, member0.onboardingItemId);
@@ -266,12 +276,12 @@ export async function ensureCohortTitlesCoordinated(
         'the frozen audit authority.',
     );
   }
-  // PR6 review BLOCKER 1: the T-hash must use the frozen UNBOUND H5 policy
-  // digest (routing authority only — NO snapshotHash binding, so H3 config /
-  // H4 Pages / evidence changes never change the title hash). The snapshot-
-  // bound view is retained ONLY for transport enforcement
-  // (`assertModelPolicyIntact` inside the audited call).
-  const unboundPolicyView = modelPolicyViewFromConfig(memberSnapshot0.modelPolicy as never);
+  // PR6 review BLOCKER 1 (superseded by PR13 C1): the T-hash must use the
+  // frozen operation-specific title authority (plan entry provider/model/
+  // versions — NO broad policy digest, NO snapshotHash binding), so H3
+  // config / H4 Pages / evidence / non-title route changes never change the
+  // title hash. The snapshot-bound view is retained ONLY for transport
+  // enforcement (`assertModelPolicyIntact` inside the audited call).
   const boundPolicyView = modelPolicyViewFromConfig(
     memberSnapshot0.modelPolicy as never,
     memberSnapshot0.snapshotHash,
@@ -286,7 +296,6 @@ export async function ensureCohortTitlesCoordinated(
   const inputHash = computeCohortTitleInputHash({
     run,
     projection,
-    modelPolicyDigest: unboundPolicyView?.policyDigest ?? null,
     titlePlanEntry: titlePlanEntry ?? undefined,
     executionTypeAuthority,
   });

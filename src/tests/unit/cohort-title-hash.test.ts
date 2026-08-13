@@ -196,14 +196,26 @@ type CohortTitleHashParams = Parameters<typeof computeCohortTitleInputHash>[0];
  * hash AND the prompt together (no independent/duplicated authority).
  */
 type ParityParams = CohortTitleHashParams & {
+  /**
+   * PR13 C1 (issue #30, DECISION-C): the broad H5 policy digest the
+   * coordinator used to hash. KEPT as a TEST-ONLY field so the suite can
+   * PROVE the hashed model authority is unchanged when ONLY this digest
+   * differs (the production params no longer carry it — the operation-
+   * specific plan entry is the entire model authority).
+   */
+  modelPolicyDigest?: string | null;
   typeLabelSource?: { productTypes: Array<{ id: string; name: string }> } | null;
 };
 
 /** Strip the test-only label source and resolve the T-hash's
  *  `executionTypeAuthority` through the SHARED production builder (the same
- *  resolution the parent op performs). */
+ *  resolution the parent op performs). PR13 C1: the test-only
+ *  `modelPolicyDigest` is DROPPED — the hashed model-execution authority is
+ *  the frozen plan entry alone, so a differing broad digest cannot change
+ *  the T-hash. */
 function resolveParams(params: ParityParams): CohortTitleHashParams {
-  const { typeLabelSource, ...rest } = params;
+  const { typeLabelSource, modelPolicyDigest: _broadPolicyDigest, ...rest } = params;
+  void _broadPolicyDigest; // PR13 C1: the broad policy digest is NOT part of the T-hash.
   const authority = titleExecutionTypeAuthorityFromRun(rest.run, typeLabelSource ?? LABEL_SOURCE);
   return { ...rest, executionTypeAuthority: authority };
 }
@@ -390,10 +402,15 @@ describe('computeCohortTitleInputHash — format rules digest (PR6 C2)', () => {
   });
 });
 
-describe('computeCohortTitleInputHash — model execution authority slice (PR6 C2 / DECISION-P)', () => {
-  it('policyDigest participates', () => {
+describe('computeCohortTitleInputHash — model execution authority slice (PR6 C2 / DECISION-P, PR13 C1 / DECISION-C)', () => {
+  it('PR13 C1: the broad policy digest does NOT participate — only the digest differs, the hash is UNCHANGED', () => {
     const base = makeParams();
-    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).not.toBe(hash(base));
+    // The coordinator used to hash the frozen UNBOUND H5 policy digest; the
+    // T-hash's model authority is now the frozen plan entry alone. A DIFFERENT
+    // broad digest (provider/model/versions fixed) leaves the hash identical.
+    expect(hash(makeParams({ modelPolicyDigest: 'other-policy-digest' }))).toBe(hash(base));
+    expect(hash(makeParams({ modelPolicyDigest: null }))).toBe(hash(base));
+    expect(hash(base).length).toBe(64);
   });
 
   it('the plan entry provider/model/promptTemplateVersion/ruleVersion each participate', () => {

@@ -35,11 +35,22 @@
  *   *re-runs* even when the title text is identical), NO `ocrInputHash` /
  *   `ocrExecutionDigest` (OCR *provenance*, not title text).
  * - NO H3 config / H4 Page catalog (titles do not depend on them).
- * - Only the title H5 slice: `policyDigest` + the frozen
- *   `cohort_title_consolidation` plan entry (provider/model/
- *   promptTemplateVersion/ruleVersion) + `FORMAT_RULES` digest. An unrelated
- *   route change (e.g. `attribute_ranking`) changes H5 but NOT the T-hash ⇒
- *   outputs are reused.
+ * - Only the title H5 slice: the frozen `cohort_title_consolidation` plan
+ *   entry (provider/model/promptTemplateVersion/ruleVersion) + `FORMAT_RULES`
+ *   digest. An unrelated route change (e.g. `attribute_ranking`) changes H5
+ *   but NOT the T-hash ⇒ outputs are reused.
+ *
+ * PR13 (issue #30, DECISION-C): the hashed model-execution authority is
+ * genuinely OPERATION-SPECIFIC — exactly `{operation,
+ * 'cohort_title_consolidation', promptTemplateVersion, ruleVersion, provider,
+ * model}` from the frozen plan entry (registry consts when absent), mirroring
+ * the P-hash's operation-specific contract. The broad H5 `policyDigest` is
+ * deliberately NOT hashed: it is routing state that changes with ANY model
+ * route change, not a title authority — dropping it means an unrelated
+ * non-title route change never re-coordinates titles. PRE-RELEASE COMPOSITION
+ * CHANGE: sets committed under the OLD composition (policy digest hashed)
+ * drift under this hash — documented in ADR 0013 PR13; there is no
+ * production data to migrate.
  *
  * The per-member slice is `titleAuthorityFromProjectionMember`: productSku,
  * spreadsheet identity (name/expectedName/brandHint), web title/brand, and
@@ -68,8 +79,6 @@ export interface CohortTitleInputHashParams {
   run: CohortRun;
   /** Frozen per-member title authority (the persisted execution-evidence-v1 payload). */
   projection: ExecutionEvidenceProjectionV1;
-  /** Frozen H5 policy digest (the member snapshot's modelPolicy view). */
-  modelPolicyDigest: string | null;
   /** Frozen `cohort_title_consolidation` plan entry (H5 title slice); absent → registry consts. */
   titlePlanEntry?: ModelExecutionPlanEntry;
   /**
@@ -198,8 +207,10 @@ export function titleAuthorityFromProjectionMember(
  * Compute the canonical title input hash (T-hash) over the frozen title
  * authority: sorted-by-`onboardingItemId` member slices, the final
  * membership hash, the execution Product Type resolution, the FORMAT_RULES
- * digest, and the model-execution authority for `cohort_title_consolidation`
- * (policy digest + plan entry, falling back to the registry consts).
+ * digest, and the operation-specific model-execution authority for
+ * `cohort_title_consolidation` (the frozen plan entry's provider/model/
+ * versions — NO broad policy digest, PR13 DECISION-C — falling back to the
+ * registry consts).
  *
  * Deterministic and pure — no DB access, no live item reads. Members are
  * sorted by onboardingItemId, so the hash is independent of input member
@@ -219,7 +230,7 @@ export function computeCohortTitleInputHashForFormatRules(
   params: CohortTitleInputHashParams,
   formatRules: string,
 ): string {
-  const { run, projection, modelPolicyDigest, titlePlanEntry, executionTypeAuthority } = params;
+  const { run, projection, titlePlanEntry, executionTypeAuthority } = params;
   const members = [...projection.members]
     .sort((a, b) => a.onboardingItemId.localeCompare(b.onboardingItemId))
     .map(titleAuthorityFromProjectionMember);
@@ -236,7 +247,6 @@ export function computeCohortTitleInputHashForFormatRules(
     },
     titleFormatRulesDigest: hashCanonicalJson(formatRules),
     modelExecutionAuthority: {
-      policyDigest: modelPolicyDigest,
       operation: 'cohort_title_consolidation',
       promptTemplateVersion:
         titlePlanEntry?.promptTemplateVersion ?? PROMPT_TEMPLATE_VERSIONS.cohort_title_consolidation,

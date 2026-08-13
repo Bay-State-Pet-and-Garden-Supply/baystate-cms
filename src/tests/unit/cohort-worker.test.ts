@@ -146,14 +146,13 @@ function resolvedExecutionTypeAuthority(
 function seedV1TitleOutputs(workspaceId: string, run: CohortRun): void {
   const projection = loadFrozenProjectionForRun(workspaceId, run);
   // v1 member snapshots carry no model policy and no frozen plan → the parent
-  // op hashes with `modelPolicyDigest: null` + registry-const versions. PR6
-  // hardening C (P1-3): the label is part of the hashed authority — resolve it
-  // through the SAME shared builder the parent op uses, or a resolved-type run
-  // sees write-once drift on the seeded set.
+  // op hashes with registry-const versions (PR13 C1: NO policy digest in the
+  // hash). PR6 hardening C (P1-3): the label is part of the hashed authority —
+  // resolve it through the SAME shared builder the parent op uses, or a
+  // resolved-type run sees write-once drift on the seeded set.
   const inputHash = computeCohortTitleInputHash({
     run,
     projection,
-    modelPolicyDigest: null,
     executionTypeAuthority: resolvedExecutionTypeAuthority(workspaceId, run, projection),
   });
   const outputs = projection.members
@@ -2300,7 +2299,6 @@ describe('PR6 C5 — prepared members consume the durable parent title outputs (
     return computeCohortTitleInputHash({
       run,
       projection,
-      modelPolicyDigest: null,
       executionTypeAuthority: resolvedExecutionTypeAuthority(workspaceId, run, projection),
     });
   }

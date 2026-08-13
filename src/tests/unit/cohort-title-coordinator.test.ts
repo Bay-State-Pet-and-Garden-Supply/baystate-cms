@@ -548,8 +548,11 @@ async function freezeMixedCohortFixture(
 }
 
 /** Recompute the T-hash the parent op uses (mirrors its step 1). PR6 review
- *  BLOCKER 1 fix: the parent op hashes the frozen UNBOUND H5 policy digest
- *  (no snapshotHash binding) — the seeded/persisted rows must match it. */
+ *  BLOCKER 1 fix + PR13 C1 (DECISION-C): the parent op hashes the frozen
+ *  OPERATION-SPECIFIC title authority — the `cohort_title_consolidation` plan
+ *  entry's provider/model/versions — with NO broad policy digest (the
+ *  snapshot-bound/unbound views are gone from the hash entirely). The
+ *  seeded/persisted rows must match it. */
 function expectedInputHash(fixture: FrozenCohortFixture): string {
   const ordered = [...fixture.projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const child = getDb().query(
@@ -558,18 +561,12 @@ function expectedInputHash(fixture: FrozenCohortFixture): string {
   const snapshot = child?.config_snapshot_hash
     ? getRuntimeSnapshotByHash(fixture.workspaceId, child.config_snapshot_hash)
     : null;
-  // UNBOUND view: `modelPolicyViewFromConfig(policy)` without snapshotHash —
-  // H3/H4/evidence changes never enter the title hash (DECISION-P).
-  const view = snapshot?.modelPolicy
-    ? modelPolicyViewFromConfig(snapshot.modelPolicy as never)
-    : null;
   // PR6 hardening C (P1-3): the label participates in the T-hash, resolved
   // through the SAME shared builder the parent op uses.
   const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(fixture.run, snapshot);
   return computeCohortTitleInputHash({
     run: fixture.run,
     projection: fixture.projection,
-    modelPolicyDigest: view?.policyDigest ?? null,
     titlePlanEntry: snapshot
       ? (getModelExecutionPlanEntry(snapshot, 'cohort_title_consolidation') ?? undefined)
       : undefined,
@@ -1004,7 +1001,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(countCohortTitleOutputs(fixture.run.id)).toBe(0);
   });
 
-  it('BLOCKER 1: the T-hash uses the frozen UNBOUND H5 policy digest — H3/H4/non-title snapshot changes never re-coordinate; title-route changes do', async () => {
+  it('PR13 C1 (BLOCKER 1 superseded): the T-hash carries the OPERATION-SPECIFIC authority only — bound/unbound policy digests and route overrides never re-coordinate; frozen plan-entry changes do', async () => {
     const fixture = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
     // Coordinate + persist ONCE, then inspect the persisted input_hash.
     const first = await ensureCohortTitlesCoordinated({
@@ -1033,52 +1030,43 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     const executionTypeAuthority = titleExecutionTypeAuthorityFromRun(fixture.run, snapshot);
 
     // (a) The BOUND digest (with snapshotHash) differs from the UNBOUND digest
-    //     (routing fields only) — the old snapshot-bound view smuggled H3/H4/
-    //     evidence into the title hash.
+    //     (routing fields only) — the distinction still exists in the policy
+    //     view, but NEITHER is part of the T-hash anymore (PR13 DECISION-C).
     const unboundView = modelPolicyViewFromConfig(snapshot.modelPolicy as never);
     const boundView = modelPolicyViewFromConfig(snapshot.modelPolicy as never, snapshot.snapshotHash);
     expect(unboundView).not.toBeNull();
     expect(boundView).not.toBeNull();
     expect(unboundView!.policyDigest).not.toBe(boundView!.policyDigest);
 
-    // (b) The persisted rows use the UNBOUND digest (not the bound one).
-    const hashWithUnbound = computeCohortTitleInputHash({
+    // (b) The persisted rows equal the T-hash computed with NO digest — and
+    //     the SAME hash regardless of which (if any) broad digest is passed
+    //     (the digest is dropped from the payload entirely).
+    const hashWithNoDigest = computeCohortTitleInputHash({
       run: fixture.run,
       projection: fixture.projection,
-      modelPolicyDigest: unboundView!.policyDigest,
       titlePlanEntry: planEntry,
       executionTypeAuthority,
     });
-    const hashWithBound = computeCohortTitleInputHash({
-      run: fixture.run,
-      projection: fixture.projection,
-      modelPolicyDigest: boundView!.policyDigest,
-      titlePlanEntry: planEntry,
-      executionTypeAuthority,
-    });
-    expect(persistedHash).toBe(hashWithUnbound);
-    expect(persistedHash).not.toBe(hashWithBound);
+    expect(persistedHash).toBe(hashWithNoDigest);
 
     // (c) A NON-TITLE snapshot field change (H3/H4/evidence authority) changes
-    //     the snapshot hash → the BOUND digest changes — but the unbound
-    //     digest (and therefore the T-hash) is UNCHANGED.
+    //     the snapshot hash → the BOUND digest changes — but the T-hash is
+    //     UNCHANGED.
     const mutated = JSON.parse(JSON.stringify(snapshot));
     mutated.catalogEvidenceHash = 'c'.repeat(64);
     expect(snapshotHash(mutated)).not.toBe(snapshot.snapshotHash);
-    const mutatedUnbound = modelPolicyViewFromConfig(mutated.modelPolicy as never);
-    const mutatedBound = modelPolicyViewFromConfig(mutated.modelPolicy as never, snapshotHash(mutated));
-    expect(mutatedUnbound!.policyDigest).toBe(unboundView!.policyDigest);
-    expect(mutatedBound!.policyDigest).not.toBe(boundView!.policyDigest);
     expect(computeCohortTitleInputHash({
       run: fixture.run,
       projection: fixture.projection,
-      modelPolicyDigest: mutatedUnbound!.policyDigest,
       titlePlanEntry: planEntry,
       executionTypeAuthority,
     })).toBe(persistedHash);
 
-    // (d) A TITLE-ROUTE change (name_consolidation stage override) changes the
-    //     unbound digest → the T-hash CHANGES (re-coordination is correct).
+    // (d) A BROAD-POLICY change (a name_consolidation route override) changes
+    //     the policy digest — but NOT the frozen plan entry (the entries are
+    //     snapshotted, never rebuilt from live modelPolicy) — so the T-hash
+    //     is UNCHANGED. This is exactly DECISION-C: routing state never
+    //     re-coordinates titles.
     const routeMutated = JSON.parse(JSON.stringify(snapshot));
     routeMutated.modelPolicy.stageOverrides = {
       ...routeMutated.modelPolicy.stageOverrides,
@@ -1094,8 +1082,17 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(computeCohortTitleInputHash({
       run: fixture.run,
       projection: fixture.projection,
-      modelPolicyDigest: routeUnbound!.policyDigest,
       titlePlanEntry: planEntry,
+      executionTypeAuthority,
+    })).toBe(persistedHash);
+
+    // (e) A FROZEN PLAN-ENTRY change (the operation-specific authority itself)
+    //     DOES change the T-hash — re-coordination is correct when the title
+    //     model/version actually changes.
+    expect(computeCohortTitleInputHash({
+      run: fixture.run,
+      projection: fixture.projection,
+      titlePlanEntry: { ...(planEntry as NonNullable<typeof planEntry>), provider: 'openai', model: 'gpt-4o-mini' },
       executionTypeAuthority,
     })).not.toBe(persistedHash);
   });
