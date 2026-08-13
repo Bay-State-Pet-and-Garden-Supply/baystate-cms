@@ -1026,6 +1026,15 @@ export function validateClassificationConfigBundle(
         });
       }
       if (target.attributeId) {
+        const attrEntry = attributes.get(target.attributeId)?.entry;
+        if (attrEntry && target.optionSource === 'live_store' && attrEntry.valueMode !== 'controlled') {
+          findings.push({
+            severity: 'error',
+            code: 'invalid_option_source_for_value_mode',
+            path: `${basePath}.optionSource`,
+            message: `Curation target "${target.label}" (${target.catalogField}) cannot use optionSource 'live_store' because attribute "${attrEntry.name}" has valueMode '${attrEntry.valueMode}'.`,
+          });
+        }
         const mappingIndex = mappedAttributes.get(target.attributeId);
         const mapping = mappingIndex === undefined ? undefined : config.attributeMappings[mappingIndex];
         if (!mapping) {

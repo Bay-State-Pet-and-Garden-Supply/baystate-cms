@@ -95,8 +95,8 @@ describe('Onboarding Repositories CRUD', () => {
 
     expect(items.length).toBe(2);
     expect(items[0].upc).toBe('111111111111');
-    // New items start in discovery stage with pending status
-    expect(items[0].stage).toBe('discovery');
+    // New items start in sourcing stage with pending status
+    expect(items[0].stage).toBe('sourcing');
     expect(items[0].stageStatus).toBe('pending');
 
     const batchItems = listItemsByBatch(batch.id);
@@ -106,7 +106,7 @@ describe('Onboarding Repositories CRUD', () => {
     updateItemStageStatus(items[0].id, 'in_progress');
     const updatedItem = findItemById(items[0].id);
     expect(updatedItem?.stageStatus).toBe('in_progress');
-    expect(updatedItem?.stage).toBe('discovery');
+    expect(updatedItem?.stage).toBe('sourcing');
 
     const batchDetails = findBatchById(batch.id);
     expect(batchDetails).toBeDefined();

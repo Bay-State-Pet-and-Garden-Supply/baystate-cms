@@ -75,12 +75,17 @@ function parseSampleValues(sampleValuesJson: string | null): string[] {
   return [];
 }
 
-function listCatalogFieldOptions(catalogField: string, limit = 250): string[] {
+export function listCatalogFieldOptions(catalogField: string, limit = 250): string[] {
   if (!/^[a-zA-Z0-9_]+$/.test(catalogField)) return [];
 
-  const rows = getDb()
-    .query('SELECT custom_fields FROM product_index WHERE custom_fields IS NOT NULL AND custom_fields != ?')
-    .all('') as Array<{ custom_fields: string | null }>;
+  let rows: Array<{ custom_fields: string | null }>;
+  try {
+    rows = getDb()
+      .query('SELECT custom_fields FROM product_index WHERE custom_fields IS NOT NULL AND custom_fields != ?')
+      .all('') as Array<{ custom_fields: string | null }>;
+  } catch {
+    return [];
+  }
 
   const values: string[] = [];
   for (const row of rows) {
@@ -174,6 +179,9 @@ export function resolveAttributeAllowedValues(
   target: CurationTargetConfig | null,
   limit = 250,
 ): string[] {
+  if (attribute.valueMode !== 'controlled') {
+    return [];
+  }
   const values = [...attribute.allowedValues];
   if (target?.optionSource === 'live_store' && target.catalogField) {
     values.push(...listCatalogFieldOptions(target.catalogField, limit));

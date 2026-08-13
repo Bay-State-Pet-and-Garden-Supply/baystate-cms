@@ -546,9 +546,16 @@ export interface CurationTargetCandidates {
   pages: CurationTargetOption[];
 }
 
+import type {
+  CurationApplicabilitySummary,
+  CurationHealthFinding,
+} from '../classification/curation-applicability';
+
 export interface CurationTargetsResponse {
   targets: CurationTargetConfig[];
   candidates: CurationTargetCandidates;
+  applicability: CurationApplicabilitySummary[];
+  findings: CurationHealthFinding[];
 }
 
 async function classificationRequest<T>(path: string, options?: RequestInit): Promise<T> {
@@ -561,7 +568,12 @@ async function classificationRequest<T>(path: string, options?: RequestInit): Pr
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error((data as any).error || `HTTP ${res.status}`);
+    const errorObj = (data as any).error;
+    const msg = (data as any).message || (typeof errorObj === 'string' ? errorObj : errorObj?.message) || `HTTP ${res.status}`;
+    const err = new Error(msg);
+    (err as any).code = typeof errorObj === 'string' ? errorObj : (data as any).code || null;
+    (err as any).status = res.status;
+    throw err;
   }
   return data as T;
 }
@@ -596,6 +608,33 @@ export async function saveCurationTargets(
   return classificationRequest<CurationTargetsResponse & { success: boolean }>('/curation-targets', {
     method: 'PUT',
     body: JSON.stringify({ targets }),
+  });
+}
+
+export interface AttributeProfileEditInput {
+  attributeId: string;
+  included: boolean;
+  required?: boolean;
+  cardinality?: 'single' | 'multiple';
+}
+
+export async function updateAttributeProfile(
+  productTypeId: string,
+  edits: AttributeProfileEditInput[],
+): Promise<{ success: boolean; bundleHash: string; commitHash: string | null; productTypeId: string; profileId: string; updatedAttributeIds: string[] }> {
+  return classificationRequest<{ success: boolean; bundleHash: string; commitHash: string | null; productTypeId: string; profileId: string; updatedAttributeIds: string[] }>(`/attribute-profiles/${productTypeId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ edits }),
+  });
+}
+
+export async function updateClassificationAttribute(
+  attributeId: string,
+  updates: { isUniversal?: boolean; name?: string; description?: string | null },
+): Promise<{ success: boolean; attribute: any }> {
+  return classificationRequest<{ success: boolean; attribute: any }>(`/attributes/${attributeId}`, {
+    method: 'PUT',
+    body: JSON.stringify(updates),
   });
 }
 

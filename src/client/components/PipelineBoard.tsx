@@ -542,9 +542,9 @@ export function PipelineBoard({
 
   const handleSendBackSelected = async () => {
     const selectedItems = getSelectedItems();
-    const eligibleItems = selectedItems.filter(item => item.stage !== 'discovery');
+    const eligibleItems = selectedItems.filter(item => item.stage !== 'sourcing');
     if (eligibleItems.length === 0) {
-      alert('Selected products in the Discovery stage cannot be sent back.');
+      alert('Selected products in the Sourcing stage cannot be sent back.');
       return;
     }
 
@@ -1599,7 +1599,7 @@ export function PipelineBoard({
   }, [reviewItem]);
 
   const selectedItems = getSelectedItems();
-  const hasSendBackEligible = selectedItems.some(item => item.stage !== 'discovery');
+  const hasSendBackEligible = selectedItems.some(item => item.stage !== 'sourcing');
   const hasResetEligible = selectedItems.length > 0;
   const hasSkipEligible = selectedItems.some(item => item.stage !== 'promotion');
   const hasAdvanceEligible = selectedItems.some(item => item.stage !== 'promotion');

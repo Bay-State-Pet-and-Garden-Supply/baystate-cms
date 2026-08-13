@@ -733,7 +733,7 @@ route.post('/onboarding/items/reset-to-stage', async (c) => {
   if (!targetStage || typeof targetStage !== 'string') {
     return c.json({ error: 'targetStage string is required' }, 400);
   }
-  const validStages = ['discovery', 'extraction', 'curation', 'review', 'promotion'];
+  const validStages = ['sourcing', 'discovery', 'extraction', 'curation', 'review', 'promotion'];
   if (!validStages.includes(targetStage)) {
     return c.json({ error: `Invalid stage: ${targetStage}` }, 400);
   }
