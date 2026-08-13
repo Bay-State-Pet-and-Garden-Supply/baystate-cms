@@ -58,6 +58,7 @@ import {
   getCohortSnapshotByHash,
   getCohortRunById,
   reclaimExpiredCohortRuns,
+  supersedeOwnedCohortRunForOutputDrift,
   COHORT_LEASE_TTL_MS,
 } from '../../db/repositories/classification-cohort-run-repo';
 import { upsertConfigSnapshot } from '../../db/repositories/classification-config-repo';
@@ -1625,5 +1626,206 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
     expect(mutated.prompt).not.toBe(base.prompt);
     expect(base.prompt).toContain('OCR Flavor: "Chicken"');
     expect(mutated.prompt).toContain('OCR Flavor: "Salmon"');
+  });
+});
+
+// ─── PR13 C2: cross-parent same-T-hash reuse (issue #30, DECISION-A/B) ───────
+
+/** Supersede a RUNNING revision (the owner-guarded drift primitive) and
+ *  re-claim + re-freeze the SAME cohort as a NEW revision — the unique
+ *  current-run slot reopens on supersession. */
+async function supersedeAndRefreeze(fixture: FrozenCohortFixture): Promise<FrozenCohortFixture> {
+  expect(supersedeOwnedCohortRunForOutputDrift(fixture.run.id, 'worker-a', 'PR13 C2 test supersede')).toBe(true);
+  const claimed = claimReadyCurationCohorts(fixture.workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+  const runB = claimed.find(r => r.cohortId === fixture.run.cohortId)!;
+  const finalized = await freezeCohortForExecution(runB, fixture.workspacePath, fixture.workspaceId);
+  expect(finalized.status).toBe('running');
+  const snap = getCohortSnapshotByHash(fixture.workspaceId, finalized.evidenceSnapshotHash!)!;
+  const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  const cohort = getCohortById(finalized.cohortId)!;
+  const members = getCohortMembers(cohort.id);
+  const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
+  return { workspaceId: fixture.workspaceId, workspacePath: fixture.workspacePath, run: finalized, projection, cohort, members, frozenLineContext, items: fixture.items };
+}
+
+function runCoordParams(fixture: FrozenCohortFixture): Parameters<typeof ensureCohortTitlesCoordinated>[0] {
+  return {
+    run: fixture.run,
+    workspaceId: fixture.workspaceId,
+    workspacePath: fixture.workspacePath,
+    projection: fixture.projection,
+    cohort: fixture.cohort,
+    members: fixture.members,
+    frozenLineContext: fixture.frozenLineContext,
+  };
+}
+
+describe('ensureCohortTitlesCoordinated — PR13 C2 cross-parent same-T-hash reuse (issue #30)', () => {
+  it('revision B with the SAME frozen authority copies the superseded parent set: ZERO calls, fresh rows, same values, ORIGINAL model-call ids, old rows untouched', async () => {
+    // Run A: ONE title call, durable rows under A.
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    const mapA = await ensureCohortTitlesCoordinated(runCoordParams(fixtureA));
+    expect(titleCallCount).toBe(1);
+    expect(mapA.size).toBe(2);
+    const rowsA = getCohortTitleOutputsByRun(fixtureA.run.id);
+    expect(rowsA).toHaveLength(2);
+    expect(rowsA.every(r => r.modelCallId !== null)).toBe(true);
+
+    // Revision B with the SAME frozen authority: supersede A, claim + freeze B.
+    titleCallCount = 0;
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+
+    const mapB = await ensureCohortTitlesCoordinated(runCoordParams(fixtureB));
+    // ZERO LLM calls — the superseded set was copied, never re-coordinated.
+    expect(titleCallCount).toBe(0);
+    // Byte-identical titles from the copied set.
+    expect([...mapB.entries()].sort()).toEqual([...mapA.entries()].sort());
+    // FRESH write-once rows under the NEW run id.
+    const rowsB = getCohortTitleOutputsByRun(fixtureB.run.id);
+    expect(rowsB).toHaveLength(2);
+    expect(rowsB.every(r => r.inputHash === expectedInputHash(fixtureB))).toBe(true);
+    expect(rowsB.map(r => JSON.parse(r.outputValueJson))).toEqual(rowsA.map(r => JSON.parse(r.outputValueJson)));
+    // DECISION-B: the ORIGINAL producing call ids are preserved.
+    expect(rowsB.map(r => r.modelCallId).sort()).toEqual(rowsA.map(r => r.modelCallId).sort());
+    expect(rowsB.every(r => r.modelCallId !== null)).toBe(true);
+    // The old run's rows are untouched (immutable historical truth).
+    expect(getCohortTitleOutputsByRun(fixtureA.run.id)).toEqual(rowsA);
+  });
+
+  it('a DIFFERENT frozen authority (mutated member evidence) → revision B coordinates FRESH (one call, no copy)', async () => {
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    await ensureCohortTitlesCoordinated(runCoordParams(fixtureA));
+    expect(titleCallCount).toBe(1);
+
+    // Mutate one member's frozen title evidence BEFORE freezing revision B —
+    // the frozen projection (and therefore the T-hash) changes.
+    const item = fixtureA.items.find(i => i.upc === '100000000001')!;
+    const ext = item.extractionData ? { ...(item.extractionData as Record<string, unknown>) } : {};
+    ext.title = 'Changed Web Title';
+    updateItemExtractionData(item.id, JSON.stringify(ext));
+
+    titleCallCount = 0;
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    expect(expectedInputHash(fixtureB)).not.toBe(expectedInputHash(fixtureA));
+
+    const mapB = await ensureCohortTitlesCoordinated(runCoordParams(fixtureB));
+    // The superseded set's hash no longer matches → NO copy → fresh coordinate.
+    expect(titleCallCount).toBe(1);
+    expect(mapB.size).toBe(2);
+    expect(getCohortTitleOutputsByRun(fixtureB.run.id)).toHaveLength(2);
+  });
+
+  it('an INCOMPLETE superseded set (missing row) → no reuse, fresh coordinate (one call)', async () => {
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    await ensureCohortTitlesCoordinated(runCoordParams(fixtureA));
+    expect(titleCallCount).toBe(1);
+
+    // Simulate a partial old set (corruption that can only exist via an
+    // illegal direct DELETE) — the reuse check must reject it.
+    getDb().run(
+      "DELETE FROM classification_cohort_outputs WHERE cohort_run_id = ? AND output_kind = 'curated_title' AND product_sku = '100000000001'",
+      [fixtureA.run.id],
+    );
+
+    titleCallCount = 0;
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    const mapB = await ensureCohortTitlesCoordinated(runCoordParams(fixtureB));
+    expect(titleCallCount).toBe(1);
+    expect(mapB.size).toBe(2);
+    expect(getCohortTitleOutputsByRun(fixtureB.run.id)).toHaveLength(2);
+  });
+
+  it('a superseded run of a DIFFERENT cohort is never reused (cohort-scoped lookup) → fresh coordinate', async () => {
+    // One workspace, TWO families → two ready cohorts. Claim both; freeze +
+    // coordinate + supersede the FOREIGN cohort's run; the target cohort's
+    // revision B must NOT copy the foreign rows.
+    const { workspaceId, workspacePath: wsPath } = newWorkspace();
+    const { bundle } = writeActiveV2Bundle(wsPath);
+    upsertConfigSnapshot(workspaceId, bundle);
+    createReadyCohort(workspaceId, {
+      '100000000001': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Chicken 5 lb', _brandHint: 'Acme' }),
+      '100000000002': settledExtraction({ _name: 'Purina Pro Plan Dry Dog Food Beef 10 lb', _brandHint: 'Acme' }),
+      '200000000001': settledExtraction({ _name: 'Royal Canin Dry Cat Food Chicken 5 lb', _brandHint: 'Royal' }),
+      '200000000002': settledExtraction({ _name: 'Royal Canin Dry Cat Food Beef 10 lb', _brandHint: 'Royal' }),
+    });
+    const claimed = claimReadyCurationCohorts(workspaceId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(claimed.length).toBe(2);
+    const foreignRun = claimed.find(r => r.cohortId !== claimed[0].cohortId)!;
+    const targetRun = claimed.find(r => r.cohortId !== foreignRun.cohortId)!;
+
+    // Foreign cohort: freeze + coordinate + supersede (its rows exist under
+    // its OWN superseded run).
+    const foreignFinalized = await freezeCohortForExecution(foreignRun, wsPath, workspaceId);
+    expect(foreignFinalized.status).toBe('running');
+    const foreignSnap = getCohortSnapshotByHash(workspaceId, foreignFinalized.evidenceSnapshotHash!)!;
+    const foreignProjection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(foreignSnap.payloadJson)) as ExecutionEvidenceProjectionV1;
+    const foreignCohort = getCohortById(foreignFinalized.cohortId)!;
+    const foreignMembers = getCohortMembers(foreignCohort.id);
+    const foreignLine = buildFrozenProductLineContext(foreignCohort, foreignMembers, foreignProjection.members);
+    await ensureCohortTitlesCoordinated({
+      run: foreignFinalized, workspaceId, workspacePath: wsPath, projection: foreignProjection,
+      cohort: foreignCohort, members: foreignMembers, frozenLineContext: foreignLine,
+    });
+    expect(titleCallCount).toBe(1);
+    expect(supersedeOwnedCohortRunForOutputDrift(foreignFinalized.id, 'worker-a', 'foreign supersede')).toBe(true);
+    expect(getCohortTitleOutputsByRun(foreignFinalized.id)).toHaveLength(2);
+
+    // Target cohort revision B: freeze + coordinate. Its own lookup finds NO
+    // superseded run for ITS cohort → never copies the foreign rows → fresh.
+    const targetFinalized = await freezeCohortForExecution(targetRun, wsPath, workspaceId);
+    expect(targetFinalized.status).toBe('running');
+    const targetSnap = getCohortSnapshotByHash(workspaceId, targetFinalized.evidenceSnapshotHash!)!;
+    const targetProjection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(targetSnap.payloadJson)) as ExecutionEvidenceProjectionV1;
+    const targetCohort = getCohortById(targetFinalized.cohortId)!;
+    const targetMembers = getCohortMembers(targetCohort.id);
+    const targetLine = buildFrozenProductLineContext(targetCohort, targetMembers, targetProjection.members);
+    titleCallCount = 0;
+    const mapTarget = await ensureCohortTitlesCoordinated({
+      run: targetFinalized, workspaceId, workspacePath: wsPath, projection: targetProjection,
+      cohort: targetCohort, members: targetMembers, frozenLineContext: targetLine,
+    });
+    expect(titleCallCount).toBe(1);
+    expect(mapTarget.size).toBe(2);
+    const targetRows = getCohortTitleOutputsByRun(targetFinalized.id);
+    expect(targetRows).toHaveLength(2);
+    // The target's fresh rows are ITS OWN members (whichever cohort the claim
+    // order made the target) — never the foreign cohort's SKUs.
+    const targetMemberSkus = targetProjection.members.map(m => m.productSku ?? '').sort();
+    expect(targetRows.map(r => r.productSku).sort()).toEqual(targetMemberSkus);
+    // The foreign rows are untouched under their own (superseded) run.
+    const foreignRowsStill = getCohortTitleOutputsByRun(foreignFinalized.id);
+    expect(foreignRowsStill).toHaveLength(2);
+    expect(foreignRowsStill.map(r => r.productSku).sort()).toEqual(
+      foreignProjection.members.map(m => m.productSku ?? '').sort(),
+    );
+  });
+
+  it('rows already committed under revision B (stale-hash sibling commit) → CohortTitleAuthorityDriftError, never copies over the non-empty set, zero calls', async () => {
+    const fixtureA = await freezeCohortFixture(TWO_MEMBER_EXTRACTIONS);
+    await ensureCohortTitlesCoordinated(runCoordParams(fixtureA));
+    expect(titleCallCount).toBe(1);
+
+    const fixtureB = await supersedeAndRefreeze(fixtureA);
+    // A sibling already committed a set under B under a DIFFERENT authority.
+    const { insertCohortTitleOutputsOnce } = await import('../../db/repositories/classification-cohort-output-repo');
+    insertCohortTitleOutputsOnce({
+      workspaceId: fixtureB.workspaceId,
+      runId: fixtureB.run.id,
+      inputHash: 'a'.repeat(64),
+      outputs: [
+        { productSku: '100000000001', title: 'Sibling Chicken Title', source: 'cohort_fallback' },
+        { productSku: '100000000002', title: 'Sibling Beef Title', source: 'cohort_fallback' },
+      ],
+    });
+
+    titleCallCount = 0;
+    await expect(
+      ensureCohortTitlesCoordinated(runCoordParams(fixtureB)),
+    ).rejects.toBeInstanceOf(CohortTitleAuthorityDriftError);
+    expect(titleCallCount).toBe(0);
+    // The stale set is untouched (write-once) — the superseded copy never ran.
+    const rowsB = getCohortTitleOutputsByRun(fixtureB.run.id);
+    expect(rowsB).toHaveLength(2);
+    expect(rowsB.every(r => r.inputHash === 'a'.repeat(64))).toBe(true);
   });
 });

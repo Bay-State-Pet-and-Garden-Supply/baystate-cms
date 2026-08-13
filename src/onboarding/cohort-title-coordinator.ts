@@ -30,11 +30,34 @@
  *    stored hash(es) + row count) — it NEVER re-coordinates and NEVER
  *    replaces.
  *
- * 4. **Coordinate — only when the set is EMPTY** — under a scoped
- *    `CohortLeaseKeeper`: groups the frozen sibling views, calls the
- *    coordinator's UNCACHED `coordinateCohortItems` with the audited
- *    `cohort_title_consolidation` call bound to the ORDINAL-0 MEMBER CHILD
- *    RUN (DECISION-N, mirroring PR4 DECISION-A) and the keeper's
+ * 4. **Cross-parent same-T-hash reuse (PR13 C2, DECISION-A/B)** — when the
+ *    CURRENT run's set is EMPTY (the drift guard above passed), the LATEST
+ *    SUPERSEDED parent revision's committed title set is inspected: it is
+ *    reused when it is EXACTLY the expected multi-item-member set AND every
+ *    row's `input_hash` equals the freshly computed T-hash — the rows are
+ *    COPIED into the current run in ONE transaction via the SAME
+ *    `insertCohortTitleOutputsOnce` three-way semantics (write-once
+ *    preserved; the copy-race — a sibling committing under the current run
+ *    between our read and the insert — converts to
+ *    `CohortTitleAuthorityDriftError` exactly like the coordinate path), and
+ *    the op returns the parsed map with ZERO LLM calls. DECISION-A: TITLES
+ *    ONLY (the named economics item; Pages can adopt the same pattern later —
+ *    ADR 0013 PR13 forward note). DECISION-B: the copied rows PRESERVE the
+ *    original `model_call_id` — the C6b linkage exemption resolves the old
+ *    call (terminal-success + a durable output row under the new cohort run +
+ *    SKU), so proposal provenance stays truthful. SAFETY: only SUPERSEDED
+ *    parents qualify (a current non-superseded run means the cohort is
+ *    already processed); exact-set + hash equality are required; the copy
+ *    NEVER touches the old run's rows; a source row that fails to parse
+ *    through `CohortTitleOutputSchema` makes the source set unusable — the
+ *    copy is SKIPPED and the op falls through to fresh coordination
+ *    (deterministic; never a supersede loop on a corrupt OLD row).
+ *
+ * 5. **Coordinate — only when the set is EMPTY (and no reusable superseded
+ *    set)** — under a scoped `CohortLeaseKeeper`: groups the frozen sibling
+ *    views, calls the coordinator's UNCACHED `coordinateCohortItems` with the
+ *    audited `cohort_title_consolidation` call bound to the ORDINAL-0 MEMBER
+ *    CHILD RUN (DECISION-N, mirroring PR4 DECISION-A) and the keeper's
  *    `assertHeld` as the ownership assertion; then re-asserts ownership
  *    (`keeper.assertHeld()`); then persists every group member's
  *    `{title, source}` (+ the audited `model_call_id` when the call returned
@@ -46,7 +69,7 @@
  *    aborts with NO output rows and the run is left to the reclaiming
  *    sibling, which re-enters and reuses-or-coordinates.
  *
- * 5. Returns the freshly persisted map.
+ * 6. Returns the freshly persisted map.
  *
  * Never consults `cohortCache` / `coordinateCohortItemsOnce` — active cohort
  * mode treats the DB outputs as the sole "already coordinated" authority.
@@ -96,7 +119,10 @@ import {
   requireModelCallContext,
   getModelExecutionPlanEntry,
 } from '../classification/runtime-snapshot';
-import { getCohortMemberRunForTitleAudit } from '../db/repositories/classification-cohort-run-repo';
+import {
+  getCohortMemberRunForTitleAudit,
+  getLatestSupersededRunForCohort,
+} from '../db/repositories/classification-cohort-run-repo';
 import { modelPolicyViewFromConfig } from './model-policy-snapshot';
 import { computeCohortTitleInputHash, titleExecutionTypeAuthorityFromRun } from './cohort-title-hash';
 import { coordinateCohortItems, groupByProductLine } from './cohort-name-coordinator';
@@ -367,6 +393,88 @@ export async function ensureCohortTitlesCoordinated(
   if (existingRows.length > 0) {
     const storedHashes = [...new Set(existingRows.map(row => row.inputHash))];
     throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, existingRows.length);
+  }
+
+  // Step 4.5 (PR13 C2, DECISION-A/B) — cross-parent same-T-hash reuse: the
+  // CURRENT run's set is EMPTY here (the drift guard passed). A SUPERSEDED
+  // parent revision's committed title set is the SAME frozen-authority
+  // decision when it is EXACTLY the expected multi-item-member set AND every
+  // row's input_hash equals the freshly computed T-hash — COPY its rows into
+  // the current run in ONE transaction (write-once preserved, `model_call_id`
+  // PRESERVED — DECISION-B) and return the parsed map with ZERO LLM calls.
+  // Titles only (DECISION-A). See the module JSDoc for the full safety
+  // contract (superseded-only, exact-set, old rows untouched).
+  const reusableRun = getLatestSupersededRunForCohort(params.cohort.id);
+  if (reusableRun) {
+    const reusableRows = getCohortTitleOutputsByRun(reusableRun.id);
+    const reusableBySku = new Map(reusableRows.map(row => [row.productSku, row]));
+    // EXACT-SET completeness: count equality AND membership equality (a
+    // same-hash superseded set carrying EXTRA rows is never a source — the
+    // same write-once corruption rule as the current-run reuse path).
+    const reusableComplete =
+      reusableRows.length === multiMemberSkus.size &&
+      [...multiMemberSkus].every(sku => reusableBySku.has(sku));
+    const reusableHashMatch = reusableRows.every(row => row.inputHash === inputHash);
+    if (reusableComplete && reusableHashMatch) {
+      // Parse every source row through the shared schema; a row that fails to
+      // parse makes the source set unusable → skip the copy and fall through
+      // to fresh coordination (deterministic — never a supersede loop on a
+      // corrupt OLD row; the current run's set is still empty).
+      const copyRows: Array<{
+        productSku: string;
+        title: string;
+        source: CohortTitleOutput['source'];
+        modelCallId: string | null;
+      }> = [];
+      let sourceCorrupt = false;
+      for (const sku of multiMemberSkus) {
+        const row = reusableBySku.get(sku)!;
+        try {
+          const parsed = parseTitleRow(row);
+          copyRows.push({
+            productSku: sku,
+            title: parsed.title,
+            source: parsed.source,
+            // DECISION-B: the ORIGINAL producing call id is preserved — the
+            // C6b linkage exemption resolves the old call (terminal-success +
+            // a durable output row under the new cohort run + SKU).
+            modelCallId: row.modelCallId,
+          });
+        } catch {
+          sourceCorrupt = true;
+          break;
+        }
+      }
+      if (!sourceCorrupt) {
+        try {
+          insertCohortTitleOutputsOnce({
+            workspaceId,
+            runId: run.id,
+            inputHash,
+            outputs: copyRows,
+          });
+        } catch (err) {
+          if (err instanceof CohortOutputAlreadyCommittedError) {
+            // Copy-race: a sibling committed a set for this run between our
+            // pure-read check and this insert — the set is write-once and can
+            // never be silently split or double-written; convert to the same
+            // deterministic drift error the coordinate path uses.
+            const committed = getCohortTitleOutputsByRun(run.id);
+            const storedHashes = [...new Set(committed.map(row => row.inputHash))];
+            throw new CohortTitleAuthorityDriftError(run.id, inputHash, storedHashes, committed.length);
+          }
+          throw err;
+        }
+        const map = new Map<string, CohortTitleOutput>();
+        for (const copy of copyRows) {
+          map.set(copy.productSku, { title: copy.title, source: copy.source });
+        }
+        console.log(
+          `[CohortTitleCoordinator] Reused ${map.size} durable title outputs from superseded run ${reusableRun.id} (same T-hash, zero LLM calls).`,
+        );
+        return map;
+      }
+    }
   }
 
   // Step 5 — coordinate ONCE under a scoped lease keeper + persist

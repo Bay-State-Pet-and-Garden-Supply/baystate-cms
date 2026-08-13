@@ -19,6 +19,7 @@ import {
 import {
   claimReadyCurationCohorts,
   ensureMemberRun,
+  getLatestSupersededRunForCohort,
   freezeCohortRunAuthorities,
   transitionCohortRunToRunning,
   completeCohortRun,
@@ -202,6 +203,46 @@ describe('classification cohort run repo (issue #30, PR3 M1)', () => {
     expect(history.length).toBe(2);
     expect(history.some(r => r.id === oldRun.id && r.status === 'superseded')).toBe(true);
     expect(getCurrentCohortRun(cohorts[0].id)!.id).toBe(retried[0].id);
+  });
+
+  it('getLatestSupersededRunForCohort: the most-recently-superseded run per cohort, cohort-scoped (PR13 C2)', () => {
+    const wsId = newWorkspace();
+    const { cohorts } = setupFamilyBatch(wsId);
+    const runs = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(runs.length).toBe(2);
+    const runA = runs.find(r => r.cohortId === cohorts[0].id)!;
+    const runB = runs.find(r => r.cohortId === cohorts[1].id)!;
+    expect(freezeAuthorities(runA.id, 'worker-a')).toBe(true);
+    expect(freezeAuthorities(runB.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(runA.id, 'worker-a')).toBe(true);
+    expect(transitionCohortRunToRunning(runB.id, 'worker-a')).toBe(true);
+
+    // No superseded run yet → null.
+    expect(getLatestSupersededRunForCohort(cohorts[0].id)).toBeNull();
+    expect(getLatestSupersededRunForCohort(cohorts[1].id)).toBeNull();
+
+    // Supersede cohort 0's run, then a NEW revision, then supersede it again
+    // with a LATER superseded_at — the latest superseded run wins. The two
+    // supersedes can land in the SAME millisecond, so the first is stamped
+    // EARLIER explicitly to make `ORDER BY superseded_at DESC` unambiguous.
+    expect(supersedeCohortRun(runA.id, 'revision 1 superseded')).toBe(true);
+    getDb().run(
+      'UPDATE classification_cohort_runs SET superseded_at = ? WHERE id = ?',
+      ['2000-01-01T00:00:00.000Z', runA.id],
+    );
+    const retried = claimReadyCurationCohorts(wsId, 10, 'worker-a', COHORT_LEASE_TTL_MS);
+    expect(retried.length).toBe(1);
+    expect(retried[0].cohortId).toBe(cohorts[0].id);
+    expect(supersedeCohortRun(retried[0].id, 'revision 2 superseded')).toBe(true);
+
+    const latest = getLatestSupersededRunForCohort(cohorts[0].id);
+    expect(latest).not.toBeNull();
+    expect(latest!.id).toBe(retried[0].id);
+    expect(latest!.status).toBe('superseded');
+    expect(latest!.supersededAt).not.toBeNull();
+    // Cohort-scoped: cohort 1's run is NOT superseded and is never returned
+    // for cohort 0 (nor does cohort 0's superseded run leak into cohort 1).
+    expect(getLatestSupersededRunForCohort(cohorts[1].id)).toBeNull();
   });
 
   it('ensureMemberRun is idempotent — the second call returns the same linked child run', () => {
