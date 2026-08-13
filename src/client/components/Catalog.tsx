@@ -11,7 +11,7 @@ import { WORKBENCH_TABS } from './catalog-workbench/types';
 
 interface Props {
   onSelectProduct: (sku: string) => void;
-  onShowChangeSets: () => void;
+  onShowChangeSets?: () => void;
 }
 
 const CONTAINER_STYLE: React.CSSProperties = {
@@ -26,9 +26,19 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
   return (
     <div style={CONTAINER_STYLE}>
       <style>{WORKBENCH_TAB_CSS}</style>
-      <h1 style={{ fontSize: 24, fontWeight: 600, marginBottom: 0 }}>Catalog</h1>
-      <p style={{ fontSize: 13, color: '#6b7280', marginTop: 4, marginBottom: 16 }}>
-        Schema workbench for your ShopSite store's catalog
+      <h1
+        className="font-display"
+        style={{
+          fontSize: 26,
+          fontWeight: 700,
+          color: 'var(--color-uniform-green, #14532D)',
+          marginBottom: 0,
+        }}
+      >
+        Catalog Workbench
+      </h1>
+      <p style={{ fontSize: 13, color: '#525252', marginTop: 4, marginBottom: 20 }}>
+        Manage products, schema fields, attribute mappings, and store category pages
       </p>
       <WorkbenchTabs
         tabs={WORKBENCH_TABS}
@@ -39,7 +49,6 @@ export function Catalog({ onSelectProduct, onShowChangeSets }: Props) {
       {activeTab === 'products' && (
         <ProductsView
           onSelectProduct={onSelectProduct}
-          onShowChangeSets={onShowChangeSets}
         />
       )}
       {activeTab === 'overview' && <OverviewView />}

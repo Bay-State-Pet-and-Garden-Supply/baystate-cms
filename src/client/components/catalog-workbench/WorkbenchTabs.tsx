@@ -1,38 +1,40 @@
 import React from 'react';
 import type { WorkbenchTab } from './types';
 
-// Shared tab bar CSS — mirrors CatalogHealth's `.tab-btn` pattern
+// Shared tab bar CSS — anchored to Bay State Pet & Garden Supply design system
 export const WORKBENCH_TAB_CSS = `
   .workbench-tabs {
     display: flex;
     gap: 0;
-    border-bottom: 2px solid #e5e7eb;
+    border-bottom: 2px solid var(--color-card-border, #E8E6D9);
     margin-bottom: 24px;
     overflow-x: auto;
     padding: 0;
     flex-shrink: 0;
   }
   .workbench-tab-btn {
-    padding: 10px 20px;
+    padding: 12px 20px;
     font-size: 13px;
     font-weight: 600;
-    color: #64748b;
+    color: #525252;
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
     margin-bottom: -2px;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: all var(--transition-fast, 0.15s ease);
     white-space: nowrap;
     position: relative;
+    font-family: var(--font-body, inherit);
   }
   .workbench-tab-btn:hover {
-    color: #334155;
-    background: #f8fafc;
+    color: var(--color-uniform-green, #14532D);
+    background: rgba(20, 83, 45, 0.05);
   }
   .workbench-tab-btn.active {
-    color: #4f46e5;
-    border-bottom-color: #4f46e5;
+    color: var(--color-uniform-green, #14532D);
+    font-weight: 700;
+    border-bottom-color: var(--color-uniform-green, #14532D);
   }
   .workbench-tab-btn.active::after {
     content: '';
@@ -41,7 +43,7 @@ export const WORKBENCH_TAB_CSS = `
     left: 0;
     right: 0;
     height: 2px;
-    background: #4f46e5;
+    background: var(--color-uniform-green, #14532D);
   }
   .workbench-tab-badge {
     display: inline-flex;
@@ -49,8 +51,8 @@ export const WORKBENCH_TAB_CSS = `
     justify-content: center;
     min-width: 18px;
     height: 18px;
-    padding: 0 5px;
-    border-radius: 999px;
+    padding: 0 6px;
+    border-radius: var(--rounded-full, 9999px);
     background: #e5e7eb;
     color: #4b5563;
     font-size: 11px;
@@ -59,12 +61,12 @@ export const WORKBENCH_TAB_CSS = `
     vertical-align: middle;
   }
   .workbench-tab-badge.warning {
-    background: #fef3c7;
-    color: #d97706;
+    background: var(--color-warning-bg, #fef3c7);
+    color: var(--color-warning-text, #78350f);
   }
   .workbench-tab-badge.danger {
-    background: #fee2e2;
-    color: #dc2626;
+    background: var(--color-danger-bg, #fee2e2);
+    color: var(--color-danger-text, #760c19);
   }
 `;
 

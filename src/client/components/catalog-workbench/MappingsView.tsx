@@ -294,11 +294,13 @@ function SerializationEditor({ value, onChange }: {
   value: EditorRow['serialization'];
   onChange: (next: EditorRow['serialization']) => void;
 }) {
+  const [showAdvanced, setShowAdvanced] = useState(Boolean(value.prefix || value.suffix));
   const inputStyle: React.CSSProperties = { ...styles.input, width: 72, fontSize: 11, padding: '4px 6px' };
+  
   return (
-    <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
       <select
-        style={{ ...styles.select, width: 92, fontSize: 11, padding: '4px 6px' }}
+        style={{ ...styles.select, width: 95, fontSize: 11, padding: '4px 6px' }}
         value={value.kind}
         onChange={(e) => onChange({ ...value, kind: e.target.value as EditorRow['serialization']['kind'] })}
       >
@@ -306,29 +308,45 @@ function SerializationEditor({ value, onChange }: {
         <option value="delimited">delimited</option>
         <option value="measured">measured</option>
       </select>
-      <input style={inputStyle} placeholder="prefix" value={value.prefix} onChange={(e) => onChange({ ...value, prefix: e.target.value })} />
-      <input style={inputStyle} placeholder="suffix" value={value.suffix} onChange={(e) => onChange({ ...value, suffix: e.target.value })} />
+
       {value.kind === 'delimited' && (
-        <input style={inputStyle} placeholder="delimiter" value={value.delimiter} onChange={(e) => onChange({ ...value, delimiter: e.target.value })} />
+        <input style={inputStyle} placeholder="delimiter" value={value.delimiter} onChange={(e) => onChange({ ...value, delimiter: e.target.value })} title="Delimiter" />
       )}
       {value.kind === 'measured' && (
         <>
-          <input style={inputStyle} placeholder="unit" value={value.unit} onChange={(e) => onChange({ ...value, unit: e.target.value })} />
-          <input style={inputStyle} placeholder="sep" value={value.valueUnitSeparator} onChange={(e) => onChange({ ...value, valueUnitSeparator: e.target.value })} />
+          <input style={inputStyle} placeholder="unit" value={value.unit} onChange={(e) => onChange({ ...value, unit: e.target.value })} title="Measurement Unit" />
+          <input style={inputStyle} placeholder="sep" value={value.valueUnitSeparator} onChange={(e) => onChange({ ...value, valueUnitSeparator: e.target.value })} title="Separator" />
         </>
+      )}
+
+      {(showAdvanced || value.prefix || value.suffix) ? (
+        <>
+          <input style={inputStyle} placeholder="prefix" value={value.prefix} onChange={(e) => onChange({ ...value, prefix: e.target.value })} title="Prefix text" />
+          <input style={inputStyle} placeholder="suffix" value={value.suffix} onChange={(e) => onChange({ ...value, suffix: e.target.value })} title="Suffix text" />
+          <button type="button" onClick={() => setShowAdvanced(false)} style={{ background: 'none', border: 'none', color: '#999', fontSize: 11, cursor: 'pointer', padding: 0 }}>×</button>
+        </>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setShowAdvanced(true)}
+          style={{ background: 'none', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, color: '#525252', fontSize: 10, cursor: 'pointer', padding: '2px 6px' }}
+          title="Configure Prefix / Suffix"
+        >
+          + Format
+        </button>
       )}
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  input: { border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontSize: 13 },
-  select: { border: '1px solid #d1d5db', borderRadius: 6, padding: '6px 8px', fontSize: 13, background: '#fff' },
-  primaryBtn: { background: '#2563eb', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13 },
-  secondaryBtn: { background: 'none', border: '1px solid #d1d5db', borderRadius: 6, padding: '8px 16px', cursor: 'pointer', fontSize: 13 },
-  error: { color: '#dc2626', padding: 12, background: '#fef2f2', borderRadius: 6, marginBottom: 16, fontSize: 13 },
-  saved: { color: '#16a34a', padding: 12, background: '#f0fdf4', borderRadius: 6, marginBottom: 16, fontSize: 13 },
+  input: { border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, padding: '6px 8px', fontSize: 13, background: '#fff' },
+  select: { border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, padding: '6px 8px', fontSize: 13, background: '#fff' },
+  primaryBtn: { background: 'var(--color-uniform-green, #14532D)', color: 'var(--color-feed-bag-cream, #FAF9F2)', border: 'none', borderRadius: 4, padding: '8px 16px', cursor: 'pointer', fontWeight: 600, fontSize: 13 },
+  secondaryBtn: { background: 'none', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 4, padding: '8px 16px', cursor: 'pointer', fontSize: 13, color: '#211414', fontWeight: 600 },
+  error: { color: 'var(--color-danger-text, #760c19)', padding: 12, background: 'var(--color-danger-bg, #fee2e2)', borderRadius: 6, marginBottom: 16, fontSize: 13, border: '1px solid var(--color-danger-border, #fca5a5)' },
+  saved: { color: 'var(--color-uniform-green, #14532D)', padding: 12, background: 'var(--color-success-bg, #d1fae5)', borderRadius: 6, marginBottom: 16, fontSize: 13, border: '1px solid var(--color-success-border, #a7f3d0)', fontWeight: 600 },
 };
 
-const th: React.CSSProperties = { textAlign: 'left', padding: '10px 12px', borderBottom: '2px solid #e5e7eb', fontSize: 11, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' };
-const td: React.CSSProperties = { padding: '8px 12px', borderBottom: '1px solid #f1f5f9', verticalAlign: 'top' };
+const th: React.CSSProperties = { textAlign: 'left', padding: '10px 12px', borderBottom: '2px solid var(--color-card-border, #E8E6D9)', fontSize: 11, fontWeight: 700, color: 'var(--color-uniform-green, #14532D)', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' };
+const td: React.CSSProperties = { padding: '10px 12px', borderBottom: '1px solid var(--color-card-border, #E8E6D9)', verticalAlign: 'top' };

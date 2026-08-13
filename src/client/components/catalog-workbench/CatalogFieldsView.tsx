@@ -12,23 +12,28 @@ const TABLE_STYLE: React.CSSProperties = {
   width: '100%',
   borderCollapse: 'collapse',
   fontSize: 13,
+  background: 'var(--color-white-surface, #fff)',
+  border: '1px solid var(--color-card-border, #E8E6D9)',
+  borderRadius: 'var(--rounded-lg, 8px)',
+  overflow: 'hidden',
 };
 
 const TH_STYLE: React.CSSProperties = {
   textAlign: 'left',
   padding: '10px 12px',
-  borderBottom: '2px solid #e5e7eb',
+  borderBottom: '2px solid var(--color-card-border, #E8E6D9)',
   fontSize: 11,
   fontWeight: 700,
-  color: '#64748b',
+  color: 'var(--color-uniform-green, #14532D)',
   textTransform: 'uppercase',
   letterSpacing: 0.5,
   whiteSpace: 'nowrap',
+  cursor: 'pointer',
 };
 
 const TD_STYLE: React.CSSProperties = {
   padding: '10px 12px',
-  borderBottom: '1px solid #f1f5f9',
+  borderBottom: '1px solid var(--color-card-border, #E8E6D9)',
   cursor: 'pointer',
 };
 
@@ -121,9 +126,9 @@ export function CatalogFieldsView({ onSelectProduct }: CatalogFieldsViewProps) {
   return (
     <div>
       {loading ? (
-        <div style={{ padding: 40, textAlign: 'center', color: '#6b7280' }}>Loading catalog fields...</div>
+        <div style={{ padding: 40, textAlign: 'center', color: '#666' }}>Loading catalog fields...</div>
       ) : fields.length === 0 ? (
-        <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>
+        <div style={{ padding: 40, textAlign: 'center', color: '#737373', background: '#fff', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 8 }}>
           No catalog fields found. Sync products from ShopSite first.
         </div>
       ) : (
@@ -145,11 +150,18 @@ export function CatalogFieldsView({ onSelectProduct }: CatalogFieldsViewProps) {
             </thead>
             <tbody>
               {sorted.map(f => (
-                <tr key={f.xmlField} style={{ cursor: 'pointer' }} onClick={() => openDrawer(f)}>
-                  <td style={TD_STYLE}><code>{f.xmlField}</code></td>
+                <tr
+                  key={f.xmlField}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => openDrawer(f)}
+                  tabIndex={0}
+                  role="button"
+                  onKeyDown={e => e.key === 'Enter' && openDrawer(f)}
+                >
+                  <td style={TD_STYLE}><code style={{ color: 'var(--color-seedling-green, #16844D)' }}>{f.xmlField}</code></td>
                   <td style={TD_STYLE}>
                     <strong>{f.label}</strong>
-                    {f.warning && <span style={{ marginLeft: 6, color: '#d97706', fontSize: 11 }}>⚠️</span>}
+                    {f.warning && <span style={{ marginLeft: 6, color: 'var(--color-warning-text, #78350f)', fontSize: 11 }}>⚠️</span>}
                   </td>
                   <td style={TD_STYLE}><KindBadge kind={f.kind} /></td>
                   <td style={TD_STYLE}><code style={{ fontSize: 11 }}>{f.dataType}</code></td>
@@ -158,25 +170,25 @@ export function CatalogFieldsView({ onSelectProduct }: CatalogFieldsViewProps) {
                   <td style={TD_STYLE}><ModeBadge mode={f.inferredValueMode} /></td>
                   <td style={TD_STYLE}>
                     {f.mappedAttributeId ? (
-                      <span style={{ fontSize: 11, color: '#059669' }}>✓ mapped</span>
+                      <span style={{ fontSize: 11, color: 'var(--color-uniform-green, #14532D)', fontWeight: 600 }}>✓ mapped</span>
                     ) : (
-                      <span style={{ fontSize: 11, color: '#9ca3af' }}>—</span>
+                      <span style={{ fontSize: 11, color: '#a3a3a3' }}>—</span>
                     )}
                   </td>
                   <td style={TD_STYLE}>
                     {f.isCurationTarget ? (
-                      <span style={{ fontSize: 11, color: '#7c3aed' }}>curated</span>
+                      <span style={{ fontSize: 11, color: 'var(--color-uniform-green, #14532D)', fontWeight: 600 }}>curated</span>
                     ) : (
-                      <span style={{ fontSize: 11, color: '#9ca3af' }}>—</span>
+                      <span style={{ fontSize: 11, color: '#a3a3a3' }}>—</span>
                     )}
                   </td>
                   <td style={TD_STYLE}>
                     {f.isStale ? (
-                      <span style={{ fontSize: 11, color: '#dc2626' }}>stale</span>
+                      <span style={{ fontSize: 11, color: 'var(--color-signet-burgundy, #760C19)', fontWeight: 600 }}>stale</span>
                     ) : f.warning ? (
-                      <span style={{ fontSize: 11, color: '#d97706' }}>warning</span>
+                      <span style={{ fontSize: 11, color: 'var(--color-warning-text, #78350f)', fontWeight: 600 }}>warning</span>
                     ) : (
-                      <span style={{ fontSize: 11, color: '#059669' }}>ok</span>
+                      <span style={{ fontSize: 11, color: 'var(--color-uniform-green, #14532D)', fontWeight: 600 }}>ok</span>
                     )}
                   </td>
                 </tr>
@@ -200,29 +212,29 @@ export function CatalogFieldsView({ onSelectProduct }: CatalogFieldsViewProps) {
 
 function KindBadge({ kind }: { kind: string }) {
   const colors: Record<string, { bg: string; fg: string }> = {
-    core: { bg: '#dcfce7', fg: '#166534' },
-    system: { bg: '#fef3c7', fg: '#92400e' },
-    custom: { bg: '#e0e7ff', fg: '#3730a3' },
+    core: { bg: 'var(--color-success-bg, #d1fae5)', fg: 'var(--color-uniform-green, #14532D)' },
+    system: { bg: 'var(--color-warning-bg, #fef3c7)', fg: 'var(--color-warning-text, #78350f)' },
+    custom: { bg: 'rgba(20, 83, 45, 0.08)', fg: 'var(--color-uniform-green, #14532D)' },
   };
-  const c = colors[kind] ?? { bg: '#f1f5f9', fg: '#475569' };
+  const c = colors[kind] ?? { bg: '#f5f5f5', fg: '#525252' };
   return (
-    <span style={{ background: c.bg, color: c.fg, padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>
+    <span style={{ background: c.bg, color: c.fg, padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, textTransform: 'uppercase' }}>
       {kind}
     </span>
   );
 }
 
 function ModeBadge({ mode }: { mode: string }) {
-  const colors: Record<string, { bg: string; fg: string }> = {
-    controlled: { bg: '#dcfce7', fg: '#166534' },
-    freeText: { bg: '#fef3c7', fg: '#92400e' },
-    measured: { bg: '#e0e7ff', fg: '#3730a3' },
-    unknown: { bg: '#f1f5f9', fg: '#6b7280' },
+  const labels: Record<string, { label: string; bg: string; fg: string }> = {
+    controlled: { label: 'Controlled List', bg: 'var(--color-success-bg, #d1fae5)', fg: 'var(--color-uniform-green, #14532D)' },
+    freeText: { label: 'Free Form Text', bg: 'var(--color-warning-bg, #fef3c7)', fg: 'var(--color-warning-text, #78350f)' },
+    measured: { label: 'Measured Unit', bg: 'rgba(20, 83, 45, 0.08)', fg: 'var(--color-uniform-green, #14532D)' },
+    unknown: { label: 'Unclassified', bg: '#f5f5f5', fg: '#737373' },
   };
-  const c = colors[mode] ?? { bg: '#f1f5f9', fg: '#6b7280' };
+  const item = labels[mode] ?? { label: mode, bg: '#f5f5f5', fg: '#737373' };
   return (
-    <span style={{ background: c.bg, color: c.fg, padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>
-      {mode}
+    <span style={{ background: item.bg, color: item.fg, padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>
+      {item.label}
     </span>
   );
 }

@@ -46,21 +46,21 @@ export function TypesAttributesView() {
             {productTypes.map((pt: any) => {
               const profile = attributeProfiles.find((ap: any) => ap.id === pt.attributeProfileId);
               return (
-                <div key={pt.id} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 16 }}>
+                <div key={pt.id} style={{ background: 'var(--color-white-surface, #fff)', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 'var(--rounded-lg, 8px)', padding: 16, boxShadow: 'var(--shadow-sm)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div>
-                      <strong style={{ fontSize: 14, color: '#0f172a' }}>{pt.name}</strong>
-                      <code style={{ marginLeft: 8, fontSize: 11, color: '#64748b' }}>{pt.id}</code>
+                      <strong style={{ fontSize: 14, color: 'var(--color-uniform-green, #14532D)' }}>{pt.name}</strong>
+                      <code style={{ marginLeft: 8, fontSize: 11, color: '#666' }}>{pt.id}</code>
                     </div>
-                    {profile && <span style={{ fontSize: 11, color: '#059669' }}>{profile.attributes.length} attributes</span>}
+                    {profile && <span style={{ fontSize: 11, color: 'var(--color-uniform-green, #14532D)', fontWeight: 600 }}>{profile.attributes.length} attributes</span>}
                   </div>
-                  {pt.description && <p style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 0' }}>{pt.description}</p>}
+                  {pt.description && <p style={{ fontSize: 12, color: '#525252', margin: '4px 0 0' }}>{pt.description}</p>}
                   {profile && profile.attributes.length > 0 && (
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
                       {profile.attributes.map((pa: any) => (
-                        <span key={pa.attributeId} style={{ fontSize: 11, background: '#e0e7ff', color: '#3730a3', padding: '2px 8px', borderRadius: 4 }}>
+                        <span key={pa.attributeId} style={{ fontSize: 11, background: 'rgba(20, 83, 45, 0.08)', color: 'var(--color-uniform-green, #14532D)', padding: '2px 8px', borderRadius: 4, fontWeight: 600 }}>
                           {attrNames.get(pa.attributeId) ?? pa.attributeId}
-                          {pa.required && <span style={{ marginLeft: 2, color: '#dc2626' }}>*</span>}
+                          {pa.required && <span style={{ marginLeft: 2, color: 'var(--color-signet-burgundy, #760C19)' }}>*</span>}
                         </span>
                       ))}
                     </div>
@@ -74,18 +74,17 @@ export function TypesAttributesView() {
 
       {/* Product Attributes */}
       <section>
-        <h3 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 8px', color: '#0f172a' }}>
+        <h3 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 8px', color: 'var(--color-uniform-green, #14532D)' }}>
           Product Attributes ({attributes.length})
         </h3>
-        <p style={{ fontSize: 12, color: '#64748b', margin: '0 0 12px' }}>
-          Product Attributes are merchandising concepts (e.g. flavor, size, material).
-          They are distinct from Catalog Fields (ShopSite XML destinations).
+        <p style={{ fontSize: 12, color: '#525252', margin: '0 0 12px' }}>
+          Product Attributes are merchandising concepts (e.g. flavor, size, material) distinct from ShopSite XML field destinations.
         </p>
         {attributes.length === 0 ? (
-          <p style={{ fontSize: 13, color: '#9ca3af' }}>No attributes configured.</p>
+          <p style={{ fontSize: 13, color: '#737373' }}>No attributes configured.</p>
         ) : (
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, background: '#fff', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 8 }}>
               <thead>
                 <tr>
                   <th style={th}>Attribute</th>
@@ -102,33 +101,33 @@ export function TypesAttributesView() {
                   return (
                     <tr key={attr.id}>
                       <td style={td}>
-                        <strong>{attr.name}</strong>
-                        {attr.isClaim && <span style={{ marginLeft: 4, fontSize: 10, color: '#dc2626' }}>claim</span>}
+                        <strong style={{ color: 'var(--color-ledger-charcoal, #211414)' }}>{attr.name}</strong>
+                        {attr.isClaim && <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-signet-burgundy, #760C19)', fontWeight: 600 }}>claim</span>}
                       </td>
                       <td style={td}><code style={{ fontSize: 11 }}>{attr.id}</code></td>
                       <td style={td}><ModeBadge mode={attr.valueMode} /></td>
                       <td style={td}>
                         {attr.allowedValues?.length > 0
-                          ? <span style={{ fontSize: 11, color: '#475569' }}>{attr.allowedValues.slice(0, 5).join(', ')}{attr.allowedValues.length > 5 ? '…' : ''}</span>
-                          : <span style={{ fontSize: 11, color: '#9ca3af' }}>free text</span>}
+                          ? <span style={{ fontSize: 11, color: '#525252' }}>{attr.allowedValues.slice(0, 5).join(', ')}{attr.allowedValues.length > 5 ? '…' : ''}</span>
+                          : <span style={{ fontSize: 11, color: '#a3a3a3' }}>free text</span>}
                       </td>
                       <td style={td}>
                         {mapping ? (
                           <div>
-                            <code style={{ fontSize: 11, color: '#059669' }}>{mapping.catalogField}</code>
-                            {mapping.isStale && <span style={{ marginLeft: 4, fontSize: 10, color: '#dc2626' }}>stale</span>}
+                            <code style={{ fontSize: 11, color: 'var(--color-seedling-green, #16844D)' }}>{mapping.catalogField}</code>
+                            {mapping.isStale && <span style={{ marginLeft: 4, fontSize: 10, color: 'var(--color-signet-burgundy, #760C19)' }}>stale</span>}
                           </div>
                         ) : (
-                          <span style={{ fontSize: 11, color: '#9ca3af' }}>— unmapped</span>
+                          <span style={{ fontSize: 11, color: '#a3a3a3' }}>— unmapped</span>
                         )}
                       </td>
                       <td style={td}>
                         {mapping?.isStale ? (
-                          <span style={{ color: '#dc2626', fontSize: 11 }}>stale</span>
+                          <span style={{ color: 'var(--color-signet-burgundy, #760C19)', fontSize: 11, fontWeight: 600 }}>stale</span>
                         ) : mapping ? (
-                          <span style={{ color: '#059669', fontSize: 11 }}>mapped</span>
+                          <span style={{ color: 'var(--color-uniform-green, #14532D)', fontSize: 11, fontWeight: 600 }}>mapped</span>
                         ) : (
-                          <span style={{ color: '#d97706', fontSize: 11 }}>unmapped</span>
+                          <span style={{ color: 'var(--color-warning-text, #78350f)', fontSize: 11, fontWeight: 600 }}>unmapped</span>
                         )}
                       </td>
                     </tr>
@@ -140,7 +139,7 @@ export function TypesAttributesView() {
         )}
       </section>
 
-      <p style={{ fontSize: 12, color: '#9ca3af', borderTop: '1px solid #e5e7eb', paddingTop: 16, margin: 0 }}>
+      <p style={{ fontSize: 12, color: '#737373', borderTop: '1px solid var(--color-card-border, #E8E6D9)', paddingTop: 16, margin: 0 }}>
         Editing Product Types, Attributes, and Mappings is available in Onboarding Settings.
       </p>
     </div>
@@ -148,14 +147,14 @@ export function TypesAttributesView() {
 }
 
 function ModeBadge({ mode }: { mode: string }) {
-  const colors: Record<string, { bg: string; fg: string }> = {
-    controlled: { bg: '#dcfce7', fg: '#166534' },
-    freeText: { bg: '#fef3c7', fg: '#92400e' },
-    measured: { bg: '#e0e7ff', fg: '#3730a3' },
+  const labels: Record<string, { label: string; bg: string; fg: string }> = {
+    controlled: { label: 'Controlled List', bg: 'var(--color-success-bg, #d1fae5)', fg: 'var(--color-uniform-green, #14532D)' },
+    freeText: { label: 'Free Form Text', bg: 'var(--color-warning-bg, #fef3c7)', fg: 'var(--color-warning-text, #78350f)' },
+    measured: { label: 'Measured Unit', bg: 'rgba(20, 83, 45, 0.08)', fg: 'var(--color-uniform-green, #14532D)' },
   };
-  const c = colors[mode] ?? { bg: '#f1f5f9', fg: '#6b7280' };
-  return <span style={{ background: c.bg, color: c.fg, padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>{mode}</span>;
+  const item = labels[mode] ?? { label: mode, bg: '#f5f5f5', fg: '#737373' };
+  return <span style={{ background: item.bg, color: item.fg, padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600 }}>{item.label}</span>;
 }
 
-const th: React.CSSProperties = { textAlign: 'left', padding: '10px 12px', borderBottom: '2px solid #e5e7eb', fontSize: 11, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' };
-const td: React.CSSProperties = { padding: '10px 12px', borderBottom: '1px solid #f1f5f9', verticalAlign: 'top' };
+const th: React.CSSProperties = { textAlign: 'left', padding: '10px 12px', borderBottom: '2px solid var(--color-card-border, #E8E6D9)', fontSize: 11, fontWeight: 700, color: 'var(--color-uniform-green, #14532D)', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' };
+const td: React.CSSProperties = { padding: '10px 12px', borderBottom: '1px solid var(--color-card-border, #E8E6D9)', verticalAlign: 'top' };

@@ -158,6 +158,7 @@ function App() {
   const handleNavigate = (newView: View, replace = false) => {
     setView(newView);
     const url = new URL(window.location.href);
+    url.searchParams.delete('settingsTab');
     if (newView === 'setup') {
       url.searchParams.delete('view');
     } else {
@@ -413,7 +414,6 @@ function App() {
         {view === 'catalog' && workspace && (
           <Catalog
             onSelectProduct={handleOpenProduct}
-            onShowChangeSets={() => handleNavigate('changesets')}
           />
         )}
 

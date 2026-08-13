@@ -856,7 +856,19 @@ export function Onboarding() {
   };
 
   if (showSettings) {
-    return <OnboardingSettings onBack={() => setShowSettings(false)} initialTab={settingsDeepLinkTab ?? undefined} />;
+    return (
+      <OnboardingSettings
+        onBack={() => {
+          setShowSettings(false);
+          const url = new URL(window.location.href);
+          if (url.searchParams.has('settingsTab')) {
+            url.searchParams.delete('settingsTab');
+            window.history.replaceState(null, '', url.toString());
+          }
+        }}
+        initialTab={settingsDeepLinkTab ?? undefined}
+      />
+    );
   }
 
   // ─── VIEW 1: BATCHES LIST ─────────────────────────────────────────────────────

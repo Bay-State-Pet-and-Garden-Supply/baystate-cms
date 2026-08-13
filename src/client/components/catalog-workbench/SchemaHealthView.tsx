@@ -59,16 +59,15 @@ export function SchemaHealthView({ onSelectProduct }: SchemaHealthViewProps) {
   const filtered = filter === 'all' ? findings : findings.filter(f => f.severity === filter);
 
   const severityColor = (s: string) => ({
-    blocker: { bg: '#fef2f2', border: '#fecaca', fg: '#dc2626', label: 'Blocker' },
-    warning: { bg: '#fef3c7', border: '#fbbf24', fg: '#d97706', label: 'Warning' },
-    info: { bg: '#eff6ff', border: '#bfdbfe', fg: '#2563eb', label: 'Info' },
-  }[s] ?? { bg: '#f8fafc', border: '#e2e8f0', fg: '#6b7280', label: s });
+    blocker: { bg: 'var(--color-danger-bg, #fee2e2)', border: 'var(--color-danger-border, #fca5a5)', fg: 'var(--color-signet-burgundy, #760C19)', label: 'Blocker' },
+    warning: { bg: 'var(--color-warning-bg, #fef3c7)', border: 'var(--color-warning-border, #fde68a)', fg: 'var(--color-warning-text, #78350f)', label: 'Warning' },
+    info: { bg: 'rgba(20, 83, 45, 0.08)', border: 'rgba(20, 83, 45, 0.2)', fg: 'var(--color-uniform-green, #14532D)', label: 'Info' },
+  }[s] ?? { bg: '#f5f5f5', border: 'var(--color-card-border, #E8E6D9)', fg: '#525252', label: s });
 
   return (
     <div>
-      <p style={{ fontSize: 12, color: '#64748b', marginBottom: 16 }}>
+      <p style={{ fontSize: 13, color: '#525252', marginBottom: 16 }}>
         Schema health checks across Catalog Fields, Attribute Mappings, Category Page assignments, and classification configuration.
-        Findings are computed from live SQLite state and classification config.
       </p>
 
       {/* Summary bar */}
@@ -83,30 +82,31 @@ export function SchemaHealthView({ onSelectProduct }: SchemaHealthViewProps) {
             key={s.key}
             onClick={() => setFilter(s.key)}
             style={{
-              padding: '8px 16px',
-              borderRadius: 8,
-              border: filter === s.key ? '2px solid #4f46e5' : '1px solid #e2e8f0',
-              background: filter === s.key ? '#eef2ff' : '#fff',
+              padding: '10px 16px',
+              borderRadius: 'var(--rounded-lg, 8px)',
+              border: filter === s.key ? '2px solid var(--color-uniform-green, #14532D)' : '1px solid var(--color-card-border, #E8E6D9)',
+              background: filter === s.key ? 'rgba(20, 83, 45, 0.08)' : '#fff',
               cursor: 'pointer',
               flex: 1,
               textAlign: 'center',
+              boxShadow: 'var(--shadow-sm)',
             }}
           >
-            <div style={{ fontSize: 20, fontWeight: 700, color: s.key === 'blocker' ? '#dc2626' : s.key === 'warning' ? '#d97706' : '#0f172a' }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: s.key === 'blocker' ? 'var(--color-signet-burgundy, #760C19)' : s.key === 'warning' ? 'var(--color-warning-text, #78350f)' : 'var(--color-uniform-green, #14532D)' }}>
               {s.count}
             </div>
-            <div style={{ fontSize: 11, color: '#64748b' }}>{s.label}</div>
+            <div style={{ fontSize: 11, color: '#525252', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{s.label}</div>
           </button>
         ))}
       </div>
 
       {findings.length === 0 ? (
-        <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>
+        <div style={{ padding: 40, textAlign: 'center', color: '#737373', background: '#fff', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 8 }}>
           <p style={{ fontSize: 24, margin: '0 0 8px' }}>✅</p>
-          <p>No schema health issues found.</p>
+          <p style={{ fontWeight: 600 }}>No schema health issues found.</p>
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {filtered.map(f => {
             const colors = severityColor(f.severity);
             return (
@@ -121,17 +121,17 @@ export function SchemaHealthView({ onSelectProduct }: SchemaHealthViewProps) {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <span style={{ background: colors.fg, color: '#fff', padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700 }}>
+                  <span style={{ background: colors.fg, color: '#fff', padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 700, textTransform: 'uppercase' }}>
                     {colors.label}
                   </span>
-                  <code style={{ fontSize: 10, color: '#6b7280' }}>{f.code}</code>
-                  {f.relatedId && <span style={{ fontSize: 10, color: '#6b7280' }}>· {f.relatedTab}:{f.relatedId}</span>}
+                  <code style={{ fontSize: 10, color: '#666' }}>{f.code}</code>
+                  {f.relatedId && <span style={{ fontSize: 10, color: '#666' }}>· {f.relatedTab}:{f.relatedId}</span>}
                 </div>
-                <div style={{ color: '#1e293b', fontWeight: 500 }}>{f.message}</div>
+                <div style={{ color: 'var(--color-ledger-charcoal, #211414)', fontWeight: 600 }}>{f.message}</div>
                 {f.relatedId && f.relatedTab === 'health' && onSelectProduct && (
                   <button
                     onClick={() => onSelectProduct(f.relatedId!)}
-                    style={{ marginTop: 6, background: 'none', border: 'none', color: '#2563eb', cursor: 'pointer', fontSize: 12, padding: 0, textDecoration: 'underline' }}
+                    style={{ marginTop: 6, background: 'none', border: 'none', color: 'var(--color-uniform-green, #14532D)', cursor: 'pointer', fontSize: 12, padding: 0, fontWeight: 600, textDecoration: 'underline' }}
                   >
                     Open product: {f.relatedId}
                   </button>

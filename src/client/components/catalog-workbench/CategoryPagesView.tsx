@@ -44,15 +44,14 @@ export function CategoryPagesView() {
 
   return (
     <div>
-      <p style={{ fontSize: 12, color: '#64748b', marginBottom: 16 }}>
-        Product Pages are customer-facing store pages. Assignments validated by page ID (per ADR 0005).
-        Pages without a stable <code>page_id</code> are flagged as name-only assignments.
+      <p style={{ fontSize: 13, color: '#525252', marginBottom: 16 }}>
+        Product Pages structure customer-facing store navigation. Products linked to pages without a recorded ShopSite ID are marked as <strong>Name Match Only</strong> until synced.
       </p>
 
       {tree.length === 0 ? (
-        <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>No product pages found. Sync from ShopSite first.</div>
+        <div style={{ padding: 40, textAlign: 'center', color: '#737373', background: '#fff', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 8 }}>No product pages found. Sync from ShopSite first.</div>
       ) : (
-        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 16 }}>
+        <div style={{ background: 'var(--color-white-surface, #fff)', border: '1px solid var(--color-card-border, #E8E6D9)', borderRadius: 'var(--rounded-lg, 8px)', padding: 16, boxShadow: 'var(--shadow-sm)' }}>
           {tree.map(node => (
             <PageNode key={node.id} node={node} depth={0} />
           ))}
@@ -78,29 +77,32 @@ function PageNode({ node, depth }: { node: CategoryPageNode; depth: number }) {
           marginLeft: depth * 24,
           borderRadius: 6,
           cursor: 'pointer',
-          background: '#f8fafc',
-          border: '1px solid #f1f5f9',
-          marginBottom: 4,
+          background: 'var(--color-feed-bag-cream, #FAF9F2)',
+          border: '1px solid var(--color-card-border, #E8E6D9)',
+          marginBottom: 6,
         }}
         onClick={() => hasChildren && setExpanded(!expanded)}
+        tabIndex={0}
+        role="button"
+        onKeyDown={e => e.key === 'Enter' && hasChildren && setExpanded(!expanded)}
       >
         {hasChildren ? (
-          <span style={{ fontSize: 10, color: '#64748b', width: 16 }}>{expanded ? '▼' : '▶'}</span>
+          <span style={{ fontSize: 10, color: 'var(--color-uniform-green, #14532D)', width: 16 }}>{expanded ? '▼' : '▶'}</span>
         ) : (
           <span style={{ width: 16 }} />
         )}
         <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <strong style={{ fontSize: 14, color: '#0f172a' }}>{node.name}</strong>
-            {isNameOnly && <span style={{ fontSize: 10, background: '#fef3c7', color: '#92400e', padding: '1px 6px', borderRadius: 4 }}>name-only</span>}
+            <strong style={{ fontSize: 14, color: 'var(--color-uniform-green, #14532D)' }}>{node.name}</strong>
+            {isNameOnly && <span style={{ fontSize: 10, background: 'var(--color-warning-bg, #fef3c7)', color: 'var(--color-warning-text, #78350f)', padding: '2px 6px', borderRadius: 4, fontWeight: 600 }}>Name Match Only</span>}
           </div>
-          <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+          <div style={{ fontSize: 11, color: '#666666', marginTop: 2 }}>
             {node.fileName && <span>📄 {node.fileName} · </span>}
-            <span>ID: <code style={{ fontSize: 10 }}>{node.id}</code></span>
+            <span>ID: <code style={{ fontSize: 10, color: 'var(--color-seedling-green, #16844D)' }}>{node.id}</code></span>
             {node.lastSyncedAt && <span> · synced {new Date(node.lastSyncedAt).toLocaleDateString()}</span>}
           </div>
         </div>
-        <div style={{ fontSize: 12, fontWeight: 600, color: '#64748b', background: '#f1f5f9', padding: '2px 10px', borderRadius: 12 }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-uniform-green, #14532D)', background: 'rgba(20, 83, 45, 0.08)', padding: '3px 10px', borderRadius: 12 }}>
           {node.productCount} products
         </div>
       </div>

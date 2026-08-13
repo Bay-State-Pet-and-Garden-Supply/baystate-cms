@@ -118,8 +118,8 @@ export function CatalogFieldDrawer({ xmlField, label, onClose, onSelectProduct }
                   onClick={handleSaveLabel}
                   disabled={saving}
                   style={{
-                    background: '#2563eb',
-                    color: '#fff',
+                    background: 'var(--color-uniform-green, #14532D)',
+                    color: 'var(--color-feed-bag-cream, #FAF9F2)',
                     border: 'none',
                     borderRadius: 6,
                     padding: '6px 14px',
@@ -137,8 +137,9 @@ export function CatalogFieldDrawer({ xmlField, label, onClose, onSelectProduct }
             {saveMessage && (
               <div style={{
                 fontSize: 12,
-                color: saveMessage.includes('Failed') ? '#dc2626' : '#059669',
+                color: saveMessage.includes('Failed') ? 'var(--color-signet-burgundy, #760C19)' : 'var(--color-uniform-green, #14532D)',
                 marginTop: 2,
+                fontWeight: 600,
               }}>
                 {saveMessage}
               </div>
@@ -174,7 +175,7 @@ export function CatalogFieldDrawer({ xmlField, label, onClose, onSelectProduct }
                       {tv.skus.length > 0 && (
                         <span style={{ marginLeft: 8 }}>
                           — SKUs: {tv.skus.map(s => (
-                            <button key={s} onClick={() => onSelectProduct(s)} style={{ background: 'none', border: 'none', color: '#2563eb', cursor: 'pointer', padding: 0, fontSize: 11, textDecoration: 'underline', marginRight: 4 }}>{s}</button>
+                            <button key={s} onClick={() => onSelectProduct(s)} style={{ background: 'none', border: 'none', color: 'var(--color-uniform-green, #14532D)', cursor: 'pointer', padding: 0, fontSize: 11, textDecoration: 'underline', fontWeight: 600, marginRight: 4 }}>{s}</button>
                           ))}
                         </span>
                       )}
