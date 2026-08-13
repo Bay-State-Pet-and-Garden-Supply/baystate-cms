@@ -1,46 +1,33 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../connection';
+import {
+  CatalogProposalSchema,
+  InsertCatalogProposalSchema,
+  type CatalogProposal,
+  type InsertCatalogProposal,
+  type ProposalSource,
+  type ProposalStatus,
+} from '../../shared/schemas/catalog-health-proposal';
 
 // ---------------------------------------------------------------------------
-// catalog_health_proposals repository (epic #42, #35)
+// catalog_health_proposals repository (epic #42, #35 + #39)
 //
 // Workspace identity is part of every read/mutation contract: lookups and
 // updates predicate on `workspace_id` so a proposal from another workspace is
 // indistinguishable from a missing one. Every mutating helper reports whether
 // a row in the caller's workspace was actually affected so services can fail
 // closed.
+//
+// The persisted row type is the shared Zod schema (single contract with the
+// client); `insertProposal` validates its input against the schema so no
+// model-controlled field reaches SQL without structural validation.
 // ---------------------------------------------------------------------------
 
-export type ProposalStatus = 'proposed' | 'applied' | 'dismissed';
-export type ProposalSource = 'deterministic' | 'ai';
+export type { ProposalStatus, ProposalSource, CatalogProposal };
 
-export interface CatalogProposal {
-  id: string;
-  workspaceId: string;
-  field: string;
-  oldValue: string;
-  newValue: string;
-  affectedSkus: string[];
-  reason: string;
-  confidence: number;
-  source: ProposalSource;
-  status: ProposalStatus;
-  changeSetId: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
+/** Input accepted by the repository insert path (see shared schema). */
+export type InsertProposalInput = InsertCatalogProposal;
 
-export interface InsertProposalInput {
-  workspaceId: string;
-  field: string;
-  oldValue: string;
-  newValue: string;
-  affectedSkus: string[];
-  reason: string;
-  confidence: number;
-  source: ProposalSource;
-  status?: ProposalStatus;
-}
 
 /**
  * List proposals for one workspace with optional field/status filters.
@@ -134,9 +121,20 @@ export function findDuplicateProposal(
 }
 
 /**
- * Insert a proposal and return the stored row.
+ * Insert a proposal and return the stored row. The input is validated against
+ * the shared schema before any SQL runs (defense in depth; the AI path
+ * additionally runs business-rule validation before calling here).
  */
 export function insertProposal(input: InsertProposalInput): CatalogProposal {
+  const parsed = InsertCatalogProposalSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid proposal input: ${parsed.error.issues
+        .slice(0, 5)
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ')}`,
+    );
+  }
   const db = getDb();
   const now = new Date().toISOString();
   const id = randomUUID();
@@ -159,6 +157,45 @@ export function insertProposal(input: InsertProposalInput): CatalogProposal {
     ],
   );
   return findProposalById(input.workspaceId, id)!;
+}
+
+/**
+ * Atomically replace prior AI-generated `proposed` rows for a workspace/field
+ * with the validated accepted candidates, inside ONE transaction. Structural
+ * validation happens BEFORE this call; on any throw the whole replace rolls
+ * back and prior proposals are preserved.
+ */
+export function replaceAiProposalsForField(
+  workspaceId: string,
+  field: string,
+  candidates: Array<Omit<InsertCatalogProposal, 'workspaceId' | 'field' | 'source' | 'status'>>,
+): CatalogProposal[] {
+  const db = getDb();
+  return db.transaction(() => {
+    deleteGeneratedProposals(workspaceId, field, 'ai');
+    const inserted: CatalogProposal[] = [];
+    for (const candidate of candidates) {
+      // Avoid re-proposing a mapping that already exists in this workspace
+      // (proposed, applied, or dismissed) inside the same transaction.
+      const existing = findDuplicateProposal(
+        workspaceId,
+        field,
+        candidate.oldValue,
+        candidate.newValue,
+      );
+      if (existing) continue;
+      inserted.push(
+        insertProposal({
+          ...candidate,
+          workspaceId,
+          field,
+          source: 'ai',
+          status: 'proposed',
+        }),
+      );
+    }
+    return inserted;
+  })();
 }
 
 /**

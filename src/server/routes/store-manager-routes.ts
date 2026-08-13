@@ -12,6 +12,9 @@ import {
 } from '../services/product-field-refactor-service';
 import {
   generateAiProposals,
+  ProposalFieldScopeError,
+  AiProposalValidationError,
+  type GenerateAiProposalsResult,
 } from '../services/store-manager-assistant-service';
 import { generateStoreManagerReport } from '../services/store-manager-report';
 import { StoreManagerReportRequestSchema } from '../../shared/schemas/store-manager-report';
@@ -284,14 +287,26 @@ route.post('/store-manager/proposals/generate', async (c) => {
     const field = body.field || 'ProductField24';
     const useAi = !!body.useAi;
 
-    let proposals;
+    let proposals: GenerateAiProposalsResult | null = null;
     if (useAi) {
-      proposals = await generateAiProposals(workspace.id, field);
-    } else {
-      proposals = generateDeterministicProposals(workspace.id, field);
+      try {
+        proposals = await generateAiProposals(workspace.id, field);
+      } catch (err) {
+        if (err instanceof ProposalFieldScopeError) {
+          return c.json({ error: err.message, errorCode: err.code }, 400);
+        }
+        if (err instanceof AiProposalValidationError) {
+          return c.json(
+            { error: err.message, errorCode: err.errorCode, diagnostics: err.diagnostics },
+            422,
+          );
+        }
+        throw err;
+      }
+      return c.json({ success: true, proposals: proposals.proposals, diagnostics: proposals.diagnostics });
     }
-
-    return c.json({ success: true, proposals });
+    const deterministic = generateDeterministicProposals(workspace.id, field);
+    return c.json({ success: true, proposals: deterministic });
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }

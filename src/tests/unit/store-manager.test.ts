@@ -21,6 +21,7 @@ import {
   findDuplicateProposal,
   dismissProposal as repoDismissProposal,
 } from '../../db/repositories/catalog-health-proposal-repo';
+import { CatalogProposalSchema } from '../../shared/schemas/catalog-health-proposal';
 import { getProductWithDraft } from '../../server/services/product-service';
 import type { Product } from '../../shared/types';
 
@@ -291,5 +292,64 @@ describe('Store Manager AI Assistant & Cleanup Tool', () => {
     expect(deleteGeneratedProposals(workspaceIdB, 'ProductField88')).toBe(0);
     expect(deleteGeneratedProposals(workspaceIdB, 'ProductField99', 'deterministic')).toBe(1);
     expect(listProposals(workspaceIdB, { field: 'ProductField99' })).toHaveLength(0);
+  });
+
+  it('shared schema maps DB rows and keeps status/vocabulary compatible', () => {
+    const row = insertProposal({
+      workspaceId,
+      field: 'ProductField24',
+      oldValue: 'Schema Row',
+      newValue: 'Schema Canonical',
+      affectedSkus: ['SKU-001'],
+      reason: 'shared schema test',
+      confidence: 0.42,
+      source: 'deterministic',
+      status: 'proposed',
+    });
+    // The shared schema is the single contract for persisted rows.
+    const parsed = CatalogProposalSchema.safeParse(row);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.status).toBe('proposed');
+      expect(parsed.data.source).toBe('deterministic');
+      expect(parsed.data.confidence).toBe(0.42);
+      expect(parsed.data.oldValue).toBe('Schema Row');
+    }
+    // Status round-trip through the repository stays enum-compatible.
+    expect(updateProposalStatus(workspaceId, row.id, 'dismissed')).toBe(true);
+    expect(getProposalById(workspaceId, row.id)?.status).toBe('dismissed');
+    expect(CatalogProposalSchema.safeParse(getProposalById(workspaceId, row.id)).success).toBe(true);
+  });
+
+  it('staging gate ignores confidence (informational only)', () => {
+    const lowConf = insertProposal({
+      workspaceId,
+      field: 'ProductField24',
+      oldValue: 'Low Confidence Value',
+      newValue: 'Canonical Low',
+      affectedSkus: ['SKU-001'],
+      reason: 'confidence independence',
+      confidence: 0.01,
+      source: 'ai',
+      status: 'proposed',
+    });
+    const highConf = insertProposal({
+      workspaceId,
+      field: 'ProductField24',
+      oldValue: 'High Confidence Value',
+      newValue: 'Canonical High',
+      affectedSkus: ['SKU-002'],
+      reason: 'confidence independence',
+      confidence: 1,
+      source: 'ai',
+      status: 'proposed',
+    });
+    // applyProposal consults workspace/ownership/status — never confidence.
+    const lowResult = applyProposal(workspaceId, testWorkspacePath, lowConf.id);
+    const highResult = applyProposal(workspaceId, testWorkspacePath, highConf.id);
+    expect(lowResult.changeSetId).toBeDefined();
+    expect(highResult.changeSetId).toBeDefined();
+    expect(getProposalById(workspaceId, lowConf.id)?.status).toBe('applied');
+    expect(getProposalById(workspaceId, highConf.id)?.status).toBe('applied');
   });
 });

@@ -1,5 +1,6 @@
 import type { FieldRegistryEntry } from '../shared/schemas/field-registry';
 import type { StoreManagerReportResponse } from '../shared/schemas/store-manager-report';
+import type { CatalogProposal } from '../shared/schemas/catalog-health-proposal';
 
 const API_BASE = '/api';
 
@@ -567,22 +568,9 @@ export function saveHealthConfig(rules: HealthRuleConfig[]) {
 }
 
 // ── Store Manager AI Assistant APIs ──────────────────────────────────────────
-
-export interface CatalogProposal {
-  id: string;
-  workspaceId: string;
-  field: string;
-  oldValue: string;
-  newValue: string;
-  affectedSkus: string[];
-  reason: string;
-  confidence: number;
-  source: 'deterministic' | 'ai';
-  status: 'proposed' | 'applied' | 'dismissed';
-  changeSetId: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
+// CatalogProposal is the shared Zod schema type (epic #42, #39) — no
+// duplicate server/client interface.
+export type { CatalogProposal } from '../shared/schemas/catalog-health-proposal';
 
 export interface FieldValueInfo {
   value: string;
@@ -649,11 +637,24 @@ export function listStoreManagerProposals(field?: string, status?: string) {
   return request<{ proposals: CatalogProposal[] }>(url);
 }
 
+/** Per-candidate AI proposal validation report (epic #42, #39). */
+export interface AiProposalValidationReport {
+  index: number;
+  status: 'accepted' | 'rejected';
+  code: string;
+  normalizationKind?: string;
+  safeToStage?: boolean;
+  message: string;
+}
+
 export function generateStoreManagerProposals(field: string, useAi = false) {
-  return request<{ success: boolean; proposals: CatalogProposal[] }>('/store-manager/proposals/generate', {
-    method: 'POST',
-    body: JSON.stringify({ field, useAi }),
-  });
+  return request<{ success: boolean; proposals: CatalogProposal[]; diagnostics?: AiProposalValidationReport[] }>(
+    '/store-manager/proposals/generate',
+    {
+      method: 'POST',
+      body: JSON.stringify({ field, useAi }),
+    },
+  );
 }
 
 export function applyStoreManagerProposal(id: string) {
