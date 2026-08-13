@@ -139,19 +139,44 @@ afterAll(() => {
 });
 
 describe('applyCurationTargetEdits (v2 surgical editor)', () => {
-  it('updates curation target enablement in the active v2 bundle and resolves profile_attribute_target_disabled', () => {
+  it('toggles curation target enablement in the active v2 bundle and tracks profile_attribute_target_disabled', () => {
     const ctxBefore = createRuntimeActivationContext(root, workspaceId);
     const authBefore = loadRuntimeConfigAuthority(root, ctxBefore);
     expect(authBefore.kind).toBe('v2');
     if (authBefore.kind !== 'v2') return;
 
-    // Verify Product Cross Sell (ProductField32) is initially disabled
+    // Seed defaults: every product-field target ships enabled, so no
+    // disabled-target health findings exist initially.
     const crossSellBefore = authBefore.bundle.curationTargets.find(t => t.catalogField === 'ProductField32');
     expect(crossSellBefore).toBeDefined();
-    expect(crossSellBefore?.enabled).toBe(false);
+    expect(crossSellBefore?.enabled).toBe(true);
 
-    // Apply target edit enabling Product Cross Sell
-    const result = applyCurationTargetEdits(root, workspaceId, [
+    const crossSellDisabledFindings = (bundle: unknown) =>
+      deriveCurationApplicability(bundle as never).findings.filter(
+        f => f.code === 'profile_attribute_target_disabled' && (f.details as any)?.catalogField === 'ProductField32',
+      );
+
+    // Disable via the surgical editor: the health finding must appear.
+    const disableResult = applyCurationTargetEdits(root, workspaceId, [
+      {
+        id: crossSellBefore!.id,
+        kind: 'product_field',
+        catalogField: 'ProductField32',
+        enabled: false,
+      },
+    ]);
+    expect(disableResult.bundleHash).toBeDefined();
+
+    let authAfter = loadRuntimeConfigAuthority(root, createRuntimeActivationContext(root, workspaceId));
+    expect(authAfter.kind).toBe('v2');
+    if (authAfter.kind !== 'v2') return;
+    const crossSellDisabled = authAfter.bundle.curationTargets.find(t => t.catalogField === 'ProductField32');
+    expect(crossSellDisabled?.enabled).toBe(false);
+    // One finding per profile slot containing product-cross-sell (72 in the seed).
+    expect(crossSellDisabledFindings(authAfter.bundle).length).toBeGreaterThan(0);
+
+    // Re-enable: the finding must resolve.
+    applyCurationTargetEdits(root, workspaceId, [
       {
         id: crossSellBefore!.id,
         kind: 'product_field',
@@ -160,23 +185,12 @@ describe('applyCurationTargetEdits (v2 surgical editor)', () => {
       },
     ]);
 
-    expect(result.bundleHash).toBeDefined();
-
-    // Verify bundle updated
-    const ctxAfter = createRuntimeActivationContext(root, workspaceId);
-    const authAfter = loadRuntimeConfigAuthority(root, ctxAfter);
+    authAfter = loadRuntimeConfigAuthority(root, createRuntimeActivationContext(root, workspaceId));
     expect(authAfter.kind).toBe('v2');
     if (authAfter.kind !== 'v2') return;
-
-    const crossSellAfter = authAfter.bundle.curationTargets.find(t => t.catalogField === 'ProductField32');
-    expect(crossSellAfter?.enabled).toBe(true);
-
-    // Verify deriveCurationApplicability no longer has profile_attribute_target_disabled for Product Cross Sell
-    const report = deriveCurationApplicability(authAfter.bundle as any);
-    const crossSellDisabledFindings = report.findings.filter(
-      f => f.code === 'profile_attribute_target_disabled' && (f.details as any)?.catalogField === 'ProductField32',
-    );
-    expect(crossSellDisabledFindings.length).toBe(0);
+    const crossSellReenabled = authAfter.bundle.curationTargets.find(t => t.catalogField === 'ProductField32');
+    expect(crossSellReenabled?.enabled).toBe(true);
+    expect(crossSellDisabledFindings(authAfter.bundle).length).toBe(0);
   });
 
   it('fails closed when attempting to add a target for an unmapped field', () => {
