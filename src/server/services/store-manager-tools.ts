@@ -199,7 +199,12 @@ function applyPolicyGate<T extends Record<string, any>>(
   return out as T;
 }
 
-export function createStoreManagerTools(context: StoreManagerToolContext) {
+/**
+ * Build the raw tool definitions for a Store Manager context. Exposed so the
+ * runtime tool-name set can be checked against the policy registry and the
+ * prompt metadata (epic #42, #41 — prompt/runtime drift guard).
+ */
+export function buildStoreManagerToolDefs(context: StoreManagerToolContext) {
   const { workspaceId, workspacePath } = context;
 
   const tools = {
@@ -416,4 +421,17 @@ export function createStoreManagerTools(context: StoreManagerToolContext) {
 
   // Wrap every tool with its policy gate (approval + execution context).
   return applyPolicyGate(tools, context);
+}
+
+/**
+ * The exact set of tool names the runtime exposes, in construction order.
+ * Used by tests to prove the tool-policy registry and the generated prompt
+ * guidelines name exactly these tools (no drift).
+ */
+export function getStoreManagerToolNames(): string[] {
+  return Object.keys(buildStoreManagerToolDefs({ workspaceId: '', workspacePath: '' }));
+}
+
+export function createStoreManagerTools(context: StoreManagerToolContext) {
+  return buildStoreManagerToolDefs(context);
 }

@@ -18,7 +18,7 @@ import { StoreManagerReportRequestSchema } from '../../shared/schemas/store-mana
 import { resolveAiSdkModel, listUsableStoreManagerModels, ModelUnavailableError, type ResolvedAiSdkModel } from '../services/ai-sdk-model-resolver';
 import { createStoreManagerTools } from '../services/store-manager-tools';
 import { buildToolApprovalConfig } from '../services/store-manager-tool-policy';
-import { STORE_MANAGER_AGENT_SYSTEM_PROMPT } from '../services/store-manager-agent-prompt';
+import { buildStoreManagerSystemPrompt } from '../services/store-manager-prompt-builder';
 import { buildAttachedProductContext, injectAttachedContext, selectedSkusSchema } from '../services/store-manager-context';
 import { streamText, convertToModelMessages, toUIMessageStream, createUIMessageStreamResponse, isStepCount, type UIMessage } from 'ai';
 import {
@@ -150,7 +150,7 @@ route.post('/store-manager/chat', async (c) => {
 
     const result = streamText({
       model,
-      system: STORE_MANAGER_AGENT_SYSTEM_PROMPT,
+      system: buildStoreManagerSystemPrompt(),
       messages: modelMessages,
       tools,
       // #34: read tools run autonomously; every persistent class pauses for a

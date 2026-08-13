@@ -4,7 +4,8 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
-import { createStoreManagerTools, ApprovalGateError } from '../../server/services/store-manager-tools';
+import { createStoreManagerTools, ApprovalGateError, getStoreManagerToolNames } from '../../server/services/store-manager-tools';
+import { STORE_MANAGER_TOOL_POLICIES } from '../../server/services/store-manager-tool-policy';
 import type { DashboardStatsData } from '../../server/services/dashboard-service';
 import type { ProductFieldAuditResult, NormalizationProposalResult } from '../../server/services/product-field-audit-service';
 
@@ -192,5 +193,12 @@ describe('Store Manager Tools', () => {
     await expect(
       tools.applyNormalizationProposal.execute({ proposalId: 'x' }, {} as any),
     ).rejects.toMatchObject({ code: 'approval_missing' });
+  });
+
+  it('runtime tool names and the policy registry cover exactly the same set (epic #42, #41)', () => {
+    const runtimeNames = getStoreManagerToolNames().sort();
+    const policyNames = Object.keys(STORE_MANAGER_TOOL_POLICIES).sort();
+    expect(runtimeNames).toEqual(policyNames);
+    expect(runtimeNames.length).toBeGreaterThanOrEqual(8);
   });
 });
