@@ -1,8 +1,5 @@
 import { tool, type ToolExecutionOptions, type ModelMessage } from 'ai';
 import { z } from 'zod';
-import path from 'path';
-import fs from 'fs';
-import { getDb } from '../../db/connection';
 import { getDashboardStatsData } from './dashboard-service';
 import { getCatalogHealthReport } from './product-service';
 import { listProductIndex } from './product-service';
@@ -14,7 +11,7 @@ import {
   dismissProposal,
 } from './product-field-refactor-service';
 import { requireStoreManagerToolPolicy, type StoreManagerToolPolicy } from './store-manager-tool-policy';
-import type { Product } from '../../shared/types';
+import { repairChangeSetImagesForWorkspace } from './store-manager-image-repair';
 
 export interface StoreManagerToolContext {
   workspaceId: string;
@@ -390,196 +387,33 @@ export function createStoreManagerTools(context: StoreManagerToolContext) {
     }),
 
     repairChangeSetImages: tool({
-      description: 'Re-download product images for an approved change set from the original onboarding extraction data. Use when export images ZIP is empty because files were lost from disk.',
+      description: 'Re-download product images for an approved change set from the original onboarding extraction data. Use when export images ZIP is empty because files were lost from disk. The change set must be approved and belong to the current workspace.',
       inputSchema: z.object({
         changeSetId: z.string().describe('The UUID of the change set to repair images for'),
       }),
       execute: async ({ changeSetId }) => {
-        const db = getDb();
-
-        // Validate change set exists and belongs to this workspace
-        const cs = db.query(
-          'SELECT id, status FROM change_sets WHERE id = ? AND workspace_id = ?',
-        ).get(changeSetId, workspaceId) as { id: string; status: string } | undefined;
-
-        if (!cs) {
-          return { success: false, error: 'Change set not found in this workspace.' };
+        // Adapter only: all network/filesystem/SQL capability lives in the
+        // hardened image-repair service so chat and the Change Set Review UI
+        // route cannot drift or bypass the boundaries.
+        const result = await repairChangeSetImagesForWorkspace({
+          workspaceId,
+          workspacePath,
+          changeSetId,
+        });
+        if (result.status === 'not_found') {
+          return { success: false, error: result.error };
         }
-
-        // Get change set items
-        const items = db.query(
-          'SELECT sku, draft_json FROM change_set_items WHERE change_set_id = ?',
-        ).all(changeSetId) as { sku: string; draft_json: string }[];
-
-        if (items.length === 0) {
-          return { success: false, error: 'Change set has no items.' };
+        if (result.status === 'policy_denied') {
+          return { success: false, error: result.error, denial: 'policy_denied' as const };
         }
-
-        const results: Array<{ sku: string; imagesDownloaded: number; error?: string }> = [];
-        let totalDownloaded = 0;
-
-        for (const item of items) {
-          try {
-            // Look up onboarding item for extraction data
-            const row = db.query(
-              'SELECT extraction_data_json, brand_hint FROM onboarding_items WHERE upc = ? LIMIT 1',
-            ).get(item.sku) as { extraction_data_json: string | null; brand_hint: string | null } | undefined;
-
-            if (!row?.extraction_data_json) {
-              results.push({ sku: item.sku, imagesDownloaded: 0, error: 'No extraction data' });
-              continue;
-            }
-
-            const extractionData = JSON.parse(row.extraction_data_json);
-            const primaryUrl: string | null = extractionData.primaryImage || null;
-            const additionalUrls: string[] = extractionData.additionalImages || [];
-
-            if (!primaryUrl && additionalUrls.length === 0) {
-              results.push({ sku: item.sku, imagesDownloaded: 0, error: 'No image URLs' });
-              continue;
-            }
-
-            // Parse product to get brand folder
-            const product = JSON.parse(item.draft_json) as Product;
-            const brandName = product.customFields?.['ProductField16'] || row.brand_hint || 'unbranded';
-            const brandFolder = slugify(brandName) || 'unbranded';
-
-            // Derive image stem from existing media ref
-            const existingPrimary = product.core?.media?.primary;
-            const imageStem = existingPrimary
-              ? path.basename(existingPrimary, path.extname(existingPrimary))
-              : slugify(product.core?.name || item.sku) || 'product';
-
-            const count = await downloadImagesForRepair(
-              workspacePath,
-              item.sku,
-              brandFolder,
-              imageStem,
-              primaryUrl,
-              additionalUrls,
-            );
-
-            totalDownloaded += count;
-            results.push({ sku: item.sku, imagesDownloaded: count });
-          } catch (err) {
-            results.push({ sku: item.sku, imagesDownloaded: 0, error: err instanceof Error ? err.message : String(err) });
-          }
+        if (result.status === 'error') {
+          return { success: false, error: result.error };
         }
-
-        const failedCount = results.filter(r => r.error).length;
-        return {
-          success: failedCount < results.length,
-          summary: `Re-downloaded ${totalDownloaded} image(s) for ${results.length} product(s)` +
-            (failedCount > 0 ? ` (${failedCount} failure(s))` : ''),
-          results,
-        };
+        return result.summary;
       },
     }),
   };
 
   // Wrap every tool with its policy gate (approval + execution context).
   return applyPolicyGate(tools, context);
-}
-
-/** Slugify helper */
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-/** Download images for a single SKU, returns count of successfully downloaded images */
-async function downloadImagesForRepair(
-  workspacePath: string,
-  sku: string,
-  brandFolder: string,
-  imageStem: string,
-  primaryUrl: string | null,
-  additionalUrls: string[],
-): Promise<number> {
-  const imagesDir = path.resolve(workspacePath, 'products', 'images', brandFolder);
-  const imagesRoot = path.resolve(workspacePath, 'products', 'images');
-  fs.mkdirSync(imagesDir, { recursive: true });
-
-  const allUrls: string[] = [];
-  if (primaryUrl) allUrls.push(primaryUrl);
-  for (const url of additionalUrls) {
-    if (url && url !== primaryUrl) allUrls.push(url);
-  }
-
-  // Avoid collision
-  let finalImageStem = imageStem;
-  if (fs.existsSync(path.join(imagesDir, `${finalImageStem}.jpg`))) {
-    finalImageStem = `${imageStem}-${sku}`;
-  }
-
-  let downloaded = 0;
-
-  for (let index = 0; index < allUrls.length; index++) {
-    const url = allUrls[index];
-    if (!url) continue;
-
-    // Non-HTTP URLs are treated as already-present relative paths
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      downloaded++;
-      continue;
-    }
-
-    const suffix = index === 0 ? '' : `-${index + 1}`;
-    const filename = `${finalImageStem}${suffix}.jpg`;
-    const destPath = path.resolve(imagesDir, filename);
-
-    // Path containment
-    if (!destPath.startsWith(imagesRoot)) {
-      console.warn(`[RepairTool] Path traversal blocked: ${filename}`);
-      continue;
-    }
-
-    try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; BaystateCMS/1.0)',
-          'Accept': 'image/*',
-        },
-        redirect: 'follow',
-      });
-
-      if (!response.ok) {
-        console.warn(`[RepairTool] HTTP ${response.status} for ${url}`);
-        continue;
-      }
-
-      const contentType = response.headers.get('content-type') || '';
-      if (!contentType.startsWith('image/')) {
-        console.warn(`[RepairTool] Non-image: ${url} (${contentType})`);
-        continue;
-      }
-
-      const buffer = Buffer.from(await response.arrayBuffer());
-
-      // Try sharp, fall back to raw save
-      let finalBuffer: Buffer;
-      try {
-        const sharp = (await import('sharp')).default;
-        finalBuffer = await sharp(buffer)
-          .flatten({ background: '#ffffff' })
-          .resize(1000, 1000, {
-            fit: 'contain',
-            background: { r: 255, g: 255, b: 255, alpha: 1 },
-          })
-          .jpeg({ quality: 90 })
-          .toBuffer();
-      } catch {
-        finalBuffer = buffer;
-      }
-
-      fs.writeFileSync(destPath, finalBuffer);
-      downloaded++;
-    } catch (err) {
-      console.error(`[RepairTool] Error downloading ${url}:`, err);
-    }
-  }
-
-  return downloaded;
 }

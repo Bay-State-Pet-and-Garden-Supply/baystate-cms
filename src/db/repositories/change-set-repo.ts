@@ -51,6 +51,20 @@ export function findChangeSetById(id: string): ChangeSetRow | null {
   return mapRow(row);
 }
 
+/**
+ * Find a change set by ID within a specific workspace. Used by privileged
+ * operations (e.g. image repair) so a change set from another workspace is
+ * indistinguishable from a missing one (fail closed, no ownership disclosure).
+ */
+export function findChangeSetByWorkspaceId(workspaceId: string, id: string): ChangeSetRow | null {
+  const db = getDb();
+  const row = db.query(
+    'SELECT * FROM change_sets WHERE workspace_id = ? AND id = ?',
+  ).get(...[workspaceId, id]) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return mapRow(row);
+}
+
 export function listChangeSets(workspaceId: string): ChangeSetRow[] {
   const db = getDb();
   const rows = db.query(

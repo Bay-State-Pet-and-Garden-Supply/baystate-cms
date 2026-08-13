@@ -54,6 +54,7 @@ export default defineConfig({
       'src/tests/unit/store-manager-approval.test.ts',
       'src/tests/unit/store-manager-chat-history-service.test.ts',
       'src/tests/unit/store-manager-context.test.ts',
+      'src/tests/unit/store-manager-image-repair.test.ts',
       'src/tests/unit/name-consolidation-guard.test.ts',
       'src/tests/unit/catalog-classification-db.test.ts',
       'src/tests/unit/decision-revision-migration.test.ts',

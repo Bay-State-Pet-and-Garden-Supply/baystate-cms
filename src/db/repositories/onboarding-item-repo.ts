@@ -162,6 +162,23 @@ export function findItemById(id: string): OnboardingItem | undefined {
   return row ? mapRowToItem(row) : undefined;
 }
 
+/**
+ * Look up the raw extraction-data payload and brand hint for an onboarding
+ * item by SKU (upc). Returns null when no onboarding item has that SKU.
+ * Used by privileged image-repair so callers never hand-roll onboarding SQL.
+ */
+export function findExtractionDataByUpc(upc: string): {
+  extractionDataJson: string | null;
+  brandHint: string | null;
+} | null {
+  const db = getDb();
+  const row = db.query(
+    'SELECT extraction_data_json, brand_hint FROM onboarding_items WHERE upc = ? LIMIT 1',
+  ).get(upc) as { extraction_data_json: string | null; brand_hint: string | null } | undefined;
+  if (!row) return null;
+  return { extractionDataJson: row.extraction_data_json, brandHint: row.brand_hint };
+}
+
 export function listItemsByBatch(
   batchId: string,
   statusFilter?: ItemStatus | ItemStatus[],
