@@ -967,6 +967,14 @@ export async function freezeCohortForExecution(
     // Fail-closed (Commit A2): reuse requires BOTH digests non-null AND equal
     // — a stored OCR with a missing/uncomputable authority (pre-hardening
     // v1/v2 data) is never accepted, it re-runs under the current authority.
+    // PR12 C5 (DECISION-D): shadow-mode OCR is NEVER a reusable authority.
+    // Shadow mode is observe-only — the worker never claims cohorts and never
+    // invokes this freeze (job-queue.ts), so the pull-forward is unreachable
+    // under shadow in production. The guard makes the invariant STRUCTURAL: a
+    // shadow-flagged freeze SKIPS the pull-forward instead of writing a
+    // shadow-mode OCR result (packagingOcrData / packagingTitle / ocrOutcome /
+    // ocrInputHash / ocrExecutionDigest) into `extraction_data_json`, where it
+    // would become a reusable authority (evidence snapshot / OCR hash).
     const currentOcrExecutionDigest = computeOcrExecutionDigest(snapshot);
     const storedExecutionDigest = storedOcrExecutionDigest(item);
     const ocrNeedsRun =
@@ -976,7 +984,7 @@ export async function freezeCohortForExecution(
       storedExecutionDigest === null ||
       storedExecutionDigest !== currentOcrExecutionDigest;
     let frozenItem = item;
-    if (ocrNeedsRun) {
+    if (ocrNeedsRun && !cohortCurationFlags.cohortShadowOnly) {
       // Scoped ownership-guarded lease keeper around the long-awaited OCR
       // call (PR3 hardening A2): the parent lease is renewed on a TTL/3
       // cadence WHILE the transport is in flight (a live-but-slow owner can
@@ -1462,6 +1470,15 @@ export interface CohortShadowObservation {
  *   measures the deterministic outcome only; LLM-vs-deterministic divergence
  *   is exactly the metric shadow should surface).
  *
+ * Shadow OCR is NEVER a reusable authority (PR12 C5, DECISION-D): the
+ * in-memory member snapshots are never persisted (no `persistRuntimeSnapshot`,
+ * no evidence snapshot), the freeze's OCR pull-forward
+ * (`runFrozenOcrPullForward` / `updateItemExtractionData`) is NEVER invoked,
+ * and no OCR authority marker (packagingOcrData / ocrOutcome / ocrInputHash /
+ * ocrExecutionDigest) is written into `extraction_data_json`. Shadow observes
+ * the CURRENT world read-only; an OCR result produced under shadow flags
+ * therefore can never be reused as an execution authority by a later freeze.
+ *
  * The caller (worker poll leg) invokes this ONLY under
  * `cohortCurationV2Enabled && cohortShadowOnly`; flag OFF / active mode stay
  * byte-identical (this function is simply not called). Returns the
@@ -1514,6 +1531,24 @@ export function observeCohortShadowTypeResolution(
         memberInputs.push({ projection: memberProjection, memberSnapshot: snapshot });
       }
       if (memberInputs.length === 0) continue;
+
+      // PR12 C5 (DECISION-D) explicit guard assertion: shadow mode builds
+      // member snapshots IN-MEMORY only — they are never persisted, and the
+      // OCR pull-forward (the ONLY OCR write path in the curator,
+      // `runFrozenOcrPullForward` → `updateItemExtractionData`) is never
+      // invoked here (the shadow-flagged freeze also SKIPS it — see
+      // `freezeCohortForExecution`). A shadow-mode OCR result can therefore
+      // never reach `extraction_data_json` and never becomes a reusable
+      // authority (evidence snapshot / OCR hash). Asserting the in-memory
+      // placeholder config ref proves nothing was persisted (a persisted
+      // snapshot would carry a real id/hash pair).
+      for (const input of memberInputs) {
+        if (input.memberSnapshot.configSnapshotRef.id !== '' || input.memberSnapshot.configSnapshotRef.hash !== '') {
+          throw new Error(
+            'Shadow observation invariant violated: a member snapshot was persisted (shadow never persists snapshots or OCR).',
+          );
+        }
+      }
 
       // DECISION-E: deterministic-only — no `memberLlmResults`, so the
       // run-bound LLM ranker is never invoked in shadow mode.
