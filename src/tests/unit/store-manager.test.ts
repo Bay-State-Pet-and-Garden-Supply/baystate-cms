@@ -12,24 +12,35 @@ import {
   getProposalById,
   applyProposal,
   dismissProposal,
+  ProposalNotFoundError,
 } from '../../server/services/product-field-refactor-service';
+import {
+  insertProposal,
+  updateProposalStatus,
+  deleteGeneratedProposals,
+  findDuplicateProposal,
+  dismissProposal as repoDismissProposal,
+} from '../../db/repositories/catalog-health-proposal-repo';
 import { getProductWithDraft } from '../../server/services/product-service';
 import type { Product } from '../../shared/types';
 
 describe('Store Manager AI Assistant & Cleanup Tool', () => {
   const testDbPath = '/tmp/baystate-cms-store-manager-test.db';
   const testWorkspacePath = '/tmp/baystate-cms-store-manager-workspace';
+  const testWorkspacePathB = '/tmp/baystate-cms-store-manager-workspace-b';
   const workspaceId = randomUUID();
+  const workspaceIdB = randomUUID();
 
   beforeAll(() => {
     try { resetDb(); } catch { /* ok */ }
     initDb(testDbPath);
     runMigrations();
 
-    // Create workspace structure
+    // Create workspace structures
     createWorkspaceDirs(testWorkspacePath);
+    createWorkspaceDirs(testWorkspacePathB);
 
-    // Insert workspace into DB
+    // Insert workspaces into DB
     const db = getDb();
     const now = new Date().toISOString();
     db.run(
@@ -37,12 +48,18 @@ describe('Store Manager AI Assistant & Cleanup Tool', () => {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [workspaceId, 'Store Manager Test Store', testWorkspacePath, `${testWorkspacePath}/.git`, now, now, 'complete'],
     );
+    db.run(
+      `INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at, bootstrap_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [workspaceIdB, 'Store Manager Test Store B', testWorkspacePathB, `${testWorkspacePathB}/.git`, now, now, 'complete'],
+    );
   });
 
   afterAll(() => {
     closeDb();
     try { unlinkSync(testDbPath); } catch { /* ok */ }
     try { rmSync(testWorkspacePath, { recursive: true, force: true }); } catch { /* ok */ }
+    try { rmSync(testWorkspacePathB, { recursive: true, force: true }); } catch { /* ok */ }
   });
 
   it('should calculate Levenshtein distance correctly', () => {
@@ -194,7 +211,7 @@ describe('Store Manager AI Assistant & Cleanup Tool', () => {
     expect(result.changeSetId).toBeDefined();
 
     // Verify the proposal status was updated in DB
-    const updatedProp = getProposalById(casingProp!.id);
+    const updatedProp = getProposalById(workspaceId, casingProp!.id);
     expect(updatedProp?.status).toBe('applied');
     expect(updatedProp?.changeSetId).toBe(result.changeSetId);
 
@@ -204,8 +221,75 @@ describe('Store Manager AI Assistant & Cleanup Tool', () => {
     expect(productWithDraft.merged?.customFields?.ProductField24).toBe('Cat Supplies');
 
     // 4. Dismiss trim whitespace proposal
-    dismissProposal(trimProp!.id);
-    const dismissedProp = getProposalById(trimProp!.id);
+    dismissProposal(workspaceId, trimProp!.id);
+    const dismissedProp = getProposalById(workspaceId, trimProp!.id);
     expect(dismissedProp?.status).toBe('dismissed');
+  });
+
+  it('workspace B cannot read, dismiss, or apply proposals owned by workspace A (and vice versa)', () => {
+    // A fresh proposal in workspace A so cross-workspace attempts can be
+    // proven to leave it untouched.
+    const freshA = insertProposal({
+      workspaceId,
+      field: 'ProductField88',
+      oldValue: 'Fresh Value',
+      newValue: 'Canonical',
+      affectedSkus: ['SKU-001'],
+      reason: 'test',
+      confidence: 0.9,
+      source: 'deterministic',
+      status: 'proposed',
+    });
+
+    // A proposal owned by workspace B (distinct field to keep deletes scoped).
+    const bProp = insertProposal({
+      workspaceId: workspaceIdB,
+      field: 'ProductField99',
+      oldValue: 'B Value',
+      newValue: 'B Canonical',
+      affectedSkus: [],
+      reason: 'test',
+      confidence: 0.9,
+      source: 'deterministic',
+      status: 'proposed',
+    });
+
+    // Scoped reads: each workspace sees only its own rows; foreign and unknown
+    // ids return the same null external result.
+    expect(getProposalById(workspaceIdB, freshA.id)).toBeNull();
+    expect(getProposalById(workspaceId, freshA.id)?.id).toBe(freshA.id);
+    expect(getProposalById(workspaceId, bProp.id)).toBeNull();
+    expect(getProposalById(workspaceIdB, bProp.id)?.id).toBe(bProp.id);
+    expect(getProposalById(workspaceId, 'no-such-proposal')).toBeNull();
+    expect(getProposalById(workspaceIdB, 'no-such-proposal')).toBeNull();
+
+    // Cross-workspace dismiss fails closed and mutates nothing.
+    expect(() => dismissProposal(workspaceIdB, freshA.id)).toThrow(ProposalNotFoundError);
+    expect(getProposalById(workspaceId, freshA.id)?.status).toBe('proposed');
+    expect(() => dismissProposal(workspaceId, bProp.id)).toThrow(ProposalNotFoundError);
+    expect(getProposalById(workspaceIdB, bProp.id)?.status).toBe('proposed');
+
+    // Cross-workspace apply fails before side effects: no change set is
+    // created for workspace B and workspace A's proposal stays proposed.
+    expect(() => applyProposal(workspaceIdB, testWorkspacePathB, freshA.id)).toThrow(
+      ProposalNotFoundError,
+    );
+    expect(getProposalById(workspaceId, freshA.id)?.status).toBe('proposed');
+    const changeSetsB = getDb().query(
+      'SELECT COUNT(*) as count FROM change_sets WHERE workspace_id = ?',
+    ).get(workspaceIdB) as { count: number };
+    expect(changeSetsB.count).toBe(0);
+
+    // Repository affected-row checks: foreign/unknown ids report zero rows.
+    expect(repoDismissProposal(workspaceIdB, freshA.id)).toBe(false);
+    expect(updateProposalStatus(workspaceIdB, freshA.id, 'dismissed')).toBe(false);
+    expect(updateProposalStatus(workspaceId, freshA.id, 'dismissed')).toBe(true);
+
+    // Scoped duplicate lookup and delete.
+    expect(findDuplicateProposal(workspaceId, 'ProductField24', 'cat supplies', 'Cat Supplies')).toBeTruthy();
+    expect(findDuplicateProposal(workspaceIdB, 'ProductField24', 'cat supplies', 'Cat Supplies')).toBeNull();
+    expect(deleteGeneratedProposals(workspaceIdB, 'ProductField88')).toBe(0);
+    expect(deleteGeneratedProposals(workspaceIdB, 'ProductField99', 'deterministic')).toBe(1);
+    expect(listProposals(workspaceIdB, { field: 'ProductField99' })).toHaveLength(0);
   });
 });

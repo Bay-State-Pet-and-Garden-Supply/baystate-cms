@@ -1,9 +1,14 @@
-import { randomUUID } from 'node:crypto';
 import { getDb } from '../../db/connection';
 import { callLlmForTask } from '../../onboarding/llm-client';
 import { generateProductFieldAuditReport } from './catalog-insight-service';
 import { listProducts } from '../../db/repositories/product-index-repo';
 import { listProposals, findSkusWithFieldValueCaseInsensitive, type CatalogProposal } from './product-field-refactor-service';
+import {
+  deleteGeneratedProposals,
+  findDuplicateProposal,
+  insertProposal,
+  countProposalsByStatus,
+} from '../../db/repositories/catalog-health-proposal-repo';
 
 export interface AssistantCleanupReport {
   summary: string;
@@ -80,16 +85,10 @@ Confidence should be a decimal between 0.1 and 0.99 (depending on how sure you a
     throw new Error('AI response did not return a proposals array.');
   }
 
-  const db = getDb();
-  const now = new Date().toISOString();
-
-  // Clear previous AI proposed changes for this field
-  db.run(
-    "DELETE FROM catalog_health_proposals WHERE workspace_id = ? AND field = ? AND status = 'proposed' AND source = 'ai'",
-    [workspaceId, field]
-  );
-
   const inserted: CatalogProposal[] = [];
+
+  // Clear previous AI proposed changes for this field (workspace-scoped)
+  deleteGeneratedProposals(workspaceId, field, 'ai');
 
   for (const p of json.proposals) {
     if (!p.oldValue || !p.newValue || p.oldValue === p.newValue) {
@@ -104,50 +103,25 @@ Confidence should be a decimal between 0.1 and 0.99 (depending on how sure you a
       continue;
     }
 
-    // Check if proposal already exists
-    const existing = db.query(
-      'SELECT id FROM catalog_health_proposals WHERE workspace_id = ? AND field = ? AND old_value = ? AND new_value = ? LIMIT 1'
-    ).get(workspaceId, field, p.oldValue, p.newValue) as { id: string } | undefined;
-
-    if (existing) {
+    // Check if proposal already exists in this workspace
+    const existingId = findDuplicateProposal(workspaceId, field, p.oldValue, p.newValue);
+    if (existingId) {
       continue;
     }
 
-    const id = randomUUID();
-    db.run(
-      `INSERT INTO catalog_health_proposals (id, workspace_id, field, old_value, new_value, affected_skus, reason, confidence, source, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
+    inserted.push(
+      insertProposal({
         workspaceId,
         field,
-        p.oldValue,
-        p.newValue,
-        JSON.stringify(affectedSkus),
-        p.reason || 'AI recommendation',
-        p.confidence || 0.8,
-        'ai',
-        'proposed',
-        now,
-        now,
-      ]
+        oldValue: p.oldValue,
+        newValue: p.newValue,
+        affectedSkus,
+        reason: p.reason || 'AI recommendation',
+        confidence: p.confidence || 0.8,
+        source: 'ai',
+        status: 'proposed',
+      }),
     );
-
-    inserted.push({
-      id,
-      workspaceId,
-      field,
-      oldValue: p.oldValue,
-      newValue: p.newValue,
-      affectedSkus,
-      reason: p.reason || 'AI recommendation',
-      confidence: p.confidence || 0.8,
-      source: 'ai',
-      status: 'proposed',
-      changeSetId: null,
-      createdAt: now,
-      updatedAt: now,
-    });
   }
 
   return inserted;
@@ -170,12 +144,8 @@ export async function generateStoreManagerReport(
   
   const warningsCount = issuesRow?.count || 0;
 
-  // Active proposals count
-  const proposedRow = db.query(
-    "SELECT COUNT(*) as count FROM catalog_health_proposals WHERE workspace_id = ? AND status = 'proposed'"
-  ).get(workspaceId) as { count: number } | undefined;
-  
-  const proposedChangesCount = proposedRow?.count || 0;
+  // Active proposals count (workspace-scoped, repository-owned)
+  const proposedChangesCount = countProposalsByStatus(workspaceId, 'proposed');
 
   // Active change sets
   const csRow = db.query(

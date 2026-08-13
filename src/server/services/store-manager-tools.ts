@@ -146,24 +146,34 @@ export function createStoreManagerTools(context: StoreManagerToolContext) {
     }),
 
     applyNormalizationProposal: tool({
-      description: 'Apply a stored proposal by its UUID, staging value updates for all affected products inside the active Change Set.',
+      description: 'Apply a stored proposal by its UUID, staging value updates for all affected products inside the active Change Set. The proposal must belong to the current workspace.',
       inputSchema: z.object({
         proposalId: z.string().describe('The UUID of the proposal to apply'),
       }),
       execute: async ({ proposalId }) => {
-        const res = applyProposal(workspaceId, workspacePath, proposalId);
-        return { success: true, changeSetId: res.changeSetId };
+        try {
+          const res = applyProposal(workspaceId, workspacePath, proposalId);
+          return { success: true, changeSetId: res.changeSetId };
+        } catch (err) {
+          // Structured denial at the agent boundary: foreign/unknown ids never
+          // disclose ownership and never reach the service side effects.
+          return { success: false, error: err instanceof Error ? err.message : 'Failed to apply proposal.' };
+        }
       },
     }),
 
     dismissNormalizationProposal: tool({
-      description: 'Dismiss a stored proposal by its UUID so it will not be suggested or applied.',
+      description: 'Dismiss a stored proposal by its UUID so it will not be suggested or applied. The proposal must belong to the current workspace.',
       inputSchema: z.object({
         proposalId: z.string().describe('The UUID of the proposal to dismiss'),
       }),
       execute: async ({ proposalId }) => {
-        dismissProposal(proposalId);
-        return { success: true };
+        try {
+          dismissProposal(workspaceId, proposalId);
+          return { success: true };
+        } catch (err) {
+          return { success: false, error: err instanceof Error ? err.message : 'Failed to dismiss proposal.' };
+        }
       },
     }),
 

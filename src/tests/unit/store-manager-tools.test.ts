@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { unlinkSync, existsSync } from 'node:fs';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { initDb, closeDb, resetDb } from '../../db/connection';
+import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
 import { createStoreManagerTools } from '../../server/services/store-manager-tools';
@@ -99,5 +99,33 @@ describe('Store Manager Tools', () => {
 
     const listResult = (await tools.listStoredProposals.execute({ field: 'ProductField24' }, {} as any)) as any[];
     expect(Array.isArray(listResult)).toBe(true);
+  });
+
+  it('foreign or unknown proposal ids return a structured denial and never invoke draft writes', async () => {
+    const tools = createStoreManagerTools({
+      workspaceId,
+      workspacePath,
+    });
+
+    const beforeChangeSetCount = (getDb().query('SELECT COUNT(*) as count FROM change_sets').get() as { count: number }).count;
+
+    // Unknown/foreign id — no proposal exists in this workspace.
+    const applyResult = (await tools.applyNormalizationProposal.execute(
+      { proposalId: 'foreign-proposal-id' },
+      {} as any,
+    )) as { success: boolean; error?: string };
+    expect(applyResult.success).toBe(false);
+    expect(applyResult.error).toContain('not found');
+
+    const dismissResult = (await tools.dismissNormalizationProposal.execute(
+      { proposalId: 'foreign-proposal-id' },
+      {} as any,
+    )) as { success: boolean; error?: string };
+    expect(dismissResult.success).toBe(false);
+    expect(dismissResult.error).toContain('not found');
+
+    // No change set or draft mutation occurred.
+    const afterChangeSetCount = (getDb().query('SELECT COUNT(*) as count FROM change_sets').get() as { count: number }).count;
+    expect(afterChangeSetCount).toBe(beforeChangeSetCount);
   });
 });

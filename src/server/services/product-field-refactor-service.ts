@@ -1,25 +1,31 @@
-import { randomUUID } from 'node:crypto';
-import { getDb } from '../../db/connection';
 import { listProducts } from '../../db/repositories/product-index-repo';
 import { generateProductFieldAuditReport } from './catalog-insight-service';
 import { autosaveDraft, getProductWithDraft } from './product-service';
 import { findActiveChangeSet, createChangeSet } from '../../db/repositories/change-set-repo';
 import { findWorkspace } from '../../db/repositories/workspace-repo';
+import {
+  findProposalById,
+  listProposals as listProposalsInRepo,
+  dismissProposal as dismissProposalInRepo,
+  updateProposalStatus,
+  deleteGeneratedProposals,
+  findDuplicateProposal,
+  insertProposal,
+  type CatalogProposal,
+} from '../../db/repositories/catalog-health-proposal-repo';
 
-export interface CatalogProposal {
-  id: string;
-  workspaceId: string;
-  field: string;
-  oldValue: string;
-  newValue: string;
-  affectedSkus: string[];
-  reason: string;
-  confidence: number;
-  source: 'deterministic' | 'ai';
-  status: 'proposed' | 'applied' | 'dismissed';
-  changeSetId: string | null;
-  createdAt: string;
-  updatedAt: string;
+export type { CatalogProposal } from '../../db/repositories/catalog-health-proposal-repo';
+
+/**
+ * Thrown when a proposal cannot be found in the caller's workspace. The same
+ * error is raised for foreign-owned and unknown ids so ownership is never
+ * disclosed.
+ */
+export class ProposalNotFoundError extends Error {
+  constructor() {
+    super('Proposal not found.');
+    this.name = 'ProposalNotFoundError';
+  }
 }
 
 /**
@@ -59,53 +65,33 @@ export function findSkusWithFieldValueCaseInsensitive(field: string, value: stri
 }
 
 /**
- * List proposals from the database with optional filters.
+ * List proposals for the given workspace with optional filters.
  */
 export function listProposals(
   workspaceId: string,
   filter?: { field?: string; status?: string }
 ): CatalogProposal[] {
-  const db = getDb();
-  let sql = 'SELECT * FROM catalog_health_proposals WHERE workspace_id = ?';
-  const params: any[] = [workspaceId];
-
-  if (filter?.field) {
-    sql += ' AND field = ?';
-    params.push(filter.field);
-  }
-  if (filter?.status) {
-    sql += ' AND status = ?';
-    params.push(filter.status);
-  }
-
-  sql += ' ORDER BY confidence DESC, created_at DESC';
-
-  const rows = db.query(sql).all(...params) as Record<string, unknown>[];
-  return rows.map(mapRow);
+  return listProposalsInRepo(workspaceId, filter);
 }
 
 /**
- * Fetch a single proposal by ID.
+ * Fetch a single proposal by ID within the caller's workspace. A proposal
+ * owned by another workspace returns null (same external result as unknown).
  */
-export function getProposalById(id: string): CatalogProposal | null {
-  const db = getDb();
-  const row = db.query('SELECT * FROM catalog_health_proposals WHERE id = ?').get(id) as
-    | Record<string, unknown>
-    | undefined;
-  if (!row) return null;
-  return mapRow(row);
+export function getProposalById(workspaceId: string, id: string): CatalogProposal | null {
+  return findProposalById(workspaceId, id);
 }
 
 /**
- * Dismiss/reject a proposal.
+ * Dismiss/reject a proposal within the caller's workspace. Throws
+ * ProposalNotFoundError when the id is not in the workspace so callers fail
+ * closed instead of silently succeeding with no effect.
  */
-export function dismissProposal(id: string): void {
-  const db = getDb();
-  const now = new Date().toISOString();
-  db.run(
-    "UPDATE catalog_health_proposals SET status = 'dismissed', updated_at = ? WHERE id = ?",
-    [now, id]
-  );
+export function dismissProposal(workspaceId: string, id: string): void {
+  const dismissed = dismissProposalInRepo(workspaceId, id);
+  if (!dismissed) {
+    throw new ProposalNotFoundError();
+  }
 }
 
 /**
@@ -196,55 +182,32 @@ export function generateDeterministicProposals(
     }
   }
 
-  // 4. Save to Database
-  const db = getDb();
-  const now = new Date().toISOString();
-
-  // Clear previous unapplied proposed changes for this field
-  db.run(
-    "DELETE FROM catalog_health_proposals WHERE workspace_id = ? AND field = ? AND status = 'proposed'",
-    [workspaceId, field]
-  );
+  // 4. Save to Database through the workspace-scoped repository.
+  // Clear previous unapplied proposed changes for this field in this workspace.
+  deleteGeneratedProposals(workspaceId, field, 'deterministic');
 
   const inserted: CatalogProposal[] = [];
 
   for (const p of proposals) {
-    // Check if a identical applied or dismissed proposal already exists to avoid duplicate suggestions
-    const existing = db.query(
-      'SELECT id FROM catalog_health_proposals WHERE workspace_id = ? AND field = ? AND old_value = ? AND new_value = ? LIMIT 1'
-    ).get(workspaceId, p.field, p.oldValue, p.newValue) as { id: string } | undefined;
-
-    if (existing) {
+    // Check if an identical proposal already exists in this workspace to avoid duplicate suggestions
+    const existingId = findDuplicateProposal(workspaceId, p.field, p.oldValue, p.newValue);
+    if (existingId) {
       continue;
     }
 
-    const id = randomUUID();
-    db.run(
-      `INSERT INTO catalog_health_proposals (id, workspace_id, field, old_value, new_value, affected_skus, reason, confidence, source, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        p.workspaceId,
-        p.field,
-        p.oldValue,
-        p.newValue,
-        JSON.stringify(p.affectedSkus),
-        p.reason,
-        p.confidence,
-        p.source,
-        p.status,
-        now,
-        now,
-      ]
+    inserted.push(
+      insertProposal({
+        workspaceId: p.workspaceId,
+        field: p.field,
+        oldValue: p.oldValue,
+        newValue: p.newValue,
+        affectedSkus: p.affectedSkus,
+        reason: p.reason,
+        confidence: p.confidence,
+        source: p.source,
+        status: 'proposed',
+      }),
     );
-
-    inserted.push({
-      id,
-      ...p,
-      changeSetId: null,
-      createdAt: now,
-      updatedAt: now,
-    });
   }
 
   return inserted;
@@ -252,19 +215,35 @@ export function generateDeterministicProposals(
 
 /**
  * Apply a proposal by saving product drafts to the active change set.
+ *
+ * Workspace ownership is enforced at the repository/service boundary: the
+ * proposal is re-read scoped to the active workspace and its SKU set is
+ * validated against the workspace data source before any draft write. A
+ * foreign or unknown id throws ProposalNotFoundError before side effects.
  */
 export function applyProposal(
   workspaceId: string,
   workspacePath: string,
   id: string
 ): { changeSetId: string } {
-  const proposal = getProposalById(id);
+  const proposal = findProposalById(workspaceId, id);
   if (!proposal) {
-    throw new Error(`Proposal with ID "${id}" not found.`);
+    throw new ProposalNotFoundError();
   }
 
   if (proposal.status !== 'proposed') {
     throw new Error(`Proposal is already ${proposal.status} and cannot be applied.`);
+  }
+
+  // Fail closed before side effects: every affected SKU must resolve in the
+  // current workspace data source.
+  for (const sku of proposal.affectedSkus) {
+    const productWithDraft = getProductWithDraft(workspaceId, workspacePath, sku);
+    if (!productWithDraft.merged && !productWithDraft.approved) {
+      throw new Error(
+        `Proposal references SKU "${sku}" that is not present in the current workspace; not applied.`,
+      );
+    }
   }
 
   let lastChangeSetId = '';
@@ -305,38 +284,11 @@ export function applyProposal(
     }
   }
 
-  // Update proposal status in DB
-  const db = getDb();
-  const now = new Date().toISOString();
-  db.run(
-    "UPDATE catalog_health_proposals SET status = 'applied', change_set_id = ?, updated_at = ? WHERE id = ?",
-    [targetChangeSetId, now, id]
-  );
-
-  return { changeSetId: targetChangeSetId };
-}
-
-function mapRow(row: Record<string, unknown>): CatalogProposal {
-  let affectedSkus: string[] = [];
-  try {
-    affectedSkus = JSON.parse(String(row.affected_skus));
-  } catch {
-    // fallback
+  // Update proposal status in DB, scoped to this workspace (both keys).
+  const updated = updateProposalStatus(workspaceId, id, 'applied', targetChangeSetId);
+  if (!updated) {
+    throw new Error('Proposal could not be updated in the current workspace.');
   }
 
-  return {
-    id: String(row.id),
-    workspaceId: String(row.workspace_id),
-    field: String(row.field),
-    oldValue: String(row.old_value),
-    newValue: String(row.new_value),
-    affectedSkus,
-    reason: String(row.reason),
-    confidence: Number(row.confidence),
-    source: row.source as any,
-    status: row.status as any,
-    changeSetId: row.change_set_id ? String(row.change_set_id) : null,
-    createdAt: String(row.created_at),
-    updatedAt: String(row.updated_at),
-  };
+  return { changeSetId: targetChangeSetId };
 }

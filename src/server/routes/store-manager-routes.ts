@@ -7,6 +7,7 @@ import {
   getProposalById,
   applyProposal,
   dismissProposal,
+  ProposalNotFoundError,
 } from '../services/product-field-refactor-service';
 import {
   generateAiProposals,
@@ -218,7 +219,7 @@ route.get('/store-manager/proposals/:id', (c) => {
 
   const id = c.req.param('id');
   try {
-    const proposal = getProposalById(id);
+    const proposal = getProposalById(workspace.id, id);
     if (!proposal) {
       return c.json({ error: 'Proposal not found.' }, 404);
     }
@@ -243,6 +244,9 @@ route.post('/store-manager/proposals/:id/apply', async (c) => {
     const result = applyProposal(workspace.id, workspace.workspacePath, id);
     return c.json({ success: true, changeSetId: result.changeSetId });
   } catch (err) {
+    if (err instanceof ProposalNotFoundError) {
+      return c.json({ error: 'Proposal not found.' }, 404);
+    }
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
@@ -259,9 +263,12 @@ route.post('/store-manager/proposals/:id/dismiss', async (c) => {
 
   const id = c.req.param('id');
   try {
-    dismissProposal(id);
+    dismissProposal(workspace.id, id);
     return c.json({ success: true });
   } catch (err) {
+    if (err instanceof ProposalNotFoundError) {
+      return c.json({ error: 'Proposal not found.' }, 404);
+    }
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
