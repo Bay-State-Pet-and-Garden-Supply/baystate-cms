@@ -30,6 +30,7 @@ import type { CurationData } from '../shared/schemas/onboarding';
 import type { ClassificationProposal } from '../shared/types';
 import type { ClassificationRunRow } from '../db/repositories/classification-run-repo';
 import type { CohortRun } from '../shared/schemas/cohorts';
+import { hashCanonicalJson } from '../shared/stable-id';
 import { getEffectivePrimaryProductTypeId } from './assignment-projection';
 import { resolveEffectiveCurationType, getReviewedTypeFromSnapshot } from './effective-curation-type';
 import type { RuntimeClassificationSnapshot } from './runtime-snapshot';
@@ -140,6 +141,33 @@ export function resolvePromotionEffectiveTypeId(
     reviewedTypeId = getReviewedTypeFromSnapshot(snapshot ?? undefined);
   }
   return resolveEffectiveCurationType(reviewedTypeId, null).effectiveTypeId;
+}
+
+/**
+ * PR12 C1 (issue #30): recompute the CURRENT execution-kind authority
+ * value-hash. Mirrors the stamped shapes in `insertProposalDependency` /
+ * the cohort freeze stamping (classification-cohort-run-repo.ts / the
+ * cohort-curator member commit): `hashCanonicalJson({executionProductTypeId,
+ * productTypeConfidence})`. Returns null when the execution type id is null
+ * — a null authority can never match a stamped (non-null) dependency value
+ * hash, so a null result means "any stamped hash is stale".
+ */
+export function computeExecutionAuthorityHash(
+  executionProductTypeId: string | null,
+  productTypeConfidence: number | null,
+): string | null {
+  if (executionProductTypeId === null) return null;
+  return hashCanonicalJson({ executionProductTypeId, productTypeConfidence });
+}
+
+/**
+ * PR12 C1 (issue #30): recompute the CURRENT reviewed-kind authority
+ * value-hash. Mirrors the stamped shape `hashCanonicalJson({reviewedProductTypeId})`.
+ * Returns null when the reviewed type id is null.
+ */
+export function computeReviewedAuthorityHash(reviewedTypeId: string | null): string | null {
+  if (reviewedTypeId === null) return null;
+  return hashCanonicalJson({ reviewedProductTypeId: reviewedTypeId });
 }
 
 /**

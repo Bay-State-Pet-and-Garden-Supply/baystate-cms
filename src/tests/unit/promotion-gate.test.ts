@@ -10,8 +10,9 @@
  * reviewed-source member pass/mismatch.
  */
 import { describe, it, expect } from 'vitest';
-import { validatePromotionGate, resolvePromotionEffectiveTypeId } from '../../classification/promotion-gate';
+import { validatePromotionGate, resolvePromotionEffectiveTypeId, computeExecutionAuthorityHash, computeReviewedAuthorityHash } from '../../classification/promotion-gate';
 import type { PromotionGateInput } from '../../classification/promotion-gate';
+import { hashCanonicalJson } from '../../shared/stable-id';
 import type { ClassificationRunRow } from '../../db/repositories/classification-run-repo';
 import type { CohortRun } from '../../shared/schemas/cohorts';
 import type { RuntimeClassificationSnapshot } from '../../classification/runtime-snapshot';
@@ -494,6 +495,43 @@ describe('PR11 C1 — validatePromotionGate (pure)', () => {
       expect(result.code).toBe('stale_proposal');
       expect(result.reason).toContain('wet-dog-food');
     }
+  });
+});
+
+describe('PR12 C1 — pure authority-hash recomputation helpers (issue #30)', () => {
+  it('computeExecutionAuthorityHash mirrors the stamped shape for identical inputs', () => {
+    const helper = computeExecutionAuthorityHash('dog-food-dry', 0.9);
+    const stamped = hashCanonicalJson({ executionProductTypeId: 'dog-food-dry', productTypeConfidence: 0.9 });
+    expect(helper).toBe(stamped);
+    expect(helper).toMatch(/^[a-f0-9]{64}$/);
+    // Deterministic across calls.
+    expect(computeExecutionAuthorityHash('dog-food-dry', 0.9)).toBe(stamped);
+  });
+
+  it('computeReviewedAuthorityHash mirrors the stamped shape for identical inputs', () => {
+    const helper = computeReviewedAuthorityHash('cat-food-wet');
+    const stamped = hashCanonicalJson({ reviewedProductTypeId: 'cat-food-wet' });
+    expect(helper).toBe(stamped);
+    expect(helper).toMatch(/^[a-f0-9]{64}$/);
+    expect(computeReviewedAuthorityHash('cat-food-wet')).toBe(stamped);
+  });
+
+  it('a confidence drift changes the execution hash (same target id)', () => {
+    expect(computeExecutionAuthorityHash('dog-food-dry', 0.9)).not.toBe(
+      computeExecutionAuthorityHash('dog-food-dry', 0.8),
+    );
+    expect(computeExecutionAuthorityHash('dog-food-dry', 0.9)).not.toBe(
+      computeExecutionAuthorityHash('dog-food-wet', 0.9),
+    );
+  });
+
+  it('null handling: a null execution/reviewed id yields null (never a matchable hash)', () => {
+    expect(computeExecutionAuthorityHash(null, 0.9)).toBeNull();
+    expect(computeExecutionAuthorityHash(null, null)).toBeNull();
+    expect(computeReviewedAuthorityHash(null)).toBeNull();
+    // A non-null id with a null confidence still hashes (confidence is part
+    // of the tuple only when the id exists).
+    expect(computeExecutionAuthorityHash('dog-food-dry', null)).toMatch(/^[a-f0-9]{64}$/);
   });
 });
 
