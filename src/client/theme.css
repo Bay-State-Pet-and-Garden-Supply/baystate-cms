@@ -1,0 +1,235 @@
+/* Design System: Bay State Pet & Garden Supply ("The General Store") */
+@import url('https://fonts.googleapis.com/css2?family=Arvo:wght@400;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* Primary Colors */
+  --color-uniform-green: #14532D; /* Store aprons & exterior signage */
+  --color-shadow-pine: #0B3D22;    /* Button hover & active nav states */
+  --color-seedling-green: #16844D; /* Category tags & success states */
+
+  /* Secondary Colors */
+  --color-signet-burgundy: #760C19; /* Secondary buttons & featured badges */
+  --color-burgundy-dark: #4E0710;   /* Burgundy hover state */
+
+  /* Tertiary / Accents */
+  --color-corner-callout-gold: #F6DB12; /* Sale badges & callout strips */
+  --color-muted-gold: #E9B520;          /* Pre-order badges & borders */
+
+  /* Neutrals */
+  --color-white-surface: #FFFFFF;    /* Primary card & input surface */
+  --color-feed-bag-cream: #FAF9F2;   /* Soft page sections & button text */
+  --color-ledger-charcoal: #211414;  /* Main body text (warm near-black) */
+  --color-card-border: #E8E6D9;      /* Card borders */
+  --color-mulch-brown: #6B3A18;      /* Footer detail text */
+
+  /* Functional Semantics */
+  --color-success-bg: #d1fae5;
+  --color-success-text: #14532d;
+  --color-success-border: #a7f3d0;
+
+  --color-warning-bg: #fef3c7;
+  --color-warning-text: #78350f;
+  --color-warning-border: #fde68a;
+
+  --color-danger-bg: #fee2e2;
+  --color-danger-text: #760c19;
+  --color-danger-border: #fca5a5;
+
+  /* Typography */
+  --font-display: 'Arvo', Georgia, serif;
+  --font-body: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+  /* Rounded Radii */
+  --rounded-none: 0;
+  --rounded-xs: 0.125rem; /* 2px */
+  --rounded-sm: 0.25rem;  /* 4px */
+  --rounded-md: 0.375rem; /* 6px */
+  --rounded-lg: 0.5rem;   /* 8px */
+  --rounded-xl: 0.75rem;  /* 12px */
+  --rounded-full: 9999px;
+
+  /* Spacing Scale */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --spacing-2xl: 3rem;
+
+  /* Elevation Shadows */
+  --shadow-sm: 0 1px 3px 0 rgba(33, 20, 20, 0.06), 0 1px 2px -1px rgba(33, 20, 20, 0.04);
+  --shadow-md: 0 4px 6px -1px rgba(33, 20, 20, 0.08), 0 2px 4px -2px rgba(33, 20, 20, 0.04);
+  --shadow-lg: 0 10px 15px -3px rgba(33, 20, 20, 0.1), 0 4px 6px -4px rgba(33, 20, 20, 0.05);
+
+  /* Transitions */
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s ease;
+}
+
+/* Base Resets */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-body);
+  background-color: var(--color-feed-bag-cream);
+  color: var(--color-ledger-charcoal);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Utility Font Classes */
+.font-display { font-family: var(--font-display); }
+.font-body { font-family: var(--font-body); }
+.font-mono { font-family: var(--font-mono); }
+
+/* Typography Casing & Labels */
+.text-label {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 0.75rem;
+  line-height: 1.25;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.text-price {
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  height: 2.5rem;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: var(--rounded-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+  line-height: 1.25;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background-color: var(--color-uniform-green);
+  color: var(--color-feed-bag-cream);
+  border-color: var(--color-shadow-pine);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--color-shadow-pine);
+}
+
+.btn-secondary {
+  background-color: var(--color-signet-burgundy);
+  color: var(--color-feed-bag-cream);
+  border-color: var(--color-burgundy-dark);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: var(--color-burgundy-dark);
+}
+
+.btn-outline {
+  background-color: transparent;
+  color: var(--color-uniform-green);
+  border-color: var(--color-uniform-green);
+}
+
+.btn-outline:hover:not(:disabled) {
+  background-color: rgba(20, 83, 45, 0.08);
+}
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.5rem;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: var(--rounded-md);
+  line-height: 1.25;
+}
+
+.badge-primary {
+  background-color: var(--color-uniform-green);
+  color: var(--color-feed-bag-cream);
+}
+
+.badge-featured {
+  background-color: var(--color-signet-burgundy);
+  color: var(--color-feed-bag-cream);
+}
+
+.badge-sale {
+  background-color: var(--color-corner-callout-gold);
+  color: var(--color-ledger-charcoal);
+}
+
+.badge-preorder {
+  background-color: var(--color-muted-gold);
+  color: var(--color-ledger-charcoal);
+}
+
+/* Cards & Containers */
+.card {
+  background-color: var(--color-white-surface);
+  color: var(--color-ledger-charcoal);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 1rem;
+}
+
+.card-header {
+  background-color: var(--color-uniform-green);
+  color: var(--color-feed-bag-cream);
+  padding: 0.75rem 1rem;
+  border-top-left-radius: var(--rounded-lg);
+  border-top-right-radius: var(--rounded-lg);
+}
+
+/* Form Inputs */
+.input {
+  width: 100%;
+  height: 2.5rem;
+  padding: 0.5rem 0.75rem;
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  color: var(--color-ledger-charcoal);
+  background-color: var(--color-white-surface);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-sm);
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.input:focus {
+  border-color: var(--color-uniform-green);
+  box-shadow: 0 0 0 3px rgba(20, 83, 45, 0.15);
+}

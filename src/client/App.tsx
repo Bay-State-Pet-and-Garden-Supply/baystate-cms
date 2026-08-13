@@ -13,8 +13,139 @@ import { StoreManagerAssistant } from './components/StoreManagerAssistant';
 import { Settings } from './components/Settings';
 import { WeeklyReportModal } from './components/WeeklyReportModal';
 import { AgentLab } from './components/agent-lab/AgentLab';
+import { colors, fonts, rounded } from './theme';
 
 type View = 'setup' | 'dashboard' | 'catalog' | 'product' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding' | 'assistant' | 'settings' | 'agentlab';
+
+// Static Navigation Styles
+const navStyles: Record<string, React.CSSProperties> = {
+  app: { fontFamily: fonts.body, minHeight: '100vh', background: colors.feedBagCream, color: colors.ledgerCharcoal },
+  nav: {
+    backgroundColor: colors.uniformGreen,
+    borderBottom: `2px solid ${colors.shadowPine}`,
+    padding: '8px 24px',
+    display: 'flex',
+    gap: 12,
+    alignItems: 'center',
+    boxShadow: '0 2px 4px rgba(0, 0, 0, 0.12)',
+    flexWrap: 'nowrap' as const,
+  },
+  navBrand: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    marginRight: 16,
+    textDecoration: 'none',
+    flexShrink: 0,
+  },
+  navBrandBadge: {
+    background: colors.signetBurgundy,
+    color: colors.feedBagCream,
+    fontSize: 10,
+    fontWeight: 700,
+    fontFamily: fonts.body,
+    padding: '3px 8px',
+    borderRadius: rounded.sm,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase' as const,
+    border: `1px solid ${colors.burgundyDark}`,
+  },
+  navBrandText: {
+    fontFamily: fonts.display,
+    fontSize: 18,
+    fontWeight: 700,
+    color: colors.feedBagCream,
+    letterSpacing: '-0.2px',
+  },
+  tabList: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    overflowX: 'auto',
+    scrollbarWidth: 'none' as const,
+    flex: 1,
+    padding: '2px 0',
+  },
+  navLink: {
+    background: 'none',
+    border: 'none',
+    fontSize: 12,
+    fontWeight: 600,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase' as const,
+    cursor: 'pointer',
+    color: colors.feedBagCream,
+    padding: '8px 12px',
+    minHeight: 38,
+    borderRadius: rounded.sm,
+    transition: 'all 0.15s ease',
+    opacity: 0.85,
+    whiteSpace: 'nowrap' as const,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  navLinkActive: {
+    backgroundColor: colors.shadowPine,
+    borderBottom: `2px solid ${colors.cornerCalloutGold}`,
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: '0.04em',
+    textTransform: 'uppercase' as const,
+    cursor: 'pointer',
+    color: colors.feedBagCream,
+    padding: '8px 12px',
+    minHeight: 38,
+    borderRadius: rounded.sm,
+    opacity: 1,
+    whiteSpace: 'nowrap' as const,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  navSpacer: { flexShrink: 0 },
+  reportBtn: {
+    backgroundColor: colors.signetBurgundy,
+    color: colors.feedBagCream,
+    border: `1px solid ${colors.burgundyDark}`,
+    borderRadius: rounded.sm,
+    padding: '7px 14px',
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: '0.05em',
+    textTransform: 'uppercase' as const,
+    cursor: 'pointer',
+    marginRight: 8,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    transition: 'all 0.15s ease',
+    flexShrink: 0,
+    minHeight: 36,
+  },
+  navStatus: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: colors.feedBagCream,
+    backgroundColor: colors.shadowPine,
+    border: `1px solid rgba(255, 255, 255, 0.15)`,
+    padding: '5px 12px',
+    borderRadius: rounded.sm,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 0,
+  },
+  statusDot: {
+    width: 7,
+    height: 7,
+    borderRadius: '50%',
+    backgroundColor: colors.seedlingGreen,
+    boxShadow: `0 0 0 2px ${colors.uniformGreen}`,
+  },
+  main: { maxWidth: 1380, margin: '0 auto', padding: '24px' },
+  loading: { padding: 40, textAlign: 'center' as any, color: colors.ledgerCharcoal, fontFamily: fonts.body },
+};
 
 function App() {
   const [view, setView] = useState<View>('setup');
@@ -49,14 +180,13 @@ function App() {
         if (needsSetup) {
           setView('setup');
         } else {
-          // Parse view and product SKU from query params on initial load
           const params = new URLSearchParams(window.location.search);
           const sku = params.get('product');
           const urlView = params.get('view') as View | null;
           
           if (sku) {
             setSelectedSku(sku);
-            setView(urlView || 'catalog'); // default background view to catalog
+            setView(urlView || 'catalog');
           } else if (urlView) {
             setView(urlView);
           } else {
@@ -154,131 +284,121 @@ function App() {
     });
   };
 
-  const handleSwitchWorkspace = async () => {
-    if (confirm('Are you sure you want to switch to a different workspace? This will close the current workspace.')) {
-      try {
-        await closeWorkspace();
-        setWorkspace(null);
-        handleNavigate('setup', true);
-      } catch (err) {
-        console.error('Failed to close workspace:', err);
-        alert('Failed to close workspace: ' + (err instanceof Error ? err.message : String(err)));
-      }
-    }
-  };
-
-  const styles: Record<string, React.CSSProperties> = {
-    app: { fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f9fafb' },
-    nav: { background: '#fff', borderBottom: '1px solid #e5e7eb', padding: '8px 24px', display: 'flex', gap: 16, alignItems: 'center' },
-    navLink: { background: 'none', border: 'none', fontSize: 14, cursor: 'pointer', color: '#6b7280', padding: '8px 0' },
-    navLinkActive: { background: 'none', border: 'none', fontSize: 14, cursor: 'pointer', color: '#2563eb', padding: '8px 0', borderBottom: '2px solid #2563eb', fontWeight: 600 },
-    navBrand: { fontSize: 16, fontWeight: 600, color: '#111827', marginRight: 24 },
-    navSpacer: { flex: 1 },
-    navStatus: { fontSize: 12, color: '#9ca3af' },
-    main: { maxWidth: 1200, margin: '0 auto' },
-    loading: { padding: 40, textAlign: 'center' as any, color: '#6b7280' },
-  };
-
   if (!ready) {
-    return <div style={styles.loading}>Loading Baystate CMS...</div>;
+    return <div style={navStyles.loading}>Loading Baystate CMS...</div>;
   }
 
   return (
-    <div style={styles.app}>
-      <nav style={styles.nav}>
-        <span style={styles.navBrand}>Baystate CMS</span>
+    <div style={navStyles.app}>
+      <nav style={navStyles.nav} aria-label="Main Navigation">
+        <div style={navStyles.navBrand}>
+          <span style={navStyles.navBrandBadge}>Bay State</span>
+          <span style={navStyles.navBrandText}>CMS</span>
+        </div>
         {workspace && workspace.bootstrapStatus === 'complete' && workspace.baselineCommit && (
-          <>
+          <div style={navStyles.tabList} role="tablist">
             <button
-              style={view === 'dashboard' ? styles.navLinkActive : styles.navLink}
+              style={view === 'dashboard' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('dashboard')}
+              aria-current={view === 'dashboard' ? 'page' : undefined}
             >
               Overview
             </button>
             <button
-              style={view === 'catalog' ? styles.navLinkActive : styles.navLink}
+              style={view === 'catalog' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('catalog')}
+              aria-current={view === 'catalog' ? 'page' : undefined}
             >
               Catalog
             </button>
             <button
-              style={view === 'onboarding' ? styles.navLinkActive : styles.navLink}
+              style={view === 'onboarding' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('onboarding')}
+              aria-current={view === 'onboarding' ? 'page' : undefined}
             >
               Onboarding
             </button>
             <button
-              style={{ ...styles.navLink, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+              style={view === 'agentlab' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('agentlab')}
+              aria-current={view === 'agentlab' ? 'page' : undefined}
             >
-              🤖 Agent Lab
-              <span style={{ display: 'inline-block', fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 8, background: '#fef3c7', color: '#92400e' }}>Experimental</span>
+              Agent Lab
+              <span style={{
+                display: 'inline-block',
+                fontSize: 9,
+                fontWeight: 700,
+                padding: '2px 5px',
+                borderRadius: rounded.xs,
+                backgroundColor: colors.cornerCalloutGold,
+                color: colors.ledgerCharcoal,
+                lineHeight: 1,
+              }}>EXP</span>
             </button>
             <button
-              style={view === 'changesets' ? styles.navLinkActive : styles.navLink}
+              style={view === 'changesets' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('changesets')}
+              aria-current={view === 'changesets' ? 'page' : undefined}
             >
               Change Sets
             </button>
             <button
-              style={view === 'health' ? styles.navLinkActive : styles.navLink}
+              style={view === 'health' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('health')}
+              aria-current={view === 'health' ? 'page' : undefined}
             >
               Catalog Health
             </button>
             <button
-              style={view === 'assistant' ? styles.navLinkActive : styles.navLink}
+              style={view === 'assistant' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('assistant')}
+              aria-current={view === 'assistant' ? 'page' : undefined}
             >
               Store Manager
             </button>
             <button
-              style={view === 'drift' ? styles.navLinkActive : styles.navLink}
+              style={view === 'drift' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('drift')}
+              aria-current={view === 'drift' ? 'page' : undefined}
             >
               Drift
             </button>
             <button
-              style={view === 'syncjobs' ? styles.navLinkActive : styles.navLink}
+              style={view === 'syncjobs' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('syncjobs')}
+              aria-current={view === 'syncjobs' ? 'page' : undefined}
             >
               Sync Jobs
             </button>
             <button
-              style={view === 'settings' ? styles.navLinkActive : styles.navLink}
+              style={view === 'settings' ? navStyles.navLinkActive : navStyles.navLink}
               onClick={() => handleNavigate('settings')}
+              aria-current={view === 'settings' ? 'page' : undefined}
             >
               Settings
             </button>
-          </>
+          </div>
         )}
-        <div style={styles.navSpacer} />
+        <div style={navStyles.navSpacer} />
         <button
-          style={{
-            background: '#eff6ff',
-            color: '#2563eb',
-            border: '1px solid #bfdbfe',
-            borderRadius: 6,
-            padding: '5px 12px',
-            fontSize: 13,
-            fontWeight: 600,
-            cursor: 'pointer',
-            marginRight: 16,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-          }}
+          style={navStyles.reportBtn}
           onClick={() => setShowWeeklyReportModal(true)}
           title="Generate Weekly Manager Report"
         >
-          📊 Weekly Report
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <line x1="18" y1="20" x2="18" y2="10"></line>
+            <line x1="12" y1="20" x2="12" y2="4"></line>
+            <line x1="6" y1="20" x2="6" y2="14"></line>
+          </svg>
+          Weekly Report
         </button>
-        <span style={styles.navStatus}>
-          {workspace ? `🏪 ${workspace.name}` : '⚙️ Store'}
+        <span style={navStyles.navStatus}>
+          <span style={navStyles.statusDot} aria-hidden="true" />
+          {workspace ? workspace.name : 'Store Disconnected'}
         </span>
       </nav>
 
-      <main style={(view === 'onboarding' || view === 'assistant' || view === 'changesets' || view === 'agentlab') ? { ...styles.main, maxWidth: 'none', margin: 0 } : styles.main}>
+      <main style={(view === 'onboarding' || view === 'assistant' || view === 'changesets' || view === 'agentlab') ? { ...navStyles.main, maxWidth: 'none', margin: 0, padding: 0 } : navStyles.main}>
         {view === 'setup' && (
           <SetupWizard
             onComplete={handleSetupComplete}
@@ -334,7 +454,7 @@ function App() {
           display: inline-block;
           width: 20px;
           height: 20px;
-          border: 2px solid rgba(0, 0, 0, 0.15);
+          border: 2px solid rgba(33, 20, 20, 0.15);
           border-radius: 50%;
           border-top-color: currentColor;
           animation: spin 0.8s linear infinite;
@@ -345,10 +465,10 @@ function App() {
           left: 0;
           right: 0;
           bottom: 0;
-          background: rgba(15, 23, 42, 0.45);
-          backdrop-filter: blur(8px);
+          background: rgba(33, 20, 20, 0.5);
+          backdrop-filter: blur(4px);
           z-index: 1000;
-          animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          animation: fadeIn 0.2s ease forwards;
         }
         .drawer-container {
           position: fixed;
@@ -356,11 +476,12 @@ function App() {
           right: 0;
           bottom: 0;
           width: 100%;
-          max-width: 850px;
-          background: #ffffff;
+          max-width: 880px;
+          background: ${colors.whiteSurface};
           z-index: 1001;
-          box-shadow: -10px 0 30px -5px rgba(15, 23, 42, 0.15);
-          animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+          box-shadow: -10px 0 30px -5px rgba(33, 20, 20, 0.15);
+          border-left: 1px solid ${colors.cardBorder};
+          animation: slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
           display: flex;
           flex-direction: column;
           height: 100vh;
@@ -368,33 +489,33 @@ function App() {
         .drawer-close-btn {
           position: absolute;
           top: 20px;
-          left: -54px;
-          width: 38px;
-          height: 38px;
+          left: -52px;
+          width: 36px;
+          height: 36px;
           border-radius: 50%;
-          background: #ffffff;
-          border: 1px solid #e2e8f0;
-          box-shadow: -4px 4px 12px rgba(15, 23, 42, 0.08);
+          background: ${colors.whiteSurface};
+          border: 1px solid ${colors.cardBorder};
+          box-shadow: -4px 4px 12px rgba(33, 20, 20, 0.08);
           display: flex;
           align-items: center;
           justify-content: center;
           cursor: pointer;
-          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+          transition: all 0.2s ease;
           z-index: 1002;
-          color: #64748b;
+          color: ${colors.ledgerCharcoal};
           font-size: 14px;
           font-weight: bold;
         }
         .drawer-close-btn:hover {
           transform: scale(1.08) rotate(90deg);
-          color: #0f172a;
-          border-color: #cbd5e1;
-          box-shadow: -4px 4px 16px rgba(15, 23, 42, 0.12);
+          background: ${colors.feedBagCream};
+          border-color: ${colors.uniformGreen};
         }
         .drawer-body {
           flex: 1;
           overflow-y: auto;
           height: 100%;
+          background: ${colors.whiteSurface};
         }
         @media (max-width: 950px) {
           .drawer-container {
@@ -402,14 +523,8 @@ function App() {
           }
           .drawer-close-btn {
             left: auto;
-            right: 24px;
-            top: 24px;
-            background: rgba(255, 255, 255, 0.95);
-            border-color: #cbd5e1;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-          }
-          .drawer-close-btn:hover {
-            transform: scale(1.08) rotate(90deg);
+            right: 20px;
+            top: 20px;
           }
         }
       ` }} />

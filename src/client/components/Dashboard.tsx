@@ -1,390 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { getDashboardStats, checkDrift, type DashboardStats } from '../api';
-
-const STYLE_RULES = `
-  .dashboard-container {
-    padding: 32px 24px;
-    max-width: 1200px;
-    margin: 0 auto;
-    color: #1f2937;
-    animation: fadeIn 0.4s ease-out;
-  }
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .dashboard-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 32px;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-  .dashboard-title-group h1 {
-    font-size: 28px;
-    font-weight: 800;
-    color: #111827;
-    margin: 0 0 6px 0;
-    letter-spacing: -0.6px;
-  }
-  .dashboard-title-group p {
-    color: #6b7280;
-    margin: 0;
-    font-size: 14px;
-    font-weight: 500;
-  }
-  .header-actions {
-    display: flex;
-    gap: 12px;
-  }
-  .btn-primary {
-    background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
-    color: white;
-    border: none;
-    padding: 10px 18px;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .btn-primary:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 16px rgba(79, 70, 229, 0.35);
-    filter: brightness(1.05);
-  }
-  .btn-primary:active:not(:disabled) {
-    transform: translateY(1px);
-  }
-  .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-    box-shadow: none;
-  }
-  .btn-secondary {
-    background: white;
-    color: #374151;
-    border: 1px solid #e5e7eb;
-    padding: 10px 18px;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .btn-secondary:hover:not(:disabled) {
-    background: #f9fafb;
-    border-color: #cbd5e1;
-    color: #111827;
-  }
-
-  /* KPI Grid */
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    gap: 20px;
-    margin-bottom: 32px;
-  }
-  .kpi-card {
-    background: white;
-    border: 1px solid #e5e7eb;
-    border-radius: 16px;
-    padding: 24px;
-    position: relative;
-    overflow: hidden;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    cursor: pointer;
-  }
-  .kpi-card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.02);
-    border-color: #cbd5e1;
-  }
-  .kpi-icon-container {
-    position: absolute;
-    top: 24px;
-    right: 24px;
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: transform 0.3s ease;
-  }
-  .kpi-card:hover .kpi-icon-container {
-    transform: scale(1.08) rotate(3deg);
-  }
-  .kpi-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: #6b7280;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    margin-bottom: 8px;
-  }
-  .kpi-value {
-    font-size: 32px;
-    font-weight: 800;
-    color: #111827;
-    line-height: 1.1;
-    margin-bottom: 12px;
-  }
-  .kpi-subtext {
-    font-size: 13px;
-    color: #6b7280;
-    font-weight: 500;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  /* Two Column Layout */
-  .dashboard-layout {
-    display: grid;
-    grid-template-columns: 8fr 7fr;
-    gap: 28px;
-  }
-  @media (max-width: 960px) {
-    .dashboard-layout {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .dashboard-panel {
-    background: white;
-    border: 1px solid #e5e7eb;
-    border-radius: 16px;
-    padding: 24px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-    display: flex;
-    flex-direction: column;
-  }
-  .panel-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid #f3f4f6;
-  }
-  .panel-header h2 {
-    font-size: 16px;
-    font-weight: 700;
-    color: #111827;
-    margin: 0;
-    letter-spacing: -0.2px;
-  }
-  .panel-header-action {
-    background: none;
-    border: none;
-    font-size: 13px;
-    font-weight: 600;
-    color: #4f46e5;
-    cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 6px;
-    transition: background-color 0.15s;
-  }
-  .panel-header-action:hover {
-    background: #f5f3ff;
-  }
-
-  /* Donut sync chart */
-  .chart-section {
-    background: linear-gradient(to bottom right, #ffffff, #fcfcff);
-    border: 1px solid #e5e7eb;
-    border-radius: 16px;
-    padding: 24px;
-    margin-bottom: 28px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  }
-  .chart-content {
-    display: flex;
-    align-items: center;
-    justify-content: space-around;
-    gap: 24px;
-    flex-wrap: wrap;
-    margin-top: 12px;
-  }
-  .donut-container {
-    position: relative;
-    width: 140px;
-    height: 140px;
-  }
-  .donut-svg {
-    transform: rotate(-90deg);
-  }
-  .donut-center-text {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    text-align: center;
-  }
-  .donut-number {
-    font-size: 24px;
-    font-weight: 800;
-    color: #111827;
-    line-height: 1;
-  }
-  .donut-label {
-    font-size: 11px;
-    color: #6b7280;
-    font-weight: 600;
-    margin-top: 2px;
-  }
-  .chart-legend {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    flex-grow: 1;
-    max-width: 280px;
-  }
-  .legend-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 13px;
-    font-weight: 500;
-    color: #4b5563;
-  }
-  .legend-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .legend-dot {
-    width: 12px;
-    height: 12px;
-    border-radius: 4px;
-  }
-  .legend-value {
-    font-weight: 700;
-    color: #111827;
-  }
-
-  /* Sync Jobs List */
-  .jobs-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-  .job-card {
-    border: 1px solid #f3f4f6;
-    background: #f9fafb;
-    border-radius: 10px;
-    padding: 14px 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    transition: all 0.2s;
-  }
-  .job-card:hover {
-    border-color: #cbd5e1;
-    background: #f8fafc;
-  }
-  .job-info {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .job-title {
-    font-size: 13px;
-    font-weight: 700;
-    color: #1f2937;
-  }
-  .job-meta {
-    font-size: 11px;
-    color: #6b7280;
-    display: flex;
-    gap: 8px;
-  }
-  .job-status-badge {
-    padding: 4px 10px;
-    border-radius: 9999px;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
-  }
-
-  /* Activity Feed / Timeline */
-  .activity-timeline {
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    max-height: 480px;
-    overflow-y: auto;
-    padding-right: 8px;
-  }
-  .activity-item {
-    display: flex;
-    gap: 16px;
-    position: relative;
-  }
-  .activity-item::before {
-    content: '';
-    position: absolute;
-    left: 20px;
-    top: 40px;
-    bottom: -24px;
-    width: 2px;
-    background: #f3f4f6;
-  }
-  .activity-item:last-child::before {
-    display: none;
-  }
-  .activity-icon-outer {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    z-index: 2;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.03);
-  }
-  .activity-content {
-    flex-grow: 1;
-    padding-top: 6px;
-  }
-  .activity-msg {
-    font-size: 13px;
-    line-height: 1.5;
-    color: #374151;
-    margin: 0 0 4px 0;
-  }
-  .activity-msg strong {
-    color: #111827;
-  }
-  .activity-date {
-    font-size: 11px;
-    color: #9ca3af;
-    font-weight: 500;
-  }
-
-  /* Empty state */
-  .empty-state {
-    padding: 32px;
-    text-align: center;
-    color: #9ca3af;
-    font-size: 14px;
-  }
-`;
+import { colors, fonts, rounded, themeStyles } from '../theme';
 
 interface DashboardProps {
-  onNavigate: (view: 'setup' | 'catalog' | 'changesets' | 'drift' | 'syncjobs' | 'health') => void;
+  onNavigate: (view: 'setup' | 'catalog' | 'changesets' | 'drift' | 'syncjobs' | 'health' | 'onboarding') => void;
 }
 
 export function Dashboard({ onNavigate }: DashboardProps) {
@@ -411,6 +30,34 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     fetchStats();
   }, []);
 
+  // Keyboard Navigation Hotkeys (g c -> Catalog, r -> Drift Check, g o -> Onboarding)
+  useEffect(() => {
+    let keyBuffer = '';
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['input', 'textarea', 'select'].includes((e.target as HTMLElement)?.tagName?.toLowerCase())) {
+        return;
+      }
+      if (e.key === 'r' || e.key === 'R') {
+        if (!checkingDrift && stats?.connection) {
+          handleDriftCheck();
+        }
+      } else {
+        keyBuffer += e.key.toLowerCase();
+        if (keyBuffer.endsWith('gc')) {
+          onNavigate('catalog');
+          keyBuffer = '';
+        } else if (keyBuffer.endsWith('go')) {
+          onNavigate('onboarding');
+          keyBuffer = '';
+        } else if (keyBuffer.length > 5) {
+          keyBuffer = keyBuffer.slice(-2);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [checkingDrift, stats]);
+
   const handleDriftCheck = async () => {
     setCheckingDrift(true);
     setMessage(null);
@@ -429,7 +76,6 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     }
   };
 
-  // Helper to format dates
   const formatTimeAgo = (isoString: string) => {
     try {
       const date = new Date(isoString);
@@ -438,13 +84,10 @@ export function Dashboard({ onNavigate }: DashboardProps) {
       
       if (seconds < 5) return 'Just now';
       if (seconds < 60) return `${seconds}s ago`;
-      
       const minutes = Math.floor(seconds / 60);
       if (minutes < 60) return `${minutes}m ago`;
-      
       const hours = Math.floor(minutes / 60);
       if (hours < 24) return `${hours}h ago`;
-      
       const days = Math.floor(hours / 24);
       if (days === 1) return 'Yesterday';
       return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -453,73 +96,24 @@ export function Dashboard({ onNavigate }: DashboardProps) {
     }
   };
 
-  // Helper to get audit log styles/icons
-  const getActivityMeta = (action: string) => {
-    switch (action.toLowerCase()) {
-      case 'drift_check':
-        return {
-          bg: '#fef3c7',
-          color: '#d97706',
-          icon: (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          )
-        };
-      case 'approved':
-        return {
-          bg: '#d1fae5',
-          color: '#059669',
-          icon: (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          )
-        };
-      case 'kept_local':
-      case 'accepted_remote':
-      case 'resolved':
-        return {
-          bg: '#e0e7ff',
-          color: '#4f46e5',
-          icon: (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-            </svg>
-          )
-        };
-      default:
-        return {
-          bg: '#f3f4f6',
-          color: '#4b5563',
-          icon: (
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          )
-        };
-    }
-  };
-
   const getJobStatusBadge = (status: string) => {
     switch (status.toLowerCase()) {
       case 'succeeded':
-        return <span className="job-status-badge badge-success">Succeeded</span>;
+        return <span className="badge badge-primary" style={{ backgroundColor: colors.seedlingGreen }}>SUCCEEDED</span>;
       case 'failed':
-        return <span className="job-status-badge badge-error">Failed</span>;
+        return <span className="badge badge-featured">FAILED</span>;
       case 'running':
-        return <span className="job-status-badge badge-running">Running</span>;
+        return <span className="badge badge-sale">RUNNING</span>;
       default:
-        return <span className="job-status-badge badge-warning">{status}</span>;
+        return <span className="badge badge-preorder">{status.toUpperCase()}</span>;
     }
   };
 
   if (loading && !stats) {
     return (
-      <div className="dashboard-container" style={{ textAlign: 'center', padding: 100 }}>
-        <style>{STYLE_RULES}</style>
-        <div style={{ display: 'inline-block', width: 40, height: 40, border: '4px solid #f3f4f6', borderTopColor: '#4f46e5', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
-        <p style={{ marginTop: 16, color: '#6b7280', fontWeight: 600 }}>Loading Commander metrics...</p>
+      <div style={{ textAlign: 'center', padding: '100px 24px', fontFamily: fonts.body, color: colors.ledgerCharcoal }}>
+        <div style={{ display: 'inline-block', width: 36, height: 36, border: `4px solid ${colors.cardBorder}`, borderTopColor: colors.uniformGreen, borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <p style={{ marginTop: 16, fontWeight: 600, fontSize: 14 }}>Loading Store Operations Overview...</p>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     );
@@ -527,11 +121,10 @@ export function Dashboard({ onNavigate }: DashboardProps) {
 
   if (error && !stats) {
     return (
-      <div className="dashboard-container" style={{ padding: 40, background: '#fef2f2', borderRadius: 12, border: '1px solid #fee2e2', margin: 24 }}>
-        <style>{STYLE_RULES}</style>
-        <h2 style={{ color: '#991b1b', fontSize: 18, margin: '0 0 8px 0' }}>Dashboard Load Error</h2>
-        <p style={{ color: '#b91c1c', margin: '0 0 16px 0' }}>{error}</p>
-        <button className="btn-secondary" onClick={fetchStats}>Retry Load</button>
+      <div style={{ padding: 32, background: colors.whiteSurface, borderRadius: rounded.lg, border: `1px solid ${colors.signetBurgundy}`, margin: 24 }}>
+        <h2 style={{ color: colors.signetBurgundy, fontFamily: fonts.display, fontSize: 18, margin: '0 0 8px 0' }}>Dashboard Load Error</h2>
+        <p style={{ color: colors.ledgerCharcoal, margin: '0 0 16px 0', fontSize: 14 }}>{error}</p>
+        <button className="btn btn-primary" onClick={fetchStats}>Retry Load</button>
       </div>
     );
   }
@@ -541,311 +134,242 @@ export function Dashboard({ onNavigate }: DashboardProps) {
   const synced = metrics.syncedProducts;
   const drifted = metrics.driftedProducts;
   const notSynced = metrics.notSyncedProducts;
-
-  // Circle Math for Donut Chart (Radius = 15.9155 makes Circumference = 100)
-  const pctSynced = total > 0 ? (synced / total) * 100 : 0;
-  const pctDrifted = total > 0 ? (drifted / total) * 100 : 0;
-  const pctNotSynced = total > 0 ? (notSynced / total) * 100 : 0;
+  const pctSynced = total > 0 ? Math.round((synced / total) * 100) : 100;
+  const healthPct = total > 0 ? Math.round(((total - metrics.productsWithWarnings) / total) * 100) : 100;
 
   return (
-    <div className="dashboard-container">
-      <style>{STYLE_RULES}</style>
-
-      {/* Header */}
-      <header className="dashboard-header">
-        <div className="dashboard-title-group">
-          <h1>Store Overview</h1>
-          <p>Control center for catalog data, remote sync pipelines, and local database drifts.</p>
+    <div style={{ padding: '24px', maxWidth: 1380, margin: '0 auto', fontFamily: fonts.body }}>
+      {/* Header Section */}
+      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ fontFamily: fonts.display, fontSize: 24, fontWeight: 700, color: colors.ledgerCharcoal, margin: '0 0 4px 0', letterSpacing: '-0.3px' }}>
+            Store Operations Overview
+          </h1>
+          <p style={{ margin: 0, fontSize: 13, color: colors.mulchBrown }}>
+            Bay State Pet & Garden Supply — 429 Winthrop St catalog management & ShopSite 15 sync pipeline.
+          </p>
         </div>
-        <div className="header-actions">
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button 
-            className="btn-secondary" 
+            className="btn btn-secondary" 
             onClick={handleDriftCheck}
             disabled={checkingDrift || !connection}
-            title={!connection ? "Configure a ShopSite connection to check remote drift" : "Check if local catalog drifts from remote store"}
+            title={!connection ? "Configure ShopSite connection in Setup" : "Check remote ShopSite catalog drift (Hotkey: R)"}
           >
-            {checkingDrift ? (
-              <>
-                <span style={{ display: 'inline-block', width: 14, height: 14, border: '2px solid #e5e7eb', borderTopColor: '#374151', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
-                Checking...
-              </>
-            ) : (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 8H18" />
-                </svg>
-                Check Remote Drift
-              </>
-            )}
+            {checkingDrift ? 'Checking Drift...' : 'Check Remote Drift (R)'}
           </button>
-          <button className="btn-primary" onClick={() => onNavigate('catalog')}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-            </svg>
-            Edit Catalog
+          <button className="btn btn-primary" onClick={() => onNavigate('catalog')}>
+            Edit Catalog (G C)
           </button>
         </div>
       </header>
 
+      {/* Action Messages */}
       {message && (
-        <div style={{ background: '#ecfdf5', border: '1px solid #d1fae5', padding: '12px 16px', borderRadius: 8, color: '#065f46', fontSize: 13, fontWeight: 600, marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ backgroundColor: colors.feedBagCream, border: `1px solid ${colors.seedlingGreen}`, padding: '12px 16px', borderRadius: rounded.md, color: colors.uniformGreen, fontSize: 13, fontWeight: 600, marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{message}</span>
-          <button style={{ background: 'none', border: 'none', color: '#047857', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setMessage(null)}>✕</button>
+          <button style={{ background: 'none', border: 'none', color: colors.uniformGreen, cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setMessage(null)}>✕</button>
         </div>
       )}
 
       {error && (
-        <div style={{ background: '#fef2f2', border: '1px solid #fee2e2', padding: '12px 16px', borderRadius: 8, color: '#991b1b', fontSize: 13, fontWeight: 600, marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ backgroundColor: '#fee2e2', border: `1px solid ${colors.signetBurgundy}`, padding: '12px 16px', borderRadius: rounded.md, color: colors.signetBurgundy, fontSize: 13, fontWeight: 600, marginBottom: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{error}</span>
-          <button style={{ background: 'none', border: 'none', color: '#b91c1c', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setError(null)}>✕</button>
+          <button style={{ background: 'none', border: 'none', color: colors.signetBurgundy, cursor: 'pointer', fontWeight: 'bold' }} onClick={() => setError(null)}>✕</button>
         </div>
       )}
 
-      {/* KPI Cards Grid */}
-      <section className="kpi-grid">
-        {/* Total Products */}
-        <div className="kpi-card" onClick={() => onNavigate('catalog')}>
-          <div className="kpi-icon-container" style={{ background: '#e0e7ff', color: '#4f46e5' }}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
-            </svg>
-          </div>
-          <div className="kpi-label">Total Products</div>
-          <div className="kpi-value">{total}</div>
-          <div className="kpi-subtext">
-            <span>{synced} In-Sync</span>
-            <span style={{ color: '#d1d5db' }}>•</span>
-            <span>{notSynced} Staged</span>
-          </div>
+      {/* 1. Streamlined Catalog & Sync Status Bar */}
+      <section style={{ ...themeStyles.card, padding: '20px 24px', marginBottom: 24 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: `1px solid ${colors.cardBorder}`, paddingBottom: 12 }}>
+          <h2 style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 700, margin: 0, color: colors.ledgerCharcoal }}>
+            Catalog Inventory & Sync Metrics
+          </h2>
+          <span style={{ fontSize: 11, fontWeight: 600, color: colors.mulchBrown, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Hotkeys: <code style={{ fontFamily: fonts.mono, background: colors.feedBagCream, padding: '2px 4px', borderRadius: rounded.xs }}>G C</code> Catalog · <code style={{ fontFamily: fonts.mono, background: colors.feedBagCream, padding: '2px 4px', borderRadius: rounded.xs }}>G O</code> Onboarding · <code style={{ fontFamily: fonts.mono, background: colors.feedBagCream, padding: '2px 4px', borderRadius: rounded.xs }}>R</code> Drift
+          </span>
         </div>
 
-        {/* Catalog Health */}
-        <div className="kpi-card" onClick={() => onNavigate('health')} style={metrics.productsWithWarnings > 0 ? { borderColor: '#fca5a5', background: '#fff5f5' } : {}}>
-          <div className="kpi-icon-container" style={metrics.productsWithWarnings > 0 ? { background: '#fee2e2', color: '#dc2626' } : { background: '#ecfdf5', color: '#10b981' }}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <circle cx="12" cy="12" r="10" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4" />
-            </svg>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 20 }}>
+          {/* Metric 1: Total SKUs */}
+          <div style={{ cursor: 'pointer' }} onClick={() => onNavigate('catalog')}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: colors.mulchBrown, letterSpacing: '0.05em', marginBottom: 4 }}>Total Inventory</div>
+            <div style={{ fontSize: 26, fontWeight: 700, fontFamily: fonts.body, color: colors.ledgerCharcoal, lineHeight: 1.1 }}>{total} <span style={{ fontSize: 13, fontWeight: 500, color: colors.mulchBrown }}>SKUs</span></div>
+            <div style={{ fontSize: 12, color: colors.seedlingGreen, marginTop: 4, fontWeight: 500 }}>{synced} In-Sync with ShopSite</div>
           </div>
-          <div className="kpi-label">Catalog Health</div>
-          <div className="kpi-value" style={metrics.productsWithWarnings > 0 ? { color: '#b91c1c' } : { color: '#047857' }}>
-            {total > 0 ? Math.round(((total - metrics.productsWithWarnings) / total) * 100) : 100}%
-          </div>
-          <div className="kpi-subtext">
-            <span>{metrics.productsWithWarnings} SKU(s) with issues</span>
-          </div>
-        </div>
 
-        {/* Pending Change Sets */}
-        <div className="kpi-card" onClick={() => onNavigate('changesets')}>
-          <div className="kpi-icon-container" style={{ background: '#ecfdf5', color: '#059669' }}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          </div>
-          <div className="kpi-label">Active Drafts</div>
-          <div className="kpi-value">{metrics.draftChangeSets}</div>
-          <div className="kpi-subtext">
-            <span>Pending change sets</span>
-          </div>
-        </div>
-
-        {/* Open Drifts */}
-        <div className="kpi-card" onClick={() => onNavigate('drift')} style={metrics.openDrifts > 0 ? { borderColor: '#fcd34d', background: '#fffbeb' } : {}}>
-          <div className="kpi-icon-container" style={metrics.openDrifts > 0 ? { background: '#fef3c7', color: '#d97706' } : { background: '#f3f4f6', color: '#4b5563' }}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          </div>
-          <div className="kpi-label">Catalog Drift</div>
-          <div className="kpi-value" style={metrics.openDrifts > 0 ? { color: '#b45309' } : {}}>{metrics.openDrifts}</div>
-          <div className="kpi-subtext">
-            <span>{metrics.openDrifts > 0 ? 'Drifted from remote store' : 'Synced with remote'}</span>
-          </div>
-        </div>
-
-        {/* Integration Connection */}
-        <div className="kpi-card" onClick={() => onNavigate('setup')}>
-          {connection ? (
-            <>
-              <div className="kpi-icon-container" style={connection.lastTestStatus === 'success' ? { background: '#e0f2fe', color: '#0284c7' } : { background: '#fee2e2', color: '#dc2626' }}>
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                </svg>
-              </div>
-              <div className="kpi-label">Sync Connection</div>
-              <div className="kpi-value" style={{ fontSize: 16, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 10, marginBottom: 12 }}>
-                {connection.cgiBaseUrl.replace(/^https?:\/\//, '').split('/')[0]}
-              </div>
-              <div className="kpi-subtext">
-                <span className={`badge-status ${connection.lastTestStatus === 'success' ? 'badge-success' : 'badge-error'}`} style={{ padding: '2px 6px', fontSize: 10 }}>
-                  {connection.lastTestStatus === 'success' ? 'CONNECTED' : 'FAILED'}
-                </span>
-                {connection.lastTestedAt && <span style={{ fontSize: 11 }}>{formatTimeAgo(connection.lastTestedAt)}</span>}
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="kpi-icon-container" style={{ background: '#f3f4f6', color: '#9ca3af' }}>
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-                </svg>
-              </div>
-              <div className="kpi-label">Sync Connection</div>
-              <div className="kpi-value" style={{ fontSize: 20, fontWeight: 700, marginTop: 6, marginBottom: 16 }}>Offline Mode</div>
-              <div className="kpi-subtext">
-                <span>Configure connection in Setup</span>
-              </div>
-            </>
-          )}
-        </div>
-      </section>
-
-      {/* Sync Status Donut Panel */}
-      <section className="chart-section">
-        <div className="panel-header" style={{ borderBottom: 'none', marginBottom: 0 }}>
-          <h2>Catalog Integration Status</h2>
-        </div>
-        <div className="chart-content">
-          <div className="donut-container">
-            <svg className="donut-svg" width="140" height="140" viewBox="0 0 36 36">
-              {/* Background circle */}
-              <circle cx="18" cy="18" r="15.9155" fill="none" stroke="#f3f4f6" strokeWidth="3.5" />
-              
-              {/* Segments stacked */}
-              {total > 0 ? (
-                <>
-                  {/* Synced segment */}
-                  {pctSynced > 0 && (
-                    <circle 
-                      cx="18" cy="18" r="15.9155" fill="none" stroke="#10b981" strokeWidth="3.5"
-                      strokeDasharray={`${pctSynced} ${100 - pctSynced}`}
-                      strokeDashoffset="0"
-                    />
-                  )}
-                  {/* Drifted segment */}
-                  {pctDrifted > 0 && (
-                    <circle 
-                      cx="18" cy="18" r="15.9155" fill="none" stroke="#f59e0b" strokeWidth="3.5"
-                      strokeDasharray={`${pctDrifted} ${100 - pctDrifted}`}
-                      strokeDashoffset={-pctSynced}
-                    />
-                  )}
-                  {/* Not Synced segment */}
-                  {pctNotSynced > 0 && (
-                    <circle 
-                      cx="18" cy="18" r="15.9155" fill="none" stroke="#6366f1" strokeWidth="3.5"
-                      strokeDasharray={`${pctNotSynced} ${100 - pctNotSynced}`}
-                      strokeDashoffset={-(pctSynced + pctDrifted)}
-                    />
-                  )}
-                </>
-              ) : (
-                <circle cx="18" cy="18" r="15.9155" fill="none" stroke="#d1d5db" strokeWidth="3.5" strokeDasharray="100 0" />
-              )}
-            </svg>
-            <div className="donut-center-text">
-              <div className="donut-number">{total}</div>
-              <div className="donut-label">SKUs</div>
+          {/* Metric 2: Remote Sync Ratio */}
+          <div style={{ cursor: 'pointer' }} onClick={() => onNavigate('drift')}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: colors.mulchBrown, letterSpacing: '0.05em', marginBottom: 4 }}>Sync Coverage</div>
+            <div style={{ fontSize: 26, fontWeight: 700, fontFamily: fonts.body, color: drifted > 0 ? colors.signetBurgundy : colors.uniformGreen, lineHeight: 1.1 }}>
+              {pctSynced}%
+            </div>
+            <div style={{ fontSize: 12, color: drifted > 0 ? colors.signetBurgundy : colors.mulchBrown, marginTop: 4, fontWeight: 500 }}>
+              {drifted > 0 ? `⚠️ ${drifted} Drifted Product(s)` : `${notSynced} Staged Local Drafts`}
             </div>
           </div>
 
-          <div className="chart-legend">
-            <div className="legend-item">
-              <div className="legend-left">
-                <span className="legend-dot" style={{ background: '#10b981' }} />
-                <span>Synced with ShopSite</span>
-              </div>
-              <span className="legend-value">{synced} ({total > 0 ? Math.round(pctSynced) : 0}%)</span>
+          {/* Metric 3: Active Change Sets */}
+          <div style={{ cursor: 'pointer' }} onClick={() => onNavigate('changesets')}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: colors.mulchBrown, letterSpacing: '0.05em', marginBottom: 4 }}>Active Change Sets</div>
+            <div style={{ fontSize: 26, fontWeight: 700, fontFamily: fonts.body, color: colors.ledgerCharcoal, lineHeight: 1.1 }}>{metrics.draftChangeSets}</div>
+            <div style={{ fontSize: 12, color: colors.mulchBrown, marginTop: 4, fontWeight: 500 }}>Draft change sets for review</div>
+          </div>
+
+          {/* Metric 4: Catalog Health */}
+          <div style={{ cursor: 'pointer' }} onClick={() => onNavigate('health')}>
+            <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: colors.mulchBrown, letterSpacing: '0.05em', marginBottom: 4 }}>Catalog Health</div>
+            <div style={{ fontSize: 26, fontWeight: 700, fontFamily: fonts.body, color: healthPct >= 95 ? colors.uniformGreen : colors.signetBurgundy, lineHeight: 1.1 }}>
+              {healthPct}%
             </div>
-            <div className="legend-item">
-              <div className="legend-left">
-                <span className="legend-dot" style={{ background: '#f59e0b' }} />
-                <span>Drifted (needs reconcile)</span>
-              </div>
-              <span className="legend-value">{drifted} ({total > 0 ? Math.round(pctDrifted) : 0}%)</span>
-            </div>
-            <div className="legend-item">
-              <div className="legend-left">
-                <span className="legend-dot" style={{ background: '#6366f1' }} />
-                <span>Staged (local drafts)</span>
-              </div>
-              <span className="legend-value">{notSynced} ({total > 0 ? Math.round(pctNotSynced) : 0}%)</span>
+            <div style={{ fontSize: 12, color: metrics.productsWithWarnings > 0 ? colors.signetBurgundy : colors.seedlingGreen, marginTop: 4, fontWeight: 500 }}>
+              {metrics.productsWithWarnings > 0 ? `⚠️ ${metrics.productsWithWarnings} SKU(s) with warnings` : 'All health audits passing'}
             </div>
           </div>
         </div>
       </section>
 
-      {/* Two Column details section */}
-      <div className="dashboard-layout">
-        {/* Recent Sync Operations */}
-        <div className="dashboard-panel">
-          <div className="panel-header">
-            <h2>Recent Sync Operations</h2>
-            <button className="panel-header-action" onClick={() => onNavigate('syncjobs')}>View All Jobs</button>
+      {/* 2. Onboarding & Curation Pipeline Progress Widget */}
+      <section style={{ ...themeStyles.card, padding: '20px 24px', marginBottom: 24, backgroundColor: colors.feedBagCream }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div>
+            <h2 style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 700, margin: '0 0 2px 0', color: colors.ledgerCharcoal }}>
+              Spreadsheet & Package Onboarding Pipeline
+            </h2>
+            <p style={{ margin: 0, fontSize: 12, color: colors.mulchBrown }}>5-Stage automated product ingestion: Discovery → Extraction → Curation → Review → Promotion</p>
           </div>
+          <button className="btn btn-outline" style={{ height: '2.2rem', fontSize: '0.7rem' }} onClick={() => onNavigate('onboarding')}>
+            Open Pipeline →
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, background: colors.whiteSurface, padding: 16, borderRadius: rounded.md, border: `1px solid ${colors.cardBorder}` }}>
+          <div style={{ padding: 10, borderRight: `1px solid ${colors.cardBorder}` }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: colors.uniformGreen, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stage 1</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 2 }}>Discovery</div>
+            <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 4 }}>URL Search</div>
+          </div>
+
+          <div style={{ padding: 10, borderRight: `1px solid ${colors.cardBorder}` }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: colors.uniformGreen, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stage 2</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 2 }}>Extraction</div>
+            <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 4 }}>Profile Scrape</div>
+          </div>
+
+          <div style={{ padding: 10, borderRight: `1px solid ${colors.cardBorder}` }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: colors.uniformGreen, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stage 3</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 2 }}>Curation</div>
+            <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 4 }}>OCR & Synthesis</div>
+          </div>
+
+          <div style={{ padding: 10, borderRight: `1px solid ${colors.cardBorder}` }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: colors.signetBurgundy, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stage 4</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 2 }}>Review</div>
+            <div style={{ fontSize: 11, color: colors.signetBurgundy, marginTop: 4, fontWeight: 600 }}>Active Drawer</div>
+          </div>
+
+          <div style={{ padding: 10 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: colors.uniformGreen, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stage 5</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal, marginTop: 2 }}>Promotion</div>
+            <div style={{ fontSize: 11, color: colors.seedlingGreen, marginTop: 4, fontWeight: 600 }}>CMS Drafts</div>
+          </div>
+        </div>
+      </section>
+
+      {/* 3. Two-Column Workspace Operational Grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: 24 }}>
+        {/* Left Column: Recent Sync Operations */}
+        <section style={themeStyles.card}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, paddingBottom: 12, borderBottom: `1px solid ${colors.cardBorder}` }}>
+            <h2 style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 700, margin: 0, color: colors.ledgerCharcoal }}>
+              Recent Sync Operations
+            </h2>
+            <button className="btn btn-outline" style={{ height: '2.1rem', fontSize: '0.7rem' }} onClick={() => onNavigate('syncjobs')}>
+              View All Jobs
+            </button>
+          </div>
+
           {recentSyncJobs.length > 0 ? (
-            <div className="jobs-list">
-              {recentSyncJobs.map(job => (
-                <div key={job.id} className="job-card">
-                  <div className="job-info">
-                    <div className="job-title">
-                      {job.kind === 'push_publish' && '🚀 Push & Publish to ShopSite'}
-                      {job.kind === 'upload_only' && '📤 XML Upload'}
-                      {job.kind === 'pull_drift' && '🔍 Drift Verification'}
-                      {job.kind === 'bootstrap' && '⚙️ Initial Catalog Bootstrap'}
-                      {job.kind === 'full_reconcile' && '🔄 Complete Re-sync'}
-                      {!['push_publish', 'upload_only', 'pull_drift', 'bootstrap', 'full_reconcile'].includes(job.kind) && `⚙️ Job: ${job.kind}`}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12, marginBottom: 8 }}>
+              {recentSyncJobs.slice(0, 5).map(job => (
+                <div key={job.id} style={{ margin: '2px 0', padding: '14px 18px', borderRadius: rounded.md, border: `1px solid ${colors.cardBorder}`, backgroundColor: colors.feedBagCream, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, boxShadow: '0 1px 2px rgba(33, 20, 20, 0.03)' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {job.kind === 'push_publish' && 'Push & Publish to ShopSite'}
+                      {job.kind === 'upload_only' && 'XML Upload'}
+                      {job.kind === 'pull_drift' && 'Drift Verification'}
+                      {job.kind === 'bootstrap' && 'Catalog Bootstrap'}
+                      {job.kind === 'full_reconcile' && 'Complete Re-sync'}
+                      {!['push_publish', 'upload_only', 'pull_drift', 'bootstrap', 'full_reconcile'].includes(job.kind) && `Job: ${job.kind}`}
                     </div>
-                    <div className="job-meta">
-                      {job.startedAt && <span>Started {formatTimeAgo(job.startedAt)}</span>}
-                      {job.productCount > 0 && <span>• {job.productCount} SKUs</span>}
+                    <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 4, fontFamily: fonts.mono }}>
+                      {job.productCount} product(s) · {job.completedAt ? formatTimeAgo(job.completedAt) : 'In progress'}
                     </div>
-                    {job.errorSummary && (
-                      <div style={{ color: '#dc2626', fontSize: 11, fontWeight: 600, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 300 }}>
-                        ⚠️ {job.errorSummary}
-                      </div>
-                    )}
                   </div>
-                  <div>
+                  <div style={{ flexShrink: 0 }}>
                     {getJobStatusBadge(job.status)}
                   </div>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="empty-state">No sync operations have run in this workspace.</div>
+            <div style={{ padding: '32px 16px', margin: '12px 0', textAlign: 'center', color: colors.mulchBrown, fontSize: 13 }}>
+              No recent sync jobs recorded.
+            </div>
           )}
-        </div>
+        </section>
 
-        {/* Workspace Activity Feed */}
-        <div className="dashboard-panel">
-          <div className="panel-header">
-            <h2>Workspace Activity Log</h2>
+        {/* Right Column: Workspace Activity Log */}
+        <section style={themeStyles.card}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, paddingBottom: 12, borderBottom: `1px solid ${colors.cardBorder}` }}>
+            <h2 style={{ fontFamily: fonts.display, fontSize: 16, fontWeight: 700, margin: 0, color: colors.ledgerCharcoal }}>
+              Workspace Activity Log
+            </h2>
           </div>
+
           {recentActivities.length > 0 ? (
-            <div className="activity-timeline">
-              {recentActivities.map(act => {
-                const meta = getActivityMeta(act.action);
-                return (
-                  <div key={act.id} className="activity-item">
-                    <div className="activity-icon-outer" style={{ background: meta.bg, color: meta.color }}>
-                      {meta.icon}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 360, overflowY: 'auto', paddingRight: 10, marginTop: 12, marginBottom: 8 }}>
+              {recentActivities.slice(0, 6).map(act => (
+                <div 
+                  key={act.id} 
+                  style={{ 
+                    display: 'flex', 
+                    gap: 14, 
+                    alignItems: 'flex-start', 
+                    margin: '2px 0',
+                    padding: '12px 16px',
+                    backgroundColor: colors.feedBagCream,
+                    borderRadius: rounded.md,
+                    border: `1px solid ${colors.cardBorder}`,
+                    boxShadow: '0 1px 2px rgba(33, 20, 20, 0.03)',
+                  }}
+                >
+                  <div style={{ 
+                    width: 8, 
+                    height: 8, 
+                    borderRadius: '50%', 
+                    backgroundColor: colors.uniformGreen, 
+                    marginTop: 5, 
+                    flexShrink: 0,
+                    boxShadow: `0 0 0 2px ${colors.whiteSurface}`,
+                  }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: colors.ledgerCharcoal, lineHeight: 1.5, wordBreak: 'break-word' }}>
+                      {act.message}
                     </div>
-                    <div className="activity-content">
-                      <p className="activity-msg">
-                        {act.message.replace(/"([^"]+)"/g, '<strong>$1</strong>')}
-                      </p>
-                      <span className="activity-date">{formatTimeAgo(act.createdAt)}</span>
+                    <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 4, fontFamily: fonts.mono }}>
+                      {formatTimeAgo(act.createdAt)}
                     </div>
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           ) : (
-            <div className="empty-state">No activities recorded. Start editing the catalog or running drift checks!</div>
+            <div style={{ padding: '32px 16px', margin: '12px 0', textAlign: 'center', color: colors.mulchBrown, fontSize: 13 }}>
+              No recent workspace activities recorded.
+            </div>
           )}
-        </div>
+        </section>
       </div>
     </div>
   );

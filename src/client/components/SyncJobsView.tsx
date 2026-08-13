@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { listSyncJobs, getSyncJobDetail, type SyncJob, type SyncJobDetail } from '../api';
+import { colors, fonts, rounded, themeStyles } from '../theme';
 
 export function SyncJobsView() {
   const [jobs, setJobs] = useState<SyncJob[]>([]);
   const [selectedJob, setSelectedJob] = useState<SyncJobDetail | null>(null);
   const [error, setError] = useState('');
 
-  const fetch = async () => {
+  const fetchJobs = async () => {
     try {
       const res = await listSyncJobs();
       setJobs(res.jobs);
@@ -15,7 +16,7 @@ export function SyncJobsView() {
     }
   };
 
-  useEffect(() => { fetch(); }, []);
+  useEffect(() => { fetchJobs(); }, []);
 
   const handleSelect = async (id: string) => {
     try {
@@ -26,92 +27,180 @@ export function SyncJobsView() {
     }
   };
 
-  const statusStyle = (s: string): React.CSSProperties => ({
-    padding: '2px 8px', borderRadius: 12, fontSize: 11, fontWeight: 600, color: '#fff',
-    background: s === 'succeeded' ? '#16a34a' : s === 'failed' ? '#dc2626' : s === 'running' ? '#f59e0b' : '#6b7280',
-  });
+  const getStatusBadge = (s: string) => {
+    switch (s.toLowerCase()) {
+      case 'succeeded':
+        return <span className="badge badge-primary" style={{ backgroundColor: colors.seedlingGreen }}>SUCCEEDED</span>;
+      case 'failed':
+        return <span className="badge badge-featured">FAILED</span>;
+      case 'running':
+        return <span className="badge badge-sale">RUNNING</span>;
+      default:
+        return <span className="badge badge-preorder">{s.toUpperCase()}</span>;
+    }
+  };
 
   const kindLabel = (k: string): string => {
     const labels: Record<string, string> = {
-      push_publish: 'Push & Publish',
-      upload_only: 'Upload Only',
-      pull_drift: 'Drift Check',
-      full_reconcile: 'Full Reconcile',
-      bootstrap: 'Bootstrap',
+      push_publish: 'Push & Publish to ShopSite',
+      upload_only: 'XML Upload',
+      pull_drift: 'Drift Check Verification',
+      full_reconcile: 'Full Catalog Reconcile',
+      bootstrap: 'Initial Catalog Bootstrap',
     };
     return labels[k] ?? k;
   };
 
-  const styles: Record<string, React.CSSProperties> = {
-    container: { padding: 24 },
-    title: { fontSize: 24, fontWeight: 600, marginBottom: 16 },
-    row: { display: 'flex', gap: 24 },
-    col: { flex: 1 },
-    list: { border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' },
-    listItem: { padding: '12px 16px', borderBottom: '1px solid #e5e7eb', cursor: 'pointer', fontSize: 14 },
-    activeItem: { padding: '12px 16px', borderBottom: '1px solid #e5e7eb', cursor: 'pointer', fontSize: 14, background: '#eff6ff' },
-    detailCard: { border: '1px solid #e5e7eb', borderRadius: 8, padding: 16 },
-    error: { color: '#dc2626', padding: 8, background: '#fef2f2', borderRadius: 4, margin: '8px 0', fontSize: 13 },
-    eventItem: { padding: '6px 0', borderBottom: '1px dashed #f3f4f6', fontSize: 13 },
-  };
-
   return (
-    <div style={styles.container}>
-      <h1 style={styles.title}>Sync Jobs</h1>
-      {error && <div style={styles.error}>{error}</div>}
+    <div style={{ padding: 24, maxWidth: 1380, margin: '0 auto', fontFamily: fonts.body }}>
+      <h1 style={{ fontFamily: fonts.display, fontSize: 24, fontWeight: 700, color: colors.ledgerCharcoal, marginBottom: 6 }}>
+        Remote Sync Jobs
+      </h1>
+      <p style={{ color: colors.mulchBrown, fontSize: 13, margin: '0 0 24px 0' }}>
+        Audit history and live execution logs for ShopSite CGI synchronization operations.
+      </p>
 
-      <div style={styles.row}>
-        <div style={styles.col}>
-          <div style={styles.list}>
-            {jobs.length === 0 && <p style={{ padding: 16, color: '#9ca3af' }}>No sync jobs yet.</p>}
-            {jobs.map(job => (
-              <div
-                key={job.id}
-                style={selectedJob?.job?.id === job.id ? styles.activeItem : styles.listItem}
-                onClick={() => handleSelect(job.id)}
-              >
-                <div>
-                  <strong>{kindLabel(job.kind)}</strong>
-                  <span style={{ marginLeft: 8 }}><span style={statusStyle(job.status)}>{job.status}</span></span>
-                </div>
-                <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
-                  {job.startedAt?.slice(0, 19) ?? '—'} | {job.productCount} product(s)
-                </div>
+      {error && (
+        <div style={{ color: colors.signetBurgundy, padding: '12px 16px', backgroundColor: '#fee2e2', borderRadius: rounded.md, border: `1px solid ${colors.signetBurgundy}`, marginBottom: 20, fontSize: 13, fontWeight: 600 }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.6fr', gap: 24 }}>
+        {/* Sync Job List */}
+        <div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {jobs.length === 0 && (
+              <div style={{ ...themeStyles.card, padding: 32, textAlign: 'center', color: colors.mulchBrown, fontSize: 13 }}>
+                No sync jobs recorded yet.
               </div>
-            ))}
+            )}
+            {jobs.map(job => {
+              const isSelected = selectedJob?.job?.id === job.id;
+              return (
+                <div
+                  key={job.id}
+                  style={{
+                    padding: '14px 18px',
+                    margin: '2px 0',
+                    borderRadius: rounded.md,
+                    border: `1px solid ${isSelected ? colors.uniformGreen : colors.cardBorder}`,
+                    backgroundColor: isSelected ? colors.feedBagCream : colors.whiteSurface,
+                    boxShadow: isSelected ? '0 2px 4px rgba(20, 83, 45, 0.08)' : '0 1px 2px rgba(33, 20, 20, 0.03)',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  onClick={() => handleSelect(job.id)}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <strong style={{ fontSize: 14, color: colors.ledgerCharcoal }}>{kindLabel(job.kind)}</strong>
+                    {getStatusBadge(job.status)}
+                  </div>
+                  <div style={{ fontSize: 11, color: colors.mulchBrown, fontFamily: fonts.mono, display: 'flex', gap: 12 }}>
+                    <span>Started: {job.startedAt?.slice(0, 19).replace('T', ' ') ?? '—'}</span>
+                    <span>·</span>
+                    <span>{job.productCount} product(s)</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
 
-        <div style={{ flex: 2 }}>
-          {selectedJob && (
-            <div style={styles.detailCard}>
-              <h3 style={{ margin: '0 0 12px' }}>
-                {kindLabel(selectedJob.job.kind)}
-                <span style={{ marginLeft: 8 }}><span style={statusStyle(selectedJob.job.status)}>{selectedJob.job.status}</span></span>
-              </h3>
-              <div style={{ fontSize: 13, marginBottom: 16 }}>
-                <div>Started: {selectedJob.job.startedAt?.slice(0, 19) ?? '—'}</div>
-                <div>Completed: {selectedJob.job.completedAt?.slice(0, 19) ?? '—'}</div>
-                <div>Products: {selectedJob.job.productCount}</div>
-                {selectedJob.job.errorSummary && (
-                  <div style={{ color: '#dc2626', marginTop: 4 }}>Error: {selectedJob.job.errorSummary}</div>
-                )}
+        {/* Sync Job Detail Card & Event Logs */}
+        <div>
+          {selectedJob ? (
+            <div style={{ ...themeStyles.card, padding: 24 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, paddingBottom: 12, borderBottom: `1px solid ${colors.cardBorder}` }}>
+                <div>
+                  <h2 style={{ fontFamily: fonts.display, fontSize: 18, fontWeight: 700, color: colors.ledgerCharcoal, margin: '0 0 4px 0' }}>
+                    {kindLabel(selectedJob.job.kind)}
+                  </h2>
+                  <div style={{ fontSize: 12, color: colors.mulchBrown, fontFamily: fonts.mono }}>
+                    Job ID: {selectedJob.job.id}
+                  </div>
+                </div>
+                {getStatusBadge(selectedJob.job.status)}
               </div>
 
-              <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>Events</h4>
-              {selectedJob.events.length === 0 && <p style={{ color: '#9ca3af', fontSize: 13 }}>No events recorded.</p>}
-              {selectedJob.events.map(evt => (
-                <div key={evt.id} style={styles.eventItem}>
-                  <span style={{
-                    display: 'inline-block', width: 60, fontSize: 11, color: '#6b7280',
-                  }}>{evt.createdAt.slice(11, 19)}</span>
-                  <span style={{
-                    display: 'inline-block', width: 60, fontSize: 11,
-                    color: evt.level === 'error' ? '#dc2626' : evt.level === 'warning' ? '#f59e0b' : '#16a34a',
-                  }}>{evt.level}</span>
-                  <span>{evt.message}</span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, backgroundColor: colors.feedBagCream, padding: 14, borderRadius: rounded.md, border: `1px solid ${colors.cardBorder}`, marginBottom: 20 }}>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase' }}>Started</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: colors.ledgerCharcoal, fontFamily: fonts.mono, marginTop: 2 }}>
+                    {selectedJob.job.startedAt?.slice(0, 19).replace('T', ' ') ?? '—'}
+                  </div>
                 </div>
-              ))}
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase' }}>Completed</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: colors.ledgerCharcoal, fontFamily: fonts.mono, marginTop: 2 }}>
+                    {selectedJob.job.completedAt?.slice(0, 19).replace('T', ' ') ?? '—'}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase' }}>Products Processed</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: colors.ledgerCharcoal, fontFamily: fonts.mono, marginTop: 2 }}>
+                    {selectedJob.job.productCount} SKU(s)
+                  </div>
+                </div>
+              </div>
+
+              {selectedJob.job.errorSummary && (
+                <div style={{ padding: '12px 14px', backgroundColor: '#fee2e2', border: `1px solid ${colors.signetBurgundy}`, borderRadius: rounded.md, color: colors.signetBurgundy, fontSize: 13, marginBottom: 20, fontWeight: 600 }}>
+                  Error Summary: {selectedJob.job.errorSummary}
+                </div>
+              )}
+
+              <h3 style={{ fontFamily: fonts.display, fontSize: 15, fontWeight: 700, color: colors.ledgerCharcoal, margin: '0 0 12px 0' }}>
+                Job Execution Logs & Events
+              </h3>
+
+              {selectedJob.events.length === 0 ? (
+                <div style={{ padding: 24, textAlign: 'center', color: colors.mulchBrown, fontSize: 13 }}>
+                  No execution log events recorded for this job.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto', paddingRight: 8 }}>
+                  {selectedJob.events.map(evt => (
+                    <div 
+                      key={evt.id} 
+                      style={{ 
+                        padding: '10px 14px', 
+                        margin: '2px 0', 
+                        backgroundColor: colors.feedBagCream, 
+                        border: `1px solid ${colors.cardBorder}`, 
+                        borderRadius: rounded.md, 
+                        display: 'flex', 
+                        gap: 12, 
+                        alignItems: 'flex-start',
+                        fontSize: 13,
+                      }}
+                    >
+                      <span style={{ fontFamily: fonts.mono, fontSize: 11, color: colors.mulchBrown, width: 65, flexShrink: 0, marginTop: 1 }}>
+                        {evt.createdAt.slice(11, 19)}
+                      </span>
+                      <span style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        textTransform: 'uppercase',
+                        padding: '2px 6px',
+                        borderRadius: rounded.xs,
+                        flexShrink: 0,
+                        backgroundColor: evt.level === 'error' ? '#fee2e2' : evt.level === 'warning' ? colors.cornerCalloutGold : colors.seedlingGreen,
+                        color: evt.level === 'error' ? colors.signetBurgundy : evt.level === 'warning' ? colors.ledgerCharcoal : '#ffffff',
+                      }}>
+                        {evt.level}
+                      </span>
+                      <span style={{ flex: 1, color: colors.ledgerCharcoal, lineHeight: 1.4, wordBreak: 'break-word' }}>
+                        {evt.message}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ ...themeStyles.card, padding: 48, textAlign: 'center', color: colors.mulchBrown, fontSize: 14 }}>
+              Select a sync job from the list on the left to inspect detailed execution logs.
             </div>
           )}
         </div>

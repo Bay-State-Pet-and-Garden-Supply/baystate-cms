@@ -6,6 +6,7 @@ import {
   formatModelPricing,
   type StoreManagerModelDescriptor,
 } from '../store-manager-api';
+import { colors, fonts, rounded, themeStyles } from '../theme';
 
 interface StoreManagerAssistantProps {
   onSelectProduct?: (sku: string) => void;
@@ -311,7 +312,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   };
 
   // Helper to parse bold markdown inside text
-  const parseInlineMarkdown = (text: string) => {
+  const parseInlineMarkdown = (text: string, isUser = false) => {
     const parts = [];
     let key = 0;
     const regex = /(\*\*|`)(.*?)\1/g;
@@ -325,18 +326,19 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
       const marker = match[1];
       const content = match[2];
       if (marker === '**') {
-        parts.push(<strong key={key++}>{content}</strong>);
+        parts.push(<strong key={key++} style={{ fontWeight: 700, color: isUser ? '#FFFFFF' : 'inherit' }}>{content}</strong>);
       } else {
         parts.push(
           <code
             key={key++}
             style={{
-              background: '#f3f4f6',
+              background: isUser ? 'rgba(255, 255, 255, 0.2)' : colors.feedBagCream,
               padding: '2px 6px',
-              borderRadius: 4,
-              fontFamily: 'monospace',
+              borderRadius: rounded.xs,
+              fontFamily: fonts.mono,
               fontSize: '13px',
-              color: '#dc2626',
+              color: isUser ? '#FFFFFF' : colors.signetBurgundy,
+              border: isUser ? '1px solid rgba(255, 255, 255, 0.3)' : `1px solid ${colors.cardBorder}`,
             }}
           >
             {content}
@@ -353,37 +355,41 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     return parts.length > 0 ? parts : text;
   };
 
-  // Helper renderer for Markdown in assistant messages
-  const renderMarkdownLine = (line: string, idx: number) => {
+  // Helper renderer for Markdown in assistant/user messages
+  const renderMarkdownLine = (line: string, idx: number, isUser = false) => {
     const trimmed = line.trim();
+    const textColor = isUser ? '#FFFFFF' : colors.ledgerCharcoal;
+    const headColor = isUser ? '#FFFFFF' : colors.ledgerCharcoal;
+
     if (trimmed.startsWith('# ')) {
       return (
         <h1
           key={idx}
           style={{
+            fontFamily: fonts.display,
             fontSize: '20px',
-            fontWeight: 800,
-            color: '#111827',
+            fontWeight: 700,
+            color: headColor,
             margin: '18px 0 8px',
-            borderBottom: '1px solid #f3f4f6',
+            borderBottom: isUser ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${colors.cardBorder}`,
             paddingBottom: '4px',
           }}
         >
-          {parseInlineMarkdown(trimmed.substring(2))}
+          {parseInlineMarkdown(trimmed.substring(2), isUser)}
         </h1>
       );
     }
     if (trimmed.startsWith('## ')) {
       return (
-        <h2 key={idx} style={{ fontSize: '16px', fontWeight: 700, color: '#1f2937', margin: '14px 0 6px' }}>
-          {parseInlineMarkdown(trimmed.substring(3))}
+        <h2 key={idx} style={{ fontFamily: fonts.display, fontSize: '16px', fontWeight: 700, color: headColor, margin: '14px 0 6px' }}>
+          {parseInlineMarkdown(trimmed.substring(3), isUser)}
         </h2>
       );
     }
     if (trimmed.startsWith('### ')) {
       return (
-        <h3 key={idx} style={{ fontSize: '14px', fontWeight: 700, color: '#374151', margin: '12px 0 4px' }}>
-          {parseInlineMarkdown(trimmed.substring(4))}
+        <h3 key={idx} style={{ fontFamily: fonts.display, fontSize: '14px', fontWeight: 700, color: isUser ? '#FFFFFF' : colors.mulchBrown, margin: '12px 0 4px' }}>
+          {parseInlineMarkdown(trimmed.substring(4), isUser)}
         </h3>
       );
     }
@@ -392,14 +398,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         <li
           key={idx}
           style={{
-            marginLeft: '16px',
+            margin: '6px 0 6px 24px',
+            paddingLeft: '4px',
             listStyleType: 'disc',
-            margin: '3px 0',
+            listStylePosition: 'outside',
             fontSize: '14px',
-            color: '#4b5563',
+            color: textColor,
+            lineHeight: '1.6',
           }}
         >
-          {parseInlineMarkdown(trimmed.substring(2))}
+          {parseInlineMarkdown(trimmed.substring(2), isUser)}
         </li>
       );
     }
@@ -409,14 +417,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         <li
           key={idx}
           style={{
-            marginLeft: '16px',
+            margin: '6px 0 6px 24px',
+            paddingLeft: '4px',
             listStyleType: 'decimal',
-            margin: '3px 0',
+            listStylePosition: 'outside',
             fontSize: '14px',
-            color: '#4b5563',
+            color: textColor,
+            lineHeight: '1.6',
           }}
         >
-          {parseInlineMarkdown(content)}
+          {parseInlineMarkdown(content, isUser)}
         </li>
       );
     }
@@ -424,15 +434,15 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
       return <div key={idx} style={{ height: '8px' }} />;
     }
     return (
-      <p key={idx} style={{ margin: '4px 0', fontSize: '14px', color: '#374151', lineHeight: '1.5' }}>
-        {parseInlineMarkdown(line)}
+      <p key={idx} style={{ margin: '8px 0', fontSize: '14px', color: textColor, lineHeight: '1.6' }}>
+        {parseInlineMarkdown(line, isUser)}
       </p>
     );
   };
 
-  const renderMessageContent = (text: string) => {
+  const renderMessageContent = (text: string, isUser = false) => {
     if (!text) return null;
-    return text.split('\n').map((line, idx) => renderMarkdownLine(line, idx));
+    return text.split('\n').map((line, idx) => renderMarkdownLine(line, idx, isUser));
   };
 
   // Render nice visual cards for tool invocation and output
@@ -445,28 +455,29 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
       return (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
           {skus.map(sku => (
-            <div key={sku} style={{ display: 'inline-flex', gap: 2, background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: 4, padding: '2px 4px', alignItems: 'center' }}>
+            <div key={sku} style={{ display: 'inline-flex', gap: 4, background: colors.whiteSurface, border: `1px solid ${colors.cardBorder}`, borderRadius: rounded.xs, padding: '2px 6px', alignItems: 'center' }}>
               <button
                 onClick={() => onSelectProduct?.(sku)}
                 style={{
                   background: 'none',
                   border: 'none',
                   fontSize: '11px',
-                  color: '#2563eb',
-                  fontWeight: 600,
+                  fontFamily: fonts.mono,
+                  color: colors.uniformGreen,
+                  fontWeight: 700,
                   cursor: 'pointer',
                   padding: 0,
                 }}
                 title="Click to open product detail"
               >
-                🔑 {sku}
+                {sku}
               </button>
               <button
                 onClick={() => toggleProductContext({ sku, title: productTitle })}
                 style={{
                   background: 'none',
                   border: 'none',
-                  color: selectedProducts.some(p => p.sku === sku) ? '#ef4444' : '#10b981',
+                  color: selectedProducts.some(p => p.sku === sku) ? colors.signetBurgundy : colors.seedlingGreen,
                   cursor: 'pointer',
                   fontSize: '11px',
                   padding: '0 2px',
@@ -474,7 +485,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 }}
                 title={selectedProducts.some(p => p.sku === sku) ? 'Remove Context' : 'Attach Context'}
               >
-                {selectedProducts.some(p => p.sku === sku) ? '✕' : '📎'}
+                {selectedProducts.some(p => p.sku === sku) ? '✕' : '+'}
               </button>
             </div>
           ))}
@@ -488,24 +499,26 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         style={{
           margin: '12px 0',
           padding: '12px 16px',
-          background: '#f8fafc',
-          border: '1px solid #e2e8f0',
-          borderRadius: 8,
-          boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
+          background: colors.feedBagCream,
+          border: `1px solid ${colors.cardBorder}`,
+          borderRadius: rounded.md,
+          boxShadow: '0 1px 2px rgba(33,20,20,0.03)',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: '#334155' }}>
-            🛠️ Tool Called: <code style={{ color: '#2563eb' }}>{toolName}</code>
+          <span style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal }}>
+            Tool Execution: <code style={{ color: colors.uniformGreen, fontFamily: fonts.mono }}>{toolName}</code>
           </span>
           <span
             style={{
-              fontSize: 11,
-              fontWeight: 600,
+              fontSize: 10,
+              fontWeight: 700,
               padding: '2px 6px',
-              borderRadius: 4,
-              background: isLoading ? '#fef3c7' : state === 'output-error' ? '#fee2e2' : '#dcfce7',
-              color: isLoading ? '#d97706' : state === 'output-error' ? '#b91c1c' : '#15803d',
+              borderRadius: rounded.xs,
+              background: isLoading ? colors.cornerCalloutGold : state === 'output-error' ? '#fee2e2' : colors.seedlingGreen,
+              color: isLoading ? colors.ledgerCharcoal : state === 'output-error' ? colors.signetBurgundy : colors.feedBagCream,
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
             }}
           >
             {isLoading ? 'Running...' : state === 'output-error' ? 'Error' : 'Complete'}
@@ -513,43 +526,42 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         </div>
 
         {input && Object.keys(input).length > 0 && (
-          <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>
+          <div style={{ fontSize: 11, color: colors.mulchBrown, marginBottom: 6, fontFamily: fonts.mono }}>
             Arguments: <code>{JSON.stringify(input)}</code>
           </div>
         )}
 
         {state === 'output-available' && output && (
-          <div style={{ fontSize: 13, borderTop: '1px solid #f1f5f9', paddingTop: 8, marginTop: 4 }}>
+          <div style={{ fontSize: 13, borderTop: `1px solid ${colors.cardBorder}`, paddingTop: 8, marginTop: 4 }}>
             {toolName === 'getDashboardStats' && (
               <div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 8 }}>
-                  <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                    <div style={{ color: '#64748b', fontSize: 10 }}>Total Products</div>
-                    <div style={{ fontSize: 14, fontWeight: 700 }}>{output.metrics?.totalProducts}</div>
+                  <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                    <div style={{ color: colors.mulchBrown, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Total Products</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: colors.ledgerCharcoal }}>{output.metrics?.totalProducts}</div>
                   </div>
-                  <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                    <div style={{ color: '#16a34a', fontSize: 10 }}>Synced Products</div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: '#16a34a' }}>
+                  <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                    <div style={{ color: colors.seedlingGreen, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Synced Products</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: colors.seedlingGreen }}>
                       {output.metrics?.syncedProducts}
                     </div>
                   </div>
-                  <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                    <div style={{ color: '#ea580c', fontSize: 10 }}>Drifted Products</div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: '#ea580c' }}>
+                  <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                    <div style={{ color: colors.signetBurgundy, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Drifted Products</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: colors.signetBurgundy }}>
                       {output.metrics?.driftedProducts}
                     </div>
                   </div>
-                  <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                    <div style={{ color: '#dc2626', fontSize: 10 }}>With Warnings</div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: '#dc2626' }}>
+                  <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                    <div style={{ color: colors.signetBurgundy, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>With Warnings</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: colors.signetBurgundy }}>
                       {output.metrics?.productsWithWarnings}
                     </div>
                   </div>
                 </div>
                 {output.recentSyncJobs && output.recentSyncJobs.length > 0 && (
-                  <div style={{ fontSize: 11, color: '#475569', marginTop: 6 }}>
-                    <strong>Last Sync Status:</strong> {output.recentSyncJobs[0].status} (
-                    {output.recentSyncJobs[0].productCount} items)
+                  <div style={{ fontSize: 11, color: colors.mulchBrown, marginTop: 6, fontFamily: fonts.mono }}>
+                    <strong>Last Sync Status:</strong> {output.recentSyncJobs[0].status} ({output.recentSyncJobs[0].productCount} items)
                   </div>
                 )}
               </div>
@@ -557,19 +569,19 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
             {toolName === 'getCatalogHealthReport' && (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                  <div style={{ color: '#64748b', fontSize: 10 }}>Healthy</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#16a34a' }}>
+                <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                  <div style={{ color: colors.seedlingGreen, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Healthy</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: colors.seedlingGreen }}>
                     {output.healthyProducts}/{output.totalProducts}
                   </div>
                 </div>
-                <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                  <div style={{ color: '#dc2626', fontSize: 10 }}>Blockers</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#dc2626' }}>{output.totalErrors}</div>
+                <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                  <div style={{ color: colors.signetBurgundy, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Blockers</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: colors.signetBurgundy }}>{output.totalErrors}</div>
                 </div>
-                <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                  <div style={{ color: '#d97706', fontSize: 10 }}>Warnings</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#d97706' }}>{output.totalWarnings}</div>
+                <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                  <div style={{ color: colors.mulchBrown, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Warnings</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: colors.mulchBrown }}>{output.totalWarnings}</div>
                 </div>
               </div>
             )}
@@ -578,15 +590,15 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               <div>
                 <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                   <thead>
-                    <tr style={{ borderBottom: '1px solid #e2e8f0', textAlign: 'left', color: '#64748b' }}>
-                      <th style={{ padding: '4px 0' }}>Product</th>
-                      <th style={{ padding: '4px 0' }}>Severity</th>
-                      <th style={{ padding: '4px 0' }}>Code / Message</th>
+                    <tr style={{ borderBottom: `1px solid ${colors.cardBorder}`, textAlign: 'left', color: colors.mulchBrown }}>
+                      <th style={{ padding: '6px 0' }}>Product</th>
+                      <th style={{ padding: '6px 0' }}>Severity</th>
+                      <th style={{ padding: '6px 0' }}>Code / Message</th>
                     </tr>
                   </thead>
                   <tbody>
                     {output.map((issue: any, index: number) => (
-                      <tr key={index} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <tr key={index} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
                         <td style={{ padding: '6px 0' }}>
                           <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
                             <button
@@ -594,9 +606,10 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                               style={{
                                 background: 'none',
                                 border: 'none',
-                                color: '#2563eb',
-                                fontWeight: 600,
+                                color: colors.uniformGreen,
+                                fontFamily: fonts.mono,
                                 cursor: 'pointer',
+                                fontWeight: 700,
                                 padding: 0,
                                 fontSize: 12,
                               }}
@@ -608,7 +621,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                               style={{
                                 background: 'none',
                                 border: 'none',
-                                color: selectedProducts.some(p => p.sku === issue.sku) ? '#ef4444' : '#10b981',
+                                color: selectedProducts.some(p => p.sku === issue.sku) ? colors.signetBurgundy : colors.seedlingGreen,
                                 cursor: 'pointer',
                                 fontSize: '11px',
                                 fontWeight: 'bold',
@@ -616,22 +629,24 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                               }}
                               title={selectedProducts.some(p => p.sku === issue.sku) ? 'Remove Context' : 'Attach Context'}
                             >
-                              {selectedProducts.some(p => p.sku === issue.sku) ? '✕' : '📎'}
+                              {selectedProducts.some(p => p.sku === issue.sku) ? '✕' : '+'}
                             </button>
                           </div>
                         </td>
                         <td style={{ padding: '6px 0' }}>
                           <span
                             style={{
-                              color: issue.severity === 'blocker' ? '#dc2626' : '#ea580c',
-                              fontWeight: 600,
+                              color: issue.severity === 'blocker' ? colors.signetBurgundy : colors.mulchBrown,
+                              fontWeight: 700,
+                              textTransform: 'uppercase',
+                              fontSize: 10,
                             }}
                           >
                             {issue.severity}
                           </span>
                         </td>
-                        <td style={{ padding: '6px 0', color: '#334155' }}>
-                          <code>{issue.code}</code>: {issue.message}
+                        <td style={{ padding: '6px 0', color: colors.ledgerCharcoal }}>
+                          <code style={{ fontFamily: fonts.mono, fontSize: 11 }}>{issue.code}</code>: {issue.message}
                         </td>
                       </tr>
                     ))}
@@ -642,7 +657,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
             {toolName === 'searchProducts' && Array.isArray(output) && (
               <div>
-                <div style={{ fontWeight: 600, color: '#64748b', fontSize: 11, marginBottom: 4 }}>
+                <div style={{ fontWeight: 600, color: colors.mulchBrown, fontSize: 11, marginBottom: 6 }}>
                   Found {output.length} products:
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -654,10 +669,10 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                         justifyContent: 'space-between',
                         alignItems: 'center',
                         fontSize: 12,
-                        background: '#fff',
-                        padding: 6,
-                        borderRadius: 6,
-                        border: '1px solid #f1f5f9',
+                        background: colors.whiteSurface,
+                        padding: '8px 12px',
+                        borderRadius: rounded.xs,
+                        border: `1px solid ${colors.cardBorder}`,
                       }}
                     >
                       <span style={{ fontWeight: 600 }}>
@@ -666,21 +681,22 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                           style={{
                             background: 'none',
                             border: 'none',
-                            color: '#2563eb',
-                            fontWeight: 600,
+                            color: colors.uniformGreen,
+                            fontFamily: fonts.mono,
+                            fontWeight: 700,
                             cursor: 'pointer',
                             padding: 0,
                             fontSize: 12,
                           }}
                         >
-                          🔑 {prod.sku}
+                          {prod.sku}
                         </button>
                         <button
                           onClick={() => toggleProductContext({ sku: prod.sku, title: prod.title })}
                           style={{
                             background: 'none',
                             border: 'none',
-                            color: selectedProducts.some(p => p.sku === prod.sku) ? '#ef4444' : '#10b981',
+                            color: selectedProducts.some(p => p.sku === prod.sku) ? colors.signetBurgundy : colors.seedlingGreen,
                             cursor: 'pointer',
                             padding: '0 4px',
                             fontSize: '11px',
@@ -688,11 +704,11 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                           }}
                           title={selectedProducts.some(p => p.sku === prod.sku) ? 'Remove Context' : 'Attach Context'}
                         >
-                          {selectedProducts.some(p => p.sku === prod.sku) ? '✕' : '📎'}
+                          {selectedProducts.some(p => p.sku === prod.sku) ? '✕' : '+'}
                         </button>{' '}
                         - {prod.title}
                       </span>
-                      <span style={{ fontSize: 11, color: '#64748b' }}>${prod.price || '0.00'}</span>
+                      <span style={{ fontSize: 11, color: colors.mulchBrown, fontFamily: fonts.mono }}>${prod.price || '0.00'}</span>
                     </div>
                   ))}
                 </div>
@@ -702,24 +718,24 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             {toolName === 'getProductFieldAudit' && (
               <div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 8 }}>
-                  <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                    <div style={{ color: '#64748b', fontSize: 10 }}>Scanned</div>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>{output.totalProductsScanned}</div>
+                  <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                    <div style={{ color: colors.mulchBrown, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Scanned</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: colors.ledgerCharcoal }}>{output.totalProductsScanned}</div>
                   </div>
-                  <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                    <div style={{ color: '#64748b', fontSize: 10 }}>Missing/Empty</div>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>{output.missingCount}</div>
+                  <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                    <div style={{ color: colors.signetBurgundy, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Missing/Empty</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: colors.signetBurgundy }}>{output.missingCount}</div>
                   </div>
-                  <div style={{ background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #f1f5f9' }}>
-                    <div style={{ color: '#64748b', fontSize: 10 }}>Unique Values</div>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>{output.uniqueValueCount}</div>
+                  <div style={{ background: colors.whiteSurface, padding: 8, borderRadius: rounded.xs, border: `1px solid ${colors.cardBorder}` }}>
+                    <div style={{ color: colors.uniformGreen, fontSize: 10, fontWeight: 600, textTransform: 'uppercase' }}>Unique Values</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: colors.uniformGreen }}>{output.uniqueValueCount}</div>
                   </div>
                 </div>
 
                 {output.duplicateGroups && output.duplicateGroups.length > 0 && (
                   <div style={{ marginTop: 8 }}>
-                    <div style={{ fontWeight: 700, color: '#b91c1c', fontSize: 12 }}>
-                      ⚠️ Duplicate Groups Detected ({output.duplicateGroups.length})
+                    <div style={{ fontWeight: 700, color: colors.signetBurgundy, fontSize: 12 }}>
+                      Duplicate Groups Detected ({output.duplicateGroups.length})
                     </div>
                     <div style={{ maxHeight: 120, overflowY: 'auto', marginTop: 4 }}>
                       {output.duplicateGroups.map((g: any, i: number) => (
@@ -727,10 +743,10 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                           key={i}
                           style={{
                             fontSize: 11,
-                            padding: '4px 6px',
-                            background: '#fff',
-                            border: '1px solid #f1f5f9',
-                            borderRadius: 4,
+                            padding: '6px 8px',
+                            background: colors.whiteSurface,
+                            border: `1px solid ${colors.cardBorder}`,
+                            borderRadius: rounded.xs,
                             marginBottom: 4,
                           }}
                         >
@@ -752,10 +768,10 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
             {toolName === 'proposeProductFieldNormalization' && (
               <div>
-                <div style={{ fontWeight: 700, color: '#1e3a8a', fontSize: 12, marginBottom: 4 }}>
-                  📋 {output.proposalCount} Proposals
+                <div style={{ fontWeight: 700, color: colors.uniformGreen, fontSize: 12, marginBottom: 4 }}>
+                  {output.proposalCount} Proposals Generated
                 </div>
-                <div style={{ fontSize: 11, color: '#4b5563', marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: colors.mulchBrown, marginBottom: 8 }}>
                   Affects {output.affectedProductCount} products. Proposed mapping:
                 </div>
                 <div style={{ maxHeight: 150, overflowY: 'auto' }}>
@@ -763,10 +779,10 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     <div
                       key={prop.id}
                       style={{
-                        padding: 6,
-                        background: '#fff',
-                        border: '1px solid #f1f5f9',
-                        borderRadius: 6,
+                        padding: 8,
+                        background: colors.whiteSurface,
+                        border: `1px solid ${colors.cardBorder}`,
+                        borderRadius: rounded.xs,
                         marginBottom: 6,
                         fontSize: 12,
                       }}
@@ -779,16 +795,17 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                           style={{
                             fontSize: 9,
                             fontWeight: 700,
-                            padding: '1px 4px',
-                            borderRadius: 4,
-                            background: prop.safeAutoApply ? '#dcfce7' : '#fee2e2',
-                            color: prop.safeAutoApply ? '#15803d' : '#b91c1c',
+                            padding: '1px 5px',
+                            borderRadius: rounded.xs,
+                            background: prop.safeAutoApply ? colors.feedBagCream : '#fee2e2',
+                            color: prop.safeAutoApply ? colors.seedlingGreen : colors.signetBurgundy,
+                            border: `1px solid ${prop.safeAutoApply ? colors.seedlingGreen : colors.signetBurgundy}`,
                           }}
                         >
                           {prop.safeAutoApply ? 'Safe Auto-Apply' : 'Requires Approval'}
                         </span>
                       </div>
-                      <div style={{ color: '#64748b', fontSize: 11, marginTop: 2 }}>
+                      <div style={{ color: colors.mulchBrown, fontSize: 11, marginTop: 4 }}>
                         Reason: {prop.reason} | Confidence: {Math.round(prop.confidence * 100)}%
                       </div>
                       <div style={{ marginTop: 4 }}>
@@ -802,7 +819,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
             {toolName === 'explainNextActions' && output.actions && (
               <div>
-                <div style={{ fontWeight: 700, color: '#0f172a', fontSize: 12, marginBottom: 4 }}>
+                <div style={{ fontWeight: 700, color: colors.ledgerCharcoal, fontSize: 12, marginBottom: 4 }}>
                   🚀 Recommended Actions Checklist:
                 </div>
                 <ul style={{ paddingLeft: 16, margin: 0, fontSize: 13, color: '#334155' }}>
@@ -869,9 +886,9 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         display: 'flex',
         height: 'calc(100vh - 54px)',
         maxHeight: 'calc(100vh - 54px)',
-        background: '#f9fafb',
-        color: '#1f2937',
-        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        background: colors.feedBagCream,
+        color: colors.ledgerCharcoal,
+        fontFamily: fonts.body,
       }}
     >
       {/* Left Sidebar - Chat History */}
@@ -880,46 +897,33 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
           width: '260px',
           minWidth: '260px',
           flexShrink: 0,
-          background: '#f3f4f6',
-          borderRight: '1px solid #e5e7eb',
+          background: colors.feedBagCream,
+          borderRight: `1px solid ${colors.cardBorder}`,
           display: 'flex',
           flexDirection: 'column',
         }}
       >
         <button
           onClick={startNewChat}
+          className="btn btn-primary"
           style={{
             margin: '16px',
             padding: '10px 16px',
-            background: '#ffffff',
-            border: '1px dashed #d1d5db',
-            borderRadius: '8px',
-            color: '#2563eb',
-            fontSize: '14px',
-            fontWeight: 600,
-            cursor: 'pointer',
+            fontFamily: fonts.display,
+            fontSize: '0.8rem',
             textAlign: 'center',
-            transition: 'all 0.2s',
-          }}
-          onMouseOver={e => {
-            e.currentTarget.style.borderColor = '#2563eb';
-            e.currentTarget.style.background = '#eff6ff';
-          }}
-          onMouseOut={e => {
-            e.currentTarget.style.borderColor = '#d1d5db';
-            e.currentTarget.style.background = '#ffffff';
           }}
         >
-          ➕ New Chat
+          + New Chat Thread
         </button>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 16px' }}>
-          <div style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.5px' }}>
+          <div style={{ fontSize: '11px', fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em' }}>
             Conversations (Last 7 Days)
           </div>
           
           {threads.length === 0 ? (
-            <div style={{ fontSize: '12px', color: '#9ca3af', fontStyle: 'italic', textAlign: 'center', marginTop: 16 }}>
+            <div style={{ fontSize: '12px', color: colors.mulchBrown, fontStyle: 'italic', textAlign: 'center', marginTop: 16 }}>
               No recent conversations
             </div>
           ) : (
@@ -934,27 +938,27 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     justifyContent: 'space-between',
                     alignItems: 'center',
                     width: '100%',
-                    padding: '8px 12px',
+                    padding: '10px 12px',
                     marginBottom: '6px',
-                    borderRadius: '6px',
-                    background: isActive ? '#ffffff' : 'transparent',
-                    border: isActive ? '1px solid #e5e7eb' : '1px solid transparent',
-                    boxShadow: isActive ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                    borderRadius: rounded.md,
+                    background: isActive ? colors.whiteSurface : 'transparent',
+                    border: isActive ? `1px solid ${colors.uniformGreen}` : '1px solid transparent',
+                    boxShadow: isActive ? '0 1px 3px rgba(33,20,20,0.06)' : 'none',
                     cursor: 'pointer',
                     fontSize: '13px',
-                    fontWeight: isActive ? 600 : 500,
-                    color: isActive ? '#111827' : '#4b5563',
+                    fontWeight: isActive ? 700 : 500,
+                    color: isActive ? colors.ledgerCharcoal : colors.mulchBrown,
                     transition: 'all 0.15s',
                   }}
                   onMouseOver={e => {
-                    if (!isActive) e.currentTarget.style.background = '#e5e7eb';
+                    if (!isActive) e.currentTarget.style.background = colors.whiteSurface;
                   }}
                   onMouseOut={e => {
                     if (!isActive) e.currentTarget.style.background = 'transparent';
                   }}
                 >
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '8px', flex: 1 }}>
-                    💬 {thread.title}
+                    {thread.title}
                   </span>
                   <button
                     onClick={e => deleteThread(e, thread.id)}
@@ -962,15 +966,15 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                       border: 'none',
                       background: 'none',
                       padding: 0,
-                      color: '#9ca3af',
+                      color: colors.mulchBrown,
                       cursor: 'pointer',
                       fontSize: '14px',
                     }}
-                    onMouseOver={e => (e.currentTarget.style.color = '#ef4444')}
-                    onMouseOut={e => (e.currentTarget.style.color = '#9ca3af')}
+                    onMouseOver={e => (e.currentTarget.style.color = colors.signetBurgundy)}
+                    onMouseOut={e => (e.currentTarget.style.color = colors.mulchBrown)}
                     title="Delete conversation"
                   >
-                    🗑️
+                    ✕
                   </button>
                 </div>
               );
@@ -988,27 +992,29 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             justifyContent: 'space-between',
             alignItems: 'center',
             padding: '16px 24px',
-            background: '#ffffff',
-            borderBottom: '1px solid #e5e7eb',
+            background: colors.whiteSurface,
+            borderBottom: `1px solid ${colors.cardBorder}`,
           }}
         >
           <div>
-            <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 800, color: '#2563eb', display: 'flex', alignItems: 'center', gap: 8 }}>
-              🤖 Store Manager AI Assistant
+            <h2 style={{ margin: 0, fontSize: '18px', fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal, display: 'flex', alignItems: 'center', gap: 10 }}>
+              Store Manager AI Assistant
               <span
                 style={{
-                  fontSize: '11px',
-                  fontWeight: 600,
+                  fontSize: '10px',
+                  fontWeight: 700,
                   padding: '2px 8px',
-                  borderRadius: 9999,
-                  background: status === 'streaming' ? '#2563eb' : status === 'submitted' ? '#ea580c' : '#10b981',
-                  color: '#fff',
+                  borderRadius: rounded.full,
+                  background: status === 'streaming' ? colors.uniformGreen : status === 'submitted' ? colors.signetBurgundy : colors.seedlingGreen,
+                  color: colors.feedBagCream,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
                 }}
               >
                 {status === 'streaming' ? 'Streaming...' : status === 'submitted' ? 'Submitting...' : 'Ready'}
               </span>
             </h2>
-            <p style={{ margin: '2px 0 0', fontSize: '12px', color: '#6b7280' }}>
+            <p style={{ margin: '2px 0 0', fontSize: '12px', color: colors.mulchBrown }}>
               {currentThreadTitle ? `Current thread: "${currentThreadTitle}"` : 'Interactive catalog auditing and refactoring advisor.'}
             </p>
           </div>
@@ -1016,19 +1022,19 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
           {/* Model selection dropdown — server-driven model list with clear pricing */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <label style={{ fontSize: '12px', fontWeight: 700, color: '#4b5563' }}>AI Model:</label>
+              <label style={{ fontSize: '12px', fontWeight: 700, color: colors.ledgerCharcoal }}>AI Model:</label>
               <div style={{ position: 'relative' }}>
                 <select
                   value={selectedModel ?? ''}
                   onChange={e => setSelectedModel(e.target.value || null)}
                   disabled={status === 'streaming' || status === 'submitted' || modelsLoading || modelOptions.length === 0}
                   style={{
-                    background: '#ffffff',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '6px',
+                    background: colors.whiteSurface,
+                    border: `1px solid ${colors.cardBorder}`,
+                    borderRadius: rounded.md,
                     padding: '6px 28px 6px 12px',
                     fontSize: '13px',
-                    color: '#374151',
+                    color: colors.ledgerCharcoal,
                     fontWeight: 600,
                     cursor: (status === 'streaming' || status === 'submitted' || modelOptions.length === 0) ? 'not-allowed' : 'pointer',
                     outline: 'none',
@@ -1055,7 +1061,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     transform: 'translateY(-50%)',
                     pointerEvents: 'none',
                     fontSize: '9px',
-                    color: '#9ca3af',
+                    color: colors.mulchBrown,
                   }}
                 >
                   ▼
@@ -1067,21 +1073,21 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 style={{
                   fontSize: '11px',
                   fontWeight: 600,
-                  color: '#b45309',
-                  background: '#fef3c7',
-                  border: '1px solid #fde68a',
-                  borderRadius: 6,
+                  color: colors.signetBurgundy,
+                  background: '#fee2e2',
+                  border: `1px solid ${colors.signetBurgundy}`,
+                  borderRadius: rounded.md,
                   padding: '4px 8px',
                   maxWidth: 320,
                   textAlign: 'right',
                 }}
               >
-                ⚠️ {modelSetupMessage}
+                {modelSetupMessage}
               </div>
             )}
-            <div style={{ fontSize: '11px', fontWeight: 700, color: '#16a34a', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span>💵 Session Cost:</span>
-              <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{formattedCost}</span>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: colors.uniformGreen, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span>Session Cost:</span>
+              <span style={{ fontFamily: fonts.mono, fontSize: '12px' }}>{formattedCost}</span>
             </div>
           </div>
         </header>
@@ -1089,46 +1095,45 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         {/* Main Chat Body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 16 }}>
           {messages.length === 0 ? (
-            <div style={{ margin: 'auto', maxWidth: 600, textAlign: 'center', padding: '40px 0' }}>
-              <div style={{ fontSize: '48px', marginBottom: 16 }}>💼</div>
-              <h3 style={{ fontSize: '22px', fontWeight: 800, color: '#111827', margin: '0 0 8px' }}>
-                How can I help you manage the store?
+            <div style={{ margin: 'auto', maxWidth: 640, textAlign: 'center', padding: '40px 24px', backgroundColor: colors.whiteSurface, borderRadius: rounded.lg, border: `1px solid ${colors.cardBorder}`, boxShadow: '0 1px 3px rgba(33,20,20,0.04)' }}>
+              <h3 style={{ fontSize: '20px', fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal, margin: '0 0 8px' }}>
+                How can I help manage your store catalog?
               </h3>
-              <p style={{ color: '#6b7280', fontSize: '14px', margin: '0 0 32px', lineHeight: 1.6 }}>
-                Attach specific products as context or ask general catalog questions.
+              <p style={{ color: colors.mulchBrown, fontSize: '14px', margin: '0 0 24px', lineHeight: 1.6 }}>
+                Attach specific products as context or click a starter prompt below to audit fields, check health, and inspect drift.
               </p>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
                 {[
-                  { title: '📊 Summarize Catalog Health', prompt: 'Summarize catalog health.' },
-                  { title: '⚠️ Show Products with Blockers', prompt: 'Show products with blockers.' },
-                  { title: '🔎 Audit ProductField24', prompt: 'Audit ProductField24.' },
-                  { title: '🔄 Find Duplicate Brands', prompt: 'Find duplicate Brand values.' },
-                  { title: '🖼️ Find Products Missing Images', prompt: 'Which products are missing images?' },
-                  { title: '📡 Show Unsynced Products', prompt: 'Show unsynced or drifted products.' },
+                  { title: 'Summarize Catalog Health', prompt: 'Summarize catalog health.' },
+                  { title: 'Show Products with Blockers', prompt: 'Show products with blockers.' },
+                  { title: 'Audit ProductField24', prompt: 'Audit ProductField24.' },
+                  { title: 'Find Duplicate Brands', prompt: 'Find duplicate Brand values.' },
+                  { title: 'Find Products Missing Images', prompt: 'Which products are missing images?' },
+                  { title: 'Show Unsynced Products', prompt: 'Show unsynced or drifted products.' },
                 ].map((item, idx) => (
                   <button
                     key={idx}
                     onClick={() => handleStarterPrompt(item.prompt)}
                     style={{
-                      background: '#ffffff',
-                      border: '1px solid #d1d5db',
-                      borderRadius: 8,
+                      background: colors.whiteSurface,
+                      border: `1px solid ${colors.cardBorder}`,
+                      borderRadius: rounded.md,
                       padding: '12px 16px',
-                      color: '#374151',
+                      color: colors.ledgerCharcoal,
                       fontSize: '13px',
-                      fontWeight: 500,
+                      fontWeight: 600,
                       textAlign: 'left',
                       cursor: 'pointer',
-                      transition: 'all 0.2s',
+                      transition: 'all 0.15s',
                     }}
                     onMouseOver={e => {
-                      e.currentTarget.style.borderColor = '#2563eb';
-                      e.currentTarget.style.background = '#eff6ff';
+                      e.currentTarget.style.borderColor = colors.uniformGreen;
+                      e.currentTarget.style.background = colors.feedBagCream;
                     }}
                     onMouseOut={e => {
-                      e.currentTarget.style.borderColor = '#d1d5db';
-                      e.currentTarget.style.background = '#ffffff';
+                      e.currentTarget.style.borderColor = colors.cardBorder;
+                      e.currentTarget.style.background = colors.whiteSurface;
                     }}
                   >
                     {item.title}
@@ -1145,21 +1150,22 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                   style={{
                     display: 'flex',
                     justifyContent: isUser ? 'flex-end' : 'flex-start',
+                    margin: '8px 0',
                     animation: 'fadeIn 0.2s ease-out',
                   }}
                 >
                   <div
                     style={{
-                      maxWidth: '80%',
-                      padding: '16px 20px',
-                      borderRadius: 12,
-                      background: isUser ? '#eff6ff' : '#ffffff',
-                      border: isUser ? '1px solid #bfdbfe' : '1px solid #e5e7eb',
-                      color: isUser ? '#1e3a8a' : '#1f2937',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                      maxWidth: '82%',
+                      padding: '20px 24px',
+                      borderRadius: rounded.lg,
+                      background: isUser ? colors.uniformGreen : colors.whiteSurface,
+                      border: isUser ? `1px solid ${colors.shadowPine}` : `1px solid ${colors.cardBorder}`,
+                      color: isUser ? '#FFFFFF' : colors.ledgerCharcoal,
+                      boxShadow: '0 2px 4px rgba(33,20,20,0.06)',
                     }}
                   >
-                    <div style={{ fontSize: '11px', color: isUser ? '#2563eb' : '#4b5563', fontWeight: 700, marginBottom: 6 }}>
+                    <div style={{ fontSize: '11px', color: isUser ? colors.cornerCalloutGold : colors.uniformGreen, fontWeight: 700, marginBottom: 10, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
                       {isUser ? 'YOU' : 'ASSISTANT'}
                     </div>
 
@@ -1167,7 +1173,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                       {message.parts && message.parts.length > 0 ? (
                         message.parts.map((part, partIdx) => {
                           if (part.type === 'text') {
-                            return <div key={partIdx}>{renderMessageContent(part.text)}</div>;
+                            return <div key={partIdx}>{renderMessageContent(part.text, isUser)}</div>;
                           }
                           if (part.type === 'reasoning') {
                             return (
@@ -1176,19 +1182,19 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                                 style={{
                                   marginTop: 6,
                                   marginBottom: 6,
-                                  background: '#f3f4f6',
-                                  padding: 8,
-                                  borderRadius: 6,
-                                  border: '1px solid #e5e7eb',
+                                  background: colors.feedBagCream,
+                                  padding: 10,
+                                  borderRadius: rounded.md,
+                                  border: `1px solid ${colors.cardBorder}`,
                                 }}
                               >
-                                <summary style={{ fontSize: 11, color: '#4b5563', cursor: 'pointer', outline: 'none' }}>
+                                <summary style={{ fontSize: 11, color: colors.mulchBrown, cursor: 'pointer', outline: 'none', fontWeight: 600 }}>
                                   Thinking Process
                                 </summary>
                                 <div
                                   style={{
                                     fontSize: 12,
-                                    color: '#6b7280',
+                                    color: colors.mulchBrown,
                                     fontStyle: 'italic',
                                     marginTop: 4,
                                     whiteSpace: 'pre-wrap',
@@ -1217,18 +1223,18 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               <div
                 style={{
                   padding: '12px 16px',
-                  borderRadius: 12,
-                  background: '#ffffff',
-                  border: '1px solid #e5e7eb',
-                  color: '#6b7280',
+                  borderRadius: rounded.md,
+                  background: colors.whiteSurface,
+                  border: `1px solid ${colors.cardBorder}`,
+                  color: colors.mulchBrown,
                   fontSize: '13px',
                   display: 'flex',
                   alignItems: 'center',
                   gap: 8,
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                  boxShadow: '0 1px 3px rgba(33,20,20,0.05)',
                 }}
               >
-                <div className="spinner-ring" style={{ width: 14, height: 14, borderWidth: 2, borderTopColor: '#2563eb' }} />
+                <div className="spinner-ring" style={{ width: 14, height: 14, borderWidth: 2, borderTopColor: colors.uniformGreen }} />
                 Assistant is thinking...
               </div>
             </div>
@@ -1239,16 +1245,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               <div
                 style={{
                   background: '#fee2e2',
-                  border: '1px solid #fca5a5',
-                  borderRadius: 8,
+                  border: `1px solid ${colors.signetBurgundy}`,
+                  borderRadius: rounded.md,
                   padding: '12px 16px',
-                  color: '#991b1b',
+                  color: colors.signetBurgundy,
                   fontSize: '13px',
                   fontWeight: 600,
                   maxWidth: 600,
                 }}
               >
-                ⚠️ Error: {error.message || 'An error occurred during response streaming.'}
+                Error: {error.message || 'An error occurred during response streaming.'}
               </div>
             </div>
           )}
@@ -1265,7 +1271,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               left: 0,
               right: 0,
               bottom: 0,
-              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              backgroundColor: 'rgba(33, 20, 20, 0.4)',
               display: 'flex',
               justifyContent: 'center',
               alignItems: 'center',
@@ -1278,30 +1284,32 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 maxWidth: '95%',
                 height: '600px',
                 maxHeight: '90%',
-                backgroundColor: '#ffffff',
-                borderRadius: '12px',
+                backgroundColor: colors.whiteSurface,
+                borderRadius: rounded.lg,
                 display: 'flex',
                 flexDirection: 'column',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)',
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.15)',
                 overflow: 'hidden',
                 animation: 'fadeIn 0.2s ease-out',
+                border: `1px solid ${colors.cardBorder}`,
               }}
             >
               {/* Modal Header */}
               <div
                 style={{
                   padding: '18px 24px',
-                  borderBottom: '1px solid #e5e7eb',
+                  borderBottom: `1px solid ${colors.cardBorder}`,
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
+                  backgroundColor: colors.whiteSurface,
                 }}
               >
                 <div>
-                  <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 800, color: '#111827' }}>
-                    📎 Attach Product Context
+                  <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 700, fontFamily: fonts.display, color: colors.ledgerCharcoal }}>
+                    Attach Product Context
                   </h3>
-                  <p style={{ margin: '2px 0 0', fontSize: '12px', color: '#6b7280' }}>
+                  <p style={{ margin: '2px 0 0', fontSize: '12px', color: colors.mulchBrown }}>
                     Search and select products to inject as conversational context for the Store Manager.
                   </p>
                 </div>
@@ -1311,12 +1319,12 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     background: 'none',
                     border: 'none',
                     fontSize: '20px',
-                    color: '#9ca3af',
+                    color: colors.mulchBrown,
                     cursor: 'pointer',
                     padding: '4px',
                   }}
-                  onMouseOver={e => e.currentTarget.style.color = '#ef4444'}
-                  onMouseOut={e => e.currentTarget.style.color = '#9ca3af'}
+                  onMouseOver={e => e.currentTarget.style.color = colors.signetBurgundy}
+                  onMouseOut={e => e.currentTarget.style.color = colors.mulchBrown}
                 >
                   ✕
                 </button>
@@ -1326,24 +1334,25 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               <div
                 style={{
                   padding: '16px 24px',
-                  borderBottom: '1px solid #e5e7eb',
-                  backgroundColor: '#f9fafb',
+                  borderBottom: `1px solid ${colors.cardBorder}`,
+                  backgroundColor: colors.feedBagCream,
                 }}
               >
                 <input
                   type="text"
                   value={modalSearchQuery}
                   onChange={e => setModalSearchQuery(e.target.value)}
-                  placeholder="🔍 Type SKU or product name to filter..."
+                  placeholder="Type SKU or product name to filter..."
                   style={{
                     width: '100%',
-                    background: '#ffffff',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '8px',
+                    background: colors.whiteSurface,
+                    border: `1px solid ${colors.cardBorder}`,
+                    borderRadius: rounded.md,
                     padding: '10px 16px',
                     fontSize: '14px',
                     outline: 'none',
                     boxSizing: 'border-box',
+                    color: colors.ledgerCharcoal,
                   }}
                   autoFocus
                 />
@@ -1355,17 +1364,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                   flex: 1,
                   overflowY: 'auto',
                   padding: '24px',
-                  background: '#f9fafb',
+                  background: colors.feedBagCream,
                 }}
               >
                 {modalLoading ? (
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                    <div className="spinner-ring" style={{ width: 32, height: 32, borderTopColor: '#2563eb', marginBottom: 12 }} />
-                    <span style={{ fontSize: '13px', color: '#6b7280' }}>Searching catalog...</span>
+                    <div className="spinner-ring" style={{ width: 32, height: 32, borderTopColor: colors.uniformGreen, marginBottom: 12 }} />
+                    <span style={{ fontSize: '13px', color: colors.mulchBrown }}>Searching catalog...</span>
                   </div>
                 ) : modalProducts.length === 0 ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#9ca3af' }}>
-                    <div style={{ fontSize: '40px', marginBottom: 8 }}>🔍</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: colors.mulchBrown }}>
                     <span style={{ fontSize: '14px', fontStyle: 'italic' }}>No matching products found</span>
                   </div>
                 ) : (
@@ -1384,17 +1392,17 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                         <div
                           key={prod.sku}
                           style={{
-                            border: isSelected ? '2px solid #2563eb' : '1px solid #e5e7eb',
-                            borderRadius: '8px',
+                            border: `1px solid ${isSelected ? colors.uniformGreen : colors.cardBorder}`,
+                            borderRadius: rounded.md,
                             padding: '12px',
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'center',
                             justifyContent: 'space-between',
                             textAlign: 'center',
-                            background: '#ffffff',
+                            background: colors.whiteSurface,
                             height: '180px',
-                            boxShadow: isSelected ? '0 4px 6px -1px rgba(37,99,235,0.1)' : '0 1px 2px rgba(0,0,0,0.05)',
+                            boxShadow: isSelected ? '0 4px 6px -1px rgba(20,83,45,0.1)' : '0 1px 2px rgba(33,20,20,0.03)',
                             transition: 'all 0.15s',
                           }}
                         >
@@ -1403,13 +1411,14 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                             style={{
                               width: '60px',
                               height: '60px',
-                              borderRadius: '6px',
-                              background: '#f3f4f6',
+                              borderRadius: rounded.sm,
+                              background: colors.feedBagCream,
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
                               marginBottom: '8px',
                               overflow: 'hidden',
+                              border: `1px solid ${colors.cardBorder}`,
                             }}
                           >
                             {imageUrl ? (
@@ -1419,7 +1428,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                                 style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                               />
                             ) : (
-                              <span style={{ fontSize: '24px' }}>📦</span>
+                              <span style={{ fontSize: '11px', color: colors.mulchBrown, fontWeight: 600 }}>NO IMAGE</span>
                             )}
                           </div>
 
@@ -1429,7 +1438,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                               style={{
                                 fontSize: '12px',
                                 fontWeight: 700,
-                                color: '#1f2937',
+                                color: colors.ledgerCharcoal,
                                 marginBottom: '2px',
                                 display: '-webkit-box',
                                 WebkitLineClamp: 2,
@@ -1440,7 +1449,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                             >
                               {prod.title}
                             </div>
-                            <div style={{ fontSize: '10px', color: '#6b7280', fontFamily: 'monospace' }}>
+                            <div style={{ fontSize: '10px', color: colors.mulchBrown, fontFamily: fonts.mono }}>
                               {prod.sku}
                             </div>
                           </div>
@@ -1451,40 +1460,18 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                             style={{
                               width: '100%',
                               padding: '6px 0',
-                              borderRadius: '6px',
-                              fontSize: '12px',
+                              borderRadius: rounded.sm,
+                              fontSize: '11px',
                               fontWeight: 600,
                               cursor: 'pointer',
                               border: '1px solid',
-                              background: isSelected ? '#dcfce7' : '#ffffff',
-                              color: isSelected ? '#15803d' : '#2563eb',
-                              borderColor: isSelected ? '#bbf7d0' : '#2563eb',
+                              background: isSelected ? colors.feedBagCream : colors.whiteSurface,
+                              color: isSelected ? colors.uniformGreen : colors.ledgerCharcoal,
+                              borderColor: isSelected ? colors.uniformGreen : colors.cardBorder,
                               transition: 'all 0.15s',
                             }}
-                            onMouseOver={e => {
-                              if (!isSelected) {
-                                e.currentTarget.style.background = '#eff6ff';
-                              } else {
-                                e.currentTarget.style.background = '#fee2e2';
-                                e.currentTarget.style.color = '#b91c1c';
-                                e.currentTarget.style.borderColor = '#fca5a5';
-                                e.currentTarget.textContent = '✕ Remove';
-                              }
-                            }}
-                            onMouseOut={e => {
-                              if (!isSelected) {
-                                e.currentTarget.style.background = '#ffffff';
-                                e.currentTarget.style.color = '#2563eb';
-                                e.currentTarget.style.borderColor = '#2563eb';
-                              } else {
-                                e.currentTarget.style.background = '#dcfce7';
-                                e.currentTarget.style.color = '#15803d';
-                                e.currentTarget.style.borderColor = '#bbf7d0';
-                                e.currentTarget.textContent = '✓ Attached';
-                              }
-                            }}
                           >
-                            {isSelected ? '✓ Attached' : '➕ Attach'}
+                            {isSelected ? '✓ Attached' : '+ Attach'}
                           </button>
                         </div>
                       );
@@ -1497,27 +1484,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               <div
                 style={{
                   padding: '14px 24px',
-                  borderTop: '1px solid #e5e7eb',
+                  borderTop: `1px solid ${colors.cardBorder}`,
                   display: 'flex',
                   justifyContent: 'flex-end',
-                  backgroundColor: '#f9fafb',
+                  backgroundColor: colors.whiteSurface,
                 }}
               >
                 <button
                   onClick={() => setShowAttachModal(false)}
-                  style={{
-                    background: '#2563eb',
-                    color: '#ffffff',
-                    border: 'none',
-                    borderRadius: '8px',
-                    padding: '10px 24px',
-                    fontSize: '14px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-                  }}
-                  onMouseOver={e => e.currentTarget.style.background = '#1d4ed8'}
-                  onMouseOut={e => e.currentTarget.style.background = '#2563eb'}
+                  className="btn btn-primary"
+                  style={{ padding: '8px 20px', fontSize: '0.8rem' }}
                 >
                   Done
                 </button>
@@ -1534,16 +1510,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               gap: 8,
               flexWrap: 'wrap',
               padding: '8px 24px',
-              background: '#f8fafc',
-              borderTop: '1px solid #e5e7eb',
+              background: colors.feedBagCream,
+              borderTop: `1px solid ${colors.cardBorder}`,
               alignItems: 'center',
             }}
           >
-            <span style={{ fontSize: '10px', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            <span style={{ fontSize: '10px', fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Context ({selectedProducts.length}/{MAX_ATTACHED_PRODUCTS}):
             </span>
             {attachmentLimitReached && (
-              <span style={{ fontSize: '10px', fontWeight: 700, color: '#b45309' }}>
+              <span style={{ fontSize: '10px', fontWeight: 700, color: colors.signetBurgundy }}>
                 ⚠ Attachment limit reached ({MAX_ATTACHED_PRODUCTS} max). Remove one before attaching more.
               </span>
             )}
@@ -1554,24 +1530,24 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: 6,
-                  background: '#eff6ff',
-                  border: '1px solid #bfdbfe',
-                  borderRadius: 6,
+                  background: colors.whiteSurface,
+                  border: `1px solid ${colors.uniformGreen}`,
+                  borderRadius: rounded.sm,
                   padding: '3px 8px',
                   fontSize: '12px',
-                  color: '#1e40af',
-                  fontWeight: 500,
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
+                  color: colors.uniformGreen,
+                  fontWeight: 600,
+                  boxShadow: '0 1px 2px rgba(33,20,20,0.02)',
                 }}
               >
-                📦 <strong>{p.sku}</strong> - {p.title.substring(0, 20)}{p.title.length > 20 ? '...' : ''}
+                <strong>{p.sku}</strong> - {p.title.substring(0, 20)}{p.title.length > 20 ? '...' : ''}
                 <button
                   type="button"
                   onClick={() => removeProductContext(p.sku)}
                   style={{
                     background: 'none',
                     border: 'none',
-                    color: '#93c5fd',
+                    color: colors.mulchBrown,
                     cursor: 'pointer',
                     fontWeight: 'bold',
                     padding: 0,
@@ -1580,8 +1556,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     display: 'flex',
                     alignItems: 'center',
                   }}
-                  onMouseOver={e => (e.currentTarget.style.color = '#ef4444')}
-                  onMouseOut={e => (e.currentTarget.style.color = '#93c5fd')}
+                  onMouseOver={e => (e.currentTarget.style.color = colors.signetBurgundy)}
+                  onMouseOut={e => (e.currentTarget.style.color = colors.mulchBrown)}
                 >
                   ✕
                 </button>
@@ -1595,8 +1571,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
           onSubmit={handleSend}
           style={{
             padding: '16px 24px',
-            background: '#ffffff',
-            borderTop: '1px solid #e5e7eb',
+            background: colors.whiteSurface,
+            borderTop: `1px solid ${colors.cardBorder}`,
             display: 'flex',
             gap: 12,
             alignItems: 'center',
@@ -1605,29 +1581,15 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
           <button
             type="button"
             onClick={() => setShowAttachModal(true)}
+            className="btn btn-outline"
             style={{
-              background: '#f3f4f6',
-              border: '1px solid #d1d5db',
-              borderRadius: 8,
-              padding: '12px 16px',
-              fontSize: '14px',
-              cursor: 'pointer',
-              fontWeight: 600,
-              color: '#4b5563',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              transition: 'all 0.2s',
-            }}
-            onMouseOver={e => {
-              e.currentTarget.style.background = '#e5e7eb';
-            }}
-            onMouseOut={e => {
-              e.currentTarget.style.background = '#f3f4f6';
+              height: '2.5rem',
+              fontSize: '0.75rem',
+              padding: '0 16px',
             }}
             title="Attach product context"
           >
-            📎 Attach Context
+            + Attach Context
           </button>
 
           <input
@@ -1644,34 +1606,28 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             disabled={status === 'submitted' || status === 'streaming' || !selectedModel}
             style={{
               flex: 1,
-              background: '#f9fafb',
-              border: '1px solid #d1d5db',
-              borderRadius: 8,
+              background: colors.feedBagCream,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: rounded.md,
               padding: '12px 16px',
-              color: '#111827',
+              color: colors.ledgerCharcoal,
               fontSize: '14px',
               outline: 'none',
               transition: 'border-color 0.2s',
             }}
-            onFocus={e => (e.currentTarget.style.borderColor = '#2563eb')}
-            onBlur={e => (e.currentTarget.style.borderColor = '#d1d5db')}
+            onFocus={e => (e.currentTarget.style.borderColor = colors.uniformGreen)}
+            onBlur={e => (e.currentTarget.style.borderColor = colors.cardBorder)}
           />
           <button
             type="submit"
             disabled={!input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel}
+            className="btn btn-primary"
             style={{
-              background: '#2563eb',
-              color: '#fff',
-              border: 'none',
-              borderRadius: 8,
-              padding: '12px 24px',
-              fontSize: '14px',
-              fontWeight: 600,
-              cursor:
-                !input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel ? 'not-allowed' : 'pointer',
-              opacity:
-                !input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel ? 0.6 : 1,
-              transition: 'background 0.2s',
+              height: '2.5rem',
+              fontSize: '0.8rem',
+              padding: '0 24px',
+              opacity: !input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel ? 0.6 : 1,
+              cursor: !input.trim() || status === 'submitted' || status === 'streaming' || !selectedModel ? 'not-allowed' : 'pointer',
             }}
           >
             Send

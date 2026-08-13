@@ -13,24 +13,25 @@ import {
   type ChangeSetItem, 
   type ValidationResult 
 } from '../api';
+import { colors, fonts, rounded, themeStyles } from '../theme';
 
 const STYLE_RULES = `
   /* Custom styled styles for the Change Sets workspace */
   .cs-manager-container {
     display: flex;
     height: calc(100vh - 57px);
-    background: #f8fafc;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: ${colors.feedBagCream};
+    font-family: ${fonts.body};
     overflow: hidden;
-    color: #334155;
+    color: ${colors.ledgerCharcoal};
   }
 
   .cs-sidebar {
     width: 320px;
     min-width: 320px;
     max-width: 320px;
-    border-right: 1px solid #e2e8f0;
-    background: #ffffff;
+    border-right: 1px solid ${colors.cardBorder};
+    background: ${colors.feedBagCream};
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -38,17 +39,18 @@ const STYLE_RULES = `
 
   .cs-sidebar-header {
     padding: 16px 20px;
-    border-bottom: 1px solid #e2e8f0;
+    border-bottom: 1px solid ${colors.cardBorder};
     display: flex;
     flex-direction: column;
     gap: 12px;
-    background: #ffffff;
+    background: ${colors.whiteSurface};
   }
 
   .cs-sidebar-title {
+    font-family: ${fonts.display};
     font-size: 16px;
     font-weight: 700;
-    color: #0f172a;
+    color: ${colors.ledgerCharcoal};
     margin: 0;
     display: flex;
     align-items: center;
@@ -64,22 +66,24 @@ const STYLE_RULES = `
   .cs-search-input {
     width: 100%;
     padding: 8px 12px 8px 32px;
-    border-radius: 8px;
-    border: 1px solid #cbd5e1;
+    border-radius: ${rounded.md};
+    border: 1px solid ${colors.cardBorder};
+    background: ${colors.whiteSurface};
+    color: ${colors.ledgerCharcoal};
     font-size: 13px;
     outline: none;
     transition: all 0.2s;
   }
 
   .cs-search-input:focus {
-    border-color: #6366f1;
-    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+    border-color: ${colors.uniformGreen};
+    box-shadow: 0 0 0 2px rgba(20, 83, 45, 0.15);
   }
 
   .cs-search-icon {
     position: absolute;
     left: 10px;
-    color: #94a3b8;
+    color: ${colors.mulchBrown};
     font-size: 14px;
     pointer-events: none;
   }
@@ -94,25 +98,24 @@ const STYLE_RULES = `
   }
 
   .cs-card {
-    padding: 12px 14px;
-    border-radius: 8px;
-    border: 1px solid #e2e8f0;
-    background: #ffffff;
+    padding: 14px 16px;
+    border-radius: ${rounded.md};
+    border: 1px solid ${colors.cardBorder};
+    background: ${colors.whiteSurface};
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
   }
 
   .cs-card:hover {
-    border-color: #cbd5e1;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-    transform: translateY(-1px);
+    border-color: ${colors.uniformGreen};
+    box-shadow: 0 2px 8px rgba(33, 20, 20, 0.04);
   }
 
   .cs-card-active {
-    background: #f5f3ff;
-    border-color: #c084fc;
-    box-shadow: 0 2px 8px rgba(139, 92, 246, 0.06);
+    background: ${colors.feedBagCream};
+    border-color: ${colors.uniformGreen};
+    box-shadow: 0 2px 8px rgba(20, 83, 45, 0.08);
   }
 
   .cs-card-active::before {
@@ -121,8 +124,8 @@ const STYLE_RULES = `
     left: 0;
     top: 12px;
     bottom: 12px;
-    width: 3px;
-    background: #8b5cf6;
+    width: 4px;
+    background: ${colors.uniformGreen};
     border-radius: 0 4px 4px 0;
   }
 
@@ -132,7 +135,7 @@ const STYLE_RULES = `
     flex-direction: column;
     height: 100%;
     overflow: hidden;
-    background: #f8fafc;
+    background: ${colors.feedBagCream};
   }
 
   .cs-empty-state {
@@ -143,42 +146,38 @@ const STYLE_RULES = `
     justify-content: center;
     text-align: center;
     padding: 40px;
-    color: #64748b;
+    color: ${colors.mulchBrown};
   }
 
   .cs-empty-icon {
     font-size: 48px;
     margin-bottom: 16px;
     opacity: 0.8;
-    animation: float 3s ease-in-out infinite;
-  }
-
-  @keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-6px); }
   }
 
   .cs-workspace-header {
     padding: 16px 24px;
-    background: #ffffff;
-    border-bottom: 1px solid #e2e8f0;
+    background: ${colors.whiteSurface};
+    border-bottom: 1px solid ${colors.cardBorder};
     display: flex;
     justify-content: space-between;
     align-items: center;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+    box-shadow: 0 1px 2px rgba(33, 20, 20, 0.03);
     z-index: 5;
   }
 
   .cs-workspace-title {
+    font-family: ${fonts.display};
     font-size: 18px;
     font-weight: 700;
-    color: #0f172a;
+    color: ${colors.ledgerCharcoal};
     margin: 0 0 4px 0;
   }
 
   .cs-workspace-meta {
     font-size: 12px;
-    color: #64748b;
+    color: ${colors.mulchBrown};
+    font-family: ${fonts.mono};
     display: flex;
     align-items: center;
     gap: 12px;
@@ -200,25 +199,25 @@ const STYLE_RULES = `
     width: 280px;
     min-width: 280px;
     max-width: 280px;
-    background: #ffffff;
-    border-right: 1px solid #e2e8f0;
+    background: ${colors.whiteSurface};
+    border-right: 1px solid ${colors.cardBorder};
     display: flex;
     flex-direction: column;
     height: 100%;
   }
 
   .cs-items-sidebar-header {
-    padding: 12px 16px;
-    border-bottom: 1px solid #e2e8f0;
+    padding: 14px 16px;
+    border-bottom: 1px solid ${colors.cardBorder};
     display: flex;
     flex-direction: column;
     gap: 8px;
   }
 
   .cs-items-sidebar-title {
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
-    color: #64748b;
+    color: ${colors.mulchBrown};
     margin: 0;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -230,14 +229,14 @@ const STYLE_RULES = `
     padding: 8px;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
   }
 
   .cs-item-row {
     padding: 10px 12px;
-    border-radius: 6px;
-    border: 1px solid #f1f5f9;
-    background: #ffffff;
+    border-radius: ${rounded.sm};
+    border: 1px solid ${colors.cardBorder};
+    background: ${colors.whiteSurface};
     cursor: pointer;
     transition: all 0.15s ease;
     display: flex;
@@ -247,133 +246,134 @@ const STYLE_RULES = `
   }
 
   .cs-item-row:hover {
-    background: #f8fafc;
-    border-color: #cbd5e1;
+    background: ${colors.feedBagCream};
+    border-color: ${colors.cardBorder};
   }
 
   .cs-item-row-active {
-    background: #eff6ff;
-    border-color: #93c5fd;
+    background: ${colors.feedBagCream};
+    border-color: ${colors.uniformGreen};
   }
 
   .cs-detail-panel {
     flex: 1;
     overflow-y: auto;
-    background: #f8fafc;
-    padding: 20px 24px;
+    background: ${colors.feedBagCream};
+    padding: 24px;
     display: flex;
     flex-direction: column;
     gap: 16px;
   }
 
   .cs-detail-card {
-    background: #ffffff;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 20px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+    background: ${colors.whiteSurface};
+    border: 1px solid ${colors.cardBorder};
+    border-radius: ${rounded.lg};
+    padding: 24px;
+    box-shadow: 0 1px 3px rgba(33, 20, 20, 0.04);
   }
 
   .cs-status-badge {
     display: inline-flex;
     align-items: center;
-    padding: 2px 8px;
-    border-radius: 9999px;
+    padding: 3px 8px;
+    border-radius: ${rounded.sm};
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
 
-  .cs-status-draft { background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
-  .cs-status-approved { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
-  .cs-status-pushed { background: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe; }
-  .cs-status-discarded { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
+  .cs-status-draft { background: ${colors.cornerCalloutGold}; color: ${colors.ledgerCharcoal}; border: 1px solid ${colors.mutedGold}; }
+  .cs-status-approved { background: ${colors.seedlingGreen}; color: #ffffff; border: 1px solid ${colors.seedlingGreen}; }
+  .cs-status-pushed { background: ${colors.uniformGreen}; color: #ffffff; border: 1px solid ${colors.shadowPine}; }
+  .cs-status-discarded { background: ${colors.mulchBrown}; color: #ffffff; border: 1px solid ${colors.mulchBrown}; }
 
   .cs-op-pill {
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: ${rounded.xs};
     font-size: 9px;
     font-weight: 700;
     text-transform: uppercase;
   }
-  .cs-op-create { background: #d1fae5; color: #065f46; }
-  .cs-op-update { background: #fffbeb; color: #b45309; }
-  .cs-op-archive { background: #ffe4e6; color: #9f1239; }
-  .cs-op-delete { background: #ffe4e6; color: #9f1239; }
+  .cs-op-create { background: ${colors.feedBagCream}; color: ${colors.seedlingGreen}; border: 1px solid ${colors.seedlingGreen}; }
+  .cs-op-update { background: ${colors.feedBagCream}; color: ${colors.uniformGreen}; border: 1px solid ${colors.uniformGreen}; }
+  .cs-op-archive { background: #fee2e2; color: ${colors.signetBurgundy}; border: 1px solid ${colors.signetBurgundy}; }
+  .cs-op-delete { background: #fee2e2; color: ${colors.signetBurgundy}; border: 1px solid ${colors.signetBurgundy}; }
 
   .cs-button {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 8px 14px;
-    font-size: 13px;
+    padding: 8px 16px;
+    font-size: 12px;
     font-weight: 600;
-    border-radius: 6px;
+    border-radius: ${rounded.sm};
     border: 1px solid transparent;
     cursor: pointer;
     transition: all 0.2s;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-family: ${fonts.body};
   }
 
   .cs-button:disabled {
-    opacity: 0.65;
+    opacity: 0.6;
     cursor: not-allowed;
   }
 
   .cs-btn-primary {
-    background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
-    color: #ffffff;
+    background: ${colors.uniformGreen};
+    color: ${colors.feedBagCream};
+    border: 1px solid ${colors.shadowPine};
   }
   .cs-btn-primary:hover:not(:disabled) {
-    box-shadow: 0 4px 10px rgba(79, 70, 229, 0.2);
-    transform: translateY(-1px);
+    background: ${colors.shadowPine};
   }
 
   .cs-btn-success {
-    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    background: ${colors.seedlingGreen};
     color: #ffffff;
   }
   .cs-btn-success:hover:not(:disabled) {
-    box-shadow: 0 4px 10px rgba(16, 185, 129, 0.2);
-    transform: translateY(-1px);
+    background: ${colors.uniformGreen};
   }
 
   .cs-btn-danger {
-    background: linear-gradient(135deg, #f43f5e 0%, #e11d48 100%);
-    color: #ffffff;
+    background: ${colors.signetBurgundy};
+    color: ${colors.feedBagCream};
+    border: 1px solid ${colors.burgundyDark};
   }
   .cs-btn-danger:hover:not(:disabled) {
-    box-shadow: 0 4px 10px rgba(244, 63, 94, 0.2);
-    transform: translateY(-1px);
+    background: ${colors.burgundyDark};
   }
 
   .cs-btn-secondary {
-    background: #ffffff;
-    color: #334155;
-    border: 1px solid #cbd5e1;
+    background: ${colors.whiteSurface};
+    color: ${colors.ledgerCharcoal};
+    border: 1px solid ${colors.cardBorder};
   }
   .cs-btn-secondary:hover:not(:disabled) {
-    background: #f8fafc;
-    border-color: #94a3b8;
+    background: ${colors.feedBagCream};
+    border-color: ${colors.uniformGreen};
   }
 
   .cs-btn-warning {
-    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-    color: #ffffff;
+    background: ${colors.cornerCalloutGold};
+    color: ${colors.ledgerCharcoal};
+    border: 1px solid ${colors.mutedGold};
   }
   .cs-btn-warning:hover:not(:disabled) {
-    box-shadow: 0 4px 10px rgba(245, 158, 11, 0.2);
-    transform: translateY(-1px);
+    background: ${colors.mutedGold};
   }
 
   .cs-btn-purple {
-    background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
-    color: #ffffff;
+    background: ${colors.uniformGreen};
+    color: ${colors.feedBagCream};
+    border: 1px solid ${colors.shadowPine};
   }
   .cs-btn-purple:hover:not(:disabled) {
-    box-shadow: 0 4px 10px rgba(139, 92, 246, 0.2);
-    transform: translateY(-1px);
+    background: ${colors.shadowPine};
   }
 
   .spinner-sm {
@@ -386,7 +386,7 @@ const STYLE_RULES = `
     animation: spin 0.8s linear infinite;
   }
   .spinner-secondary {
-    border-top-color: #6366f1;
+    border-top-color: ${colors.uniformGreen};
     border-right-color: transparent;
   }
 
@@ -396,52 +396,47 @@ const STYLE_RULES = `
 
   .cs-banner {
     padding: 12px 16px;
-    border-radius: 8px;
+    border-radius: ${rounded.md};
     display: flex;
     flex-direction: column;
     gap: 6px;
     border: 1px solid transparent;
     font-size: 13px;
   }
-  
-  .cs-banner-title {
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
 
-  .cs-banner-success { background: #f0fdf4; border-color: #bbf7d0; color: #15803d; }
-  .cs-banner-warning { background: #fffbeb; border-color: #fde68a; color: #b45309; }
-  .cs-banner-error { background: #fff1f2; border-color: #fecdd3; color: #be123c; }
+  .cs-banner-success { background: ${colors.feedBagCream}; border-color: ${colors.seedlingGreen}; color: ${colors.uniformGreen}; }
+  .cs-banner-warning { background: ${colors.feedBagCream}; border-color: ${colors.mutedGold}; color: ${colors.ledgerCharcoal}; }
+  .cs-banner-error { background: #fee2e2; border-color: ${colors.signetBurgundy}; color: ${colors.signetBurgundy}; }
 
   .cs-tabs-bar {
     display: flex;
     gap: 16px;
-    border-bottom: 2px solid #e2e8f0;
+    border-bottom: 2px solid ${colors.cardBorder};
     margin-bottom: 16px;
   }
 
   .cs-tab-button {
     background: none;
     border: none;
-    padding: 8px 4px;
+    padding: 10px 4px;
     font-size: 13px;
     font-weight: 600;
-    color: #64748b;
+    color: ${colors.mulchBrown};
     cursor: pointer;
     border-bottom: 2px solid transparent;
     margin-bottom: -2px;
     transition: all 0.2s;
+    font-family: ${fonts.body};
   }
 
   .cs-tab-button:hover {
-    color: #0f172a;
+    color: ${colors.ledgerCharcoal};
   }
 
   .cs-tab-button-active {
-    color: #4f46e5;
-    border-bottom-color: #4f46e5;
+    color: ${colors.uniformGreen};
+    border-bottom-color: ${colors.uniformGreen};
+    font-weight: 700;
   }
 
   .cs-table-diff {
@@ -452,47 +447,49 @@ const STYLE_RULES = `
 
   .cs-table-diff th {
     padding: 10px 12px;
-    background: #f8fafc;
-    border-bottom: 2px solid #e2e8f0;
-    font-weight: 600;
-    color: #475569;
+    background: ${colors.feedBagCream};
+    border-bottom: 2px solid ${colors.cardBorder};
+    font-weight: 700;
+    color: ${colors.ledgerCharcoal};
     text-align: left;
+    font-family: ${fonts.body};
   }
 
   .cs-table-diff td {
     padding: 10px 12px;
-    border-bottom: 1px solid #f1f5f9;
+    border-bottom: 1px solid ${colors.cardBorder};
     vertical-align: top;
   }
 
   .cs-table-diff tr:hover {
-    background: #fafafb;
+    background: ${colors.feedBagCream};
   }
 
   .diff-path {
-    font-family: monospace;
+    font-family: ${fonts.mono};
     font-weight: 600;
-    color: #475569;
+    color: ${colors.ledgerCharcoal};
     word-break: break-all;
   }
 
   .diff-val-removed {
-    background: #ffe4e6;
-    color: #9f1239;
+    background: #fee2e2;
+    color: ${colors.signetBurgundy};
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: ${rounded.xs};
     text-decoration: line-through;
-    font-family: monospace;
+    font-family: ${fonts.mono};
     display: inline-block;
     word-break: break-all;
   }
 
   .diff-val-added {
-    background: #d1fae5;
-    color: #065f46;
+    background: ${colors.feedBagCream};
+    color: ${colors.seedlingGreen};
+    border: 1px solid ${colors.seedlingGreen};
     padding: 2px 6px;
-    border-radius: 4px;
-    font-family: monospace;
+    border-radius: ${rounded.xs};
+    font-family: ${fonts.mono};
     display: inline-block;
     word-break: break-all;
   }
@@ -514,17 +511,17 @@ const STYLE_RULES = `
     flex: 1;
     display: flex;
     flex-direction: column;
-    border: 1px solid #e2e8f0;
-    border-radius: 8px;
-    background: #0f172a;
+    border: 1px solid ${colors.cardBorder};
+    border-radius: ${rounded.md};
+    background: ${colors.ledgerCharcoal};
     overflow: hidden;
   }
 
   .cs-json-split-col-header {
-    background: #1e293b;
-    border-bottom: 1px solid #334155;
+    background: ${colors.shadowPine};
+    border-bottom: 1px solid ${colors.uniformGreen};
     padding: 8px 16px;
-    color: #94a3b8;
+    color: ${colors.feedBagCream};
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
@@ -536,10 +533,10 @@ const STYLE_RULES = `
     margin: 0;
     padding: 16px;
     overflow: auto;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: ${fonts.mono};
     font-size: 12px;
     line-height: 1.5;
-    color: #cbd5e1;
+    color: ${colors.feedBagCream};
   }
 
   .cs-item-empty {
