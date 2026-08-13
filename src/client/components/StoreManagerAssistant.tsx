@@ -28,14 +28,7 @@ interface ModelOption {
 
 const MODEL_OPTIONS: ModelOption[] = [
   {
-    id: 'gemma4:12b-mlx',
-    name: 'Gemma 4 12B (Local)',
-    provider: 'Ollama',
-    pricing: 'Free (Local)',
-    desc: 'Runs entirely on your computer via Ollama. Strong local model with parallel tool calling.',
-  },
-  {
-    id: 'deepseek-v4-flash',
+    id: 'deepseek-chat',
     name: 'DeepSeek-V4 Flash',
     provider: 'DeepSeek',
     pricing: '$0.14 / 1M Input, $0.28 / 1M Output',
@@ -47,6 +40,20 @@ const MODEL_OPTIONS: ModelOption[] = [
     provider: 'OpenAI',
     pricing: '$0.15 / 1M Input, $0.60 / 1M Output',
     desc: 'Very fast, low-cost model with high quality across common tasks.',
+  },
+  {
+    id: 'gpt-4o',
+    name: 'GPT-4o',
+    provider: 'OpenAI',
+    pricing: '$2.50 / 1M Input, $10.00 / 1M Output',
+    desc: 'Highly capable reasoning model for complex structuring and logic.',
+  },
+  {
+    id: 'llama3',
+    name: 'Llama 3 (Local)',
+    provider: 'Ollama',
+    pricing: 'Free (Local)',
+    desc: 'Runs entirely on your computer. Requires local Ollama service.',
   },
 ];
 
@@ -63,7 +70,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   
   // Model selection state
   const [selectedModel, setSelectedModel] = useState<string>(() => {
-    // Default to the local Gemma 4 12B model (first option)
+    // Default to the first option
     return MODEL_OPTIONS[0].id;
   });
 

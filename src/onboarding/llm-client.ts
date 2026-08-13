@@ -83,7 +83,7 @@ const DEFAULT_BASE_URLS: Record<LlmProvider, string> = {
 const DEFAULT_MODELS: Record<LlmProvider, string> = {
   deepseek: 'deepseek-v4-flash',
   openai: 'gpt-4o-mini',
-  ollama: 'gemma4:12b-mlx',
+  ollama: 'llama3',
 };
 
 /**
