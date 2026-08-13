@@ -611,6 +611,12 @@ export async function saveCurationTargets(
   });
 }
 
+export async function syncClassificationSeed(): Promise<CurationTargetsResponse & { success: boolean }> {
+  return classificationRequest<CurationTargetsResponse & { success: boolean }>('/sync-seed', {
+    method: 'POST',
+  });
+}
+
 export interface AttributeProfileEditInput {
   attributeId: string;
   included: boolean;

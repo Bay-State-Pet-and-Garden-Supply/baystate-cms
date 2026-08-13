@@ -8,6 +8,7 @@ import {
   getOpenaiModels,
   getCurationTargets,
   saveCurationTargets,
+  syncClassificationSeed,
   updateAttributeProfile,
   updateClassificationAttribute,
   getClassificationReadiness,
@@ -346,6 +347,23 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       fetchData();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const [syncingSeed, setSyncingSeed] = useState(false);
+
+  const handleSyncSeed = async () => {
+    if (!confirm('Sync latest taxonomy seed (60+ Product Types across 10 Departments) into your workspace?')) return;
+    setSyncingSeed(true);
+    setError('');
+    try {
+      const res = await syncClassificationSeed();
+      setCurationTargetState(res);
+      alert(`Taxonomy seed synchronized! ${res.candidates.productTypes.length} Product Types active.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncingSeed(false);
     }
   };
 
@@ -750,6 +768,26 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
             }}
           >
             By Product Type
+          </button>
+
+          <button
+            type="button"
+            disabled={syncingSeed}
+            style={{
+              padding: '6px 14px',
+              borderRadius: 6,
+              fontSize: 13,
+              fontWeight: 600,
+              border: '1px solid #d1d5db',
+              cursor: syncingSeed ? 'not-allowed' : 'pointer',
+              background: '#ffffff',
+              color: '#374151',
+              marginLeft: 'auto',
+            }}
+            onClick={handleSyncSeed}
+            title="Synchronize the latest 60+ product types & taxonomy seed into active workspace"
+          >
+            {syncingSeed ? 'Syncing Taxonomy…' : '🔄 Sync Seed Taxonomy'}
           </button>
         </div>
 

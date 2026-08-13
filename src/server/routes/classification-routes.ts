@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { loadClassificationConfig, saveClassificationConfig, loadRuntimeConfig, createRuntimeActivationContext, loadRuntimeConfigAuthority } from '../../classification/config-loader';
 import { migrateLegacyToClassificationConfig } from '../../classification/legacy-migration';
+import { syncSeedToWorkspace } from '../../classification/seed-sync';
 import { applyFieldMappingEdits, FieldMappingEditError, FieldMappingEditSchema } from '../../classification/field-mapping-editor';
 import { applyAttributeProfileEdits, AttributeProfileEditError, AttributeProfileEditsPayloadSchema } from '../../classification/attribute-profile-editor';
 import { applyCurationTargetEdits, CurationTargetEditError } from '../../classification/curation-target-editor';
@@ -384,6 +385,40 @@ router.post('/classification/migrate-legacy', (c) => {
     });
   } catch (err) {
     console.error('[ClassificationRoutes] Migration failed:', err);
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * POST /api/classification/sync-seed
+ * Synchronizes the approved seed taxonomy (BayStatePetGardenSeed) into the active
+ * workspace's store/classification/ bundle directory and updates the SQLite runtime cache.
+ */
+router.post('/classification/sync-seed', async (c) => {
+  const ws = getCurrentWorkspace();
+  if (!ws) {
+    return c.json({ error: 'No active workspace' }, 400);
+  }
+
+  try {
+    const config = await syncSeedToWorkspace(ws.workspacePath, ws.id);
+    const { applicability, findings } = deriveCurationApplicability(config);
+    const candidates = listCurationTargetCandidates(ws.id, config);
+
+    return c.json({
+      success: true,
+      summary: {
+        productTypes: config.productTypes.length,
+        attributes: config.attributes.length,
+        attributeProfiles: config.attributeProfiles.length,
+        attributeMappings: config.attributeMappings.length,
+      },
+      candidates,
+      applicability,
+      findings,
+    });
+  } catch (err) {
+    console.error('[ClassificationRoutes] Seed sync failed:', err);
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
