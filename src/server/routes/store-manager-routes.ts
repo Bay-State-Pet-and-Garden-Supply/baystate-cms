@@ -121,7 +121,20 @@ import {
   StoreManagerBulkReviewPreviewRequestSchema,
   StoreManagerBulkReviewDenyRequestSchema,
 } from '../../shared/schemas/store-manager-bulk-review';
-import { getStoreManagerFlags } from '../../store-manager/flags';
+import { getStoreManagerFlags, DEFAULT_STORE_MANAGER_FLAGS } from '../../store-manager/flags';
+import {
+  pruneStoreManagerRetention,
+} from '../../db/store-manager-operations-migration';
+
+/** Route-local strict contract for the retention prune endpoint (Issue 9). */
+const StoreManagerRetentionRequestSchema = z
+  .object({
+    runDetailCutoffDays: z.number().int().min(1).max(3650).optional(),
+    resolvedInboxCutoffDays: z.number().int().min(1).max(3650).optional(),
+    notificationCutoffDays: z.number().int().min(1).max(3650).optional(),
+    maxSessions: z.number().int().min(1).max(5000).optional(),
+  })
+  .strict();
 import {
   createPlaybookFromTemplate,
   listPlaybooks,
@@ -640,6 +653,10 @@ route.post('/store-manager/commands/compile', async (c) => {
 route.post('/store-manager/commands/execute', async (c) => {
   const workspace = getCurrentWorkspace();
   if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'New Store Manager command runs are disabled by the kill switch.' }, 409);
+  }
   const body = await c.req.json().catch(() => ({}));
   const parsed = StoreManagerCommandExecuteRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -1752,6 +1769,55 @@ route.post('/store-manager/bulk-review/batches/:id/deny', async (c) => {
       return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'not_found' ? 404 : 400);
     }
     return c.json({ ok: false, errorCode: 'bulk_deny_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Deny failed.' }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Operations console (Issue 9): console state + retention
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/store-manager/console/state
+ * Server-owned operations-console state for the UI: effective flags plus the
+ * documented defaults. No secrets, no workspace data, no mutation. Reads are
+ * ALWAYS available (including during the kill switch) so the console can show
+ * honest disabled/kill-switch states instead of guessing.
+ */
+route.get('/store-manager/console/state', (c) => {
+  const flags = getStoreManagerFlags();
+  return c.json({ ok: true, flags, defaults: DEFAULT_STORE_MANAGER_FLAGS });
+});
+
+/**
+ * POST /api/store-manager/retention/prune
+ * Workspace-scoped retention pruning (run events/artifacts, resolved Inbox
+ * items, notifications). Refuses under the kill switch so history stays fully
+ * inspectable while new runs are frozen. Bounded, transactional, idempotent;
+ * decision/audit lineage and ai_model_calls rows are never touched. Auth is
+ * the global mutating-request token check in app.ts.
+ */
+route.post('/store-manager/retention/prune', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Retention pruning is paused by the kill switch so history remains inspectable.' }, 409);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerRetentionRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid retention request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = pruneStoreManagerRetention(workspace.id, {
+      runDetailCutoffDays: parsed.data.runDetailCutoffDays,
+      resolvedInboxCutoffDays: parsed.data.resolvedInboxCutoffDays,
+      notificationCutoffDays: parsed.data.notificationCutoffDays,
+      maxSessions: parsed.data.maxSessions,
+    });
+    return c.json({ ok: true, result });
+  } catch (err) {
+    return c.json({ ok: false, errorCode: 'retention_prune_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Retention prune failed.' }, 400);
   }
 });
 

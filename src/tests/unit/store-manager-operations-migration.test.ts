@@ -5,6 +5,7 @@ import { runMigrations } from '../../db/migrations';
 import {
   runStoreManagerOperationsMigration,
   ensureStoreManagerOperationsSchema,
+  pruneStoreManagerRetention,
   STORE_MANAGER_OPERATIONS_MARKER,
   STORE_MANAGER_OPERATIONS_SCHEMA_VERSION,
 } from '../../db/store-manager-operations-migration';
@@ -318,6 +319,114 @@ describe('Store Manager operations schema migration (Issue 1)', () => {
     const occDdl = getDb().query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_schedule_occurrences'").get() as { sql: string };
     expect(occDdl.sql).toMatch(/UNIQUE \(workspace_id, occurrence_key\)/);
   });
+
+  it('pruneStoreManagerRetention prunes only stale derived rows and preserves audit/telemetry lineage (Issue 9)', () => {
+    const db = getDb();
+    const now = new Date('2026-06-01T00:00:00.000Z');
+    const oldIso = '2026-01-01T00:00:00.000Z';
+    const freshIso = '2026-05-01T00:00:00.000Z';
+
+    // Seed two terminal sessions: one stale (workspace ws-a) and one fresh (ws-b).
+    for (const [id, ws, at] of [
+      ['run-old', 'ws-a', oldIso],
+      ['run-fresh', 'ws-b', freshIso],
+      ['run-active', 'ws-a', oldIso],
+    ] as const) {
+      const status = id === 'run-active' ? 'active' : 'terminal';
+      db.query(
+        `INSERT INTO store_manager_sessions (id, workspace_id, turn_id, execution_id, policy_hash, policy_version, resolved_provider, resolved_model, resolved_locality, resolution_reason, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, 'p', 'm', 'cloud', 'explicit', ?, ?, ?)`,
+      ).run(id, ws, `turn-${id}`, `exec-${id}`, 'b'.repeat(64), status, at, at);
+      db.query(
+        `INSERT INTO store_manager_events (id, workspace_id, session_id, turn_id, event_type, event_version, payload_json, created_at)
+         VALUES (?, ?, ?, ?, 'turn_started', 1, '{}', ?)`,
+      ).run(`ev-${id}`, ws, id, `turn-${id}`, at);
+      db.query(
+        `INSERT INTO store_manager_run_artifacts (id, workspace_id, run_id, kind, schema_version, content_json, content_hash, created_at)
+         VALUES (?, ?, ?, 'report', 1, '{}', ?, ?)`,
+      ).run(`art-${id}`, ws, id, 'c'.repeat(64), at);
+    }
+
+    // Resolved inbox item (stale) + open inbox item (stale but not resolved -> kept).
+    db.query(
+      `INSERT INTO store_manager_inbox_items (id, workspace_id, kind, dedupe_key, severity, title, summary, scope_json, source_refs_json, fingerprint, source_updated_at, lifecycle, first_seen_at, last_seen_at, created_at, updated_at)
+       VALUES ('inbox-resolved', 'ws-a', 'proposals_awaiting_review', 'k1', 'medium', 't', 's', '{}', '[]', 'fp1', ?, 'resolved', ?, ?, ?, ?)`,
+    ).run(freshIso, oldIso, oldIso, oldIso, oldIso);
+    db.query(
+      `INSERT INTO store_manager_inbox_items (id, workspace_id, kind, dedupe_key, severity, title, summary, scope_json, source_refs_json, fingerprint, source_updated_at, lifecycle, first_seen_at, last_seen_at, created_at, updated_at)
+       VALUES ('inbox-open', 'ws-a', 'proposals_awaiting_review', 'k2', 'medium', 't', 's', '{}', '[]', 'fp2', ?, 'open', ?, ?, ?, ?)`,
+    ).run(freshIso, oldIso, oldIso, oldIso, oldIso);
+
+    // Old + fresh notifications.
+    db.query(
+      `INSERT INTO store_manager_notifications (id, workspace_id, rule_id, rule_kind, rule_version, fingerprint, severity, title, message, sequence, created_at)
+       VALUES ('notif-old', 'ws-a', 'r1', 'proposal_backlog', 1, 'f1', 'medium', 't', 'm', 1, ?)`,
+    ).run(oldIso);
+    db.query(
+      `INSERT INTO store_manager_notifications (id, workspace_id, rule_id, rule_kind, rule_version, fingerprint, severity, title, message, sequence, created_at)
+       VALUES ('notif-fresh', 'ws-b', 'r1', 'proposal_backlog', 1, 'f2', 'medium', 't', 'm', 2, ?)`,
+    ).run(freshIso);
+
+    // Audit lineage that must survive: a review decision row.
+    db.query(
+      `INSERT INTO store_manager_review_decisions (id, workspace_id, proposal_id, field, decision, actor, run_id, created_at)
+       VALUES ('decision-1', 'ws-a', 'p1', 'ProductField24', 'dismiss', 'operator', 'run-old', ?)`,
+    ).run(oldIso);
+
+    const result = pruneStoreManagerRetention('ws-a', {
+      runDetailCutoffDays: 90,
+      resolvedInboxCutoffDays: 90,
+      notificationCutoffDays: 30,
+      maxSessions: 100,
+      now: () => now,
+    });
+
+    // Stale terminal session's events/artifacts pruned; active session untouched.
+    expect(result.prunedSessions).toBe(1);
+    expect(result.prunedEvents).toBe(1);
+    expect(result.prunedArtifacts).toBe(1);
+    // Resolved inbox pruned; open inbox kept (no lifecycle authority for a prune).
+    expect(result.prunedInboxItems).toBe(1);
+    expect(db.query("SELECT id FROM store_manager_inbox_items WHERE id = 'inbox-open'").get()).toBeTruthy();
+    // Old notification pruned; ws-b untouched entirely.
+    expect(result.prunedNotifications).toBe(1);
+    expect(db.query("SELECT id FROM store_manager_notifications WHERE id = 'notif-fresh'").get()).toBeTruthy();
+    // Session row retained (audit lineage) + decision row retained + telemetry intact.
+    expect(db.query("SELECT id FROM store_manager_sessions WHERE id = 'run-old'").get()).toBeTruthy();
+    expect(db.query("SELECT id FROM store_manager_review_decisions WHERE id = 'decision-1'").get()).toBeTruthy();
+    expect(result.retainedDecisionRows).toBe(1);
+    expect(result.aiModelCallsIntact).toBeGreaterThanOrEqual(0);
+    // ws-b entirely untouched.
+    expect(db.query("SELECT id FROM store_manager_events WHERE session_id = 'run-fresh'").get()).toBeTruthy();
+    expect(db.query("SELECT id FROM store_manager_run_artifacts WHERE run_id = 'run-fresh'").get()).toBeTruthy();
+
+    // Idempotent: a second run prunes nothing new.
+    const second = pruneStoreManagerRetention('ws-a', {
+      runDetailCutoffDays: 90,
+      resolvedInboxCutoffDays: 90,
+      notificationCutoffDays: 30,
+      maxSessions: 100,
+      now: () => now,
+    });
+    expect(second.prunedSessions).toBe(0);
+    expect(second.prunedEvents).toBe(0);
+    expect(second.prunedArtifacts).toBe(0);
+    expect(second.prunedInboxItems).toBe(0);
+    expect(second.prunedNotifications).toBe(0);
+  });
+
+  it('pruneStoreManagerRetention rolls the whole batch back when a table is missing (Issue 9)', () => {
+    // A fresh DB without the operations migration: pruning must roll back and
+    // rethrow rather than leave a partial delete.
+    const db = getDb();
+    const before = Number((db.query('SELECT COUNT(*) AS c FROM store_manager_sessions').get() as { c: number }).c);
+    const run = () =>
+      pruneStoreManagerRetention('does-not-exist', { now: () => new Date('2026-06-01T00:00:00.000Z') });
+    // Not found: no rows to prune, idempotent no-op, no throw.
+    expect(() => run()).not.toThrow();
+    const after = Number((db.query('SELECT COUNT(*) AS c FROM store_manager_sessions').get() as { c: number }).c);
+    expect(after).toBe(before);
+  });
 });
 
 describe('Store Manager operations migration — upgrade path (Issue 1)', () => {
@@ -397,4 +506,6 @@ describe('Store Manager operations migration — upgrade path (Issue 1)', () => 
     try { unlinkSync(`${upgradeDbPath}-shm`); } catch { /* ok */ }
     try { unlinkSync(`${upgradeDbPath}-wal`); } catch { /* ok */ }
   });
+
+
 });

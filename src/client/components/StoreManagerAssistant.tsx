@@ -7,10 +7,12 @@ import {
   fetchStoreManagerCommands,
   executeStoreManagerCommand,
   resolveStoreManagerScope,
+  fetchStoreManagerConsoleState,
   type StoreManagerModelDescriptor,
   type StoreManagerCommandDescriptor,
   type StoreManagerPinnedScope,
   type StoreManagerResolvedScope,
+  type StoreManagerConsoleFlags,
 } from '../store-manager-api';
 import {
   approvalCardCopy,
@@ -25,11 +27,14 @@ import { PreferencesPanel } from './store-manager/PreferencesPanel';
 import { ManagerInbox } from './store-manager/ManagerInbox';
 import { NotificationCenter } from './store-manager/NotificationCenter';
 import { SchedulesPanel } from './store-manager/SchedulesPanel';
+import { TriggersPanel } from './store-manager/TriggersPanel';
 import { PlaybooksPanel } from './store-manager/PlaybooksPanel';
 import { BulkReviewPanel } from './store-manager/BulkReviewPanel';
 import { RunHistory } from './store-manager/RunHistory';
 import { RunInspector } from './store-manager/RunInspector';
 import { RunComparison } from './store-manager/RunComparison';
+import { OperationsConsole } from './store-manager/OperationsConsole';
+import { OperationsNav, type OperationsViewId, type OperationsViewDescriptor } from './store-manager/OperationsNav';
 import { useStoreManagerEvents } from '../hooks/useStoreManagerEvents';
 import { colors, fonts, rounded, themeStyles } from '../theme';
 import { ViewHeader } from './common/ViewHeader';
@@ -52,6 +57,29 @@ interface SelectedProduct {
 
 /** Server-enforced attachment limit (mirrors MAX_ATTACHED_SKUS in store-manager-context.ts). */
 const MAX_ATTACHED_PRODUCTS = 10;
+
+/** Conservative client-side default: every console surface inert until the server says otherwise. */
+const ALL_FLAGS_OFF: StoreManagerConsoleFlags = {
+  operationsConsoleEnabled: false,
+  schedulesEnabled: false,
+  eventTriggersEnabled: false,
+  playbooksEnabled: false,
+  bulkReviewEnabled: false,
+  notificationsEnabled: false,
+  killSwitch: false,
+};
+
+/** Server-owned console views (labels/icons are presentation only — capability is server-gated). */
+const CONSOLE_VIEWS: OperationsViewDescriptor[] = [
+  { id: 'chat', label: 'Chat', icon: '💬' },
+  { id: 'inbox', label: 'Inbox', icon: '📥' },
+  { id: 'schedules', label: 'Schedules', icon: '⏰' },
+  { id: 'triggers', label: 'Triggers', icon: '⚡' },
+  { id: 'playbooks', label: 'Playbooks', icon: '📋' },
+  { id: 'bulk', label: 'Bulk Review', icon: '📦' },
+  { id: 'history', label: 'History', icon: '🕘' },
+  { id: 'preferences', label: 'Preferences', icon: '⚙' },
+];
 
 const generateUuid = () =>
   typeof crypto !== 'undefined' && crypto.randomUUID
@@ -76,12 +104,9 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [pinnedScope, setPinnedScope] = useState<StoreManagerResolvedScope | null>(null);
   const [scopeBusy, setScopeBusy] = useState(false);
   const [scopeError, setScopeError] = useState<string | null>(null);
-  const [showPreferences, setShowPreferences] = useState(false);
-  const [showInbox, setShowInbox] = useState(false);
-  const [showSchedules, setShowSchedules] = useState(false);
-  const [showPlaybooks, setShowPlaybooks] = useState(false);
-  const [showBulkReview, setShowBulkReview] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
+  // Operations console (Issue 9): server-owned console state + navigation.
+  const [consoleFlags, setConsoleFlags] = useState<StoreManagerConsoleFlags>(ALL_FLAGS_OFF);
+  const [activeView, setActiveView] = useState<OperationsViewId>('chat');
   const [inspectedRunId, setInspectedRunId] = useState<string | null>(null);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
   const { notifications, status: eventStatus } = useStoreManagerEvents();
@@ -154,6 +179,24 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
       })
       .catch(() => {
         if (!cancelled) setCommands([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load the server-owned operations-console state (Issue 9): effective
+  // flags + defaults. Reads stay available under the kill switch; the UI
+  // only disables run-producing views. Failing to load keeps the ALL-OFF
+  // defaults so the console never shows enabled surfaces by accident.
+  useEffect(() => {
+    let cancelled = false;
+    fetchStoreManagerConsoleState()
+      .then((state) => {
+        if (!cancelled) setConsoleFlags(state.flags);
+      })
+      .catch(() => {
+        if (!cancelled) setConsoleFlags(ALL_FLAGS_OFF);
       });
     return () => {
       cancelled = true;
@@ -1395,8 +1438,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             </div>
           </div>
 
-          {/* Operations console (Issue 2): pinned scope + explicit preferences */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* Operations console (Issue 9): accessible nav (deep-linked views) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <ScopePin
               scope={pinnedScope}
               onPin={handlePinScope}
@@ -1404,66 +1447,14 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               error={scopeError}
               busy={scopeBusy}
             />
-            <button
-              type="button"
-              onClick={() => setShowInbox(v => !v)}
-              aria-expanded={showInbox}
-              className="btn btn-outline"
-              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
-              title="Manager Inbox — deterministic triage queue"
-            >
-              📥 Inbox
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowSchedules(v => !v)}
-              aria-expanded={showSchedules}
-              className="btn btn-outline"
-              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
-              title="Schedules — leased read-only scheduled runs (inert by default)"
-            >
-              ⏰ Schedules
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowPlaybooks(v => !v)}
-              aria-expanded={showPlaybooks}
-              className="btn btn-outline"
-              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
-              title="Playbooks — immutable versioned definitions (inert until activated)"
-            >
-              📋 Playbooks
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowBulkReview(v => !v)}
-              aria-expanded={showBulkReview}
-              className="btn btn-outline"
-              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
-              title="Bulk Review — homogeneous deterministic fixes, one approval for the exact batch"
-            >
-              📦 Bulk Review
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowHistory(v => !v)}
-              aria-expanded={showHistory}
-              className="btn btn-outline"
-              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
-              title="Run History — inspectable runs, replay, comparison, bounded history queries"
-            >
-              🕘 History
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowPreferences(v => !v)}
-              aria-expanded={showPreferences}
-              className="btn btn-outline"
-              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
-              title="Operational preferences (explicit, versioned workspace configuration)"
-            >
-              ⚙ Preferences
-            </button>
+            <OperationsNav
+              views={CONSOLE_VIEWS}
+              activeView={activeView}
+              onNavigate={(view) => {
+                setActiveView(view);
+              }}
+              killSwitch={consoleFlags.killSwitch}
+            />
             <NotificationCenter
               notifications={notifications}
               status={eventStatus}
@@ -1474,26 +1465,51 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
           </div>
         </header>
 
-        {showPreferences && <PreferencesPanel open={showPreferences} onClose={() => setShowPreferences(false)} />}
-        <PlaybooksPanel open={showPlaybooks} onClose={() => setShowPlaybooks(false)} />
-        <BulkReviewPanel
-          open={showBulkReview}
-          onClose={() => setShowBulkReview(false)}
-          onRequestReview={(objective) => {
-            // The approval flow stays inside the runtime: the objective enters
-            // the chat session, the model proposes bulk_apply_stored_proposals,
-            // and the standard approval card shows the exact diff first.
-            if (!selectedModel) return;
-            sendMessage({ text: objective });
-          }}
-        />
-        <ManagerInbox open={showInbox} onClose={() => setShowInbox(false)} notifications={notifications} eventStatus={eventStatus} />
-        <SchedulesPanel open={showSchedules} onClose={() => setShowSchedules(false)} />
-        <RunHistory
-          open={showHistory}
-          onClose={() => setShowHistory(false)}
-          onSelectRun={(runId) => {
-            setInspectedRunId(runId);
+        <OperationsConsole
+          flags={consoleFlags}
+          activeView={activeView}
+          onNavigate={setActiveView}
+          views={CONSOLE_VIEWS}
+          renderView={(view) => {
+            switch (view) {
+              case 'preferences':
+                return <PreferencesPanel open onClose={() => setActiveView('chat')} />;
+              case 'playbooks':
+                return <PlaybooksPanel open onClose={() => setActiveView('chat')} />;
+              case 'bulk':
+                return (
+                  <BulkReviewPanel
+                    open
+                    onClose={() => setActiveView('chat')}
+                    onRequestReview={(objective) => {
+                      // The approval flow stays inside the runtime: the objective enters
+                      // the chat session, the model proposes bulk_apply_stored_proposals,
+                      // and the standard approval card shows the exact diff first.
+                      if (!selectedModel) return;
+                      sendMessage({ text: objective });
+                    }}
+                  />
+                );
+              case 'inbox':
+                return <ManagerInbox open onClose={() => setActiveView('chat')} notifications={notifications} eventStatus={eventStatus} />;
+              case 'schedules':
+                return <SchedulesPanel open onClose={() => setActiveView('chat')} />;
+              case 'triggers':
+                return <TriggersPanel open onClose={() => setActiveView('chat')} />;
+              case 'history':
+                return (
+                  <RunHistory
+                    open
+                    onClose={() => setActiveView('chat')}
+                    onSelectRun={(runId) => {
+                      setInspectedRunId(runId);
+                    }}
+                  />
+                );
+              case 'chat':
+              default:
+                return null;
+            }
           }}
         />
         <RunInspector
@@ -1504,7 +1520,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               try {
                 const api = await import('../store-manager-api');
                 await api.replayStoreManagerRun(runId);
-                setShowHistory(true);
+                setActiveView('history');
               } catch (err) {
                 console.error('Replay failed:', err instanceof Error ? err.message : err);
               }

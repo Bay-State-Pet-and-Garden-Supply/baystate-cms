@@ -628,3 +628,168 @@ export function ensureStoreManagerOperationsSchema(): void {
   if (marker && Number(marker.value) >= Number(STORE_MANAGER_OPERATIONS_SCHEMA_VERSION)) return;
   runStoreManagerOperationsMigration();
 }
+
+// ---------------------------------------------------------------------------
+// Issue 9: retention pruning (data maintenance, not schema)
+// ---------------------------------------------------------------------------
+
+/**
+ * Workspace-scoped retention policy (Issue 9). Pruning deletes only derived
+ * runtime rows whose owning run is terminal and older than the window:
+ *
+ *  - run events (`store_manager_events`) and run artifacts
+ *    (`store_manager_run_artifacts`) for terminal sessions older than
+ *    `runDetailCutoffDays` (the session/turn rows themselves are retained:
+ *    they carry the audit lineage and the `ai_model_calls` linkage, so
+ *    telemetry is never orphaned or pruned while a run is retained);
+ *  - resolved Inbox items older than `resolvedInboxCutoffDays`;
+ *  - notifications older than `notificationCutoffDays`.
+ *
+ * NEVER touched: `ai_model_calls`, `catalog_health_proposals`, review
+ * decisions, bulk-review decisions/items, playbook runs/steps, policy
+ * snapshots, schedules/triggers/occurrences. Conservative defaults are the
+ * locked plan values (90d run details, 90d resolved Inbox, 30d
+ * notifications); a max batch bound keeps each transaction small.
+ */
+export interface StoreManagerRetentionOptions {
+  runDetailCutoffDays?: number;
+  resolvedInboxCutoffDays?: number;
+  notificationCutoffDays?: number;
+  /** Hard cap on pruned run sessions per invocation (bounded batches). */
+  maxSessions?: number;
+  now?: () => Date;
+}
+
+export interface StoreManagerRetentionResult {
+  workspaceId: string;
+  prunedSessions: number;
+  prunedEvents: number;
+  prunedArtifacts: number;
+  prunedInboxItems: number;
+  prunedNotifications: number;
+  aiModelCallsIntact: number;
+  retainedDecisionRows: number;
+}
+
+function isoDaysAgo(now: Date, days: number): string {
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * Prune stale derived runtime rows for ONE workspace inside one transaction
+ * (SAVEPOINT so an interruption rolls the batch back cleanly). Idempotent:
+ * re-running with the same cutoffs deletes nothing new. Returns per-class
+ * counts plus proof that `ai_model_calls` and decision/audit rows survived.
+ */
+export function pruneStoreManagerRetention(
+  workspaceId: string,
+  options: StoreManagerRetentionOptions = {},
+): StoreManagerRetentionResult {
+  const db = getDb();
+  if (!workspaceId || workspaceId.length > 200) {
+    throw new Error('pruneStoreManagerRetention: invalid workspace id.');
+  }
+  const now = options.now ? options.now() : new Date();
+  const runCutoff = isoDaysAgo(now, options.runDetailCutoffDays ?? 90);
+  const inboxCutoff = isoDaysAgo(now, options.resolvedInboxCutoffDays ?? 90);
+  const notifCutoff = isoDaysAgo(now, options.notificationCutoffDays ?? 30);
+  const maxSessions = Math.min(Math.max(options.maxSessions ?? 500, 1), 5000);
+
+  db.exec('SAVEPOINT store_manager_retention');
+  try {
+    const sessionRows = db
+      .query(
+        `SELECT id FROM store_manager_sessions
+         WHERE workspace_id = ? AND status = 'terminal' AND created_at < ?
+         ORDER BY created_at ASC LIMIT ?`,
+      )
+      .all(workspaceId, runCutoff, maxSessions) as Array<{ id: string }>;
+    const sessionIds = sessionRows.map((r) => r.id);
+
+    let prunedEvents = 0;
+    let prunedArtifacts = 0;
+    let prunedSessions = 0;
+    if (sessionIds.length > 0) {
+      const placeholders = sessionIds.map(() => '?').join(',');
+      const hadDerivedRowsBefore = Number(
+        (
+          db
+            .query(
+              `SELECT COUNT(*) AS c FROM store_manager_events WHERE session_id IN (${placeholders})`,
+            )
+            .get(...sessionIds) as { c: number }
+        ).c ?? 0,
+      );
+      const eventsResult = db
+        .query(`DELETE FROM store_manager_events WHERE session_id IN (${placeholders})`)
+        .run(...sessionIds);
+      prunedEvents = Number(eventsResult.changes ?? 0);
+      const artifactsResult = db
+        .query(`DELETE FROM store_manager_run_artifacts WHERE run_id IN (${placeholders})`)
+        .run(...sessionIds);
+      prunedArtifacts = Number(artifactsResult.changes ?? 0);
+      // Sessions are retained as audit lineage; count only sessions whose
+      // derived rows were actually removed so repeated prunes are idempotent.
+      const hasDerivedRowsAfter = Number(
+        (
+          db
+            .query(
+              `SELECT COUNT(*) AS c FROM store_manager_events WHERE session_id IN (${placeholders})`,
+            )
+            .get(...sessionIds) as { c: number }
+        ).c ?? 0,
+      );
+      prunedSessions = Math.max(0, hadDerivedRowsBefore - hasDerivedRowsAfter);
+    }
+
+    const inboxResult = db
+      .query(
+        `DELETE FROM store_manager_inbox_items
+         WHERE workspace_id = ? AND lifecycle = 'resolved' AND updated_at < ?`,
+      )
+      .run(workspaceId, inboxCutoff);
+    const prunedInboxItems = Number(inboxResult.changes ?? 0);
+
+    const notifResult = db
+      .query(
+        `DELETE FROM store_manager_notifications
+         WHERE workspace_id = ? AND created_at < ?`,
+      )
+      .run(workspaceId, notifCutoff);
+    const prunedNotifications = Number(notifResult.changes ?? 0);
+
+    const aiModelCallsIntact = Number(
+      (
+        db
+          .query('SELECT COUNT(*) AS c FROM ai_model_calls')
+          .get() as { c: number }
+      ).c ?? 0,
+    );
+    const retainedDecisionRows = tableExists(db, 'store_manager_review_decisions')
+      ? Number(
+          (
+            db
+              .query(
+                'SELECT COUNT(*) AS c FROM store_manager_review_decisions',
+              )
+              .get() as { c: number }
+          ).c ?? 0,
+        )
+      : 0;
+
+    db.exec('RELEASE store_manager_retention');
+    return {
+      workspaceId,
+      prunedSessions,
+      prunedEvents,
+      prunedArtifacts,
+      prunedInboxItems,
+      prunedNotifications,
+      aiModelCallsIntact,
+      retainedDecisionRows,
+    };
+  } catch (err) {
+    db.exec('ROLLBACK TO store_manager_retention; RELEASE store_manager_retention');
+    throw err;
+  }
+}

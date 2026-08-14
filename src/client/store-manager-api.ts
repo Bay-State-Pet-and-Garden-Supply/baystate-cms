@@ -1358,3 +1358,61 @@ export async function denyStoreManagerBulkReviewBatch(id: string, reason?: strin
   if (!data.ok) throw new Error(data.error ?? `Deny failed (${res.status}).`);
   return { batchId: String(data.batchId), status: 'denied', itemCount: Number(data.itemCount ?? 0) };
 }
+
+// ---------------------------------------------------------------------------
+// Operations console (Issue 9): console state + retention
+// ---------------------------------------------------------------------------
+
+export interface StoreManagerConsoleFlags {
+  operationsConsoleEnabled: boolean;
+  schedulesEnabled: boolean;
+  eventTriggersEnabled: boolean;
+  playbooksEnabled: boolean;
+  bulkReviewEnabled: boolean;
+  notificationsEnabled: boolean;
+  killSwitch: boolean;
+}
+
+export interface StoreManagerConsoleState {
+  flags: StoreManagerConsoleFlags;
+  defaults: StoreManagerConsoleFlags;
+}
+
+/** Fetch server-owned operations-console state (flags + defaults; no secrets). */
+export async function fetchStoreManagerConsoleState(): Promise<StoreManagerConsoleState> {
+  const res = await fetch('/api/store-manager/console/state');
+  if (!res.ok) throw new Error(`Failed to load Store Manager console state (${res.status}).`);
+  const data = (await res.json()) as StoreManagerConsoleState & { ok?: boolean; error?: string };
+  if (!data.ok || !data.flags) throw new Error(data.error ?? 'Malformed console state response.');
+  return { flags: data.flags, defaults: data.defaults };
+}
+
+export interface StoreManagerRetentionResult {
+  workspaceId: string;
+  prunedSessions: number;
+  prunedEvents: number;
+  prunedArtifacts: number;
+  prunedInboxItems: number;
+  prunedNotifications: number;
+  aiModelCallsIntact: number;
+  retainedDecisionRows: number;
+}
+
+export interface StoreManagerRetentionRequest {
+  runDetailCutoffDays?: number;
+  resolvedInboxCutoffDays?: number;
+  notificationCutoffDays?: number;
+  maxSessions?: number;
+}
+
+/** Trigger workspace-scoped retention pruning (token-auth'd POST; refuses under kill switch). */
+export async function pruneStoreManagerRetention(opts: StoreManagerRetentionRequest = {}): Promise<StoreManagerRetentionResult> {
+  const res = await fetch('/api/store-manager/retention/prune', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+  const data = (await res.json()) as { ok: boolean; result?: StoreManagerRetentionResult; error?: string; errorCode?: string };
+  if (!data.ok || !data.result) throw new Error(data.error ?? `Retention prune failed (${res.status}).`);
+  return data.result;
+}
