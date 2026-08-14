@@ -813,4 +813,186 @@ route.get('/store-manager/notifications', (c) => {
 // the full paths stay /api/store-manager/notifications[...].
 route.route('/store-manager', storeManagerEventsRoutes);
 
+// ---------------------------------------------------------------------------
+// Operations console — Issue 4: leased scheduled read-only runs.
+// Schedules enter runStoreManagerExecution with entrypoint 'schedule' and the
+// unattended read-only policy; the runtime denies persistent adapters at
+// dispatch. Automation stays inert while schedulesEnabled is false or the
+// kill switch is on; reads/history remain available under the kill switch.
+// ---------------------------------------------------------------------------
+
+import {
+  createScheduleFromTemplate,
+  listSchedulesForWorkspace,
+  getScheduleForWorkspace,
+  updateScheduleForWorkspace,
+  setScheduleEnabledForWorkspace,
+  runNowReadOnly,
+} from '../services/store-manager-schedule-service';
+import { listOccurrencesBySchedule } from '../../db/repositories/store-manager-schedule-repo';
+import { listScheduleTemplates } from '../../store-manager/schedules/templates';
+import {
+  StoreManagerScheduleCreateRequestSchema,
+  StoreManagerScheduleUpdateRequestSchema,
+  StoreManagerScheduleRunNowRequestSchema,
+  StoreManagerOccurrenceListQuerySchema,
+} from '../../shared/schemas/store-manager-schedule';
+import { getStoreManagerFlags } from '../../store-manager/flags';
+
+/**
+ * GET /api/store-manager/schedules — workspace-scoped schedule list. Read
+ * access stays available under the kill switch (history/inbox reads only).
+ */
+route.get('/store-manager/schedules', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const schedules = listSchedulesForWorkspace(workspace.id);
+  return c.json({ schedules });
+});
+
+/**
+ * POST /api/store-manager/schedules — create a schedule from a locked
+ * template. Schedules are created disabled (automation inert until enabled).
+ */
+route.post('/store-manager/schedules', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerScheduleCreateRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid schedule create request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = createScheduleFromTemplate(workspace.id, parsed.data);
+    return c.json({ ok: true, schedule: result.schedule, nextRunAt: result.nextRunAt });
+  } catch (err) {
+    return c.json({ ok: false, errorCode: 'schedule_create_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * GET /api/store-manager/schedules/templates — server-owned template list.
+ */
+route.get('/store-manager/schedules/templates', (c) => {
+  return c.json({ templates: listScheduleTemplates() });
+});
+
+/**
+ * GET /api/store-manager/schedules/:id — schedule detail.
+ */
+route.get('/store-manager/schedules/:id', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid schedule id.' }, 400);
+  const schedule = getScheduleForWorkspace(workspace.id, id);
+  if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
+  return c.json({ schedule });
+});
+
+/**
+ * POST /api/store-manager/schedules/:id — update editable fields (new
+ * immutable definition version; no cron/code).
+ */
+route.post('/store-manager/schedules/:id', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid schedule id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerScheduleUpdateRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid schedule update request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const schedule = updateScheduleForWorkspace(workspace.id, id, parsed.data);
+    return c.json({ ok: true, schedule });
+  } catch (err) {
+    return c.json({ ok: false, errorCode: 'schedule_update_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * POST /api/store-manager/schedules/:id/enable — explicitly enable (gated by
+ * schedulesEnabled flag; automation inert otherwise).
+ */
+route.post('/store-manager/schedules/:id/enable', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.schedulesEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Scheduled runs are disabled (flag or kill switch).' }, 409);
+  }
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid schedule id.' }, 400);
+  const schedule = setScheduleEnabledForWorkspace(workspace.id, id, true, 'operator');
+  if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
+  return c.json({ ok: true, schedule });
+});
+
+/**
+ * POST /api/store-manager/schedules/:id/disable — explicitly disable.
+ */
+route.post('/store-manager/schedules/:id/disable', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid schedule id.' }, 400);
+  const schedule = setScheduleEnabledForWorkspace(workspace.id, id, false, 'operator');
+  if (!schedule) return c.json({ error: 'Schedule not found.' }, 404);
+  return c.json({ ok: true, schedule });
+});
+
+/**
+ * POST /api/store-manager/schedules/:id/run-now — synchronous READ-ONLY run
+ * through the common unattended runtime. Not an approval shortcut; gated by
+ * the schedulesEnabled flag and kill switch.
+ */
+route.post('/store-manager/schedules/:id/run-now', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.schedulesEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Scheduled runs are disabled (flag or kill switch).' }, 409);
+  }
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid schedule id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerScheduleRunNowRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid run-now request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = await runNowReadOnly(workspace.id, id, {
+      workspacePath: workspace.workspacePath,
+      selectedModel: parsed.data.selectedModel,
+    });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof ModelUnavailableError) {
+      return c.json({ ok: false, errorCode: 'model_unavailable', error: err.message }, 400);
+    }
+    return c.json({ ok: false, errorCode: 'run_now_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * GET /api/store-manager/schedules/:id/occurrences — bounded occurrence
+ * history (read access stays available under kill switch).
+ */
+route.get('/store-manager/schedules/:id/occurrences', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid schedule id.' }, 400);
+  const query = StoreManagerOccurrenceListQuerySchema.safeParse({
+    limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
+    status: c.req.query('status') ?? undefined,
+  });
+  const limit = query.success ? query.data.limit ?? 50 : 50;
+  const status = query.success ? query.data.status : undefined;
+  const occurrences = listOccurrencesBySchedule(workspace.id, id, { limit, status });
+  return c.json({ occurrences });
+});
+
 export default route;

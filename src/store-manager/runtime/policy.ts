@@ -133,6 +133,23 @@ function effectivePolicy(
 }
 
 /**
+ * Server-owned allowlist derivation for unattended/preview modes (Issue 4):
+ * only `riskClass = 'read'` adapters are allowed. Interactive runs get the
+ * full registry surface (persistent tools still require signed approval).
+ */
+export function deriveRunToolAllowlist(
+  adapters: ReadonlyArray<{ name: string; version: number; riskClass: string }>,
+  executionMode: StoreManagerExecutionMode,
+): readonly StoreManagerToolNameVersion[] {
+  if (executionMode === 'interactive') {
+    return adapters.map((a) => ({ name: a.name, version: a.version }));
+  }
+  return adapters
+    .filter((a) => a.riskClass === 'read')
+    .map((a) => ({ name: a.name, version: a.version }));
+}
+
+/**
  * Build the immutable policy for one run. `allowedToolNameVersions` comes from
  * the adapter registry (server-owned), never from the request.
  */

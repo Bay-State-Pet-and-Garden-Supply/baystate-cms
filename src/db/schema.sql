@@ -496,3 +496,74 @@ CREATE TABLE IF NOT EXISTS store_manager_run_artifacts (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_store_manager_run_artifacts_ws_run ON store_manager_run_artifacts(workspace_id, run_id, created_at);
+
+-- Operations-console schedules (epic: operations console, Issue 4):
+-- workspace-owned leased read-only run definitions, immutable versions,
+-- restart-safe occurrences (unique per-workspace occurrence key), and leases.
+CREATE TABLE IF NOT EXISTS store_manager_schedules (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  template_kind TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  timezone TEXT NOT NULL,
+  recurrence_preset TEXT NOT NULL,
+  time_of_day TEXT NOT NULL,
+  day_of_week INTEGER,
+  scope_json TEXT,
+  selected_model TEXT,
+  objective TEXT NOT NULL,
+  definition_hash TEXT NOT NULL,
+  policy_profile_json TEXT,
+  next_run_at TEXT,
+  last_run_at TEXT,
+  last_run_status TEXT,
+  last_run_id TEXT,
+  enable_audit_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_store_manager_schedules_ws_enabled ON store_manager_schedules(workspace_id, enabled);
+CREATE TABLE IF NOT EXISTS store_manager_schedule_versions (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  schedule_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  definition_json TEXT NOT NULL,
+  definition_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (workspace_id, schedule_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_store_manager_schedule_versions_sched ON store_manager_schedule_versions(workspace_id, schedule_id, version);
+CREATE TABLE IF NOT EXISTS store_manager_schedule_occurrences (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  schedule_id TEXT NOT NULL,
+  schedule_version INTEGER NOT NULL,
+  occurrence_key TEXT NOT NULL,
+  scheduled_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  run_id TEXT,
+  error_code TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT,
+  lease_expires_at TEXT,
+  heartbeat_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (workspace_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_store_manager_occurrences_due ON store_manager_schedule_occurrences(workspace_id, status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_store_manager_occurrences_sched ON store_manager_schedule_occurrences(workspace_id, schedule_id, scheduled_at);
+CREATE TABLE IF NOT EXISTS store_manager_schedule_leases (
+  occurrence_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  schedule_id TEXT NOT NULL,
+  owner TEXT NOT NULL,
+  claimed_at TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_store_manager_leases_expiry ON store_manager_schedule_leases(workspace_id, lease_expires_at);

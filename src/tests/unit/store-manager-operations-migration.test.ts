@@ -197,6 +197,26 @@ describe('Store Manager operations schema migration (Issue 1)', () => {
     // Restore the shared test DB for subsequent tests.
     initDb(testDbPath);
   });
+
+  it('adds the Issue 4 schedule/occurrence/lease tables and their indexes', () => {
+    for (const table of ['store_manager_schedules', 'store_manager_schedule_versions', 'store_manager_schedule_occurrences', 'store_manager_schedule_leases']) {
+      expect(getDb().query("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get(table)).toBeTruthy();
+    }
+    for (const index of [
+      'idx_store_manager_schedules_ws_enabled',
+      'idx_store_manager_schedule_versions_sched',
+      'idx_store_manager_occurrences_due',
+      'idx_store_manager_occurrences_sched',
+      'idx_store_manager_leases_expiry',
+    ]) {
+      expect(getDb().query("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+        .get(index)).toBeTruthy();
+    }
+    // Occurrence table enforces the restart-safety uniqueness backstop.
+    const occDdl = getDb().query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_schedule_occurrences'").get() as { sql: string };
+    expect(occDdl.sql).toMatch(/UNIQUE \(workspace_id, occurrence_key\)/);
+  });
 });
 
 describe('Store Manager operations migration — upgrade path (Issue 1)', () => {

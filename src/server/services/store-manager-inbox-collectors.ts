@@ -20,6 +20,7 @@ import { listFailedSyncJobs } from '../../db/repositories/sync-job-repo';
 import { listChangeSetsNeedingImageRepair } from '../../db/repositories/change-set-repo';
 import { listBatches } from '../../db/repositories/onboarding-batch-repo';
 import { listItemsByBatchStaged } from '../../db/repositories/onboarding-item-repo';
+import { listSchedules, listRecentFailedOccurrences } from '../../db/repositories/store-manager-schedule-repo';
 import type {
   StoreManagerInboxKind,
   StoreManagerInboxScope,
@@ -37,6 +38,7 @@ const COLLECTOR_RULE_VERSION: Record<StoreManagerInboxKind, number> = {
   failed_sync_jobs: 1,
   image_repairs_recommended: 1,
   curation_stalled: 1,
+  scheduled_run_failed: 1,
 };
 
 export interface InboxCollectorContext {
@@ -46,6 +48,8 @@ export interface InboxCollectorContext {
   curationStallMs?: number;
   /** Bounded per-kind source-reference caps. */
   maxSourceRefs?: number;
+  /** Recent-failure window for scheduled-run failures (tests). */
+  scheduleFailureWindowMs?: number;
 }
 
 export interface InboxCandidate {
@@ -227,6 +231,52 @@ function collectCurationStalled(workspaceId: string, ctx: InboxCollectorContext)
 }
 
 // ---------------------------------------------------------------------------
+// Collector 6: failed scheduled runs (Issue 4 — deduped operational item).
+// Derives from recent failed/unavailable schedule occurrences; the item
+// disappears (and reconcile resolves it) when the source recovers.
+// ---------------------------------------------------------------------------
+
+function collectScheduledRunFailures(workspaceId: string, ctx: InboxCollectorContext): InboxCandidate[] {
+  const windowMs = ctx.scheduleFailureWindowMs ?? 7 * 24 * 60 * 60 * 1000;
+  const sinceIso = new Date((ctx.now?.() ?? new Date()).getTime() - windowMs).toISOString();
+  const occurrences = listRecentFailedOccurrences(workspaceId, sinceIso, 50);
+  const bySchedule = new Map<string, { count: number; latestErrorCode: string; latestAt: string; occurrences: Array<{ id: string }> }>();
+  for (const occ of occurrences) {
+    const entry = bySchedule.get(occ.scheduleId) ?? { count: 0, latestErrorCode: occ.errorCode ?? 'unknown', latestAt: occ.completedAt ?? occ.updatedAt, occurrences: [] };
+    entry.count += 1;
+    entry.occurrences.push({ id: occ.id });
+    if ((occ.completedAt ?? occ.updatedAt) > entry.latestAt) {
+      entry.latestAt = occ.completedAt ?? occ.updatedAt;
+      entry.latestErrorCode = occ.errorCode ?? 'unknown';
+    }
+    bySchedule.set(occ.scheduleId, entry);
+  }
+  const maxRefs = ctx.maxSourceRefs ?? 20;
+  const candidates: InboxCandidate[] = [];
+  for (const schedule of listSchedules(workspaceId, 100)) {
+    const entry = bySchedule.get(schedule.id);
+    if (!entry) continue;
+    candidates.push({
+      workspaceId,
+      kind: 'scheduled_run_failed',
+      dedupeKey: dedupeKeyFor('scheduled_run_failed', `schedule:${schedule.id}`),
+      severity: 'warning',
+      title: `Scheduled run failing — ${schedule.name.slice(0, 80)}`,
+      summary: `${entry.count} recent failed run(s) (${entry.latestErrorCode}). Review occurrence history before re-enabling.`,
+      scope: { kind: 'catalog' },
+      count: entry.count,
+      sourceRefs: [
+        { kind: 'schedule', id: schedule.id },
+        ...entry.occurrences.slice(0, maxRefs).map((o) => ({ kind: 'schedule_occurrence', id: o.id })),
+      ],
+      fingerprint: fingerprintFor('scheduled_run_failed', `schedule:${schedule.id}`, COLLECTOR_RULE_VERSION.scheduled_run_failed, entry.count, 'warning'),
+      sourceUpdatedAt: entry.latestAt,
+    });
+  }
+  return candidates;
+}
+
+// ---------------------------------------------------------------------------
 // Combined collection
 // ---------------------------------------------------------------------------
 
@@ -242,6 +292,7 @@ export function collectInboxCandidates(workspaceId: string, ctx: InboxCollectorC
     collectFailedSyncJobs(workspaceId, ctx),
     collectImageRepairsRecommended(workspaceId, ctx),
     collectCurationStalled(workspaceId, ctx),
+    collectScheduledRunFailures(workspaceId, ctx),
   ];
   return parts
     .flat()

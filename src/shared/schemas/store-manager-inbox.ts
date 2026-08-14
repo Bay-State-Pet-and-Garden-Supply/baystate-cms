@@ -22,13 +22,16 @@ export const STORE_MANAGER_INBOX_BOUNDS = {
   maxCount: 1_000_000,
 } as const;
 
-/** The five deterministic collector classes (exact, stable vocabulary). */
+/** The six deterministic collector classes (exact, stable vocabulary).
+ * `scheduled_run_failed` is the additive Issue 4 kind: a deduped operational
+ * item for a scheduled run that failed/unavailable/deadline-terminalized. */
 export const STORE_MANAGER_INBOX_KINDS = [
   'high_severity_catalog_issues',
   'proposals_awaiting_review',
   'failed_sync_jobs',
   'image_repairs_recommended',
   'curation_stalled',
+  'scheduled_run_failed',
 ] as const;
 export const StoreManagerInboxKindSchema = z.enum(STORE_MANAGER_INBOX_KINDS);
 export type StoreManagerInboxKind = z.infer<typeof StoreManagerInboxKindSchema>;

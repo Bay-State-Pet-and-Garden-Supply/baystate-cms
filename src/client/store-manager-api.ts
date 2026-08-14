@@ -308,7 +308,8 @@ export type StoreManagerInboxKind =
   | 'proposals_awaiting_review'
   | 'failed_sync_jobs'
   | 'image_repairs_recommended'
-  | 'curation_stalled';
+  | 'curation_stalled'
+  | 'scheduled_run_failed';
 
 export type StoreManagerInboxLifecycle = 'open' | 'acknowledged' | 'resolved' | 'superseded';
 export type StoreManagerSeverity = 'info' | 'warning' | 'critical';
@@ -440,4 +441,188 @@ export async function fetchStoreManagerNotifications(opts: { afterSequence?: num
 /** Mark one notification read. */
 export async function markStoreManagerNotificationRead(id: string): Promise<void> {
   await fetch(`/api/store-manager/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' });
+}
+
+// ---------------------------------------------------------------------------
+// Operations console (Issue 4): leased scheduled read-only runs.
+// Wire types mirror the shared schedule schemas; the client never imports
+// server code. All execution enters the common runtime server-side — these
+// are plain fetch wrappers with no client-side scheduling logic.
+// ---------------------------------------------------------------------------
+
+export type StoreManagerRecurrencePreset = 'daily' | 'nightly' | 'weekly';
+export type StoreManagerScheduleTemplateKind =
+  | 'daily_catalog_health'
+  | 'weekly_cleanup_report'
+  | 'nightly_anomalies'
+  | 'failed_sync_digest'
+  | 'stale_proposal_review';
+export type StoreManagerOccurrenceStatus =
+  | 'pending'
+  | 'claimed'
+  | 'completed'
+  | 'failed'
+  | 'unavailable'
+  | 'cancelled';
+
+export interface StoreManagerScheduleDefinition {
+  id: string;
+  workspaceId: string;
+  name: string;
+  version: number;
+  templateKind: StoreManagerScheduleTemplateKind;
+  enabled: boolean;
+  timezone: string;
+  recurrencePreset: StoreManagerRecurrencePreset;
+  timeOfDay: string;
+  dayOfWeek: number | null;
+  scope: StoreManagerPinnedScope | null;
+  selectedModel: string | null;
+  objective: string;
+  definitionHash: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunStatus: StoreManagerOccurrenceStatus | null;
+  lastRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerScheduleTemplate {
+  kind: StoreManagerScheduleTemplateKind;
+  name: string;
+  description: string;
+  objective: string;
+  defaultRecurrencePreset: StoreManagerRecurrencePreset;
+  defaultTimeOfDay: string;
+  defaultDayOfWeek?: number;
+}
+
+export interface StoreManagerScheduleOccurrence {
+  id: string;
+  workspaceId: string;
+  scheduleId: string;
+  scheduleVersion: number;
+  occurrenceKey: string;
+  scheduledAt: string;
+  status: StoreManagerOccurrenceStatus;
+  runId: string | null;
+  errorCode: string | null;
+  retryCount: number;
+  claimedAt: string | null;
+  leaseExpiresAt: string | null;
+  heartbeatAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerScheduleCreateInput {
+  templateKind: StoreManagerScheduleTemplateKind;
+  name: string;
+  timezone: string;
+  recurrencePreset: StoreManagerRecurrencePreset;
+  timeOfDay: string;
+  dayOfWeek?: number;
+  scope?: StoreManagerPinnedScope;
+  selectedModel?: string;
+}
+
+export interface StoreManagerScheduleUpdateInput {
+  name?: string;
+  timezone?: string;
+  recurrencePreset?: StoreManagerRecurrencePreset;
+  timeOfDay?: string;
+  dayOfWeek?: number;
+  scope?: StoreManagerPinnedScope | null;
+  selectedModel?: string | null;
+}
+
+export async function fetchStoreManagerSchedules(): Promise<StoreManagerScheduleDefinition[]> {
+  const res = await fetch('/api/store-manager/schedules');
+  if (!res.ok) throw new Error(`Failed to load schedules (${res.status}).`);
+  const data = (await res.json()) as { schedules: StoreManagerScheduleDefinition[] };
+  return data.schedules ?? [];
+}
+
+export async function fetchStoreManagerScheduleTemplates(): Promise<StoreManagerScheduleTemplate[]> {
+  const res = await fetch('/api/store-manager/schedules/templates');
+  if (!res.ok) throw new Error(`Failed to load schedule templates (${res.status}).`);
+  const data = (await res.json()) as { templates: StoreManagerScheduleTemplate[] };
+  return data.templates ?? [];
+}
+
+export async function createStoreManagerSchedule(
+  input: StoreManagerScheduleCreateInput,
+): Promise<StoreManagerScheduleDefinition> {
+  const res = await fetch('/api/store-manager/schedules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok: boolean; schedule?: StoreManagerScheduleDefinition; error?: string; errorCode?: string };
+  if (!data.ok || !data.schedule) throw new Error(data.error ?? `Schedule create failed (${res.status}).`);
+  return data.schedule;
+}
+
+export async function updateStoreManagerSchedule(
+  id: string,
+  input: StoreManagerScheduleUpdateInput,
+): Promise<StoreManagerScheduleDefinition> {
+  const res = await fetch(`/api/store-manager/schedules/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok: boolean; schedule?: StoreManagerScheduleDefinition; error?: string; errorCode?: string };
+  if (!data.ok || !data.schedule) throw new Error(data.error ?? `Schedule update failed (${res.status}).`);
+  return data.schedule;
+}
+
+export async function setStoreManagerScheduleEnabled(id: string, enabled: boolean): Promise<StoreManagerScheduleDefinition> {
+  const res = await fetch(`/api/store-manager/schedules/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`, {
+    method: 'POST',
+  });
+  const data = (await res.json()) as { ok: boolean; schedule?: StoreManagerScheduleDefinition; error?: string; errorCode?: string };
+  if (!data.ok || !data.schedule) throw new Error(data.error ?? `Schedule enable/disable failed (${res.status}).`);
+  return data.schedule;
+}
+
+export interface StoreManagerRunNowResult {
+  occurrenceId: string;
+  occurrenceKey: string;
+  result: {
+    occurrenceId: string;
+    occurrenceKey: string;
+    status: string;
+    runId: string | null;
+    errorCode: string | null;
+    terminalStatus: string | null;
+    retryCount: number;
+  };
+}
+
+export async function runStoreManagerScheduleNow(id: string): Promise<StoreManagerRunNowResult> {
+  const res = await fetch(`/api/store-manager/schedules/${encodeURIComponent(id)}/run-now`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  const data = (await res.json()) as { ok: boolean; error?: string; errorCode?: string } & Partial<StoreManagerRunNowResult>;
+  if (!data.ok) throw new Error(data.error ?? `Run-now failed (${res.status}).`);
+  return data as StoreManagerRunNowResult;
+}
+
+export async function fetchStoreManagerScheduleOccurrences(
+  id: string,
+  opts: { limit?: number; status?: StoreManagerOccurrenceStatus } = {},
+): Promise<StoreManagerScheduleOccurrence[]> {
+  const params = new URLSearchParams();
+  if (opts.limit != null) params.set('limit', String(opts.limit));
+  if (opts.status) params.set('status', opts.status);
+  const qs = params.toString();
+  const res = await fetch(`/api/store-manager/schedules/${encodeURIComponent(id)}/occurrences${qs ? `?${qs}` : ''}`);
+  if (!res.ok) throw new Error(`Failed to load schedule occurrences (${res.status}).`);
+  const data = (await res.json()) as { occurrences: StoreManagerScheduleOccurrence[] };
+  return data.occurrences ?? [];
 }

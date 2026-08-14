@@ -49,6 +49,7 @@ import {
 import { hashCanonicalJson } from '../../shared/stable-id';
 import {
   createStoreManagerPolicy,
+  deriveRunToolAllowlist,
   policyToSnapshotJson,
   type StoreManagerRuntimePolicy,
 } from './policy';
@@ -236,6 +237,9 @@ export async function runStoreManagerExecution(
     (deps.chat?.toolApprovalSecret ?? randomBytes(32).toString('hex'));
 
   // --- immutable per-run policy (execution mode + scope + actor captured) ---
+  // Unattended/preview modes derive a read-only tool allowlist (read adapters
+  // only) so the policy snapshot itself excludes persistent adapters (Issue 4).
+  const runToolAllowlist = deriveRunToolAllowlist(registry.all(), validated.executionMode);
   const policy = createStoreManagerPolicy(
     {
       workspaceId: validated.workspaceId,
@@ -249,7 +253,7 @@ export async function runStoreManagerExecution(
       promptVersion: STORE_MANAGER_PROMPT_VERSION.toString(),
       overrides: deps.policyOverrides ?? validated.policyProfile,
     },
-    registry.allowlistVersions(),
+    runToolAllowlist,
   );
 
   const sessionState: StoreManagerRuntimeSessionState = createRuntimeSessionState({
@@ -683,6 +687,19 @@ function emitRunStarted(
       commandName: request.lineage.commandName,
       commandVersion: request.lineage.commandVersion ?? 1,
       compiledObjective: request.objective.slice(0, 800),
+    });
+  }
+  if (request.lineage?.scheduleId || request.lineage?.triggerKind) {
+    emit({
+      version: 1,
+      type: 'schedule_trigger_lineage',
+      sessionId: runId,
+      workspaceId: request.workspaceId,
+      turnId,
+      createdAt: now().toISOString(),
+      scheduleId: request.lineage.scheduleId ?? null,
+      triggerKind: request.lineage.triggerKind ?? null,
+      occurrenceKey: request.lineage.occurrenceKey ?? null,
     });
   }
 }
