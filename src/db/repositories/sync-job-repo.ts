@@ -56,6 +56,37 @@ export function listSyncJobs(workspaceId: string): SyncJobRow[] {
   return rows.map(mapRow);
 }
 
+/**
+ * Bounded workspace-scoped read of terminal failed sync jobs (operations
+ * console, Issue 3 — Inbox collector). Foreign rows are invisible; the error
+ * summary is returned raw here and must be redacted/truncated by callers
+ * before it reaches the client.
+ */
+export function listFailedSyncJobs(workspaceId: string, limit = 50): SyncJobRow[] {
+  const db = getDb();
+  const bounded = Math.min(Math.max(limit, 1), 200);
+  const rows = db.query(
+    "SELECT * FROM sync_jobs WHERE workspace_id = ? AND status = 'failed' ORDER BY completed_at DESC LIMIT ?",
+  ).all(...[workspaceId, bounded]) as Record<string, unknown>[];
+  return rows.map(mapRow);
+}
+
+/**
+ * Workspace-scoped count of failed sync jobs (bounded by time window), used
+ * by the failed-sync-diff notification rule and Inbox collector.
+ */
+export function countFailedSyncJobsSince(workspaceId: string, sinceIso: string | null): number {
+  const db = getDb();
+  const row = sinceIso
+    ? db.query(
+        "SELECT COUNT(*) as count FROM sync_jobs WHERE workspace_id = ? AND status = 'failed' AND completed_at >= ?",
+      ).get(...[workspaceId, sinceIso]) as { count: number }
+    : db.query(
+        "SELECT COUNT(*) as count FROM sync_jobs WHERE workspace_id = ? AND status = 'failed'",
+      ).get(...[workspaceId]) as { count: number };
+  return Number(row?.count ?? 0);
+}
+
 export function completeSyncJob(id: string, status: string, fields?: {
   productCount?: number;
   artifactPath?: string;

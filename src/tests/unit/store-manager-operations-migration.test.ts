@@ -105,6 +105,45 @@ describe('Store Manager operations schema migration (Issue 1)', () => {
     expect(marker?.value).toBe(STORE_MANAGER_OPERATIONS_SCHEMA_VERSION);
   });
 
+  it('creates the Inbox + notification tables and indexes (Issue 3, v3)', () => {
+    for (const table of [
+      'store_manager_inbox_items',
+      'store_manager_notification_rules',
+      'store_manager_notifications',
+    ]) {
+      const t = getDb()
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get(table);
+      expect(t).toBeTruthy();
+    }
+    for (const index of [
+      'idx_store_manager_inbox_ws_lifecycle',
+      'idx_store_manager_inbox_ws_updated',
+      'idx_store_manager_notifications_ws_seq',
+      'idx_store_manager_notifications_ws_created',
+      'idx_store_manager_notifications_ws_unread',
+    ]) {
+      const i = getDb()
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+        .get(index);
+      expect(i).toBeTruthy();
+    }
+    // Inbox rows are unique per (workspace, dedupe_key) and notifications per
+    // (workspace, fingerprint) — the dedupe contract lives in the schema.
+    const inboxUnique = getDb()
+      .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_inbox_items'")
+      .get() as { sql: string };
+    expect(inboxUnique.sql).toMatch(/UNIQUE \(workspace_id, dedupe_key\)/);
+    const notifUnique = getDb()
+      .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_notifications'")
+      .get() as { sql: string };
+    expect(notifUnique.sql).toMatch(/UNIQUE \(workspace_id, fingerprint\)/);
+    const rulesUnique = getDb()
+      .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_notification_rules'")
+      .get() as { sql: string };
+    expect(rulesUnique.sql).toMatch(/UNIQUE \(workspace_id, kind\)/);
+  });
+
   it('is idempotent across repeated runs', () => {
     expect(() => runStoreManagerOperationsMigration()).not.toThrow();
     expect(() => ensureStoreManagerOperationsSchema()).not.toThrow();
@@ -164,6 +203,12 @@ describe('Store Manager operations migration — upgrade path (Issue 1)', () => 
   const upgradeDbPath = './test-operations-upgrade.db';
 
   it('upgrades a pre-operations DB (old #42 shape) in place', () => {
+    // Defensive cleanup: a failed run can leave -wal/-shm siblings that SQLite
+    // would recover into the "fresh" main file (resurrecting old rows and
+    // tripping UNIQUE on reseed). Remove all three before init.
+    for (const suffix of ['', '-shm', '-wal']) {
+      try { unlinkSync(`${upgradeDbPath}${suffix}`); } catch { /* ok */ }
+    }
     try { resetDb(); } catch { /* ok */ }
     initDb(upgradeDbPath);
     // Minimal old-shape #42 tables (no operations columns/sequence/artifacts).

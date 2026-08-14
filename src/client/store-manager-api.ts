@@ -297,3 +297,147 @@ export async function saveStoreManagerPreferences(
   if (!data.ok) throw new Error((data as StoreManagerCommandError).error ?? 'Preference save failed.');
   return data as { ok: true; revision: StoreManagerPreferenceRevision; unknownSkus: string[] };
 }
+
+// ---------------------------------------------------------------------------
+// Operations console (Issue 3): Manager Inbox + notifications.
+// Wire types mirror the shared schemas; the client never imports server code.
+// ---------------------------------------------------------------------------
+
+export type StoreManagerInboxKind =
+  | 'high_severity_catalog_issues'
+  | 'proposals_awaiting_review'
+  | 'failed_sync_jobs'
+  | 'image_repairs_recommended'
+  | 'curation_stalled';
+
+export type StoreManagerInboxLifecycle = 'open' | 'acknowledged' | 'resolved' | 'superseded';
+export type StoreManagerSeverity = 'info' | 'warning' | 'critical';
+
+export interface StoreManagerInboxScope {
+  kind: 'catalog' | StoreManagerScopeKind;
+  batchId?: string;
+  changeSetId?: string;
+  field?: string;
+  vendorId?: string;
+  skus?: string[];
+}
+
+export interface StoreManagerInboxSourceRef {
+  kind: string;
+  id: string;
+}
+
+export interface StoreManagerInboxItem {
+  id: string;
+  workspaceId: string;
+  kind: StoreManagerInboxKind;
+  dedupeKey: string;
+  severity: StoreManagerSeverity;
+  title: string;
+  summary: string;
+  scope: StoreManagerInboxScope;
+  count: number;
+  sourceRefs: StoreManagerInboxSourceRef[];
+  fingerprint: string;
+  lifecycle: StoreManagerInboxLifecycle;
+  sourceUpdatedAt: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  acknowledgedAt: string | null;
+  resolvedAt: string | null;
+  supersededAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerInboxOpenResult {
+  item: StoreManagerInboxItem;
+  current: StoreManagerInboxItem | null;
+  isCurrent: boolean;
+}
+
+export interface StoreManagerNotification {
+  id: string;
+  workspaceId: string;
+  ruleId: string;
+  ruleKind: string;
+  ruleVersion: number;
+  fingerprint: string;
+  severity: StoreManagerSeverity;
+  title: string;
+  message: string;
+  inboxItemId: string | null;
+  sourceRunId: string | null;
+  sequence: number;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface StoreManagerInboxReconcileResult {
+  ok: true;
+  inserted: number;
+  refreshed: number;
+  reopened: number;
+  resolved: number;
+  items: StoreManagerInboxItem[];
+  emittedNotifications: StoreManagerNotification[];
+  latestNotificationSequence: number;
+}
+
+/** Re-derive inbox candidates + reconcile lifecycle rows + evaluate rules. */
+export async function reconcileStoreManagerInbox(): Promise<StoreManagerInboxReconcileResult> {
+  const res = await fetch('/api/store-manager/inbox/reconcile', { method: 'POST' });
+  const data = (await res.json()) as StoreManagerInboxReconcileResult | StoreManagerCommandError;
+  if (!data.ok) throw new Error((data as StoreManagerCommandError).error ?? 'Inbox reconcile failed.');
+  return data as StoreManagerInboxReconcileResult;
+}
+
+/** List inbox items (lifecycle filter optional). */
+export async function fetchStoreManagerInbox(opts: { lifecycle?: StoreManagerInboxLifecycle | null } = {}): Promise<{
+  items: StoreManagerInboxItem[];
+  openCount: number;
+}> {
+  const qs = opts.lifecycle ? `?lifecycle=${encodeURIComponent(opts.lifecycle)}` : '';
+  const res = await fetch(`/api/store-manager/inbox${qs}`);
+  if (!res.ok) throw new Error(`Failed to load Manager Inbox (${res.status}).`);
+  return (await res.json()) as { items: StoreManagerInboxItem[]; openCount: number };
+}
+
+/** Open an item and re-validate against current authority. */
+export async function fetchStoreManagerInboxItem(id: string): Promise<StoreManagerInboxOpenResult> {
+  const res = await fetch(`/api/store-manager/inbox/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`Failed to open inbox item (${res.status}).`);
+  return (await res.json()) as StoreManagerInboxOpenResult;
+}
+
+/** Operator acknowledge (no catalog effect). */
+export async function acknowledgeStoreManagerInboxItem(id: string): Promise<StoreManagerInboxItem> {
+  const res = await fetch(`/api/store-manager/inbox/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' });
+  const data = (await res.json()) as { ok: boolean; item?: StoreManagerInboxItem; error?: string };
+  if (!data.ok) throw new Error(data.error ?? 'Acknowledge failed.');
+  return data.item!;
+}
+
+/** Operator resolve (no catalog effect). */
+export async function resolveStoreManagerInboxItem(id: string): Promise<StoreManagerInboxItem> {
+  const res = await fetch(`/api/store-manager/inbox/${encodeURIComponent(id)}/resolve`, { method: 'POST' });
+  const data = (await res.json()) as { ok: boolean; item?: StoreManagerInboxItem; error?: string };
+  if (!data.ok) throw new Error(data.error ?? 'Resolve failed.');
+  return data.item!;
+}
+
+/** Fetch bounded notification list + unread count. */
+export async function fetchStoreManagerNotifications(opts: { afterSequence?: number } = {}): Promise<{
+  notifications: StoreManagerNotification[];
+  unread: number;
+}> {
+  const qs = opts.afterSequence ? `?afterSequence=${opts.afterSequence}` : '';
+  const res = await fetch(`/api/store-manager/notifications${qs}`);
+  if (!res.ok) throw new Error(`Failed to load notifications (${res.status}).`);
+  return (await res.json()) as { notifications: StoreManagerNotification[]; unread: number };
+}
+
+/** Mark one notification read. */
+export async function markStoreManagerNotificationRead(id: string): Promise<void> {
+  await fetch(`/api/store-manager/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' });
+}

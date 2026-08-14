@@ -236,6 +236,33 @@ export function countProposalsByStatus(workspaceId: string, status: string): num
 }
 
 /**
+ * Bounded workspace-scoped proposal review summary (operations console,
+ * Issue 3 — Inbox collector). Returns the total count of `proposed` rows plus
+ * a bounded set of recent samples with truncated values for display only.
+ */
+export function getProposalReviewSummary(
+  workspaceId: string,
+  limit = 10,
+): { count: number; samples: Array<{ id: string; field: string; oldValue: string; newValue: string; createdAt: string }> } {
+  const db = getDb();
+  const bounded = Math.min(Math.max(limit, 1), 50);
+  const count = countProposalsByStatus(workspaceId, 'proposed');
+  const rows = db.query(
+    "SELECT id, field, old_value, new_value, created_at FROM catalog_health_proposals WHERE workspace_id = ? AND status = 'proposed' ORDER BY created_at DESC LIMIT ?",
+  ).all(...[workspaceId, bounded]) as Array<Record<string, unknown>>;
+  return {
+    count,
+    samples: rows.map((r) => ({
+      id: String(r.id),
+      field: String(r.field),
+      oldValue: String(r.old_value).slice(0, 200),
+      newValue: String(r.new_value).slice(0, 200),
+      createdAt: String(r.created_at),
+    })),
+  };
+}
+
+/**
  * Count proposals per field in one workspace (optionally restricted to one
  * status), used by the evidence-grounded cleanup report (epic #42, #38).
  */

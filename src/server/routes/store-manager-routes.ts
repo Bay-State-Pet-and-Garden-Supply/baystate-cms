@@ -65,6 +65,23 @@ import {
 import { listRegistry } from '../../db/repositories/field-registry-repo';
 import { StoreManagerChatRequestSchema } from '../../shared/schemas/store-manager';
 import type { UIMessage } from 'ai';
+import {
+  reconcileInbox,
+  openInboxItem,
+  acknowledgeInboxItemForWorkspace,
+  resolveInboxItemForWorkspace,
+  listInboxItemsForWorkspace,
+} from '../services/store-manager-inbox-service';
+import {
+  evaluateNotificationRules,
+  listNotificationsForWorkspace,
+  countUnreadNotificationsForWorkspace,
+} from '../services/store-manager-notification-service';
+import {
+  StoreManagerInboxLifecycleSchema,
+  type StoreManagerInboxLifecycle,
+} from '../../shared/schemas/store-manager-inbox';
+import storeManagerEventsRoutes from './store-manager-events-routes';
 
 const route = new Hono();
 
@@ -674,5 +691,126 @@ route.post('/store-manager/preferences', async (c) => {
     return c.json({ ok: false, errorCode: 'preference_failed', error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Operations console — Issue 3: Manager Inbox + notifications.
+// The Inbox is one workspace-scoped triage queue. Counts are re-derived from
+// authoritative sources on every reconcile; opening an item re-validates
+// against current state. The model has NO tool to create, acknowledge,
+// resolve, or hide Inbox items — only operators through these routes.
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/store-manager/inbox/reconcile
+ * Re-derive the deterministic inbox candidates and reconcile lifecycle rows,
+ * then evaluate threshold notification rules. Idempotent; never mutates
+ * onboarding or catalog state.
+ */
+route.post('/store-manager/inbox/reconcile', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  try {
+    const reconciled = reconcileInbox(workspace.id);
+    const evaluation = evaluateNotificationRules(workspace.id);
+    return c.json({
+      ok: true,
+      ...reconciled,
+      emittedNotifications: evaluation.emitted,
+      latestNotificationSequence: evaluation.latestSequence,
+    });
+  } catch (err) {
+    console.error('[StoreManagerInbox] Reconcile error:', err);
+    return c.json({ ok: false, errorCode: 'reconcile_failed', error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * GET /api/store-manager/inbox
+ * List inbox items (optionally filtered by lifecycle), bounded. Counts are
+ * display values; current authority is re-read on open (:id).
+ */
+route.get('/store-manager/inbox', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const lifecycleRaw = c.req.query('lifecycle');
+  const lifecycle: StoreManagerInboxLifecycle | null = lifecycleRaw
+    ? StoreManagerInboxLifecycleSchema.safeParse(lifecycleRaw).success
+      ? (lifecycleRaw as StoreManagerInboxLifecycle)
+      : null
+    : null;
+  const limitRaw = c.req.query('limit');
+  const limit = limitRaw && /^\d+$/.test(limitRaw) ? Math.min(Math.max(Number(limitRaw), 1), 200) : 100;
+  try {
+    const items = listInboxItemsForWorkspace(workspace.id, { lifecycle, limit });
+    const openCount = listInboxItemsForWorkspace(workspace.id, { lifecycle: 'open', limit: 200 }).length;
+    return c.json({ items, openCount });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/**
+ * GET /api/store-manager/inbox/:id
+ * Open an inbox item AND re-validate it against the current authoritative
+ * source. A stale row stays auditable but `isCurrent: false` — it must never
+ * be treated as current authority or used to approve work.
+ */
+route.get('/store-manager/inbox/:id', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid inbox item id.' }, 400);
+  try {
+    const result = openInboxItem(workspace.id, id);
+    if (!result) return c.json({ error: 'Inbox item not found.' }, 404);
+    return c.json(result);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/** POST /api/store-manager/inbox/:id/acknowledge — operator ack (no catalog effect). */
+route.post('/store-manager/inbox/:id/acknowledge', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid inbox item id.' }, 400);
+  const updated = acknowledgeInboxItemForWorkspace(workspace.id, id);
+  if (!updated) return c.json({ error: 'Inbox item not found or not actionable.' }, 404);
+  return c.json({ ok: true, item: updated });
+});
+
+/** POST /api/store-manager/inbox/:id/resolve — operator resolve (no catalog effect). */
+route.post('/store-manager/inbox/:id/resolve', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid inbox item id.' }, 400);
+  const updated = resolveInboxItemForWorkspace(workspace.id, id);
+  if (!updated) return c.json({ error: 'Inbox item not found or not actionable.' }, 404);
+  return c.json({ ok: true, item: updated });
+});
+
+/**
+ * GET /api/store-manager/notifications — bounded notification list + unread.
+ */
+route.get('/store-manager/notifications', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const afterRaw = c.req.query('afterSequence');
+  const afterSequence = afterRaw && /^\d+$/.test(afterRaw) ? Number(afterRaw) : 0;
+  try {
+    return c.json({
+      notifications: listNotificationsForWorkspace(workspace.id, { afterSequence, limit: 100 }),
+      unread: countUnreadNotificationsForWorkspace(workspace.id),
+    });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+// Issue 3 events routes (notifications + SSE) mounted under /store-manager so
+// the full paths stay /api/store-manager/notifications[...].
+route.route('/store-manager', storeManagerEventsRoutes);
 
 export default route;

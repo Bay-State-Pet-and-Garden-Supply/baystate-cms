@@ -17,12 +17,19 @@
  *  - store_manager_events: monotonic per-workspace `sequence` for cursor
  *    pagination/SSE.
  *  - store_manager_run_artifacts: immutable content-addressed artifacts.
+ * New surface (v3, Issue 3):
+ *  - store_manager_inbox_items: durable triage lifecycle rows with stable
+ *    per-workspace dedupe keys and content fingerprints.
+ *  - store_manager_notification_rules: deterministic threshold rules with
+ *    per-rule last-seen snapshots (edge-triggered emission).
+ *  - store_manager_notifications: durable in-app threshold facts with a
+ *    per-workspace monotonic sequence for cursor SSE + polling fallback.
  */
 
 import { getDb } from './connection';
 import type { Database } from './driver';
 
-export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '2';
+export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '3';
 export const STORE_MANAGER_OPERATIONS_MARKER = 'store_manager_operations_schema_version';
 
 const SESSION_ADDITIVE_COLUMNS: ReadonlyArray<readonly [column: string, ddl: string]> = [
@@ -129,6 +136,77 @@ export function runStoreManagerOperationsMigration(): void {
         activated_at TEXT NOT NULL
       );
     `);
+    // Block 6 (Issue 3): Manager Inbox + deterministic in-app notifications.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_inbox_items (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        dedupe_key TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        scope_json TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        source_refs_json TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        lifecycle TEXT NOT NULL DEFAULT 'open',
+        source_updated_at TEXT NOT NULL,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        resolved_at TEXT,
+        superseded_at TEXT,
+        resolved_reason TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, dedupe_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_inbox_ws_lifecycle
+        ON store_manager_inbox_items(workspace_id, lifecycle, severity);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_inbox_ws_updated
+        ON store_manager_inbox_items(workspace_id, last_seen_at);
+      CREATE TABLE IF NOT EXISTS store_manager_notification_rules (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        config_json TEXT NOT NULL,
+        last_seen_snapshot_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, kind)
+      );
+      CREATE TABLE IF NOT EXISTS store_manager_notifications (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        rule_id TEXT NOT NULL,
+        rule_kind TEXT NOT NULL,
+        rule_version INTEGER NOT NULL,
+        fingerprint TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        inbox_item_id TEXT,
+        source_run_id TEXT,
+        sequence INTEGER NOT NULL DEFAULT 0,
+        read_at TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (workspace_id, fingerprint)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_notifications_ws_seq
+        ON store_manager_notifications(workspace_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_notifications_ws_created
+        ON store_manager_notifications(workspace_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_notifications_ws_unread
+        ON store_manager_notifications(workspace_id, read_at);
+    `);
+    // Self-heal: resolved_reason distinguishes collector-disappearance from
+    // operator resolve (drives re-open semantics for reappeared findings).
+    if (!columnExists(db, 'store_manager_inbox_items', 'resolved_reason')) {
+      db.exec('ALTER TABLE store_manager_inbox_items ADD COLUMN resolved_reason TEXT');
+    }
     db.query(
       'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',
     ).run(STORE_MANAGER_OPERATIONS_MARKER, STORE_MANAGER_OPERATIONS_SCHEMA_VERSION);
@@ -150,6 +228,6 @@ export function ensureStoreManagerOperationsSchema(): void {
   const marker = db
     .query('SELECT value FROM app_meta WHERE key = ?')
     .get(STORE_MANAGER_OPERATIONS_MARKER) as { value: string } | undefined;
-  if (marker) return;
+  if (marker && Number(marker.value) >= Number(STORE_MANAGER_OPERATIONS_SCHEMA_VERSION)) return;
   runStoreManagerOperationsMigration();
 }
