@@ -26,6 +26,9 @@ import { ManagerInbox } from './store-manager/ManagerInbox';
 import { NotificationCenter } from './store-manager/NotificationCenter';
 import { SchedulesPanel } from './store-manager/SchedulesPanel';
 import { PlaybooksPanel } from './store-manager/PlaybooksPanel';
+import { RunHistory } from './store-manager/RunHistory';
+import { RunInspector } from './store-manager/RunInspector';
+import { RunComparison } from './store-manager/RunComparison';
 import { useStoreManagerEvents } from '../hooks/useStoreManagerEvents';
 import { colors, fonts, rounded, themeStyles } from '../theme';
 import { ViewHeader } from './common/ViewHeader';
@@ -76,6 +79,9 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [showInbox, setShowInbox] = useState(false);
   const [showSchedules, setShowSchedules] = useState(false);
   const [showPlaybooks, setShowPlaybooks] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [inspectedRunId, setInspectedRunId] = useState<string | null>(null);
+  const [compareRunId, setCompareRunId] = useState<string | null>(null);
   const { notifications, status: eventStatus } = useStoreManagerEvents();
   const [commandOutput, setCommandOutput] = useState<{
     raw: string;
@@ -1428,6 +1434,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             </button>
             <button
               type="button"
+              onClick={() => setShowHistory(v => !v)}
+              aria-expanded={showHistory}
+              className="btn btn-outline"
+              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
+              title="Run History — inspectable runs, replay, comparison, bounded history queries"
+            >
+              🕘 History
+            </button>
+            <button
+              type="button"
               onClick={() => setShowPreferences(v => !v)}
               aria-expanded={showPreferences}
               className="btn btn-outline"
@@ -1450,6 +1466,36 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         <PlaybooksPanel open={showPlaybooks} onClose={() => setShowPlaybooks(false)} />
         <ManagerInbox open={showInbox} onClose={() => setShowInbox(false)} notifications={notifications} eventStatus={eventStatus} />
         <SchedulesPanel open={showSchedules} onClose={() => setShowSchedules(false)} />
+        <RunHistory
+          open={showHistory}
+          onClose={() => setShowHistory(false)}
+          onSelectRun={(runId) => {
+            setInspectedRunId(runId);
+          }}
+        />
+        <RunInspector
+          runId={inspectedRunId}
+          onClose={() => setInspectedRunId(null)}
+          onReplay={(runId) => {
+            void (async () => {
+              try {
+                const api = await import('../store-manager-api');
+                await api.replayStoreManagerRun(runId);
+                setShowHistory(true);
+              } catch (err) {
+                console.error('Replay failed:', err instanceof Error ? err.message : err);
+              }
+            })();
+          }}
+          onCompare={(runId) => {
+            setCompareRunId(runId);
+          }}
+        />
+        <RunComparison
+          open={compareRunId !== null}
+          onClose={() => setCompareRunId(null)}
+          preselectedRunId={compareRunId ?? undefined}
+        />
 
         {/* Main Chat Body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 16 }}>

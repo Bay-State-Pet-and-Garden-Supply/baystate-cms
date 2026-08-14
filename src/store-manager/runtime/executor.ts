@@ -133,6 +133,21 @@ export interface StoreManagerExecutionDeps {
   /** Chat-specific transport (messages + approval secret) for entrypoint 'chat'. */
   chat?: StoreManagerChatTurnDeps;
   /**
+   * Server-owned execution-context extras (operations console, Issue 7).
+   * Playbook checkpoints inject server-recorded approvals + approval-bound
+   * diff hashes so a resumed execute step passes the gate and refuses stale
+   * previews. Never request-derived.
+   */
+  executionContextExtras?: {
+    serverApprovedCalls?: ReadonlyArray<{
+      toolCallId: string;
+      approvalId: string;
+      diffHash: string;
+      expiresAt: number;
+    }>;
+    boundDiffHashes?: ReadonlyMap<string, string>;
+  };
+  /**
    * Active workspace-preference content hash (server-owned). Defaults to the
    * repository-backed resolver; injectable for tests. Never request-derived.
    */
@@ -375,6 +390,8 @@ export async function runStoreManagerExecution(
       workspacePath: validated.workspacePath,
       executionId,
       approvalExpiresAt: deadlineAt,
+      serverApprovedCalls: deps.executionContextExtras?.serverApprovedCalls,
+      boundDiffHashes: deps.executionContextExtras?.boundDiffHashes,
     },
     adapterContext: {
       workspaceId: validated.workspaceId,
@@ -454,7 +471,13 @@ export async function runStoreManagerExecution(
       // so persistent adapters are also forced to not-applicable — they are
       // refused at the approval gate (approval_required) before any side
       // effect, and repair never runs without explicit operator approval.
-      forceNotApplicable: policy.denyPersistent || validated.entrypoint === 'command',
+      // Playbook steps (Issue 7) drain server-side with server-recorded
+      // checkpoint approvals — the SDK must never render a client approval
+      // UI for a drained stream; the gate enforces checkpoint approvals.
+      forceNotApplicable:
+        policy.denyPersistent ||
+        validated.entrypoint === 'command' ||
+        validated.entrypoint === 'playbook',
     }),
     experimental_toolApprovalSecret: approvalSecret,
     // Whole-run deadline + caller cancellation, composed server-side.
@@ -559,10 +582,13 @@ export async function runStoreManagerExecution(
             toolNameById.set(c.toolCallId, c.toolName);
           }
           if (c.type === 'tool-output-available' && c.toolCallId) {
+            const output = c.output as { status?: string; reasonCode?: string } | undefined;
+            const structuredDenial =
+              output && typeof output === 'object' && (output.status === 'policy_denied' || output.status === 'error');
             drainedOutput.toolResults.push({
               toolCallId: c.toolCallId,
               toolName: toolNameById.get(c.toolCallId) ?? 'unknown',
-              status: 'ok',
+              status: structuredDenial ? (output.status === 'policy_denied' ? 'denied' : 'error') : 'ok',
               output: c.output,
             });
           } else if (c.type === 'tool-output-error' && c.toolCallId) {
@@ -700,6 +726,32 @@ function emitRunStarted(
       scheduleId: request.lineage.scheduleId ?? null,
       triggerKind: request.lineage.triggerKind ?? null,
       occurrenceKey: request.lineage.occurrenceKey ?? null,
+    });
+  }
+  if (request.lineage?.replayOfRunId) {
+    emit({
+      version: 1,
+      type: 'replay_lineage',
+      sessionId: runId,
+      workspaceId: request.workspaceId,
+      turnId,
+      createdAt: now().toISOString(),
+      replayOfRunId: request.lineage.replayOfRunId,
+      sourceEntrypoint: request.entrypoint,
+    });
+  }
+  if (request.lineage?.playbookId) {
+    emit({
+      version: 1,
+      type: 'playbook_lineage',
+      sessionId: runId,
+      workspaceId: request.workspaceId,
+      turnId,
+      createdAt: now().toISOString(),
+      playbookId: request.lineage.playbookId,
+      playbookVersion: request.lineage.playbookVersion ?? null,
+      stepId: request.lineage.stepId ?? null,
+      stepKind: request.lineage.stepKind ?? null,
     });
   }
 }

@@ -13,6 +13,7 @@ import { createStoreManagerExecutionRequest } from '../../store-manager/runtime/
 import { StoreManagerToolRegistry } from '../../store-manager/runtime/tool-registry';
 import type { StoreManagerToolAdapter, StoreManagerToolResult } from '../../store-manager/runtime/contracts';
 import { okResult } from '../../store-manager/runtime/contracts';
+import { buildStoreManagerActionDiff } from '../../store-manager/runtime/action-preview';
 import { getAiModelCallsByWorkspace } from '../../db/repositories/ai-model-call-repo';
 import {
   getStoreManagerSession,
@@ -62,6 +63,19 @@ const writeAdapter: StoreManagerToolAdapter = {
   stateTransition: 'proposal stored',
   allowedPhases: ['approve'] as const,
   scopeSummary: (i) => `write ${String(i.proposalId ?? '')}`,
+  previewDiff: async ({ proposalId }, ctx) =>
+    buildStoreManagerActionDiff({
+      toolName: 'runtime_write',
+      toolVersion: 1,
+      riskClass: 'proposal_write',
+      workspaceId: ctx.workspaceId,
+      scopeHash: null,
+      affectedSkuCount: 1,
+      affectedSkus: ['SKU-1'],
+      changeSet: null,
+      networkActivity: { kind: 'none' },
+      evidenceRefs: [`proposal:${String(proposalId ?? '')}`],
+    }),
   execute: async (): Promise<StoreManagerToolResult> => {
     readCalls.push('write');
     return okResult({ ok: true });

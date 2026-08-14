@@ -137,6 +137,15 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
     scopeSummary: (input) =>
       `deterministic operational report${typeof input.focus === 'string' && input.focus !== 'full' ? ` (${input.focus})` : ''}`,
   },
+  history_query: {
+    name: 'history_query',
+    version: 1,
+    riskClass: 'read',
+    sideEffects: 'none',
+    requiresApproval: false,
+    stateTransition: 'none',
+    scopeSummary: (input) => `history query ${String((input as Record<string, unknown>).queryId ?? '?')}`,
+  },
   // ---------------------------------------------------------- proposal_write --
   store_product_field_normalization_proposals: {
     name: 'store_product_field_normalization_proposals',

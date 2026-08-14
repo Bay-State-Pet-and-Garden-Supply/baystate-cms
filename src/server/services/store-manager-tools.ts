@@ -31,6 +31,24 @@ export interface StoreManagerToolContext {
   executionId?: string;
   /** Absolute epoch ms after which this execution context refuses to run. */
   approvalExpiresAt?: number;
+  /**
+   * Server-recorded approvals (operations console, Issue 7 — playbook
+   * checkpoints). Each entry binds one exact tool call to an operator
+   * approval of a deterministic diff hash. Consumed exactly once like any
+   * approval; playbook steps never synthesize approval messages.
+   */
+  serverApprovedCalls?: ReadonlyArray<{
+    toolCallId: string;
+    approvalId: string;
+    diffHash: string;
+    expiresAt: number;
+  }>;
+  /**
+   * Approval-bound diff hashes by tool call id. The registry recomputes the
+   * adapter preview at dispatch and refuses `stale_preview` on any mismatch
+   * (drift consumes no mutation authority).
+   */
+  boundDiffHashes?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -207,6 +225,26 @@ export function gateToolExecution(
     }
 
     if (policy.requiresApproval) {
+      // Server-recorded approvals (playbook checkpoints) bind an exact tool
+      // call to an operator-approved diff hash without SDK approval messages.
+      // They are single-use (consumed here) and expire like any approval.
+      const serverApproved = context.serverApprovedCalls?.find(
+        (a) => a.toolCallId === options.toolCallId,
+      );
+      if (serverApproved) {
+        if (Date.now() > serverApproved.expiresAt) {
+          throw new ApprovalGateError(
+            'approval_session_expired',
+            'The playbook checkpoint approval for this step has expired; re-approve a fresh diff.',
+          );
+        }
+        const consumed = consumeApproval(serverApproved.approvalId, context.executionId ?? 'unknown');
+        if (!consumed.ok) {
+          throw new ApprovalGateError('approval_replay_or_altered', consumed.reason);
+        }
+        return execute(input, options);
+      }
+
       const messages = options?.messages ?? [];
       const state = approvalStateForToolCall(messages, options.toolCallId);
       if (state === 'approved') {

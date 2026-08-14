@@ -33,6 +33,8 @@ import { policyDenied, errorResult } from './contracts';
 import type { StoreManagerRuntimePolicy } from './policy';
 import { hashCanonicalJson } from '../../shared/stable-id';
 import type { StoreManagerScopeKind } from '../../shared/schemas/store-manager-operations';
+import { computeAdapterPreviewDiff, checkDiffStaleness } from './action-preview';
+import type { StoreManagerActionDiff } from '../../shared/schemas/store-manager-diff';
 import {
   gateToolExecution,
   ApprovalGateError,
@@ -43,6 +45,7 @@ import { PROPOSAL_TOOL_ADAPTERS } from '../tools/proposal-tools';
 import { IMAGE_REPAIR_TOOL_ADAPTERS } from '../tools/image-repair-tool';
 import { CHANGE_SET_READ_TOOL_ADAPTERS } from '../tools/change-set-read-tools';
 import { REPORT_TOOL_ADAPTERS } from '../tools/report-tools';
+import { HISTORY_TOOL_ADAPTERS } from '../tools/history-tools';
 
 // ---------------------------------------------------------------------------
 // Mutable per-turn session state the registry enforces against
@@ -138,6 +141,14 @@ export class StoreManagerToolRegistry {
   register(adapter: StoreManagerToolAdapter): void {
     if (this.adapters.has(adapter.name)) {
       throw new Error(`Store Manager tool "${adapter.name}" is already registered.`);
+    }
+    // Diff-first action UX (Issue 7): every persistent adapter MUST provide a
+    // deterministic preview provider so an operator always approves an exact
+    // diff. Failing registration is cheaper and safer than failing dispatch.
+    if (adapter.riskClass !== 'read' && !adapter.previewDiff) {
+      throw new Error(
+        `Store Manager tool "${adapter.name}" is persistent (${adapter.riskClass}) but has no previewDiff provider; refusing to register.`,
+      );
     }
     this.adapters.set(adapter.name, adapter);
   }
@@ -314,9 +325,11 @@ export class StoreManagerToolRegistry {
     }
     // 4. phase allowlist (persistent calls allowed only via a valid approval)
     const approvalState = this.resolveApprovalState(opts);
+    const serverApprovedForCall =
+      executionContext.serverApprovedCalls?.some((a) => a.toolCallId === toolCallId) === true;
     const phaseAllowed =
       adapter.allowedPhases.includes(session.phase) ||
-      (adapter.requiresApproval && approvalState === 'approved');
+      (adapter.requiresApproval && (approvalState === 'approved' || serverApprovedForCall));
     if (!phaseAllowed) {
       return deny(
         'phase_not_allowed',
@@ -376,6 +389,34 @@ export class StoreManagerToolRegistry {
 
     // 9. fresh domain ownership/state is enforced by the workspace-scoped
     //    services the adapters call (#35/#36); no duplication here.
+
+    // 9b. diff-first action UX (Issue 7): recompute the deterministic preview
+    //     immediately before a persistent mutation and compare with the
+    //     approval-bound diff hash (playbook checkpoints). Mismatch refuses
+    //     `stale_preview` and consumes NO mutation authority. Unbound chat
+    //     approvals execute on the fresh deterministic diff (the operator
+    //     approved the exact tool input; the diff is re-derived from current
+    //     authoritative state at dispatch).
+    let recomputedDiff: StoreManagerActionDiff | null = null;
+    if (adapter.riskClass !== 'read') {
+      const adapterCtxForPreview: StoreManagerAdapterContext = {
+        ...opts.adapterContext,
+        signal: undefined,
+        pinnedScope: policy.pinnedScope,
+        entrypoint: policy.entrypoint,
+        emit,
+      };
+      recomputedDiff = await computeAdapterPreviewDiff(adapter, validInput, adapterCtxForPreview);
+      const boundDiffHash = executionContext.boundDiffHashes?.get(toolCallId);
+      const freshness = checkDiffStaleness(recomputedDiff, boundDiffHash);
+      emitActionDiff(emit, adapter, policy, recomputedDiff, freshness === 'stale');
+      if (freshness === 'stale') {
+        return deny(
+          'stale_preview',
+          `The catalog state changed since this ${adapter.riskClass} action was previewed; refresh the diff and re-approve. No changes were made.`,
+        );
+      }
+    }
 
     // 10. composed AbortSignal + per-call timeout
     const { signal, dispose } = composeSignal(opts.callerSignal, policy.perCallTimeoutMs);
@@ -543,6 +584,29 @@ function emitToolResult(
   });
 }
 
+function emitActionDiff(
+  emit: StoreManagerAdapterContext['emit'],
+  adapter: StoreManagerToolAdapter,
+  policy: StoreManagerRuntimePolicy,
+  diff: StoreManagerActionDiff | null,
+  stale: boolean,
+): void {
+  emit({
+    version: 1,
+    type: 'action_diff',
+    sessionId: policy.sessionId,
+    workspaceId: policy.workspaceId,
+    turnId: policy.turnId,
+    createdAt: new Date().toISOString(),
+    toolName: adapter.name,
+    toolVersion: adapter.version,
+    diffHash: diff?.diffHash ?? 'unknown',
+    skuCount: diff?.affectedSkuCount ?? 0,
+    networkActivity: diff?.networkActivity.kind ?? 'unknown',
+    stale,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Signal composition
 // ---------------------------------------------------------------------------
@@ -579,6 +643,7 @@ export const DEFAULT_TOOL_ADAPTERS: readonly StoreManagerToolAdapter[] = [
   ...IMAGE_REPAIR_TOOL_ADAPTERS,
   ...CHANGE_SET_READ_TOOL_ADAPTERS,
   ...REPORT_TOOL_ADAPTERS,
+  ...HISTORY_TOOL_ADAPTERS,
 ];
 
 export function createStoreManagerToolRegistry(): StoreManagerToolRegistry {

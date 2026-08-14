@@ -9,6 +9,7 @@ import {
   type StoreManagerRuntimeSessionState,
 } from '../../store-manager/runtime/tool-registry';
 import { createStoreManagerPolicy, STORE_MANAGER_POLICY_DEFAULTS } from '../../store-manager/runtime/policy';
+import { buildStoreManagerActionDiff } from '../../store-manager/runtime/action-preview';
 import type { StoreManagerToolAdapter, StoreManagerToolResult, StoreManagerRuntimeEvent } from '../../store-manager/runtime/contracts';
 import { okResult } from '../../store-manager/runtime/contracts';
 
@@ -53,6 +54,20 @@ function makeAdapters(overrides?: {
     stateTransition: 'proposal stored',
     allowedPhases: ['approve'] as const,
     scopeSummary: (i) => `write ${String(i.proposalId ?? '')}`,
+    previewDiff: async ({ proposalId }, ctx) =>
+      buildStoreManagerActionDiff({
+        toolName: 'test_write',
+        toolVersion: 1,
+        riskClass: 'proposal_write',
+        workspaceId: ctx.workspaceId,
+        scopeHash: null,
+        affectedSkuCount: 1,
+        affectedSkus: ['SKU-1'],
+        beforeAfter: [{ field: 'ProductField24', before: 'old', after: 'new', affectedCount: 1 }],
+        changeSet: null,
+        networkActivity: { kind: 'none' },
+        evidenceRefs: [`proposal:${String(proposalId ?? '')}`],
+      }),
     execute: async () => {
       calls.push('write');
       return overrides?.writeExecutes ? overrides.writeExecutes() : okResult({ ok: true });

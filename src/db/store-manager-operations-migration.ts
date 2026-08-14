@@ -30,12 +30,18 @@
  *    event-triggered read-only runs (same lease + unique-key discipline).
  *  - store_manager_source_cursors: per-source observation cursors with
  *    fingerprints + deterministic baselines (drift), out-of-order safe.
+ * New surface (v6, Issue 7):
+ *  - store_manager_playbook_runs / _steps: durable playbook execution with
+ *    per-step claims, checkpoints, leases, and typed outputs/artifacts.
+ *  - store_manager_review_decisions: durable per-proposal review decisions
+ *    (dismiss/deny) so history queries can count repeated rejections.
+ *  - history indexes for run listing + decision lookups.
  */
 
 import { getDb } from './connection';
 import type { Database } from './driver';
 
-export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '5';
+export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '6';
 export const STORE_MANAGER_OPERATIONS_MARKER = 'store_manager_operations_schema_version';
 
 const SESSION_ADDITIVE_COLUMNS: ReadonlyArray<readonly [column: string, ddl: string]> = [
@@ -425,6 +431,90 @@ export function runStoreManagerOperationsMigration(): void {
       );
       CREATE INDEX IF NOT EXISTS idx_store_manager_playbook_versions_pb
         ON store_manager_playbook_versions(workspace_id, playbook_id, version);
+    `);
+    // Block 10 (Issue 7): durable playbook runs + steps. One run row per
+    // invocation with a current-step pointer and lease; one step row per
+    // declared step capturing typed input/output, diff hash for the
+    // checkpoint, execution run id, and approval state. Checkpoints pause
+    // the run (status paused_at_checkpoint) and only a fresh operator
+    // approval with the exact diff hash resumes it.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_playbook_runs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        workspace_path TEXT NOT NULL,
+        playbook_id TEXT NOT NULL,
+        playbook_version INTEGER NOT NULL,
+        definition_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        current_step_id TEXT,
+        variables_json TEXT NOT NULL,
+        scope_json TEXT,
+        actor TEXT NOT NULL DEFAULT 'operator',
+        owner TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        error_code TEXT,
+        error_detail TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_playbook_runs_ws
+        ON store_manager_playbook_runs(workspace_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_playbook_runs_status
+        ON store_manager_playbook_runs(workspace_id, status);
+      CREATE TABLE IF NOT EXISTS store_manager_playbook_steps (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        step_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        tool_name TEXT,
+        tool_version INTEGER,
+        tool_call_id TEXT,
+        input_json TEXT,
+        output_json TEXT,
+        artifact_id TEXT,
+        diff_hash TEXT,
+        execution_run_id TEXT,
+        approval_actor TEXT,
+        approval_diff_hash TEXT,
+        approval_expires_at TEXT,
+        error_code TEXT,
+        started_at TEXT,
+        ended_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (run_id, step_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_playbook_steps_run
+        ON store_manager_playbook_steps(workspace_id, run_id, step_id);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_playbook_steps_status
+        ON store_manager_playbook_steps(workspace_id, status);
+      -- Durable per-proposal review decisions (dismiss/deny) for history
+      -- queries (rejected-more-than-once) and per-item audit. Never a
+      -- staging authority: decisions record ONLY what an operator did.
+      CREATE TABLE IF NOT EXISTS store_manager_review_decisions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        proposal_id TEXT NOT NULL,
+        field TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        run_id TEXT,
+        step_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_decisions_ws_proposal
+        ON store_manager_review_decisions(workspace_id, proposal_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_decisions_ws_created
+        ON store_manager_review_decisions(workspace_id, created_at);
+      -- History listing index (run list is ordered by created_at DESC).
+      CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_ws_created
+        ON store_manager_sessions(workspace_id, created_at);
     `);
     db.query(
       'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',

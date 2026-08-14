@@ -999,3 +999,228 @@ export async function activateStoreManagerPlaybook(id: string, version: number):
   if (!data.ok) throw new Error(data.error ?? `Playbook activation failed (${res.status}).`);
   return data.playbook!;
 }
+
+// ---------------------------------------------------------------------------
+// Operations console — Issue 7: diff-first previews, run history, replay,
+// comparison, and bounded history queries.
+// ---------------------------------------------------------------------------
+
+export interface StoreManagerActionDiff {
+  schemaVersion: 1;
+  toolName: string;
+  toolVersion: number;
+  riskClass: 'read' | 'proposal_write' | 'catalog_mutation' | 'network_filesystem_repair';
+  workspaceId: string;
+  scopeHash: string | null;
+  affectedSkuCount: number;
+  affectedSkus: string[];
+  affectedSkusTruncated: boolean;
+  beforeAfter: Array<{ field: string; sku?: string; before: string; after: string; affectedCount?: number }>;
+  filesTouched: Array<{ path: string; note?: string }>;
+  changeSet: { id?: string; currentState?: string | null; expectedState?: string; itemCount?: number } | null;
+  networkActivity:
+    | { kind: 'none' }
+    | { kind: 'bounded'; hosts: string[]; requestCount: number; note?: string }
+    | { kind: 'unknown'; note: string };
+  evidenceRefs: string[];
+  stateHashes: Record<string, string>;
+  generatedAt: string;
+  diffHash: string;
+}
+
+export interface StoreManagerHistoryRun {
+  runId: string;
+  workspaceId: string;
+  entrypoint: string;
+  executionMode: string;
+  actorClass: string;
+  objective: string;
+  status: string;
+  terminalStatus: string | null;
+  outcomeReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  modelCallId: string | null;
+  policyHash: string;
+  scopeHash: string | null;
+  lineage: unknown;
+  artifactCount: number;
+}
+
+export interface StoreManagerRunHistoryDetail {
+  run: StoreManagerHistoryRun;
+  events: unknown[];
+  artifacts: Array<{ id: string; kind: string; schemaVersion: number; contentHash: string; createdAt: string }>;
+  modelCall: {
+    id: string;
+    provider: string;
+    model: string;
+    locality: string;
+    status: string;
+    promptTokens: number | null;
+    completionTokens: number | null;
+    estimatedApiCostUsd: number | null;
+    errorCode: string | null;
+    startedAt: string;
+  } | null;
+}
+
+export interface StoreManagerReplayResult {
+  ok: boolean;
+  replayRunId: string;
+  replayOfRunId: string;
+  terminalStatus: string;
+  text: string;
+  toolResults: Array<{ toolName: string; status: string }>;
+}
+
+export interface StoreManagerCompareResult {
+  comparable: boolean;
+  runIdA: string;
+  runIdB: string;
+  kind: string | null;
+  delta: Array<{ field: string; before: string | number | null; after: string | number | null }> | null;
+  reason: string | null;
+}
+
+export interface StoreManagerHistoryQueryResult {
+  queryId: string;
+  matchedRows: number;
+  sourceRunIds: string[];
+  columns: string[];
+  rows: Array<Record<string, string | number | null>>;
+  truncated: boolean;
+}
+
+export interface StoreManagerHistoryQueryDescriptor {
+  queryId: string;
+  version: number;
+  description: string;
+  paramSpec: unknown;
+}
+
+export interface StoreManagerPlaybookRunResult {
+  runId: string;
+  playbookId: string;
+  version: number;
+  status: 'running' | 'paused_at_checkpoint' | 'completed' | 'failed';
+  currentStepId: string | null;
+  steps: Array<{
+    stepId: string;
+    kind: string;
+    status: string;
+    toolName: string | null;
+    diffHash: string | null;
+    executionRunId: string | null;
+    output: unknown;
+    errorCode: string | null;
+  }>;
+  checkpoint: { stepId: string; toolName: string; toolCallId: string; diffHash: string; expiresAtMs: number } | null;
+  errorCode: string | null;
+}
+
+export async function fetchStoreManagerActionPreview(
+  toolName: string,
+  input: Record<string, unknown>,
+): Promise<StoreManagerActionDiff> {
+  const res = await fetch('/api/store-manager/action-preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ toolName, input }),
+  });
+  const data = (await res.json()) as { ok: boolean; diff?: StoreManagerActionDiff; error?: string };
+  if (!data.ok || !data.diff) throw new Error(data.error ?? `Preview failed (${res.status}).`);
+  return data.diff;
+}
+
+export async function fetchStoreManagerRuns(opts: { after?: { createdAt: string; id: string } | null; limit?: number } = {}): Promise<{
+  runs: StoreManagerHistoryRun[];
+  nextCursor: { createdAt: string; id: string } | null;
+}> {
+  const params = new URLSearchParams();
+  if (opts.after) params.set('after', JSON.stringify(opts.after));
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const qs = params.toString();
+  const res = await fetch(`/api/store-manager/runs${qs ? `?${qs}` : ''}`);
+  if (!res.ok) throw new Error(`Failed to load run history (${res.status}).`);
+  return (await res.json()) as { runs: StoreManagerHistoryRun[]; nextCursor: { createdAt: string; id: string } | null };
+}
+
+export async function fetchStoreManagerRunDetail(runId: string): Promise<StoreManagerRunHistoryDetail> {
+  const res = await fetch(`/api/store-manager/runs/${encodeURIComponent(runId)}`);
+  if (!res.ok) throw new Error(`Failed to load run detail (${res.status}).`);
+  return (await res.json()) as StoreManagerRunHistoryDetail;
+}
+
+export async function replayStoreManagerRun(
+  runId: string,
+  selectedModel?: string,
+): Promise<StoreManagerReplayResult> {
+  const res = await fetch(`/api/store-manager/runs/${encodeURIComponent(runId)}/replay`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(selectedModel ? { selectedModel } : {}),
+  });
+  const data = (await res.json()) as StoreManagerReplayResult & { error?: string; errorCode?: string };
+  if (!data.ok) throw new Error(data.error ?? `Replay failed (${res.status}).`);
+  return data;
+}
+
+export async function compareStoreManagerRuns(runIdA: string, runIdB: string): Promise<StoreManagerCompareResult> {
+  const res = await fetch('/api/store-manager/runs/compare', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runIdA, runIdB }),
+  });
+  return (await res.json()) as StoreManagerCompareResult;
+}
+
+export async function fetchStoreManagerHistoryQueries(): Promise<StoreManagerHistoryQueryDescriptor[]> {
+  const res = await fetch('/api/store-manager/history/queries');
+  if (!res.ok) return [];
+  const data = (await res.json()) as { queries?: StoreManagerHistoryQueryDescriptor[] };
+  return data.queries ?? [];
+}
+
+export async function executeStoreManagerHistoryQuery(
+  queryId: string,
+  params: Record<string, unknown>,
+): Promise<StoreManagerHistoryQueryResult> {
+  const res = await fetch('/api/store-manager/history/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queryId, params }),
+  });
+  const data = (await res.json()) as StoreManagerHistoryQueryResult & { error?: string; errorCode?: string };
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+export async function runStoreManagerPlaybook(
+  playbookId: string,
+  variables: Record<string, unknown>,
+): Promise<StoreManagerPlaybookRunResult> {
+  const res = await fetch(`/api/store-manager/playbooks/${encodeURIComponent(playbookId)}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ variables }),
+  });
+  const data = (await res.json()) as StoreManagerPlaybookRunResult & { error?: string; errorCode?: string };
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+export async function resumeStoreManagerPlaybookRun(
+  runId: string,
+  approve: boolean,
+  diffHash: string,
+): Promise<StoreManagerPlaybookRunResult> {
+  const res = await fetch(`/api/store-manager/playbook-runs/${encodeURIComponent(runId)}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ approve, diffHash }),
+  });
+  const data = (await res.json()) as StoreManagerPlaybookRunResult & { error?: string; errorCode?: string };
+  if (data.error) throw new Error(data.error);
+  return data;
+}

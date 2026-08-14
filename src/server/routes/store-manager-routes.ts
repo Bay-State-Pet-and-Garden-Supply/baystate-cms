@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { randomBytes } from 'node:crypto';
+import { z } from 'zod';
 import { getCurrentWorkspace } from '../services/workspace-service';
 import { generateProductFieldAuditReport } from '../services/catalog-insight-service';
 import {
@@ -33,7 +34,6 @@ import {
 } from '../services/store-manager-telemetry';
 import { runStoreManagerTurn, runStoreManagerExecution, StoreManagerTurnError } from '../../store-manager/runtime/executor';
 import { createStoreManagerExecutionRequest } from '../../store-manager/runtime/execution-request';
-import { createStoreManagerToolRegistry } from '../../store-manager/runtime/tool-registry';
 import {
   compileStoreManagerCommand,
   StoreManagerCommandCompileError,
@@ -64,6 +64,32 @@ import {
 } from '../../shared/schemas/store-manager-preferences';
 import { listRegistry } from '../../db/repositories/field-registry-repo';
 import { StoreManagerChatRequestSchema } from '../../shared/schemas/store-manager';
+import {
+  runStoreManagerPlaybook,
+  resumeStoreManagerPlaybookRun,
+  getStoreManagerPlaybookRunDetail,
+  StoreManagerPlaybookRunError,
+} from '../../store-manager/playbooks/runner';
+import { createStoreManagerToolRegistry } from '../../store-manager/runtime/tool-registry';
+import { computeAdapterPreviewDiff } from '../../store-manager/runtime/action-preview';
+import {
+  listRunHistory,
+  getRunHistoryDetail,
+  toHistoryRun,
+  recordReviewDecision,
+} from '../../db/repositories/store-manager-history-repo';
+import { replayStoreManagerRun, StoreManagerReplayError } from '../services/store-manager-replay-service';
+import { compareStoreManagerRuns, StoreManagerComparisonError } from '../services/store-manager-comparison-service';
+import { executeHistoryQuery, StoreManagerHistoryQueryError } from '../services/store-manager-history-query-service';
+import { describeHistoryQueries } from '../../store-manager/history/query-registry';
+import {
+  StoreManagerReplayRequestSchema,
+  StoreManagerCompareRequestSchema,
+  StoreManagerHistoryQueryRequestSchema,
+  StoreManagerRunHistoryListSchema,
+  StoreManagerRunHistoryDetailSchema,
+} from '../../shared/schemas/store-manager-history';
+import { StoreManagerActionDiffSchema } from '../../shared/schemas/store-manager-diff';
 import {
   createTriggerFromTemplate,
   listTriggersForWorkspace,
@@ -350,6 +376,16 @@ route.post('/store-manager/proposals/:id/dismiss', async (c) => {
   const id = c.req.param('id');
   try {
     dismissProposal(workspace.id, id);
+    // Durable review decision (Issue 7) for the bounded history queries
+    // (proposals-rejected-more-than-once) and per-item audit.
+    const proposal = getProposalById(workspace.id, id);
+    recordReviewDecision({
+      workspaceId: workspace.id,
+      proposalId: id,
+      field: proposal?.field ?? 'unknown',
+      decision: 'dismissed',
+      actor: 'operator',
+    });
     return c.json({ success: true });
   } catch (err) {
     if (err instanceof ProposalNotFoundError) {
@@ -1337,6 +1373,284 @@ route.post('/store-manager/playbooks/:id/activate', async (c) => {
       return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'not_found' ? 404 : 400);
     }
     return c.json({ ok: false, errorCode: 'playbook_activate_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Operations console — Issue 7: diff-first action previews, playbook runner,
+// run history/replay/comparison, and bounded history queries.
+// All execution still enters runStoreManagerExecution; history reads are
+// workspace-scoped and redacted; replay creates a NEW current-state run.
+// ---------------------------------------------------------------------------
+
+/** Minimal zod request schemas (boundary-validated inline). */
+const PlaybookRunRequestSchema = z
+  .object({
+    version: z.number().int().positive().max(10_000).optional(),
+    variables: z.record(z.string().min(1).max(64), z.unknown()).optional(),
+  })
+  .strict();
+
+const PlaybookResumeRequestSchema = z
+  .object({
+    approve: z.boolean(),
+    diffHash: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
+const ActionPreviewRequestSchema = z
+  .object({
+    toolName: z.string().min(1).max(200),
+    input: z.record(z.string().min(1).max(50), z.unknown()).optional(),
+  })
+  .strict();
+
+/**
+ * POST /api/store-manager/action-preview
+ * Deterministic pre-approval diff for a persistent tool + input (read-only
+ * compute; no side effects). The operator reviews this before approving; the
+ * runner/registry revalidates the same diff at dispatch (stale_preview on
+ * drift).
+ */
+route.post('/store-manager/action-preview', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = ActionPreviewRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid preview request.', details: parsed.error.flatten() }, 400);
+  }
+  const registry = createStoreManagerToolRegistry();
+  const adapter = registry.get(parsed.data.toolName);
+  if (!adapter || adapter.riskClass === 'read' || !adapter.previewDiff) {
+    return c.json({ ok: false, errorCode: 'not_previewable', error: 'This tool has no deterministic preview (read tools are not previewed).' }, 404);
+  }
+  try {
+    const diff = await computeAdapterPreviewDiff(adapter, parsed.data.input ?? {}, {
+      workspaceId: workspace.id,
+      workspacePath: workspace.workspacePath,
+      sessionId: 'preview',
+      executionId: 'preview',
+      deadlineAt: Date.now() + 60_000,
+      entrypoint: 'command',
+      pinnedScope: null,
+      emit: () => undefined,
+    });
+    if (!diff) {
+      return c.json({ ok: false, errorCode: 'preview_failed', error: 'The deterministic preview could not be built.' }, 422);
+    }
+    return c.json({ ok: true, diff });
+  } catch (err) {
+    return c.json({ ok: false, errorCode: 'preview_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Preview failed.' }, 400);
+  }
+});
+
+/**
+ * POST /api/store-manager/playbooks/:id/run
+ * Start a playbook run (operator). Runs synchronously until the first
+ * approval checkpoint (pause) or completion. Gated by flags + kill switch
+ * (the runner also fails closed).
+ */
+route.post('/store-manager/playbooks/:id/run', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.playbooksEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Playbooks are disabled (flag or kill switch).' }, 409);
+  }
+  const id = c.req.param('id');
+  if (id.length > 100) return c.json({ error: 'Invalid playbook id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = PlaybookRunRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid playbook run request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = await runStoreManagerPlaybook({
+      workspaceId: workspace.id,
+      workspacePath: workspace.workspacePath,
+      playbookId: id,
+      version: parsed.data.version,
+      variables: parsed.data.variables ?? {},
+      actor: 'operator',
+    });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof StoreManagerPlaybookRunError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'playbook_not_found' || err.code === 'version_not_found' ? 404 : 400);
+    }
+    return c.json({ ok: false, errorCode: 'playbook_run_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Playbook run failed.' }, 400);
+  }
+});
+
+/**
+ * POST /api/store-manager/playbook-runs/:runId/resume
+ * Approve (exact diff hash) or deny the paused checkpoint. Only the operator
+ * actor can approve; the approval binds the exact diff and is single-use.
+ */
+route.post('/store-manager/playbook-runs/:runId/resume', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.playbooksEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Playbooks are disabled (flag or kill switch).' }, 409);
+  }
+  const runId = c.req.param('runId');
+  if (runId.length > 64) return c.json({ error: 'Invalid playbook run id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = PlaybookResumeRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid resume request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = await resumeStoreManagerPlaybookRun(workspace.id, runId, {
+      approve: parsed.data.approve,
+      actor: 'operator',
+      diffHash: parsed.data.diffHash,
+    });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof StoreManagerPlaybookRunError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'run_not_found' ? 404 : 400);
+    }
+    return c.json({ ok: false, errorCode: 'resume_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Resume failed.' }, 400);
+  }
+});
+
+/** GET /api/store-manager/playbook-runs/:runId — workspace-scoped run detail. */
+route.get('/store-manager/playbook-runs/:runId', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const runId = c.req.param('runId');
+  if (runId.length > 64) return c.json({ error: 'Invalid playbook run id.' }, 400);
+  const detail = getStoreManagerPlaybookRunDetail(workspace.id, runId);
+  if (!detail.run) return c.json({ error: 'Playbook run not found.' }, 404);
+  return c.json(detail);
+});
+
+/**
+ * GET /api/store-manager/runs — workspace-scoped run history (cursor list).
+ * Reads stay available under the kill switch (history remains inspectable).
+ */
+route.get('/store-manager/runs', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const afterRaw = c.req.query('after');
+  let after: { createdAt: string; id: string } | null = null;
+  if (afterRaw) {
+    try {
+      after = JSON.parse(afterRaw) as { createdAt: string; id: string };
+      if (!after || typeof after.createdAt !== 'string' || typeof after.id !== 'string') after = null;
+    } catch {
+      after = null;
+    }
+  }
+  const limitRaw = c.req.query('limit');
+  const limit = limitRaw && /^\d+$/.test(limitRaw) ? Math.min(Math.max(Number(limitRaw), 1), 200) : 50;
+  const entrypoint = c.req.query('entrypoint') || null;
+  try {
+    const result = listRunHistory(workspace.id, { after, limit, entrypoint });
+    const runs = result.runs.map((row) => toHistoryRun(row, row.artifact_count));
+    const validated = StoreManagerRunHistoryListSchema.safeParse({ runs, nextCursor: result.nextCursor });
+    return c.json(validated.success ? validated.data : { runs: [], nextCursor: null });
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+  }
+});
+
+/** GET /api/store-manager/runs/:runId — run detail (events + artifacts + telemetry join). */
+route.get('/store-manager/runs/:runId', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const runId = c.req.param('runId');
+  if (runId.length > 64) return c.json({ error: 'Invalid run id.' }, 400);
+  const detail = getRunHistoryDetail(workspace.id, runId);
+  if (!detail) return c.json({ error: 'Run not found.' }, 404);
+  const validated = StoreManagerRunHistoryDetailSchema.safeParse(detail);
+  return c.json(validated.success ? validated.data : { error: 'Run detail failed validation.' });
+});
+
+/**
+ * POST /api/store-manager/runs/:runId/replay
+ * Replay = a NEW current-state run with honest lineage. No approval reuse,
+ * no fallback for an explicitly selected model, fail-closed on invalid
+ * source policy snapshot / foreign run / incompatible scope.
+ */
+route.post('/store-manager/runs/:runId/replay', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'New Store Manager runs are disabled by the kill switch.' }, 409);
+  }
+  const runId = c.req.param('runId');
+  if (runId.length > 64) return c.json({ error: 'Invalid run id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerReplayRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid replay request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = await replayStoreManagerRun({
+      workspaceId: workspace.id,
+      workspacePath: workspace.workspacePath,
+      sourceRunId: runId,
+      selectedModel: parsed.data.selectedModel,
+    });
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof StoreManagerReplayError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'run_not_found' ? 404 : 400);
+    }
+    if (err instanceof ModelUnavailableError) {
+      return c.json({ ok: false, errorCode: 'model_unavailable', error: err.message }, 400);
+    }
+    return c.json({ ok: false, errorCode: 'replay_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Replay failed.' }, 400);
+  }
+});
+
+/** POST /api/store-manager/runs/compare — deterministic compatible-artifact comparison. */
+route.post('/store-manager/runs/compare', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerCompareRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid compare request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = compareStoreManagerRuns(workspace.id, parsed.data.runIdA, parsed.data.runIdB);
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof StoreManagerComparisonError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, 404);
+    }
+    return c.json({ ok: false, errorCode: 'compare_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Compare failed.' }, 400);
+  }
+});
+
+/** GET /api/store-manager/history/queries — supported query descriptors (server-owned). */
+route.get('/store-manager/history/queries', (c) => {
+  return c.json({ queries: describeHistoryQueries() });
+});
+
+/** POST /api/store-manager/history/query — bounded query execution. */
+route.post('/store-manager/history/query', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerHistoryQueryRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid history query request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = executeHistoryQuery(workspace.id, parsed.data.queryId, parsed.data.params);
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof StoreManagerHistoryQueryError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, 400);
+    }
+    return c.json({ ok: false, errorCode: 'query_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Query failed.' }, 400);
   }
 });
 

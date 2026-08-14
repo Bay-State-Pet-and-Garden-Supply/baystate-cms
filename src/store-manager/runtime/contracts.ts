@@ -25,6 +25,7 @@ export type {
   StoreManagerLineage,
 } from '../../shared/schemas/store-manager-operations';
 import type { StoreManagerArtifactKind } from '../../shared/schemas/store-manager-operations';
+import type { StoreManagerActionDiff } from '../../shared/schemas/store-manager-diff';
 
 // ---------------------------------------------------------------------------
 // Structured outcomes
@@ -52,7 +53,8 @@ export type StoreManagerToolResult =
         | 'size_exceeded'
         | 'unsupported'
         | 'invalid_input'
-        | 'persistent_not_allowed';
+        | 'persistent_not_allowed'
+        | 'stale_preview';
       message: string;
     }
   | { status: 'error'; errorCode: string; message: string };
@@ -146,6 +148,17 @@ export interface StoreManagerToolAdapter {
    * declared, the registry refuses `scope_unsupported` for any other kind.
    */
   supportedScopes?: readonly StoreManagerScopeKind[];
+  /**
+   * Deterministic pre-approval preview (operations console, Issue 7).
+   * REQUIRED for persistent-risk adapters (the registry refuses to register
+   * a persistent adapter without one). Produces the bounded action diff the
+   * operator approves; dispatch recomputes it and refuses `stale_preview` on
+   * any drift (bound by diff hash). Read adapters may omit it.
+   */
+  previewDiff?: (
+    input: Record<string, unknown>,
+    ctx: StoreManagerAdapterContext,
+  ) => Promise<StoreManagerActionDiff | null> | StoreManagerActionDiff | null;
   /** Normalized one-line scope summary for approval cards and events. */
   scopeSummary(input: Record<string, unknown>): string;
   execute(
@@ -258,4 +271,26 @@ export type StoreManagerRuntimeEvent =
       objectiveHash: string;
       scopeHash: string | null;
       lineage: StoreManagerLineage | null;
+    })
+  // ── Issue 7: diff-first action UX, replay lineage, bounded history queries ──
+  | (StoreManagerRuntimeEventBase & {
+      type: 'action_diff';
+      toolName: string;
+      toolVersion: number;
+      diffHash: string;
+      skuCount: number;
+      networkActivity: string;
+      stale: boolean;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'replay_lineage';
+      replayOfRunId: string;
+      sourceEntrypoint: StoreManagerEntrypoint | null;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'history_query';
+      queryId: string;
+      queryVersion: number;
+      matchedRows: number;
+      truncated: boolean;
     });

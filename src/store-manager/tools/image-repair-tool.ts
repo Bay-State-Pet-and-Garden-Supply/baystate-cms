@@ -9,7 +9,45 @@
 import { z } from 'zod';
 import type { StoreManagerToolAdapter, StoreManagerToolResult } from '../runtime/contracts';
 import { okResult, policyDenied, errorResult } from '../runtime/contracts';
+import { buildStoreManagerActionDiff } from '../runtime/action-preview';
+import type { StoreManagerActionDiff } from '../../shared/schemas/store-manager-diff';
 import { repairChangeSetImagesForWorkspace } from '../../server/services/store-manager-image-repair';
+import { getChangeSetWithItemsForWorkspace } from '../../db/repositories/change-set-repo';
+
+/** Deterministic preview: approved Change Set + item count => expected network/file activity. */
+function previewRepairImages(changeSetId: string, ctx: { workspaceId: string; pinnedScope?: unknown }): StoreManagerActionDiff | null {
+  const detail = getChangeSetWithItemsForWorkspace(ctx.workspaceId, changeSetId);
+  const changeSet = detail?.changeSet ?? null;
+  const skus = (detail?.items ?? []).map((i) => i.sku).filter((s): s is string => typeof s === 'string');
+  return buildStoreManagerActionDiff({
+    toolName: repairApprovedChangeSetImagesAdapter.name,
+    toolVersion: repairApprovedChangeSetImagesAdapter.version,
+    riskClass: 'network_filesystem_repair',
+    workspaceId: ctx.workspaceId,
+    scopeHash: ctx.pinnedScope && typeof ctx.pinnedScope === 'object' && ctx.pinnedScope !== null && 'kind' in ctx.pinnedScope ? JSON.stringify(ctx.pinnedScope) : null,
+    affectedSkuCount: skus.length,
+    affectedSkus: skus.slice(0, 200),
+    filesTouched: skus.slice(0, 100).map((sku) => ({
+      path: `products/images/${sku}.jpg`,
+      note: 'derived: per-SKU image writes under the products/images root',
+    })),
+    changeSet: changeSet
+      ? {
+          id: changeSet.id,
+          currentState: changeSet.status,
+          expectedState: 'approved',
+          itemCount: skus.length,
+        }
+      : { currentState: null, expectedState: 'approved' },
+    networkActivity: {
+      kind: 'bounded',
+      hosts: [],
+      requestCount: skus.length,
+      note: 'one fetch per affected SKU from the original onboarding extraction URLs (resolved at execution)',
+    },
+    evidenceRefs: changeSet ? [`change_set:${changeSet.id}`] : [],
+  });
+}
 
 export const repairApprovedChangeSetImagesAdapter: StoreManagerToolAdapter = {
   name: 'repair_approved_change_set_images',
@@ -28,6 +66,7 @@ export const repairApprovedChangeSetImagesAdapter: StoreManagerToolAdapter = {
   stateTransition: 'Change Set images re-downloaded into workspace (filesystem write)',
   allowedPhases: ['approve'] as const,
   scopeSummary: (input) => `re-download images for Change Set ${String(input.changeSetId ?? '?')}`,
+  previewDiff: async ({ changeSetId }, ctx) => previewRepairImages(String(changeSetId), ctx),
   execute: async ({ changeSetId }, ctx): Promise<StoreManagerToolResult> => {
     const result = await repairChangeSetImagesForWorkspace({
       workspaceId: ctx.workspaceId,

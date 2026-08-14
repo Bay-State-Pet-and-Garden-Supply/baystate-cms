@@ -108,6 +108,9 @@ export const StoreManagerLineageSchema = z.object({
   occurrenceKey: z.string().min(1).max(STORE_MANAGER_OPERATIONS_BOUNDS.maxOccurrenceKeyLength).optional(),
   playbookId: z.string().min(1).max(STORE_MANAGER_OPERATIONS_BOUNDS.maxPlaybookIdLength).optional(),
   playbookVersion: z.number().int().positive().max(10_000).optional(),
+  /** Playbook step lineage (Issue 7): bounded step id + kind for step runs. */
+  stepId: z.string().min(1).max(64).optional(),
+  stepKind: z.string().min(1).max(64).optional(),
   replayOfRunId: z.string().min(1).max(STORE_MANAGER_OPERATIONS_BOUNDS.maxRunIdLength).optional(),
 }).strict();
 export type StoreManagerLineage = z.infer<typeof StoreManagerLineageSchema>;
