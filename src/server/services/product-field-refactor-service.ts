@@ -102,7 +102,7 @@ export function generateDeterministicProposals(
   field: string
 ): CatalogProposal[] {
   const report = generateProductFieldAuditReport(workspaceId, field);
-  const proposals: Omit<CatalogProposal, 'id' | 'createdAt' | 'updatedAt' | 'changeSetId'>[] = [];
+  const proposals: Omit<CatalogProposal, 'id' | 'createdAt' | 'updatedAt' | 'changeSetId' | 'currentDigest'>[] = [];
 
   // 1. Casing Normalization
   for (const group of report.casingDuplicates) {
@@ -123,6 +123,10 @@ export function generateDeterministicProposals(
         confidence: 0.95,
         source: 'deterministic',
         status: 'proposed',
+        normalizationKind: 'casing',
+        ruleVersion: 'deterministic:casing:v1',
+        evidenceKey: 'casing_normalization',
+        manualReviewRequired: false,
       });
     }
   }
@@ -145,6 +149,11 @@ export function generateDeterministicProposals(
         confidence: 0.85,
         source: 'deterministic',
         status: 'proposed',
+        // Typo corrections require human review: NEVER bulk-eligible.
+        normalizationKind: 'typo',
+        ruleVersion: 'deterministic:typo:v1',
+        evidenceKey: 'typo_consensus',
+        manualReviewRequired: true,
       });
     } else if (freqB >= 3 * freqA) {
       // Propose changing A to B
@@ -158,6 +167,10 @@ export function generateDeterministicProposals(
         confidence: 0.85,
         source: 'deterministic',
         status: 'proposed',
+        normalizationKind: 'typo',
+        ruleVersion: 'deterministic:typo:v1',
+        evidenceKey: 'typo_consensus',
+        manualReviewRequired: true,
       });
     }
   }
@@ -177,6 +190,10 @@ export function generateDeterministicProposals(
           confidence: 0.99,
           source: 'deterministic',
           status: 'proposed',
+          normalizationKind: 'whitespace',
+          ruleVersion: 'deterministic:whitespace:v1',
+          evidenceKey: 'whitespace_trim',
+          manualReviewRequired: false,
         });
       }
     }

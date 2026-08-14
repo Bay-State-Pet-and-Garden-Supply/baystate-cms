@@ -26,6 +26,7 @@ import { ManagerInbox } from './store-manager/ManagerInbox';
 import { NotificationCenter } from './store-manager/NotificationCenter';
 import { SchedulesPanel } from './store-manager/SchedulesPanel';
 import { PlaybooksPanel } from './store-manager/PlaybooksPanel';
+import { BulkReviewPanel } from './store-manager/BulkReviewPanel';
 import { RunHistory } from './store-manager/RunHistory';
 import { RunInspector } from './store-manager/RunInspector';
 import { RunComparison } from './store-manager/RunComparison';
@@ -79,6 +80,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [showInbox, setShowInbox] = useState(false);
   const [showSchedules, setShowSchedules] = useState(false);
   const [showPlaybooks, setShowPlaybooks] = useState(false);
+  const [showBulkReview, setShowBulkReview] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [inspectedRunId, setInspectedRunId] = useState<string | null>(null);
   const [compareRunId, setCompareRunId] = useState<string | null>(null);
@@ -1434,6 +1436,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             </button>
             <button
               type="button"
+              onClick={() => setShowBulkReview(v => !v)}
+              aria-expanded={showBulkReview}
+              className="btn btn-outline"
+              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
+              title="Bulk Review — homogeneous deterministic fixes, one approval for the exact batch"
+            >
+              📦 Bulk Review
+            </button>
+            <button
+              type="button"
               onClick={() => setShowHistory(v => !v)}
               aria-expanded={showHistory}
               className="btn btn-outline"
@@ -1464,6 +1476,17 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
 
         {showPreferences && <PreferencesPanel open={showPreferences} onClose={() => setShowPreferences(false)} />}
         <PlaybooksPanel open={showPlaybooks} onClose={() => setShowPlaybooks(false)} />
+        <BulkReviewPanel
+          open={showBulkReview}
+          onClose={() => setShowBulkReview(false)}
+          onRequestReview={(objective) => {
+            // The approval flow stays inside the runtime: the objective enters
+            // the chat session, the model proposes bulk_apply_stored_proposals,
+            // and the standard approval card shows the exact diff first.
+            if (!selectedModel) return;
+            sendMessage({ text: objective });
+          }}
+        />
         <ManagerInbox open={showInbox} onClose={() => setShowInbox(false)} notifications={notifications} eventStatus={eventStatus} />
         <SchedulesPanel open={showSchedules} onClose={() => setShowSchedules(false)} />
         <RunHistory

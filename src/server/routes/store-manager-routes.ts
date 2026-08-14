@@ -37,8 +37,7 @@ import { createStoreManagerExecutionRequest } from '../../store-manager/runtime/
 import {
   compileStoreManagerCommand,
   StoreManagerCommandCompileError,
-} from '../../store-manager/commands/compiler';
-import { describeStoreManagerCommands } from '../../store-manager/commands/registry';
+} from '../../store-manager/commands/compiler';import { describeStoreManagerCommands } from '../../store-manager/commands/registry';
 import {
   StoreManagerCommandCompileRequestSchema,
   StoreManagerCommandExecuteRequestSchema,
@@ -106,6 +105,22 @@ import {
   StoreManagerTriggerRunNowRequestSchema,
   StoreManagerTriggerOccurrenceListQuerySchema,
 } from '../../shared/schemas/store-manager-trigger';
+import {
+  previewBulkReviewBatch,
+  revalidateBulkReviewBatch,
+  denyBulkReviewBatch,
+  BulkReviewError,
+  BulkReviewDisabledError,
+} from '../services/store-manager-bulk-review-service';
+import {
+  listBulkReviewBatches,
+  findBulkReviewBatch,
+  listBulkReviewBatchItems,
+} from '../../db/repositories/store-manager-bulk-review-repo';
+import {
+  StoreManagerBulkReviewPreviewRequestSchema,
+  StoreManagerBulkReviewDenyRequestSchema,
+} from '../../shared/schemas/store-manager-bulk-review';
 import { getStoreManagerFlags } from '../../store-manager/flags';
 import {
   createPlaybookFromTemplate,
@@ -1651,6 +1666,92 @@ route.post('/store-manager/history/query', async (c) => {
       return c.json({ ok: false, errorCode: err.code, error: err.message }, 400);
     }
     return c.json({ ok: false, errorCode: 'query_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Query failed.' }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Operations console — Issue 8: homogeneous bulk review.
+// Grouping is a read/preview operation; the persisted batch preview is
+// immutable; the stage path is the registry/policy approval-gated tool
+// (bulk_apply_stored_proposals), never a direct route mutation. Deny is an
+// operator action with zero catalog effect. Gated by bulkReviewEnabled +
+// kill switch (read access to batch history stays available during kill
+// switch, matching the operations-console posture).
+// ---------------------------------------------------------------------------
+
+/** POST /api/store-manager/bulk-review/preview — derive + persist one immutable batch preview. */
+route.post('/store-manager/bulk-review/preview', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerBulkReviewPreviewRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid bulk-review preview request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = previewBulkReviewBatch(workspace.id, parsed.data, 'operator');
+    return c.json(result);
+  } catch (err) {
+    if (err instanceof BulkReviewDisabledError) {
+      return c.json({ ok: false, errorCode: 'not_configured', error: err.message }, 409);
+    }
+    if (err instanceof BulkReviewError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'empty_group' ? 422 : 400);
+    }
+    return c.json({ ok: false, errorCode: 'bulk_preview_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Preview failed.' }, 400);
+  }
+});
+
+/** GET /api/store-manager/bulk-review/batches — bounded batch history (reads stay available). */
+route.get('/store-manager/bulk-review/batches', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const limitRaw = Number(c.req.query('limit') ?? '50');
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+  return c.json({ batches: listBulkReviewBatches(workspace.id, limit) });
+});
+
+/** GET /api/store-manager/bulk-review/batches/:id — batch detail + live staleness revalidation. */
+route.get('/store-manager/bulk-review/batches/:id', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid batch id.' }, 400);
+  const batch = findBulkReviewBatch(workspace.id, id);
+  if (!batch) return c.json({ error: 'Bulk review batch not found.' }, 404);
+  const revalidation = revalidateBulkReviewBatch(workspace.id, id);
+  return c.json({
+    ok: true,
+    batch,
+    items: listBulkReviewBatchItems(workspace.id, id),
+    stale: !revalidation.fresh,
+    staleReason: revalidation.reason,
+    currentProposalCount: revalidation.currentProposalCount,
+  });
+});
+
+/** POST /api/store-manager/bulk-review/batches/:id/deny — per-item denied decisions; zero catalog effect. */
+route.post('/store-manager/bulk-review/batches/:id/deny', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid batch id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerBulkReviewDenyRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid deny request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = denyBulkReviewBatch(workspace.id, id, 'operator', undefined, parsed.data.reason);
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof BulkReviewDisabledError) {
+      return c.json({ ok: false, errorCode: 'not_configured', error: err.message }, 409);
+    }
+    if (err instanceof BulkReviewError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'not_found' ? 404 : 400);
+    }
+    return c.json({ ok: false, errorCode: 'bulk_deny_failed', error: err instanceof Error ? err.message.slice(0, 300) : 'Deny failed.' }, 400);
   }
 });
 

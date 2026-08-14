@@ -57,6 +57,19 @@ const catalogProposalCore = {
   source: z.enum(PROPOSAL_SOURCES),
   status: z.enum(PROPOSAL_STATUSES),
   changeSetId: z.string().nullable(),
+  // ── Bulk-review eligibility metadata (operations console, Issue 8) ──
+  // Only NEW records carry these explicitly; legacy/unknown rows default
+  // `manualReviewRequired = true` (ineligible) and are NEVER reclassified as
+  // safe by inference or confidence.
+  normalizationKind: z.enum(NORMALIZATION_KINDS).nullable(),
+  /** Deterministic rule that produced the mapping (stable, server-owned). */
+  ruleVersion: z.string().max(64).nullable(),
+  /** Evidence class the mapping belongs to (uniform within a bulk group). */
+  evidenceKey: z.string().max(200).nullable(),
+  /** True => never eligible for homogeneous bulk review. */
+  manualReviewRequired: z.boolean(),
+  /** Content digest captured at insert; bulk previews bind this exact row. */
+  currentDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 };
@@ -82,6 +95,13 @@ export const InsertCatalogProposalSchema = z
     confidence: z.number().finite().min(0).max(1),
     source: z.enum(PROPOSAL_SOURCES),
     status: z.enum(PROPOSAL_STATUSES).optional().default('proposed'),
+    // Optional bulk-review metadata (Issue 8). Omitted values default to
+    // `manualReviewRequired = true` so ANY caller that does not prove the
+    // mapping deterministic-safe produces an ineligible row.
+    normalizationKind: z.enum(NORMALIZATION_KINDS).optional(),
+    ruleVersion: z.string().max(64).optional(),
+    evidenceKey: z.string().max(200).optional(),
+    manualReviewRequired: z.boolean().optional(),
   })
   .strict();
 

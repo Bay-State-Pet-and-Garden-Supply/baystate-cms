@@ -178,6 +178,17 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
       'stored proposal -> staged in Change Set (draft changes); not approved, not published, not synced',
     scopeSummary: (input) => `stage stored proposal ${String(input.proposalId ?? '?')} in a Change Set`,
   },
+  bulk_apply_stored_proposals: {
+    name: 'bulk_apply_stored_proposals',
+    version: 1,
+    riskClass: 'catalog_mutation',
+    sideEffects:
+      'stages the exact bulk-review batch preview (per-proposal decision + status transition + Change Set item) into the active Change Set (draft only)',
+    requiresApproval: true,
+    stateTransition:
+      'bulk batch (pending) -> proposals staged in Change Set (draft); batch status applied; not approved, not published, not synced',
+    scopeSummary: (input) => `stage bulk review batch ${String(input.batchId ?? '?')} in a Change Set`,
+  },
   // ------------------------------------------------- network_filesystem_repair --
   repair_approved_change_set_images: {
     name: 'repair_approved_change_set_images',

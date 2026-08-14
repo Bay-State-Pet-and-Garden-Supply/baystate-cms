@@ -27,6 +27,7 @@ import { generateProductFieldAuditReport } from '../../server/services/catalog-i
 import { findProposalById } from '../../db/repositories/catalog-health-proposal-repo';
 import { findActiveChangeSet } from '../../db/repositories/change-set-repo';
 import { recordReviewDecision } from '../../db/repositories/store-manager-history-repo';
+import { BULK_REVIEW_TOOL_ADAPTERS } from './bulk-review-tools';
 
 /**
  * Deterministic preview for `store_product_field_normalization_proposals`:
@@ -269,4 +270,8 @@ export const PROPOSAL_TOOL_ADAPTERS: StoreManagerToolAdapter[] = [
   storeProductFieldNormalizationProposalsAdapter,
   stageStoredProposalInChangeSetAdapter,
   dismissStoredProposalAdapter,
+  // Homogeneous bulk stage (operations console, Issue 8) shares the registry
+  // surface; it lives in its own module but registers with the persistent
+  // proposal tools so the single DEFAULT_TOOL_ADAPTERS surface stays flat.
+  ...BULK_REVIEW_TOOL_ADAPTERS,
 ];

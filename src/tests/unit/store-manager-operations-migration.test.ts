@@ -83,6 +83,34 @@ describe('Store Manager operations schema migration (Issue 1)', () => {
     expect(entrypointIndex).toBeTruthy();
   });
 
+  it('creates the bulk-review tables and self-heals the proposal metadata columns (Issue 8)', () => {
+    for (const table of [
+      'store_manager_bulk_review_batches',
+      'store_manager_bulk_review_items',
+      'store_manager_bulk_review_decisions',
+    ]) {
+      expect(getDb().query("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)).toBeTruthy();
+    }
+    // Item snapshots are unique per (batch, proposal) so the approval binds an exact set.
+    const itemDdl = (getDb().query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_bulk_review_items'").get() as { sql: string }).sql;
+    expect(itemDdl).toContain('UNIQUE (batch_id, proposal_id)');
+    // Additive proposal metadata columns default legacy rows to manual review required.
+    const columns = (getDb().query('PRAGMA table_info(catalog_health_proposals)').all() as Array<{ name: string; dflt_value: string | null }>).map((c) => c.name);
+    for (const col of ['normalization_kind', 'rule_version', 'evidence_key', 'manual_review_required', 'current_digest']) {
+      expect(columns).toContain(col);
+    }
+    // Legacy row (no metadata) is ineligible by construction.
+    getDb().run(
+      "INSERT INTO workspace (id, name, workspace_path, git_path, created_at, updated_at, bootstrap_status) VALUES ('ws-a', 'M', '.', '.', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'complete')",
+    );
+    getDb().run(
+      "INSERT INTO catalog_health_proposals (id, workspace_id, field, old_value, new_value, affected_skus, reason, confidence, source, status, created_at, updated_at) VALUES ('legacy-1', 'ws-a', 'ProductField24', 'a', 'b', '[]', 'old', 0.5, 'deterministic', 'proposed', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+    );
+    const legacy = getDb().query('SELECT manual_review_required FROM catalog_health_proposals WHERE id = ?').get('legacy-1') as { manual_review_required: number };
+    expect(legacy.manual_review_required).toBe(1);
+  });
+
+
   it('creates the immutable preferences tables and active pointer (Issue 2, v2)', () => {
     const prefs = getDb()
       .query("SELECT name FROM sqlite_master WHERE type='table' AND name='store_manager_preferences'")

@@ -116,6 +116,7 @@ describe('Store Manager Tools (epic #42, #40 renamed contract)', () => {
       'dismiss_stored_proposal',
       'explainNextActions',
       'repair_approved_change_set_images',
+      'bulk_apply_stored_proposals',
     ]) {
       expect(tools[name], `tool ${name} missing`).toBeDefined();
     }
@@ -313,6 +314,8 @@ describe('Store Manager Tools (epic #42, #40 renamed contract)', () => {
       'src/store-manager/tools/image-repair-tool.ts',
       'src/store-manager/tools/change-set-read-tools.ts',
       'src/store-manager/tools/report-tools.ts',
+      'src/store-manager/tools/history-tools.ts',
+      'src/store-manager/tools/bulk-review-tools.ts',
     ];
     for (const file of adapterFiles) {
       const source = readFileSync(path.resolve(__dirname, '../../../', file), 'utf-8');

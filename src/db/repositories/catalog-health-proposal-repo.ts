@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getDb } from '../connection';
+import { hashCanonicalJson } from '../../shared/stable-id';
+import { ensureStoreManagerOperationsSchema } from '../store-manager-operations-migration';
 import {
   CatalogProposalSchema,
   InsertCatalogProposalSchema,
@@ -7,6 +9,7 @@ import {
   type InsertCatalogProposal,
   type ProposalSource,
   type ProposalStatus,
+  type NormalizationKind,
 } from '../../shared/schemas/catalog-health-proposal';
 
 // ---------------------------------------------------------------------------
@@ -121,9 +124,40 @@ export function findDuplicateProposal(
 }
 
 /**
+ * Deterministic content digest for a proposal's mapping + evidence identity
+ * (operations console, Issue 8). Bulk previews bind this exact row: if the
+ * mapping or affected-SKU set changes after the preview, the digest mismatch
+ * refuses the WHOLE batch. Unknown/null metadata yields a stable digest over
+ * whatever is present, so legacy rows can never be reclassified as eligible.
+ */
+export function computeProposalDigest(proposal: {
+  id: string;
+  field: string;
+  oldValue: string;
+  newValue: string;
+  affectedSkus: string[];
+  normalizationKind: NormalizationKind | null;
+  ruleVersion: string | null;
+  evidenceKey: string | null;
+}): string {
+  return hashCanonicalJson({
+    id: proposal.id,
+    field: proposal.field,
+    oldValue: proposal.oldValue,
+    newValue: proposal.newValue,
+    affectedSkus: proposal.affectedSkus,
+    normalizationKind: proposal.normalizationKind ?? null,
+    ruleVersion: proposal.ruleVersion ?? null,
+    evidenceKey: proposal.evidenceKey ?? null,
+  });
+}
+
+/**
  * Insert a proposal and return the stored row. The input is validated against
  * the shared schema before any SQL runs (defense in depth; the AI path
- * additionally runs business-rule validation before calling here).
+ * additionally runs business-rule validation before calling here). The bulk-
+ * review metadata columns default to `manual_review_required = 1` when the
+ * caller does not supply them (fail closed: unknown provenance is ineligible).
  */
 export function insertProposal(input: InsertProposalInput): CatalogProposal {
   const parsed = InsertCatalogProposalSchema.safeParse(input);
@@ -135,28 +169,51 @@ export function insertProposal(input: InsertProposalInput): CatalogProposal {
         .join('; ')}`,
     );
   }
+  // The bulk-review metadata columns are additive (operations schema);
+  // self-heal so any caller (legacy suites, collectors) stays safe.
+  ensureStoreManagerOperationsSchema();
   const db = getDb();
   const now = new Date().toISOString();
   const id = randomUUID();
+  const normalizationKind: NormalizationKind | null = parsed.data.normalizationKind ?? null;
+  const ruleVersion: string | null = parsed.data.ruleVersion ?? null;
+  const evidenceKey: string | null = parsed.data.evidenceKey ?? null;
+  const manualReviewRequired = parsed.data.manualReviewRequired ?? true;
+  const digestRow = {
+    id,
+    field: parsed.data.field,
+    oldValue: parsed.data.oldValue,
+    newValue: parsed.data.newValue,
+    affectedSkus: parsed.data.affectedSkus,
+    normalizationKind,
+    ruleVersion,
+    evidenceKey,
+  };
+  const currentDigest = computeProposalDigest(digestRow);
   db.run(
-    `INSERT INTO catalog_health_proposals (id, workspace_id, field, old_value, new_value, affected_skus, reason, confidence, source, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO catalog_health_proposals (id, workspace_id, field, old_value, new_value, affected_skus, reason, confidence, source, status, normalization_kind, rule_version, evidence_key, manual_review_required, current_digest, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
-      input.workspaceId,
-      input.field,
-      input.oldValue,
-      input.newValue,
-      JSON.stringify(input.affectedSkus),
-      input.reason,
-      input.confidence,
-      input.source,
-      input.status ?? 'proposed',
+      parsed.data.workspaceId,
+      parsed.data.field,
+      parsed.data.oldValue,
+      parsed.data.newValue,
+      JSON.stringify(parsed.data.affectedSkus),
+      parsed.data.reason,
+      parsed.data.confidence,
+      parsed.data.source,
+      parsed.data.status ?? 'proposed',
+      normalizationKind,
+      ruleVersion,
+      evidenceKey,
+      manualReviewRequired ? 1 : 0,
+      currentDigest,
       now,
       now,
     ],
   );
-  return findProposalById(input.workspaceId, id)!;
+  return findProposalById(parsed.data.workspaceId, id)!;
 }
 
 /**
@@ -291,6 +348,13 @@ function mapRow(row: Record<string, unknown>): CatalogProposal {
     // fallback to empty list
   }
 
+  const kindRaw = row.normalization_kind;
+  const normalizationKind = kindRaw === null || kindRaw === undefined ? null : (String(kindRaw) as NormalizationKind);
+  const manualReviewRequired =
+    row.manual_review_required === null || row.manual_review_required === undefined
+      ? true
+      : Number(row.manual_review_required) === 1;
+
   return {
     id: String(row.id),
     workspaceId: String(row.workspace_id),
@@ -303,6 +367,11 @@ function mapRow(row: Record<string, unknown>): CatalogProposal {
     source: row.source as ProposalSource,
     status: row.status as ProposalStatus,
     changeSetId: row.change_set_id ? String(row.change_set_id) : null,
+    normalizationKind,
+    ruleVersion: row.rule_version ? String(row.rule_version) : null,
+    evidenceKey: row.evidence_key ? String(row.evidence_key) : null,
+    manualReviewRequired,
+    currentDigest: row.current_digest ? String(row.current_digest) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };

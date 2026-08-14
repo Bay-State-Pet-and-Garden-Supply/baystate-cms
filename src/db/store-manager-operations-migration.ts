@@ -41,7 +41,7 @@
 import { getDb } from './connection';
 import type { Database } from './driver';
 
-export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '6';
+export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '7';
 export const STORE_MANAGER_OPERATIONS_MARKER = 'store_manager_operations_schema_version';
 
 const SESSION_ADDITIVE_COLUMNS: ReadonlyArray<readonly [column: string, ddl: string]> = [
@@ -93,7 +93,13 @@ export function runStoreManagerOperationsMigration(): void {
   // re-runs and fresh-vs-upgraded DBs behave identically.
   if (marker && Number(marker.value) >= Number(STORE_MANAGER_OPERATIONS_SCHEMA_VERSION)) return;
 
-  db.exec('BEGIN');
+  // Nested-safe transaction: when a caller is already inside a transaction
+  // (e.g. the proposal replace path calls insertProposal -> self-heal), use a
+  // SAVEPOINT so the migration never throws "cannot start a transaction
+  // within a transaction". A failing savepoint only undoes the migration's own
+  // work; the outer transaction decides what happens next.
+  const nested = (db as Database & { inTransaction?: boolean }).inTransaction === true;
+  db.exec(nested ? 'SAVEPOINT store_manager_ops_migration' : 'BEGIN');
   try {
     // Block 1: additive session columns (self-heal: only missing columns).
     for (const [column, ddl] of SESSION_ADDITIVE_COLUMNS) {
@@ -516,12 +522,94 @@ export function runStoreManagerOperationsMigration(): void {
       CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_ws_created
         ON store_manager_sessions(workspace_id, created_at);
     `);
+    // Block 11 (Issue 8): homogeneous bulk review. One immutable batch
+    // header + per-item snapshots/digests (the approval binds the EXACT set),
+    // plus an append-only per-item decision ledger. Batch id is correlation
+    // only — per-item audit comes from the decision rows + proposal status
+    // transitions + Change Set item references. The catalog_health_proposals
+    // additive columns (normalization_kind, rule_version, evidence_key,
+    // manual_review_required, current_digest) are self-healed below so legacy
+    // rows default to manual_review_required = 1 (ineligible).
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_bulk_review_batches (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        group_key TEXT NOT NULL,
+        field TEXT NOT NULL,
+        normalization_kind TEXT NOT NULL,
+        rule_version TEXT NOT NULL,
+        evidence_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        proposal_count INTEGER NOT NULL DEFAULT 0,
+        distinct_sku_count INTEGER NOT NULL DEFAULT 0,
+        diff_hash TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_bulk_batches_ws
+        ON store_manager_bulk_review_batches(workspace_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_bulk_batches_status
+        ON store_manager_bulk_review_batches(workspace_id, status);
+      CREATE TABLE IF NOT EXISTS store_manager_bulk_review_items (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        proposal_id TEXT NOT NULL,
+        field TEXT NOT NULL,
+        old_value TEXT NOT NULL,
+        new_value TEXT NOT NULL,
+        affected_skus_json TEXT NOT NULL,
+        item_digest TEXT NOT NULL,
+        decision TEXT NOT NULL DEFAULT 'pending',
+        decision_actor TEXT,
+        change_set_item_ref TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (batch_id, proposal_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_bulk_items_ws_batch
+        ON store_manager_bulk_review_items(workspace_id, batch_id);
+      CREATE TABLE IF NOT EXISTS store_manager_bulk_review_decisions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        proposal_id TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        run_id TEXT,
+        diff_hash TEXT,
+        change_set_item_ref TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_bulk_decisions_ws_proposal
+        ON store_manager_bulk_review_decisions(workspace_id, proposal_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_bulk_decisions_ws_batch
+        ON store_manager_bulk_review_decisions(workspace_id, batch_id);
+    `);
+    // Self-heal: additive bulk-review metadata columns on catalog_health_proposals.
+    // Legacy rows keep manual_review_required = 1 (never reclassified safe).
+    // Guarded on the base table: synthetic #42 upgrade fixtures may omit it,
+    // and the proposal repo self-heals its own surface on demand.
+    if (tableExists(db, 'catalog_health_proposals')) {
+      for (const [column, ddl] of [
+        ['normalization_kind', 'TEXT'],
+        ['rule_version', 'TEXT'],
+        ['evidence_key', 'TEXT'],
+        ['manual_review_required', 'INTEGER NOT NULL DEFAULT 1'],
+        ['current_digest', 'TEXT'],
+      ] as const) {
+        if (!columnExists(db, 'catalog_health_proposals', column)) {
+          db.exec(`ALTER TABLE catalog_health_proposals ADD COLUMN ${column} ${ddl}`);
+        }
+      }
+    }
     db.query(
       'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',
     ).run(STORE_MANAGER_OPERATIONS_MARKER, STORE_MANAGER_OPERATIONS_SCHEMA_VERSION);
-    db.exec('COMMIT');
+    db.exec(nested ? 'RELEASE store_manager_ops_migration' : 'COMMIT');
   } catch (err) {
-    db.exec('ROLLBACK');
+    db.exec(nested ? 'ROLLBACK TO store_manager_ops_migration; RELEASE store_manager_ops_migration' : 'ROLLBACK');
     throw err;
   }
 }

@@ -41,6 +41,7 @@ import {
   listProposals,
   findProposalById,
 } from '../../db/repositories/catalog-health-proposal-repo';
+import { isBulkReviewEligible } from '../../server/services/store-manager-bulk-review-service';
 import { CatalogProposalSchema } from '../../shared/schemas/catalog-health-proposal';
 import type { Product } from '../../shared/types';
 
@@ -597,5 +598,56 @@ describe('generateAiProposals integration (epic #42, #39)', () => {
     const ok = await generateAiProposals(workspaceId, 'ProductField24', { callLlm: fakeCallLlm });
     expect(ok.proposals.length).toBeGreaterThanOrEqual(1);
     expect(llmCallCount).toBe(1);
+  });
+
+  it('AI and legacy proposals remain bulk-INELIGIBLE (Issue 8: no reclassification by confidence or inference)', async () => {
+    aiResponse = JSON.stringify({
+      proposals: [
+        { oldValue: 'Feline', newValue: 'Cat' },
+        { oldValue: 'Canine', newValue: 'Dog' },
+      ],
+    });
+    const ai = await generateAiProposals(workspaceId, 'ProductField24', { callLlm: fakeCallLlm });
+    for (const row of ai.proposals) {
+      // AI rows never carry bulk-eligibility metadata: source + manual-review
+      // defaults make them ineligible even if metadata were forged.
+      expect(row.source).toBe('ai');
+      expect(isBulkReviewEligible(row)).toBe(false);
+      expect(CatalogProposalSchema.safeParse(row).success).toBe(true);
+    }
+
+    // Simulated legacy deterministic row with NO metadata: defaults ineligible.
+    const legacy = await import('../../db/repositories/catalog-health-proposal-repo');
+    const row = legacy.insertProposal({
+      workspaceId,
+      field: 'ProductField24',
+      oldValue: 'Legacy Old',
+      newValue: 'Legacy New',
+      affectedSkus: ['SKU-LEGACY'],
+      reason: 'legacy row',
+      confidence: 0.9,
+      source: 'deterministic',
+      status: 'proposed',
+    });
+    expect(isBulkReviewEligible(row)).toBe(false);
+    expect(row.manualReviewRequired).toBe(true);
+    expect(row.normalizationKind).toBeNull();
+    // Deterministic rows WITH the metadata ARE eligible (sanity check).
+    const eligible = legacy.insertProposal({
+      workspaceId,
+      field: 'ProductField24',
+      oldValue: 'low',
+      newValue: 'Low',
+      affectedSkus: ['SKU-ELIG'],
+      reason: 'casing normalization',
+      confidence: 0.95,
+      source: 'deterministic',
+      status: 'proposed',
+      normalizationKind: 'casing',
+      ruleVersion: 'deterministic:casing:v1',
+      evidenceKey: 'casing_normalization',
+      manualReviewRequired: false,
+    });
+    expect(isBulkReviewEligible(eligible)).toBe(true);
   });
 });

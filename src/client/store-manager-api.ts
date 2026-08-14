@@ -1224,3 +1224,137 @@ export async function resumeStoreManagerPlaybookRun(
   if (data.error) throw new Error(data.error);
   return data;
 }
+
+// ---------------------------------------------------------------------------
+// Homogeneous bulk review (operations console, Issue 8)
+// ---------------------------------------------------------------------------
+
+export type StoreManagerBulkReviewKind = 'casing' | 'whitespace' | 'separator';
+
+export interface StoreManagerBulkReviewExclusion {
+  proposalId: string;
+  reason: string;
+}
+
+export interface StoreManagerBulkReviewGroup {
+  workspaceId: string;
+  field: string;
+  normalizationKind: StoreManagerBulkReviewKind;
+  ruleVersion: string;
+  evidenceKey: string;
+  proposalCount: number;
+  distinctSkuCount: number;
+  beforeAfterSamples: Array<{ oldValue: string; newValue: string; affectedCount: number }>;
+  exclusions: StoreManagerBulkReviewExclusion[];
+  truncated: boolean;
+  maxItems: number;
+}
+
+export interface StoreManagerBulkReviewBatchSummary {
+  id: string;
+  field: string;
+  normalizationKind: StoreManagerBulkReviewKind;
+  status: 'pending' | 'applied' | 'denied';
+  proposalCount: number;
+  distinctSkuCount: number;
+  createdAt: string;
+}
+
+export interface StoreManagerBulkReviewBatch {
+  id: string;
+  workspaceId: string;
+  field: string;
+  normalizationKind: StoreManagerBulkReviewKind;
+  ruleVersion: string;
+  evidenceKey: string;
+  groupKey: string;
+  status: 'pending' | 'applied' | 'denied';
+  proposalCount: number;
+  distinctSkuCount: number;
+  diffHash: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerBulkReviewItem {
+  id: string;
+  workspaceId: string;
+  batchId: string;
+  proposalId: string;
+  field: string;
+  oldValue: string;
+  newValue: string;
+  affectedSkus: string[];
+  itemDigest: string;
+  decision: 'pending' | 'applied' | 'denied';
+  decisionActor: string | null;
+  changeSetItemRef: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerBulkReviewPreviewResult {
+  ok: true;
+  batch: StoreManagerBulkReviewBatch;
+  items: StoreManagerBulkReviewItem[];
+  group: StoreManagerBulkReviewGroup;
+  diffHash: string;
+  diffSummary: {
+    affectedSkuCount: number;
+    proposalCount: number;
+    beforeAfterSamples: Array<{ oldValue: string; newValue: string; affectedCount: number }>;
+    filesTouched: string[];
+    changeSetCurrentState: string | null;
+    changeSetExpectedState: string;
+    networkActivity: 'none' | 'bounded' | 'unknown';
+  };
+}
+
+export interface StoreManagerBulkReviewBatchDetail {
+  ok: true;
+  batch: StoreManagerBulkReviewBatch;
+  items: StoreManagerBulkReviewItem[];
+  stale: boolean;
+  staleReason: string | null;
+  currentProposalCount: number;
+}
+
+export async function previewStoreManagerBulkReview(
+  field: string,
+  opts: { normalizationKind?: StoreManagerBulkReviewKind; maxItems?: number } = {},
+): Promise<StoreManagerBulkReviewPreviewResult> {
+  const res = await fetch('/api/store-manager/bulk-review/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ field, ...(opts.normalizationKind ? { normalizationKind: opts.normalizationKind } : {}), ...(opts.maxItems ? { maxItems: opts.maxItems } : {}) }),
+  });
+  const data = (await res.json()) as StoreManagerBulkReviewPreviewResult & { error?: string; errorCode?: string };
+  if (!data.ok || data.error) throw new Error(data.error ?? `Bulk review preview failed (${res.status}).`);
+  return data;
+}
+
+export async function fetchStoreManagerBulkReviewBatches(): Promise<StoreManagerBulkReviewBatchSummary[]> {
+  const res = await fetch('/api/store-manager/bulk-review/batches');
+  if (!res.ok) throw new Error(`Failed to load bulk-review batches (${res.status}).`);
+  const data = (await res.json()) as { batches: StoreManagerBulkReviewBatchSummary[] };
+  return data.batches ?? [];
+}
+
+export async function fetchStoreManagerBulkReviewBatch(id: string): Promise<StoreManagerBulkReviewBatchDetail> {
+  const res = await fetch(`/api/store-manager/bulk-review/batches/${encodeURIComponent(id)}`);
+  const data = (await res.json()) as StoreManagerBulkReviewBatchDetail & { error?: string };
+  if (!data.ok || data.error) throw new Error(data.error ?? `Failed to load batch (${res.status}).`);
+  return data;
+}
+
+export async function denyStoreManagerBulkReviewBatch(id: string, reason?: string): Promise<{ batchId: string; status: 'denied'; itemCount: number }> {
+  const res = await fetch(`/api/store-manager/bulk-review/batches/${encodeURIComponent(id)}/deny`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...(reason ? { reason } : {}) }),
+  });
+  const data = (await res.json()) as { ok: boolean; batchId?: string; status?: string; itemCount?: number; error?: string; errorCode?: string };
+  if (!data.ok) throw new Error(data.error ?? `Deny failed (${res.status}).`);
+  return { batchId: String(data.batchId), status: 'denied', itemCount: Number(data.itemCount ?? 0) };
+}

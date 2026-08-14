@@ -147,6 +147,7 @@ describe('Store Manager tool policy metadata (epic #42, #34)', () => {
       'dismiss_stored_proposal',
       'stage_stored_proposal_in_change_set',
       'repair_approved_change_set_images',
+      'bulk_apply_stored_proposals',
     ];
     for (const name of readTools) {
       expect(config[name], `${name} should be not-applicable`).toBe('not-applicable');
@@ -386,6 +387,44 @@ describe('Store Manager tool policy metadata (epic #42, #34)', () => {
       )) as { success: boolean; error?: string };
       expect(result.success).toBe(false);
       expect(result.error).toContain('not found');
+    });
+
+    it('bulk_apply_stored_proposals is approval-bound like every catalog mutation (Issue 8)', async () => {
+      const policy = requireStoreManagerToolPolicy('bulk_apply_stored_proposals');
+      expect(policy.riskClass).toBe('catalog_mutation');
+      expect(policy.requiresApproval).toBe(true);
+
+      const calls: string[] = [];
+      const gated = gateToolExecution(policy, executionCtx, async () => {
+        calls.push('run');
+        return { ok: true };
+      });
+
+      // No approval response -> fail closed, zero executions.
+      await expect(
+        gated({ batchId: 'batch-x' }, { toolCallId: 'call-1', messages: [] } as any),
+      ).rejects.toMatchObject({ code: 'approval_missing' });
+      expect(calls).toEqual([]);
+
+      // Valid approved call -> executes exactly once, then single-use.
+      const { messages, executeInput } = makeMessages({
+        toolCallInput: { batchId: 'batch-x' },
+        executeInput: { batchId: 'batch-x' },
+      });
+      const result = await gated(executeInput, { toolCallId: 'call-1', messages } as any);
+      expect(result).toEqual({ ok: true });
+      expect(calls).toEqual(['run']);
+
+      // The same approval cannot be replayed under a different execution context.
+      const foreignCtx = { ...executionCtx, executionId: 'exec-other' };
+      const gatedForeign = gateToolExecution(policy, foreignCtx, async () => {
+        calls.push('run-again');
+        return { ok: true };
+      });
+      await expect(
+        gatedForeign(executeInput, { toolCallId: 'call-1', messages } as any),
+      ).rejects.toMatchObject({ code: 'approval_replay_or_altered' });
+      expect(calls).toEqual(['run']);
     });
   });
 });
