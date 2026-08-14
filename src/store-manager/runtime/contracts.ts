@@ -8,6 +8,23 @@
  */
 
 import type { z } from 'zod';
+import type {
+  StoreManagerEntrypoint,
+  StoreManagerExecutionMode,
+  StoreManagerActorClass,
+  StoreManagerPinnedScope,
+  StoreManagerScopeKind,
+  StoreManagerLineage,
+} from '../../shared/schemas/store-manager-operations';
+export type {
+  StoreManagerEntrypoint,
+  StoreManagerExecutionMode,
+  StoreManagerActorClass,
+  StoreManagerPinnedScope,
+  StoreManagerScopeKind,
+  StoreManagerLineage,
+} from '../../shared/schemas/store-manager-operations';
+import type { StoreManagerArtifactKind } from '../../shared/schemas/store-manager-operations';
 
 // ---------------------------------------------------------------------------
 // Structured outcomes
@@ -34,7 +51,8 @@ export type StoreManagerToolResult =
         | 'timeout'
         | 'size_exceeded'
         | 'unsupported'
-        | 'invalid_input';
+        | 'invalid_input'
+        | 'persistent_not_allowed';
       message: string;
     }
   | { status: 'error'; errorCode: string; message: string };
@@ -84,14 +102,18 @@ export const READ_PHASES: readonly StoreManagerPhase[] = ['investigate', 'verify
 export interface StoreManagerAdapterContext {
   workspaceId: string;
   workspacePath: string;
-  /** Durable per-turn session id (store_manager_sessions.id). */
+  /** Durable per-run session id (store_manager_sessions.id). */
   sessionId: string;
   /** Per-chat execution id bound by the route (#34). */
   executionId: string;
   /** Absolute epoch ms after which the execution context refuses to run. */
   deadlineAt: number;
-  /** Caller/whole-turn AbortSignal (composed per call with a timeout). */
+  /** Caller/whole-run AbortSignal (composed per call with a timeout). */
   signal?: AbortSignal;
+  /** Resolved pinned scope (bounded identifiers only); null when unpinned. */
+  pinnedScope?: StoreManagerPinnedScope | null;
+  /** Entrypoint that produced this run. */
+  entrypoint?: StoreManagerEntrypoint;
   /** Bounded, server-side emit hook for runtime events. */
   emit(event: StoreManagerRuntimeEvent): void;
 }
@@ -118,6 +140,12 @@ export interface StoreManagerToolAdapter {
   stateTransition: string;
   /** Phases in which this adapter is allowed to dispatch. */
   allowedPhases: readonly StoreManagerPhase[];
+  /**
+   * Pinned scope kinds this adapter can honor. Undefined = the adapter does
+   * not declare scope support (legacy adapters execute regardless); when
+   * declared, the registry refuses `scope_unsupported` for any other kind.
+   */
+  supportedScopes?: readonly StoreManagerScopeKind[];
   /** Normalized one-line scope summary for approval cards and events. */
   scopeSummary(input: Record<string, unknown>): string;
   execute(
@@ -173,4 +201,54 @@ export type StoreManagerRuntimeEvent =
       reason?: string;
       modelCallId: string | null;
       totalToolCalls: number;
+    })
+  // ── Operations-console event types (Issue 1: bounded lineage/artifact hooks) ──
+  | (StoreManagerRuntimeEventBase & {
+      type: 'command_compiled';
+      commandName: string;
+      commandVersion: number;
+      compiledObjective: string;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'plan_preview';
+      expectedToolCount: number;
+      modelCalls: 0;
+      toolDispatches: 0;
+      scopeHash: string | null;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'checkpoint';
+      checkpointId: string;
+      diffHash: string | null;
+      scopeHash: string | null;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'artifact_created';
+      artifactId: string;
+      kind: StoreManagerArtifactKind;
+      contentHash: string;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'verification_diff';
+      artifactId: string | null;
+      diffHash: string | null;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'schedule_trigger_lineage';
+      scheduleId: string | null;
+      triggerKind: string | null;
+      occurrenceKey: string | null;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'notification_linkage';
+      notificationId: string;
+    })
+  | (StoreManagerRuntimeEventBase & {
+      type: 'execution_started';
+      entrypoint: StoreManagerEntrypoint;
+      executionMode: StoreManagerExecutionMode;
+      actorClass: StoreManagerActorClass;
+      objectiveHash: string;
+      scopeHash: string | null;
+      lineage: StoreManagerLineage | null;
     });

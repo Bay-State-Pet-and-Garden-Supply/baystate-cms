@@ -1,15 +1,23 @@
 /**
- * Store Manager turn executor (epic #42, #40).
+ * Store Manager run executor (epic #42, #40; operations console, Issue 1).
  *
- * The executor is the ONLY route orchestration seam for chat: it resolves the
- * model once, starts telemetry, builds the static prompt + bounded attached
- * context, validates inbound messages, runs `streamText` with the registry's
- * tools and the #34 approval wiring, aggregates usage, emits versioned events,
- * and terminalizes the durable session/turn/telemetry rows on every terminal
- * path (success, failure, cancel, deadline).
+ * `runStoreManagerExecution` is the ONLY runtime runner for every Store
+ * Manager entrypoint (chat, command, schedule, event, playbook, replay,
+ * plan_preview). It resolves the model once, starts telemetry, builds the
+ * static prompt + bounded context, validates inbound chat messages OR a
+ * server-owned objective, runs `streamText` with the registry's tools and the
+ * #34 approval wiring, aggregates usage, emits versioned events, and
+ * terminalizes the durable session/turn/telemetry rows on every terminal path
+ * (success, failure, cancel, deadline, policy denial).
+ *
+ * `runStoreManagerTurn` is a compatibility wrapper for the interactive chat
+ * request kind — it must never become a second orchestration implementation.
+ * Preview mode executes zero model/tool calls and returns a contract-derived
+ * descriptor; unattended modes (schedule/event/playbook/replay) drain the
+ * stream server-side and return a completed terminal outcome.
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import { streamText, toUIMessageStream, isStepCount, convertToModelMessages, type UIMessage } from 'ai';
 import { resolveAiSdkModel, type ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
 import { buildStoreManagerSystemPrompt } from '../../server/services/store-manager-prompt-builder';
@@ -28,7 +36,18 @@ import {
   safeValidateStoreManagerMessages,
   StoreManagerMessageValidationError,
 } from '../../shared/schemas/store-manager';
-import { createStoreManagerPolicy, type StoreManagerRuntimePolicy } from './policy';
+import {
+  validateStoreManagerExecutionRequest,
+  deriveStoreManagerActorClass,
+  type StoreManagerExecutionRequest,
+  type StoreManagerPreviewDescriptor,
+} from '../../shared/schemas/store-manager-operations';
+import { hashCanonicalJson } from '../../shared/stable-id';
+import {
+  createStoreManagerPolicy,
+  policyToSnapshotJson,
+  type StoreManagerRuntimePolicy,
+} from './policy';
 import {
   createStoreManagerToolRegistry,
   createRuntimeSessionState,
@@ -36,7 +55,9 @@ import {
   type StoreManagerRuntimeSessionState,
   type StoreManagerToolRegistry,
 } from './tool-registry';
-import { createEventSink, type StoreManagerEventSink } from './events';
+import { createEventSink, type StoreManagerRuntimeEvent } from './events';
+import { compileExecutionPreview } from './artifacts';
+import type { StoreManagerPinnedScope } from './contracts';
 import {
   createStoreManagerSession,
   createStoreManagerTurn,
@@ -45,6 +66,10 @@ import {
   terminalizeStoreManagerTurn,
   persistStoreManagerEvents,
 } from '../../db/repositories/store-manager-session-repo';
+
+// ---------------------------------------------------------------------------
+// Chat (compatibility) input
+// ---------------------------------------------------------------------------
 
 export interface StoreManagerTurnInput {
   workspaceId: string;
@@ -59,7 +84,17 @@ export interface StoreManagerTurnInput {
   executionId?: string;
 }
 
-export interface StoreManagerTurnDeps {
+/** Chat-specific extras carried through the execution boundary. */
+export interface StoreManagerChatTurnDeps {
+  messages: unknown;
+  selectedSkus?: string[];
+  toolApprovalSecret: string;
+  executionId?: string;
+  /** Caller (HTTP request) abort signal composed with the whole-run deadline. */
+  abortSignal?: AbortSignal;
+}
+
+export interface StoreManagerExecutionDeps {
   /** Injectable model resolver for tests (defaults to the real resolver). */
   resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
   /** Injectable clock for tests. */
@@ -67,7 +102,39 @@ export interface StoreManagerTurnDeps {
   registry?: StoreManagerToolRegistry;
   /** Server-owned policy narrowing (test seams / operator config); never request-derived. */
   policyOverrides?: NonNullable<Parameters<typeof createStoreManagerPolicy>[0]>['overrides'];
+  /** Approval secret for chat streaming; generated per-run otherwise. */
+  toolApprovalSecret?: string;
+  /** Chat-specific transport (messages + approval secret) for entrypoint 'chat'. */
+  chat?: StoreManagerChatTurnDeps;
 }
+
+export type StoreManagerExecutionResult =
+  | {
+      kind: 'chat';
+      runId: string;
+      turnId: string;
+      modelCallId: string;
+      executionId: string;
+      uiMessageStream: ReturnType<typeof toUIMessageStream>;
+      resolvedModel: ResolvedAiSdkModel;
+      policy: StoreManagerRuntimePolicy;
+    }
+  | {
+      kind: 'completed';
+      runId: string;
+      turnId: string;
+      modelCallId: string | null;
+      terminalStatus: 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded';
+      resolvedModel: ResolvedAiSdkModel | null;
+      policy: StoreManagerRuntimePolicy;
+    }
+  | {
+      kind: 'preview';
+      runId: string;
+      turnId: string;
+      preview: StoreManagerPreviewDescriptor;
+      policy: StoreManagerRuntimePolicy;
+    };
 
 export interface StoreManagerTurnResult {
   uiMessageStream: ReturnType<typeof toUIMessageStream>;
@@ -88,102 +155,102 @@ export class StoreManagerTurnError extends Error {
   }
 }
 
-export async function runStoreManagerTurn(
-  input: StoreManagerTurnInput,
-  deps: StoreManagerTurnDeps = {},
-): Promise<StoreManagerTurnResult> {
+// ---------------------------------------------------------------------------
+// Objective → server-owned inbound messages (non-chat entrypoints)
+// ---------------------------------------------------------------------------
+
+function objectiveToMessages(objective: string, scope: StoreManagerPinnedScope | null): UIMessage[] {
+  const scopeLine = scope ? `\nPinned scope: ${JSON.stringify(scope)}` : '';
+  return [
+    {
+      id: 'objective-1',
+      role: 'user' as const,
+      parts: [{ type: 'text' as const, text: `Objective: ${objective}${scopeLine}` }],
+    },
+  ];
+}
+
+function scopeJson(scope: StoreManagerPinnedScope | null | undefined): string | null {
+  return scope ? JSON.stringify(scope) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Main runner
+// ---------------------------------------------------------------------------
+
+export async function runStoreManagerExecution(
+  request: StoreManagerExecutionRequest,
+  deps: StoreManagerExecutionDeps = {},
+): Promise<StoreManagerExecutionResult> {
   const registry = deps.registry ?? createStoreManagerToolRegistry();
   const now = deps.now ?? (() => new Date());
-  const resolveModel = deps.resolveModel ?? ((selectedModel?: string) => resolveAiSdkModel(selectedModel));
 
-  // --- resolve model once (fail before any transport attempt on explicit unavailability) ---
-  const resolved = resolveModel(input.selectedModel);
-  const model = resolved.modelInstance;
+  // Strict request validation: unknown keys/oversized fields fail before any
+  // model/tool/service work (server-generated runId is still schema-checked).
+  const validated = validateStoreManagerExecutionRequest(request);
 
-  // --- immutable per-turn policy + durable session/turn rows ---
-  const executionId = input.executionId ?? randomUUID();
+  const executionId = deps.chat?.executionId ?? validated.runId;
   const turnId = randomUUID();
-  const sessionId = randomUUID();
+  const runId = validated.runId;
+
+  const actorClass = deriveStoreManagerActorClass(validated.entrypoint, validated.executionMode);
+  const isPreview = validated.executionMode === 'preview';
+  const approvalSecret =
+    deps.toolApprovalSecret ??
+    (deps.chat?.toolApprovalSecret ?? randomBytes(32).toString('hex'));
+
+  // --- immutable per-run policy (execution mode + scope + actor captured) ---
   const policy = createStoreManagerPolicy(
-    { workspaceId: input.workspaceId, sessionId, turnId, overrides: deps.policyOverrides },
-    registry.allowlist(),
+    {
+      workspaceId: validated.workspaceId,
+      sessionId: runId,
+      turnId,
+      entrypoint: validated.entrypoint,
+      executionMode: validated.executionMode,
+      actorClass,
+      pinnedScope: validated.pinnedScope,
+      preferencesHash: null,
+      overrides: deps.policyOverrides ?? validated.policyProfile,
+    },
+    registry.allowlistVersions(),
   );
 
   const sessionState: StoreManagerRuntimeSessionState = createRuntimeSessionState({
-    sessionId,
-    workspaceId: input.workspaceId,
+    sessionId: runId,
+    workspaceId: validated.workspaceId,
     turnId,
-  });
-
-  createStoreManagerSession({
-    id: sessionId,
-    workspaceId: input.workspaceId,
-    threadId: input.threadId,
-    turnId,
-    executionId,
-    policyHash: policy.policyHash,
-    policyVersion: policy.version,
-    requestedModel: input.selectedModel ?? null,
-    resolvedProvider: resolved.provider,
-    resolvedModel: resolved.modelId,
-    resolvedLocality: resolved.locality,
-    resolutionReason: resolved.resolutionReason,
-    modelCallId: null,
-  });
-  createStoreManagerTurn({
-    workspaceId: input.workspaceId,
-    sessionId,
-    turnId,
-    phase: 'investigate',
-    policyHash: policy.policyHash,
   });
 
   const sink = createEventSink({ persistEvents: persistStoreManagerEvents });
-  const emit = (event: Parameters<StoreManagerEventSink['record']>[0]) => sink.record(event);
-  emit({
-    version: 1,
-    type: 'turn_started',
-    sessionId,
-    workspaceId: input.workspaceId,
-    turnId,
-    createdAt: now().toISOString(),
-    phase: 'investigate',
-    policyHash: policy.policyHash,
-    modelCallId: null,
-  });
+  const emit: RuntimeEmit = (event) => sink.record(event);
 
-  const deadlineAt = now().getTime() + policy.deadlineMs;
-
-  // Whole-turn deadline enforced OUTSIDE the model: a server-owned controller
-  // fires at deadlineAt and is composed with the caller's abort signal so a
-  // model that never calls a tool (or an in-flight tool call) is aborted too.
-  // `deadlineHit` distinguishes this from a client abort for terminalization.
+  // Whole-run deadline machinery + terminalization helper are declared BEFORE
+  // any early-return path (preview, validation failure) so every terminal path
+  // can clear the timer and terminalize the durable rows exactly once.
   const deadlineController = new AbortController();
   let deadlineHit = false;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-  const modelSignal = input.abortSignal
-    ? AbortSignal.any([input.abortSignal, deadlineController.signal])
-    : deadlineController.signal;
-  // Arm the deadline after the durable session/turn rows exist but before any
-  // transport; a fired deadline aborts the composed signal (and any in-flight
-  // tool call). `unref` keeps the timer from holding the process open in tests.
+  const deadlineAt = now().getTime() + policy.deadlineMs;
+  const modelSignal =
+    deps.chat && deps.chat.abortSignal
+      ? AbortSignal.any([deps.chat.abortSignal, deadlineController.signal])
+      : deadlineController.signal;
   const armDeadline = () => {
     if (deadlineTimer !== undefined) return;
     const remaining = Math.max(0, deadlineAt - now().getTime());
     deadlineTimer = setTimeout(() => {
       deadlineHit = true;
-      deadlineController.abort(new Error('store_manager_turn_deadline'));
+      deadlineController.abort(new Error('store_manager_run_deadline'));
     }, remaining);
     if (typeof (deadlineTimer as { unref?: () => void }).unref === 'function') {
       (deadlineTimer as { unref: () => void }).unref();
     }
   };
 
-  // Terminalization state + helper declared before any early-return path so
-  // validation failures can terminalize the durable turn/session correctly.
   let modelCallId: string | null = null;
   let didTerminalize = false;
-  function terminalizeTurn(
+  let finalStatus: 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded' = 'success';
+  function terminalizeTurnState(
     status: 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded',
     reason: string | undefined,
     totalToolCalls: number,
@@ -195,13 +262,14 @@ export async function runStoreManagerTurn(
       deadlineTimer = undefined;
     }
     didTerminalize = true;
-    terminalizeStoreManagerTurn(input.workspaceId, turnId, status, reason ?? null, totalToolCalls);
-    terminalizeStoreManagerSession(input.workspaceId, sessionId);
+    finalStatus = status;
+    terminalizeStoreManagerTurn(validated.workspaceId, turnId, status, reason ?? null, totalToolCalls);
+    terminalizeStoreManagerSession(validated.workspaceId, runId);
     emit({
       version: 1,
       type: 'turn_terminal',
-      sessionId,
-      workspaceId: input.workspaceId,
+      sessionId: runId,
+      workspaceId: validated.workspaceId,
       turnId,
       createdAt: now().toISOString(),
       status,
@@ -213,8 +281,8 @@ export async function runStoreManagerTurn(
       emit({
         version: 1,
         type: 'tool_result',
-        sessionId,
-        workspaceId: input.workspaceId,
+        sessionId: runId,
+        workspaceId: validated.workspaceId,
         turnId,
         createdAt: now().toISOString(),
         toolName: 'runtime',
@@ -222,23 +290,55 @@ export async function runStoreManagerTurn(
         errorCode: reason,
       });
     }
-    sink.flush(input.workspaceId);
+    sink.flush(validated.workspaceId);
   }
 
-  // --- build registry tools (needed for tool-aware message validation) ---
+  // Preview mode: contract compilation only. No model resolution, no transport,
+  // no tool dispatch, no reads. The run row is the bounded preview audit record.
+  if (isPreview) {
+    createRunRows(validated, runId, turnId, executionId, policy, null, now);
+    emitRunStarted(emit, validated, runId, turnId, policy, now);
+    const preview = compileExecutionPreview(validated, registry, policy);
+    emit({
+      version: 1,
+      type: 'plan_preview',
+      sessionId: runId,
+      workspaceId: validated.workspaceId,
+      turnId,
+      createdAt: now().toISOString(),
+      expectedToolCount: preview.expectedTools.length,
+      modelCalls: 0,
+      toolDispatches: 0,
+      scopeHash: preview.scopeHash,
+    });
+    terminalizeTurnState('success', 'preview', 0);
+    sink.flush(validated.workspaceId);
+    return { kind: 'preview', runId, turnId, preview, policy };
+  }
+
+  // --- resolve model once (fail before any transport attempt on explicit unavailability) ---
+  const resolved = (deps.resolveModel ?? ((selectedModel?: string) => resolveAiSdkModel(selectedModel)))(
+    validated.selectedModel,
+  );
+  const model = resolved.modelInstance;
+
+  createRunRows(validated, runId, turnId, executionId, policy, resolved, now);
+  emitRunStarted(emit, validated, runId, turnId, policy, now);
+
+  // --- build registry tools (needed for tool-aware chat message validation) ---
   const aiSdkTools = registry.buildAiSdkTools({
     policy,
     session: sessionState,
     executionContext: {
-      workspaceId: input.workspaceId,
-      workspacePath: input.workspacePath,
+      workspaceId: validated.workspaceId,
+      workspacePath: validated.workspacePath,
       executionId,
       approvalExpiresAt: deadlineAt,
     },
     adapterContext: {
-      workspaceId: input.workspaceId,
-      workspacePath: input.workspacePath,
-      sessionId,
+      workspaceId: validated.workspaceId,
+      workspacePath: validated.workspacePath,
+      sessionId: runId,
       executionId,
       deadlineAt,
     },
@@ -248,42 +348,51 @@ export async function runStoreManagerTurn(
     callerSignal: modelSignal,
   });
 
-  // --- inbound message validation BEFORE model conversion/execution ---
-  let validatedMessages: UIMessage[];
-  try {
-    validatedMessages = await safeValidateStoreManagerMessages({
-      messages: input.messages,
-      tools: aiSdkTools,
-    });
-  } catch (err) {
-    const code = err instanceof StoreManagerMessageValidationError ? err.code : 'message_validation_failed';
-    terminalizeTurn('failed', code, 0, err instanceof Error ? err.message : 'Message validation failed.');
-    throw new StoreManagerTurnError(code, err instanceof Error ? err.message : 'Message validation failed.');
-  }
-
-  // --- bounded attached context (#33) injected below system ---
-  let chatMessages: unknown[] = validatedMessages;
-  if (input.selectedSkus && Array.isArray(input.selectedSkus) && input.selectedSkus.length > 0) {
-    const parsed = selectedSkusSchema.safeParse({ selectedSkus: input.selectedSkus });
-    if (!parsed.success) {
-      terminalizeTurn('failed', 'invalid_selected_skus', 0, 'Invalid attached product selection.');
+  // --- inbound content: validated chat messages OR server-owned objective ---
+  let chatMessages: unknown[];
+  if (validated.entrypoint === 'chat') {
+    if (!deps.chat) {
       throw new StoreManagerTurnError(
-        'invalid_selected_skus',
-        'Invalid attached product selection: at most 10 unique SKUs of bounded length are allowed.',
+        'chat_transport_missing',
+        'Chat entrypoint requires the chat transport (messages + approval secret).',
       );
     }
-    const context = buildAttachedProductContext(
-      input.workspaceId,
-      input.workspacePath,
-      parsed.data.selectedSkus,
-    );
-    chatMessages = injectAttachedContext(validatedMessages, context.serialized);
+    try {
+      chatMessages = await safeValidateStoreManagerMessages({
+        messages: deps.chat.messages,
+        tools: aiSdkTools,
+      });
+    } catch (err) {
+      const code = err instanceof StoreManagerMessageValidationError ? err.code : 'message_validation_failed';
+      terminalizeTurnState('failed', code, 0, err instanceof Error ? err.message : 'Message validation failed.');
+      throw new StoreManagerTurnError(code, err instanceof Error ? err.message : 'Message validation failed.');
+    }
+    // Bounded attached context (#33) injected below system.
+    const selectedSkus = deps.chat.selectedSkus;
+    if (selectedSkus && Array.isArray(selectedSkus) && selectedSkus.length > 0) {
+      const parsed = selectedSkusSchema.safeParse({ selectedSkus });
+      if (!parsed.success) {
+        terminalizeTurnState('failed', 'invalid_selected_skus', 0, 'Invalid attached product selection.');
+        throw new StoreManagerTurnError(
+          'invalid_selected_skus',
+          'Invalid attached product selection: at most 10 unique SKUs of bounded length are allowed.',
+        );
+      }
+      const context = buildAttachedProductContext(
+        validated.workspaceId,
+        validated.workspacePath,
+        parsed.data.selectedSkus,
+      );
+      chatMessages = injectAttachedContext(chatMessages as UIMessage[], context.serialized);
+    }
+  } else {
+    chatMessages = objectiveToMessages(validated.objective, validated.pinnedScope ?? null);
   }
 
   // --- model messages + telemetry start (immediately before transport) ---
   const modelMessages = await convertToModelMessages(chatMessages as UIMessage[]);
-  modelCallId = beginStoreManagerCall(input.workspaceId, resolved);
-  updateStoreManagerSessionModelCall(input.workspaceId, sessionId, modelCallId);
+  modelCallId = beginStoreManagerCall(validated.workspaceId, resolved);
+  updateStoreManagerSessionModelCall(validated.workspaceId, runId, modelCallId);
   armDeadline();
 
   const result = streamText({
@@ -291,9 +400,13 @@ export async function runStoreManagerTurn(
     system: buildStoreManagerSystemPrompt(),
     messages: modelMessages,
     tools: aiSdkTools,
-    toolApproval: buildRegistryApprovalConfig(registry.all()),
-    experimental_toolApprovalSecret: input.toolApprovalSecret,
-    // Whole-turn deadline + caller cancellation, composed server-side.
+    toolApproval: buildRegistryApprovalConfig(registry.all(), {
+      // Unattended/preview runs must never wait for an approval the operator
+      // will not see; the registry denies persistent adapters at dispatch.
+      forceNotApplicable: policy.denyPersistent,
+    }),
+    experimental_toolApprovalSecret: approvalSecret,
+    // Whole-run deadline + caller cancellation, composed server-side.
     abortSignal: modelSignal,
     stopWhen: isStepCount(policy.maxToolCalls),
     onEnd: ({ usage }) => {
@@ -307,7 +420,7 @@ export async function runStoreManagerTurn(
       const costExceeded =
         typeof cost.estimatedApiCostUsd === 'number' &&
         cost.estimatedApiCostUsd > policy.maxModelCostUsd;
-      terminalizeTurn(
+      terminalizeTurnState(
         costExceeded ? 'policy_denied' : 'success',
         costExceeded ? 'cost_exceeded' : undefined,
         sessionState.toolCalls,
@@ -316,22 +429,22 @@ export async function runStoreManagerTurn(
     onError: (error) => {
       if (deadlineHit) {
         terminalizeStoreManagerCall(modelCallId, resolved, 'deadline_exceeded');
-        terminalizeTurn('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
+        terminalizeTurnState('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
         return;
       }
       terminalizeStoreManagerCall(modelCallId, resolved, 'failed', {
         errorCode: error instanceof Error ? error.name : 'STREAM_ERROR',
       });
-      terminalizeTurn('failed', 'stream_error', sessionState.toolCalls);
+      terminalizeTurnState('failed', 'stream_error', sessionState.toolCalls);
     },
     onAbort: () => {
       if (deadlineHit) {
         terminalizeStoreManagerCall(modelCallId, resolved, 'deadline_exceeded');
-        terminalizeTurn('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
+        terminalizeTurnState('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
         return;
       }
       terminalizeStoreManagerCall(modelCallId, resolved, 'cancelled');
-      terminalizeTurn('cancelled', 'client_abort', sessionState.toolCalls);
+      terminalizeTurnState('cancelled', 'client_abort', sessionState.toolCalls);
     },
   });
 
@@ -358,5 +471,187 @@ export async function runStoreManagerTurn(
     },
   });
 
-  return { uiMessageStream, modelCallId, executionId, sessionId, turnId, resolvedModel: resolved, policy };
+  if (validated.entrypoint === 'chat') {
+    return {
+      kind: 'chat',
+      runId,
+      turnId,
+      modelCallId,
+      executionId,
+      uiMessageStream,
+      resolvedModel: resolved,
+      policy,
+    };
+  }
+
+  // Non-chat entrypoints: drain the stream server-side (tool dispatch happens
+  // through the registry; terminalization fires via onEnd/onError/onAbort).
+  try {
+    for await (const _chunk of uiMessageStream as unknown as AsyncIterable<unknown>) {
+      // drain
+    }
+  } catch {
+    // The stream may throw on abort (deadline/cancel); terminalization is
+    // handled by the SDK callbacks above — never throw here.
+  }
+  return {
+    kind: 'completed',
+    runId,
+    turnId,
+    modelCallId,
+    terminalStatus: finalStatus,
+    resolvedModel: resolved,
+    policy,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared row/event helpers
+// ---------------------------------------------------------------------------
+
+function createRunRows(
+  request: StoreManagerExecutionRequest,
+  runId: string,
+  turnId: string,
+  executionId: string,
+  policy: StoreManagerRuntimePolicy,
+  resolved: ResolvedAiSdkModel | null,
+  now: () => Date,
+): void {
+  createStoreManagerSession({
+    id: runId,
+    workspaceId: request.workspaceId,
+    threadId: request.threadId ?? null,
+    turnId,
+    executionId,
+    policyHash: policy.policyHash,
+    policyVersion: policy.version,
+    policySnapshotJson: policyToSnapshotJson(policy),
+    requestedModel: request.selectedModel ?? null,
+    resolvedProvider: resolved?.provider ?? 'none',
+    resolvedModel: resolved?.modelId ?? 'none',
+    resolvedLocality: resolved?.locality ?? 'cloud',
+    resolutionReason: resolved?.resolutionReason ?? 'preview_no_model_resolution',
+    modelCallId: null,
+    objective: request.objective,
+    entrypoint: request.entrypoint,
+    executionMode: request.executionMode,
+    actorClass: policy.actorClass,
+    scopeJson: scopeJson(request.pinnedScope ?? null),
+    scopeHash: request.pinnedScope ? hashCanonicalJson(request.pinnedScope) : null,
+    promptVersion: policy.promptVersion,
+    lineageJson: request.lineage ? JSON.stringify(request.lineage) : null,
+  });
+  createStoreManagerTurn({
+    workspaceId: request.workspaceId,
+    sessionId: runId,
+    turnId,
+    phase: 'investigate',
+    policyHash: policy.policyHash,
+  });
+}
+
+function emitRunStarted(
+  emit: RuntimeEmit,
+  request: StoreManagerExecutionRequest,
+  runId: string,
+  turnId: string,
+  policy: StoreManagerRuntimePolicy,
+  now: () => Date,
+): void {
+  emit({
+    version: 1,
+    type: 'turn_started',
+    sessionId: runId,
+    workspaceId: request.workspaceId,
+    turnId,
+    createdAt: now().toISOString(),
+    phase: 'investigate',
+    policyHash: policy.policyHash,
+    modelCallId: null,
+  });
+  emit({
+    version: 1,
+    type: 'execution_started',
+    sessionId: runId,
+    workspaceId: request.workspaceId,
+    turnId,
+    createdAt: now().toISOString(),
+    entrypoint: request.entrypoint,
+    executionMode: request.executionMode,
+    actorClass: policy.actorClass,
+    objectiveHash: hashCanonicalJson(request.objective),
+    scopeHash: request.pinnedScope ? hashCanonicalJson(request.pinnedScope) : null,
+    lineage: request.lineage ?? null,
+  });
+}
+
+type RuntimeEmit = (event: StoreManagerRuntimeEvent) => void;
+
+// ---------------------------------------------------------------------------
+// Compatibility wrapper (chat)
+// ---------------------------------------------------------------------------
+
+export async function runStoreManagerTurn(
+  input: StoreManagerTurnInput,
+  deps: StoreManagerTurnDeps = {},
+): Promise<StoreManagerTurnResult> {
+  let request: StoreManagerExecutionRequest;
+  try {
+    request = validateStoreManagerExecutionRequest({
+      runId: randomUUID(),
+      workspaceId: input.workspaceId,
+      workspacePath: input.workspacePath,
+      threadId: input.threadId ?? null,
+      entrypoint: 'chat',
+      objective: 'Chat interaction with the Store Manager assistant.',
+      executionMode: 'interactive',
+      selectedModel: input.selectedModel,
+    });
+  } catch (err) {
+    throw new StoreManagerTurnError(
+      'execution_request_invalid',
+      err instanceof Error ? err.message : 'Invalid execution request.',
+    );
+  }
+
+  const result = await runStoreManagerExecution(request, {
+    registry: deps.registry,
+    now: deps.now,
+    resolveModel: deps.resolveModel,
+    policyOverrides: deps.policyOverrides,
+    chat: {
+      messages: input.messages,
+      selectedSkus: input.selectedSkus,
+      toolApprovalSecret: input.toolApprovalSecret,
+      executionId: input.executionId,
+      abortSignal: input.abortSignal,
+    },
+  });
+
+  if (result.kind !== 'chat') {
+    throw new StoreManagerTurnError(
+      'chat_result_missing',
+      'Chat execution did not produce a streaming result.',
+    );
+  }
+  return {
+    uiMessageStream: result.uiMessageStream,
+    modelCallId: result.modelCallId,
+    executionId: result.executionId,
+    sessionId: result.runId,
+    turnId: result.turnId,
+    resolvedModel: result.resolvedModel,
+    policy: result.policy,
+  };
+}
+
+export interface StoreManagerTurnDeps {
+  /** Injectable model resolver for tests (defaults to the real resolver). */
+  resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
+  /** Injectable clock for tests. */
+  now?: () => Date;
+  registry?: StoreManagerToolRegistry;
+  /** Server-owned policy narrowing (test seams / operator config); never request-derived. */
+  policyOverrides?: NonNullable<Parameters<typeof createStoreManagerPolicy>[0]>['overrides'];
 }

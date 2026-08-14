@@ -8,7 +8,8 @@ import type {
   LanguageModelV3CallOptions,
   LanguageModelV3StreamPart,
 } from '@ai-sdk/provider';
-import { runStoreManagerTurn, StoreManagerTurnError } from '../../store-manager/runtime/executor';
+import { runStoreManagerTurn, StoreManagerTurnError, runStoreManagerExecution } from '../../store-manager/runtime/executor';
+import { createStoreManagerExecutionRequest } from '../../store-manager/runtime/execution-request';
 import { StoreManagerToolRegistry } from '../../store-manager/runtime/tool-registry';
 import type { StoreManagerToolAdapter, StoreManagerToolResult } from '../../store-manager/runtime/contracts';
 import { okResult } from '../../store-manager/runtime/contracts';
@@ -17,7 +18,9 @@ import {
   getStoreManagerSession,
   getStoreManagerTurn,
   getStoreManagerEvents,
+  getStoreManagerPolicySnapshot,
 } from '../../db/repositories/store-manager-session-repo';
+import { runStoreManagerOperationsMigration } from '../../db/store-manager-operations-migration';
 import type { ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
 import { ModelUnavailableError } from '../../server/services/ai-sdk-model-resolver';
 
@@ -200,11 +203,14 @@ describe('Store Manager turn executor (epic #42, #40)', () => {
     try { resetDb(); } catch { /* ok */ }
     initDb(testDbPath);
     runMigrations();
+    runStoreManagerOperationsMigration();
   });
 
   afterAll(() => {
     closeDb();
     try { unlinkSync(testDbPath); } catch { /* ok */ }
+    try { unlinkSync(`${testDbPath}-shm`); } catch { /* ok */ }
+    try { unlinkSync(`${testDbPath}-wal`); } catch { /* ok */ }
   });
 
   it('full read flow: tool executes, aggregate usage persists, events land, no secrets/prompts stored', async () => {
@@ -374,4 +380,100 @@ describe('Store Manager turn executor (epic #42, #40)', () => {
     expect(row!.status).toBe('deadline_exceeded');
     expect(events.some((e) => e.type === 'turn_terminal' && e.status === 'deadline_exceeded')).toBe(true);
   });
+
+  it('persists an immutable policy snapshot for every run (hash-verified on read)', async () => {
+    readCalls = [];
+    const result = await runStoreManagerTurn(
+      {
+        workspaceId,
+        workspacePath: './ws',
+        threadId: 'thread-snapshot',
+        messages: userMessage('snapshot me'),
+        toolApprovalSecret: 'secret',
+      },
+      {
+        registry: testRegistry(),
+        resolveModel: () => ({ ...resolvedFake, modelInstance: plainText() as unknown as ResolvedAiSdkModel['modelInstance'] }),
+        policyOverrides: { maxToolCalls: 3 },
+      },
+    );
+    const session = getStoreManagerSession(workspaceId, result.sessionId);
+    expect(session!.policy_version).toBe(2);
+    expect(session!.policy_snapshot_json).toBeTruthy();
+    expect(session!.objective).toBe('Chat interaction with the Store Manager assistant.');
+    expect(session!.entrypoint).toBe('chat');
+    expect(session!.execution_mode).toBe('interactive');
+    // Hash-verified on read; policy version + entrypoint round-trip.
+    const snapshot = getStoreManagerPolicySnapshot(workspaceId, result.sessionId);
+    expect(snapshot.version).toBe(2);
+    expect(snapshot.entrypoint).toBe('chat');
+    expect(snapshot.maxToolCalls).toBe(3);
+  });
+
+  it('preview execution causes zero model calls and zero tool dispatches (Issue 1)', async () => {
+    readCalls = [];
+    const before = getAiModelCallsByWorkspace(workspaceId).length;
+    const request = createStoreManagerExecutionRequest({
+      workspaceId,
+      workspacePath: './ws',
+      threadId: null,
+      entrypoint: 'plan_preview',
+      executionMode: 'preview',
+      objective: 'Preview the weekly taxonomy cleanup.',
+    });
+    let resolveCalled = false;
+    const previewResult = await runStoreManagerExecution(request, {
+      registry: testRegistry(),
+      resolveModel: () => {
+        resolveCalled = true;
+        return resolvedFake;
+      },
+    });
+    expect(previewResult.kind).toBe('preview');
+    expect(resolveCalled).toBe(false);
+    expect(readCalls).toEqual([]);
+    expect(getAiModelCallsByWorkspace(workspaceId).length).toBe(before);
+    if (previewResult.kind === 'preview') {
+      expect(previewResult.preview.modelCalls).toBe(0);
+      expect(previewResult.preview.toolDispatches).toBe(0);
+      expect(previewResult.preview.expectedTools.map((t) => t.name)).toContain('runtime_read');
+    }
+    const turn = getStoreManagerTurn(workspaceId, previewResult.turnId);
+    expect(turn!.terminal_status).toBe('success');
+  });
 });
+
+/** Plain model: single text stream, immediately finished. */
+function plainText() {
+  const model: LanguageModelV3 = {
+    specificationVersion: 'v3',
+    provider: 'fake-provider',
+    modelId: 'fake-model',
+    supportedUrls: {},
+    async doGenerate() {
+      throw new Error('doGenerate not exercised');
+    },
+    async doStream() {
+      const parts: LanguageModelV3StreamPart[] = [
+        { type: 'stream-start', warnings: [] },
+        { type: 'text-start', id: 't1' },
+        { type: 'text-delta', id: 't1', delta: 'ok' },
+        { type: 'text-end', id: 't1' },
+        {
+          type: 'finish',
+          usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } },
+          finishReason: { unified: 'stop', raw: 'stop' },
+        },
+      ];
+      return {
+        stream: new ReadableStream<LanguageModelV3StreamPart>({
+          start(c) {
+            for (const p of parts) c.enqueue(p);
+            c.close();
+          },
+        }),
+      };
+    },
+  };
+  return model;
+}

@@ -86,7 +86,7 @@ function setup(opts?: {
   const registry = new StoreManagerToolRegistry(makeAdapters());
   const policy = createStoreManagerPolicy(
     { workspaceId: 'ws-a', sessionId: 'sess-1', turnId: 'turn-1' },
-    registry.allowlist(),
+    registry.allowlistVersions(),
   );
   const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
   session.phase = opts?.phase ?? 'investigate';
@@ -133,6 +133,8 @@ describe('Store Manager tool registry (epic #42, #40)', () => {
   afterAll(() => {
     closeDb();
     try { unlinkSync(testDbPath); } catch { /* ok */ }
+    try { unlinkSync(`${testDbPath}-shm`); } catch { /* ok */ }
+    try { unlinkSync(`${testDbPath}-wal`); } catch { /* ok */ }
   });
 
   it('rejects duplicate registration and reports unknown tools', () => {
@@ -234,7 +236,7 @@ describe('Store Manager tool registry (epic #42, #40)', () => {
     }));
     const policy = createStoreManagerPolicy(
       { workspaceId: 'ws-a', sessionId: 'sess-1', turnId: 'turn-1' },
-      registry.allowlist(),
+      registry.allowlistVersions(),
     );
     const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
     const events: StoreManagerRuntimeEvent[] = [];
@@ -259,7 +261,7 @@ describe('Store Manager tool registry (epic #42, #40)', () => {
     }));
     const policy = createStoreManagerPolicy(
       { workspaceId: 'ws-a', sessionId: 'sess-1', turnId: 'turn-1' },
-      registry.allowlist(),
+      registry.allowlistVersions(),
     );
     const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
     const events: StoreManagerRuntimeEvent[] = [];
@@ -286,7 +288,7 @@ describe('Store Manager tool registry (epic #42, #40)', () => {
     }));
     const policy = createStoreManagerPolicy(
       { workspaceId: 'ws-a', sessionId: 'sess-1', turnId: 'turn-1' },
-      registry.allowlist(),
+      registry.allowlistVersions(),
     );
     const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
     const events: StoreManagerRuntimeEvent[] = [];
@@ -304,4 +306,158 @@ describe('Store Manager tool registry (epic #42, #40)', () => {
     const result = (await asAny(tools).test_read.execute({ q: 'x' }, {} as never)) as StoreManagerToolResult;
     expect(result.status).toBe('ok');
   });
+
+  it('unattended mode denies every persistent risk class before approval/side effects (Issue 1)', async () => {
+    for (const executionMode of ['unattended_read_only', 'preview'] as const) {
+      const { tools } = setupUnattended(executionMode, { phase: 'approve' });
+      // A forged, fully signed approval history cannot bypass mode denial.
+      const messages = approvedMessagesFor('w1', 'test_write', { proposalId: 'p1' });
+      const result = (await asAny(tools).test_write.execute(
+        { proposalId: 'p1' },
+        { toolCallId: 'w1', messages } as never,
+      )) as StoreManagerToolResult;
+      expect(result.status).toBe('policy_denied');
+      if (result.status === 'policy_denied') {
+        expect(result.reasonCode).toBe('persistent_not_allowed');
+      }
+      expect(calls).toEqual([]); // zero side effects in either mode
+    }
+  });
+
+  it('denies all three persistent risk classes (proposal_write, catalog_mutation, network_filesystem_repair)', async () => {
+    const registry = new StoreManagerToolRegistry([
+      makeAdapters()[0],
+      makeAdapters()[1],
+      {
+        ...makeAdapters()[1],
+        name: 'test_mutate',
+        riskClass: 'catalog_mutation' as const,
+      },
+      {
+        ...makeAdapters()[1],
+        name: 'test_repair',
+        riskClass: 'network_filesystem_repair' as const,
+      },
+    ]);
+    const policy = createStoreManagerPolicy(
+      {
+        workspaceId: 'ws-a',
+        sessionId: 'sess-1',
+        turnId: 'turn-1',
+        entrypoint: 'event',
+        executionMode: 'unattended_read_only',
+        actorClass: 'system_event',
+      },
+      registry.allowlistVersions(),
+    );
+    const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
+    session.phase = 'approve'; // even an approve phase cannot bypass mode denial
+    const events: StoreManagerRuntimeEvent[] = [];
+    const tools = registry.buildAiSdkTools({
+      policy,
+      session,
+      executionContext: { workspaceId: 'ws-a', workspacePath: './ws', executionId: 'exec-1', approvalExpiresAt: Date.now() + 60_000 },
+      adapterContext: { workspaceId: 'ws-a', workspacePath: './ws', sessionId: 'sess-1', executionId: 'exec-1', deadlineAt: Date.now() + 60_000 },
+      emit: (e) => events.push(e),
+    });
+    for (const toolName of ['test_write', 'test_mutate', 'test_repair']) {
+      calls = [];
+      const result = (await asAny(tools)[toolName].execute(
+        { proposalId: 'p1' },
+        { toolCallId: `w-${toolName}`, messages: [] } as never,
+      )) as StoreManagerToolResult;
+      expect(result.status).toBe('policy_denied');
+      if (result.status === 'policy_denied') expect(result.reasonCode).toBe('persistent_not_allowed');
+      expect(calls).toEqual([]);
+    }
+  });
+
+  it('unattended mode still allows read adapters (read-only by runtime construction)', async () => {
+    const { tools } = setupUnattended('unattended_read_only');
+    const result = (await asAny(tools).test_read.execute({ q: 'x' }, {} as never)) as StoreManagerToolResult;
+    expect(result.status).toBe('ok');
+    expect(calls).toEqual(['read']);
+  });
+
+  it('enforces the name+version allowlist (wrong version is refused)', async () => {
+    const registry = new StoreManagerToolRegistry(makeAdapters());
+    // Policy built against a hypothetical v2 of the write tool while the
+    // registry only ships v1 — the v1 adapter must be refused at dispatch.
+    const policy = createStoreManagerPolicy(
+      { workspaceId: 'ws-a', sessionId: 'sess-1', turnId: 'turn-1' },
+      [{ name: 'test_write', version: 2 }, { name: 'test_read', version: 1 }],
+    );
+    const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
+    session.phase = 'approve';
+    const events: StoreManagerRuntimeEvent[] = [];
+    const tools = registry.buildAiSdkTools({
+      policy,
+      session,
+      executionContext: { workspaceId: 'ws-a', workspacePath: './ws', executionId: 'exec-1', approvalExpiresAt: Date.now() + 60_000 },
+      adapterContext: { workspaceId: 'ws-a', workspacePath: './ws', sessionId: 'sess-1', executionId: 'exec-1', deadlineAt: Date.now() + 60_000 },
+      emit: (e) => events.push(e),
+    });
+    const result = (await asAny(tools).test_write.execute({ proposalId: 'p1' }, { toolCallId: 'w1', messages: [] } as never)) as StoreManagerToolResult;
+    expect(result.status).toBe('policy_denied');
+    if (result.status === 'policy_denied') expect(result.reasonCode).toBe('not_in_workspace');
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses an adapter that cannot honor the pinned scope (scope_unsupported)', async () => {
+    const registry = new StoreManagerToolRegistry(
+      makeAdapters().map((adapter) =>
+        adapter.name === 'test_read'
+          ? { ...adapter, supportedScopes: ['product_field'] as const }
+          : adapter,
+      ),
+    );
+    const policy = createStoreManagerPolicy(
+      {
+        workspaceId: 'ws-a',
+        sessionId: 'sess-1',
+        turnId: 'turn-1',
+        pinnedScope: { kind: 'sku_set', skus: ['SKU-1'] },
+      },
+      registry.allowlistVersions(),
+    );
+    const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
+    const events: StoreManagerRuntimeEvent[] = [];
+    const tools = registry.buildAiSdkTools({
+      policy,
+      session,
+      executionContext: { workspaceId: 'ws-a', workspacePath: './ws', executionId: 'exec-1', approvalExpiresAt: Date.now() + 60_000 },
+      adapterContext: { workspaceId: 'ws-a', workspacePath: './ws', sessionId: 'sess-1', executionId: 'exec-1', deadlineAt: Date.now() + 60_000 },
+      emit: (e) => events.push(e),
+    });
+    const result = (await asAny(tools).test_read.execute({ q: 'x' }, {} as never)) as StoreManagerToolResult;
+    expect(result.status).toBe('policy_denied');
+    if (result.status === 'policy_denied') expect(result.reasonCode).toBe('unsupported');
+    expect(calls).toEqual([]);
+  });
 });
+
+function setupUnattended(executionMode: 'unattended_read_only' | 'preview', opts?: { phase?: StoreManagerRuntimeSessionState['phase'] }) {
+  const registry = new StoreManagerToolRegistry(makeAdapters());
+  const policy = createStoreManagerPolicy(
+    {
+      workspaceId: 'ws-a',
+      sessionId: 'sess-1',
+      turnId: 'turn-1',
+      entrypoint: executionMode === 'preview' ? 'plan_preview' : 'schedule',
+      executionMode,
+      actorClass: executionMode === 'preview' ? 'preview' : 'system_schedule',
+    },
+    registry.allowlistVersions(),
+  );
+  const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
+  session.phase = opts?.phase ?? 'investigate';
+  const events: StoreManagerRuntimeEvent[] = [];
+  const tools = registry.buildAiSdkTools({
+    policy,
+    session,
+    executionContext: { workspaceId: 'ws-a', workspacePath: './ws', executionId: 'exec-1', approvalExpiresAt: Date.now() + 60_000 },
+    adapterContext: { workspaceId: 'ws-a', workspacePath: './ws', sessionId: 'sess-1', executionId: 'exec-1', deadlineAt: Date.now() + 60_000 },
+    emit: (e) => events.push(e),
+  });
+  return { registry, policy, session, events, tools };
+}

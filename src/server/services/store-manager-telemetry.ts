@@ -22,8 +22,34 @@ import {
   type GeneralModelCallStatus,
 } from '../../db/repositories/ai-model-call-repo';
 import type { ResolvedAiSdkModel } from './ai-sdk-model-resolver';
+import type {
+  StoreManagerEntrypoint,
+  StoreManagerLineage,
+} from '../../shared/schemas/store-manager-operations';
+import { hashCanonicalJson } from '../../shared/stable-id';
 
 export const STORE_MANAGER_TASK = 'store_manager_assistant' as const;
+
+/**
+ * Task label for an entrypoint. Chat keeps the historical task id so existing
+ * `ai_model_calls` rows stay queryable; other entrypoints use a bounded
+ * `store_manager_<entrypoint>` label. No new telemetry columns are added —
+ * this is a labeling helper only.
+ */
+export function storeManagerTaskForEntrypoint(entrypoint: StoreManagerEntrypoint): string {
+  if (entrypoint === 'chat') return STORE_MANAGER_TASK;
+  return `store_manager_${entrypoint}`;
+}
+
+/**
+ * Deterministic lineage digest for a run (bounded identifiers only). Returns
+ * null when there is no lineage so callers can store a NULL column. Never
+ * contains secrets or free-form text.
+ */
+export function storeManagerLineageDigest(lineage: StoreManagerLineage | null | undefined): string | null {
+  if (!lineage) return null;
+  return hashCanonicalJson(lineage);
+}
 
 /**
  * Safe metadata attached to the assistant UI message at stream finish. This

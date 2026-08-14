@@ -160,6 +160,11 @@ export class StoreManagerToolRegistry {
     return this.names();
   }
 
+  /** Tool name+version pairs the policy allowlist is built from (server-owned). */
+  allowlistVersions(): readonly { name: string; version: number }[] {
+    return this.all().map((adapter) => ({ name: adapter.name, version: adapter.version }));
+  }
+
   /**
    * Build AI SDK tool definitions for one turn, wired to this registry's
    * dispatch gate. The `phase`/`budget`/`deadline` checks read the mutable
@@ -246,7 +251,28 @@ export class StoreManagerToolRegistry {
     if (session.status !== 'active') {
       return deny('not_in_workspace', 'The runtime session for this turn is no longer active.');
     }
-    // 3. phase allowlist (persistent calls allowed only via a valid approval)
+    // 3. execution-mode persistent denial (operations console, Issue 1):
+    //    unattended_read_only / preview refuse every non-read adapter BEFORE
+    //    phase/approval handling, so forged/valid-looking approval parts can
+    //    never reach the gate or any side effect.
+    if (policy.denyPersistent && adapter.riskClass !== 'read') {
+      return deny(
+        'persistent_not_allowed',
+        `Tool "${adapter.name}" is a ${adapter.riskClass} adapter and is not allowed in ${policy.executionMode} mode.`,
+      );
+    }
+    // 3b. pinned-scope support: an adapter that declares supported scopes must
+    //     honor the resolved scope or abstain (scope_unsupported) — it may not
+    //     silently scan the whole catalog.
+    if (policy.pinnedScope && adapter.supportedScopes && adapter.supportedScopes.length > 0) {
+      if (!adapter.supportedScopes.includes(policy.pinnedScope.kind)) {
+        return deny(
+          'unsupported',
+          `Tool "${adapter.name}" does not support the pinned ${policy.pinnedScope.kind} scope.`,
+        );
+      }
+    }
+    // 4. phase allowlist (persistent calls allowed only via a valid approval)
     const approvalState = this.resolveApprovalState(opts);
     const phaseAllowed =
       adapter.allowedPhases.includes(session.phase) ||
@@ -257,9 +283,12 @@ export class StoreManagerToolRegistry {
         `Tool "${adapter.name}" is not allowed in the current ${session.phase} phase.`,
       );
     }
-    // 4. tool/version allowlist: the adapter is the allowed version; unknown tools never reach here.
-    if (!policy.allowedToolNames.includes(adapter.name)) {
-      return deny('not_in_workspace', `Tool "${adapter.name}" is not allowed by this turn's policy.`);
+    // 5. tool/version allowlist: the adapter is the allowed version; unknown tools never reach here.
+    const allowedPair = policy.allowedToolNameVersions.some(
+      (p) => p.name === adapter.name && p.version === adapter.version,
+    );
+    if (!allowedPair) {
+      return deny('not_in_workspace', `Tool "${adapter.name}" v${adapter.version} is not allowed by this run's policy.`);
     }
     // 5. remaining deadline
     if (now() > deadlineAt) {
@@ -318,6 +347,8 @@ export class StoreManagerToolRegistry {
     const adapterCtx: StoreManagerAdapterContext = {
       ...opts.adapterContext,
       signal,
+      pinnedScope: policy.pinnedScope,
+      entrypoint: policy.entrypoint,
       emit,
     };
     try {
@@ -519,14 +550,18 @@ export const TOOL_OUTPUT_SCHEMA_NONE = z.unknown();
  * Build the `streamText.toolApproval` config from ADAPTER metadata (the
  * runtime source of truth) so custom/injected registries work identically to
  * the default surface. Read tools are `not-applicable`, persistent classes are
- * `user-approval`.
+ * `user-approval`. In unattended/preview modes pass `forceNotApplicable: true`
+ * so the SDK never halts a background run waiting for an approval that can
+ * never arrive — the registry denies persistent adapters at dispatch instead.
  */
 export function buildRegistryApprovalConfig(
   adapters: readonly StoreManagerToolAdapter[],
+  opts?: { forceNotApplicable?: boolean },
 ): Record<string, 'not-applicable' | 'user-approval'> {
   const config: Record<string, 'not-applicable' | 'user-approval'> = {};
   for (const adapter of adapters) {
-    config[adapter.name] = adapter.requiresApproval ? 'user-approval' : 'not-applicable';
+    config[adapter.name] =
+      opts?.forceNotApplicable || !adapter.requiresApproval ? 'not-applicable' : 'user-approval';
   }
   return config;
 }

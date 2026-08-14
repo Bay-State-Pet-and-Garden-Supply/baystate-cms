@@ -427,12 +427,21 @@ CREATE TABLE IF NOT EXISTS store_manager_sessions (
   execution_id TEXT NOT NULL,
   policy_hash TEXT NOT NULL,
   policy_version INTEGER NOT NULL,
+  policy_snapshot_json TEXT,
   requested_model TEXT,
   resolved_provider TEXT NOT NULL,
   resolved_model TEXT NOT NULL,
   resolved_locality TEXT NOT NULL CHECK (resolved_locality IN ('local', 'cloud')),
   resolution_reason TEXT NOT NULL,
   model_call_id TEXT,
+  objective TEXT,
+  entrypoint TEXT,
+  execution_mode TEXT,
+  actor_class TEXT,
+  scope_json TEXT,
+  scope_hash TEXT,
+  prompt_version TEXT,
+  lineage_json TEXT,
   status TEXT NOT NULL CHECK (status IN ('active', 'terminal')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -440,6 +449,7 @@ CREATE TABLE IF NOT EXISTS store_manager_sessions (
 CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_ws ON store_manager_sessions(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_thread ON store_manager_sessions(thread_id);
 CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_model_call ON store_manager_sessions(model_call_id);
+CREATE INDEX IF NOT EXISTS idx_store_manager_sessions_entrypoint ON store_manager_sessions(workspace_id, entrypoint);
 
 CREATE TABLE IF NOT EXISTS store_manager_turns (
   id TEXT PRIMARY KEY,
@@ -466,7 +476,23 @@ CREATE TABLE IF NOT EXISTS store_manager_events (
   event_type TEXT NOT NULL,
   event_version INTEGER NOT NULL,
   payload_json TEXT NOT NULL,
+  sequence INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_store_manager_events_ws ON store_manager_events(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_store_manager_events_session ON store_manager_events(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_store_manager_events_sequence ON store_manager_events(workspace_id, sequence);
+
+-- Operations-console run artifacts (epic: operations console, Issue 1):
+-- immutable, content-addressed, bounded by the artifacts runtime module.
+CREATE TABLE IF NOT EXISTS store_manager_run_artifacts (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  content_json TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_store_manager_run_artifacts_ws_run ON store_manager_run_artifacts(workspace_id, run_id, created_at);
