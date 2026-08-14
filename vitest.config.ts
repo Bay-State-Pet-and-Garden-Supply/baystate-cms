@@ -114,6 +114,36 @@ export default defineConfig({
       'src/tests/unit/sourcing-resolution.test.ts',
       'src/tests/unit/sourcing-stage-order.test.ts',
       'src/tests/unit/sourcing-safety-routes.test.ts',
+      // Operations-console epic DB suites (Issues 3-9): bun:sqlite/bun:test
+      // imports — excluded here, registered in package.json test:db.
+      'src/tests/unit/store-manager-action-diff.test.ts',
+      'src/tests/unit/store-manager-bulk-review-repo.test.ts',
+      'src/tests/unit/store-manager-bulk-review-tools.test.ts',
+      'src/tests/unit/store-manager-bulk-review.test.ts',
+      'src/tests/unit/store-manager-event-runtime.test.ts',
+      'src/tests/unit/store-manager-event-worker.test.ts',
+      'src/tests/unit/store-manager-events-sse.test.ts',
+      'src/tests/unit/store-manager-execution-boundary.test.ts',
+      'src/tests/unit/store-manager-history-query.test.ts',
+      'src/tests/unit/store-manager-history.test.ts',
+      'src/tests/unit/store-manager-inbox-repo.test.ts',
+      'src/tests/unit/store-manager-inbox.test.ts',
+      'src/tests/unit/store-manager-notifications.test.ts',
+      'src/tests/unit/store-manager-operations-acceptance.test.ts',
+      'src/tests/unit/store-manager-operations-migration.test.ts',
+      'src/tests/unit/store-manager-playbook-repo.test.ts',
+      'src/tests/unit/store-manager-playbook-runner.test.ts',
+      'src/tests/unit/store-manager-playbook-templates.test.ts',
+      'src/tests/unit/store-manager-playbook-validator.test.ts',
+      'src/tests/unit/store-manager-preferences.test.ts',
+      'src/tests/unit/store-manager-replay.test.ts',
+      'src/tests/unit/store-manager-schedule-repo.test.ts',
+      'src/tests/unit/store-manager-scheduled-runtime.test.ts',
+      'src/tests/unit/store-manager-scheduler.test.ts',
+      'src/tests/unit/store-manager-scope.test.ts',
+      'src/tests/unit/store-manager-trigger-repo.test.ts',
+      // DB-backed suites committed without vitest registration (bun:sqlite /
+      // bun:test imports — vitest cannot collect them; run under test:db)
       // DB-backed suites committed without vitest registration (bun:sqlite /
       // bun:test imports — vitest cannot collect them; run under test:db)
       'src/tests/unit/attribute-editor.test.ts',

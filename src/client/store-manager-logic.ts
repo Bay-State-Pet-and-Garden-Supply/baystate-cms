@@ -102,6 +102,33 @@ export const STORE_MANAGER_TOOL_DISPLAY: Record<string, StoreManagerToolDisplayM
     actionLabel: 'Repair Change Set images (network download + file write)',
     stateTransition: 'Change Set images re-downloaded into workspace products/images',
   },
+
+  // Operations console read adapters (Issues 2/7): registry-name entries so
+  // the client display map matches the server policy registry exactly.
+  getChangeSetDetail: {
+    riskClass: 'read',
+    requiresApproval: false,
+    actionLabel: 'Read Change Set detail and diff',
+    stateTransition: 'none',
+  },
+  getStoreManagerReport: {
+    riskClass: 'read',
+    requiresApproval: false,
+    actionLabel: 'Generate a deterministic operational report',
+    stateTransition: 'none',
+  },
+  history_query: {
+    riskClass: 'read',
+    requiresApproval: false,
+    actionLabel: 'Run a bounded history query',
+    stateTransition: 'none',
+  },
+  bulk_apply_stored_proposals: {
+    riskClass: 'catalog_mutation',
+    requiresApproval: true,
+    actionLabel: 'Stage the exact bulk-review batch in a Change Set',
+    stateTransition: 'bulk batch (pending) -> proposals staged in Change Set (draft); batch status applied; not approved, not published, not synced',
+  },
 };
 
 export const STORE_MANAGER_RISK_LABELS: Record<StoreManagerRiskClass, string> = {
