@@ -12,6 +12,7 @@ import type {
 } from '@ai-sdk/provider';
 import { createScheduleFromTemplate, runNowReadOnly, dispatchOccurrence } from '../../server/services/store-manager-schedule-service';
 import { StoreManagerToolRegistry } from '../../store-manager/runtime/tool-registry';
+import { buildStoreManagerActionDiff } from '../../store-manager/runtime/action-preview';
 import type { StoreManagerToolAdapter, StoreManagerToolResult } from '../../store-manager/runtime/contracts';
 import { okResult } from '../../store-manager/runtime/contracts';
 import { getStoreManagerSession, getStoreManagerRunArtifacts } from '../../db/repositories/store-manager-session-repo';
@@ -123,6 +124,22 @@ const writeAdapter: StoreManagerToolAdapter = {
   stateTransition: 'proposal stored',
   allowedPhases: ['approve'] as const,
   scopeSummary: (i) => `write ${String(i.proposalId ?? '')}`,
+  previewDiff: ({ proposalId }) =>
+    buildStoreManagerActionDiff({
+      toolName: 'runtime_write',
+      toolVersion: 1,
+      riskClass: 'proposal_write',
+      workspaceId: '',
+      scopeHash: null,
+      affectedSkuCount: 1,
+      affectedSkus: [],
+      beforeAfter: [],
+      filesTouched: [],
+      changeSet: null,
+      networkActivity: { kind: 'none' },
+      evidenceRefs: [],
+      stateHashes: {},
+    }),
   execute: async (): Promise<StoreManagerToolResult> => {
     writeCalls += 1;
     return okResult({ ok: true });

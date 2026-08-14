@@ -15,6 +15,7 @@ import type {
   LanguageModelV3StreamPart,
 } from '@ai-sdk/provider';
 import { StoreManagerToolRegistry } from '../../store-manager/runtime/tool-registry';
+import { buildStoreManagerActionDiff } from '../../store-manager/runtime/action-preview';
 import type {
   StoreManagerToolAdapter,
   StoreManagerToolResult,
@@ -53,6 +54,22 @@ export function makeTestAdapters(calls: string[]): StoreManagerToolAdapter[] {
     stateTransition: 'proposal stored',
     allowedPhases: ['approve'] as const,
     scopeSummary: (i) => `write ${String(i.proposalId ?? '')}`,
+    previewDiff: ({ proposalId }) =>
+      buildStoreManagerActionDiff({
+        toolName: 'runtime_write',
+        toolVersion: 1,
+        riskClass: 'proposal_write',
+        workspaceId: '',
+        scopeHash: null,
+        affectedSkuCount: 1,
+        affectedSkus: [],
+        beforeAfter: [],
+        filesTouched: [],
+        changeSet: null,
+        networkActivity: { kind: 'none' },
+        evidenceRefs: [],
+        stateHashes: {},
+      }),
     execute: async (): Promise<StoreManagerToolResult> => {
       calls.push('write');
       return okResult({ ok: true });
