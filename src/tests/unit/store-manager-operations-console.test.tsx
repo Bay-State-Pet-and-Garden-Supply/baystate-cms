@@ -175,6 +175,57 @@ describe('Operations console (Issue 9)', () => {
     }
   });
 
+  it('ships enabled by default: core surfaces render while only the opt-in automation views show the disabled state', async () => {
+    const DEFAULT_FLAGS: StoreManagerConsoleFlags = {
+      operationsConsoleEnabled: true,
+      schedulesEnabled: false,
+      eventTriggersEnabled: false,
+      playbooksEnabled: false,
+      bulkReviewEnabled: false,
+      notificationsEnabled: false,
+      killSwitch: false,
+    };
+    // Core shipped surfaces render with default flags — no disabled banner.
+    for (const view of ['inbox', 'preferences', 'history', 'chat'] as const) {
+      const { container, unmount } = await renderAsync(
+        <OperationsConsole
+          flags={DEFAULT_FLAGS}
+          activeView={view}
+          onNavigate={() => undefined}
+          views={VIEWS}
+          renderView={(v) => <div data-testid={`view-${v}`}>view body {v}</div>}
+        />,
+      );
+      try {
+        expect(container.querySelector(`[data-testid="view-${view}"]`)).toBeTruthy();
+        expect(container.querySelector('[data-testid="operations-empty-flag-off"]')).toBeFalsy();
+      } finally {
+        await unmount();
+      }
+    }
+    // Opt-in automation views show the per-surface disabled state by default.
+    for (const view of ['schedules', 'triggers', 'playbooks', 'bulk'] as const) {
+      const { container, unmount } = await renderAsync(
+        <OperationsConsole
+          flags={DEFAULT_FLAGS}
+          activeView={view}
+          onNavigate={() => undefined}
+          views={VIEWS}
+          renderView={(v) => <div data-testid={`view-${v}`}>view body {v}</div>}
+        />,
+      );
+      try {
+        expect(container.querySelector(`[data-testid="view-${view}"]`)).toBeFalsy();
+        const empty = container.querySelector('[data-testid="operations-empty-flag-off"]');
+        expect(empty).toBeTruthy();
+        // The copy names the exact env flag for this surface.
+        expect(empty!.textContent).toContain('BAYSTATE_CMS_STORE_MANAGER');
+      } finally {
+        await unmount();
+      }
+    }
+  });
+
   it('OperationsEmptyState is purely presentational and offers no automatic action', async () => {
     const { container, unmount } = await renderAsync(
       <OperationsEmptyState

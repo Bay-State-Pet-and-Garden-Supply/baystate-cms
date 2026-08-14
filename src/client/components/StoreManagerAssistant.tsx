@@ -58,9 +58,12 @@ interface SelectedProduct {
 /** Server-enforced attachment limit (mirrors MAX_ATTACHED_SKUS in store-manager-context.ts). */
 const MAX_ATTACHED_PRODUCTS = 10;
 
-/** Conservative client-side default: every console surface inert until the server says otherwise. */
+/** Pre-fetch default mirrors the server defaults: the shipped console surface
+ * (chat, inbox, commands, scope, preferences, history) is enabled; only the
+ * opt-in automation (schedules, triggers, playbooks, bulk review,
+ * notifications) is inert until the server says otherwise. */
 const ALL_FLAGS_OFF: StoreManagerConsoleFlags = {
-  operationsConsoleEnabled: false,
+  operationsConsoleEnabled: true,
   schedulesEnabled: false,
   eventTriggersEnabled: false,
   playbooksEnabled: false,
@@ -245,6 +248,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   // (epic #42, #37): the durable model-call row id, resolved provider/model,
   // aggregate tokens, and honest cost basis. Client-supplied `usage` is never
   // accepted.
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
   const totalThreadCost = messages.reduce((sum: number, msg: any) => {
     const meta = msg?.metadata;
     if (meta && typeof meta.estimatedCostUsd === 'number') {
@@ -252,7 +257,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     }
     return sum;
   }, 0);
-  const formattedCost = totalThreadCost > 0 ? `$${totalThreadCost.toFixed(5)}` : '$0.00';
+  const formattedCost = totalThreadCost > 0 ? `$${totalThreadCost.toFixed(4)}` : '$0.00';
 
   // #34: per-approval decision state (blocks duplicate clicks while a decision
   // is being submitted).
@@ -1242,28 +1247,47 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
       {/* Left Sidebar - Chat History */}
       <aside
         style={{
-          width: '260px',
-          minWidth: '260px',
+          width: isSidebarOpen ? '260px' : '0px',
+          minWidth: isSidebarOpen ? '260px' : '0px',
           flexShrink: 0,
           background: colors.feedBagCream,
-          borderRight: `1px solid ${colors.cardBorder}`,
+          borderRight: isSidebarOpen ? `1px solid ${colors.cardBorder}` : 'none',
           display: 'flex',
           flexDirection: 'column',
+          overflow: 'hidden',
+          transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
       >
-        <button
-          onClick={startNewChat}
-          className="btn btn-primary"
-          style={{
-            margin: '16px',
-            padding: '10px 16px',
-            fontFamily: fonts.display,
-            fontSize: '0.8rem',
-            textAlign: 'center',
-          }}
-        >
-          + New Chat Thread
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 16px 8px 16px' }}>
+          <button
+            onClick={startNewChat}
+            className="btn btn-primary"
+            style={{
+              flex: 1,
+              padding: '9px 12px',
+              fontFamily: fonts.display,
+              fontSize: '0.8rem',
+              textAlign: 'center',
+            }}
+          >
+            + New Chat Thread
+          </button>
+          <button
+            onClick={() => setIsSidebarOpen(false)}
+            title="Collapse sidebar"
+            style={{
+              background: colors.whiteSurface,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: rounded.sm,
+              padding: '7px 9px',
+              cursor: 'pointer',
+              fontSize: 12,
+              color: colors.ledgerCharcoal,
+            }}
+          >
+            ◀
+          </button>
+        </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 16px' }}>
           <div style={{ fontSize: '11px', fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em' }}>
@@ -1339,37 +1363,67 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            padding: '16px 24px',
+            padding: '12px 24px',
             background: colors.whiteSurface,
             borderBottom: `1px solid ${colors.cardBorder}`,
+            gap: 16,
+            flexWrap: 'wrap',
           }}
         >
-        <ViewHeader
-          title="Store Manager AI Assistant"
-          description={currentThreadTitle ? `Current thread: "${currentThreadTitle}"` : 'Interactive catalog auditing and refactoring advisor.'}
-          style={{ marginBottom: 0 }}
-          badge={
-            <span
-              style={{
-                fontSize: '10px',
-                fontWeight: 700,
-                padding: '2px 8px',
-                borderRadius: rounded.full,
-                background: status === 'streaming' ? colors.uniformGreen : status === 'submitted' ? colors.signetBurgundy : colors.seedlingGreen,
-                color: colors.feedBagCream,
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-              }}
-            >
-              {status === 'streaming' ? 'Streaming...' : status === 'submitted' ? 'Submitting...' : 'Ready'}
-            </span>
-          }
-        />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {!isSidebarOpen && (
+              <button
+                onClick={() => setIsSidebarOpen(true)}
+                title="Expand sidebar"
+                style={{
+                  background: colors.whiteSurface,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: rounded.sm,
+                  padding: '6px 10px',
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: colors.ledgerCharcoal,
+                  fontWeight: 600,
+                }}
+              >
+                ▶ Threads
+              </button>
+            )}
+            <ViewHeader
+              title="Store Manager AI Assistant"
+              description={currentThreadTitle ? `Thread: "${currentThreadTitle}"` : 'Interactive catalog auditing and refactoring advisor.'}
+              style={{ marginBottom: 0 }}
+              badge={
+                <span
+                  style={{
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '2px 8px',
+                    borderRadius: rounded.full,
+                    background: status === 'streaming' ? colors.uniformGreen : status === 'submitted' ? colors.signetBurgundy : colors.seedlingGreen,
+                    color: colors.feedBagCream,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                  }}
+                >
+                  {status === 'streaming' ? 'Streaming...' : status === 'submitted' ? 'Submitting...' : 'Ready'}
+                </span>
+              }
+            />
+          </div>
 
-          {/* Model selection dropdown — server-driven model list with clear pricing */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <label style={{ fontSize: '12px', fontWeight: 700, color: colors.ledgerCharcoal }}>AI Model:</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <ScopePin
+              scope={pinnedScope}
+              onPin={handlePinScope}
+              onClear={() => setPinnedScope(null)}
+              error={scopeError}
+              busy={scopeBusy}
+            />
+
+            {/* Model selection dropdown */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <label style={{ fontSize: '12px', fontWeight: 700, color: colors.ledgerCharcoal }}>Model:</label>
               <div style={{ position: 'relative' }}>
                 <select
                   value={selectedModel ?? ''}
@@ -1379,8 +1433,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     background: colors.whiteSurface,
                     border: `1px solid ${colors.cardBorder}`,
                     borderRadius: rounded.md,
-                    padding: '6px 28px 6px 12px',
-                    fontSize: '13px',
+                    padding: '5px 24px 5px 10px',
+                    fontSize: '12px',
                     color: colors.ledgerCharcoal,
                     fontWeight: 600,
                     cursor: (status === 'streaming' || status === 'submitted' || modelOptions.length === 0) ? 'not-allowed' : 'pointer',
@@ -1389,9 +1443,9 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                   }}
                 >
                   {modelsLoading ? (
-                    <option value="">Loading models…</option>
+                    <option value="">Loading…</option>
                   ) : modelOptions.length === 0 ? (
-                    <option value="">No models available</option>
+                    <option value="">No models</option>
                   ) : (
                     modelOptions.map(opt => (
                       <option key={opt.id} value={opt.id} title={opt.capabilitySummary}>
@@ -1403,11 +1457,11 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 <div
                   style={{
                     position: 'absolute',
-                    right: '10px',
+                    right: '8px',
                     top: '50%',
                     transform: 'translateY(-50%)',
                     pointerEvents: 'none',
-                    fontSize: '9px',
+                    fontSize: '8px',
                     color: colors.mulchBrown,
                   }}
                 >
@@ -1415,46 +1469,12 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 </div>
               </div>
             </div>
-            {modelSetupMessage && !modelsLoading && modelOptions.length === 0 && (
-              <div
-                style={{
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  color: colors.signetBurgundy,
-                  background: '#fee2e2',
-                  border: `1px solid ${colors.signetBurgundy}`,
-                  borderRadius: rounded.md,
-                  padding: '4px 8px',
-                  maxWidth: 320,
-                  textAlign: 'right',
-                }}
-              >
-                {modelSetupMessage}
-              </div>
-            )}
+
             <div style={{ fontSize: '11px', fontWeight: 700, color: colors.uniformGreen, display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span>Session Cost:</span>
+              <span>Cost:</span>
               <span style={{ fontFamily: fonts.mono, fontSize: '12px' }}>{formattedCost}</span>
             </div>
-          </div>
 
-          {/* Operations console (Issue 9): accessible nav (deep-linked views) */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <ScopePin
-              scope={pinnedScope}
-              onPin={handlePinScope}
-              onClear={() => setPinnedScope(null)}
-              error={scopeError}
-              busy={scopeBusy}
-            />
-            <OperationsNav
-              views={CONSOLE_VIEWS}
-              activeView={activeView}
-              onNavigate={(view) => {
-                setActiveView(view);
-              }}
-              killSwitch={consoleFlags.killSwitch}
-            />
             <NotificationCenter
               notifications={notifications}
               status={eventStatus}
@@ -1482,9 +1502,6 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                     open
                     onClose={() => setActiveView('chat')}
                     onRequestReview={(objective) => {
-                      // The approval flow stays inside the runtime: the objective enters
-                      // the chat session, the model proposes bulk_apply_stored_proposals,
-                      // and the standard approval card shows the exact diff first.
                       if (!selectedModel) return;
                       sendMessage({ text: objective });
                     }}
@@ -1600,17 +1617,18 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                 >
                   <div
                     style={{
-                      maxWidth: '82%',
-                      padding: '20px 24px',
+                      maxWidth: isUser ? '75%' : '85%',
+                      padding: '16px 20px',
                       borderRadius: rounded.lg,
-                      background: isUser ? colors.uniformGreen : colors.whiteSurface,
-                      border: isUser ? `1px solid ${colors.shadowPine}` : `1px solid ${colors.cardBorder}`,
-                      color: isUser ? '#FFFFFF' : colors.ledgerCharcoal,
-                      boxShadow: '0 2px 4px rgba(33,20,20,0.06)',
+                      background: colors.whiteSurface,
+                      border: `1px solid ${colors.cardBorder}`,
+                      borderLeft: isUser ? `4px solid ${colors.uniformGreen}` : `1px solid ${colors.cardBorder}`,
+                      color: colors.ledgerCharcoal,
+                      boxShadow: '0 1px 3px rgba(33,20,20,0.04)',
                     }}
                   >
-                    <div style={{ fontSize: '11px', color: isUser ? colors.cornerCalloutGold : colors.uniformGreen, fontWeight: 700, marginBottom: 10, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-                      {isUser ? 'YOU' : 'ASSISTANT'}
+                    <div style={{ fontSize: '11px', color: colors.uniformGreen, fontWeight: 700, marginBottom: 8, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                      {isUser ? 'YOU' : 'STORE MANAGER'}
                     </div>
 
                     <div className="message-text">

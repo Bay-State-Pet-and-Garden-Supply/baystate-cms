@@ -36,7 +36,11 @@ export interface StoreManagerFlags {
 }
 
 export const DEFAULT_STORE_MANAGER_FLAGS: StoreManagerFlags = {
-  operationsConsoleEnabled: false,
+  // The operations console is a shipped surface (chat, inbox, commands, scope,
+  // preferences, history) — it is enabled by default. Only the unattended
+  // automation (schedules, event triggers, playbooks, bulk review,
+  // notifications) ships disabled and requires an explicit opt-in.
+  operationsConsoleEnabled: true,
   schedulesEnabled: false,
   eventTriggersEnabled: false,
   playbooksEnabled: false,

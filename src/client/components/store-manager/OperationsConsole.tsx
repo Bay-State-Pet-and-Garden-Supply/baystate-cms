@@ -78,14 +78,14 @@ export function OperationsConsole({ activeView, onNavigate, flags, views, render
       disabledReasons.set(
         view.id,
         view.id === 'schedules'
-          ? 'Scheduled runs are disabled (feature flag off).'
+          ? 'Scheduled runs ship disabled by default — set BAYSTATE_CMS_STORE_MANAGER_SCHEDULES_ENABLED (or the future Settings toggle) to enable them.'
           : view.id === 'triggers'
-            ? 'Event triggers are disabled (feature flag off).'
+            ? 'Event triggers ship disabled by default — set BAYSTATE_CMS_STORE_MANAGER_EVENT_TRIGGERS_ENABLED (or the future Settings toggle) to enable them.'
             : view.id === 'playbooks'
-              ? 'Playbooks are disabled (feature flag off).'
+              ? 'Saved playbooks ship disabled by default — set BAYSTATE_CMS_STORE_MANAGER_PLAYBOOKS_ENABLED (or the future Settings toggle) to enable them.'
               : view.id === 'bulk'
-                ? 'Bulk review is disabled (feature flag off).'
-                : 'The operations console is disabled (feature flag off).',
+                ? 'Bulk review ships disabled by default — set BAYSTATE_CMS_STORE_MANAGER_BULK_REVIEW_ENABLED (or the future Settings toggle) to enable it.'
+                : 'The operations console is disabled (BAYSTATE_CMS_STORE_MANAGER_OPERATIONS_CONSOLE_ENABLED is off). Chat, Inbox, and History remain available.',
       );
     }
     if (flags.killSwitch && RUN_PRODUCING.includes(view.id)) {
@@ -122,8 +122,8 @@ export function OperationsConsole({ activeView, onNavigate, flags, views, render
           <div style={{ padding: '16px 0' }}>
             <OperationsEmptyState
               reason="flag-off"
-              title="This surface is inert by default"
-              description="This Store Manager surface ships disabled. Enable the matching BAYSTATE_CMS_STORE_MANAGER_* flag (or the future Settings toggle) to use it — nothing here runs without an explicit opt-in."
+              title="This surface is disabled"
+              description={disabledReasons.get(activeView) ?? 'This surface is disabled by a Store Manager feature flag.'}
             />
           </div>
         )

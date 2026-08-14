@@ -16,9 +16,9 @@ describe('Store Manager console flags (Issue 4)', () => {
     resetStoreManagerFlagsOverride();
   });
 
-  it('defaults every automation flag OFF (chat surface is never gated)', () => {
+  it('ships the operations console enabled; defaults every automation flag OFF (chat surface is never gated)', () => {
     const flags = loadStoreManagerFlags({});
-    expect(flags.operationsConsoleEnabled).toBe(false);
+    expect(flags.operationsConsoleEnabled).toBe(true);
     expect(flags.schedulesEnabled).toBe(false);
     expect(flags.eventTriggersEnabled).toBe(false);
     expect(flags.playbooksEnabled).toBe(false);
