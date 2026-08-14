@@ -40,6 +40,8 @@ import {
 import { CATALOG_TOOL_ADAPTERS } from '../tools/catalog-tools';
 import { PROPOSAL_TOOL_ADAPTERS } from '../tools/proposal-tools';
 import { IMAGE_REPAIR_TOOL_ADAPTERS } from '../tools/image-repair-tool';
+import { CHANGE_SET_READ_TOOL_ADAPTERS } from '../tools/change-set-read-tools';
+import { REPORT_TOOL_ADAPTERS } from '../tools/report-tools';
 
 // ---------------------------------------------------------------------------
 // Mutable per-turn session state the registry enforces against
@@ -261,10 +263,12 @@ export class StoreManagerToolRegistry {
         `Tool "${adapter.name}" is a ${adapter.riskClass} adapter and is not allowed in ${policy.executionMode} mode.`,
       );
     }
-    // 3b. pinned-scope support: an adapter that declares supported scopes must
-    //     honor the resolved scope or abstain (scope_unsupported) — it may not
-    //     silently scan the whole catalog.
-    if (policy.pinnedScope && adapter.supportedScopes && adapter.supportedScopes.length > 0) {
+    // 3b. pinned-scope support: an adapter that DECLARES `supportedScopes`
+    //     (including an empty list = catalog-wide, refuses any pinned scope)
+    //     must honor the resolved scope or abstain (scope_unsupported) — it
+    //     may not silently scan the whole catalog. Undefined keeps legacy
+    //     behavior (executes regardless) for adapters that do not declare.
+    if (policy.pinnedScope && adapter.supportedScopes !== undefined) {
       if (!adapter.supportedScopes.includes(policy.pinnedScope.kind)) {
         return deny(
           'unsupported',
@@ -537,6 +541,8 @@ export const DEFAULT_TOOL_ADAPTERS: readonly StoreManagerToolAdapter[] = [
   ...CATALOG_TOOL_ADAPTERS,
   ...PROPOSAL_TOOL_ADAPTERS,
   ...IMAGE_REPAIR_TOOL_ADAPTERS,
+  ...CHANGE_SET_READ_TOOL_ADAPTERS,
+  ...REPORT_TOOL_ADAPTERS,
 ];
 
 export function createStoreManagerToolRegistry(): StoreManagerToolRegistry {

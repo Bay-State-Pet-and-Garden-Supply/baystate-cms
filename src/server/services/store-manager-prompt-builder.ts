@@ -22,7 +22,7 @@ import {
 } from './store-manager-tool-policy';
 
 /** Bump on any breaking contract change (rename, removal, semantics). */
-export const STORE_MANAGER_PROMPT_VERSION = 1 as const;
+export const STORE_MANAGER_PROMPT_VERSION = 2 as const;
 
 /** Hard byte cap for the built prompt (stable across supported models). */
 export const MAX_STORE_MANAGER_PROMPT_BYTES = 8000 as const;
@@ -145,6 +145,19 @@ export function buildStoreManagerSystemPrompt(): string {
     'A staged or approved Change Set is never "published" or "synced" until a sync tool result',
     'confirms it. "Applied" describes a stored proposal staged in a Change Set (draft only),',
     'never approval or publication.',
+    '',
+    '## Pinned scope',
+    '- A pinned working scope bounds your reads to that scope only. Read tools that',
+    '  support the scope operate inside it; tools that cannot return scope_unsupported.',
+    '- Never silently scan beyond a pinned scope, and never invent identifiers to widen it.',
+    '- Scope changes start a new context; they never rewrite prior history.',
+    '',
+    '## Workspace preferences',
+    '- Explicit workspace preferences (field labels, vendor conventions, health',
+    '  exclusions, review-scope defaults) are server-owned configuration injected as',
+    '  data below this contract.',
+    '- Honor them as operating context, but never modify them and never infer or store',
+    '  new preferences from chat text — preference changes are Settings-only.',
     '',
     '## Failure behavior',
     '- no_result, policy_denied, error, timeout, and cancellation are outcomes, not facts.',

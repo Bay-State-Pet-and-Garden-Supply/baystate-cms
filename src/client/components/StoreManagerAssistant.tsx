@@ -4,13 +4,24 @@ import { DefaultChatTransport, lastAssistantMessageIsCompleteWithApprovalRespons
 import {
   fetchStoreManagerModels,
   formatModelPricing,
+  fetchStoreManagerCommands,
+  executeStoreManagerCommand,
+  resolveStoreManagerScope,
   type StoreManagerModelDescriptor,
+  type StoreManagerCommandDescriptor,
+  type StoreManagerPinnedScope,
+  type StoreManagerResolvedScope,
 } from '../store-manager-api';
 import {
   approvalCardCopy,
   deniedOutcomeText,
   approvedAwaitingExecutionText,
 } from '../store-manager-logic';
+import { isCommandInput, summarizeCommandResult } from '../store-manager-command-logic';
+import { CommandPalette } from './store-manager/CommandPalette';
+import { ScopePin } from './store-manager/ScopePin';
+import { PlanPreview } from './store-manager/PlanPreview';
+import { PreferencesPanel } from './store-manager/PreferencesPanel';
 import { colors, fonts, rounded, themeStyles } from '../theme';
 import { ViewHeader } from './common/ViewHeader';
 
@@ -51,6 +62,20 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [modelSetupMessage, setModelSetupMessage] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
 
+  // Operations console (Issue 2): slash commands, pinned scope, preferences.
+  const [commands, setCommands] = useState<StoreManagerCommandDescriptor[]>([]);
+  const [pinnedScope, setPinnedScope] = useState<StoreManagerResolvedScope | null>(null);
+  const [scopeBusy, setScopeBusy] = useState(false);
+  const [scopeError, setScopeError] = useState<string | null>(null);
+  const [showPreferences, setShowPreferences] = useState(false);
+  const [commandOutput, setCommandOutput] = useState<{
+    raw: string;
+    loading: boolean;
+    text?: string;
+    plan?: import('../store-manager-api').StoreManagerPreviewDescriptor;
+    error?: string;
+  } | null>(null);
+
   // Product context attachment states
   const [selectedProducts, setSelectedProducts] = useState<SelectedProduct[]>([]);
   const [attachmentLimitReached, setAttachmentLimitReached] = useState(false);
@@ -75,6 +100,11 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     selectedModelRef.current = selectedModel;
   }, [selectedModel]);
 
+  const pinnedScopeRef = useRef(pinnedScope);
+  useEffect(() => {
+    pinnedScopeRef.current = pinnedScope;
+  }, [pinnedScope]);
+
   // Load the server-owned model descriptor list on mount.
   useEffect(() => {
     let cancelled = false;
@@ -91,6 +121,22 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
       })
       .finally(() => {
         if (!cancelled) setModelsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Load the server-owned command palette descriptors (the client never
+  // maintains a second command catalog).
+  useEffect(() => {
+    let cancelled = false;
+    fetchStoreManagerCommands()
+      .then(cmd => {
+        if (!cancelled) setCommands(cmd);
+      })
+      .catch(() => {
+        if (!cancelled) setCommands([]);
       });
     return () => {
       cancelled = true;
@@ -120,6 +166,9 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         selectedSkus: selectedProductsRef.current.map(p => p.sku),
         selectedModel: selectedModelRef.current,
         threadId: currentThreadIdRef.current,
+        // Pinned conversational scope (Issue 2): bounded identifiers only;
+        // the server resolves + workspace-checks it before the run.
+        pinnedScope: pinnedScopeRef.current?.pinnedScope ?? null,
       }),
     })
   );
@@ -325,8 +374,52 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
     e.preventDefault();
     if (!input.trim() || status === 'submitted' || status === 'streaming') return;
     if (!selectedModel) return; // no usable model configured
+    // Slash commands (Issue 2): compile + execute through the runtime — never
+    // a local execution path. /plan returns a zero-execution preview.
+    if (isCommandInput(input)) {
+      runCommand(input.trim());
+      setInput('');
+      return;
+    }
     sendMessage({ text: input.trim() });
     setInput('');
+  };
+
+  /** Execute a slash command (or its /plan preview) through the server runtime. */
+  const runCommand = async (raw: string) => {
+    if (status === 'submitted' || status === 'streaming') return;
+    const mode = raw.startsWith('/plan') ? 'plan' : 'execute';
+    setCommandOutput({ raw, loading: true });
+    try {
+      const result = await executeStoreManagerCommand(raw, {
+        pinnedScope: pinnedScope?.pinnedScope ?? null,
+        selectedModel,
+        mode,
+      });
+      if (mode === 'plan' && 'plan' in result) {
+        setCommandOutput({ raw, loading: false, plan: result.plan });
+      } else if ('text' in result) {
+        setCommandOutput({ raw, loading: false, text: summarizeCommandResult(result) });
+      } else {
+        setCommandOutput({ raw, loading: false, error: 'Command returned an unexpected result.' });
+      }
+    } catch (err) {
+      setCommandOutput({ raw, loading: false, error: err instanceof Error ? err.message : 'Command failed.' });
+    }
+  };
+
+  /** Pin a scope (server-validated; the server is stateless, the pin is client-held). */
+  const handlePinScope = async (scope: StoreManagerPinnedScope) => {
+    setScopeBusy(true);
+    setScopeError(null);
+    try {
+      const resolved = await resolveStoreManagerScope(scope);
+      setPinnedScope(resolved);
+    } catch (err) {
+      setScopeError(err instanceof Error ? err.message : 'Scope pin failed.');
+    } finally {
+      setScopeBusy(false);
+    }
   };
 
   const handleStarterPrompt = (promptText: string) => {
@@ -1284,7 +1377,30 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               <span style={{ fontFamily: fonts.mono, fontSize: '12px' }}>{formattedCost}</span>
             </div>
           </div>
+
+          {/* Operations console (Issue 2): pinned scope + explicit preferences */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <ScopePin
+              scope={pinnedScope}
+              onPin={handlePinScope}
+              onClear={() => setPinnedScope(null)}
+              error={scopeError}
+              busy={scopeBusy}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPreferences(v => !v)}
+              aria-expanded={showPreferences}
+              className="btn btn-outline"
+              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
+              title="Operational preferences (explicit, versioned workspace configuration)"
+            >
+              ⚙ Preferences
+            </button>
+          </div>
         </header>
+
+        {showPreferences && <PreferencesPanel open={showPreferences} onClose={() => setShowPreferences(false)} />}
 
         {/* Main Chat Body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1771,6 +1887,60 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
           </div>
         )}
 
+        {/* Command output (Issue 2): structured slash-command result or /plan preview */}
+        {commandOutput && (
+          <div
+            style={{
+              padding: '16px 24px',
+              background: colors.whiteSurface,
+              borderTop: `1px solid ${colors.cardBorder}`,
+              maxHeight: 240,
+              overflowY: 'auto',
+              fontSize: 13,
+              color: colors.ledgerCharcoal,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: colors.mulchBrown, textTransform: 'uppercase' }}>
+                {commandOutput.loading ? 'Running…' : commandOutput.plan ? 'Plan preview' : 'Command result'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCommandOutput(null)}
+                aria-label="Dismiss command output"
+                className="btn btn-outline"
+                style={{ fontSize: 11, padding: '2px 10px' }}
+              >
+                ✕
+              </button>
+            </div>
+            {commandOutput.plan ? (
+              <PlanPreview
+                objective={commandOutput.raw}
+                plan={commandOutput.plan}
+                loading={commandOutput.loading}
+                error={commandOutput.error}
+              />
+            ) : commandOutput.loading ? (
+              <div style={{ color: colors.mulchBrown }}>Command is running through the Store Manager runtime…</div>
+            ) : commandOutput.error ? (
+              <div style={{ color: colors.signetBurgundy }}>{commandOutput.error}</div>
+            ) : (
+              <pre
+                style={{
+                  whiteSpace: 'pre-wrap',
+                  fontFamily: fonts.body,
+                  fontSize: 13,
+                  margin: 0,
+                  color: colors.ledgerCharcoal,
+                }}
+              >
+                {commandOutput.text}
+              </pre>
+            )}
+          </div>
+        )}
+
         {/* Input Form */}
         <form
           onSubmit={handleSend}
@@ -1781,8 +1951,15 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             display: 'flex',
             gap: 12,
             alignItems: 'center',
+            position: 'relative',
           }}
         >
+          <CommandPalette
+            input={input}
+            commands={commands}
+            onExecute={runCommand}
+            onPrefill={(text) => setInput(text)}
+          />
           <button
             type="button"
             onClick={() => setShowAttachModal(true)}

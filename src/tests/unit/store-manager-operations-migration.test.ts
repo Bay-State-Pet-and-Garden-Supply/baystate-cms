@@ -83,6 +83,21 @@ describe('Store Manager operations schema migration (Issue 1)', () => {
     expect(entrypointIndex).toBeTruthy();
   });
 
+  it('creates the immutable preferences tables and active pointer (Issue 2, v2)', () => {
+    const prefs = getDb()
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='store_manager_preferences'")
+      .get();
+    expect(prefs).toBeTruthy();
+    const active = getDb()
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='store_manager_preference_active'")
+      .get();
+    expect(active).toBeTruthy();
+    const idx = getDb()
+      .query("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_store_manager_preferences_ws'")
+      .get();
+    expect(idx).toBeTruthy();
+  });
+
   it('sets the operations schema marker', () => {
     const marker = getDb()
       .query('SELECT value FROM app_meta WHERE key = ?')

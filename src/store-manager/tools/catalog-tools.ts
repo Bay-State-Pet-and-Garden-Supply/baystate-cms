@@ -8,7 +8,7 @@
 
 import { z } from 'zod';
 import type { StoreManagerToolAdapter, StoreManagerToolResult } from '../runtime/contracts';
-import { okResult, noResult } from '../runtime/contracts';
+import { okResult, noResult, policyDenied } from '../runtime/contracts';
 import { getDashboardStatsData } from '../../server/services/dashboard-service';
 import { getCatalogHealthReport, listProductIndex } from '../../server/services/product-service';
 import {
@@ -141,6 +141,7 @@ export const getDashboardStatsAdapter: StoreManagerToolAdapter = {
   requiresApproval: false,
   stateTransition: 'none',
   allowedPhases: ['investigate', 'verify'] as const,
+  supportedScopes: [] as const,
   scopeSummary: () => 'dashboard metrics',
   execute: async (_params, ctx): Promise<StoreManagerToolResult> => {
     const data = getDashboardStatsData(ctx.workspaceId);
@@ -162,6 +163,7 @@ export const getCatalogHealthReportAdapter: StoreManagerToolAdapter = {
   requiresApproval: false,
   stateTransition: 'none',
   allowedPhases: ['investigate', 'verify'] as const,
+  supportedScopes: [] as const,
   scopeSummary: () => 'catalog health summary',
   execute: async (): Promise<StoreManagerToolResult> => {
     const report = getCatalogHealthReport();
@@ -192,6 +194,7 @@ export const listCatalogHealthIssuesAdapter: StoreManagerToolAdapter = {
   requiresApproval: false,
   stateTransition: 'none',
   allowedPhases: ['investigate', 'verify'] as const,
+  supportedScopes: [] as const,
   scopeSummary: (input) =>
     `catalog health issues${typeof input.search === 'string' && input.search ? ` matching "${input.search}"` : ''}`,
   execute: async (params): Promise<StoreManagerToolResult> => {
@@ -237,10 +240,17 @@ export const searchProductsAdapter: StoreManagerToolAdapter = {
   requiresApproval: false,
   stateTransition: 'none',
   allowedPhases: ['investigate', 'verify'] as const,
+  supportedScopes: ['sku_set'] as const,
   scopeSummary: (input) =>
     `product search${typeof input.search === 'string' && input.search ? ` for "${input.search}"` : ''}`,
-  execute: async (filter): Promise<StoreManagerToolResult> => {
+  execute: async (filter, ctx): Promise<StoreManagerToolResult> => {
     const result = listProductIndex(filter as Parameters<typeof listProductIndex>[0]);
+    const pinnedSkus = ctx.pinnedScope?.kind === 'sku_set' ? ctx.pinnedScope.skus : null;
+    if (pinnedSkus) {
+      const set = new Set(pinnedSkus);
+      const limit = typeof filter.limit === 'number' ? filter.limit : 25;
+      return okResult(result.products.filter((p) => set.has(p.sku)).slice(0, limit));
+    }
     return okResult(result.products);
   },
 };
@@ -251,7 +261,7 @@ export const getProductFieldAuditAdapter: StoreManagerToolAdapter = {
   description: 'Scan active products and perform a detailed ProductField value audit, counting unique/missing values and detecting casing, whitespace, and separator duplicate groups.',
   promptGuidelines: 'Use before proposing field normalization; evidence-backed.',
   inputSchema: z.object({
-    field: z.string().describe('ProductField name, e.g. ProductField24 or ProductField16'),
+    field: z.string().min(1).max(200).optional().describe('ProductField name, e.g. ProductField24 or ProductField16; defaults to the pinned product_field scope'),
     limit: z.number().int().min(1).max(500).default(100),
   }),
   riskClass: 'read',
@@ -259,9 +269,19 @@ export const getProductFieldAuditAdapter: StoreManagerToolAdapter = {
   requiresApproval: false,
   stateTransition: 'none',
   allowedPhases: ['investigate', 'verify'] as const,
-  scopeSummary: (input) => `ProductField ${String(input.field ?? '?')} audit`,
-  execute: async ({ field, limit }): Promise<StoreManagerToolResult> => {
-    return okResult(getProductFieldAudit(String(field), Number(limit)));
+  supportedScopes: ['product_field'] as const,
+  scopeSummary: (input) => `ProductField ${String(input.field ?? '(pinned)')} audit`,
+  execute: async ({ field, limit }, ctx): Promise<StoreManagerToolResult> => {
+    const effectiveField =
+      typeof field === 'string' && field
+        ? field
+        : ctx.pinnedScope?.kind === 'product_field'
+          ? ctx.pinnedScope.field
+          : undefined;
+    if (!effectiveField) {
+      return policyDenied('invalid_input', 'getProductFieldAudit requires a field or a pinned product_field scope.');
+    }
+    return okResult(getProductFieldAudit(effectiveField, Number(limit)));
   },
 };
 
@@ -273,7 +293,7 @@ export const previewProductFieldNormalizationAdapter: StoreManagerToolAdapter = 
   promptGuidelines:
     'Use to preview normalization options; the result is an in-memory recommendation only.',
   inputSchema: z.object({
-    field: z.string(),
+    field: z.string().min(1).max(200).optional().describe('ProductField name; defaults to the pinned product_field scope'),
     strategy: z
       .enum(['case_only', 'trim_whitespace', 'separator_cleanup', 'safe_duplicates'])
       .default('safe_duplicates'),
@@ -284,10 +304,20 @@ export const previewProductFieldNormalizationAdapter: StoreManagerToolAdapter = 
   requiresApproval: false,
   stateTransition: 'none (in-memory recommendation only)',
   allowedPhases: ['investigate', 'verify'] as const,
+  supportedScopes: ['product_field'] as const,
   scopeSummary: (input) =>
-    `transient ${String(input.strategy ?? 'safe_duplicates')} normalization preview for ${String(input.field ?? '?')}`,
-  execute: async ({ field, strategy, limit }): Promise<StoreManagerToolResult> => {
-    return okResult(proposeProductFieldNormalization(String(field), strategy as never, Number(limit)));
+    `transient ${String(input.strategy ?? 'safe_duplicates')} normalization preview for ${String(input.field ?? '(pinned)')}`,
+  execute: async ({ field, strategy, limit }, ctx): Promise<StoreManagerToolResult> => {
+    const effectiveField =
+      typeof field === 'string' && field
+        ? field
+        : ctx.pinnedScope?.kind === 'product_field'
+          ? ctx.pinnedScope.field
+          : undefined;
+    if (!effectiveField) {
+      return policyDenied('invalid_input', 'preview_product_field_normalization requires a field or a pinned product_field scope.');
+    }
+    return okResult(proposeProductFieldNormalization(effectiveField, strategy as never, Number(limit)));
   },
 };
 
@@ -305,11 +335,18 @@ export const listStoredProposalsAdapter: StoreManagerToolAdapter = {
   requiresApproval: false,
   stateTransition: 'none',
   allowedPhases: ['investigate', 'verify'] as const,
+  supportedScopes: ['product_field'] as const,
   scopeSummary: (input) =>
     `stored proposals${typeof input.field === 'string' && input.field ? ` for ${input.field}` : ''}`,
   execute: async ({ field, status }, ctx): Promise<StoreManagerToolResult> => {
+    const effectiveField =
+      typeof field === 'string' && field
+        ? field
+        : ctx.pinnedScope?.kind === 'product_field'
+          ? ctx.pinnedScope.field
+          : undefined;
     const proposals = listProposals(ctx.workspaceId, {
-      field: typeof field === 'string' ? field : undefined,
+      field: effectiveField,
       status: typeof status === 'string' ? status : undefined,
     });
     return okResult(proposals);
@@ -331,6 +368,7 @@ export const explainNextActionsAdapter: StoreManagerToolAdapter = {
   requiresApproval: false,
   stateTransition: 'none',
   allowedPhases: ['investigate', 'verify'] as const,
+  supportedScopes: [] as const,
   scopeSummary: (input) =>
     `next actions${typeof input.focus === 'string' ? ` focused on ${input.focus}` : ''}`,
   execute: async ({ focus }, ctx): Promise<StoreManagerToolResult> => {

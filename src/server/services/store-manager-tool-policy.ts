@@ -116,6 +116,27 @@ export const STORE_MANAGER_TOOL_POLICIES: Record<string, StoreManagerToolPolicy>
     scopeSummary: (input) =>
       `next actions${typeof input.focus === 'string' ? ` focused on ${input.focus}` : ''}`,
   },
+  // ---------------------------------------------- change-set read / report --
+  getChangeSetDetail: {
+    name: 'getChangeSetDetail',
+    version: 1,
+    riskClass: 'read',
+    sideEffects: 'none',
+    requiresApproval: false,
+    stateTransition: 'none',
+    scopeSummary: (input) =>
+      `Change Set ${typeof input.changeSetId === 'string' && input.changeSetId ? input.changeSetId : '(pinned)'}`,
+  },
+  getStoreManagerReport: {
+    name: 'getStoreManagerReport',
+    version: 1,
+    riskClass: 'read',
+    sideEffects: 'none',
+    requiresApproval: false,
+    stateTransition: 'none',
+    scopeSummary: (input) =>
+      `deterministic operational report${typeof input.focus === 'string' && input.focus !== 'full' ? ` (${input.focus})` : ''}`,
+  },
   // ---------------------------------------------------------- proposal_write --
   store_product_field_normalization_proposals: {
     name: 'store_product_field_normalization_proposals',

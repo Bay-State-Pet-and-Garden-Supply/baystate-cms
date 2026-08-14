@@ -434,6 +434,55 @@ describe('Store Manager tool registry (epic #42, #40)', () => {
     if (result.status === 'policy_denied') expect(result.reasonCode).toBe('unsupported');
     expect(calls).toEqual([]);
   });
+
+  it('a DECLARED-but-empty supportedScopes adapter (catalog-wide) refuses every pinned scope (Issue 2)', async () => {
+    const registry = new StoreManagerToolRegistry(
+      makeAdapters().map((adapter) =>
+        adapter.name === 'test_read' ? { ...adapter, supportedScopes: [] as const } : adapter,
+      ),
+    );
+    // Catalog-wide adapter is fine when unpinned…
+    const unpinnedPolicy = createStoreManagerPolicy(
+      { workspaceId: 'ws-a', sessionId: 'sess-1', turnId: 'turn-1' },
+      registry.allowlistVersions(),
+    );
+    const session = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
+    const events: StoreManagerRuntimeEvent[] = [];
+    const unpinned = registry.buildAiSdkTools({
+      policy: unpinnedPolicy,
+      session,
+      executionContext: { workspaceId: 'ws-a', workspacePath: './ws', executionId: 'exec-1', approvalExpiresAt: Date.now() + 60_000 },
+      adapterContext: { workspaceId: 'ws-a', workspacePath: './ws', sessionId: 'sess-1', executionId: 'exec-1', deadlineAt: Date.now() + 60_000 },
+      emit: (e) => events.push(e),
+    });
+    expect(((await asAny(unpinned).test_read.execute({ q: 'x' }, {} as never)) as StoreManagerToolResult).status).toBe('ok');
+
+    // …but with ANY pinned scope it must refuse rather than widen silently.
+    for (const pinnedScope of [
+      { kind: 'product_field' as const, field: 'ProductField24' },
+      { kind: 'sku_set' as const, skus: ['SKU-1'] },
+      { kind: 'change_set' as const, changeSetId: 'cs-1' },
+    ]) {
+      calls = [];
+      const policy = createStoreManagerPolicy(
+        { workspaceId: 'ws-a', sessionId: 'sess-1', turnId: 'turn-1', pinnedScope },
+        registry.allowlistVersions(),
+      );
+      const s = createRuntimeSessionState({ sessionId: 'sess-1', workspaceId: 'ws-a', turnId: 'turn-1' });
+      const ev: StoreManagerRuntimeEvent[] = [];
+      const tools = registry.buildAiSdkTools({
+        policy,
+        session: s,
+        executionContext: { workspaceId: 'ws-a', workspacePath: './ws', executionId: 'exec-1', approvalExpiresAt: Date.now() + 60_000 },
+        adapterContext: { workspaceId: 'ws-a', workspacePath: './ws', sessionId: 'sess-1', executionId: 'exec-1', deadlineAt: Date.now() + 60_000 },
+        emit: (e) => ev.push(e),
+      });
+      const result = (await asAny(tools).test_read.execute({ q: 'x' }, {} as never)) as StoreManagerToolResult;
+      expect(result.status).toBe('policy_denied');
+      if (result.status === 'policy_denied') expect(result.reasonCode).toBe('unsupported');
+      expect(calls).toEqual([]);
+    }
+  });
 });
 
 function setupUnattended(executionMode: 'unattended_read_only' | 'preview', opts?: { phase?: StoreManagerRuntimeSessionState['phase'] }) {

@@ -22,7 +22,7 @@
 import { getDb } from './connection';
 import type { Database } from './driver';
 
-export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '1';
+export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '2';
 export const STORE_MANAGER_OPERATIONS_MARKER = 'store_manager_operations_schema_version';
 
 const SESSION_ADDITIVE_COLUMNS: ReadonlyArray<readonly [column: string, ddl: string]> = [
@@ -69,7 +69,10 @@ export function runStoreManagerOperationsMigration(): void {
   const marker = db
     .query('SELECT value FROM app_meta WHERE key = ?')
     .get(STORE_MANAGER_OPERATIONS_MARKER) as { value: string } | undefined;
-  if (marker) return;
+  // Version-aware: v1 DBs (Issue 1) re-run the guarded blocks below so the
+  // v2 surface (preferences) is added; all blocks are existence-guarded so
+  // re-runs and fresh-vs-upgraded DBs behave identically.
+  if (marker && Number(marker.value) >= Number(STORE_MANAGER_OPERATIONS_SCHEMA_VERSION)) return;
 
   db.exec('BEGIN');
   try {
@@ -105,10 +108,30 @@ export function runStoreManagerOperationsMigration(): void {
       CREATE INDEX IF NOT EXISTS idx_store_manager_events_sequence
         ON store_manager_events(workspace_id, sequence);
     `);
-    db.query('INSERT OR IGNORE INTO app_meta (key, value) VALUES (?, ?)').run(
-      STORE_MANAGER_OPERATIONS_MARKER,
-      STORE_MANAGER_OPERATIONS_SCHEMA_VERSION,
-    );
+    // Block 5 (Issue 2): explicit versioned workspace preferences. Revisions
+    // are immutable (insert-only); one active revision per workspace.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_preferences (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        content_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        actor_class TEXT NOT NULL DEFAULT 'operator',
+        created_at TEXT NOT NULL,
+        UNIQUE (workspace_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_preferences_ws
+        ON store_manager_preferences(workspace_id, version);
+      CREATE TABLE IF NOT EXISTS store_manager_preference_active (
+        workspace_id TEXT PRIMARY KEY,
+        preference_id TEXT NOT NULL,
+        activated_at TEXT NOT NULL
+      );
+    `);
+    db.query(
+      'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',
+    ).run(STORE_MANAGER_OPERATIONS_MARKER, STORE_MANAGER_OPERATIONS_SCHEMA_VERSION);
     db.exec('COMMIT');
   } catch (err) {
     db.exec('ROLLBACK');

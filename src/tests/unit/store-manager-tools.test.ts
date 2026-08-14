@@ -4,7 +4,9 @@ import path from 'node:path';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
+import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { insertProductIndex } from '../../db/repositories/product-index-repo';
+import { createChangeSet, upsertChangeSetItem } from '../../db/repositories/change-set-repo';
 import { createStoreManagerTools, getStoreManagerToolNames } from '../../server/services/store-manager-tools';
 import { STORE_MANAGER_TOOL_POLICIES } from '../../server/services/store-manager-tool-policy';
 import { createStoreManagerToolRegistry } from '../../store-manager/runtime/tool-registry';
@@ -49,6 +51,16 @@ describe('Store Manager Tools (epic #42, #40 renamed contract)', () => {
     runMigrations();
 
     const now = new Date().toISOString();
+    insertWorkspace({
+      id: workspaceId,
+      name: 'Tools Test Workspace',
+      workspacePath,
+      gitPath: workspacePath,
+      createdAt: now,
+      updatedAt: now,
+      bootstrapStatus: 'complete',
+      baselineCommit: null,
+    });
     insertProductIndex({
       id: randomUUID(),
       sku: 'SKU_TOOL_TEST',
@@ -232,6 +244,61 @@ describe('Store Manager Tools (epic #42, #40 renamed contract)', () => {
     }
   });
 
+  it('change-set reads are workspace-scoped and repair remains approval/state gated (Issue 2)', async () => {
+    const tools = buildTools('exec-cs');
+
+    // Foreign change set: no_result, no ownership disclosure.
+    const foreign = (await tools.getChangeSetDetail.execute(
+      { changeSetId: 'foreign-cs' },
+      { toolCallId: 'c1', messages: [] } as never,
+    )) as unknown as { success?: boolean; error?: string; changeSet?: unknown };
+    if (typeof foreign.success === 'boolean') {
+      expect(foreign.success).toBe(false);
+      expect(foreign.error).toMatch(/not found/i);
+    } else {
+      expect(foreign.changeSet).toBeUndefined();
+    }
+
+    // Owned change set with an item.
+    const changeSet = createChangeSet({ workspaceId, title: 'Issue2 CS', baseCommit: 'base' });
+    upsertChangeSetItem({
+      changeSetId: changeSet.id,
+      sku: 'SKU_TOOL_TEST',
+      operation: 'update',
+      draftJson: '{}',
+      baseJson: '{}',
+      draftHash: 'draft-hash',
+    });
+    const owned = (await tools.getChangeSetDetail.execute(
+      { changeSetId: changeSet.id },
+      { toolCallId: 'c2', messages: [] } as never,
+    )) as unknown as { changeSet: { id: string; status: string }; itemCount: number };
+    expect(owned.changeSet.id).toBe(changeSet.id);
+    expect(owned.itemCount).toBe(1);
+
+    // The repair adapter is present but still requires a signed approval and
+    // an approved Change Set — never callable directly.
+    await expect(
+      tools.repair_approved_change_set_images.execute(
+        { changeSetId: changeSet.id },
+        { toolCallId: 'c3', messages: [] } as never,
+      ),
+    ).rejects.toMatchObject({ code: 'approval_missing' });
+  });
+
+  it('the deterministic report adapter assembles bounded evidence without a model (Issue 2)', async () => {
+    const tools = buildTools('exec-report');
+    const report = (await tools.getStoreManagerReport.execute(
+      { focus: 'full' },
+      { toolCallId: 'r1', messages: [] } as never,
+    )) as unknown as { scope: string; sections: Record<string, unknown> };
+    expect(report.scope).toBe('catalog');
+    expect(report.sections.health).toBeDefined();
+    expect(report.sections.product_fields).toBeDefined();
+    expect(report.sections.sync).toBeDefined();
+    expect(report.sections.drift).toBeDefined();
+  });
+
   it('runtime tool names and the policy registry cover exactly the same set (epic #42, #41/#40)', () => {
     const runtimeNames = getStoreManagerToolNames().sort();
     const policyNames = Object.keys(STORE_MANAGER_TOOL_POLICIES).sort();
@@ -244,6 +311,8 @@ describe('Store Manager Tools (epic #42, #40 renamed contract)', () => {
       'src/store-manager/tools/catalog-tools.ts',
       'src/store-manager/tools/proposal-tools.ts',
       'src/store-manager/tools/image-repair-tool.ts',
+      'src/store-manager/tools/change-set-read-tools.ts',
+      'src/store-manager/tools/report-tools.ts',
     ];
     for (const file of adapterFiles) {
       const source = readFileSync(path.resolve(__dirname, '../../../', file), 'utf-8');

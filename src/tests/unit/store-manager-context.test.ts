@@ -13,11 +13,13 @@ import {
   injectAttachedContext,
   selectedSkusSchema,
   resolveCustomFieldAllowlist,
+  buildPinnedScopeContext,
   ATTACHED_CONTEXT_PREAMBLE,
   MAX_ATTACHED_SKUS,
   MAX_CUSTOM_FIELD_KEYS,
   MAX_FIELD_STRING_LENGTH,
   MAX_CONTEXT_BYTES,
+  MAX_SCOPE_CONTEXT_BYTES,
 } from '../../server/services/store-manager-context';
 import type { Product } from '../../shared/types';
 
@@ -284,5 +286,24 @@ describe('Store Manager attached product context (epic #42, #33)', () => {
     expect(routeSource).not.toContain('ATTACHED PRODUCT CONTEXT');
     expect(routeSource).not.toMatch(/systemPrompt\s*\+=/);
     expect(routeSource).not.toMatch(/STORE_MANAGER_AGENT_SYSTEM_PROMPT\s*\+/);
+  });
+
+  it('builds a bounded, deterministic pinned-scope context below the system prompt (Issue 2)', () => {
+    const field = buildPinnedScopeContext({ kind: 'product_field', field: 'ProductField24' });
+    expect(field.serialized).toContain('Pinned working scope');
+    expect(field.serialized).toContain('ProductField24');
+    expect(field.serialized).toContain('never scan beyond it');
+    expect(field.serialized).not.toContain('SKU_SAFE');
+    expect(field.bytes).toBeLessThanOrEqual(MAX_SCOPE_CONTEXT_BYTES);
+
+    const skus = buildPinnedScopeContext({ kind: 'sku_set', skus: Array.from({ length: 300 }, (_, i) => `SKU-${i}`) });
+    expect(skus.bytes).toBeLessThanOrEqual(MAX_SCOPE_CONTEXT_BYTES);
+    expect(skus.serialized).not.toContain('SKU-299');
+
+    const cs = buildPinnedScopeContext({ kind: 'change_set', changeSetId: 'cs-123' });
+    expect(cs.serialized).toContain('cs-123');
+
+    const again = buildPinnedScopeContext({ kind: 'product_field', field: 'ProductField24' });
+    expect(again.serialized).toBe(field.serialized);
   });
 });

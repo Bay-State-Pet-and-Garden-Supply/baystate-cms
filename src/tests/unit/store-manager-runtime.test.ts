@@ -21,6 +21,7 @@ import {
   getStoreManagerPolicySnapshot,
 } from '../../db/repositories/store-manager-session-repo';
 import { runStoreManagerOperationsMigration } from '../../db/store-manager-operations-migration';
+import { saveStoreManagerPreference } from '../../server/services/store-manager-preference-service';
 import type { ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
 import { ModelUnavailableError } from '../../server/services/ai-sdk-model-resolver';
 
@@ -440,6 +441,107 @@ describe('Store Manager turn executor (epic #42, #40)', () => {
     }
     const turn = getStoreManagerTurn(workspaceId, previewResult.turnId);
     expect(turn!.terminal_status).toBe('success');
+  });
+
+  it('command entrypoint drains through the single runner with lineage and captured output (Issue 2)', async () => {
+    readCalls = [];
+    const request = createStoreManagerExecutionRequest({
+      workspaceId,
+      workspacePath: './ws',
+      threadId: null,
+      entrypoint: 'command',
+      executionMode: 'interactive',
+      objective: 'Audit ProductField24 and summarize duplicate groups.',
+      pinnedScope: { kind: 'product_field', field: 'ProductField24' },
+      lineage: { commandName: 'audit', commandVersion: 1 },
+    });
+    const result = await runStoreManagerExecution(request, {
+      registry: testRegistry(),
+      resolveModel: () => ({ ...resolvedFake, modelInstance: plainText() as unknown as ResolvedAiSdkModel['modelInstance'] }),
+    });
+    expect(result.kind).toBe('completed');
+    if (result.kind === 'completed') {
+      expect(result.terminalStatus).toBe('success');
+      // The drained stream captured the bounded assistant text.
+      expect(result.output.text).toContain('ok');
+    }
+    const session = getStoreManagerSession(workspaceId, result.runId);
+    expect(session!.entrypoint).toBe('command');
+    expect(session!.scope_json).toContain('ProductField24');
+    expect(session!.lineage_json).toContain('audit');
+    const events = getStoreManagerEvents(workspaceId, result.runId);
+    expect(events.some((e) => e.type === 'command_compiled' && e.commandName === 'audit')).toBe(true);
+    const turn = getStoreManagerTurn(workspaceId, result.turnId);
+    expect(turn!.terminal_status).toBe('success');
+  });
+
+  it('command runs cannot execute persistent adapters (approval required, zero side effects) (Issue 2)', async () => {
+    readCalls = [];
+    // Model calls runtime_write (persistent) without any approval channel.
+    const writeCallingModel = () => {
+      const model: LanguageModelV3 = {
+        specificationVersion: 'v3',
+        provider: 'fake-provider',
+        modelId: 'fake-model',
+        supportedUrls: {},
+        async doGenerate() {
+          throw new Error('doGenerate not exercised');
+        },
+        async doStream() {
+          const parts: LanguageModelV3StreamPart[] = [
+            { type: 'stream-start', warnings: [] },
+            { type: 'tool-call', toolCallId: 'call-w', toolName: 'runtime_write', input: JSON.stringify({ proposalId: 'p1' }) },
+            { type: 'text-start', id: 't1' },
+            { type: 'text-delta', id: 't1', delta: 'requires approval' },
+            { type: 'text-end', id: 't1' },
+            { type: 'finish', usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } }, finishReason: { unified: 'stop', raw: 'stop' } },
+          ];
+          return { stream: new ReadableStream<LanguageModelV3StreamPart>({ start(c) { for (const p of parts) c.enqueue(p); c.close(); } }) };
+        },
+      };
+      return model;
+    };
+    const request = createStoreManagerExecutionRequest({
+      workspaceId,
+      workspacePath: './ws',
+      threadId: null,
+      entrypoint: 'command',
+      executionMode: 'interactive',
+      objective: 'Stage proposal p1.',
+    });
+    const result = await runStoreManagerExecution(request, {
+      registry: testRegistry(),
+      resolveModel: () => ({ ...resolvedFake, modelInstance: writeCallingModel() as unknown as ResolvedAiSdkModel['modelInstance'] }),
+    });
+    expect(result.kind).toBe('completed');
+    expect(readCalls).not.toContain('write'); // zero side effects
+    if (result.kind === 'completed') {
+      // The persistent tool was denied; the run still completes with the
+      // denial surfaced as a structured tool outcome.
+      expect(result.output.toolResults.length).toBeGreaterThanOrEqual(1);
+      expect(result.output.toolResults.some((t) => t.toolName === 'runtime_write')).toBe(true);
+    }
+  });
+
+  it('captures the active preference revision hash in the policy snapshot (Issue 2)', async () => {
+    readCalls = [];
+    const saved = saveStoreManagerPreference(workspaceId, { vendor_identifier_convention: 'upc_a' });
+    const request = createStoreManagerExecutionRequest({
+      workspaceId,
+      workspacePath: './ws',
+      threadId: null,
+      entrypoint: 'command',
+      executionMode: 'interactive',
+      objective: 'Run a bounded health check.',
+    });
+    const result = await runStoreManagerExecution(request, {
+      registry: testRegistry(),
+      resolveModel: () => ({ ...resolvedFake, modelInstance: plainText() as unknown as ResolvedAiSdkModel['modelInstance'] }),
+    });
+    expect(result.policy.preferencesHash).toBe(saved.revision.contentHash);
+    const session = getStoreManagerSession(workspaceId, result.runId);
+    // The policy snapshot (persisted) carries the preferences hash.
+    expect(session!.policy_snapshot_json).toContain(saved.revision.contentHash);
   });
 });
 

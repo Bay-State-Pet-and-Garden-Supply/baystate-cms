@@ -20,10 +20,14 @@
 import { randomUUID, randomBytes } from 'node:crypto';
 import { streamText, toUIMessageStream, isStepCount, convertToModelMessages, type UIMessage } from 'ai';
 import { resolveAiSdkModel, type ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
-import { buildStoreManagerSystemPrompt } from '../../server/services/store-manager-prompt-builder';
+import {
+  buildStoreManagerSystemPrompt,
+  STORE_MANAGER_PROMPT_VERSION,
+} from '../../server/services/store-manager-prompt-builder';
 import {
   buildAttachedProductContext,
   injectAttachedContext,
+  buildPinnedScopeContext,
   selectedSkusSchema,
 } from '../../server/services/store-manager-context';
 import {
@@ -66,6 +70,7 @@ import {
   terminalizeStoreManagerTurn,
   persistStoreManagerEvents,
 } from '../../db/repositories/store-manager-session-repo';
+import { resolveActivePreferenceContentHash } from '../../server/services/store-manager-preference-service';
 
 // ---------------------------------------------------------------------------
 // Chat (compatibility) input
@@ -82,6 +87,8 @@ export interface StoreManagerTurnInput {
   toolApprovalSecret: string;
   /** Optional pre-generated per-chat execution id (route-bound). */
   executionId?: string;
+  /** Pinned conversational scope (Issue 2); server-resolved by the route. */
+  pinnedScope?: StoreManagerPinnedScope | null;
 }
 
 /** Chat-specific extras carried through the execution boundary. */
@@ -92,6 +99,24 @@ export interface StoreManagerChatTurnDeps {
   executionId?: string;
   /** Caller (HTTP request) abort signal composed with the whole-run deadline. */
   abortSignal?: AbortSignal;
+}
+
+/**
+ * Bounded tool outcome captured from a drained stream (Issue 2). The command
+ * route returns these to the palette; nothing raw/unbounded is retained.
+ */
+export interface StoreManagerDrainedToolOutcome {
+  toolCallId: string;
+  toolName: string;
+  status: 'ok' | 'error' | 'denied';
+  output?: unknown;
+  errorText?: string;
+}
+
+/** Bounded summary of a drained (non-chat) run for interactive entrypoints. */
+export interface StoreManagerDrainedOutput {
+  text: string;
+  toolResults: StoreManagerDrainedToolOutcome[];
 }
 
 export interface StoreManagerExecutionDeps {
@@ -106,6 +131,11 @@ export interface StoreManagerExecutionDeps {
   toolApprovalSecret?: string;
   /** Chat-specific transport (messages + approval secret) for entrypoint 'chat'. */
   chat?: StoreManagerChatTurnDeps;
+  /**
+   * Active workspace-preference content hash (server-owned). Defaults to the
+   * repository-backed resolver; injectable for tests. Never request-derived.
+   */
+  resolvePreferencesHash?: (workspaceId: string) => string | null;
 }
 
 export type StoreManagerExecutionResult =
@@ -127,6 +157,8 @@ export type StoreManagerExecutionResult =
       terminalStatus: 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded';
       resolvedModel: ResolvedAiSdkModel | null;
       policy: StoreManagerRuntimePolicy;
+      /** Bounded text + tool-outcome summary (Issue 2; empty for schedules/events). */
+      output: StoreManagerDrainedOutput;
     }
   | {
       kind: 'preview';
@@ -160,12 +192,16 @@ export class StoreManagerTurnError extends Error {
 // ---------------------------------------------------------------------------
 
 function objectiveToMessages(objective: string, scope: StoreManagerPinnedScope | null): UIMessage[] {
-  const scopeLine = scope ? `\nPinned scope: ${JSON.stringify(scope)}` : '';
+  let text = `Objective: ${objective}`;
+  if (scope) {
+    const scopeContext = buildPinnedScopeContext(scope);
+    text = `Objective: ${objective}\n\n${scopeContext.serialized}`;
+  }
   return [
     {
       id: 'objective-1',
       role: 'user' as const,
-      parts: [{ type: 'text' as const, text: `Objective: ${objective}${scopeLine}` }],
+      parts: [{ type: 'text' as const, text }],
     },
   ];
 }
@@ -209,7 +245,8 @@ export async function runStoreManagerExecution(
       executionMode: validated.executionMode,
       actorClass,
       pinnedScope: validated.pinnedScope,
-      preferencesHash: null,
+      preferencesHash: (deps.resolvePreferencesHash ?? resolveActivePreferenceContentHash)(validated.workspaceId),
+      promptVersion: STORE_MANAGER_PROMPT_VERSION.toString(),
       overrides: deps.policyOverrides ?? validated.policyProfile,
     },
     registry.allowlistVersions(),
@@ -385,6 +422,12 @@ export async function runStoreManagerExecution(
       );
       chatMessages = injectAttachedContext(chatMessages as UIMessage[], context.serialized);
     }
+    // Pinned conversational scope (Issue 2): bounded structured context below
+    // the system prompt so the model never silently scans the whole catalog.
+    if (validated.pinnedScope) {
+      const scopeContext = buildPinnedScopeContext(validated.pinnedScope);
+      chatMessages = injectAttachedContext(chatMessages as UIMessage[], scopeContext.serialized);
+    }
   } else {
     chatMessages = objectiveToMessages(validated.objective, validated.pinnedScope ?? null);
   }
@@ -403,7 +446,11 @@ export async function runStoreManagerExecution(
     toolApproval: buildRegistryApprovalConfig(registry.all(), {
       // Unattended/preview runs must never wait for an approval the operator
       // will not see; the registry denies persistent adapters at dispatch.
-      forceNotApplicable: policy.denyPersistent,
+      // Command runs (Issue 2) use the drained path with no approval channel,
+      // so persistent adapters are also forced to not-applicable — they are
+      // refused at the approval gate (approval_required) before any side
+      // effect, and repair never runs without explicit operator approval.
+      forceNotApplicable: policy.denyPersistent || validated.entrypoint === 'command',
     }),
     experimental_toolApprovalSecret: approvalSecret,
     // Whole-run deadline + caller cancellation, composed server-side.
@@ -486,10 +533,50 @@ export async function runStoreManagerExecution(
 
   // Non-chat entrypoints: drain the stream server-side (tool dispatch happens
   // through the registry; terminalization fires via onEnd/onError/onAbort).
-  try {
-    for await (const _chunk of uiMessageStream as unknown as AsyncIterable<unknown>) {
-      // drain
-    }
+  // Interactive commands (Issue 2) also capture a bounded text + tool-outcome
+  // summary for the command palette — no raw/unbounded content is retained.
+  let drainedOutput: StoreManagerDrainedOutput = { text: '', toolResults: [] };
+  const toolNameById = new Map<string, string>();
+    try {
+      for await (const chunk of uiMessageStream as unknown as AsyncIterable<unknown>) {
+        const c = chunk as {
+          type?: string;
+          delta?: string;
+          toolCallId?: string;
+          toolName?: string;
+          input?: unknown;
+          output?: unknown;
+          errorText?: string;
+        };
+        if (c.type === 'text-delta' && typeof c.delta === 'string') {
+          drainedOutput.text = (drainedOutput.text + c.delta).slice(0, 64 * 1024);
+        } else if (typeof c.type === 'string' && c.type.startsWith('tool-')) {
+          if (c.toolCallId && typeof c.toolName === 'string') {
+            toolNameById.set(c.toolCallId, c.toolName);
+          }
+          if (c.type === 'tool-output-available' && c.toolCallId) {
+            drainedOutput.toolResults.push({
+              toolCallId: c.toolCallId,
+              toolName: toolNameById.get(c.toolCallId) ?? 'unknown',
+              status: 'ok',
+              output: c.output,
+            });
+          } else if (c.type === 'tool-output-error' && c.toolCallId) {
+            drainedOutput.toolResults.push({
+              toolCallId: c.toolCallId,
+              toolName: toolNameById.get(c.toolCallId) ?? 'unknown',
+              status: 'error',
+              errorText: c.errorText?.slice(0, 500),
+            });
+          } else if (c.type === 'tool-output-denied' && c.toolCallId) {
+            drainedOutput.toolResults.push({
+              toolCallId: c.toolCallId,
+              toolName: toolNameById.get(c.toolCallId) ?? 'unknown',
+              status: 'denied',
+            });
+          }
+        }
+      }
   } catch {
     // The stream may throw on abort (deadline/cancel); terminalization is
     // handled by the SDK callbacks above — never throw here.
@@ -502,6 +589,7 @@ export async function runStoreManagerExecution(
     terminalStatus: finalStatus,
     resolvedModel: resolved,
     policy,
+    output: drainedOutput,
   };
 }
 
@@ -584,6 +672,19 @@ function emitRunStarted(
     scopeHash: request.pinnedScope ? hashCanonicalJson(request.pinnedScope) : null,
     lineage: request.lineage ?? null,
   });
+  if (request.lineage?.commandName) {
+    emit({
+      version: 1,
+      type: 'command_compiled',
+      sessionId: runId,
+      workspaceId: request.workspaceId,
+      turnId,
+      createdAt: now().toISOString(),
+      commandName: request.lineage.commandName,
+      commandVersion: request.lineage.commandVersion ?? 1,
+      compiledObjective: request.objective.slice(0, 800),
+    });
+  }
 }
 
 type RuntimeEmit = (event: StoreManagerRuntimeEvent) => void;
@@ -607,6 +708,7 @@ export async function runStoreManagerTurn(
       objective: 'Chat interaction with the Store Manager assistant.',
       executionMode: 'interactive',
       selectedModel: input.selectedModel,
+      pinnedScope: input.pinnedScope ?? undefined,
     });
   } catch (err) {
     throw new StoreManagerTurnError(

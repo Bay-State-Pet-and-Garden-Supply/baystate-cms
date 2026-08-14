@@ -65,6 +65,20 @@ export function findChangeSetByWorkspaceId(workspaceId: string, id: string): Cha
   return mapRow(row);
 }
 
+/**
+ * Workspace-scoped Change Set read with its bounded item summary (operations
+ * console, Issue 2). A change set from another workspace is indistinguishable
+ * from a missing one (fail closed, no ownership disclosure).
+ */
+export function getChangeSetWithItemsForWorkspace(
+  workspaceId: string,
+  changeSetId: string,
+): { changeSet: ChangeSetRow; items: ChangeSetItemRow[] } | null {
+  const changeSet = findChangeSetByWorkspaceId(workspaceId, changeSetId);
+  if (!changeSet) return null;
+  return { changeSet, items: listChangeSetItems(changeSetId) };
+}
+
 export function listChangeSets(workspaceId: string): ChangeSetRow[] {
   const db = getDb();
   const rows = db.query(
