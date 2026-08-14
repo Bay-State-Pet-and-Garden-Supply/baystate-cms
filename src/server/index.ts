@@ -1,6 +1,7 @@
 import { serve } from 'bun';
 import app from './app';
 import { createStoreManagerScheduler } from './services/store-manager-scheduler';
+import { createStoreManagerEventWorker } from './services/store-manager-event-worker';
 import { getStoreManagerFlags } from '../store-manager/flags';
 
 const PORT = parseInt(process.env.PORT ?? '3030', 10);
@@ -18,8 +19,21 @@ const schedulerStarted = (() => {
   return true;
 })();
 
+// ── Store Manager operations console (Issue 5): durable event-triggered
+// read-only runs. One sequential worker; inert unless the eventTriggersEnabled
+// flag is on AND the kill switch is off. Shares the shutdown lifecycle with
+// the scheduler. ──────────────────────────────────────────────────────────────
+const storeManagerEventWorker = createStoreManagerEventWorker();
+const eventWorkerStarted = (() => {
+  const flags = getStoreManagerFlags();
+  if (!flags.eventTriggersEnabled || flags.killSwitch) return false;
+  storeManagerEventWorker.start();
+  return true;
+})();
+
 const shutdown = () => {
   storeManagerScheduler.stop();
+  storeManagerEventWorker.stop();
   process.exit(0);
 };
 process.on('SIGINT', shutdown);
@@ -34,6 +48,7 @@ const server = serve({
 
 console.log(`Baystate CMS API server running on http://${HOST}:${PORT}`);
 console.log(`Store Manager scheduler: ${schedulerStarted ? 'running' : 'inert (flag off or kill switch on)'}`);
+console.log(`Store Manager event worker: ${eventWorkerStarted ? 'running' : 'inert (flag off or kill switch on)'}`);
 if (process.env.BAYSTATE_CMS_API_TOKEN) {
   console.log(`API token authentication is enabled for mutating requests.`);
 } else {

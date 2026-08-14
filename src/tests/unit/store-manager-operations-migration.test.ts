@@ -144,6 +144,47 @@ describe('Store Manager operations schema migration (Issue 1)', () => {
     expect(rulesUnique.sql).toMatch(/UNIQUE \(workspace_id, kind\)/);
   });
 
+  it('creates the trigger + source-cursor tables and indexes (Issue 5, v5)', () => {
+    for (const table of [
+      'store_manager_triggers',
+      'store_manager_trigger_versions',
+      'store_manager_trigger_occurrences',
+      'store_manager_trigger_leases',
+      'store_manager_source_cursors',
+    ]) {
+      const t = getDb()
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get(table);
+      expect(t).toBeTruthy();
+    }
+    for (const index of [
+      'idx_store_manager_triggers_ws_enabled',
+      'idx_store_manager_triggers_ws_kind',
+      'idx_store_manager_trigger_versions_trig',
+      'idx_store_manager_trigger_occ_due',
+      'idx_store_manager_trigger_occ_trig',
+      'idx_store_manager_trigger_occ_source',
+      'idx_store_manager_trigger_leases_expiry',
+      'idx_store_manager_source_cursors_ws',
+    ]) {
+      const i = getDb()
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+        .get(index);
+      expect(i).toBeTruthy();
+    }
+    // Occurrence rows are unique per (workspace, occurrence_key) — the
+    // at-least-once/idempotency backstop lives in the schema.
+    const occUnique = getDb()
+      .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_trigger_occurrences'")
+      .get() as { sql: string };
+    expect(occUnique.sql).toMatch(/UNIQUE \(workspace_id, occurrence_key\)/);
+    // Source cursors are unique per (workspace, source_kind, source_id).
+    const cursorUnique = getDb()
+      .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_source_cursors'")
+      .get() as { sql: string };
+    expect(cursorUnique.sql).toMatch(/UNIQUE \(workspace_id, source_kind, source_id\)/);
+  });
+
   it('is idempotent across repeated runs', () => {
     expect(() => runStoreManagerOperationsMigration()).not.toThrow();
     expect(() => ensureStoreManagerOperationsSchema()).not.toThrow();

@@ -64,6 +64,23 @@ import {
 } from '../../shared/schemas/store-manager-preferences';
 import { listRegistry } from '../../db/repositories/field-registry-repo';
 import { StoreManagerChatRequestSchema } from '../../shared/schemas/store-manager';
+import {
+  createTriggerFromTemplate,
+  listTriggersForWorkspace,
+  getTriggerForWorkspace,
+  updateTriggerForWorkspace,
+  setTriggerEnabledForWorkspace,
+  runTriggerNowReadOnly,
+} from '../services/store-manager-trigger-service';
+import { listOccurrencesByTrigger } from '../../db/repositories/store-manager-trigger-repo';
+import { listTriggerTemplates } from '../../store-manager/events/trigger-registry';
+import {
+  StoreManagerTriggerCreateRequestSchema,
+  StoreManagerTriggerUpdateRequestSchema,
+  StoreManagerTriggerRunNowRequestSchema,
+  StoreManagerTriggerOccurrenceListQuerySchema,
+} from '../../shared/schemas/store-manager-trigger';
+import { getStoreManagerFlags } from '../../store-manager/flags';
 import type { UIMessage } from 'ai';
 import {
   reconcileInbox,
@@ -837,7 +854,6 @@ import {
   StoreManagerScheduleRunNowRequestSchema,
   StoreManagerOccurrenceListQuerySchema,
 } from '../../shared/schemas/store-manager-schedule';
-import { getStoreManagerFlags } from '../../store-manager/flags';
 
 /**
  * GET /api/store-manager/schedules — workspace-scoped schedule list. Read
@@ -992,6 +1008,176 @@ route.get('/store-manager/schedules/:id/occurrences', (c) => {
   const limit = query.success ? query.data.limit ?? 50 : 50;
   const status = query.success ? query.data.status : undefined;
   const occurrences = listOccurrencesBySchedule(workspace.id, id, { limit, status });
+  return c.json({ occurrences });
+});
+
+// ---------------------------------------------------------------------------
+// Operations console — Issue 5: durable event-triggered read-only runs.
+// Triggers observe committed durable state and every occurrence enters
+// runStoreManagerExecution with entrypoint 'event' and the unattended
+// read-only policy. Automation stays inert while eventTriggersEnabled is
+// false or the kill switch is on; reads/history remain available under the
+// kill switch.
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/store-manager/triggers — workspace-scoped trigger list. Read
+ * access stays available under the kill switch (history/inbox reads only).
+ */
+route.get('/store-manager/triggers', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const triggers = listTriggersForWorkspace(workspace.id);
+  return c.json({ triggers });
+});
+
+/**
+ * POST /api/store-manager/triggers — create a trigger from one of the four
+ * locked templates. Triggers are created disabled (automation inert until
+ * enabled). Gated by the eventTriggersEnabled flag and kill switch.
+ */
+route.post('/store-manager/triggers', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.eventTriggersEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Event triggers are disabled (flag or kill switch).' }, 409);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerTriggerCreateRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid trigger create request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = createTriggerFromTemplate(workspace.id, parsed.data);
+    return c.json({ ok: true, trigger: result.trigger });
+  } catch (err) {
+    return c.json({ ok: false, errorCode: 'trigger_create_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * GET /api/store-manager/triggers/templates — server-owned template list.
+ */
+route.get('/store-manager/triggers/templates', (c) => {
+  return c.json({ templates: listTriggerTemplates() });
+});
+
+/**
+ * GET /api/store-manager/triggers/:id — trigger detail.
+ */
+route.get('/store-manager/triggers/:id', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid trigger id.' }, 400);
+  const trigger = getTriggerForWorkspace(workspace.id, id);
+  if (!trigger) return c.json({ error: 'Trigger not found.' }, 404);
+  return c.json({ trigger });
+});
+
+/**
+ * POST /api/store-manager/triggers/:id — update editable fields (new
+ * immutable definition version; kind is immutable).
+ */
+route.post('/store-manager/triggers/:id', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid trigger id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerTriggerUpdateRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid trigger update request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const trigger = updateTriggerForWorkspace(workspace.id, id, parsed.data);
+    return c.json({ ok: true, trigger });
+  } catch (err) {
+    return c.json({ ok: false, errorCode: 'trigger_update_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * POST /api/store-manager/triggers/:id/enable — explicitly enable (gated by
+ * the eventTriggersEnabled flag; automation inert otherwise).
+ */
+route.post('/store-manager/triggers/:id/enable', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.eventTriggersEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Event triggers are disabled (flag or kill switch).' }, 409);
+  }
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid trigger id.' }, 400);
+  const trigger = setTriggerEnabledForWorkspace(workspace.id, id, true, 'operator');
+  if (!trigger) return c.json({ error: 'Trigger not found.' }, 404);
+  return c.json({ ok: true, trigger });
+});
+
+/**
+ * POST /api/store-manager/triggers/:id/disable — explicitly disable.
+ */
+route.post('/store-manager/triggers/:id/disable', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid trigger id.' }, 400);
+  const trigger = setTriggerEnabledForWorkspace(workspace.id, id, false, 'operator');
+  if (!trigger) return c.json({ error: 'Trigger not found.' }, 404);
+  return c.json({ ok: true, trigger });
+});
+
+/**
+ * POST /api/store-manager/triggers/:id/run-now — synchronous READ-ONLY run
+ * through the common unattended runtime. Not an approval shortcut; gated by
+ * the eventTriggersEnabled flag and kill switch.
+ */
+route.post('/store-manager/triggers/:id/run-now', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.eventTriggersEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Event triggers are disabled (flag or kill switch).' }, 409);
+  }
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid trigger id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerTriggerRunNowRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid run-now request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = await runTriggerNowReadOnly(workspace.id, id, {
+      workspacePath: workspace.workspacePath,
+      selectedModel: parsed.data.selectedModel,
+    });
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof ModelUnavailableError) {
+      return c.json({ ok: false, errorCode: 'model_unavailable', error: err.message }, 400);
+    }
+    return c.json({ ok: false, errorCode: 'run_now_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * GET /api/store-manager/triggers/:id/occurrences — bounded occurrence
+ * history (read access stays available under kill switch).
+ */
+route.get('/store-manager/triggers/:id/occurrences', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 64) return c.json({ error: 'Invalid trigger id.' }, 400);
+  const query = StoreManagerTriggerOccurrenceListQuerySchema.safeParse({
+    limit: c.req.query('limit') ? Number(c.req.query('limit')) : undefined,
+    status: c.req.query('status') ?? undefined,
+  });
+  const limit = query.success ? query.data.limit ?? 50 : 50;
+  const status = query.success ? query.data.status : undefined;
+  const occurrences = listOccurrencesByTrigger(workspace.id, id, { limit, status });
   return c.json({ occurrences });
 });
 

@@ -22,14 +22,20 @@
  *    per-workspace dedupe keys and content fingerprints.
  *  - store_manager_notification_rules: deterministic threshold rules with
  *    per-rule last-seen snapshots (edge-triggered emission).
- *  - store_manager_notifications: durable in-app threshold facts with a
- *    per-workspace monotonic sequence for cursor SSE + polling fallback.
+ * New surface (v4, Issue 4):
+ *  - store_manager_schedules / _versions / _occurrences / _leases: leased
+ *    scheduled read-only runs (unique occurrence keys, atomic claims).
+ * New surface (v5, Issue 5):
+ *  - store_manager_triggers / _versions / _occurrences / _leases: durable
+ *    event-triggered read-only runs (same lease + unique-key discipline).
+ *  - store_manager_source_cursors: per-source observation cursors with
+ *    fingerprints + deterministic baselines (drift), out-of-order safe.
  */
 
 import { getDb } from './connection';
 import type { Database } from './driver';
 
-export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '4';
+export const STORE_MANAGER_OPERATIONS_SCHEMA_VERSION = '5';
 export const STORE_MANAGER_OPERATIONS_MARKER = 'store_manager_operations_schema_version';
 
 const SESSION_ADDITIVE_COLUMNS: ReadonlyArray<readonly [column: string, ddl: string]> = [
@@ -284,6 +290,104 @@ export function runStoreManagerOperationsMigration(): void {
       );
       CREATE INDEX IF NOT EXISTS idx_store_manager_leases_expiry
         ON store_manager_schedule_leases(workspace_id, lease_expires_at);
+    `);
+    // Block 8 (Issue 5): durable event-triggered read-only runs. Triggers are
+    // versioned definitions (immutable version rows; the trigger row holds the
+    // current pointer), occurrences are restart-safe via a unique per-workspace
+    // occurrence key, leases drive atomic claim/heartbeat/expiry, and source
+    // cursors record last-seen fingerprints + deterministic baselines so
+    // at-least-once observation survives restarts and out-of-order updates.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_triggers (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        config_json TEXT NOT NULL,
+        scope_json TEXT,
+        selected_model TEXT,
+        objective TEXT NOT NULL,
+        definition_hash TEXT NOT NULL,
+        enable_audit_json TEXT,
+        last_scan_at TEXT,
+        last_scan_status TEXT,
+        last_run_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_triggers_ws_enabled
+        ON store_manager_triggers(workspace_id, enabled);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_triggers_ws_kind
+        ON store_manager_triggers(workspace_id, kind);
+      CREATE TABLE IF NOT EXISTS store_manager_trigger_versions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        trigger_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        definition_json TEXT NOT NULL,
+        definition_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (workspace_id, trigger_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_trigger_versions_trig
+        ON store_manager_trigger_versions(workspace_id, trigger_id, version);
+      CREATE TABLE IF NOT EXISTS store_manager_trigger_occurrences (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        trigger_id TEXT NOT NULL,
+        trigger_version INTEGER NOT NULL,
+        occurrence_key TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        scope_json TEXT,
+        scheduled_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        run_id TEXT,
+        error_code TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        claimed_at TEXT,
+        lease_expires_at TEXT,
+        heartbeat_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, occurrence_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_trigger_occ_due
+        ON store_manager_trigger_occurrences(workspace_id, status, scheduled_at);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_trigger_occ_trig
+        ON store_manager_trigger_occurrences(workspace_id, trigger_id, scheduled_at);
+      CREATE INDEX IF NOT EXISTS idx_store_manager_trigger_occ_source
+        ON store_manager_trigger_occurrences(workspace_id, source_kind, source_id);
+      CREATE TABLE IF NOT EXISTS store_manager_trigger_leases (
+        occurrence_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        trigger_id TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        claimed_at TEXT NOT NULL,
+        lease_expires_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_trigger_leases_expiry
+        ON store_manager_trigger_leases(workspace_id, lease_expires_at);
+      CREATE TABLE IF NOT EXISTS store_manager_source_cursors (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        baseline_json TEXT,
+        terminal_observed INTEGER NOT NULL DEFAULT 0,
+        last_observed_at TEXT NOT NULL,
+        eval_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, source_kind, source_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_source_cursors_ws
+        ON store_manager_source_cursors(workspace_id, source_kind, source_id);
     `);
     db.query(
       'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',

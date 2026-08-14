@@ -87,6 +87,22 @@ export function countFailedSyncJobsSince(workspaceId: string, sinceIso: string |
   return Number(row?.count ?? 0);
 }
 
+/**
+ * Workspace-scoped terminal transition observation (operations console,
+ * Issue 5 — sync_failed trigger). Failed sync jobs observed as committed
+ * durable state only; foreign rows are invisible. Bounded; error summaries
+ * are returned raw here and MUST be redacted/truncated by the caller before
+ * they reach a prompt, artifact, or the client.
+ */
+export function listFailedSyncJobsForObservation(workspaceId: string, limit = 200): SyncJobRow[] {
+  const db = getDb();
+  const bounded = Math.min(Math.max(limit, 1), 500);
+  const rows = db.query(
+    "SELECT * FROM sync_jobs WHERE workspace_id = ? AND status = 'failed' ORDER BY completed_at ASC LIMIT ?",
+  ).all(...[workspaceId, bounded]) as Record<string, unknown>[];
+  return rows.map(mapRow);
+}
+
 export function completeSyncJob(id: string, status: string, fields?: {
   productCount?: number;
   artifactPath?: string;

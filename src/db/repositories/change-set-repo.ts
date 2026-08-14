@@ -179,6 +179,20 @@ export function listChangeSetsNeedingImageRepair(workspaceId: string, limit = 50
   return [...perChangeSet.values()].slice(0, bounded);
 }
 
+/**
+ * Workspace-scoped terminal transition observation (operations console,
+ * Issue 5 — change_set_approved trigger). Approved Change Sets are observed
+ * as committed durable state only; foreign rows are invisible. Bounded.
+ */
+export function listApprovedChangeSetsForObservation(workspaceId: string, limit = 200): ChangeSetRow[] {
+  const db = getDb();
+  const bounded = Math.min(Math.max(limit, 1), 500);
+  const rows = db.query(
+    "SELECT * FROM change_sets WHERE workspace_id = ? AND status = 'approved' ORDER BY approved_at ASC, updated_at ASC LIMIT ?",
+  ).all(...[workspaceId, bounded]) as Record<string, unknown>[];
+  return rows.map(mapRow);
+}
+
 export function updateChangeSetStatus(id: string, status: string, approvedCommit?: string): void {
   const db = getDb();
   const now = new Date().toISOString();

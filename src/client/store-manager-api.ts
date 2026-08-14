@@ -626,3 +626,181 @@ export async function fetchStoreManagerScheduleOccurrences(
   const data = (await res.json()) as { occurrences: StoreManagerScheduleOccurrence[] };
   return data.occurrences ?? [];
 }
+
+// ---------------------------------------------------------------------------
+// Operations console (Issue 5): durable event-triggered read-only runs.
+// Wire types mirror the shared trigger schemas; the client never imports
+// server code. All observation + execution is server-side; these are plain
+// fetch wrappers with no client-side trigger logic.
+// ---------------------------------------------------------------------------
+
+export type StoreManagerTriggerKind = 'import_finished' | 'change_set_approved' | 'sync_failed' | 'product_field_drift';
+
+export type StoreManagerTriggerOccurrenceStatus =
+  | 'pending'
+  | 'claimed'
+  | 'completed'
+  | 'failed'
+  | 'unavailable'
+  | 'cancelled'
+  | 'diagnostic';
+
+export type StoreManagerTriggerConfig =
+  | { kind: 'import_finished'; batchId: string | null }
+  | { kind: 'change_set_approved' }
+  | { kind: 'sync_failed' }
+  | { kind: 'product_field_drift'; threshold: number };
+
+export interface StoreManagerTriggerDefinition {
+  id: string;
+  workspaceId: string;
+  name: string;
+  version: number;
+  kind: StoreManagerTriggerKind;
+  enabled: boolean;
+  config: StoreManagerTriggerConfig;
+  scope: StoreManagerPinnedScope | null;
+  selectedModel: string | null;
+  objective: string;
+  definitionHash: string;
+  lastScanAt: string | null;
+  lastScanStatus: 'completed' | 'failed' | 'unavailable' | 'diagnostic' | null;
+  lastRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerTriggerTemplate {
+  kind: StoreManagerTriggerKind;
+  name: string;
+  description: string;
+  objective: string;
+  defaultConfig: StoreManagerTriggerConfig;
+  scopeSummary: string;
+  readOnly: true;
+}
+
+export interface StoreManagerTriggerOccurrence {
+  id: string;
+  workspaceId: string;
+  triggerId: string;
+  triggerVersion: number;
+  occurrenceKey: string;
+  sourceRef: { kind: string; id: string };
+  scopeJson: string | null;
+  scheduledAt: string;
+  status: StoreManagerTriggerOccurrenceStatus;
+  runId: string | null;
+  errorCode: string | null;
+  retryCount: number;
+  claimedAt: string | null;
+  leaseExpiresAt: string | null;
+  heartbeatAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerTriggerCreateInput {
+  kind: StoreManagerTriggerKind;
+  name: string;
+  config?: StoreManagerTriggerConfig;
+  scope?: StoreManagerPinnedScope;
+  selectedModel?: string;
+}
+
+export interface StoreManagerTriggerUpdateInput {
+  name?: string;
+  config?: StoreManagerTriggerConfig;
+  scope?: StoreManagerPinnedScope | null;
+  selectedModel?: string | null;
+}
+
+export async function fetchStoreManagerTriggers(): Promise<StoreManagerTriggerDefinition[]> {
+  const res = await fetch('/api/store-manager/triggers');
+  if (!res.ok) throw new Error(`Failed to load triggers (${res.status}).`);
+  const data = (await res.json()) as { triggers: StoreManagerTriggerDefinition[] };
+  return data.triggers ?? [];
+}
+
+export async function fetchStoreManagerTriggerTemplates(): Promise<StoreManagerTriggerTemplate[]> {
+  const res = await fetch('/api/store-manager/triggers/templates');
+  if (!res.ok) throw new Error(`Failed to load trigger templates (${res.status}).`);
+  const data = (await res.json()) as { templates: StoreManagerTriggerTemplate[] };
+  return data.templates ?? [];
+}
+
+export async function createStoreManagerTrigger(
+  input: StoreManagerTriggerCreateInput,
+): Promise<StoreManagerTriggerDefinition> {
+  const res = await fetch('/api/store-manager/triggers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok: boolean; trigger?: StoreManagerTriggerDefinition; error?: string; errorCode?: string };
+  if (!data.ok || !data.trigger) throw new Error(data.error ?? `Trigger create failed (${res.status}).`);
+  return data.trigger;
+}
+
+export async function updateStoreManagerTrigger(
+  id: string,
+  input: StoreManagerTriggerUpdateInput,
+): Promise<StoreManagerTriggerDefinition> {
+  const res = await fetch(`/api/store-manager/triggers/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json()) as { ok: boolean; trigger?: StoreManagerTriggerDefinition; error?: string; errorCode?: string };
+  if (!data.ok || !data.trigger) throw new Error(data.error ?? `Trigger update failed (${res.status}).`);
+  return data.trigger;
+}
+
+export async function setStoreManagerTriggerEnabled(id: string, enabled: boolean): Promise<StoreManagerTriggerDefinition> {
+  const res = await fetch(`/api/store-manager/triggers/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`, {
+    method: 'POST',
+  });
+  const data = (await res.json()) as { ok: boolean; trigger?: StoreManagerTriggerDefinition; error?: string; errorCode?: string };
+  if (!data.ok || !data.trigger) throw new Error(data.error ?? `Trigger enable/disable failed (${res.status}).`);
+  return data.trigger;
+}
+
+export interface StoreManagerTriggerRunNowResult {
+  occurrenceId: string;
+  occurrenceKey: string;
+  result: {
+    occurrenceId: string;
+    occurrenceKey: string;
+    status: string;
+    runId: string | null;
+    errorCode: string | null;
+    terminalStatus: string | null;
+    retryCount: number;
+  };
+}
+
+export async function runStoreManagerTriggerNow(id: string): Promise<StoreManagerTriggerRunNowResult> {
+  const res = await fetch(`/api/store-manager/triggers/${encodeURIComponent(id)}/run-now`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  const data = (await res.json()) as { ok: boolean; error?: string; errorCode?: string } & Partial<StoreManagerTriggerRunNowResult>;
+  if (!data.ok) throw new Error(data.error ?? `Trigger run-now failed (${res.status}).`);
+  return data as StoreManagerTriggerRunNowResult;
+}
+
+export async function fetchStoreManagerTriggerOccurrences(
+  id: string,
+  opts: { limit?: number; status?: StoreManagerTriggerOccurrenceStatus } = {},
+): Promise<StoreManagerTriggerOccurrence[]> {
+  const params = new URLSearchParams();
+  if (opts.limit != null) params.set('limit', String(opts.limit));
+  if (opts.status) params.set('status', opts.status);
+  const qs = params.toString();
+  const res = await fetch(`/api/store-manager/triggers/${encodeURIComponent(id)}/occurrences${qs ? `?${qs}` : ''}`);
+  if (!res.ok) throw new Error(`Failed to load trigger occurrences (${res.status}).`);
+  const data = (await res.json()) as { occurrences: StoreManagerTriggerOccurrence[] };
+  return data.occurrences ?? [];
+}
