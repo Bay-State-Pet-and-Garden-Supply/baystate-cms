@@ -81,6 +81,23 @@ import {
   StoreManagerTriggerOccurrenceListQuerySchema,
 } from '../../shared/schemas/store-manager-trigger';
 import { getStoreManagerFlags } from '../../store-manager/flags';
+import {
+  createPlaybookFromTemplate,
+  listPlaybooks,
+  getPlaybook,
+  getPlaybookVersions,
+  getPlaybookVersion,
+  savePlaybookDraft,
+  activatePlaybook,
+  StoreManagerPlaybookError,
+} from '../services/store-manager-playbook-service';
+import {
+  StoreManagerPlaybookCreateRequestSchema,
+  StoreManagerPlaybookSaveDraftRequestSchema,
+  StoreManagerPlaybookActivateRequestSchema,
+} from '../../shared/schemas/store-manager-playbook';
+import { describeStoreManagerPlaybookTemplates } from '../../store-manager/playbooks/templates';
+import { StoreManagerPlaybookValidationError } from '../../store-manager/playbooks/contracts';
 import type { UIMessage } from 'ai';
 import {
   reconcileInbox,
@@ -1179,6 +1196,148 @@ route.get('/store-manager/triggers/:id/occurrences', (c) => {
   const status = query.success ? query.data.status : undefined;
   const occurrences = listOccurrencesByTrigger(workspace.id, id, { limit, status });
   return c.json({ occurrences });
+});
+
+/**
+ * GET /api/store-manager/playbooks — list workspace playbooks (reads stay
+ * available under kill switch; playbooks are inert until activated).
+ */
+route.get('/store-manager/playbooks', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const playbooks = listPlaybooks(workspace.id);
+  return c.json({ playbooks });
+});
+
+/**
+ * GET /api/store-manager/playbooks/templates — server-owned template list.
+ */
+route.get('/store-manager/playbooks/templates', (c) => {
+  return c.json({ templates: describeStoreManagerPlaybookTemplates() });
+});
+
+/**
+ * POST /api/store-manager/playbooks — copy a locked starter template into a
+ * workspace draft (version 1). Playbook DEFINITIONS are inert data: copying
+ * does nothing until the draft is explicitly activated. Gated by the
+ * playbooksEnabled flag and kill switch.
+ */
+route.post('/store-manager/playbooks', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.playbooksEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Playbooks are disabled (flag or kill switch).' }, 409);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerPlaybookCreateRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid playbook create request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const playbook = createPlaybookFromTemplate(workspace.id, parsed.data);
+    return c.json({ ok: true, playbook });
+  } catch (err) {
+    return c.json({ ok: false, errorCode: 'playbook_create_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * GET /api/store-manager/playbooks/:id — playbook detail + version history
+ * (read access stays available under kill switch).
+ */
+route.get('/store-manager/playbooks/:id', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  if (id.length > 100) return c.json({ error: 'Invalid playbook id.' }, 400);
+  const playbook = getPlaybook(workspace.id, id);
+  if (!playbook) return c.json({ error: 'Playbook not found.' }, 404);
+  const versions = getPlaybookVersions(workspace.id, id);
+  return c.json({ playbook, versions });
+});
+
+/**
+ * GET /api/store-manager/playbooks/:id/versions/:version — one immutable version.
+ */
+route.get('/store-manager/playbooks/:id/versions/:version', (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const id = c.req.param('id');
+  const version = Number(c.req.param('version'));
+  if (id.length > 100 || !Number.isInteger(version) || version < 1) {
+    return c.json({ error: 'Invalid playbook id or version.' }, 400);
+  }
+  const versionRow = getPlaybookVersion(workspace.id, id, version);
+  if (!versionRow) return c.json({ error: 'Playbook version not found.' }, 404);
+  return c.json({ version: versionRow });
+});
+
+/**
+ * POST /api/store-manager/playbooks/:id/versions — save a new immutable draft
+ * version (copy-on-edit). The service re-validates against the current registry
+ * and recomputes the content hash; invalid definitions are rejected before any
+ * persistence.
+ */
+route.post('/store-manager/playbooks/:id/versions', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.playbooksEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Playbooks are disabled (flag or kill switch).' }, 409);
+  }
+  const id = c.req.param('id');
+  if (id.length > 100) return c.json({ error: 'Invalid playbook id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerPlaybookSaveDraftRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid playbook draft.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const result = savePlaybookDraft(workspace.id, id, parsed.data);
+    return c.json({ ok: true, version: result.version, staticRisk: result.staticRisk });
+  } catch (err) {
+    if (err instanceof StoreManagerPlaybookValidationError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, 400);
+    }
+    if (err instanceof StoreManagerPlaybookError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'not_found' ? 404 : 400);
+    }
+    return c.json({ ok: false, errorCode: 'playbook_save_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * POST /api/store-manager/playbooks/:id/activate — explicit reviewed
+ * activation of a specific immutable version. Records actor/time/hash and is
+ * the ONLY way a playbook leaves the inert draft state. Gated by flags.
+ */
+route.post('/store-manager/playbooks/:id/activate', async (c) => {
+  const workspace = getCurrentWorkspace();
+  if (!workspace) return c.json({ error: 'No workspace loaded.' }, 400);
+  const flags = getStoreManagerFlags();
+  if (flags.killSwitch || !flags.playbooksEnabled) {
+    return c.json({ ok: false, errorCode: 'not_configured', error: 'Playbooks are disabled (flag or kill switch).' }, 409);
+  }
+  const id = c.req.param('id');
+  if (id.length > 100) return c.json({ error: 'Invalid playbook id.' }, 400);
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = StoreManagerPlaybookActivateRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ ok: false, errorCode: 'invalid_request', error: 'Invalid playbook activation request.', details: parsed.error.flatten() }, 400);
+  }
+  try {
+    const playbook = activatePlaybook(workspace.id, id, parsed.data.version, 'operator');
+    return c.json({ ok: true, playbook });
+  } catch (err) {
+    if (err instanceof StoreManagerPlaybookValidationError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, 400);
+    }
+    if (err instanceof StoreManagerPlaybookError) {
+      return c.json({ ok: false, errorCode: err.code, error: err.message }, err.code === 'not_found' ? 404 : 400);
+    }
+    return c.json({ ok: false, errorCode: 'playbook_activate_failed', error: err instanceof Error ? err.message : String(err) }, 400);
+  }
 });
 
 export default route;

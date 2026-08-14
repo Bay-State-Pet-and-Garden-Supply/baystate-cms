@@ -804,3 +804,198 @@ export async function fetchStoreManagerTriggerOccurrences(
   const data = (await res.json()) as { occurrences: StoreManagerTriggerOccurrence[] };
   return data.occurrences ?? [];
 }
+
+// ---------------------------------------------------------------------------
+// Operations console (Issue 6): immutable versioned playbooks.
+// Wire types mirror the shared schemas; the client never imports server code.
+// ---------------------------------------------------------------------------
+
+export type StoreManagerPlaybookTemplateKind =
+  | 'weekly_taxonomy_cleanup'
+  | 'new_vendor_import_review'
+  | 'image_integrity_pass'
+  | 'launch_readiness_check';
+
+export type StoreManagerPlaybookStepKind =
+  | 'read'
+  | 'summarize'
+  | 'propose'
+  | 'approval_checkpoint'
+  | 'execute'
+  | 'verify';
+
+export type StoreManagerPlaybookRiskClass =
+  | 'read'
+  | 'proposal_write'
+  | 'catalog_mutation'
+  | 'network_filesystem_repair';
+
+export type StoreManagerPlaybookStatus = 'draft' | 'active';
+
+export interface StoreManagerPlaybookToolRef {
+  toolName: string;
+  toolVersion: number;
+}
+
+export interface StoreManagerPlaybookStep {
+  stepId: string;
+  kind: StoreManagerPlaybookStepKind;
+  description?: string;
+  dependsOnStepIds?: string[];
+  toolName?: string;
+  toolVersion?: number;
+  inputTemplate?: Record<string, unknown>;
+  mode?: 'deterministic' | 'model_bounded' | 'transient_preview' | 'persistent_stored';
+  proposalWriteRiskDeclared?: boolean;
+  diffRequired?: boolean;
+  declaredRiskClass?: StoreManagerPlaybookRiskClass;
+  toolNames?: StoreManagerPlaybookToolRef[];
+}
+
+export interface StoreManagerPlaybookScopeInput {
+  allowedKinds: string[];
+  maxSkus: number;
+}
+
+export interface StoreManagerPlaybookVariable {
+  name: string;
+  type: string;
+  required: boolean;
+}
+
+export interface StoreManagerPlaybookStaticRisk {
+  riskClasses: StoreManagerPlaybookRiskClass[];
+  expectedApprovals: StoreManagerPlaybookToolRef[];
+  networkActivity: 'none' | 'bounded';
+  expectedDiffKinds: ('diff' | 'verification_diff')[];
+  hasMutationStep: boolean;
+  hasVerifyStep: boolean;
+}
+
+export interface StoreManagerPlaybookVersion {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description?: string;
+  templateKind: StoreManagerPlaybookTemplateKind | null;
+  version: number;
+  status: StoreManagerPlaybookStatus;
+  scopeInput: StoreManagerPlaybookScopeInput;
+  variables: StoreManagerPlaybookVariable[];
+  steps: StoreManagerPlaybookStep[];
+  definitionHash: string;
+  versionId: string;
+  activatedAt: string | null;
+  activatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerPlaybookSummary {
+  id: string;
+  workspaceId: string;
+  name: string;
+  templateKind: StoreManagerPlaybookTemplateKind | null;
+  currentVersion: number;
+  status: StoreManagerPlaybookStatus;
+  activeVersion: number | null;
+  activeHash: string | null;
+  activatedAt: string | null;
+  activatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoreManagerPlaybookTemplate {
+  kind: StoreManagerPlaybookTemplateKind;
+  name: string;
+  description: string;
+  scopeAllowedKinds: string[];
+  stepCount: number;
+}
+
+export interface StoreManagerPlaybookDetail {
+  playbook: StoreManagerPlaybookSummary;
+  versions: StoreManagerPlaybookVersion[];
+}
+
+/** List workspace playbooks (read access stays available under kill switch). */
+export async function fetchStoreManagerPlaybooks(): Promise<StoreManagerPlaybookSummary[]> {
+  const res = await fetch('/api/store-manager/playbooks');
+  if (!res.ok) throw new Error(`Failed to load playbooks (${res.status}).`);
+  const data = (await res.json()) as { playbooks: StoreManagerPlaybookSummary[] };
+  return data.playbooks ?? [];
+}
+
+/** Server-owned template descriptors (the client renders only these). */
+export async function fetchStoreManagerPlaybookTemplates(): Promise<StoreManagerPlaybookTemplate[]> {
+  const res = await fetch('/api/store-manager/playbooks/templates');
+  if (!res.ok) throw new Error(`Failed to load playbook templates (${res.status}).`);
+  const data = (await res.json()) as { templates: StoreManagerPlaybookTemplate[] };
+  return data.templates ?? [];
+}
+
+/** Copy a starter template into a workspace draft (inert until activated). */
+export async function createStoreManagerPlaybook(
+  templateKind: StoreManagerPlaybookTemplateKind,
+  name?: string,
+): Promise<StoreManagerPlaybookSummary> {
+  const res = await fetch('/api/store-manager/playbooks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ templateKind, name }),
+  });
+  const data = (await res.json()) as { ok: boolean; playbook?: StoreManagerPlaybookSummary; error?: string; errorCode?: string };
+  if (!data.ok) throw new Error(data.error ?? `Playbook create failed (${res.status}).`);
+  return data.playbook!;
+}
+
+/** Playbook detail + immutable version history. */
+export async function fetchStoreManagerPlaybookDetail(id: string): Promise<StoreManagerPlaybookDetail> {
+  const res = await fetch(`/api/store-manager/playbooks/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`Failed to load playbook (${res.status}).`);
+  return (await res.json()) as StoreManagerPlaybookDetail;
+}
+
+/** One immutable version. */
+export async function fetchStoreManagerPlaybookVersion(id: string, version: number): Promise<StoreManagerPlaybookVersion> {
+  const res = await fetch(`/api/store-manager/playbooks/${encodeURIComponent(id)}/versions/${version}`);
+  if (!res.ok) throw new Error(`Failed to load playbook version (${res.status}).`);
+  const data = (await res.json()) as { version: StoreManagerPlaybookVersion };
+  return data.version;
+}
+
+/** Save a new immutable draft version (copy-on-edit; registry-validated). */
+export async function saveStoreManagerPlaybookDraft(
+  id: string,
+  draft: {
+    name: string;
+    description?: string;
+    scopeInput: StoreManagerPlaybookScopeInput;
+    variables: StoreManagerPlaybookVariable[];
+    steps: StoreManagerPlaybookStep[];
+  },
+): Promise<{ version: StoreManagerPlaybookVersion; staticRisk: StoreManagerPlaybookStaticRisk }> {
+  const res = await fetch(`/api/store-manager/playbooks/${encodeURIComponent(id)}/versions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+  });
+  const data = (await res.json()) as
+    | { ok: true; version: StoreManagerPlaybookVersion; staticRisk: StoreManagerPlaybookStaticRisk }
+    | { ok: false; error?: string; errorCode?: string };
+  if (!data.ok) throw new Error((data as { error?: string }).error ?? `Playbook save failed (${res.status}).`);
+  return { version: data.version, staticRisk: data.staticRisk };
+}
+
+/** Explicit reviewed activation of an immutable version (records actor/time/hash). */
+export async function activateStoreManagerPlaybook(id: string, version: number): Promise<StoreManagerPlaybookSummary> {
+  const res = await fetch(`/api/store-manager/playbooks/${encodeURIComponent(id)}/activate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  });
+  const data = (await res.json()) as { ok: boolean; playbook?: StoreManagerPlaybookSummary; error?: string; errorCode?: string };
+  if (!data.ok) throw new Error(data.error ?? `Playbook activation failed (${res.status}).`);
+  return data.playbook!;
+}

@@ -389,6 +389,43 @@ export function runStoreManagerOperationsMigration(): void {
       CREATE INDEX IF NOT EXISTS idx_store_manager_source_cursors_ws
         ON store_manager_source_cursors(workspace_id, source_kind, source_id);
     `);
+    // Block 9 (Issue 6): immutable versioned playbooks. The logical playbook
+    // row holds the current pointer (name, status, active version + audit);
+    // every edit appends a NEW immutable version row (content-addressed) — a
+    // playbook can never observe later edits. Activation is an explicit
+    // reviewed operation recording actor/time/hash. Versions are bounded and
+    // redacted by construction (strict Zod at the boundary).
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_manager_playbooks (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        template_kind TEXT,
+        current_version INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT 'draft',
+        active_version INTEGER,
+        active_hash TEXT,
+        activated_at TEXT,
+        activated_by TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_playbooks_ws
+        ON store_manager_playbooks(workspace_id, updated_at);
+      CREATE TABLE IF NOT EXISTS store_manager_playbook_versions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        playbook_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        definition_json TEXT NOT NULL,
+        definition_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (workspace_id, playbook_id, version)
+      );
+      CREATE INDEX IF NOT EXISTS idx_store_manager_playbook_versions_pb
+        ON store_manager_playbook_versions(workspace_id, playbook_id, version);
+    `);
     db.query(
       'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',
     ).run(STORE_MANAGER_OPERATIONS_MARKER, STORE_MANAGER_OPERATIONS_SCHEMA_VERSION);

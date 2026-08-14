@@ -25,6 +25,7 @@ import { PreferencesPanel } from './store-manager/PreferencesPanel';
 import { ManagerInbox } from './store-manager/ManagerInbox';
 import { NotificationCenter } from './store-manager/NotificationCenter';
 import { SchedulesPanel } from './store-manager/SchedulesPanel';
+import { PlaybooksPanel } from './store-manager/PlaybooksPanel';
 import { useStoreManagerEvents } from '../hooks/useStoreManagerEvents';
 import { colors, fonts, rounded, themeStyles } from '../theme';
 import { ViewHeader } from './common/ViewHeader';
@@ -74,6 +75,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [showPreferences, setShowPreferences] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
   const [showSchedules, setShowSchedules] = useState(false);
+  const [showPlaybooks, setShowPlaybooks] = useState(false);
   const { notifications, status: eventStatus } = useStoreManagerEvents();
   const [commandOutput, setCommandOutput] = useState<{
     raw: string;
@@ -1416,6 +1418,16 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
             </button>
             <button
               type="button"
+              onClick={() => setShowPlaybooks(v => !v)}
+              aria-expanded={showPlaybooks}
+              className="btn btn-outline"
+              style={{ height: '2rem', fontSize: '0.75rem', padding: '0 12px' }}
+              title="Playbooks — immutable versioned definitions (inert until activated)"
+            >
+              📋 Playbooks
+            </button>
+            <button
+              type="button"
               onClick={() => setShowPreferences(v => !v)}
               aria-expanded={showPreferences}
               className="btn btn-outline"
@@ -1435,6 +1447,7 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
         </header>
 
         {showPreferences && <PreferencesPanel open={showPreferences} onClose={() => setShowPreferences(false)} />}
+        <PlaybooksPanel open={showPlaybooks} onClose={() => setShowPlaybooks(false)} />
         <ManagerInbox open={showInbox} onClose={() => setShowInbox(false)} notifications={notifications} eventStatus={eventStatus} />
         <SchedulesPanel open={showSchedules} onClose={() => setShowSchedules(false)} />
 

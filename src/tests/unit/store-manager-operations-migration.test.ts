@@ -185,6 +185,38 @@ describe('Store Manager operations schema migration (Issue 1)', () => {
     expect(cursorUnique.sql).toMatch(/UNIQUE \(workspace_id, source_kind, source_id\)/);
   });
 
+  it('creates the playbook tables and indexes (Issue 6, v6)', () => {
+    for (const table of ['store_manager_playbooks', 'store_manager_playbook_versions']) {
+      const t = getDb()
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+        .get(table);
+      expect(t).toBeTruthy();
+    }
+    for (const index of [
+      'idx_store_manager_playbooks_ws',
+      'idx_store_manager_playbook_versions_pb',
+    ]) {
+      const i = getDb()
+        .query("SELECT name FROM sqlite_master WHERE type='index' AND name=?")
+        .get(index);
+      expect(i).toBeTruthy();
+    }
+    // Versions are content-addressed: definition_hash is NOT NULL, and rows
+    // are unique per (workspace, playbook, version) — the immutability + copy-
+    // on-edit backstop lives in the schema.
+    const versionUnique = getDb()
+      .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_playbook_versions'")
+      .get() as { sql: string };
+    expect(versionUnique.sql).toMatch(/UNIQUE \(workspace_id, playbook_id, version\)/);
+    expect(versionUnique.sql).toMatch(/definition_hash TEXT NOT NULL/);
+    // Playbook rows record the active version pointer + activation audit.
+    const playbookSql = getDb()
+      .query("SELECT sql FROM sqlite_master WHERE type='table' AND name='store_manager_playbooks'")
+      .get() as { sql: string };
+    expect(playbookSql.sql).toMatch(/active_version INTEGER/);
+    expect(playbookSql.sql).toMatch(/activated_by TEXT/);
+  });
+
   it('is idempotent across repeated runs', () => {
     expect(() => runStoreManagerOperationsMigration()).not.toThrow();
     expect(() => ensureStoreManagerOperationsSchema()).not.toThrow();

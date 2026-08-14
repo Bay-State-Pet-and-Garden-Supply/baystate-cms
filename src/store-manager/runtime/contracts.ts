@@ -240,6 +240,13 @@ export type StoreManagerRuntimeEvent =
       occurrenceKey: string | null;
     })
   | (StoreManagerRuntimeEventBase & {
+      type: 'playbook_lineage';
+      playbookId: string | null;
+      playbookVersion: number | null;
+      stepId: string | null;
+      stepKind: string | null;
+    })
+  | (StoreManagerRuntimeEventBase & {
       type: 'notification_linkage';
       notificationId: string;
     })

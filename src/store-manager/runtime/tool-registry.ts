@@ -32,6 +32,7 @@ import type {
 import { policyDenied, errorResult } from './contracts';
 import type { StoreManagerRuntimePolicy } from './policy';
 import { hashCanonicalJson } from '../../shared/stable-id';
+import type { StoreManagerScopeKind } from '../../shared/schemas/store-manager-operations';
 import {
   gateToolExecution,
   ApprovalGateError,
@@ -165,6 +166,41 @@ export class StoreManagerToolRegistry {
   /** Tool name+version pairs the policy allowlist is built from (server-owned). */
   allowlistVersions(): readonly { name: string; version: number }[] {
     return this.all().map((adapter) => ({ name: adapter.name, version: adapter.version }));
+  }
+
+  /**
+   * Registry metadata seam for the playbook validator (Issue 6): a minimal,
+   * resolver-shaped view of one adapter so stored playbook definitions can be
+   * validated against the CURRENT registry without importing adapter internals.
+   */
+  playbookMetadata(name: string):
+    | {
+        name: string;
+        version: number;
+        riskClass: 'read' | 'proposal_write' | 'catalog_mutation' | 'network_filesystem_repair';
+        requiresApproval: boolean;
+        supportedScopes?: readonly StoreManagerScopeKind[];
+      }
+    | undefined {
+    const adapter = this.adapters.get(name);
+    if (!adapter) return undefined;
+    return {
+      name: adapter.name,
+      version: adapter.version,
+      riskClass: adapter.riskClass,
+      requiresApproval: adapter.requiresApproval,
+      supportedScopes: adapter.supportedScopes,
+    };
+  }
+
+  /**
+   * Playbook validator resolver over the default registry surface (Issue 6).
+   * Pure: no service/DB imports — validation of stored playbook definitions is
+   * fully registry-aware and fail-closed. `requestedVersion` is ignored by
+   * this single-version registry; drift is rejected by the validator instead.
+   */
+  playbookResolver(): (toolName: string, requestedVersion?: number) => ReturnType<StoreManagerToolRegistry['playbookMetadata']> {
+    return (toolName: string, _requestedVersion?: number) => this.playbookMetadata(toolName);
   }
 
   /**
