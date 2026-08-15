@@ -30,18 +30,19 @@ export function addAuditLog(entry: {
   return { id, ...entry, detailsJson: entry.detailsJson ?? null };
 }
 
-function listAuditLogs(workspaceId: string, limit = 50): AuditLogRow[] {
+/**
+ * Count audit-log rows for an action within one workspace.
+ *
+ * Additive telemetry helper (epic #46): e.g. `domain_release` operations
+ * (entityType `extractor_profile_domain`) are counted to measure
+ * extractor-profile domain unblocks. NOTE: the private `listAuditLogs`
+ * helper that previously sat right above this function was removed as dead
+ * code (never referenced) while touching this file.
+ */
+export function countAuditLogsByAction(workspaceId: string, action: string): number {
   const db = getDb();
-  const rows = db.query(
-    'SELECT * FROM audit_log WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?',
-  ).all(...[workspaceId, limit]) as Record<string, unknown>[];
-  return rows.map(row => ({
-    id: String(row.id),
-    workspaceId: String(row.workspace_id),
-    entityType: String(row.entity_type),
-    entityId: String(row.entity_id),
-    action: String(row.action),
-    message: String(row.message),
-    detailsJson: row.details_json ? String(row.details_json) : null,
-  }));
+  const row = db.query(
+    'SELECT COUNT(*) AS count FROM audit_log WHERE workspace_id = ? AND action = ?',
+  ).get(workspaceId, action) as { count: number } | undefined;
+  return row ? Number(row.count) : 0;
 }

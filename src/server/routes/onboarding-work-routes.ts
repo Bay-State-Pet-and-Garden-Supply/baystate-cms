@@ -26,6 +26,7 @@ import { getReviewState, markApproved } from '../../db/repositories/onboarding-r
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
 import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
+import { getOnboardingMetrics } from '../../onboarding/onboarding-telemetry';
 import { getWorker } from './onboarding-routes';import {
   ApproveItemsRequestSchema,
   WorkStateCategoryEnum,
@@ -305,6 +306,34 @@ route.post('/onboarding/domains/:domain/release', async (c) => {
   });
 
   return c.json({ domain, releasedItemIds: releasedIds, count: releasedIds.length, skippedCount });
+});
+
+/**
+ * GET /api/onboarding/metrics?batchId=<id>
+ * Epic #46 observability — batch-scoped (when batchId is given) or global
+ * onboarding success metrics, all derived from durable state at query time.
+ * Every metric carries a derivation honesty marker (exact | approximation |
+ * not_available).
+ */
+route.get('/onboarding/metrics', (c) => {
+  const workspace = findWorkspace();
+  if (!workspace) {
+    return c.json({ error: 'No active workspace loaded' }, 400);
+  }
+
+  const batchIdRaw = c.req.query('batchId');
+  if (batchIdRaw) {
+    const batch = findBatchById(batchIdRaw);
+    if (!batch || batch.workspaceId !== workspace.id) {
+      return c.json({ error: 'Batch not found' }, 404);
+    }
+  }
+
+  const telemetry = getOnboardingMetrics({
+    workspaceId: workspace.id,
+    batchId: batchIdRaw ?? undefined,
+  });
+  return c.json(telemetry);
 });
 
 export default route;
