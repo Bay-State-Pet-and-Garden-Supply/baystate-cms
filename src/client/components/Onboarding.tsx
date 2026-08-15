@@ -29,6 +29,7 @@ import { ViewHeader } from './common/ViewHeader';
 import { colors } from '../theme';
 import { OnboardingSettings } from './OnboardingSettings';
 import { PipelineBoard } from './PipelineBoard';
+import { BatchWorkspace } from './onboarding/BatchWorkspace';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { WeeklyReportModal } from './WeeklyReportModal';
 import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
@@ -1248,27 +1249,41 @@ export function Onboarding() {
     );
   }
 
-  // ─── VIEW 2: PIPELINE BOARD ───────────────────────────────────────────────
-
+  // ─── VIEW 2: BATCH WORKSPACE (default) or PIPELINE BOARD (diagnostics) ──
+  // Epic #46: the six-stage Kanban is no longer the primary operator model.
+  // The Batch Workspace is the default; the Pipeline Board remains available
+  // as a diagnostics escape hatch via `?board=pipeline` (separate query param
+  // so App.tsx's `view` routing is untouched).
   if (selectedBatchId && selectedBatch) {
+    const isPipelineDiagnostics =
+      new URLSearchParams(window.location.search).get('board') === 'pipeline';
     return (
       <>
-        <PipelineBoard
-          batchId={selectedBatchId}
-          batchName={selectedBatch.name}
-          onBack={handleBackToBatches}
-          cachedBrandSites={cachedBrandSites}
-          _catalogBrands={catalogBrands}
-          sourcingEngineEnabled={sourcingEngineEnabled}
-          onRefreshBrandSites={loadBrandSites}
-          onOpenProfileBuilder={(domain, item) => {
-            setProfileBuilderDomain(domain);
-            setProfileBuilderSeed({ url: item.sourceUrl ?? undefined, item });
-          }}
-          onOpenBrandSetup={() => {
-            setShowSettings(true);
-          }}
-        />
+        {isPipelineDiagnostics ? (
+          <PipelineBoard
+            batchId={selectedBatchId}
+            batchName={selectedBatch.name}
+            onBack={handleBackToBatches}
+            cachedBrandSites={cachedBrandSites}
+            _catalogBrands={catalogBrands}
+            sourcingEngineEnabled={sourcingEngineEnabled}
+            onRefreshBrandSites={loadBrandSites}
+            onOpenProfileBuilder={(domain, item) => {
+              setProfileBuilderDomain(domain);
+              setProfileBuilderSeed({ url: item.sourceUrl ?? undefined, item });
+            }}
+            onOpenBrandSetup={() => {
+              setShowSettings(true);
+            }}
+          />
+        ) : (
+          <BatchWorkspace
+            batchId={selectedBatchId}
+            batchName={selectedBatch.name}
+            onBack={handleBackToBatches}
+            onOpenSettings={() => setShowSettings(true)}
+          />
+        )}
         {profileBuilderDomain && (
           <ProfileBuilder
             mode="modal"

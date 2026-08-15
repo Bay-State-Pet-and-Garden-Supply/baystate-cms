@@ -113,6 +113,11 @@ export async function releaseDomainItems(domain: string): Promise<DomainReleaseR
  * Subscribe to batch SSE events (reuses the existing
  * `GET /api/onboarding/batches/:id/events` stream). Returns an unsubscribe
  * function. The stream is a firehose — consumers filter by event type.
+ *
+ * The server writes NAMED events (`event: item:status` etc.), so listeners
+ * are attached per event name plus a fallback `message` handler for any
+ * unnamed frames. Data payloads carry the full event object
+ * `{ type, batchId, itemId?, data }`.
  */
 export function subscribeBatchEvents(
   batchId: string,
@@ -128,6 +133,9 @@ export function subscribeBatchEvents(
     }
   };
   sse.onmessage = handler;
+  for (const eventName of ['item:status', 'batch:progress', 'batch:complete', 'batch:error']) {
+    sse.addEventListener(eventName, handler);
+  }
   sse.onerror = () => {
     // SSE reconnect is automatic; consumers refresh on demand.
   };
