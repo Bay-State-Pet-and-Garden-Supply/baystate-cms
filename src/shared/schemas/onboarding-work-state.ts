@@ -179,6 +179,23 @@ export const BatchWorkStateSchema = z.object({
 
 export type BatchWorkState = z.infer<typeof BatchWorkStateSchema>;
 
+/**
+ * Client-safe filter shape (mirrors the projection service's WorkStateFilters;
+ * invalid enum values fail closed server-side, never 500).
+ */
+export interface WorkStateFilters {
+  category?: WorkStateCategory;
+  /** Free-text search across UPC / name / brand. */
+  q?: string;
+  /** Normalized source host (official page items only). */
+  domain?: string;
+  sourceType?: 'official_page' | 'distributor_record';
+  cohortId?: string;
+  reviewState?: ReviewState;
+  limit?: number;
+  offset?: number;
+}
+
 export const EMPTY_WORK_STATE_COUNTS: WorkStateCounts = {
   processing: 0,
   needs_attention: 0,
