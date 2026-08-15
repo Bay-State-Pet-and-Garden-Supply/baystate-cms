@@ -1,28 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   getBatches,
   getBatch,
   deleteBatch,
-  getBatchItems,
-  startSourceDiscovery,
-  startExtraction,
-  startCuration,
-  promoteBatchItems,
   uploadSpreadsheet,
   createBatch,
-  getItemDetail,
-  updateItem,
-  retryItem,
-  selectSource,
-  setItemUrl,
-  skipItem,
   resolveBrandDomains,
   getBrandSites,
-  submitDecisions,
-  completeReviewStage,
-  bulkAssignBrand,
-  bulkSkipItems,
-  bulkRetryItems,
   getOnboardingCapabilities,
 } from '../onboarding-api';
 import { ViewHeader } from './common/ViewHeader';
@@ -32,10 +16,9 @@ import { PipelineBoard } from './PipelineBoard';
 import { BatchWorkspace } from './onboarding/BatchWorkspace';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { WeeklyReportModal } from './WeeklyReportModal';
-import type { OnboardingBatch, OnboardingItem, OnboardingSource, ExtractionData, CurationData, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
-import type { ClassificationProposal, ClassificationEvidence } from '../../shared/schemas/classification';
+import type { OnboardingBatch, ColumnMapping, BrandSite } from '../../shared/schemas/onboarding';
 import { matchExistingBrand } from '../../shared/brand-matcher';
-
+import { getOnboardingFeatureFlags } from '../onboarding-feature-flags';
 export function Onboarding() {
   const [showSettings, setShowSettings] = useState(false);
 
@@ -60,7 +43,6 @@ export function Onboarding() {
   const [batches, setBatches] = useState<OnboardingBatch[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [selectedBatch, setSelectedBatch] = useState<OnboardingBatch | null>(null);
-  const [items, setItems] = useState<OnboardingItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -93,43 +75,19 @@ export function Onboarding() {
   const [brandMappings, setBrandMappings] = useState<Record<string, string>>({});
   const [loadingBrands, setLoadingBrands] = useState(false);
 
-  // Item review/edit drawer states
-  const [reviewItemId, setReviewItemId] = useState<string | null>(null);
-  const [reviewItem, setReviewItem] = useState<OnboardingItem | null>(null);
-  const [reviewSources, setReviewSources] = useState<OnboardingSource[]>([]);
-  const [reviewExtraction, setReviewExtraction] = useState<ExtractionData | null>(null);
-  const [manualUrlInput, setManualUrlInput] = useState('');
-  const [editFields, setEditFields] = useState<Partial<ExtractionData>>({});
-  const [curationFields, setCurationFields] = useState<Partial<CurationData>>({});
-  const [storePages, setStorePages] = useState<string[]>([]);
-  const [classificationProposals, setClassificationProposals] = useState<ClassificationProposal[]>([]);
-  const [classificationEvidence, setClassificationEvidence] = useState<ClassificationEvidence[]>([]);
+  // Item review/edit drawer states were removed in the epic #46 operator
+  // rollover — per-item review lives in the Review workspace, bulk actions in
+  // the Batch Workspace, and the legacy Pipeline Board (diagnostics) owns its
+  // own drawer components.
   const [profileBuilderDomain, setProfileBuilderDomain] = useState<string | null>(null);
   const [profileBuilderSeed, setProfileBuilderSeed] = useState<{ url?: string; item?: any } | null>(null);
 
   // Custom Selector Editor state was removed; extractor profiles are
   // managed in OnboardingSettings ("Domain Extractor Profiles" section).
 
-  // Selection state for promotion
-  const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
-
   // Brand/Domain Management states
   const [cachedBrandSites, setCachedBrandSites] = useState<BrandSite[]>([]);
   const [catalogBrands, setCatalogBrands] = useState<string[]>([]);
-  const [activeEditBrandItem, setActiveEditBrandItem] = useState<OnboardingItem | null>(null);
-  const [editBrandName, setEditBrandName] = useState('');
-  const [editBrandDomain, setEditBrandDomain] = useState('');
-  const [propagateBrandName, setPropagateBrandName] = useState(false);
-  const [validationModalItems, setValidationModalItems] = useState<OnboardingItem[] | null>(null);
-  const [drawerBrandName, setDrawerBrandName] = useState('');
-  const [drawerBrandDomain, setDrawerBrandDomain] = useState('');
-  const [showBulkBrandModal, setShowBulkBrandModal] = useState(false);
-  const [bulkBrandName, setBulkBrandName] = useState('');
-  const [bulkBrandDomain, setBulkBrandDomain] = useState('');
-  const [lastSelectedItemId, setLastSelectedItemId] = useState<string | null>(null);
-
-  // SSE reference
-  const sseRef = useRef<EventSource | null>(null);
 
   const fetchBatchesList = async () => {
     try {
@@ -137,20 +95,6 @@ export function Onboarding() {
       setBatches(res.batches);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const loadStorePages = async () => {
-    try {
-      const res = await fetch('/api/pages');
-      if (res.ok) {
-        const data = await res.json();
-        if (data && Array.isArray(data.pages)) {
-          setStorePages(data.pages.map((p: any) => p.name));
-        }
-      }
-    } catch (err) {
-      console.error('Failed to load store pages:', err);
     }
   };
 
@@ -168,30 +112,16 @@ export function Onboarding() {
 
   useEffect(() => {
     fetchBatchesList();
-    loadStorePages();
     loadBrandSites();
-  }, []);
-
-  // SSE lifecycle handled by PipelineBoard now
-  useEffect(() => {
-    return () => {
-      if (sseRef.current) {
-        sseRef.current.close();
-      }
-    };
   }, []);
 
   const handleSelectBatch = async (batchId: string) => {
     setLoading(true);
     setError('');
     setSelectedBatchId(batchId);
-    setSelectedItemIds([]);
     try {
       const batchRes = await getBatch(batchId);
       setSelectedBatch(batchRes.batch);
-      
-      const itemsRes = await getBatchItems(batchId);
-      setItems(itemsRes.items);
       await loadBrandSites();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -201,13 +131,8 @@ export function Onboarding() {
   };
 
   const handleBackToBatches = () => {
-    if (sseRef.current) {
-      sseRef.current.close();
-      sseRef.current = null;
-    }
     setSelectedBatchId(null);
     setSelectedBatch(null);
-    setItems([]);
     fetchBatchesList();
   };
 
@@ -347,454 +272,14 @@ export function Onboarding() {
     }
   };
 
-  // ─── PIPELINE ACTIONS ─────────────────────────────────────────────────────────
-
-  const handleStartDiscovery = async () => {
-    if (!selectedBatchId) return;
-    
-    const itemsToValidate = selectedItemIds.length > 0
-      ? items.filter(item => selectedItemIds.includes(item.id))
-      : items;
-
-    // Check if any items are missing brands or domains
-    const invalidItems = itemsToValidate.filter(item => {
-      if (!item.brandHint || !item.brandHint.trim()) return true;
-      
-      const site = cachedBrandSites.find(b => b.brandName.toLowerCase() === item.brandHint!.toLowerCase().trim());
-      if (!site || !site.domain || !site.domain.trim()) return true;
-      
-      return false;
-    });
-
-    if (invalidItems.length > 0) {
-      setValidationModalItems(invalidItems);
-      return;
-    }
-
-    setLoading(true);
-    setError('');
-    try {
-      await startSourceDiscovery(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
-      setSelectedItemIds([]);
-      // Refresh details
-      await handleSelectBatch(selectedBatchId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSkipAndStartDiscovery = async () => {
-    if (!selectedBatchId || !validationModalItems) return;
-    setLoading(true);
-    setError('');
-    const itemsToSkip = [...validationModalItems];
-    setValidationModalItems(null);
-    try {
-      // Mark all invalid items as skipped
-      await Promise.all(
-        itemsToSkip.map(item => updateItem(item.id, { status: 'skipped' }))
-      );
-      
-      // Then start discovery
-      await startSourceDiscovery(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
-      setSelectedItemIds([]);
-      await handleSelectBatch(selectedBatchId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleStartExtraction = async () => {
-    if (!selectedBatchId) return;
-    setLoading(true);
-    setError('');
-    try {
-      await startExtraction(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
-      setSelectedItemIds([]);
-      // Refresh details
-      await handleSelectBatch(selectedBatchId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleStartCuration = async () => {
-    if (!selectedBatchId) return;
-    setLoading(true);
-    setError('');
-    try {
-      await startCuration(selectedBatchId, selectedItemIds.length > 0 ? selectedItemIds : undefined);
-      setSelectedItemIds([]);
-      handleSelectBatch(selectedBatchId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handlePromoteSelected = async () => {
-    if (!selectedBatchId || selectedItemIds.length === 0) return;
-    if (!confirm(`Are you sure you want to promote ${selectedItemIds.length} approved items as product drafts?`)) return;
-    setLoading(true);
-    setError('');
-    try {
-      const res = await promoteBatchItems(selectedBatchId, selectedItemIds);
-      alert(`Successfully promoted ${res.count} product drafts!`);
-      handleSelectBatch(selectedBatchId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ─── REVIEW/DRAWER FLOW ──────────────────────────────────────────────────────
-
-  const handleOpenReview = async (item: OnboardingItem) => {
-    setReviewItemId(item.id);
-    setReviewItem(item);
-    setManualUrlInput(item.sourceUrl || '');
-    setDrawerBrandName(item.brandHint ? item.brandHint : '');
-    const site = cachedBrandSites.find(b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim());
-    setDrawerBrandDomain(site?.domain || '');
-    setReviewSources([]);
-    setReviewExtraction(null);
-    setEditFields({});
-
-    if (item.curationData?.classificationProposals) {
-      setClassificationProposals(item.curationData.classificationProposals);
-      setClassificationEvidence(item.curationData.classificationEvidence || []);
-    } else {
-      setClassificationProposals([]);
-      setClassificationEvidence([]);
-    }
-
-    try {
-      const res = await getItemDetail(item.id);
-      setReviewSources(res.sources);
-      const extractionData = res.extraction ?? res.item?.extractionData ?? null;
-      if (extractionData) {
-        setReviewExtraction(extractionData);
-        setEditFields(extractionData);
-      }
-      if (res.item?.curationData) {
-        setCurationFields(res.item.curationData);
-      } else if (item.curationData) {
-        setCurationFields(item.curationData);
-      } else {
-        setCurationFields({
-          curatedTitle: extractionData?.title || item.name,
-          packagingOcrTitle: null,
-          titleSource: 'web',
-          suggestedPages: [],
-          suggestedProductType: null,
-        });
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const handleCloseReview = () => {
-    setReviewItemId(null);
-    setReviewItem(null);
-    setReviewSources([]);
-    setReviewExtraction(null);
-    setEditFields({});
-    setCurationFields({});
-    setClassificationProposals([]);
-    setClassificationEvidence([]);
-    setDrawerBrandName('');
-    setDrawerBrandDomain('');
-
-    // Refresh batch items list to show updated status
-    if (selectedBatchId) {
-      getBatchItems(selectedBatchId).then(res => setItems(res.items));
-    }
-  };
-
-  const handleSaveItemEdit = async () => {
-    if (!reviewItemId) return;
-
-    // Step 1: Save editable data WITHOUT setting legacy status 'ready'
-    try {
-      await updateItem(reviewItemId, {
-        extraction_data: editFields,
-        curation_data: { ...curationFields, classificationProposals, classificationEvidence }
-      });
-    } catch (err) {
-      alert('Error saving item data: ' + (err instanceof Error ? err.message : String(err)));
-      return;
-    }
-
-    // Step 2: Submit classification decisions, when this run has proposals.
-    try {
-      if (classificationProposals.length > 0) {
-        const decs = classificationProposals
-          .filter(p => p.status === 'accepted' || p.status === 'rejected' || p.status === 'deferred')
-          .map(p => ({ proposalId: p.id, decision: p.status as 'accepted' | 'rejected' | 'deferred', proposedValue: p.proposedValue, targetId: p.targetId }));
-        if (decs.length > 0) {
-          await submitDecisions(reviewItemId, decs);
-        }
-      }
-    } catch (err) {
-      // Edits are saved; decisions failed. The item remains in review for retry.
-      alert('Item edits were saved, but recording decisions failed: ' + (err instanceof Error ? err.message : String(err)) + ' — item remains in review.');
-      // Keep the drawer open so the user can retry. Refresh the batch list to
-      // reflect any edits that were saved before the decision failure.
-      if (selectedBatchId) {
-        getBatchItems(selectedBatchId).then(res => setItems(res.items));
-      }
-      return;
-    }
-
-    // Step 3: Complete review stage (separate from decisions)
-    try {
-      // Always ask the server to complete review. Classified items with missing
-      // decisions fail closed; legacy items use the server's explicit bypass.
-      await completeReviewStage([reviewItemId]);
-    } catch (err) {
-      alert('Item saved and decisions recorded, but completing review failed: ' +
-        (err instanceof Error ? err.message : String(err)) +
-        ' — use the "Complete Review" action in the pipeline board.');
-      // Fetch latest items to reflect saved changes
-      if (selectedBatchId) {
-        getBatchItems(selectedBatchId).then(res => setItems(res.items));
-      }
-      return;
-    }
-
-    // All three steps succeeded
-    alert('Item approved and saved to queue.');
-    handleCloseReview();
-  };
-
-  const handleSelectSourceUrl = async (source: OnboardingSource) => {
-    if (!reviewItemId) return;
-    try {
-      await selectSource(reviewItemId, source.id);
-      
-      // Refresh detail
-      const res = await getItemDetail(reviewItemId);
-      setReviewItem(res.item);
-      setManualUrlInput(res.item.sourceUrl || '');
-      setReviewSources(res.sources);
-      const extractionData = res.extraction ?? res.item?.extractionData ?? null;
-      if (extractionData) {
-        setReviewExtraction(extractionData);
-        setEditFields(extractionData);
-      }
-    } catch (err) {
-      alert('Failed to select source: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  };
-
-  const handleSetManualUrl = async () => {
-    if (!reviewItemId || !manualUrlInput.trim()) return;
-    try {
-      await setItemUrl(reviewItemId, manualUrlInput);
-      
-      // Refresh detail
-      const res = await getItemDetail(reviewItemId);
-      setReviewItem(res.item);
-      setReviewSources(res.sources);
-      const extractionData = res.extraction ?? res.item?.extractionData ?? null;
-      if (extractionData) {
-        setReviewExtraction(extractionData);
-        setEditFields(extractionData);
-      }
-
-      alert('Source URL set successfully.');
-    } catch (err) {
-      alert('Failed to set URL: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  };
-
-  const handleSkipItem = async (itemId: string) => {
-    try {
-      await skipItem(itemId);
-      handleCloseReview();
-    } catch (err) {
-      alert('Error skipping item: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  };
-
-  const handleRetryItem = async (itemId: string) => {
-    try {
-      await retryItem(itemId);
-      handleCloseReview();
-    } catch (err) {
-      alert('Error retrying item: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  };
-
-  const handleStartInlineEditBrand = (item: OnboardingItem, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setActiveEditBrandItem(item);
-    setEditBrandName(item.brandHint ? item.brandHint : '');
-    setPropagateBrandName(false);
-    
-    const site = cachedBrandSites.find(b => b.brandName.toLowerCase() === (item.brandHint || '').toLowerCase().trim());
-    setEditBrandDomain(site?.domain || '');
-  };
-
-  const handleSaveInlineBrandEdit = async (itemId: string) => {
-    setLoading(true);
-    try {
-      await updateItem(itemId, {
-        brandHint: editBrandName.trim() || null,
-        brandDomain: editBrandDomain.trim() || null,
-        propagateBrandName: propagateBrandName
-      });
-      if (selectedBatchId) {
-        const itemsRes = await getBatchItems(selectedBatchId);
-        setItems(itemsRes.items);
-        await loadBrandSites();
-      }
-      setActiveEditBrandItem(null);
-    } catch (err) {
-      alert('Failed to update brand: ' + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSaveDrawerBrand = async () => {
-    if (!reviewItemId) return;
-    try {
-      await updateItem(reviewItemId, {
-        brandHint: drawerBrandName.trim() || null,
-        brandDomain: drawerBrandDomain.trim() || null,
-      });
-      if (selectedBatchId) {
-        const itemsRes = await getBatchItems(selectedBatchId);
-        setItems(itemsRes.items);
-        await loadBrandSites();
-      }
-      alert('Brand details updated.');
-    } catch (err) {
-      alert('Failed to update brand: ' + (err instanceof Error ? err.message : String(err)));
-    }
-  };
-
-  const handleSaveBulkBrand = async () => {
-    if (!selectedBatchId || selectedItemIds.length === 0) return;
-    setLoading(true);
-    try {
-      await bulkAssignBrand(
-        selectedBatchId,
-        selectedItemIds,
-        bulkBrandName.trim() || null,
-        bulkBrandDomain.trim() || null
-      );
-      if (selectedBatchId) {
-        const itemsRes = await getBatchItems(selectedBatchId);
-        setItems(itemsRes.items);
-        await loadBrandSites();
-      }
-      setShowBulkBrandModal(false);
-      setBulkBrandName('');
-      setBulkBrandDomain('');
-      setSelectedItemIds([]);
-      alert(`Successfully assigned brand to ${selectedItemIds.length} items.`);
-    } catch (err) {
-      alert('Failed to bulk assign brand: ' + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleBulkSkip = async () => {
-    if (!selectedBatchId || selectedItemIds.length === 0) return;
-    if (!confirm(`Are you sure you want to skip the ${selectedItemIds.length} selected items?`)) return;
-    setLoading(true);
-    try {
-      await bulkSkipItems(selectedBatchId, selectedItemIds);
-      const itemsRes = await getBatchItems(selectedBatchId);
-      setItems(itemsRes.items);
-      setSelectedItemIds([]);
-      alert(`Successfully skipped ${selectedItemIds.length} items.`);
-    } catch (err) {
-      alert('Failed to bulk skip: ' + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleBulkRetry = async () => {
-    if (!selectedBatchId || selectedItemIds.length === 0) return;
-    if (!confirm(`Are you sure you want to reset/retry the ${selectedItemIds.length} selected items?`)) return;
-    setLoading(true);
-    try {
-      await bulkRetryItems(selectedBatchId, selectedItemIds);
-      const itemsRes = await getBatchItems(selectedBatchId);
-      setItems(itemsRes.items);
-      setSelectedItemIds([]);
-      alert(`Successfully reset ${selectedItemIds.length} items.`);
-    } catch (err) {
-      alert('Failed to bulk reset: ' + (err instanceof Error ? err.message : String(err)));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCheckboxClick = (item: OnboardingItem, e: React.MouseEvent<any>) => {
-    e.stopPropagation();
-
-    const isChecked = selectedItemIds.includes(item.id);
-    const targetChecked = !isChecked;
-
-    const selectableItems = items.filter(i => i.status !== 'promoted');
-    const currentIndex = selectableItems.findIndex(i => i.id === item.id);
-
-    if (e.shiftKey && lastSelectedItemId) {
-      const lastIndex = selectableItems.findIndex(i => i.id === lastSelectedItemId);
-      if (lastIndex !== -1) {
-        const start = Math.min(currentIndex, lastIndex);
-        const end = Math.max(currentIndex, lastIndex);
-        const rangeIds = selectableItems.slice(start, end + 1).map(i => i.id);
-
-        setSelectedItemIds(prev => {
-          if (targetChecked) {
-            return Array.from(new Set([...prev, ...rangeIds]));
-          } else {
-            return prev.filter(id => !rangeIds.includes(id));
-          }
-        });
-        setLastSelectedItemId(item.id);
-        return;
-      }
-    }
-
-    setSelectedItemIds(prev =>
-      targetChecked
-        ? [...prev, item.id]
-        : prev.filter(id => id !== item.id)
-    );
-    setLastSelectedItemId(item.id);
-  };
-
   // ─── LAYOUTS AND RENDERING ───────────────────────────────────────────────────
 
-  const renderBatchProgress = (batch: OnboardingBatch, itemsList?: OnboardingItem[]) => {
+  const renderBatchProgress = (batch: OnboardingBatch) => {
     const total = batch.totalItems || 1;
-    
-    let completed = batch.completedItems;
-    let failed = batch.failedItems;
-    let skipped = batch.skippedItems ?? 0;
-    
-    if (itemsList && itemsList.length > 0) {
-      completed = itemsList.filter(i => i.stage === 'promotion' && i.stageStatus === 'completed').length;
-      failed = itemsList.filter(i => i.stageStatus === 'failed').length;
-      skipped = itemsList.filter(i => i.stageStatus === 'skipped').length;
-    }
+
+    const completed = batch.completedItems;
+    const failed = batch.failedItems;
+    const skipped = batch.skippedItems ?? 0;
     
     const completedPercent = Math.round((completed / total) * 100);
     const failedPercent = Math.round((failed / total) * 100);
@@ -902,8 +387,8 @@ export function Onboarding() {
     return (
       <div style={styles.container}>
         <ViewHeader
-          title="Product Onboarding Pipeline"
-          description="Automated 5-stage product ingestion and curation pipeline for supplier catalog spreadsheets."
+          title="Product Onboarding"
+          description="Automatic acquisition — distributor lookups, official-site fallback, extraction, and family curation — with human review and bulk approval before export."
           actions={
             <>
               <button
@@ -1253,13 +738,70 @@ export function Onboarding() {
   // Epic #46: the six-stage Kanban is no longer the primary operator model.
   // The Batch Workspace is the default; the Pipeline Board remains available
   // as a diagnostics escape hatch via `?board=pipeline` (separate query param
-  // so App.tsx's `view` routing is untouched).
+  // so App.tsx's `view` routing is untouched), gated by the rollout flags
+  // (src/client/onboarding-feature-flags.ts).
   if (selectedBatchId && selectedBatch) {
-    const isPipelineDiagnostics =
+    const { batchWorkspaceEnabled, pipelineDiagnosticsEnabled } = getOnboardingFeatureFlags();
+    const forcePipelineDiagnostics =
       new URLSearchParams(window.location.search).get('board') === 'pipeline';
+    // Rollout guard: workspace disabled → Pipeline Board (unless the
+    // diagnostics surface itself is disabled, which leaves a clear message
+    // instead of a blank screen).
+    if (!batchWorkspaceEnabled && pipelineDiagnosticsEnabled) {
+      return (
+        <>
+          <div style={{ padding: 24 }}>
+            <button
+              onClick={handleBackToBatches}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: '#1d4ed8',
+                cursor: 'pointer',
+                fontWeight: 600,
+                fontSize: 14,
+              }}
+            >
+              ← All Batches
+            </button>
+            <PipelineBoard
+              batchId={selectedBatchId}
+              batchName={selectedBatch.name}
+              onBack={handleBackToBatches}
+              cachedBrandSites={cachedBrandSites}
+              _catalogBrands={catalogBrands}
+              sourcingEngineEnabled={sourcingEngineEnabled}
+              onRefreshBrandSites={loadBrandSites}
+              onOpenProfileBuilder={(domain, item) => {
+                setProfileBuilderDomain(domain);
+                setProfileBuilderSeed({ url: item.sourceUrl ?? undefined, item });
+              }}
+              onOpenBrandSetup={() => {
+                setShowSettings(true);
+              }}
+            />
+          </div>
+          {profileBuilderDomain && (
+            <ProfileBuilder
+              mode="modal"
+              initialDomain={profileBuilderDomain}
+              initialProductUrl={profileBuilderSeed?.url}
+              onCancel={() => { setProfileBuilderDomain(null); setProfileBuilderSeed(null); }}
+            />
+          )}
+        </>
+      );
+    }
     return (
       <>
-        {isPipelineDiagnostics ? (
+        {batchWorkspaceEnabled && !forcePipelineDiagnostics && pipelineDiagnosticsEnabled ? (
+          <BatchWorkspace
+            batchId={selectedBatchId}
+            batchName={selectedBatch.name}
+            onBack={handleBackToBatches}
+            onOpenSettings={() => setShowSettings(true)}
+          />
+        ) : pipelineDiagnosticsEnabled ? (
           <PipelineBoard
             batchId={selectedBatchId}
             batchName={selectedBatch.name}
@@ -1277,12 +819,13 @@ export function Onboarding() {
             }}
           />
         ) : (
-          <BatchWorkspace
-            batchId={selectedBatchId}
-            batchName={selectedBatch.name}
-            onBack={handleBackToBatches}
-            onOpenSettings={() => setShowSettings(true)}
-          />
+          <div style={{ padding: 24 }}>
+            <ViewHeader
+              title="Onboarding unavailable"
+              description="Both the Batch Workspace and the Pipeline diagnostics surface are disabled. Enable VITE_BATCH_WORKSPACE_ENABLED or VITE_PIPELINE_DIAGNOSTICS_ENABLED to use onboarding."
+            />
+            <button onClick={handleBackToBatches} style={styles.secondaryBtn}>← All Batches</button>
+          </div>
         )}
         {profileBuilderDomain && (
           <ProfileBuilder

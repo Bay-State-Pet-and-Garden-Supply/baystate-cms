@@ -1912,9 +1912,20 @@ export function PipelineBoard({
             >
               ← All Batches
             </button>
-            <h1 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: '#111827' }}>
-              Pipeline Board: <span style={{ color: '#2563eb' }}>{batchName}</span>
-            </h1>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <h1 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: '#111827' }}>
+                  Pipeline Board: <span style={{ color: '#2563eb' }}>{batchName}</span>
+                </h1>
+                <span style={{ fontSize: 11, fontWeight: 600, background: '#f3f4f6', border: '1px solid #d1d5db', color: '#4b5563', borderRadius: 999, padding: '2px 10px' }}>
+                  Diagnostics
+                </span>
+              </div>
+              <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>
+                Pipeline diagnostics — raw execution state (read-only guidance for troubleshooting).
+                The Batch Workspace is the recommended operator surface; manual stage actions here are admin tools.
+              </div>
+            </div>
           </div>
           <div style={{ fontSize: 12, color: '#6b7280' }}>
             {totalCards > 0 && (

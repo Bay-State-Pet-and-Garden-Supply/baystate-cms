@@ -230,6 +230,10 @@ export default defineConfig({
       'src/tests/unit/catalog-evidence-freshness.test.ts',
       // Epic #46 Phase 2 automation suite (bun:sqlite/bun:test — run under bun test via test:db)
       'src/tests/unit/onboarding-automation.test.ts',
+      // Epic #46 Phase 1/7/8 + telemetry DB suites (bun:sqlite — run under bun test via test:db)
+      'src/tests/unit/onboarding-work-state.test.ts',
+      'src/tests/unit/onboarding-review-state.test.ts',
+      'src/tests/unit/onboarding-telemetry.test.ts',
     ],
   },
 });
