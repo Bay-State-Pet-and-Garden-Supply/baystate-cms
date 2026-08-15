@@ -26,6 +26,7 @@
  */
 
 import { getApiKey } from '../db/repositories/api-key-repo';
+import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
 import {
   getLlmTaskConfig,
   type LlmProvider,
@@ -120,8 +121,26 @@ export const PROFILE_TASKS_REQUIRE_EXPLICIT: ReadonlySet<LlmTask> = new Set([
  * order (DeepSeek → OpenAI → Ollama) and is used when no task-
  * specific config is found AND the caller allows fallback.
  */
-/** @expected-unused */
 export function getLlmConfig(): LlmConfig | null {
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    const target = aiConfig.defaults.catalogTarget;
+    const conn = aiConfig.connections[target.connectionId];
+    if (conn && conn.enabled) {
+      const provider: LlmProvider = conn.id.includes('deepseek')
+        ? 'deepseek'
+        : (conn.id.includes('ollama') ? 'ollama' : 'openai');
+      return {
+        provider,
+        apiKey: conn.credential || 'enabled',
+        baseUrl: conn.baseUrl,
+        model: target.modelId,
+      };
+    }
+  } catch {
+    // Database fallback
+  }
+
   // Try DeepSeek first (recommended cloud)
   const deepseek = getApiKey('deepseek');
   if (deepseek && deepseek.api_key) {
@@ -387,7 +406,36 @@ export function getLlmConfigForTask(
     throw new ModelPolicyDeniedError('policy_absent', operation);
   }
 
-  // Non-protected tasks or calls without explicit modelPolicy: legacy resolution order.
+  // Non-protected tasks or calls without explicit modelPolicy: check AI Compute configuration first!
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    let workloadKey: keyof typeof aiConfig.workloads = 'discovery';
+    if (task.startsWith('profile_')) {
+      workloadKey = 'profileBuilder';
+    } else if (task === 'product_curation' || task === 'category_classification') {
+      workloadKey = 'curation';
+    } else if (task === 'brand_inference' || task === 'product_name_consolidation') {
+      workloadKey = 'discovery';
+    }
+
+    const route = aiConfig.workloads[workloadKey];
+    const target = route.primary === 'inherit' ? aiConfig.defaults.catalogTarget : route.primary;
+    const conn = aiConfig.connections[target.connectionId];
+    if (conn && conn.enabled) {
+      const provider: LlmProvider = conn.id.includes('deepseek')
+        ? 'deepseek'
+        : (conn.id.includes('ollama') ? 'ollama' : 'openai');
+      return {
+        provider,
+        apiKey: conn.credential || 'enabled',
+        baseUrl: conn.baseUrl,
+        model: target.modelId,
+      };
+    }
+  } catch {
+    // Continue to legacy task config check
+  }
+
   const taskConfig = getLlmTaskConfig(task);
   if (taskConfig) {
     const built = buildConfigFromTaskConfig(taskConfig);

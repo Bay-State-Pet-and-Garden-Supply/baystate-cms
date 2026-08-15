@@ -4,7 +4,7 @@
  * Provides a unified settings interface for:
  * 1. Provider Connections (Desktop LM Studio on LAN, OpenAI Cloud, Local Ollama).
  * 2. Privacy & Data Sharing Policies (This Device, Trusted LAN, Cloud).
- * 3. Workload Routing with Catalog Default inheritance.
+ * 3. Workload Routing with Catalog Default inheritance and per-workload fallbacks.
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
@@ -13,6 +13,8 @@ import {
   upsertAiConnection,
   deleteAiConnection,
   probeAiConnection,
+  testEphemeralAiConnection,
+  saveAiDefaults,
   upsertAiWorkloadRoute,
 } from '../onboarding-api';
 import type {
@@ -34,6 +36,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
   const [config, setConfig] = useState<AiRoutingConfig | null>(null);
   const [healthMap, setHealthMap] = useState<Record<string, ConnectionHealthReport>>({});
 
@@ -74,11 +77,13 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
   };
 
   const handleDeleteConnection = async (id: string) => {
-    if (!confirm(`Are you sure you want to delete connection "${id}"?`)) return;
+    if (!confirm(`Are you sure you want to delete connection "${id}"? Dependent workloads will be automatically reassigned.`)) return;
     try {
       await deleteAiConnection(id);
       await loadData();
       onChange?.();
+      setSuccessMsg(`Connection "${id}" deleted.`);
+      setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err: any) {
       setError(`Delete failed: ${err.message}`);
     }
@@ -90,7 +95,6 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
     setSaving(true);
     setError('');
     try {
-      // Auto-populate approvedHost from URL if missing
       const url = new URL(editingConnection.baseUrl);
       const connToSave: ProviderConnection = {
         ...editingConnection,
@@ -102,6 +106,8 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
       setEditingConnection(null);
       await loadData();
       onChange?.();
+      setSuccessMsg(`Connection "${connToSave.label}" saved successfully.`);
+      setTimeout(() => setSuccessMsg(''), 3000);
     } catch (err: any) {
       setError(`Save failed: ${err.message}`);
     } finally {
@@ -118,8 +124,9 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
       const conn: ProviderConnection = {
         ...editingConnection,
         approvedHost: editingConnection.approvedHost || url.hostname,
+        approvedPort: editingConnection.approvedPort || (url.port ? parseInt(url.port, 10) : undefined),
       };
-      const res = await upsertAiConnection(conn);
+      const res = await testEphemeralAiConnection(conn);
       setTestResult({
         success: res.health.status === 'online',
         message: res.health.status === 'online'
@@ -131,6 +138,19 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
       setTestResult({ success: false, message: `Test failed: ${err.message}` });
     } finally {
       setProbingId(null);
+    }
+  };
+
+  const handleDefaultsChange = async (newDefaults: AiRoutingConfig['defaults']) => {
+    if (!config) return;
+    setConfig({ ...config, defaults: newDefaults });
+    try {
+      await saveAiDefaults(newDefaults);
+      onChange?.();
+      setSuccessMsg('Defaults saved.');
+      setTimeout(() => setSuccessMsg(''), 2000);
+    } catch (err: any) {
+      setError(`Failed to save defaults: ${err.message}`);
     }
   };
 
@@ -149,6 +169,8 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
       await upsertAiWorkloadRoute(workload, updated);
       await loadData();
       onChange?.();
+      setSuccessMsg(`Workload "${workload}" updated.`);
+      setTimeout(() => setSuccessMsg(''), 2000);
     } catch (err: any) {
       setError(`Failed to update workload route: ${err.message}`);
     }
@@ -172,6 +194,19 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
           fontSize: '0.875rem',
         }}>
           {error}
+        </div>
+      )}
+
+      {successMsg && (
+        <div style={{
+          padding: '0.75rem 1rem',
+          background: '#DCFCE7',
+          border: '1px solid #86EFAC',
+          borderRadius: rounded.md,
+          color: '#15803D',
+          fontSize: '0.875rem',
+        }}>
+          {successMsg}
         </div>
       )}
 
@@ -245,7 +280,6 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                  {/* Status indicator */}
                   <span
                     style={{
                       width: '10px',
@@ -271,6 +305,11 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                       }}>
                         {conn.trustZone.replace('_', ' ').toUpperCase()}
                       </span>
+                      {(conn as any).hasCredential && (
+                        <span style={{ fontSize: '0.6875rem', color: colors.mulchBrown }}>
+                          🔒 Auth Configured
+                        </span>
+                      )}
                     </div>
                     <div style={{ fontSize: '0.75rem', color: colors.mulchBrown, marginTop: '0.125rem', fontFamily: fonts.mono }}>
                       {conn.baseUrl} {conn.approvedHost ? `(Pinned: ${conn.approvedHost})` : ''}
@@ -370,10 +409,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                     checked={config?.defaults.textDataSharing === p}
                     onChange={() => {
                       if (config) {
-                        setConfig({
-                          ...config,
-                          defaults: { ...config.defaults, textDataSharing: p },
-                        });
+                        handleDefaultsChange({ ...config.defaults, textDataSharing: p });
                       }
                     }}
                   />
@@ -400,10 +436,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                     checked={config?.defaults.imageDataSharing === p}
                     onChange={() => {
                       if (config) {
-                        setConfig({
-                          ...config,
-                          defaults: { ...config.defaults, imageDataSharing: p },
-                        });
+                        handleDefaultsChange({ ...config.defaults, imageDataSharing: p });
                       }
                     }}
                   />
@@ -451,12 +484,9 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                         const connId = e.target.value;
                         const models = healthMap[connId]?.models ?? [];
                         const modelId = models[0]?.id ?? config.defaults.catalogTarget.modelId;
-                        setConfig({
-                          ...config,
-                          defaults: {
-                            ...config.defaults,
-                            catalogTarget: { connectionId: connId, modelId },
-                          },
+                        handleDefaultsChange({
+                          ...config.defaults,
+                          catalogTarget: { connectionId: connId, modelId },
                         });
                       }}
                       style={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
@@ -466,12 +496,9 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                     <input
                       type="text"
                       value={config.defaults.catalogTarget.modelId}
-                      onChange={(e) => setConfig({
-                        ...config,
-                        defaults: {
-                          ...config.defaults,
-                          catalogTarget: { ...config.defaults.catalogTarget, modelId: e.target.value },
-                        },
+                      onChange={(e) => handleDefaultsChange({
+                        ...config.defaults,
+                        catalogTarget: { ...config.defaults.catalogTarget, modelId: e.target.value },
                       })}
                       style={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
                     />
@@ -484,12 +511,9 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                       value={config.defaults.catalogFallback?.connectionId ?? ''}
                       onChange={(e) => {
                         const connId = e.target.value;
-                        setConfig({
-                          ...config,
-                          defaults: {
-                            ...config.defaults,
-                            catalogFallback: connId ? { connectionId: connId, modelId: 'gpt-4o-mini' } : null,
-                          },
+                        handleDefaultsChange({
+                          ...config.defaults,
+                          catalogFallback: connId ? { connectionId: connId, modelId: 'gpt-4o-mini' } : null,
                         });
                       }}
                       style={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
@@ -497,6 +521,20 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                       <option value="">None (Heuristic / Fail)</option>
                       {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
                     </select>
+                    {config.defaults.catalogFallback && (
+                      <input
+                        type="text"
+                        value={config.defaults.catalogFallback.modelId}
+                        onChange={(e) => handleDefaultsChange({
+                          ...config.defaults,
+                          catalogFallback: {
+                            ...config.defaults.catalogFallback!,
+                            modelId: e.target.value,
+                          },
+                        })}
+                        style={{ flex: 1, padding: '0.375rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -511,19 +549,20 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
               { id: 'storeManager', label: 'Store Manager Assistant', hint: 'Agentic assistant with native tool-calling.' },
             ].map(w => {
               const route = config.workloads[w.id as keyof typeof config.workloads];
-              const isInherit = route.primary === 'inherit';
+              const isPrimaryInherit = route.primary === 'inherit';
+              const isFallbackInherit = route.fallback === 'inherit';
 
               return (
                 <div
                   key={w.id}
                   style={{
-                    padding: '0.75rem 1rem',
+                    padding: '1rem',
                     background: colors.feedBagCream,
                     borderRadius: rounded.md,
                     border: `1px solid ${colors.cardBorder}`,
                   }}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.5rem' }}>
                     <div>
                       <span style={{ fontWeight: 600, fontSize: '0.875rem', color: colors.ledgerCharcoal }}>
                         {w.label}
@@ -532,36 +571,78 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                         {w.hint}
                       </p>
                     </div>
+                  </div>
 
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                      <select
-                        value={isInherit ? 'inherit' : (route.primary as ModelTarget).connectionId}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (val === 'inherit') {
-                            handleWorkloadChange(w.id, 'primary', 'inherit');
-                          } else {
-                            handleWorkloadChange(w.id, 'primary', { connectionId: val, modelId: 'qwen3.8:27b' });
-                          }
-                        }}
-                        style={{ padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
-                      >
-                        <option value="inherit">Inherit Catalog Default</option>
-                        {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
-                      </select>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', fontSize: '0.8125rem', marginTop: '0.5rem' }}>
+                    {/* Primary */}
+                    <div>
+                      <label style={{ display: 'block', color: colors.mulchBrown, fontSize: '0.75rem', marginBottom: '0.25rem' }}>Primary</label>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <select
+                          value={isPrimaryInherit ? 'inherit' : (route.primary as ModelTarget).connectionId}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === 'inherit') {
+                              handleWorkloadChange(w.id, 'primary', 'inherit');
+                            } else {
+                              handleWorkloadChange(w.id, 'primary', { connectionId: val, modelId: 'qwen3.8:27b' });
+                            }
+                          }}
+                          style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                        >
+                          <option value="inherit">Inherit Catalog Default</option>
+                          {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+                        </select>
+                        {!isPrimaryInherit && (
+                          <input
+                            type="text"
+                            value={(route.primary as ModelTarget).modelId}
+                            onChange={(e) => handleWorkloadChange(w.id, 'primary', {
+                              ...(route.primary as ModelTarget),
+                              modelId: e.target.value,
+                            })}
+                            placeholder="Model ID"
+                            style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                          />
+                        )}
+                      </div>
+                    </div>
 
-                      {!isInherit && (
-                        <input
-                          type="text"
-                          value={(route.primary as ModelTarget).modelId}
-                          onChange={(e) => handleWorkloadChange(w.id, 'primary', {
-                            ...(route.primary as ModelTarget),
-                            modelId: e.target.value,
-                          })}
-                          placeholder="Model ID"
-                          style={{ width: '180px', padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
-                        />
-                      )}
+                    {/* Fallback */}
+                    <div>
+                      <label style={{ display: 'block', color: colors.mulchBrown, fontSize: '0.75rem', marginBottom: '0.25rem' }}>Fallback</label>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <select
+                          value={isFallbackInherit ? 'inherit' : (route.fallback ? (route.fallback as ModelTarget).connectionId : '')}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val === 'inherit') {
+                              handleWorkloadChange(w.id, 'fallback', 'inherit');
+                            } else if (val === '') {
+                              handleWorkloadChange(w.id, 'fallback', null);
+                            } else {
+                              handleWorkloadChange(w.id, 'fallback', { connectionId: val, modelId: 'gpt-4o-mini' });
+                            }
+                          }}
+                          style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                        >
+                          <option value="inherit">Inherit Catalog Fallback</option>
+                          <option value="">None (Heuristic / Fail)</option>
+                          {connections.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+                        </select>
+                        {!isFallbackInherit && route.fallback && (
+                          <input
+                            type="text"
+                            value={(route.fallback as ModelTarget).modelId}
+                            onChange={(e) => handleWorkloadChange(w.id, 'fallback', {
+                              ...(route.fallback as ModelTarget),
+                              modelId: e.target.value,
+                            })}
+                            placeholder="Fallback Model ID"
+                            style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
+                          />
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -641,13 +722,13 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
 
               <div>
                 <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 600, color: colors.ledgerCharcoal, marginBottom: '0.25rem' }}>
-                  API Key / Bearer Token (Optional for authenticated LAN / Cloud)
+                  API Key / Bearer Token {(editingConnection as any).hasCredential ? '(Configured — leave blank to keep existing)' : '(Optional)'}
                 </label>
                 <input
                   type="password"
                   value={editingConnection.credential ?? ''}
                   onChange={(e) => setEditingConnection({ ...editingConnection, credential: e.target.value })}
-                  placeholder="Bearer token or leave blank if none"
+                  placeholder={(editingConnection as any).hasCredential ? '••••••••••••' : 'Enter API key or leave blank'}
                   style={{ width: '100%', padding: '0.5rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
                 />
               </div>

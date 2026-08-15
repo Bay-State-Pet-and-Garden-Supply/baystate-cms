@@ -848,6 +848,26 @@ export async function probeAiConnection(id: string): Promise<{
   });
 }
 
+export async function testEphemeralAiConnection(
+  connection: import('../ai/provider-connections').ProviderConnection,
+): Promise<{
+  health: import('../ai/connection-health-monitor').ConnectionHealthReport;
+}> {
+  return request('/settings/ai/connections/test-ephemeral', {
+    method: 'POST',
+    body: JSON.stringify(connection),
+  });
+}
+
+export async function saveAiDefaults(
+  defaults: import('../ai/provider-connections').AiRoutingConfig['defaults'],
+): Promise<{ success: boolean }> {
+  return request('/settings/ai/defaults', {
+    method: 'PUT',
+    body: JSON.stringify(defaults),
+  });
+}
+
 export async function upsertAiWorkloadRoute(
   workload: string,
   route: import('../ai/provider-connections').WorkloadRoute,

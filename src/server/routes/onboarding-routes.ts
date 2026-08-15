@@ -102,10 +102,16 @@ import {
   listProviderConnections,
   deleteProviderConnection,
   upsertWorkloadRoute,
+  saveAiRoutingDefaults,
   getFullAiRoutingConfig,
 } from '../../db/repositories/provider-connection-repo';
 import { probeConnectionHealth } from '../../ai/connection-health-monitor';
-import { validateConnectionTrustZone, type ProviderConnection, type WorkloadRoute } from '../../ai/provider-connections';
+import {
+  validateConnectionTrustZone,
+  toClientProviderConnection,
+  type ProviderConnection,
+  type WorkloadRoute,
+} from '../../ai/provider-connections';
 import {
   listAllProfileGenerations,
   listProfileGenerationsByDomain,
@@ -2998,7 +3004,7 @@ route.delete('/onboarding/settings/llm-task-configs/:task', (c) => {
 
 /**
  * GET /api/onboarding/settings/ai/config
- * Return full AI routing config and live health reports for all connections.
+ * Return full AI routing config (sanitized/redacted) and live health reports for all connections.
  */
 route.get('/onboarding/settings/ai/config', async (c) => {
   const config = getFullAiRoutingConfig();
@@ -3013,7 +3019,45 @@ route.get('/onboarding/settings/ai/config', async (c) => {
     healthMap[r.connectionId] = r;
   }
 
-  return c.json({ config, health: healthMap });
+  // Redact credentials from client serialization
+  const sanitizedConnections: Record<string, any> = {};
+  for (const conn of connections) {
+    sanitizedConnections[conn.id] = toClientProviderConnection(conn);
+  }
+
+  return c.json({
+    config: {
+      ...config,
+      connections: sanitizedConnections,
+    },
+    health: healthMap,
+  });
+});
+
+/**
+ * PUT /api/onboarding/settings/ai/defaults
+ * Update Catalog Default target, fallback, and Privacy data sharing defaults.
+ */
+route.put('/onboarding/settings/ai/defaults', async (c) => {
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  if (!body?.catalogTarget?.connectionId || !body?.catalogTarget?.modelId) {
+    return c.json({ error: 'Missing catalogTarget' }, 400);
+  }
+
+  saveAiRoutingDefaults({
+    catalogTarget: body.catalogTarget,
+    catalogFallback: body.catalogFallback ?? null,
+    textDataSharing: body.textDataSharing ?? 'cloud_allowed',
+    imageDataSharing: body.imageDataSharing ?? 'trusted_lan_allowed',
+  });
+
+  return c.json({ success: true });
 });
 
 /**
@@ -3034,7 +3078,7 @@ route.put('/onboarding/settings/ai/connections/:id', async (c) => {
     label: body.label || id,
     transport: body.transport || 'openai-compatible',
     baseUrl: body.baseUrl,
-    credential: body.credential ?? null,
+    credential: body.credential ?? undefined,
     trustZone: body.trustZone || 'this_device',
     approvedHost: body.approvedHost,
     approvedPort: body.approvedPort,
@@ -3051,7 +3095,52 @@ route.put('/onboarding/settings/ai/connections/:id', async (c) => {
 
   upsertProviderConnection(conn);
   const health = await probeConnectionHealth(conn, true);
-  return c.json({ success: true, connection: conn, health });
+  return c.json({ success: true, connection: toClientProviderConnection(conn), health });
+});
+
+/**
+ * POST /api/onboarding/settings/ai/connections/test-ephemeral
+ * Test an unsaved connection payload in-memory without mutating the database.
+ */
+route.post('/onboarding/settings/ai/connections/test-ephemeral', async (c) => {
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const conn: ProviderConnection = {
+    id: body.id || 'test-ephemeral',
+    label: body.label || 'Test Connection',
+    transport: body.transport || 'openai-compatible',
+    baseUrl: body.baseUrl,
+    credential: body.credential ?? undefined,
+    trustZone: body.trustZone || 'this_device',
+    approvedHost: body.approvedHost,
+    approvedPort: body.approvedPort,
+    enabled: true,
+    connectTimeoutMs: body.connectTimeoutMs ?? 2000,
+    inferenceTimeoutMs: body.inferenceTimeoutMs ?? 30000,
+  };
+
+  try {
+    validateConnectionTrustZone(conn);
+  } catch (err: any) {
+    return c.json({
+      health: {
+        connectionId: conn.id,
+        status: 'misconfigured',
+        latencyMs: 0,
+        models: [],
+        lastChecked: new Date().toISOString(),
+        errorMessage: `Validation failed: ${err.message}`,
+      },
+    });
+  }
+
+  const health = await probeConnectionHealth(conn, true);
+  return c.json({ health });
 });
 
 /**
@@ -3066,7 +3155,7 @@ route.delete('/onboarding/settings/ai/connections/:id', (c) => {
 
 /**
  * POST /api/onboarding/settings/ai/connections/:id/probe
- * Force refresh health and model list for a connection.
+ * Force refresh health and model list for an existing connection.
  */
 route.post('/onboarding/settings/ai/connections/:id/probe', async (c) => {
   const id = c.req.param('id');

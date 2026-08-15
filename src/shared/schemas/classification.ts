@@ -235,8 +235,8 @@ export const ModelPolicyConfigSchema = z.object({
       }),
     )
     .default(() => ({})),
-  imageDataSharing: z.enum(['local_only', 'cloud_allowed']).default('local_only'),
-  textDataSharing: z.enum(['local_only', 'cloud_allowed']).default('local_only'),
+  imageDataSharing: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']).default('local_only'),
+  textDataSharing: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']).default('local_only'),
 });
 
 export type ModelPolicyConfig = z.infer<typeof ModelPolicyConfigSchema>;
@@ -246,8 +246,8 @@ export type ModelPolicyConfig = z.infer<typeof ModelPolicyConfigSchema>;
  * Image policy defaults to local-only for privacy.
  */
 export const DataSharingConfigSchema = z.object({
-  imagePolicy: z.enum(['local_only', 'cloud_allowed']).default('local_only'),
-  textPolicy: z.enum(['local_only', 'cloud_allowed']).default('local_only'),
+  imagePolicy: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']).default('local_only'),
+  textPolicy: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']).default('local_only'),
   sensitiveDataFiltering: z.literal(true).default(true),
   retentionDays: z.number().int().positive().default(90),
 });
@@ -567,8 +567,8 @@ export const ModelPolicyConfigV2Schema = z.object({
     fallbackProvider: z.string().nullable(),
     fallbackModel: z.string().nullable(),
   }).strict()),
-  imageDataSharing: z.enum(['local_only', 'cloud_allowed']),
-  textDataSharing: z.enum(['local_only', 'cloud_allowed']),
+  imageDataSharing: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']),
+  textDataSharing: z.enum(['local_only', 'this_device_only', 'trusted_lan_allowed', 'cloud_allowed']),
   mlFeatures: MlFeaturesPolicySchema,
 }).strict();
 export type ModelPolicyConfigV2 = z.infer<typeof ModelPolicyConfigV2Schema>;

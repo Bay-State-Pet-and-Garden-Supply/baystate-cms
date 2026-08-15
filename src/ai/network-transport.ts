@@ -1,8 +1,8 @@
 /**
  * Resilient Network Transport for AI Inference.
  *
- * Implements split connect vs. inference timeouts, error categorization
- * (Availability vs Misconfiguration vs Policy Denial), and OpenAI-compatible dispatch.
+ * Implements strict redirect blocking (anti-SSRF), error categorization
+ * (Availability vs Misconfiguration vs Policy Denial), whole-request timeouts, and OpenAI-compatible dispatch.
  */
 
 import type { ProviderConnection } from './provider-connections';
@@ -28,7 +28,7 @@ export abstract class AiTransportError extends Error {
 }
 
 /**
- * Thrown when a remote machine is unreachable (connection refused, connect timeout, 502/503).
+ * Thrown when a remote machine is unreachable (connection refused, timeout, 502/503).
  * Triggers clean, immediate failover to configured fallbacks.
  */
 export class AiAvailabilityError extends AiTransportError {
@@ -54,7 +54,7 @@ export class AiMisconfigurationError extends AiTransportError {
 }
 
 /**
- * Thrown when a request violates Trust Zone or data-sharing governance.
+ * Thrown when a request violates Trust Zone, redirect rules, or data-sharing governance.
  * FAILS CLOSED immediately. Never falls back.
  */
 export class AiPolicyDeniedError extends AiTransportError {
@@ -69,77 +69,61 @@ export class AiPolicyDeniedError extends AiTransportError {
 // ─── Network Transport ────────────────────────────────────────────────────────
 
 export interface FetchWithDeadlinesOptions extends RequestInit {
-  connectTimeoutMs?: number;
-  inferenceTimeoutMs?: number;
+  timeoutMs?: number;
 }
 
 /**
- * Executes a fetch request with separate connect and inference deadlines.
+ * Executes a fetch request with strict redirect blocking (anti-SSRF) and whole-request timeout.
  */
 export async function fetchWithDeadlines(
   url: string,
   options: FetchWithDeadlinesOptions = {},
 ): Promise<Response> {
   const {
-    connectTimeoutMs = 2000,
-    inferenceTimeoutMs = 60000,
+    timeoutMs = 60000,
     signal: callerSignal,
     ...fetchInit
   } = options;
 
   const controller = new AbortController();
 
-  // Combine caller signal with our internal abort controller
   if (callerSignal) {
     callerSignal.addEventListener('abort', () => controller.abort(callerSignal.reason));
   }
 
-  // Phase 1: Connect timeout
-  let connectTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-    controller.abort(new Error(`Connect timeout after ${connectTimeoutMs}ms (Host offline or unreachable)`));
-  }, connectTimeoutMs);
-
-  // Phase 2: Total inference timeout
-  const inferenceTimer = setTimeout(() => {
-    controller.abort(new Error(`Inference timeout after ${inferenceTimeoutMs}ms`));
-  }, inferenceTimeoutMs);
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Request timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
 
   try {
-    const responsePromise = fetch(url, {
+    const response = await fetch(url, {
       ...fetchInit,
+      redirect: 'manual', // Strictly reject HTTP redirects to prevent trust-zone / SSRF bypass
       signal: controller.signal,
     });
 
-    // Clear connect timer as soon as response headers arrive
-    const response = await responsePromise;
-    if (connectTimer) {
-      clearTimeout(connectTimer);
-      connectTimer = null;
-    }
-
-    // Clean up inference timer when the body is handled later
-    response.clone(); // verify valid response
-    clearTimeout(inferenceTimer);
-    return response;
-  } catch (err: any) {
-    if (connectTimer) clearTimeout(connectTimer);
-    clearTimeout(inferenceTimer);
-
-    const msg = String(err?.message || '');
-    const isConnectTimeout = msg.includes('Connect timeout');
-    const isConnRefused = msg.includes('ECONNREFUSED') || msg.includes('fetch failed') || msg.includes('Connection refused');
-
-    if (isConnectTimeout || isConnRefused) {
-      throw new AiAvailabilityError(
-        `Host unreachable at ${url}: ${isConnectTimeout ? `Connect timed out (${connectTimeoutMs}ms)` : 'Connection refused'}`,
+    // Check for HTTP 3xx Redirects
+    if (response.status >= 300 && response.status < 400) {
+      throw new AiPolicyDeniedError(
+        `HTTP ${response.status} redirect from ${url} rejected: AI endpoints forbid redirects to protect data-sharing boundaries.`,
       );
     }
 
-    if (msg.includes('Inference timeout')) {
-      throw new AiAvailabilityError(`Inference request timed out after ${inferenceTimeoutMs}ms at ${url}`);
+    return response;
+  } catch (err: any) {
+    const msg = String(err?.message || '');
+    const isTimeout = msg.includes('timed out') || err?.name === 'AbortError' || err?.name === 'TimeoutError';
+    const isConnRefused = msg.includes('ECONNREFUSED') || msg.includes('fetch failed') || msg.includes('Connection refused');
+
+    if (isTimeout || isConnRefused) {
+      throw new AiAvailabilityError(
+        `Host unreachable at ${url}: ${isTimeout ? `Timed out (${timeoutMs}ms)` : 'Connection refused'}`,
+      );
     }
 
     throw err;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -211,13 +195,11 @@ export async function executeOpenAiChat(
       method: 'POST',
       headers,
       body: JSON.stringify(bodyPayload),
-      connectTimeoutMs: conn.connectTimeoutMs ?? 2000,
-      inferenceTimeoutMs: conn.inferenceTimeoutMs ?? 60000,
+      timeoutMs: conn.inferenceTimeoutMs ?? 60000,
       signal: options.signal,
     });
   } catch (err: any) {
     if (err instanceof AiTransportError) {
-      // Re-throw typed errors with connection/model context
       throw new (err.constructor as any)(err.message, conn.id, modelId, err.statusCode);
     }
     throw new AiAvailabilityError(

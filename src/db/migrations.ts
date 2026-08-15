@@ -110,9 +110,21 @@ export function runMigrations(): void {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS ai_routing_defaults (
+        id TEXT PRIMARY KEY DEFAULT 'current',
+        catalog_primary_connection_id TEXT NOT NULL,
+        catalog_primary_model_id TEXT NOT NULL,
+        catalog_fallback_connection_id TEXT,
+        catalog_fallback_model_id TEXT,
+        text_data_sharing TEXT NOT NULL DEFAULT 'cloud_allowed',
+        image_data_sharing TEXT NOT NULL DEFAULT 'trusted_lan_allowed',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
   } catch (e) {
-    console.error('[Migrations] Failed to create provider_connections / ai_workload_routes tables:', e);
+    console.error('[Migrations] Failed to create provider_connections / ai_workload_routes / ai_routing_defaults tables:', e);
   }
 
 

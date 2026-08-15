@@ -1,5 +1,8 @@
 /**
  * SQLite Repository for Provider Connections and Workload Routes.
+ *
+ * Single authoritative persistence for AI Compute configuration:
+ * provider connections, default catalog/privacy settings, and workload routing.
  */
 
 import { getDb } from '../connection';
@@ -13,10 +16,7 @@ import type {
   DataSharingPolicy,
   TerminalBehavior,
 } from '../../ai/provider-connections';
-import {
-  DEFAULT_BUILTIN_CONNECTIONS,
-  buildEffectiveRoutingConfig,
-} from '../../ai/provider-connections';
+import { DEFAULT_BUILTIN_CONNECTIONS } from '../../ai/provider-connections';
 
 interface DbProviderConnection {
   id: string;
@@ -47,9 +47,126 @@ interface DbWorkloadRoute {
   updated_at: string;
 }
 
+interface DbRoutingDefaults {
+  id: string;
+  catalog_primary_connection_id: string;
+  catalog_primary_model_id: string;
+  catalog_fallback_connection_id: string | null;
+  catalog_fallback_model_id: string | null;
+  text_data_sharing: string;
+  image_data_sharing: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Ensures initial default connections, routes, and defaults exist in the DB.
+ */
+function ensureSeededDefaults(): void {
+  const db = getDb();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_connections (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      transport TEXT NOT NULL DEFAULT 'openai-compatible',
+      base_url TEXT NOT NULL,
+      credential TEXT,
+      trust_zone TEXT NOT NULL DEFAULT 'this_device',
+      approved_host TEXT NOT NULL,
+      approved_port INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      connect_timeout_ms INTEGER NOT NULL DEFAULT 2000,
+      inference_timeout_ms INTEGER NOT NULL DEFAULT 60000,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_workload_routes (
+      workload TEXT PRIMARY KEY,
+      primary_connection_id TEXT NOT NULL,
+      primary_model_id TEXT NOT NULL,
+      fallback_connection_id TEXT,
+      fallback_model_id TEXT,
+      text_data_sharing TEXT,
+      image_data_sharing TEXT,
+      terminal_behavior TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_routing_defaults (
+      id TEXT PRIMARY KEY DEFAULT 'current',
+      catalog_primary_connection_id TEXT NOT NULL,
+      catalog_primary_model_id TEXT NOT NULL,
+      catalog_fallback_connection_id TEXT,
+      catalog_fallback_model_id TEXT,
+      text_data_sharing TEXT NOT NULL DEFAULT 'cloud_allowed',
+      image_data_sharing TEXT NOT NULL DEFAULT 'trusted_lan_allowed',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  const count = db.query('SELECT COUNT(*) as count FROM provider_connections').get() as { count: number };
+  if (count.count === 0) {
+    const now = new Date().toISOString();
+    const insertConn = db.query(`
+      INSERT OR IGNORE INTO provider_connections (
+        id, label, transport, base_url, credential, trust_zone,
+        approved_host, approved_port, enabled, connect_timeout_ms,
+        inference_timeout_ms, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const conn of Object.values(DEFAULT_BUILTIN_CONNECTIONS)) {
+      insertConn.run(
+        conn.id,
+        conn.label,
+        conn.transport,
+        conn.baseUrl,
+        conn.credential ?? null,
+        conn.trustZone,
+        conn.approvedHost || 'localhost',
+        conn.approvedPort ?? null,
+        conn.enabled ? 1 : 0,
+        conn.connectTimeoutMs ?? 2000,
+        conn.inferenceTimeoutMs ?? 60000,
+        now,
+        now,
+      );
+    }
+  }
+
+  const defaultsRow = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current');
+  if (!defaultsRow) {
+    const now = new Date().toISOString();
+    db.query(`
+      INSERT OR IGNORE INTO ai_routing_defaults (
+        id, catalog_primary_connection_id, catalog_primary_model_id,
+        catalog_fallback_connection_id, catalog_fallback_model_id,
+        text_data_sharing, image_data_sharing, created_at, updated_at
+      ) VALUES ('current', 'desktop-lmstudio', 'qwen3.8:27b', 'openai-cloud', 'gpt-4o-mini', 'cloud_allowed', 'trusted_lan_allowed', ?, ?)
+    `).run(now, now);
+  }
+}
+
 export function upsertProviderConnection(conn: ProviderConnection): void {
   const db = getDb();
   const now = new Date().toISOString();
+
+  // If incoming credential is omitted or redacted, preserve the existing credential
+  const existing = getProviderConnection(conn.id);
+  const credentialToSave = (conn.credential === undefined || conn.credential === null || conn.credential === '[REDACTED]')
+    ? (existing?.credential ?? null)
+    : (conn.credential.trim() === '' ? null : conn.credential);
+
+  let approvedHost = conn.approvedHost;
+  let approvedPort = conn.approvedPort;
+  try {
+    const url = new URL(conn.baseUrl);
+    approvedHost = approvedHost || url.hostname;
+    approvedPort = approvedPort ?? (url.port ? parseInt(url.port, 10) : (url.protocol === 'https:' ? 443 : 80));
+  } catch { /* use existing */ }
 
   db.query(`
     INSERT INTO provider_connections (
@@ -74,10 +191,10 @@ export function upsertProviderConnection(conn: ProviderConnection): void {
     conn.label,
     conn.transport,
     conn.baseUrl,
-    conn.credential ?? null,
+    credentialToSave,
     conn.trustZone,
-    conn.approvedHost || (new URL(conn.baseUrl).hostname),
-    conn.approvedPort ?? (new URL(conn.baseUrl).port ? parseInt(new URL(conn.baseUrl).port, 10) : null),
+    approvedHost || 'localhost',
+    approvedPort ?? null,
     conn.enabled ? 1 : 0,
     conn.connectTimeoutMs ?? 2000,
     conn.inferenceTimeoutMs ?? 60000,
@@ -88,31 +205,34 @@ export function upsertProviderConnection(conn: ProviderConnection): void {
 
 export function getProviderConnection(id: string): ProviderConnection | null {
   const db = getDb();
-  const row = db.query('SELECT * FROM provider_connections WHERE id = ?').get(id) as DbProviderConnection | undefined;
-  if (!row) return null;
+  try {
+    ensureSeededDefaults();
+    const row = db.query('SELECT * FROM provider_connections WHERE id = ?').get(id) as DbProviderConnection | undefined;
+    if (!row) return null;
 
-  return {
-    id: row.id,
-    label: row.label,
-    transport: row.transport as AiTransport,
-    baseUrl: row.base_url,
-    credential: row.credential,
-    trustZone: row.trust_zone as AiTrustZone,
-    approvedHost: row.approved_host,
-    approvedPort: row.approved_port ?? undefined,
-    enabled: Boolean(row.enabled),
-    connectTimeoutMs: row.connect_timeout_ms,
-    inferenceTimeoutMs: row.inference_timeout_ms,
-  };
+    return {
+      id: row.id,
+      label: row.label,
+      transport: row.transport as AiTransport,
+      baseUrl: row.base_url,
+      credential: row.credential,
+      trustZone: row.trust_zone as AiTrustZone,
+      approvedHost: row.approved_host,
+      approvedPort: row.approved_port ?? undefined,
+      enabled: Boolean(row.enabled),
+      connectTimeoutMs: row.connect_timeout_ms,
+      inferenceTimeoutMs: row.inference_timeout_ms,
+    };
+  } catch {
+    return DEFAULT_BUILTIN_CONNECTIONS[id] ?? null;
+  }
 }
 
 export function listProviderConnections(): ProviderConnection[] {
   const db = getDb();
   try {
+    ensureSeededDefaults();
     const rows = db.query('SELECT * FROM provider_connections ORDER BY id').all() as DbProviderConnection[];
-    if (rows.length === 0) {
-      return Object.values(DEFAULT_BUILTIN_CONNECTIONS);
-    }
     return rows.map(row => ({
       id: row.id,
       label: row.label,
@@ -133,13 +253,64 @@ export function listProviderConnections(): ProviderConnection[] {
 
 export function deleteProviderConnection(id: string): boolean {
   const db = getDb();
-  const res = db.query('DELETE FROM provider_connections WHERE id = ?').run(id);
-  return res.changes > 0;
+  ensureSeededDefaults();
+
+  // Atomically delete and repair any dangling workload routes or defaults
+  db.transaction(() => {
+    db.query('DELETE FROM provider_connections WHERE id = ?').run(id);
+
+    // Repair defaults if deleting the primary catalog connection
+    const defaults = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current') as DbRoutingDefaults | undefined;
+    if (defaults && defaults.catalog_primary_connection_id === id) {
+      // Reassign to remaining connection or fallback
+      const remaining = db.query('SELECT id FROM provider_connections LIMIT 1').get() as { id: string } | undefined;
+      const newPrimary = remaining?.id ?? 'openai-cloud';
+      db.query('UPDATE ai_routing_defaults SET catalog_primary_connection_id = ? WHERE id = ?').run(newPrimary, 'current');
+    }
+
+    // Repair workload routes referencing deleted connection
+    db.query('UPDATE ai_workload_routes SET primary_connection_id = "inherit" WHERE primary_connection_id = ?').run(id);
+    db.query('UPDATE ai_workload_routes SET fallback_connection_id = NULL, fallback_model_id = NULL WHERE fallback_connection_id = ?').run(id);
+  })();
+
+  return true;
+}
+
+export function saveAiRoutingDefaults(defaults: AiRoutingConfig['defaults']): void {
+  const db = getDb();
+  const now = new Date().toISOString();
+  ensureSeededDefaults();
+
+  db.query(`
+    INSERT INTO ai_routing_defaults (
+      id, catalog_primary_connection_id, catalog_primary_model_id,
+      catalog_fallback_connection_id, catalog_fallback_model_id,
+      text_data_sharing, image_data_sharing, created_at, updated_at
+    ) VALUES ('current', ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      catalog_primary_connection_id = excluded.catalog_primary_connection_id,
+      catalog_primary_model_id = excluded.catalog_primary_model_id,
+      catalog_fallback_connection_id = excluded.catalog_fallback_connection_id,
+      catalog_fallback_model_id = excluded.catalog_fallback_model_id,
+      text_data_sharing = excluded.text_data_sharing,
+      image_data_sharing = excluded.image_data_sharing,
+      updated_at = excluded.updated_at
+  `).run(
+    defaults.catalogTarget.connectionId,
+    defaults.catalogTarget.modelId,
+    defaults.catalogFallback?.connectionId ?? null,
+    defaults.catalogFallback?.modelId ?? null,
+    defaults.textDataSharing,
+    defaults.imageDataSharing,
+    now,
+    now,
+  );
 }
 
 export function upsertWorkloadRoute(workload: string, route: WorkloadRoute): void {
   const db = getDb();
   const now = new Date().toISOString();
+  ensureSeededDefaults();
 
   const primaryConnId = typeof route.primary === 'string' ? route.primary : route.primary.connectionId;
   const primaryModelId = typeof route.primary === 'string' ? 'inherit' : route.primary.modelId;
@@ -188,6 +359,7 @@ export function upsertWorkloadRoute(workload: string, route: WorkloadRoute): voi
 export function getWorkloadRoute(workload: string): WorkloadRoute | null {
   const db = getDb();
   try {
+    ensureSeededDefaults();
     const row = db.query('SELECT * FROM ai_workload_routes WHERE workload = ?').get(workload) as DbWorkloadRoute | undefined;
     if (!row) return null;
 
@@ -215,23 +387,74 @@ export function getWorkloadRoute(workload: string): WorkloadRoute | null {
 }
 
 export function getFullAiRoutingConfig(): AiRoutingConfig {
+  const db = getDb();
+  ensureSeededDefaults();
+
   const connectionsList = listProviderConnections();
   const connections: Record<string, ProviderConnection> = {};
   for (const c of connectionsList) {
     connections[c.id] = c;
   }
 
-  const effective = buildEffectiveRoutingConfig();
+  // Read persisted defaults
+  const defaultsRow = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current') as DbRoutingDefaults | undefined;
+  const defaults: AiRoutingConfig['defaults'] = {
+    textDataSharing: (defaultsRow?.text_data_sharing as DataSharingPolicy) ?? 'cloud_allowed',
+    imageDataSharing: (defaultsRow?.image_data_sharing as DataSharingPolicy) ?? 'trusted_lan_allowed',
+    catalogTarget: {
+      connectionId: defaultsRow?.catalog_primary_connection_id ?? 'desktop-lmstudio',
+      modelId: defaultsRow?.catalog_primary_model_id ?? 'qwen3.8:27b',
+    },
+    catalogFallback: defaultsRow?.catalog_fallback_connection_id
+      ? {
+          connectionId: defaultsRow.catalog_fallback_connection_id,
+          modelId: defaultsRow.catalog_fallback_model_id ?? 'gpt-4o-mini',
+        }
+      : null,
+  };
 
-  const discovery = getWorkloadRoute('discovery') ?? effective.workloads.discovery;
-  const curation = getWorkloadRoute('curation') ?? effective.workloads.curation;
-  const visionOcr = getWorkloadRoute('visionOcr') ?? effective.workloads.visionOcr;
-  const profileBuilder = getWorkloadRoute('profileBuilder') ?? effective.workloads.profileBuilder;
-  const storeManager = getWorkloadRoute('storeManager') ?? effective.workloads.storeManager;
+  // Ensure catalog primary targets an existing connection
+  if (!connections[defaults.catalogTarget.connectionId] && connectionsList.length > 0) {
+    defaults.catalogTarget.connectionId = connectionsList[0].id;
+  }
+
+  // Read individual workloads (or supply defaults)
+  const discovery = getWorkloadRoute('discovery') ?? {
+    primary: 'inherit',
+    fallback: 'inherit',
+    terminalBehavior: 'heuristic',
+  };
+  const curation = getWorkloadRoute('curation') ?? {
+    primary: 'inherit',
+    fallback: 'inherit',
+    terminalBehavior: 'defer',
+  };
+  const visionOcr = getWorkloadRoute('visionOcr') ?? {
+    primary: connections['desktop-lmstudio']
+      ? { connectionId: 'desktop-lmstudio', modelId: 'gemma-4-26b-a4b-qat' }
+      : { connectionId: 'local-ollama', modelId: 'qwen2.5vl:latest' },
+    fallback: null,
+    imageDataSharing: 'trusted_lan_allowed',
+    terminalBehavior: 'heuristic',
+  };
+  const profileBuilder = getWorkloadRoute('profileBuilder') ?? {
+    primary: connections['desktop-lmstudio']
+      ? { connectionId: 'desktop-lmstudio', modelId: 'qwen3.8:27b' }
+      : defaults.catalogTarget,
+    fallback: defaults.catalogFallback,
+    terminalBehavior: 'fail_closed',
+  };
+  const storeManager = getWorkloadRoute('storeManager') ?? {
+    primary: connections['desktop-lmstudio']
+      ? { connectionId: 'desktop-lmstudio', modelId: 'muse-glimmer' }
+      : defaults.catalogTarget,
+    fallback: defaults.catalogFallback,
+    terminalBehavior: 'unavailable',
+  };
 
   return {
     connections,
-    defaults: effective.defaults,
+    defaults,
     workloads: {
       discovery,
       curation,

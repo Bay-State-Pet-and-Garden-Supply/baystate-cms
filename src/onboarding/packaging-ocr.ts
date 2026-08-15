@@ -13,6 +13,7 @@
 
 import { getVlmConfig, callVlm, type VlmConfig } from './vlm-client';
 import { isLoopbackBaseUrl, redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
+import { isPrivateLanHost } from '../ai/provider-connections';
 import {
   computePromptHashes,
   MODEL_CALL_STATUS,
@@ -421,7 +422,7 @@ export async function extractPackagingOcr(
   // fetch or model call) and recorded as `policy_denied` — never a false
   // 'local' success row.
   let vlmConfig: VlmConfig | null;
-  let routeLocality: 'local' | null = null;
+  let routeLocality: 'local' | 'trusted_lan' | null = null;
   if (runBound) {
     if (!auditCtx) {
       throw new Error(
@@ -460,17 +461,26 @@ export async function extractPackagingOcr(
       );
       return null;
     }
-    if (!isLoopbackBaseUrl(frozen.baseUrl)) {
+    let isPermittedEndpoint = isLoopbackBaseUrl(frozen.baseUrl);
+    if (!isPermittedEndpoint && (params.snapshot?.modelPolicy?.imageDataSharing === 'trusted_lan_allowed' || params.snapshot?.modelPolicy?.imageDataSharing === 'cloud_allowed')) {
+      try {
+        const host = new URL(frozen.baseUrl).hostname;
+        isPermittedEndpoint = isPrivateLanHost(host);
+      } catch {
+        isPermittedEndpoint = false;
+      }
+    }
+    if (!isPermittedEndpoint) {
       recordTerminalPreflight(
         auditCtx,
         planDigest,
         MODEL_CALL_STATUS.policyDenied,
-        `Local VLM route denied: frozen base URL ${redactImageUrl(frozen.baseUrl)} is not loopback.`,
+        `Local VLM route denied: frozen base URL ${redactImageUrl(frozen.baseUrl)} is not loopback or permitted trusted LAN.`,
       );
       return null;
     }
     vlmConfig = { baseUrl: frozen.baseUrl, model: frozen.model, enabled: true };
-    routeLocality = 'local';
+    routeLocality = isLoopbackBaseUrl(frozen.baseUrl) ? 'local' : 'trusted_lan';
   } else {
     vlmConfig = getVlmConfig();
     if (!vlmConfig?.enabled) {

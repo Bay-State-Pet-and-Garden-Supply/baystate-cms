@@ -5,9 +5,6 @@
  * connection-addressed ModelTarget definitions, and inherited workload routing.
  */
 
-import { getApiKey, listApiKeys } from '../db/repositories/api-key-repo';
-
-
 export type AiTrustZone = 'this_device' | 'trusted_lan' | 'cloud';
 export type AiTransport = 'openai-compatible' | 'ollama-native';
 export type DataSharingPolicy = 'this_device_only' | 'trusted_lan_allowed' | 'cloud_allowed';
@@ -24,10 +21,41 @@ export interface ProviderConnection {
   /** Exact operator-approved port (anti-SSRF guard). */
   approvedPort?: number;
   enabled: boolean;
-  /** Fast connect timeout to detect offline machines quickly (default 2000ms). */
+  /** Fast connect timeout for reachability probes (default 2000ms). */
   connectTimeoutMs?: number;
   /** Total inference timeout (default 60000ms). */
   inferenceTimeoutMs?: number;
+}
+
+/** Sanitized connection view for client serialization (never exposes raw credentials). */
+export interface ClientProviderConnection {
+  id: string;
+  label: string;
+  transport: AiTransport;
+  baseUrl: string;
+  hasCredential: boolean;
+  trustZone: AiTrustZone;
+  approvedHost?: string;
+  approvedPort?: number;
+  enabled: boolean;
+  connectTimeoutMs?: number;
+  inferenceTimeoutMs?: number;
+}
+
+export function toClientProviderConnection(conn: ProviderConnection): ClientProviderConnection {
+  return {
+    id: conn.id,
+    label: conn.label,
+    transport: conn.transport,
+    baseUrl: conn.baseUrl,
+    hasCredential: Boolean(conn.credential && conn.credential.trim().length > 0),
+    trustZone: conn.trustZone,
+    approvedHost: conn.approvedHost,
+    approvedPort: conn.approvedPort,
+    enabled: conn.enabled,
+    connectTimeoutMs: conn.connectTimeoutMs,
+    inferenceTimeoutMs: conn.inferenceTimeoutMs,
+  };
 }
 
 export interface ModelTarget {
@@ -98,11 +126,23 @@ export function isLoopbackHost(hostname: string): boolean {
 }
 
 /**
+ * Checks if a hostname is a link-local, carrier-grade NAT, or cloud metadata IP.
+ */
+export function isLinkLocalOrMetadataHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase();
+  if (/^169\.254\.\d{1,3}\.\d{1,3}$/.test(h)) return true; // IPv4 Link-Local & AWS/GCP Metadata
+  if (/^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$/.test(h)) return true; // CGNAT 100.64.0.0/10
+  if (/^0\.0\.0\.0$/.test(h)) return true;
+  if (/^\[?fe[89ab][0-9a-f]:/i.test(h)) return true; // IPv6 Link-Local
+  return false;
+}
+
+/**
  * Checks if a hostname is an RFC1918 / RFC4193 private LAN address or .local domain.
  */
 export function isPrivateLanHost(hostname: string): boolean {
   const h = hostname.trim().toLowerCase();
-  if (isLoopbackHost(h)) return false;
+  if (isLoopbackHost(h) || isLinkLocalOrMetadataHost(h)) return false;
 
   // .local mDNS hostname
   if (h.endsWith('.local')) return true;
@@ -192,10 +232,10 @@ export function validateConnectionTrustZone(conn: ProviderConnection): void {
     }
     case 'trusted_lan': {
       if (isLoopbackHost(hostname)) {
-        // Loopback is allowed on trusted_lan if operator configured it
+        // Loopback is permitted under trusted_lan if operator configured it
         break;
       }
-      if (!isPrivateLanHost(hostname)) {
+      if (isLinkLocalOrMetadataHost(hostname) || !isPrivateLanHost(hostname)) {
         throw new TrustZoneValidationError(
           `Connection declared "trusted_lan" but host "${hostname}" is not a private LAN IP/mDNS address.`,
           'trust_zone_mismatch_trusted_lan',
@@ -205,9 +245,18 @@ export function validateConnectionTrustZone(conn: ProviderConnection): void {
       break;
     }
     case 'cloud': {
-      if (isLoopbackHost(hostname)) {
+      // Cloud endpoints MUST use HTTPS to prevent cleartext credential/prompt leakage over public internet
+      if (parsed.protocol !== 'https:') {
         throw new TrustZoneValidationError(
-          `Connection declared "cloud" cannot point to loopback address "${hostname}".`,
+          `Cloud connection "${conn.label}" must use https: protocol, received "${parsed.protocol}".`,
+          'cloud_requires_https',
+          conn.id,
+        );
+      }
+      // Cloud endpoints CANNOT target internal loopback, private LAN, link-local, or cloud metadata ranges
+      if (isLoopbackHost(hostname) || isPrivateLanHost(hostname) || isLinkLocalOrMetadataHost(hostname)) {
+        throw new TrustZoneValidationError(
+          `Connection declared "cloud" cannot point to local/private/metadata address "${hostname}".`,
           'trust_zone_mismatch_cloud',
           conn.id,
         );
@@ -242,9 +291,22 @@ export function isTargetPermittedByPolicy(
   return false;
 }
 
-// ─── Default Connections & Fallbacks ──────────────────────────────────────────
+// ─── Built-in Default Connections ─────────────────────────────────────────────
 
 export const DEFAULT_BUILTIN_CONNECTIONS: Record<string, ProviderConnection> = {
+  'desktop-lmstudio': {
+    id: 'desktop-lmstudio',
+    label: 'Desktop LM Studio',
+    transport: 'openai-compatible',
+    baseUrl: 'http://192.168.1.50:1234/v1',
+    credential: null,
+    trustZone: 'trusted_lan',
+    approvedHost: '192.168.1.50',
+    approvedPort: 1234,
+    enabled: true,
+    connectTimeoutMs: 2000,
+    inferenceTimeoutMs: 60000,
+  },
   'local-ollama': {
     id: 'local-ollama',
     label: 'Ollama (Local Mac)',
@@ -286,165 +348,12 @@ export const DEFAULT_BUILTIN_CONNECTIONS: Record<string, ProviderConnection> = {
   },
 };
 
-// ─── Legacy Resolver & Adapter ────────────────────────────────────────────────
-
-/**
- * Adapter that reads existing `api_keys` and `llm_task_configs` database state
- * and maps it into standard `ProviderConnection` and `AiRoutingConfig` structures.
- * Provides 100% backward compatibility.
- */
-export function buildEffectiveRoutingConfig(): AiRoutingConfig {
-  const connections: Record<string, ProviderConnection> = { ...DEFAULT_BUILTIN_CONNECTIONS };
-
-  // Load configured api_keys
-  try {
-    const keyRows = listApiKeys();
-    for (const row of keyRows) {
-      const s = row.service.toLowerCase();
-      if (s === 'ollama') {
-        const rawUrl = row.base_url || 'http://localhost:11434/v1';
-        const url = rawUrl.endsWith('/v1') ? rawUrl : `${rawUrl.replace(/\/+$/, '')}/v1`;
-        let host = 'localhost';
-        let port = 11434;
-        try {
-          const p = new URL(url);
-          host = p.hostname;
-          port = p.port ? parseInt(p.port, 10) : 80;
-        } catch { /* use default */ }
-        const trustZone: AiTrustZone = isLoopbackHost(host) ? 'this_device' : (isPrivateLanHost(host) ? 'trusted_lan' : 'cloud');
-        connections['local-ollama'] = {
-          id: 'local-ollama',
-          label: 'Ollama',
-          transport: 'openai-compatible',
-          baseUrl: url,
-          credential: row.api_key && row.api_key !== 'enabled' ? row.api_key : null,
-          trustZone,
-          approvedHost: host,
-          approvedPort: port,
-          enabled: true,
-          connectTimeoutMs: 2000,
-          inferenceTimeoutMs: 60000,
-        };
-      } else if (s === 'openai') {
-        connections['openai-cloud'] = {
-          id: 'openai-cloud',
-          label: 'OpenAI (Cloud)',
-          transport: 'openai-compatible',
-          baseUrl: row.base_url || 'https://api.openai.com/v1',
-          credential: row.api_key,
-          trustZone: 'cloud',
-          approvedHost: 'api.openai.com',
-          approvedPort: 443,
-          enabled: true,
-          connectTimeoutMs: 5000,
-          inferenceTimeoutMs: 60000,
-        };
-      } else if (s === 'deepseek') {
-        connections['deepseek-cloud'] = {
-          id: 'deepseek-cloud',
-          label: 'DeepSeek (Cloud)',
-          transport: 'openai-compatible',
-          baseUrl: row.base_url || 'https://api.deepseek.com',
-          credential: row.api_key,
-          trustZone: 'cloud',
-          approvedHost: 'api.deepseek.com',
-          approvedPort: 443,
-          enabled: true,
-          connectTimeoutMs: 5000,
-          inferenceTimeoutMs: 60000,
-        };
-      } else if (s === 'desktop_lmstudio' || s === 'lmstudio' || s === 'desktop-lmstudio') {
-        const rawUrl = row.base_url || 'http://192.168.1.50:1234/v1';
-        let host = '192.168.1.50';
-        let port = 1234;
-        try {
-          const p = new URL(rawUrl);
-          host = p.hostname;
-          port = p.port ? parseInt(p.port, 10) : 1234;
-        } catch { /* use default */ }
-        connections['desktop-lmstudio'] = {
-          id: 'desktop-lmstudio',
-          label: 'Desktop LM Studio',
-          transport: 'openai-compatible',
-          baseUrl: rawUrl,
-          credential: row.api_key && row.api_key !== 'enabled' ? row.api_key : null,
-          trustZone: 'trusted_lan',
-          approvedHost: host,
-          approvedPort: port,
-          enabled: true,
-          connectTimeoutMs: 2000,
-          inferenceTimeoutMs: 60000,
-        };
-      }
-    }
-  } catch {
-    // Database may be unavailable during isolated unit testing; fall back to defaults
-  }
-
-  // Determine default catalog target
-  const defaultCatalogTarget: ModelTarget = connections['desktop-lmstudio']
-    ? { connectionId: 'desktop-lmstudio', modelId: 'qwen3.8:27b' }
-    : (connections['deepseek-cloud']?.credential
-      ? { connectionId: 'deepseek-cloud', modelId: 'deepseek-v4-flash' }
-      : { connectionId: 'openai-cloud', modelId: 'gpt-4o-mini' });
-
-  const defaultCatalogFallback: ModelTarget | null = connections['openai-cloud']?.credential
-    ? { connectionId: 'openai-cloud', modelId: 'gpt-4o-mini' }
-    : null;
-
-  return {
-    connections,
-    defaults: {
-      textDataSharing: 'cloud_allowed',
-      imageDataSharing: 'trusted_lan_allowed',
-      catalogTarget: defaultCatalogTarget,
-      catalogFallback: defaultCatalogFallback,
-    },
-    workloads: {
-      discovery: {
-        primary: 'inherit',
-        fallback: 'inherit',
-        terminalBehavior: 'heuristic',
-      },
-      curation: {
-        primary: 'inherit',
-        fallback: 'inherit',
-        terminalBehavior: 'defer',
-      },
-      visionOcr: {
-        primary: connections['desktop-lmstudio']
-          ? { connectionId: 'desktop-lmstudio', modelId: 'gemma-4-26b-a4b-qat' }
-          : { connectionId: 'local-ollama', modelId: 'qwen2.5vl:latest' },
-        fallback: null,
-        imageDataSharing: 'trusted_lan_allowed',
-        terminalBehavior: 'heuristic',
-      },
-      profileBuilder: {
-        primary: connections['desktop-lmstudio']
-          ? { connectionId: 'desktop-lmstudio', modelId: 'qwen3.8:27b' }
-          : (connections['deepseek-cloud']?.credential
-            ? { connectionId: 'deepseek-cloud', modelId: 'deepseek-v4-flash' }
-            : { connectionId: 'openai-cloud', modelId: 'gpt-4o-mini' }),
-        fallback: defaultCatalogFallback,
-        terminalBehavior: 'fail_closed',
-      },
-      storeManager: {
-        primary: connections['desktop-lmstudio']
-          ? { connectionId: 'desktop-lmstudio', modelId: 'muse-glimmer' }
-          : defaultCatalogTarget,
-        fallback: defaultCatalogFallback,
-        terminalBehavior: 'unavailable',
-      },
-    },
-  };
-}
-
 /**
  * Resolves an effective workload route, inheriting from defaults where specified.
  */
 export function resolveWorkloadRoute(
   workload: keyof AiRoutingConfig['workloads'],
-  config: AiRoutingConfig = buildEffectiveRoutingConfig(),
+  config: AiRoutingConfig,
 ): ResolvedWorkloadRoute {
   const route = config.workloads[workload];
   const primary = route.primary === 'inherit' ? config.defaults.catalogTarget : route.primary;

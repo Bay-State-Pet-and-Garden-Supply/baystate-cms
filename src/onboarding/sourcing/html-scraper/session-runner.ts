@@ -798,14 +798,18 @@ export function createCrawleeHtmlScraperEngine(): HtmlScraperEngine {
           const crawlee = await getCrawlee();
           const config = new crawlee.Configuration({
             storageClientOptions: { localDataDirectory: storageDir },
-            // crawlee defaults `availableMemoryRatio` to 0.25 (max memory =
-            // 25% of total system RAM) and emits "Memory is critically
-            // overloaded" warnings + sheds concurrency whenever the whole
-            // dev machine is busy (Chrome + dev servers — observed
-            // 2026-08-15). Sourcing crawls are bounded single-request
-            // lookups with an explicit deadline: memory-aware autoscaling is
-            // noise here. 0.9 is fail-safe — the pool still sheds when the
-            // machine is genuinely at 90%+.
+            // No disk persistence: crawlee telemetry (e.g.
+            // SDK_CRAWLER_STATISTICS_2) would race the per-run storage-dir
+            // removal in `removeSourcingStorageDir` and log ENOENT noise
+            // (observed live 2026-08-15). Sessions/stats are memory-only by
+            // policy anyway — nothing here is worth writing.
+            persistStorage: false,
+            purgeOnStart: false,
+            // Memory backstop. The effective knob is `CRAWLEE_MEMORY_MBYTES`
+            // in `.env` (env vars beat this config); if that line is ever
+            // removed, 0.9 keeps the pool shedding only when the machine is
+            // genuinely near-full (the 0.25 default makes a busy dev box
+            // look critically overloaded at idle — observed live).
             availableMemoryRatio: 0.9,
           });
           let outcome: HtmlScraperEngineFetchResult = {

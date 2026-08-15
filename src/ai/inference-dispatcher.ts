@@ -12,10 +12,10 @@ import type {
   ResolvedWorkloadRoute,
 } from './provider-connections';
 import {
-  buildEffectiveRoutingConfig,
   resolveWorkloadRoute,
   isTargetPermittedByPolicy,
 } from './provider-connections';
+import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
 import {
   executeOpenAiChat,
   AiAvailabilityError,
@@ -47,7 +47,7 @@ export async function dispatchWorkloadChat(
   messages: ChatMessage[],
   options: DispatchWorkloadOptions = {},
 ): Promise<DispatchExecutionResult> {
-  const config = options.routingConfig ?? buildEffectiveRoutingConfig();
+  const config = options.routingConfig ?? getFullAiRoutingConfig();
   const route: ResolvedWorkloadRoute = resolveWorkloadRoute(workload, config);
 
   const { primary, fallback, textDataSharing, imageDataSharing, terminalBehavior } = route;

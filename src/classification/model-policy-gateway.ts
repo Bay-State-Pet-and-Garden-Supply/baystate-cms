@@ -101,13 +101,15 @@ export interface StageOverrideView {
  * both data-sharing policies); it is recomputed at the transport boundary so
  * tampering after snapshot creation is detected.
  */
+export type ClassificationDataSharingPolicy = 'local_only' | 'this_device_only' | 'trusted_lan_allowed' | 'cloud_allowed';
+
 export interface ModelPolicyView {
   readonly defaultProvider: string;
   readonly defaultModel: string;
   readonly providerLocalities: Readonly<Record<string, ProviderLocality>>;
   readonly stageOverrides: Readonly<Record<string, StageOverrideView>>;
-  readonly textDataSharing: 'local_only' | 'cloud_allowed';
-  readonly imageDataSharing: 'local_only' | 'cloud_allowed';
+  readonly textDataSharing: ClassificationDataSharingPolicy;
+  readonly imageDataSharing: ClassificationDataSharingPolicy;
   /** Optional binding to the runtime snapshot hash (tamper detection). */
   readonly snapshotHash?: string;
   readonly policyDigest: string;
@@ -379,13 +381,21 @@ function resolveRoute(
   if (!locality) {
     throw new ModelPolicyDeniedError('locality_undeclared', operation, provider);
   }
-  if (view.textDataSharing === 'local_only' && locality !== 'local') {
+  if ((view.textDataSharing === 'local_only' || view.textDataSharing === 'this_device_only') && locality !== 'local') {
     throw new ModelPolicyDeniedError('text_local_only_non_local_provider', operation, provider);
   }
-  // Image-bearing operations additionally enforce imageDataSharing: an image
-  // may never leave the machine unless the provider is declared local.
-  if (requiresImage && view.imageDataSharing === 'local_only' && locality !== 'local') {
-    throw new ModelPolicyDeniedError('image_local_only_non_local_provider', operation, provider);
+  if (view.textDataSharing === 'trusted_lan_allowed' && locality !== 'local' && locality !== 'trusted_lan') {
+    throw new ModelPolicyDeniedError('text_local_only_non_local_provider', operation, provider);
+  }
+
+  // Image-bearing operations additionally enforce imageDataSharing:
+  if (requiresImage) {
+    if ((view.imageDataSharing === 'local_only' || view.imageDataSharing === 'this_device_only') && locality !== 'local') {
+      throw new ModelPolicyDeniedError('image_local_only_non_local_provider', operation, provider);
+    }
+    if (view.imageDataSharing === 'trusted_lan_allowed' && locality !== 'local' && locality !== 'trusted_lan') {
+      throw new ModelPolicyDeniedError('image_local_only_non_local_provider', operation, provider);
+    }
   }
 
   const credential = deps.getCredential(provider);
