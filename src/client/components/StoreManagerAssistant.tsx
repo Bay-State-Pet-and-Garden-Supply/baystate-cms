@@ -13,6 +13,7 @@ import {
   type StoreManagerPinnedScope,
   type StoreManagerResolvedScope,
   type StoreManagerConsoleFlags,
+  type StoreManagerModelSelection,
 } from '../store-manager-api';
 import {
   approvalCardCopy,
@@ -96,8 +97,12 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   const [input, setInput] = useState('');
   
   // Model selection state — populated from the server-owned descriptor
-  // endpoint; there is no hard-coded client model catalog.
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  // endpoint; there is no hard-coded client model catalog. The selection is
+  // either `{ mode: 'route_default' }` (follow the configured route, keeping
+  // its fallback semantics) or a connection-addressed `explicit` override
+  // (manual picker change — disables route fallback). The configured default
+  // is NEVER converted into an explicit selection.
+  const [selectedModel, setSelectedModel] = useState<StoreManagerModelSelection | null>(null);
   const [modelOptions, setModelOptions] = useState<StoreManagerModelDescriptor[]>([]);
   const [modelSetupMessage, setModelSetupMessage] = useState<string | null>(null);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -207,12 +212,24 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   }, []);
 
   // Keep the selection valid across refresh/config changes: never keep an
-  // unavailable stale value selected.
+  // unavailable stale value selected. A manual explicit pick must reference a
+  // descriptor that still exists; otherwise reset to route_default (the
+  // configured default must never become an explicit selection).
   useEffect(() => {
     setSelectedModel(prev => {
-      if (prev && modelOptions.some(m => m.id === prev)) return prev;
-      const preferred = modelOptions.find(m => m.isDefault) ?? modelOptions[0] ?? null;
-      return preferred?.id ?? null;
+      const stillUsable = (sel: StoreManagerModelSelection | null): boolean => {
+        if (!sel) return false;
+        if (typeof sel === 'string') {
+          // Legacy bare model id (only ever sent by older clients/persisted defs).
+          return modelOptions.some(m => m.id === sel);
+        }
+        if (sel.mode === 'route_default') return modelOptions.length > 0;
+        return modelOptions.some(
+          m => m.id === sel.target.modelId && m.provider === sel.target.connectionId,
+        );
+      };
+      if (prev && stillUsable(prev)) return prev;
+      return modelOptions.length > 0 ? { mode: 'route_default' } : null;
     });
   }, [modelOptions]);
 
@@ -220,6 +237,29 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
   useEffect(() => {
     currentThreadIdRef.current = currentThreadId;
   }, [currentThreadId]);
+
+  // Dropdown wire format: 'Auto (configured route)' selects route_default;
+  // descriptor options are composite `${provider}::${id}` so the server keeps
+  // the connection id (two connections may expose the same model id).
+  const MODEL_ROUTE_DEFAULT_VALUE = '__route_default__';
+  const modelDropdownValue =
+    selectedModel === null
+      ? ''
+      : typeof selectedModel === 'string'
+        ? selectedModel
+        : selectedModel.mode === 'route_default'
+          ? MODEL_ROUTE_DEFAULT_VALUE
+          : `${selectedModel.target.connectionId}::${selectedModel.target.modelId}`;
+  const handleModelSelectionChange = (value: string) => {
+    if (!value) return setSelectedModel(null);
+    if (value === MODEL_ROUTE_DEFAULT_VALUE) return setSelectedModel({ mode: 'route_default' });
+    const sep = value.indexOf('::');
+    if (sep === -1) return setSelectedModel(value); // legacy bare model id
+    setSelectedModel({
+      mode: 'explicit',
+      target: { connectionId: value.slice(0, sep), modelId: value.slice(sep + 2) },
+    });
+  };
 
   // Set up the default transport pointing to our Hono chat route
   const transport = useRef(
@@ -1326,8 +1366,8 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
               <label style={{ fontSize: '12px', fontWeight: 700, color: colors.ledgerCharcoal }}>Model:</label>
               <div style={{ position: 'relative' }}>
                 <select
-                  value={selectedModel ?? ''}
-                  onChange={e => setSelectedModel(e.target.value || null)}
+                  value={modelDropdownValue}
+                  onChange={e => handleModelSelectionChange(e.target.value)}
                   disabled={status === 'streaming' || status === 'submitted' || modelsLoading || modelOptions.length === 0}
                   style={{
                     background: colors.whiteSurface,
@@ -1347,11 +1387,18 @@ export function StoreManagerAssistant({ onSelectProduct }: StoreManagerAssistant
                   ) : modelOptions.length === 0 ? (
                     <option value="">No models</option>
                   ) : (
-                    modelOptions.map(opt => (
-                      <option key={opt.id} value={opt.id} title={opt.capabilitySummary}>
-                        {opt.providerLabel} · {opt.id} ({formatModelPricing(opt)})
-                      </option>
-                    ))
+                    <>
+                      <option value={MODEL_ROUTE_DEFAULT_VALUE}>Auto (configured route)</option>
+                      {modelOptions.map(opt => (
+                        <option
+                          key={`${opt.provider}::${opt.id}`}
+                          value={`${opt.provider}::${opt.id}`}
+                          title={opt.capabilitySummary}
+                        >
+                          {opt.providerLabel} · {opt.id} ({formatModelPricing(opt)})
+                        </option>
+                      ))}
+                    </>
                   )}
                 </select>
                 <div

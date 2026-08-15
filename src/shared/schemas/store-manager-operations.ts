@@ -19,6 +19,7 @@ export const STORE_MANAGER_OPERATIONS_BOUNDS = {
   maxLineageJsonBytes: 4096,
   maxPromptVersionLength: 100,
   maxModelIdLength: 200,
+  maxConnectionIdLength: 200,
   maxPolicySnapshotJsonBytes: 32 * 1024,
   maxArtifactContentBytes: 128 * 1024,
   maxArtifactKindLength: 64,
@@ -58,6 +59,31 @@ export type StoreManagerActorClass = z.infer<typeof StoreManagerActorClassSchema
 export const STORE_MANAGER_SCOPE_KINDS = ['onboarding_batch', 'change_set', 'product_field', 'vendor', 'sku_set'] as const;
 export const StoreManagerScopeKindSchema = z.enum(STORE_MANAGER_SCOPE_KINDS);
 export type StoreManagerScopeKind = z.infer<typeof StoreManagerScopeKindSchema>;
+
+/**
+ * Store Manager model selection wire contract.
+ *
+ * - `string`: legacy explicit model-id selection (registry-resolved, NEVER
+ *   falls back). Kept for persisted trigger/schedule/playbook definitions and
+ *   older clients.
+ * - `{ mode: 'route_default' }`: follow the configured `storeManager` workload
+ *   route (primary + configured fallback). This is the UI default — the
+ *   server picks the configured primary and keeps its fallback semantics.
+ * - `{ mode: 'explicit', target }`: connection-addressed manual override.
+ *   Disables route fallback (the operator picked a specific target).
+ */
+export const StoreManagerModelSelectionSchema = z.union([
+  z.string().min(1).max(STORE_MANAGER_OPERATIONS_BOUNDS.maxModelIdLength),
+  z.object({ mode: z.literal('route_default') }),
+  z.object({
+    mode: z.literal('explicit'),
+    target: z.object({
+      connectionId: z.string().min(1).max(STORE_MANAGER_OPERATIONS_BOUNDS.maxConnectionIdLength),
+      modelId: z.string().min(1).max(STORE_MANAGER_OPERATIONS_BOUNDS.maxModelIdLength),
+    }),
+  }),
+]);
+export type StoreManagerModelSelection = z.infer<typeof StoreManagerModelSelectionSchema>;
 
 const boundId = (max: number) => z.string().trim().min(1).max(max);
 
@@ -149,7 +175,7 @@ export const StoreManagerExecutionRequestSchema = z.object({
   actorClass: StoreManagerActorClassSchema.optional(),
   pinnedScope: StoreManagerPinnedScopeSchema.optional(),
   lineage: StoreManagerLineageSchema.optional(),
-  selectedModel: z.string().min(1).max(STORE_MANAGER_OPERATIONS_BOUNDS.maxModelIdLength).optional(),
+  selectedModel: StoreManagerModelSelectionSchema.optional(),
   policyProfile: StoreManagerPolicyProfileSchema.optional(),
 }).strict();
 export type StoreManagerExecutionRequest = z.infer<typeof StoreManagerExecutionRequestSchema>;

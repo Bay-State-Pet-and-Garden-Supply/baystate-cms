@@ -2,6 +2,7 @@ import { getApiKey } from '../db/repositories/api-key-repo';
 import { acquireLocalSlot, releaseLocalSlot } from '../ai/local-runtime-coordinator';
 import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
 import { dispatchWorkloadChat } from '../ai/inference-dispatcher';
+import { resolveWorkloadRoute, isConnectionUsable } from '../ai/provider-connections';
 
 /** Minimal structural fetch signature — lets callers inject the PI
  *  policy-gateway bound fetch (P0-1). */
@@ -17,24 +18,32 @@ export interface VlmConfig {
 
 /**
  * Retrieve the active vision model configuration from the database.
- * Prefers the connection-addressed visionOcr workload route, falling back to legacy settings.
+ *
+ * Resolves the connection-addressed `visionOcr` workload route WITH
+ * inheritance (via `resolveWorkloadRoute`), so 'Vision / OCR: Inherit
+ * Catalog Default' uses the catalog default when that connection is usable
+ * — an inherited vision-capable catalog default must actually run OCR
+ * instead of falling through to the legacy `api_keys.ollama_vlm` row.
+ * Only when the resolved AI Compute primary is unusable (disabled, or a
+ * cloud connection without a credential) does the legacy setting apply.
  */
 export function getVlmConfig(): VlmConfig | null {
-  // 1. Check explicit AI Compute visionOcr route first (if configured explicitly)
+  // 1. AI Compute visionOcr route — explicit OR inherited from the catalog
+  //    default. `resolveWorkloadRoute` resolves 'inherit' to
+  //    `defaults.catalogTarget`, so this is the same resolution the
+  //    InferenceDispatcher uses for live OCR calls.
   try {
     const config = getFullAiRoutingConfig();
-    const route = config.workloads.visionOcr;
-    if (route && route.primary !== 'inherit') {
-      const conn = config.connections[route.primary.connectionId];
-      if (conn && conn.enabled) {
-        return {
-          baseUrl: conn.baseUrl,
-          model: route.primary.modelId || 'gemma-4-26b-a4b-qat',
-          enabled: true,
-          transport: conn.transport,
-          credential: conn.credential ?? undefined,
-        };
-      }
+    const route = resolveWorkloadRoute('visionOcr', config);
+    const conn = config.connections[route.primary.connectionId];
+    if (conn && isConnectionUsable(conn)) {
+      return {
+        baseUrl: conn.baseUrl,
+        model: route.primary.modelId || 'gemma-4-26b-a4b-qat',
+        enabled: true,
+        transport: conn.transport,
+        credential: conn.credential ?? undefined,
+      };
     }
   } catch {
     // Database fallback
@@ -97,9 +106,11 @@ export async function callVlmWithDispatcher(prompt: string, imageBase64: string)
     return { content, executedTarget: null };
   }
 
-  // OpenAI-compatible: only reachable when an explicit AI Compute visionOcr
-  // route is configured (getVlmConfig returns the route primary only when
-  // it is non-inherit).
+  // OpenAI-compatible: reached when the resolved AI Compute visionOcr route
+  // (explicit OR inherited from the catalog default) points at an
+  // openai-compatible connection. The dispatcher re-resolves the same route
+  // with `resolveWorkloadRoute`, so primary/fallback and the image
+  // data-sharing policy stay consistent with getVlmConfig().
   const dataUri = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
   const result = await dispatchWorkloadChat(
     'visionOcr',

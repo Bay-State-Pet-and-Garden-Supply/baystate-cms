@@ -17,8 +17,10 @@ import {
   resolveAiSdkModel,
   resolveAiSdkModelWithFallback,
   createResilientModel,
+  buildConnectionGuardedFetch,
   ModelUnavailableError,
 } from '../../server/services/ai-sdk-model-resolver';
+import { AiAvailabilityError, AiPolicyDeniedError } from '../../ai/network-transport';
 import storeManagerRoutes from '../../server/routes/store-manager-routes';
 
 describe('Store Manager model descriptor endpoint (epic #42, #32)', () => {
@@ -163,6 +165,9 @@ describe('AI Compute connections: capability validation, picker parity & resilie
     try { resetDb(); } catch { /* ok */ }
     initDb(testDbPath);
     runMigrations();
+    // Registry credential for the legacy string-selection test (connection
+    // suite keeps no other api_keys rows).
+    upsertApiKey('deepseek', 'sk-deepseek-connections', 'https://api.deepseek.com', 'deepseek-v4-flash');
   });
 
   afterAll(() => {
@@ -253,6 +258,10 @@ describe('AI Compute connections: capability validation, picker parity & resilie
     upsertWorkloadRoute('storeManager', {
       primary: { connectionId: 'office-pc', modelId: 'muse-glimmer' },
       fallback: null,
+      // LAN primary requires a route policy permitting trusted_lan text (the
+      // primary resolver now enforces the route's text data-sharing policy;
+      // the seeded default is this_device_only).
+      textDataSharing: 'trusted_lan_allowed',
       terminalBehavior: 'unavailable',
     });
 
@@ -401,5 +410,161 @@ describe('AI Compute connections: capability validation, picker parity & resilie
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test('route_default keeps the configured fallback; explicit and legacy selections never fall back', () => {
+    upsertLanConnection('office-pc', 'http://192.168.1.75:1234/v1');
+    upsertLanConnection('office-pc-2', 'http://192.168.1.76:1234/v1');
+    upsertWorkloadRoute('storeManager', {
+      primary: { connectionId: 'office-pc', modelId: 'muse-glimmer' },
+      fallback: { connectionId: 'office-pc-2', modelId: 'gpt-4o-mini' },
+      textDataSharing: 'trusted_lan_allowed',
+      terminalBehavior: 'unavailable',
+    });
+
+    // { mode: 'route_default' } (the UI default) keeps fallback semantics.
+    const routeDefault = resolveAiSdkModelWithFallback({ mode: 'route_default' });
+    expect(routeDefault.provider).toBe('office-pc');
+    expect(routeDefault.modelId).toBe('muse-glimmer');
+    expect(routeDefault.fallback).toBeDefined();
+    expect(routeDefault.fallback?.provider).toBe('office-pc-2');
+    expect(routeDefault.fallback?.modelId).toBe('gpt-4o-mini');
+
+    // Connection-addressed explicit override: never falls back.
+    const explicit = resolveAiSdkModelWithFallback({
+      mode: 'explicit',
+      target: { connectionId: 'office-pc', modelId: 'muse-glimmer' },
+    });
+    expect(explicit.provider).toBe('office-pc');
+    expect(explicit.modelId).toBe('muse-glimmer');
+    expect(explicit.fallback).toBeUndefined();
+
+    // Legacy bare model-id string: registry-resolved, never falls back.
+    const legacy = resolveAiSdkModelWithFallback('deepseek-v4-flash');
+    expect(legacy.provider).toBe('deepseek');
+    expect(legacy.modelId).toBe('deepseek-v4-flash');
+    expect(legacy.fallback).toBeUndefined();
+  });
+
+  test('a cloud primary denied by the route text data-sharing policy fails closed', () => {
+    upsertProviderConnection({
+      id: 'cloud-openai',
+      label: 'OpenAI Cloud',
+      transport: 'openai-compatible',
+      baseUrl: 'https://api.openai.com/v1',
+      credential: 'sk-test-openai-conn',
+      trustZone: 'cloud',
+      approvedHost: 'api.openai.com',
+      approvedPort: 443,
+      enabled: true,
+    });
+    upsertWorkloadRoute('storeManager', {
+      primary: { connectionId: 'cloud-openai', modelId: 'gpt-4o-mini' },
+      fallback: null,
+      textDataSharing: 'this_device_only',
+      terminalBehavior: 'unavailable',
+    });
+    try {
+      expect(() => resolveAiSdkModelWithFallback({ mode: 'route_default' })).toThrow(ModelUnavailableError);
+      try {
+        resolveAiSdkModelWithFallback({ mode: 'route_default' });
+      } catch (err) {
+        expect((err as ModelUnavailableError).message).toMatch(/this_device_only/i);
+      }
+    } finally {
+      deleteProviderConnection('cloud-openai');
+    }
+  });
+
+  test('guarded fetch rejects trust-zone-violating connections before any request', async () => {
+    const conn = {
+      id: 'bad-pin-conn',
+      label: 'Bad Pin',
+      transport: 'openai-compatible' as const,
+      baseUrl: 'http://192.168.1.50:1234/v1',
+      trustZone: 'trusted_lan' as const,
+      approvedHost: '192.168.1.99',
+      approvedPort: 1234,
+      enabled: true,
+    };
+    let fetchCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error('should not be reached');
+    }) as unknown as typeof fetch;
+    try {
+      const guarded = buildConnectionGuardedFetch(conn);
+      await expect(guarded('http://192.168.1.50:1234/v1/chat/completions')).rejects.toThrow(/approved host/);
+      expect(fetchCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('guarded fetch denies redirects (anti-SSRF) and classifies network failures as availability', async () => {
+    const conn = {
+      id: 'guard-conn',
+      label: 'Guard',
+      transport: 'openai-compatible' as const,
+      baseUrl: 'http://192.168.1.75:1234/v1',
+      trustZone: 'trusted_lan' as const,
+      approvedHost: '192.168.1.75',
+      approvedPort: 1234,
+      enabled: true,
+    };
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => new Response('redirect', { status: 307 })) as unknown as typeof fetch;
+      const guarded = buildConnectionGuardedFetch(conn);
+      await expect(guarded('http://192.168.1.75:1234/v1/chat/completions')).rejects.toThrow(/redirect/i);
+
+      globalThis.fetch = (async () => {
+        throw new TypeError('fetch failed: Connection refused');
+      }) as unknown as typeof fetch;
+      await expect(guarded('http://192.168.1.75:1234/v1/chat/completions')).rejects.toThrow(AiAvailabilityError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('resilient wrapper never falls back on policy-denial errors, including wrapped causes', async () => {
+    const policyDenied = new AiPolicyDeniedError('redirect rejected (anti-SSRF)', 'office-pc', 'muse-glimmer');
+    const makePrimary = (error: unknown) => ({
+      ...fakeV4Model(),
+      doStream: async () => {
+        throw error;
+      },
+      doGenerate: async () => {
+        throw error;
+      },
+    });
+    const fallback = fakeV4Model({ parts: [{ type: 'text-delta', id: 't1', delta: 'SHOULD NOT APPEAR' }] });
+
+    // Direct AiPolicyDeniedError: no fallback.
+    let fallbackUsed = 0;
+    const wrappedDirect = createResilientModel(
+      makePrimary(policyDenied) as unknown as Parameters<typeof createResilientModel>[0],
+      fallback as unknown as Parameters<typeof createResilientModel>[1],
+      () => { fallbackUsed += 1; },
+    );
+    await expect(
+      (wrappedDirect as unknown as { doStream: (o: unknown) => Promise<unknown> }).doStream({ prompt: [] }),
+    ).rejects.toBe(policyDenied);
+    expect(fallbackUsed).toBe(0);
+
+    // Error wrapped by the AI SDK (APICallError carries the original as cause).
+    const sdkWrapped = new Error('APICallError: fetch failed');
+    sdkWrapped.cause = policyDenied;
+    fallbackUsed = 0;
+    const wrappedCause = createResilientModel(
+      makePrimary(sdkWrapped) as unknown as Parameters<typeof createResilientModel>[0],
+      fallback as unknown as Parameters<typeof createResilientModel>[1],
+      () => { fallbackUsed += 1; },
+    );
+    await expect(
+      (wrappedCause as unknown as { doStream: (o: unknown) => Promise<unknown> }).doStream({ prompt: [] }),
+    ).rejects.toBe(sdkWrapped);
+    expect(fallbackUsed).toBe(0);
   });
 });

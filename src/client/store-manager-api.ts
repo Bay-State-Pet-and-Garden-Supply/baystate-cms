@@ -10,6 +10,12 @@
 export type StoreManagerModelLocality = 'local' | 'cloud';
 export type StoreManagerCostBasis = 'local_zero' | 'published_rate' | 'unknown';
 
+// Connection-addressed model-selection wire type (mirrors the server schema
+// in shared/schemas/store-manager-operations.ts). Imported as a type only —
+// the client must never pull the runtime schema (zod) or server modules.
+import type { StoreManagerModelSelection } from '../shared/schemas/store-manager-operations';
+export type { StoreManagerModelSelection };
+
 export interface StoreManagerModelPricingInfo {
   inputPerMillion: number | null;
   outputPerMillion: number | null;
@@ -234,7 +240,7 @@ export async function compileStoreManagerCommand(
  */
 export async function executeStoreManagerCommand(
   raw: string,
-  opts: { pinnedScope?: StoreManagerPinnedScope | null; selectedModel?: string | null; mode?: 'execute' | 'plan' } = {},
+  opts: { pinnedScope?: StoreManagerPinnedScope | null; selectedModel?: StoreManagerModelSelection | null; mode?: 'execute' | 'plan' } = {},
 ): Promise<StoreManagerCommandResult | StoreManagerPlanPreviewResult> {
   const res = await fetch('/api/store-manager/commands/execute', {
     method: 'POST',
@@ -1154,7 +1160,7 @@ export async function fetchStoreManagerRunDetail(runId: string): Promise<StoreMa
 
 export async function replayStoreManagerRun(
   runId: string,
-  selectedModel?: string,
+  selectedModel?: StoreManagerModelSelection,
 ): Promise<StoreManagerReplayResult> {
   const res = await fetch(`/api/store-manager/runs/${encodeURIComponent(runId)}/replay`, {
     method: 'POST',

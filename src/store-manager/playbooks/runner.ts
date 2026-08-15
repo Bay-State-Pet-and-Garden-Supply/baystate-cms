@@ -14,6 +14,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
+import type { StoreManagerModelSelection } from '../../shared/schemas/store-manager-operations';
 import { runStoreManagerExecution, type StoreManagerExecutionResult } from '../runtime/executor';
 import { createStoreManagerExecutionRequest } from '../runtime/execution-request';
 import { StoreManagerToolRegistry, createStoreManagerToolRegistry } from '../runtime/tool-registry';
@@ -75,7 +76,7 @@ export interface RunPlaybookOptions {
   /** `operator` only can approve checkpoints; schedule/event actors never can. */
   actor?: string;
   registry?: StoreManagerToolRegistry;
-  resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
+  resolveModel?: (selectedModel?: StoreManagerModelSelection) => ResolvedAiSdkModel;
   now?: () => Date;
   policyOverrides?: Record<string, number>;
 }
@@ -255,7 +256,7 @@ async function executeStepRun(
     expectedToolName: string;
     expectedInput: Record<string, unknown>;
     registry: StoreManagerToolRegistry;
-    resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
+    resolveModel?: (selectedModel?: StoreManagerModelSelection) => ResolvedAiSdkModel;
     now?: () => Date;
     policyOverrides?: Record<string, number>;
     serverApprovedCalls?: ReadonlyArray<{ toolCallId: string; approvalId: string; diffHash: string; expiresAt: number }>;
@@ -320,7 +321,7 @@ async function runStepsFrom(
     version: number;
     variables: Record<string, unknown>;
     registry: StoreManagerToolRegistry;
-    resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
+    resolveModel?: (selectedModel?: StoreManagerModelSelection) => ResolvedAiSdkModel;
     now?: () => Date;
     policyOverrides?: Record<string, number>;
     resumeFromIndex: number;
@@ -910,7 +911,7 @@ export async function resumeStoreManagerPlaybookRun(
     actor: string;
     diffHash: string;
     registry?: StoreManagerToolRegistry;
-    resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
+    resolveModel?: (selectedModel?: StoreManagerModelSelection) => ResolvedAiSdkModel;
     now?: () => Date;
     policyOverrides?: Record<string, number>;
   },

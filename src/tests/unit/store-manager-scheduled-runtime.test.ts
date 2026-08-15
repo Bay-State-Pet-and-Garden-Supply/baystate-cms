@@ -252,7 +252,7 @@ describe('scheduled read-only runtime (Issue 4)', () => {
     const result = await runNowReadOnly(workspaceId, created.schedule.id, {
       workspacePath,
       runtime: {
-        resolveModel: (selectedModel?: string) => {
+        resolveModel: (_selectedModel?: import('../../shared/schemas/store-manager-operations').StoreManagerModelSelection) => {
           throw new ModelUnavailableError('Model is not configured.');
         },
       },

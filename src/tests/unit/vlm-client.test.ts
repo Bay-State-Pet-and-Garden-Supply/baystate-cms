@@ -7,8 +7,15 @@
  * stubbing (bun:test has no `vi.stubGlobal`).
  */
 
-import { afterEach, describe, expect, it } from 'bun:test';
-import { callVlm } from '../../onboarding/vlm-client';
+import { afterEach, beforeAll, afterAll, describe, expect, it } from 'bun:test';
+import { callVlm, getVlmConfig } from '../../onboarding/vlm-client';
+import { initDb, closeDb } from '../../db/connection';
+import { runMigrations } from '../../db/migrations';
+import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import {
+  upsertProviderConnection,
+  saveAiRoutingDefaults,
+} from '../../db/repositories/provider-connection-repo';
 
 const config = {
   enabled: true,
@@ -46,5 +53,64 @@ describe('VLM client timeout handling', () => {
     }) as unknown as typeof fetch;
 
     await expect(callVlm('read this label', 'base64-image', config)).rejects.toBe(failure);
+  });
+});
+
+describe('VLM client — AI Compute route inheritance (getVlmConfig)', () => {
+  beforeAll(() => {
+    initDb(':memory:');
+    runMigrations();
+  });
+
+  afterAll(() => {
+    closeDb();
+  });
+
+  it('resolves an INHERITED visionOcr route to the usable catalog default', () => {
+    upsertProviderConnection({
+      id: 'desktop-lmstudio',
+      label: 'Desktop LM Studio',
+      transport: 'openai-compatible',
+      baseUrl: 'http://192.168.1.50:1234/v1',
+      trustZone: 'trusted_lan',
+      approvedHost: '192.168.1.50',
+      approvedPort: 1234,
+      enabled: true,
+    });
+    saveAiRoutingDefaults({
+      catalogTarget: { connectionId: 'desktop-lmstudio', modelId: 'gemma-4-26b-a4b-qat' },
+      catalogFallback: null,
+      textDataSharing: 'trusted_lan_allowed',
+      imageDataSharing: 'trusted_lan_allowed',
+    });
+    // NO visionOcr route → the route inherits the catalog default.
+    const cfg = getVlmConfig();
+    expect(cfg).not.toBeNull();
+    expect(cfg?.baseUrl).toBe('http://192.168.1.50:1234/v1');
+    expect(cfg?.model).toBe('gemma-4-26b-a4b-qat');
+    expect(cfg?.transport).toBe('openai-compatible');
+    expect(cfg?.enabled).toBe(true);
+  });
+
+  it('falls back to the legacy ollama_vlm setting when the inherited AI Compute primary is unusable', () => {
+    // Inherited catalog default is a DISABLED connection → not usable → the
+    // legacy api_keys.ollama_vlm route is consulted.
+    upsertProviderConnection({
+      id: 'desktop-lmstudio',
+      label: 'Desktop LM Studio',
+      transport: 'openai-compatible',
+      baseUrl: 'http://192.168.1.50:1234/v1',
+      trustZone: 'trusted_lan',
+      approvedHost: '192.168.1.50',
+      approvedPort: 1234,
+      enabled: false,
+    });
+    upsertApiKey('ollama_vlm', 'enabled', 'http://localhost:11434', 'qwen2.5vl:latest');
+
+    const cfg = getVlmConfig();
+    expect(cfg).not.toBeNull();
+    expect(cfg?.transport).toBe('ollama-native');
+    expect(cfg?.baseUrl).toBe('http://localhost:11434');
+    expect(cfg?.model).toBe('qwen2.5vl:latest');
   });
 });

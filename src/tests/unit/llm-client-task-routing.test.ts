@@ -15,9 +15,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { unlinkSync } from 'node:fs';
-import { initDb, closeDb, resetDb } from '../../db/connection';
+import { initDb, closeDb, resetDb, getDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import { upsertApiKey } from '../../db/repositories/api-key-repo';
+import {
+  upsertProviderConnection,
+  upsertWorkloadRoute,
+} from '../../db/repositories/provider-connection-repo';
 import {
   upsertLlmTaskConfig,
   deleteLlmTaskConfig,
@@ -1632,5 +1636,108 @@ describe('Model-call provenance wrapper (issue #17 E)', () => {
     })).rejects.toThrow(/audit context without a runtime snapshot/i);
     expect(fetches).toBe(0);
     expect(getModelCallsByRun(run.id)).toHaveLength(0);
+  });
+});
+
+describe('AI Compute authority — configured routing never consults the legacy chain', () => {
+  const testDbPath = 'src/tests/unit/llm-client-authority-test.db';
+  let originalFetch: typeof fetch;
+
+  function stubFetch(responseBody: unknown = {
+    choices: [{ message: { content: 'mock response' } }],
+  }): { calls: Array<{ url: string }> } {
+    const calls: Array<{ url: string }> = [];
+    globalThis.fetch = (async (url: string) => {
+      calls.push({ url: String(url) });
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    return { calls };
+  }
+
+  beforeAll(() => {
+    try { resetDb(); } catch { /* ok */ }
+    initDb(testDbPath);
+    runMigrations();
+    upsertApiKey('deepseek', 'sk-deepseek-test', null, 'deepseek-default');
+    upsertApiKey('ollama', 'ollama-default', 'http://localhost:11434/v1', 'llama3');
+  });
+
+  afterAll(() => {
+    closeDb();
+    try { unlinkSync(testDbPath); } catch { /* ok */ }
+  });
+
+  beforeEach(() => { originalFetch = globalThis.fetch; });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    // Route cleanup: a route row makes the DB 'configured', which would leak
+    // into the pristine-install tests below and the sibling describes.
+    getDb().run('DELETE FROM ai_workload_routes');
+    getDb().run(`DELETE FROM provider_connections WHERE id NOT IN ('local-ollama','openai-cloud','deepseek-cloud')`);
+  });
+
+  test('configured + unusable route fails closed — legacy llm_task_configs/api_keys are never consulted', async () => {
+    upsertWorkloadRoute('storeManager', {
+      primary: { connectionId: 'ghost-conn', modelId: 'ghost-model' },
+      fallback: null,
+      terminalBehavior: 'unavailable',
+    });
+
+    const { isAiComputeConfigured } = await import('../../db/repositories/provider-connection-repo');
+    expect(isAiComputeConfigured()).toBe(true);
+
+    // A task config pointing at the seeded deepseek api_key must NOT resolve:
+    upsertLlmTaskConfig({ task: 'store_manager_assistant', provider: 'deepseek', model: 'deepseek-v4-flash' });
+    try {
+      expect(getLlmConfigForTask('store_manager_assistant', { allowFallback: true })).toBeNull();
+      expect(getLlmConfig()).toBeNull();
+
+      // Live dispatch: the dispatcher enforces usability and fails closed.
+      stubFetch();
+      await expect(
+        callLlmForTask('store_manager_assistant', 'hello', 'system', { allowFallback: true }),
+      ).rejects.toThrowError(/not configured or disabled|policy denied/i);
+    } finally {
+      deleteLlmTaskConfig('store_manager_assistant');
+    }
+  });
+
+  test('configured + usable route dispatches through AI Compute (never api_keys)', async () => {
+    upsertProviderConnection({
+      id: 'local-test',
+      label: 'Local Test',
+      transport: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      trustZone: 'this_device',
+      approvedHost: '127.0.0.1',
+      approvedPort: 11434,
+      enabled: true,
+    });
+    upsertWorkloadRoute('storeManager', {
+      primary: { connectionId: 'local-test', modelId: 'llama3' },
+      fallback: null,
+      terminalBehavior: 'unavailable',
+    });
+
+    const { calls } = stubFetch();
+    const result = await callLlmForTask('store_manager_assistant', 'hello', 'system', { allowFallback: true });
+    expect(result).toBe('mock response');
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0].url).toContain('127.0.0.1:11434');
+    expect(calls[0].url).not.toContain('api.deepseek.com');
+  });
+
+  test('pristine install (no routes) still resolves through the legacy chain', async () => {
+    upsertLlmTaskConfig({ task: 'store_manager_assistant', provider: 'deepseek', model: 'deepseek-v4-flash' });
+    try {
+      const cfg = getLlmConfigForTask('store_manager_assistant', { allowFallback: true });
+      expect(cfg).not.toBeNull();
+      expect(cfg?.provider).toBe('deepseek');
+    } finally {
+      deleteLlmTaskConfig('store_manager_assistant');
+    }
   });
 });

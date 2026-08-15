@@ -291,6 +291,24 @@ export function isTargetPermittedByPolicy(
   return false;
 }
 
+/**
+ * True when a connection can actually serve an inference request: enabled,
+ * and — for cloud connections — carrying a real credential (a cloud endpoint
+ * without a key would send an inert bearer token and must never be resolved
+ * or dispatched). Local/LAN servers need no credential.
+ *
+ * This is the single availability predicate for AI Compute routing across
+ * the dispatcher, llm-client, the VLM client, and the Store Manager resolver;
+ * bare `enabled` is never sufficient.
+ */
+export function isConnectionUsable(conn: ProviderConnection): boolean {
+  if (!conn.enabled) return false;
+  if (conn.trustZone === 'cloud') {
+    return Boolean(conn.credential && conn.credential.trim().length > 0);
+  }
+  return true;
+}
+
 // ─── Built-in Default Connections ─────────────────────────────────────────────
 
 export const DEFAULT_BUILTIN_CONNECTIONS: Record<string, ProviderConnection> = {

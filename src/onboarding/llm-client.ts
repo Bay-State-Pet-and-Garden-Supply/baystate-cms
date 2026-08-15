@@ -26,10 +26,10 @@
  */
 
 import { getApiKey } from '../db/repositories/api-key-repo';
-import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
+import { getFullAiRoutingConfig, isAiComputeConfigured } from '../db/repositories/provider-connection-repo';
 import { dispatchWorkloadChat } from '../ai/inference-dispatcher';
 import { AiPolicyDeniedError } from '../ai/network-transport';
-import type { ProviderConnection, ModelTarget } from '../ai/provider-connections';
+import { isConnectionUsable, type ProviderConnection, type ModelTarget } from '../ai/provider-connections';
 import {
   getLlmTaskConfig,
   type LlmProvider,
@@ -91,21 +91,6 @@ const DEFAULT_MODELS: Record<LlmProvider, string> = {
 };
 
 /**
- * True when a ProviderConnection is actually usable for inference: enabled,
- * and — for cloud connections — carrying a real credential (a cloud
- * endpoint without a key would send a bogus `Bearer enabled`). Local/LAN
- * servers need no credential. This is the single availability predicate for
- * AI Compute routing; bare `enabled` is never sufficient.
- */
-function isConnectionUsable(conn: ProviderConnection): boolean {
-  if (!conn.enabled) return false;
-  if (conn.trustZone === 'cloud') {
-    return Boolean(conn.credential && conn.credential.trim().length > 0);
-  }
-  return true;
-}
-
-/**
  * Thrown when a profile task is requested but no `llm_task_configs`
  * row exists and `allowFallback` is false. Distinct error class so
  * callers (e.g. the page extractor) can map this to a `failed` audit
@@ -155,11 +140,18 @@ export function getLlmConfig(): LlmConfig | null {
         model: target.modelId,
       };
     }
+
+    // AI Compute is authoritative once configured: a configured-but-unusable
+    // route fails closed here rather than silently selecting the legacy
+    // api_keys chain (which would bypass the AI Compute privacy boundary).
+    if (isAiComputeConfigured()) {
+      return null;
+    }
   } catch {
     // Database fallback
   }
 
-  // Try DeepSeek first (recommended cloud)
+  // Legacy migration path (never-configured installs only): Try DeepSeek first (recommended cloud)
   const deepseek = getApiKey('deepseek');
   if (deepseek && deepseek.api_key) {
     if (deepseek.api_key.includes('•')) {
@@ -466,10 +458,19 @@ export function getLlmConfigForTask(
         model: target.modelId,
       };
     }
+
+    // AI Compute is authoritative once configured: a configured-but-unusable
+    // route must NOT leak into the legacy `llm_task_configs` / generic chain
+    // (which would bypass the AI Compute privacy boundary). Legacy resolution
+    // below is a migration path for never-configured installs only.
+    if (isAiComputeConfigured()) {
+      return null;
+    }
   } catch {
     // Continue to legacy task config check
   }
 
+  // Legacy migration path (never-configured installs only):
   const taskConfig = getLlmTaskConfig(task);
   if (taskConfig) {
     const built = buildConfigFromTaskConfig(taskConfig);
@@ -587,11 +588,16 @@ function workloadKeyForTask(task: LlmTask): 'discovery' | 'curation' | 'profileB
 }
 
 /**
- * Resolve the AI Compute dispatch target for a live task when a usable
- * primary connection exists. Returns `null` when no usable route is
- * configured — callers then fall back to the legacy task-config chain
- * (a fresh install with nothing enabled must keep working through
- * `llm_task_configs` / `api_keys`).
+ * Resolve the AI Compute dispatch target for a live task.
+ *
+ * - AI Compute CONFIGURED (isAiComputeConfigured()): returns the resolved
+ *   route target unconditionally — the InferenceDispatcher enforces
+ *   usability, fails closed with `policy_denied` telemetry when the primary
+ *   is disabled/misconfigured, and applies the route's configured fallback
+ *   and terminal behavior. The legacy chain is never consulted.
+ * - NOT configured (pristine install): returns the target only when the
+ *   primary connection is usable, so callers fall back to the legacy
+ *   `llm_task_configs` / `api_keys` chain (migration path only).
  */
 function resolveLiveDispatchTarget(task: LlmTask): {
   workloadKey: ReturnType<typeof workloadKeyForTask>;
@@ -602,6 +608,9 @@ function resolveLiveDispatchTarget(task: LlmTask): {
     const workloadKey = workloadKeyForTask(task);
     const route = aiConfig.workloads[workloadKey];
     const target = route.primary === 'inherit' ? aiConfig.defaults.catalogTarget : route.primary;
+    if (isAiComputeConfigured()) {
+      return { workloadKey, target };
+    }
     const conn = aiConfig.connections[target.connectionId];
     if (conn && isConnectionUsable(conn)) {
       return { workloadKey, target };
@@ -1003,7 +1012,9 @@ export async function callLlmForTask(
         throw err;
       }
     }
-    // No usable AI Compute route → continue to the legacy resolution path.
+    // NOT configured (pristine install) and no usable route → legacy migration
+    // path below. Once AI Compute is configured, resolveLiveDispatchTarget
+    // always returns a target and this comment is never reached.
   }
 
   let config: LlmConfig | null;

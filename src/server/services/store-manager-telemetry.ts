@@ -76,6 +76,7 @@ export interface StoreManagerMessageMetadata {
 export function beginStoreManagerCall(
   workspaceId: string,
   resolved: ResolvedAiSdkModel,
+  opts: { fallbackFromCallId?: string; retryCount?: number } = {},
 ): string {
   return insertAiModelCallStart({
     workspaceId,
@@ -83,6 +84,8 @@ export function beginStoreManagerCall(
     provider: resolved.provider,
     model: resolved.modelId,
     locality: resolved.locality,
+    fallbackFromCallId: opts.fallbackFromCallId,
+    retryCount: opts.retryCount,
   });
 }
 
@@ -100,6 +103,7 @@ export function terminalizeStoreManagerCall(
     promptTokens?: number | null;
     completionTokens?: number | null;
     errorCode?: string | null;
+    durationMs?: number | null;
   } = {},
 ): boolean {
   const cost = computeApiCost(
@@ -111,6 +115,7 @@ export function terminalizeStoreManagerCall(
   );
   return completeAiModelCall(callId, {
     status,
+    durationMs: opts.durationMs ?? null,
     promptTokens: opts.promptTokens ?? null,
     completionTokens: opts.completionTokens ?? null,
     estimatedApiCostUsd: cost.estimatedApiCostUsd,

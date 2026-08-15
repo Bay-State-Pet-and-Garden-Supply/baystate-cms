@@ -20,6 +20,7 @@
 import { randomUUID, randomBytes } from 'node:crypto';
 import { streamText, toUIMessageStream, isStepCount, convertToModelMessages, type UIMessage } from 'ai';
 import { resolveAiSdkModelWithFallback, type ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
+import type { StoreManagerModelSelection } from '../../shared/schemas/store-manager-operations';
 import {
   buildStoreManagerSystemPrompt,
   STORE_MANAGER_PROMPT_VERSION,
@@ -83,7 +84,7 @@ export interface StoreManagerTurnInput {
   threadId: string | null;
   messages: unknown;
   selectedSkus?: string[];
-  selectedModel?: string;
+  selectedModel?: StoreManagerModelSelection;
   abortSignal?: AbortSignal;
   toolApprovalSecret: string;
   /** Optional pre-generated per-chat execution id (route-bound). */
@@ -122,7 +123,7 @@ export interface StoreManagerDrainedOutput {
 
 export interface StoreManagerExecutionDeps {
   /** Injectable model resolver for tests (defaults to the real resolver). */
-  resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
+  resolveModel?: (selectedModel?: StoreManagerModelSelection) => ResolvedAiSdkModel;
   /** Injectable clock for tests. */
   now?: () => Date;
   registry?: StoreManagerToolRegistry;
@@ -304,6 +305,7 @@ export async function runStoreManagerExecution(
   };
 
   let modelCallId: string | null = null;
+  let primaryCallStartedAt: number | null = null;
   let didTerminalize = false;
   let finalStatus: 'success' | 'failed' | 'cancelled' | 'policy_denied' | 'deadline_exceeded' = 'success';
   function terminalizeTurnState(
@@ -377,21 +379,38 @@ export async function runStoreManagerExecution(
   // workload route) into a resilient transport. `executedResolved` returns
   // the model that ACTUALLY ran: the resilient wrapper mutates
   // `resolved.executedFallback` when the primary fails and the fallback
-  // executes, so telemetry/cost/metadata never attribute a fallback run to
-  // the failed primary. Injected test resolvers return plain resolved models
-  // (no `fallback`), so no wrapping occurs and behavior is unchanged.
-  const resolved = (deps.resolveModel ?? ((selectedModel?: string) => resolveAiSdkModelWithFallback(selectedModel)))(
-    validated.selectedModel,
-  );
+  // executes. Telemetry mirrors the InferenceDispatcher: the primary attempt
+  // gets its own `ai_model_calls` row (terminalized 'failed' when the
+  // fallback executes) and the fallback runs under a SECOND row linked via
+  // `fallback_from_call_id` + `retry_count` — provider/model/locality/cost
+  // are never mixed between the two targets, and chat metadata rehydrates
+  // from the successful fallback row. Injected test resolvers return plain
+  // resolved models (no `fallback`), so no wrapping or hooking occurs and
+  // behavior is unchanged.
+  const defaultResolveModel = (selection?: StoreManagerModelSelection): ResolvedAiSdkModel =>
+    resolveAiSdkModelWithFallback(selection, (fallback) => {
+      if (!modelCallId || primaryCallStartedAt === null) return;
+      // Primary attempt failed → durable failed row for the primary target.
+      terminalizeStoreManagerCall(modelCallId, resolved, 'failed', {
+        errorCode: 'primary_failed_fallback',
+        durationMs: Date.now() - primaryCallStartedAt,
+      });
+      // The fallback executes under its own row (mirrors dispatchWorkloadChat
+      // telemetry), which becomes the row this turn references for cost and
+      // chat-history rehydration.
+      const fallbackCallId = beginStoreManagerCall(validated.workspaceId, fallback, {
+        fallbackFromCallId: modelCallId,
+        retryCount: 1,
+      });
+      modelCallId = fallbackCallId;
+      updateStoreManagerSessionModelCall(validated.workspaceId, runId, fallbackCallId);
+      console.warn(
+        `[StoreManager] Primary ${resolved.provider}:${resolved.modelId} failed; executing fallback ${fallback.provider}:${fallback.modelId} (call ${fallbackCallId}).`,
+      );
+    });
+  const resolved = (deps.resolveModel ?? defaultResolveModel)(validated.selectedModel);
   const model = resolved.modelInstance;
   const executedResolved = (): ResolvedAiSdkModel => resolved.executedFallback ?? resolved;
-  const logFallbackExecution = (): void => {
-    if (resolved.executedFallback) {
-      console.warn(
-        `[StoreManager] Executed fallback model ${resolved.executedFallback.provider}:${resolved.executedFallback.modelId} after primary ${resolved.provider}:${resolved.modelId} failed.`,
-      );
-    }
-  };
 
   createRunRows(validated, runId, turnId, executionId, policy, resolved, now);
   emitRunStarted(emit, validated, runId, turnId, policy, now);
@@ -471,6 +490,7 @@ export async function runStoreManagerExecution(
   // --- model messages + telemetry start (immediately before transport) ---
   const modelMessages = await convertToModelMessages(chatMessages as UIMessage[]);
   modelCallId = beginStoreManagerCall(validated.workspaceId, resolved);
+  primaryCallStartedAt = Date.now();
   updateStoreManagerSessionModelCall(validated.workspaceId, runId, modelCallId);
   armDeadline();
 
@@ -501,8 +521,7 @@ export async function runStoreManagerExecution(
     onEnd: ({ usage }) => {
       const promptTokens = usage?.inputTokens ?? null;
       const completionTokens = usage?.outputTokens ?? null;
-      logFallbackExecution();
-      terminalizeStoreManagerCall(modelCallId, executedResolved(), 'success', {
+      terminalizeStoreManagerCall(modelCallId!, executedResolved(), 'success', {
         promptTokens,
         completionTokens,
       });
@@ -517,25 +536,23 @@ export async function runStoreManagerExecution(
       );
     },
     onError: (error) => {
-      logFallbackExecution();
       if (deadlineHit) {
-        terminalizeStoreManagerCall(modelCallId, executedResolved(), 'deadline_exceeded');
+        terminalizeStoreManagerCall(modelCallId!, executedResolved(), 'deadline_exceeded');
         terminalizeTurnState('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
         return;
       }
-      terminalizeStoreManagerCall(modelCallId, executedResolved(), 'failed', {
+      terminalizeStoreManagerCall(modelCallId!, executedResolved(), 'failed', {
         errorCode: error instanceof Error ? error.name : 'STREAM_ERROR',
       });
       terminalizeTurnState('failed', 'stream_error', sessionState.toolCalls);
     },
     onAbort: () => {
-      logFallbackExecution();
       if (deadlineHit) {
-        terminalizeStoreManagerCall(modelCallId, executedResolved(), 'deadline_exceeded');
+        terminalizeStoreManagerCall(modelCallId!, executedResolved(), 'deadline_exceeded');
         terminalizeTurnState('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
         return;
       }
-      terminalizeStoreManagerCall(modelCallId, executedResolved(), 'cancelled');
+      terminalizeStoreManagerCall(modelCallId!, executedResolved(), 'cancelled');
       terminalizeTurnState('cancelled', 'client_abort', sessionState.toolCalls);
     },
   });
@@ -545,16 +562,17 @@ export async function runStoreManagerExecution(
     tools: aiSdkTools,
     messageMetadata: ({ part }) => {
       if (part.type === 'start') {
+        const started = executedResolved();
         return {
           modelCallId,
-          provider: resolved.provider,
-          model: resolved.modelId,
-          locality: resolved.locality,
-          resolutionReason: resolved.resolutionReason,
+          provider: started.provider,
+          model: started.modelId,
+          locality: started.locality,
+          resolutionReason: started.resolutionReason,
         };
       }
       if (part.type === 'finish') {
-        return buildStoreManagerMessageMetadata(executedResolved(), modelCallId, {
+        return buildStoreManagerMessageMetadata(executedResolved(), modelCallId!, {
           inputTokens: part.totalUsage?.inputTokens,
           outputTokens: part.totalUsage?.outputTokens,
         });
@@ -663,7 +681,12 @@ function createRunRows(
     policyHash: policy.policyHash,
     policyVersion: policy.version,
     policySnapshotJson: policyToSnapshotJson(policy),
-    requestedModel: request.selectedModel ?? null,
+    requestedModel:
+      request.selectedModel == null
+        ? null
+        : typeof request.selectedModel === 'string'
+          ? request.selectedModel
+          : JSON.stringify(request.selectedModel),
     resolvedProvider: resolved?.provider ?? 'none',
     resolvedModel: resolved?.modelId ?? 'none',
     resolvedLocality: resolved?.locality ?? 'cloud',
@@ -837,7 +860,7 @@ export async function runStoreManagerTurn(
 
 export interface StoreManagerTurnDeps {
   /** Injectable model resolver for tests (defaults to the real resolver). */
-  resolveModel?: (selectedModel?: string) => ResolvedAiSdkModel;
+  resolveModel?: (selectedModel?: StoreManagerModelSelection) => ResolvedAiSdkModel;
   /** Injectable clock for tests. */
   now?: () => Date;
   registry?: StoreManagerToolRegistry;

@@ -6,18 +6,25 @@ import type {
   LanguageModelV4StreamPart,
   LanguageModelV4StreamResult,
 } from '@ai-sdk/provider';
+import type { FetchFunction } from '@ai-sdk/provider-utils';
 import { getLlmConfig, getLlmConfigForTask } from '../../onboarding/llm-client';
 import { getApiKey } from '../../db/repositories/api-key-repo';
 import { getFullAiRoutingConfig } from '../../db/repositories/provider-connection-repo';
 import {
+  isConnectionUsable,
   isTargetPermittedByPolicy,
   resolveWorkloadRoute,
+  TrustZoneValidationError,
+  validateConnectionTrustZone,
+  type AiRoutingConfig,
   type ProviderConnection,
 } from '../../ai/provider-connections';
+import { AiPolicyDeniedError, fetchWithDeadlines } from '../../ai/network-transport';
 import { inferModelCapabilities } from '../../ai/connection-health-monitor';
 import { getProviderDefinition } from '../../ai/provider-registry';
 import { getModelProfile, listModelProfiles, type ModelProfile } from '../../ai/model-registry';
 import { getModelPricing, type CostBasis } from '../../ai/model-pricing';
+import type { StoreManagerModelSelection } from '../../shared/schemas/store-manager-operations';
 
 export type ModelResolutionReason = 'explicit' | 'task_config' | 'global_default';
 
@@ -105,16 +112,68 @@ export function isModelToolCapableForTarget(modelId: string): boolean {
 }
 
 /**
- * Build a resolved model directly from an enabled ProviderConnection.
+ * Build the AI-SDK fetch adapter for a ProviderConnection so the Store
+ * Manager transport applies the SAME security boundary as the generic
+ * InferenceDispatcher transport:
+ *
+ * - trust-zone validation (host/port pinning, protocol, private/metadata
+ *   ranges) BEFORE every request — fail closed per request, not just at
+ *   resolution;
+ * - strict redirect denial (anti-SSRF) and a whole-request timeout via
+ *   `fetchWithDeadlines` (src/ai/network-transport.ts);
+ * - availability classification for network/timeout failures.
+ *
+ * The AI SDK wraps thrown fetch errors in APICallError with the original as
+ * `cause`, so callers that need classification must inspect the cause chain.
+ */
+export function buildConnectionGuardedFetch(conn: ProviderConnection): FetchFunction {
+  const guardedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    // Re-validate the trust zone on EVERY request (fail closed): a connection
+    // edited between resolution and transport must not send bytes anywhere.
+    validateConnectionTrustZone(conn);
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input instanceof Request
+            ? input.url
+            : String(input);
+    return fetchWithDeadlines(url, {
+      ...(init as RequestInit),
+      timeoutMs: conn.inferenceTimeoutMs ?? 60000,
+    });
+  };
+  // FetchFunction is `typeof globalThis.fetch` (carries preconnect/default
+  // props in Bun); the guarded adapter is structurally the same call
+  // signature, which is what the AI SDK exercises.
+  return guardedFetch as unknown as FetchFunction;
+}
+
+/**
+ * Build a resolved model directly from an enabled ProviderConnection. The
+ * connection's trust zone is validated at resolution time (fail before any
+ * transport attempt) and every SDK request rides the guarded fetch transport.
  */
 function buildConnectionModel(
   conn: ProviderConnection,
   modelName: string,
   resolutionReason: ModelResolutionReason,
 ): ResolvedAiSdkModel {
+  try {
+    validateConnectionTrustZone(conn);
+  } catch (err) {
+    if (err instanceof TrustZoneValidationError) {
+      throw new ModelUnavailableError(
+        `Connection "${conn.label}" fails trust-zone validation and cannot be used by the Store Manager: ${err.message}`,
+      );
+    }
+    throw err;
+  }
   const modelInstance = createOpenAI({
     baseURL: conn.baseUrl,
     apiKey: conn.credential || 'enabled',
+    fetch: buildConnectionGuardedFetch(conn),
   }).chat(modelName);
   return {
     modelInstance,
@@ -126,16 +185,21 @@ function buildConnectionModel(
 }
 
 /**
- * True when a connection can actually serve a request: enabled, and cloud
- * connections must carry a credential (a cloud target without a credential
- * would send an inert bearer token and must never be resolved).
+ * Enforce the storeManager workload route's text data-sharing policy for a
+ * connection target. A destination trust zone the policy forbids (e.g. a
+ * cloud primary under `this_device_only`) is a misconfiguration: fail closed
+ * at resolution with the corrective setting named — never silently transport
+ * data outside the declared boundary.
  */
-function isConnectionUsable(conn: ProviderConnection): boolean {
-  if (!conn.enabled) return false;
-  if (conn.trustZone === 'cloud') {
-    return Boolean(conn.credential && conn.credential.trim().length > 0);
+function assertConnectionTextSharingPermitted(conn: ProviderConnection, aiConfig: AiRoutingConfig): void {
+  const route = resolveWorkloadRoute('storeManager', aiConfig);
+  if (!isTargetPermittedByPolicy(conn.trustZone, route.textDataSharing)) {
+    throw new ModelUnavailableError(
+      `The Store Manager route pairs "${conn.label}" (${conn.trustZone}) with text data-sharing policy ` +
+        `"${route.textDataSharing}", which forbids transmission to that destination. ` +
+        'Change the privacy policy or the Store Manager primary in Settings → AI Compute.',
+    );
   }
-  return true;
 }
 
 function defaultBaseUrlForProvider(provider: string): string {
@@ -184,13 +248,14 @@ function resolveExplicit(provider: string | undefined, modelName: string): Resol
     const aiConfig = getFullAiRoutingConfig();
     if (provider && aiConfig.connections[provider]) {
       const conn = aiConfig.connections[provider];
-      if (conn.enabled) {
+      if (isConnectionUsable(conn)) {
         if (!isModelToolCapableForTarget(modelName)) {
           throw new ModelUnavailableError(
             `Model "${modelName}" on connection "${conn.label}" does not support tool calling and cannot be used by the Store Manager. ` +
               'Choose a model with tool-calling support on the connection in Settings → AI Compute.',
           );
         }
+        assertConnectionTextSharingPermitted(conn, aiConfig);
         return buildConnectionModel(conn, modelName, 'explicit');
       }
     }
@@ -241,13 +306,14 @@ function resolveDefault(): ResolvedAiSdkModel {
     const target = route.primary === 'inherit' ? aiConfig.defaults.catalogTarget : route.primary;
     if (target && target.connectionId) {
       const conn = aiConfig.connections[target.connectionId];
-      if (conn && conn.enabled) {
+      if (conn && isConnectionUsable(conn)) {
         if (!isModelToolCapableForTarget(target.modelId)) {
           throw new ModelUnavailableError(
             `The configured Store Manager model "${target.modelId}" on connection "${conn.label}" does not support tool calling. ` +
               'Choose a model with tool-calling support in Settings → AI Compute.',
           );
         }
+        assertConnectionTextSharingPermitted(conn, aiConfig);
         return buildConnectionModel(conn, target.modelId, 'task_config');
       }
     }
@@ -335,24 +401,36 @@ export function resolveAiSdkModel(input?: string | ResolveAiSdkModelOptions): Re
 /**
  * Resolve the Store Manager chat model WITH a resilient fallback transport.
  *
- * Default (no explicit selection) resolution wraps the primary model in a
- * one-retry fallback wrapper backed by the `storeManager` workload route's
- * configured fallback (or the catalog fallback when the route inherits). The
- * fallback is only wired when it is usable (enabled, credentialed when cloud,
- * tool-capable) AND permitted by the route's text data-sharing policy.
+ * - `undefined` | `{ mode: 'route_default' }`: resolve the configured route
+ *   and wrap the primary in a one-retry fallback transport backed by the
+ *   `storeManager` workload route's configured fallback (or the catalog
+ *   fallback when the route inherits). This is the UI default — normal chat
+ *   gets the configured fallback.
+ * - `{ mode: 'explicit', target }`: connection-addressed manual override —
+ *   NEVER falls back (the operator picked a specific target).
+ * - `string`: legacy explicit model-id selection — registry-resolved, NEVER
+ *   falls back (kept for persisted trigger/schedule/playbook definitions and
+ *   older clients).
  *
- * Explicit selections NEVER fall back (the operator picked a specific model),
- * matching `resolveAiSdkModel` semantics.
- *
+ * @param onFallbackUsed Optional observer fired when the resilient wrapper
+ *   actually executes the fallback (used by the executor to record the
+ *   fallback telemetry row).
  * @throws {ModelUnavailableError} When no compatible primary can be resolved.
  */
 export function resolveAiSdkModelWithFallback(
-  input?: string | ResolveAiSdkModelOptions,
+  input?: StoreManagerModelSelection,
+  onFallbackUsed?: (fallback: ResolvedAiSdkModel) => void,
 ): ResolvedAiSdkModel {
-  if (input) {
-    // Explicit selections never fall back.
-    return resolveAiSdkModel(input);
+  if (typeof input === 'string') {
+    // Legacy explicit model-id selection: never falls back.
+    return resolveExplicit(undefined, input);
   }
+  if (input && input.mode === 'explicit') {
+    // Connection-addressed manual override: never falls back.
+    return resolveExplicit(input.target.connectionId, input.target.modelId);
+  }
+  // undefined | { mode: 'route_default' }: follow the configured route with
+  // its configured fallback transport.
   const primary = resolveAiSdkModel();
   const fallback = resolveStoreManagerFallback(primary);
   if (!fallback) return primary;
@@ -363,6 +441,7 @@ export function resolveAiSdkModelWithFallback(
     fallback.modelInstance,
     () => {
       resolvedWithFallback.executedFallback = fallback;
+      onFallbackUsed?.(fallback);
     },
   );
   return resolvedWithFallback;
@@ -406,7 +485,9 @@ function resolveStoreManagerFallback(primary: ResolvedAiSdkModel): ResolvedAiSdk
  *   (mid-stream retry is impossible without re-running the whole turn).
  *
  * Aborted calls (caller abort / run deadline) NEVER retry — they propagate
- * immediately.
+ * immediately. Policy denials / trust-zone violations NEVER retry either
+ * (fail closed like the InferenceDispatcher): with the guarded fetch the AI
+ * SDK wraps those in APICallError, so the cause chain is inspected.
  *
  * Exported for unit tests; production callers use `resolveAiSdkModelWithFallback`.
  */
@@ -418,6 +499,24 @@ export function createResilientModel(
   const p = primary as unknown as LanguageModelV4;
   const f = fallback as unknown as LanguageModelV4;
   const aborted = (options: LanguageModelV4CallOptions) => options.abortSignal?.aborted === true;
+
+  // Policy denials / trust-zone violations must NEVER trigger a fallback
+  // (fail closed). The guarded fetch throws these inside the AI SDK's
+  // APICallError wrapper, so walk the cause chain.
+  const isPolicyDenial = (err: unknown): boolean => {
+    let current: unknown = err;
+    for (let depth = 0; depth < 3 && current !== undefined && current !== null; depth++) {
+      if (
+        current instanceof AiPolicyDeniedError ||
+        current instanceof TrustZoneValidationError ||
+        (current as { isPolicyDenial?: boolean } | undefined)?.isPolicyDenial === true
+      ) {
+        return true;
+      }
+      current = (current as { cause?: unknown } | undefined)?.cause;
+    }
+    return false;
+  };
 
   const runFallback = async (options: LanguageModelV4CallOptions): Promise<LanguageModelV4StreamResult> => {
     onFallbackUsed();
@@ -433,7 +532,7 @@ export function createResilientModel(
       try {
         return await p.doGenerate(options);
       } catch (err) {
-        if (aborted(options)) throw err;
+        if (aborted(options) || isPolicyDenial(err)) throw err;
         onFallbackUsed();
         return f.doGenerate(options);
       }
@@ -443,7 +542,7 @@ export function createResilientModel(
       try {
         primaryResult = await p.doStream(options);
       } catch (err) {
-        if (aborted(options)) throw err;
+        if (aborted(options) || isPolicyDenial(err)) throw err;
         return runFallback(options);
       }
       return {
@@ -451,7 +550,7 @@ export function createResilientModel(
         stream: resilientStream(
           primaryResult.stream,
           () => runFallback(options).then((r) => r.stream),
-          () => !aborted(options),
+          (err) => !aborted(options) && !isPolicyDenial(err),
         ),
       };
     },
@@ -462,12 +561,13 @@ export function createResilientModel(
 /**
  * Wrap a primary model stream so a failure BEFORE the first delivered part
  * restarts the stream against the fallback. Once any part has been delivered
- * (or the caller aborted), errors propagate unchanged.
+ * (or the caller aborted / the error is a policy denial), errors propagate
+ * unchanged.
  */
 function resilientStream(
   primaryStream: ReadableStream<LanguageModelV4StreamPart>,
   getFallbackStream: () => Promise<ReadableStream<LanguageModelV4StreamPart>>,
-  shouldRetry: () => boolean,
+  shouldRetry: (err: unknown) => boolean,
 ): ReadableStream<LanguageModelV4StreamPart> {
   let reader = primaryStream.getReader();
   let deliveredAnyPart = false;
@@ -484,7 +584,7 @@ function resilientStream(
         deliveredAnyPart = true;
         controller.enqueue(value);
       } catch (err) {
-        if (!deliveredAnyPart && shouldRetry() && !fallbackRequested) {
+        if (!deliveredAnyPart && shouldRetry(err) && !fallbackRequested) {
           fallbackRequested = true;
           try {
             const fallbackStream = await getFallbackStream();

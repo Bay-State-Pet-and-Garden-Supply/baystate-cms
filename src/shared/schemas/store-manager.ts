@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { safeValidateUIMessages } from 'ai';
 import type { UIMessage } from 'ai';
 import { StoreManagerPinnedScopeSchema } from './store-manager-scope';
+import { StoreManagerModelSelectionSchema } from './store-manager-operations';
 
 export const STORE_MANAGER_REQUEST_BOUNDS = {
   maxMessages: 100,
@@ -181,7 +182,7 @@ export const StoreManagerChatRequestSchema = z.object({
     .array(z.string().trim().min(1).max(STORE_MANAGER_REQUEST_BOUNDS.maxSkuLength))
     .max(STORE_MANAGER_REQUEST_BOUNDS.maxSelectedSkus)
     .optional(),
-  selectedModel: z.string().min(1).max(STORE_MANAGER_REQUEST_BOUNDS.maxModelIdLength).optional(),
+  selectedModel: StoreManagerModelSelectionSchema.optional(),
   /**
    * Pinned conversational scope (operations console, Issue 2, Locked Decision
    * 5). Bounded identifiers only; the server resolves and workspace-checks it

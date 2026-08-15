@@ -255,7 +255,11 @@ route.post('/store-manager/chat', async (c) => {
       // fallback row.
       insertStoreManagerUnavailableCall(
         workspace.id,
-        typeof selectedModel === 'string' ? selectedModel : undefined,
+        typeof selectedModel === 'string'
+          ? selectedModel
+          : selectedModel?.mode === 'explicit'
+            ? selectedModel.target.modelId
+            : undefined,
       );
       return c.json({ error: err.message, errorCode: 'model_unavailable' }, 400);
     }

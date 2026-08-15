@@ -391,6 +391,49 @@ export function getWorkloadRoute(workload: string): WorkloadRoute | null {
   }
 }
 
+/**
+ * True when the persisted AI Compute routing state deviates from the pristine
+ * built-in seeds — i.e. the operator has explicitly configured routing
+ * (workload route rows, privacy defaults, modified built-in connections, or
+ * operator-added connections).
+ *
+ * When configured, AI Compute is AUTHORITATIVE: live tasks never consult the
+ * legacy `llm_task_configs` / `api_keys` chain, which would bypass the AI
+ * Compute privacy boundary. Legacy routing remains available only to
+ * never-touched installs (migration path, not runtime semantics).
+ */
+export function isAiComputeConfigured(): boolean {
+  const db = getDb();
+  ensureSeededDefaults();
+  try {
+    const routeCount = db.query('SELECT COUNT(*) as c FROM ai_workload_routes').get() as { c: number };
+    if (routeCount.c > 0) return true;
+
+    const defaultsRow = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current') as DbRoutingDefaults | undefined;
+    if (defaultsRow) {
+      if (defaultsRow.text_data_sharing !== 'this_device_only' || defaultsRow.image_data_sharing !== 'this_device_only') return true;
+      if (defaultsRow.catalog_primary_connection_id !== 'local-ollama' || defaultsRow.catalog_primary_model_id !== 'qwen2.5vl:latest') return true;
+      if (defaultsRow.catalog_fallback_connection_id !== null || defaultsRow.catalog_fallback_model_id !== null) return true;
+    }
+
+    const rows = db.query('SELECT * FROM provider_connections').all() as DbProviderConnection[];
+    for (const row of rows) {
+      const seed = DEFAULT_BUILTIN_CONNECTIONS[row.id];
+      if (!seed) return true; // operator-added connection
+      if (seed.enabled !== Boolean(row.enabled)) return true;
+      if (seed.baseUrl !== row.base_url) return true;
+      if (seed.trustZone !== row.trust_zone) return true;
+      if ((seed.credential ?? null) !== row.credential) return true;
+      if (seed.approvedHost !== row.approved_host) return true;
+      if ((seed.approvedPort ?? null) !== row.approved_port) return true;
+    }
+  } catch {
+    // DB unavailable → treat as unconfigured (legacy migration path remains).
+    return false;
+  }
+  return false;
+}
+
 export function getFullAiRoutingConfig(): AiRoutingConfig {
   const db = getDb();
   ensureSeededDefaults();

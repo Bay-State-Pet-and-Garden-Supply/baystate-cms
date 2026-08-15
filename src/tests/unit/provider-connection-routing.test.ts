@@ -745,6 +745,10 @@ describe('End-to-End Production Routing, Failover & Authority Integration', () =
     upsertWorkloadRoute('storeManager', {
       primary: { connectionId: 'custom-lan-box', modelId: 'muse-glimmer' },
       fallback: 'inherit',
+      // LAN primary requires a route policy that permits trusted_lan text
+      // (the seeded default is this_device_only — the primary resolver now
+      // enforces the route's text data-sharing policy).
+      textDataSharing: 'trusted_lan_allowed',
       terminalBehavior: 'unavailable',
     });
 
