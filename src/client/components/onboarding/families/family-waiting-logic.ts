@@ -1,7 +1,7 @@
 /**
  * Epic #46 — Family waiting + processing views logic (pure, unit-tested).
  */
-import type { OnboardingWorkState, WorkActivity } from '../../../shared/schemas/onboarding-work-state';
+import type { OnboardingWorkState, WorkActivity } from '../../../../shared/schemas/onboarding-work-state';
 
 // ─── Family waiting ────────────────────────────────────────────────────────────
 
