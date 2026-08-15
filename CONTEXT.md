@@ -913,3 +913,54 @@ Catalog Product Classification extends the classification pipeline to existing S
   ProductType, Weight, Graphic, SearchKeywords, MoreInfoImage1–20); DTD-level
   behavior is not workspace-configurable (ADR-0011). Custom `ProductField*`
   values remain classification-managed via Catalog Field Serialization.
+
+## Store Manager Operating Model (epic #46)
+
+The operator-facing onboarding model adopted by ADR 0016. Automation owns progression; the Store Manager owns exceptions, final verification, and release decisions. The six internal Pipeline Stages remain the execution/diagnostics truth; this section governs how they are presented and operated.
+
+**Batch Workspace**:
+The primary Store Manager view for onboarding, replacing the Pipeline Board Kanban as the default operating model. Organized by operator meaning (Processing, Needs Attention, Waiting on Family, Ready for Review, Approved / Ready to Export) rather than by raw pipeline stage. Every product has exactly one current operator work-state, and Needs Attention is the most prominent queue while automation is active. The Pipeline Board remains available for diagnostics.
+_Avoid_: Six-column Kanban as the primary operating surface, stage-by-stage interpretation
+
+**Operator Work-State**:
+The server-derived, human-facing projection of an onboarding item's state, owned by the server (never reverse-engineered by the client from `stage`, `stage_status`, error strings, source metadata, cohort state, or feature flags). Shape: `category` ∈ `processing | needs_attention | waiting_on_family | ready_for_review | approved | ready_to_export | completed | skipped`; optional `activity` ∈ `distributor_lookup | official_site_search | official_url_verification | extraction | curation | review | approval | export`; human `label`/`detail`; `attentionReason`/`attentionAction` (e.g. `verify_official_url`, `choose_official_url`, `setup_extractor_profile`, `retry_extraction`, `resolve_source_conflict`, `retry_processing`); optional `family` readiness `{ cohortId, label, memberCount, readyCount, blockedCount, waitingOnItemIds }`; `reviewState` ∈ `not_ready | unreviewed | reviewed | approved`. Example: `discovery/needs_input` + ambiguous candidates projects to Needs Attention / "Verify official product page"; `extraction/in_progress` projects to Processing / "Extracting product data"; `curation/pending` + cohort waiting on 2 siblings projects to Waiting on Family / "3 of 5 products ready".
+_Avoid_: Client-side stage-status inference, raw error strings in operator UI, provider/query identifiers
+
+**Automation-Owned Progression**:
+The rule that an item satisfying the exit contract for the current automated activity with no human gate advances automatically. Manual advancement is reserved for explicit human decisions (URL/profile exception resolution, source-conflict resolution, approval, export) — never routine pipeline progression. This supersedes the "Advancement is always manual" wording of the Stage Advancement entry above for the operator-facing model; every automatic transition remains auditable, retries are idempotent, and automation fails closed into an actionable Needs Attention state when judgment is required.
+_Avoid_: Click-to-advance happy paths, operator shepherding of machine stages
+
+**Distributor Lookup**:
+The human-facing name for the Sourcing stage. Distributor sources are checked first (ADR 0014 + Amendments A/B); a qualified distributor record is a complete product source that SKIPS Discovery (`distributor_record_to_extraction`, `source_type='distributor_record'`, null URL) and proceeds to the family barrier without operator review. Insufficient distributor data falls back to Official Site Search automatically. Source conflicts surface as Needs Attention only when human judgment is required. The UI identifies whether final listing evidence came from distributor records, official page extraction, or a supported combination.
+_Avoid_: "Sourcing" as operator terminology, treating distributor records as a preliminary phase
+
+**Official Site Resolution**:
+The human-facing name for the combined URL-verification + extractor-profile operator workflow (Discovery + Extraction exception handling as one continuous task): confirm the correct product/variant page → if the domain has a usable extractor profile, resume automatic extraction; otherwise set up/fix the profile, which automatically retries affected domain items where safe. A confirmed URL is persisted before extraction resumes; a bad candidate URL can be replaced.
+_Avoid_: Mentally switching between "Discovery" and "Extraction" as unrelated stages
+
+**Family Readiness Barrier**:
+The Curation gate: a product family (ADR 0013 durable candidate cohort) waits until every active member is Extraction-ready. There is no default partial-family Curation ("curate the available 3 of 4"). Ready cohorts may run automatically under the cohort Curation worker path (feature-flagged). Waiting vs blocked members are distinguished; blocking siblings link directly to their Needs Attention task.
+_Avoid_: Per-SKU Curation as the default operator model, manual "curate now" partial-family actions
+
+**Durable Review State**:
+Explicit, independently recorded review/approval state distinct from pipeline stage: Curation-complete alone does not make a product reviewed. States: `not_ready` (Curation incomplete), `unreviewed` (Curation complete, not yet inspected), `reviewed` (human final inspection recorded), `approved` (bulk release decision recorded). Review covers every product; unreviewed products cannot be bulk-approved; editing a reviewed product invalidates review when the edited field affects approved output.
+_Avoid_: Inferring "reviewed" from `stage='review'` / `stage_status='completed'` alone
+
+**Bulk Approval**:
+The deliberate release decision applied to the reviewed selection (approve-all-reviewed or selected reviewed items) with per-item validation (reviewed state + semantic/promotion gates), exact success/failure counts, visible retryable partial failures, and actor/time audit. Approval never implies export or publication.
+_Avoid_: Risk-based auto-approval, approving unreviewed products, conflating approval with export
+
+**Ready to Export**:
+The operator output/release area that demotes Promotion from a peer machine stage: approved products appear here with accurate pending/exporting/exported/failed states and retry for failures. Language matches the actual side effect (e.g. ShopSite draft creation); a product is never called `published` or `exported` until the underlying operation has succeeded and been verified. Approval and export are separate decisions.
+_Avoid_: Labeling approved items as published/exported, "Promotion" as a primary operator stage
+
+### Terminology mapping (internal → human-facing)
+
+| Internal stage | Human-facing term |
+| --- | --- |
+| Sourcing | Distributor Lookup |
+| Discovery | Official Site Search / Verify Product Page |
+| Extraction | Extracting Product Data |
+| Curation | Curating Product Family |
+| Review | Review |
+| Promotion | Approved / Ready to Export / Exporting |

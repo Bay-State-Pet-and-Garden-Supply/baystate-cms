@@ -1,0 +1,64 @@
+# Adopt an operator-facing onboarding operating model with automation-owned progression
+
+Onboarding today is an item-centric six-stage pipeline (Sourcing → Discovery → Extraction → Curation → Review → Promotion, ADR 0007) rendered as a Kanban board with one column per stage. That model is correct for execution and diagnostics, but it presents every machine stage as an equally meaningful human workflow step and historically treats advancement as manual. This ADR adopts a Store Manager operating model for the onboarding batch workspace (epic #46): **automation owns progression, the Store Manager owns exceptions, final verification, and release decisions**. Distributor lookup is the first enrichment step and distributor records are valid complete product sources; official-site verification and extractor-profile setup form one continuous exception workflow; cohort readiness is the Curation barrier (ADR 0013); Review, bulk Approval, and Export are three separate durable concepts; and a server-derived operator work-state projection replaces client-side reverse-engineering of pipeline meaning.
+
+**Status**: accepted
+
+**Context**: the Store Manager is the primary user of onboarding and may need to onboard hundreds of products in one sitting. The current item-centric pipeline and Kanban UI couple operator navigation directly to execution states, which creates several product problems:
+
+- machine stages are presented as if they are all equally meaningful human workflow steps;
+- stage advancement is historically modeled as manual even though automation is preferred (ADR 0007: "Advancement is always manual");
+- `Sourcing` is vague operator terminology and does not communicate the real activity (distributor lookup);
+- distributor records are treated visually as a preliminary phase even though a strong distributor match may provide enough data to create the listing without visiting the official site (ADR 0014 Amendment A: `distributor_record_to_extraction`);
+- official-site URL verification and extraction-profile setup are split across separate concepts even though they are one continuous operator problem;
+- products that are processing correctly occupy just as much UI attention as products that actually require a human;
+- Curation is presented per item even though the desired behavior is family/cohort-aware (ADR 0013);
+- Review competes with earlier stage drawers instead of being the primary human QA surface;
+- Promotion appears as another peer pipeline stage even though approval does not automatically export or publish;
+- the current review flow is too slow for hundreds of products and lacks an explicit reviewed → bulk-approved operating model.
+
+**Decision drivers**:
+
+- The Store Manager must be able to onboard hundreds of products with minimal manual intervention, clear visibility into what genuinely requires attention, fast resolution of official-site URL/extraction problems, family-aware Curation that never runs one variant ahead of incomplete siblings, rapid review of every product, bulk approval after review, and separation between approval and actual export/publish operations.
+- The user should not need to understand internal worker-state terminology (stage, stage_status, source metadata, cohort state, feature flags) to operate the system successfully.
+- Automation is preferred everywhere deterministic/system requirements are satisfied; human judgment is required only for exceptions, final verification, and release decisions.
+- Approval must not imply export or publication; a product is never called `published` or `exported` until the underlying operation has succeeded and been verified.
+- The cohort semantic architecture from ADR 0013 (durable candidate families, cohort readiness, cohort-owned Curation behind feature flags) is the canonical family machinery; this ADR does not duplicate or replace it.
+- The six-stage execution model remains the diagnostics/admin truth; this ADR governs the operator-facing read model, automation behavior, and Store Manager UX around it.
+
+**Decisions**:
+
+- **Automation owns progression; the Store Manager owns exceptions, final verification, and release decisions.** If an item has satisfied the exit contract for the current automated activity and there is no human gate, the system advances it automatically. Manual advancement is reserved for explicit human decisions (approval, export, source-conflict resolution, URL/profile exception resolution), never routine pipeline progression. Every automatic transition remains auditable; retries are idempotent and safe; no successful item becomes stranded because an operator forgot to click the next stage; automation fails closed into an actionable work-state when judgment is required. This decision supersedes ADR 0007's "Advancement is always manual" instruction for the operator-facing model (the internal six-stage enum and diagnostics semantics are unchanged).
+- **Distributor lookup is the first enrichment step; distributor records are valid complete product sources.** The system checks configured distributor sources first (ADR 0014 + Amendments A/B are the authority for the engine, routing, and materialization; this ADR records only the operator-facing consequence). An exact/acceptable distributor match with sufficient product data proceeds through materialization/extraction without a human visiting the official manufacturer site and without operator review before Curation. Insufficient distributor data falls back to official-site search automatically. Hard source conflicts become explicit Needs Attention tasks only when human judgment is actually required. Operator-facing terminology says `Distributor Lookup` / the distributor name, never generic `Sourcing`; the UI identifies whether final listing evidence came from distributor records, official page extraction, or a supported combination.
+- **Official-site URL verification and extractor-profile setup are one continuous operator exception workflow.** The operator flow is: candidate official product page found → is this the correct product/variant? (No → choose/search another URL; Yes → persist the confirmed URL) → does this domain have a usable extractor profile? (Yes → resume automatic extraction; No → set up/fix the extractor profile → retry affected domain items). A successful domain-profile fix automatically unblocks/retries other applicable products from the same domain where safe. The Store Manager never mentally switches between "Discovery" and "Extraction" as unrelated stages.
+- **Cohort readiness is the Curation barrier.** Curation is family/cohort-gated: the entire product family waits until every active family member is Extraction-ready (ADR 0013 canonical readiness; `waiting` vs `blocked` members are distinguished, and a pre-Curation barrier failure produces a deterministic blocked state, never a wait). There is no default "curate the available 3 of 4" escape hatch. Once the family readiness barrier clears, Curation is eligible to run automatically as a cohort under the ADR 0013 cohort worker path (feature-flagged). Successful extraction automatically refreshes/re-evaluates cohort readiness.
+- **Review, bulk Approval, and Export are three separate durable concepts.** Review covers all products: every Curation-complete product must receive a human final review before approval, and review completion is durable state independent of pipeline stage (distinct from merely being Curation-complete). Approval is a bulk-oriented release decision applied to the reviewed selection; unreviewed products and products with blocking semantic/review errors cannot be approved; approval reports exact per-item success/failure outcomes and is auditable with actor/time. Approval never implies export/publish. Approved products enter a **Ready to Export** state where the operator performs the existing/future export action separately. `Promotion` is demoted from a peer machine-stage concept into an operator output/release area in human-facing language (the internal `promotion` stage enum remains unchanged).
+- **Server-owned operator work-state projection.** The server exposes a canonical projection (`onboarding work-state`) that derives the human-facing state by joining: item stage/stage_status, selected source/source type, source candidates, extraction/profile errors, cohort readiness, Curation execution state, review state, approval state, and export state. The client renders the batch workspace from this projection and never reverse-engineers operator meaning from raw fields. The conceptual shape:
+  - `category`: `processing | needs_attention | waiting_on_family | ready_for_review | approved | ready_to_export | completed | skipped`;
+  - `activity`: `distributor_lookup | official_site_search | official_url_verification | extraction | curation | review | approval | export`;
+  - `label` / `detail`: human-readable task text;
+  - `attentionReason` / `attentionAction`: `verify_official_url | choose_official_url | no_official_url | setup_extractor_profile | retry_extraction | resolve_source_conflict | retry_processing` (implementation-defined exact names);
+  - `family`: `{ cohortId, label, memberCount, readyCount, blockedCount, waitingOnItemIds }` when the item belongs to a candidate family;
+  - `reviewState`: `not_ready | unreviewed | reviewed | approved`.
+  
+  Example mappings: `discovery/needs_input` + ambiguous candidates → Needs Attention / "Verify official product page"; `extraction/in_progress` → Processing / "Extracting product data"; `curation/pending` + cohort waiting on 2 siblings → Waiting on Family / "3 of 5 products ready". Raw technical pipeline state remains available as secondary diagnostics detail.
+- **Human-facing terminology mapping.** The internal enum names do not change; operator-facing vocabulary describes tasks and outcomes:
+
+  | Internal stage | Human-facing term |
+  | --- | --- |
+  | Sourcing | Distributor Lookup |
+  | Discovery | Official Site Search / Verify Product Page |
+  | Extraction | Extracting Product Data |
+  | Curation | Curating Product Family |
+  | Review | Review |
+  | Promotion | Approved / Ready to Export / Exporting |
+
+- **Rollout behind a feature flag is allowed.** The new operator model ships behind a UI/behavior feature flag where necessary; old and new models never compete in the production Store Manager experience. Legacy Kanban-only interaction patterns are retired from the operator path after replacement surfaces are proven, while diagnostics/admin access to raw pipeline state is preserved.
+
+**Consequences**:
+
+- **Positive:** the Store Manager manages exceptions and quality, not pipeline mechanics. The six raw backend stages are no longer the primary operator information architecture; Needs Attention, Review, and Ready to Export become the primary operator surfaces while automation handles distributor acquisition, official-site fallback, extraction, family readiness, and cohort Curation wherever human judgment is not required. Clean distributor products require no human pre-Curation action. Waiting families clearly explain what they are waiting for. Reviewing hundreds of products is practical through rapid sequential navigation, and approval is bulk-efficient. Approval and export state are never conflated.
+- **Cost:** this ADR requires a server-side work-state projection service, durable review/approval state (review completion and approval must be independently recorded, not inferred from pipeline stage alone), a bulk approval API with per-item validation, a domain-level extraction release/retry path, and a modular replacement for the monolithic `PipelineBoard` surface (batch workspace shell, Needs Attention queue, official-site resolution workspace, family waiting view, rapid review workspace, bulk approval, Ready to Export). The existing `review-complete`/`advance`/`promote` endpoints and the ADR 0013 cohort machinery are extended rather than rewritten.
+- **Supersession:** for the operator-facing model, ADR 0007's "Advancement is always manual" wording is superseded by this ADR's automation-owned progression decision. ADR 0007's item-centric `stage` + `stage_status` execution model remains in force for diagnostics and internal execution.
+- **Non-goals (unchanged):** this epic does not remove `stage`/`stage_status` from the backend, rewrite ADR 0013's cohort semantic architecture, replace deterministic product-family grouping, auto-approve products without human review, allow partial-family Curation as the default path, automatically export immediately upon approval, or hide technical execution state from diagnostics/admin tooling.
+- **Acceptance criterion:** architecture docs no longer instruct UI/product work to model every stage as a manually advanced peer step — this ADR (and its operational guide `docs/onboarding-operating-model.md`) defines the automation-owned operator model for all future onboarding UI work.
