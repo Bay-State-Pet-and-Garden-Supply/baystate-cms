@@ -105,6 +105,12 @@ route.get('/onboarding/batches/:id/work-state', async (c) => {
   if (!batch) {
     return c.json({ error: 'Batch not found' }, 404);
   }
+  // Workspace-ownership guard (epic #46 review round 2): batch projections
+  // are workspace-scoped — foreign-workspace batches are 404, never readable.
+  const workspace = findWorkspace();
+  if (!workspace || batch.workspaceId !== workspace.id) {
+    return c.json({ error: 'Batch not found' }, 404);
+  }
   const filters = parseWorkStateFilters(c);
   const payload = getBatchWorkState(batchId, filters);
   return c.json(payload);

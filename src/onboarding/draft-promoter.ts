@@ -5,8 +5,9 @@ import sharp from 'sharp';
 import { getDb } from '../db/connection';
 import { findWorkspace } from '../db/repositories/workspace-repo';
 import { findBatchById, isBatchComplete, setBatchArchived } from '../db/repositories/onboarding-batch-repo';
-import { listItemsByBatch, completePromotionStage } from '../db/repositories/onboarding-item-repo';
+import { listItemsByBatch, completePromotionStage, findItemById } from '../db/repositories/onboarding-item-repo';
 import { createChangeSet, upsertChangeSetItem } from '../db/repositories/change-set-repo';
+import { getReviewState, type OnboardingReviewState } from '../db/repositories/onboarding-review-repo';
 import { clearProductPages, assignProductToPageId, getProductPageAssignments, listVerifiedPageOptions } from '../db/repositories/page-repo';
 import { verifyImportedResultGate } from '../product-intelligence/onboarding-import';
 import { readProductFile } from '../git/workspace-files';
@@ -466,6 +467,63 @@ function parseStoredExtractionData(raw: string | null): Record<string, unknown> 
  * Promotes approved onboarding items to the CMS change-set/approval pipeline.
  * Creates a new change set containing all promoted items.
  */
+/**
+ * Epic #46 review round 2 — deterministic durable-approval authority guard.
+ *
+ * Pure and unit-testable. True only when the freshly reloaded item is still
+ * `promotion / pending` in THIS batch/workspace with a non-invalidated durable
+ * approval. Evaluated INSIDE the final promoter transaction so a consequential
+ * edit that invalidates approval between the image pre-pass and the change-set
+ * write can never produce an export draft (the route-level precheck is
+ * defense-in-depth; this predicate is the final transactional authority).
+ */
+export function durableApprovalHolds(params: {
+  freshItem: OnboardingItem | undefined;
+  freshBatch: { id: string; workspaceId: string } | undefined;
+  reviewState: OnboardingReviewState | undefined;
+  batchId: string;
+  workspaceId: string;
+}):
+  | { ok: true }
+  | {
+      ok: false;
+      reason:
+        | 'not_found'
+        | 'wrong_batch'
+        | 'not_in_promotion'
+        | 'not_pending'
+        | 'approval_missing'
+        | 'approval_invalidated';
+    } {
+  const { freshItem, freshBatch, reviewState, batchId, workspaceId } = params;
+  if (!freshItem) return { ok: false, reason: 'not_found' };
+  if (!freshBatch || freshBatch.id !== batchId || freshBatch.workspaceId !== workspaceId) {
+    return { ok: false, reason: 'wrong_batch' };
+  }
+  if (freshItem.stage !== 'promotion') return { ok: false, reason: 'not_in_promotion' };
+  if (freshItem.stageStatus !== 'pending') return { ok: false, reason: 'not_pending' };
+  if (!reviewState || !reviewState.approvedAt) return { ok: false, reason: 'approval_missing' };
+  if (reviewState.reviewInvalidatedAt) return { ok: false, reason: 'approval_invalidated' };
+  return { ok: true };
+}
+
+type ApprovalRefusalReason =
+  | 'not_found'
+  | 'wrong_batch'
+  | 'not_in_promotion'
+  | 'not_pending'
+  | 'approval_missing'
+  | 'approval_invalidated';
+
+const APPROVAL_REFUSAL_MESSAGES: Record<ApprovalRefusalReason, string> = {
+  not_found: 'Item not found',
+  wrong_batch: 'Item does not belong to this batch/workspace',
+  not_in_promotion: 'Item is no longer in the promotion stage (a consequential edit invalidated approval and returned it to Review)',
+  not_pending: 'Item promotion state already moved',
+  approval_missing: 'Durable approval is required before export-draft creation',
+  approval_invalidated: 'Approval was invalidated after review; re-approve before exporting',
+};
+
 export async function promoteItems(
   workspaceId: string,
   workspacePath: string,
@@ -598,6 +656,39 @@ export async function promoteItems(
   // its images were already downloaded in (b)).
   db.transaction(() => {
     for (const item of passedItems) {
+      // ── Epic #46 review round 2 (HIGH): durable approval re-checked at the
+      // FINAL draft-write authority ──────────────────────────────────────
+      // `passedItems` were evaluated before the async image pre-pass (b).
+      // Between then and this transaction a concurrent consequential edit can
+      // invalidate approval AND move the item back to Review. Re-read the item
+      // + durable review state HERE, inside the transaction, and require
+      // same batch/workspace, still promotion/pending, and non-invalidated
+      // durable approval. An edited/no-longer-approved item NEVER writes a
+      // change-set row, even though its images may already be downloaded (that
+      // residual single-item image/refusal race is documented above).
+      const freshItem = findItemById(item.id);
+      const freshBatch = freshItem ? findBatchById(freshItem.batchId) : undefined;
+      const reviewState = freshItem ? getReviewState(freshItem.id) : undefined;
+      const approval = durableApprovalHolds({
+        freshItem,
+        freshBatch,
+        reviewState,
+        batchId,
+        workspaceId,
+      });
+      if (!approval.ok) {
+        const errMsg = APPROVAL_REFUSAL_MESSAGES[approval.reason];
+        console.warn(`[DraftPromoter] Skipping item ${item.id} - ${errMsg}`);
+        // Only fail the promotion stage when the item is still in promotion —
+        // an item already moved back to Review is legitimately awaiting
+        // re-approval and must NOT be marked failed in the review stage.
+        if (freshItem && freshItem.stage === 'promotion') {
+          completePromotionStage(item.id, false, errMsg);
+        }
+        failures.push({ itemId: item.id, error: errMsg });
+        continue;
+      }
+
       const extractionData = item.extractionData;
       // Defensive narrowing: phase (a) already filtered out items without
       // extraction data (recorded as failures); this guard is never hit and

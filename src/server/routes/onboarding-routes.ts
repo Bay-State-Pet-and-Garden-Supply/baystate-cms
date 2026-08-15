@@ -1486,7 +1486,12 @@ route.put('/onboarding/items/:id', async (c) => {
     return c.json({ error: 'Item not found' }, 404);
   }
 
-  // Distributor-source extraction data is DERIVED and immutable: it must
+  // Workspace-ownership guard (epic #46 review round 2): a consequential
+  // edit is a workspace-scoped mutation — foreign-workspace items are 404,
+  // never mutated.
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
+
   // equal what the canonical projection dictates (the materializer re-
   // validates this on every idempotent retry). Editing the payload or
   // assigning a URL here would let a tampered payload be restored later or
