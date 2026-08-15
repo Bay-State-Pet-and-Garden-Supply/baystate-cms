@@ -1,0 +1,278 @@
+/* Epic #46 — Waiting on Family view (Batch Workspace). Prefix `fw-` avoids
+   collisions with theme.css globals. Light cream "General Store" theme. */
+
+.fw-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  background-color: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--rounded-md);
+  padding: 0.625rem 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.fw-note-text {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-warning-text);
+  margin: 0;
+}
+
+.fw-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.fw-card {
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  background-color: var(--color-white-surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.fw-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.875rem 1rem;
+  background-color: rgba(20, 83, 45, 0.06);
+  border-bottom: 1px solid var(--color-card-border);
+}
+
+.fw-card-title {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-ledger-charcoal);
+  line-height: 1.3;
+  margin: 0;
+}
+
+.fw-card-blocked .fw-card-header {
+  background-color: var(--color-danger-bg);
+}
+
+.fw-fraction {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-uniform-green);
+  background-color: rgba(20, 83, 45, 0.08);
+  border-radius: var(--rounded-md);
+  padding: 0.25rem 0.625rem;
+  white-space: nowrap;
+}
+
+.fw-fraction-blocked {
+  color: var(--color-danger-text);
+  background-color: var(--color-danger-bg);
+}
+
+.fw-progress {
+  height: 0.375rem;
+  background-color: var(--color-card-border);
+  border-radius: var(--rounded-full);
+  overflow: hidden;
+}
+
+.fw-progress-fill {
+  height: 100%;
+  background-color: var(--color-seedling-green);
+  border-radius: var(--rounded-full);
+  transition: width var(--transition-normal);
+}
+
+.fw-progress-fill-blocked {
+  background-color: var(--color-signet-burgundy);
+}
+
+.fw-card-body {
+  padding: 0.75rem 1rem;
+}
+
+.fw-members {
+  display: flex;
+  flex-direction: column;
+}
+
+.fw-member {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.4375rem 0;
+  border-bottom: 1px dashed var(--color-card-border);
+}
+
+.fw-member:last-child {
+  border-bottom: none;
+}
+
+.fw-member-identity {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fw-member-name {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-ledger-charcoal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0;
+}
+
+.fw-member-upc {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-mulch-brown);
+}
+
+.fw-state-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-family: var(--font-body);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: var(--rounded-md);
+  padding: 0.125rem 0.4375rem;
+}
+
+.fw-state-ready {
+  background-color: var(--color-success-bg);
+  color: var(--color-success-text);
+  border: 1px solid var(--color-success-border);
+}
+
+.fw-state-waiting {
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  border: 1px solid var(--color-warning-border);
+}
+
+.fw-state-blocked {
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger-text);
+  border: 1px solid var(--color-danger-border);
+}
+
+.fw-waiting-section {
+  margin-top: 0.625rem;
+  padding-top: 0.625rem;
+  border-top: 1px solid var(--color-card-border);
+}
+
+.fw-waiting-title {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-mulch-brown);
+  margin: 0 0 0.375rem 0;
+}
+
+.fw-action-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.375rem 0;
+}
+
+.fw-action-identity {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fw-action-name {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-ledger-charcoal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0;
+}
+
+.fw-action-reason {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-danger-text);
+  margin: 0.125rem 0 0 0;
+}
+
+.fw-view-button {
+  flex: none;
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--color-uniform-green);
+  background-color: transparent;
+  border: 1px solid var(--color-uniform-green);
+  border-radius: var(--rounded-sm);
+  padding: 0.375rem 0.75rem;
+  min-height: 2rem;
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.fw-view-button:hover:not(:disabled) {
+  background-color: rgba(20, 83, 45, 0.08);
+}
+
+.fw-empty {
+  border: 1px dashed var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  background-color: var(--color-white-surface);
+  padding: var(--spacing-xl);
+  text-align: center;
+}
+
+.fw-empty-title {
+  font-family: var(--font-body);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+  margin: 0 0 0.25rem 0;
+}
+
+.fw-empty-copy {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-mulch-brown);
+  margin: 0;
+}
+
+.fw-error {
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--rounded-lg);
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger-text);
+  padding: 0.75rem 1rem;
+  font-size: 0.8125rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.fw-loading {
+  padding: var(--spacing-lg);
+  text-align: center;
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-mulch-brown);
+}

@@ -1,0 +1,200 @@
+/* Epic #46 — Processing view (Batch Workspace). Prefix `pw-` avoids
+   collisions with theme.css globals. Light cream "General Store" theme. */
+
+.pw-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.pw-group {
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  background-color: var(--color-white-surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.pw-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.625rem 1rem;
+  background-color: rgba(20, 83, 45, 0.06);
+  border-bottom: 1px solid var(--color-card-border);
+}
+
+.pw-group-title {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-uniform-green);
+  margin: 0;
+}
+
+.pw-group-count {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+}
+
+.pw-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem 1rem;
+  border-bottom: 1px solid var(--color-card-border);
+}
+
+.pw-row:last-child {
+  border-bottom: none;
+}
+
+.pw-indicator {
+  flex: none;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: var(--rounded-full);
+  background-color: var(--color-seedling-green);
+  animation: pw-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pw-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.pw-identity {
+  flex: 1 1 38%;
+  min-width: 0;
+}
+
+.pw-name {
+  font-family: var(--font-body);
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0;
+}
+
+.pw-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.125rem;
+}
+
+.pw-upc {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+}
+
+.pw-brand {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+}
+
+.pw-activity {
+  flex: 1 1 34%;
+  min-width: 0;
+}
+
+.pw-status-label {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--color-ledger-charcoal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0;
+}
+
+.pw-detail {
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+  color: var(--color-mulch-brown);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0.125rem 0 0 0;
+}
+
+.pw-stage {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-mulch-brown);
+  background-color: var(--color-feed-bag-cream);
+  border: 1px solid var(--color-card-border);
+  border-radius: var(--rounded-md);
+  padding: 0.125rem 0.375rem;
+  white-space: nowrap;
+}
+
+.pw-empty {
+  border: 1px dashed var(--color-card-border);
+  border-radius: var(--rounded-lg);
+  background-color: var(--color-white-surface);
+  padding: var(--spacing-xl);
+  text-align: center;
+}
+
+.pw-empty-title {
+  font-family: var(--font-body);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-ledger-charcoal);
+  margin: 0 0 0.25rem 0;
+}
+
+.pw-empty-copy {
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-mulch-brown);
+  margin: 0;
+}
+
+.pw-error {
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--rounded-lg);
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger-text);
+  padding: 0.75rem 1rem;
+  font-size: 0.8125rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.pw-loading {
+  padding: var(--spacing-lg);
+  text-align: center;
+  font-family: var(--font-body);
+  font-size: 0.8125rem;
+  color: var(--color-mulch-brown);
+}
+
+.pw-load-more {
+  margin-top: 0.75rem;
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  .pw-row {
+    flex-wrap: wrap;
+  }
+  .pw-activity {
+    flex: 1 1 100%;
+    padding-left: 1.375rem;
+  }
+}
