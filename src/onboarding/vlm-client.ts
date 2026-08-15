@@ -1,6 +1,7 @@
 import { getApiKey } from '../db/repositories/api-key-repo';
 import { acquireLocalSlot, releaseLocalSlot } from '../ai/local-runtime-coordinator';
 import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
+import { dispatchWorkloadChat } from '../ai/inference-dispatcher';
 
 /** Minimal structural fetch signature — lets callers inject the PI
  *  policy-gateway bound fetch (P0-1). */
@@ -56,6 +57,64 @@ export function getVlmConfig(): VlmConfig | null {
   }
 
   return null;
+}
+
+/**
+ * Result of a dispatcher-routed VLM call.
+ */
+export interface DispatchedVlmResult {
+  content: string;
+  /** The ModelTarget actually executed (primary or fallback), or null for the legacy direct path. */
+  executedTarget: { connectionId: string; modelId: string } | null;
+}
+
+/**
+ * Live VLM invocation with configured fallback + image data-sharing policy.
+ *
+ * Resolves the active vision configuration and:
+ * - legacy Ollama-native route (`api_keys.ollama_vlm`): direct invocation
+ *   (no dispatcher semantics — same behavior as before);
+ * - OpenAI-compatible AI Compute route (explicit `visionOcr` route): routed
+ *   through `dispatchWorkloadChat('visionOcr', …, { requiresImage: true })`
+ *   so the configured fallback is actually executed and the image
+ *   data-sharing policy is enforced (e.g. LAN primary down + Images =
+ *   trusted_lan_allowed → cloud fallback denied; cloud_allowed → configured
+ *   cloud VLM fallback used).
+ *
+ * This must ONLY be used for non-frozen, non-gateway-bound live OCR. Frozen
+ * (run-bound) calls and Product Intelligence's gateway-bound `modelFetchFn`
+ * path keep the exact-endpoint `callVlm` invocation.
+ */
+export async function callVlmWithDispatcher(prompt: string, imageBase64: string): Promise<DispatchedVlmResult> {
+  const config = getVlmConfig();
+  if (!config || !config.enabled) {
+    throw new Error('VLM vision model is not enabled or configured.');
+  }
+
+  if (config.transport === 'ollama-native') {
+    // Legacy Ollama-native endpoint: no dispatcher/fallback semantics.
+    const content = await callVlm(prompt, imageBase64, config);
+    return { content, executedTarget: null };
+  }
+
+  // OpenAI-compatible: only reachable when an explicit AI Compute visionOcr
+  // route is configured (getVlmConfig returns the route primary only when
+  // it is non-inherit).
+  const dataUri = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
+  const result = await dispatchWorkloadChat(
+    'visionOcr',
+    [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: dataUri } },
+        ],
+      },
+    ],
+    { requiresImage: true },
+  );
+  return { content: result.content, executedTarget: result.executedTarget };
 }
 
 /**

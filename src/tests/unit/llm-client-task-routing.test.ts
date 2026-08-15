@@ -458,6 +458,72 @@ describe('Protected classification operations — model-policy gateway (issue #1
     expect(calls.length).toBe(0);
   });
 
+  test('explicit null policy (disabled) never invokes an LLM for non-protected tasks either', async () => {
+    const { calls } = stubFetch();
+    upsertLlmTaskConfig({ task: 'profile_generation', provider: 'deepseek', model: 'deepseek-v4-pro' });
+    const result = await callLlmForTask('profile_generation', 'hello', 'system', {
+      allowFallback: false,
+      modelPolicy: null,
+    });
+    // The explicit disabled policy must short-circuit BEFORE the live
+    // dispatcher branch (regression: `!options.modelPolicy` treated null as
+    // absent and dispatched a live LLM call).
+    expect(result).toBeNull();
+    expect(calls.length).toBe(0);
+    deleteLlmTaskConfig('profile_generation');
+  });
+
+  test('a frozen policy referencing an AI Compute ProviderConnection resolves through the connection bridge', async () => {
+    const { upsertProviderConnection, deleteProviderConnection } = await import('../../db/repositories/provider-connection-repo');
+    upsertProviderConnection({
+      id: 'office-desktop',
+      label: 'Office Desktop',
+      transport: 'openai-compatible',
+      baseUrl: 'http://192.168.7.20:1234/v1',
+      trustZone: 'trusted_lan',
+      approvedHost: '192.168.7.20',
+      approvedPort: 1234,
+      enabled: true,
+    });
+    try {
+      const view = buildModelPolicyView({
+        defaultProvider: 'office-desktop',
+        defaultModel: 'qwen3.8:27b',
+        providerLocalities: { 'office-desktop': 'trusted_lan' },
+        stageOverrides: {},
+        textDataSharing: 'trusted_lan_allowed',
+        imageDataSharing: 'trusted_lan_allowed',
+        mlFeatures: {
+          productionRetrieval: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          pageReranking: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          confidenceCalibration: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+          productionEmbeddings: { state: 'disabled', qualificationReceiptDigest: null, activatedBy: null, activatedAt: null },
+        },
+      } as any, { snapshotHash: 'snap-bridge-1' });
+
+      // A frozen protected run referencing the connection id resolves the
+      // credential/base URL from AI Compute — no parallel api_keys entry.
+      const config = getLlmConfigForTask('classification_evidence_extraction', {
+        modelPolicy: view,
+        protectedOperation: 'evidence_extraction',
+      });
+      expect(config?.provider).toBe('office-desktop');
+      expect(config?.model).toBe('qwen3.8:27b');
+      expect(config?.baseUrl).toBe('http://192.168.7.20:1234/v1');
+
+      const { calls } = stubFetch();
+      await callLlmForTask('classification_evidence_extraction', 'hello', 'system', {
+        modelPolicy: view,
+        protectedOperation: 'evidence_extraction',
+      });
+      expect(calls.length).toBe(1);
+      expect(calls[0].url).toContain('http://192.168.7.20:1234/v1/chat/completions');
+      expect(calls[0].body.model).toBe('qwen3.8:27b');
+    } finally {
+      deleteProviderConnection('office-desktop');
+    }
+  });
+
   test('missing policy on a protected op throws policy_absent (no silent fallback model)', () => {
     expect(() =>
       getLlmConfigForTask('classification_evidence_extraction', {

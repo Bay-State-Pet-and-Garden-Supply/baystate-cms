@@ -42,6 +42,10 @@ export default defineConfig({
       'src/tests/unit/profile-generation-field-decision-repo.test.ts',
       'src/tests/unit/llm-task-config-repo.test.ts',
       'src/tests/unit/llm-client-task-routing.test.ts',
+      // bun:sqlite suites missing from the excludes at 0e9a242 (vitest
+      // cannot collect them); registered in package.json test:db
+      'src/tests/unit/provider-connection-routing.test.ts',
+      'src/tests/unit/vlm-client.test.ts',
       'src/tests/unit/profile-governance-service.test.ts',
       'src/tests/unit/domain-diagnostics-service.test.ts',
       'src/tests/unit/packaging-ocr.test.ts',

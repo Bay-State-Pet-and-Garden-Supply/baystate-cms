@@ -294,19 +294,6 @@ export function isTargetPermittedByPolicy(
 // ─── Built-in Default Connections ─────────────────────────────────────────────
 
 export const DEFAULT_BUILTIN_CONNECTIONS: Record<string, ProviderConnection> = {
-  'desktop-lmstudio': {
-    id: 'desktop-lmstudio',
-    label: 'Desktop LM Studio',
-    transport: 'openai-compatible',
-    baseUrl: 'http://192.168.1.50:1234/v1',
-    credential: null,
-    trustZone: 'trusted_lan',
-    approvedHost: '192.168.1.50',
-    approvedPort: 1234,
-    enabled: true,
-    connectTimeoutMs: 2000,
-    inferenceTimeoutMs: 60000,
-  },
   'local-ollama': {
     id: 'local-ollama',
     label: 'Ollama (Local Mac)',
@@ -316,7 +303,8 @@ export const DEFAULT_BUILTIN_CONNECTIONS: Record<string, ProviderConnection> = {
     trustZone: 'this_device',
     approvedHost: 'localhost',
     approvedPort: 11434,
-    enabled: true,
+    // Present but opt-in: nothing routes to it until the operator enables it.
+    enabled: false,
     connectTimeoutMs: 2000,
     inferenceTimeoutMs: 60000,
   },

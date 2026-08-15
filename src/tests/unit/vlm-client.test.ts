@@ -1,9 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+/**
+ * VLM client timeout handling (bun:test — `vlm-client.ts` imports
+ * `bun:sqlite` transitively, so vitest cannot collect this suite; it runs
+ * under `bun test` via `test:db`).
+ *
+ * Timeout normalization is exercised with direct `globalThis.fetch`
+ * stubbing (bun:test has no `vi.stubGlobal`).
+ */
 
-vi.mock('../../db/repositories/api-key-repo', () => ({
-  getApiKey: vi.fn(),
-}));
-
+import { afterEach, describe, expect, it } from 'bun:test';
 import { callVlm } from '../../onboarding/vlm-client';
 
 const config = {
@@ -12,14 +16,18 @@ const config = {
   model: 'test-vlm',
 };
 
+const originalFetch = globalThis.fetch;
+
 afterEach(() => {
-  vi.unstubAllGlobals();
+  globalThis.fetch = originalFetch;
 });
 
 describe('VLM client timeout handling', () => {
   it.each(['AbortError', 'TimeoutError'])('normalizes %s with the original cause', async name => {
     const cause = Object.assign(new Error('aborted by timeout signal'), { name });
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(cause));
+    globalThis.fetch = (async () => {
+      throw cause;
+    }) as unknown as typeof fetch;
 
     try {
       await callVlm('read this label', 'base64-image', config);
@@ -33,7 +41,9 @@ describe('VLM client timeout handling', () => {
 
   it('rethrows non-timeout failures unchanged', async () => {
     const failure = new Error('connection refused');
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(failure));
+    globalThis.fetch = (async () => {
+      throw failure;
+    }) as unknown as typeof fetch;
 
     await expect(callVlm('read this label', 'base64-image', config)).rejects.toBe(failure);
   });

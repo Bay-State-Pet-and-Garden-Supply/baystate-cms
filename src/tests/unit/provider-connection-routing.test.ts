@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initDb, closeDb } from '../../db/connection';
+import { runMigrations } from '../../db/migrations';
 import {
   isLoopbackHost,
   isPrivateLanHost,
@@ -17,6 +18,12 @@ import {
   executeOpenAiChat,
 } from '../../ai/network-transport';
 import { dispatchWorkloadChat } from '../../ai/inference-dispatcher';
+import {
+  probeConnectionHealth,
+  getCachedConnectionHealth,
+  clearHealthCache,
+} from '../../ai/connection-health-monitor';
+import { getAiModelCallsByWorkspace } from '../../db/repositories/ai-model-call-repo';
 import {
   upsertProviderConnection,
   getProviderConnection,
@@ -182,6 +189,7 @@ describe('Inference Dispatcher & Availability Failover', () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
+    clearHealthCache();
   });
 
   const mockConfig: AiRoutingConfig = {
@@ -362,6 +370,98 @@ describe('Inference Dispatcher & Availability Failover', () => {
     expect(result.executedTarget).toEqual({ connectionId: 'openai-cloud', modelId: 'gpt-4o-mini' });
   });
 
+  it('never converts a cached misconfigured LAN state into an availability failure', async () => {
+    clearHealthCache();
+    let mode: 'probe' | 'dispatch' = 'probe';
+    const calls: string[] = [];
+    (globalThis as any).fetch = vi.fn().mockImplementation(async (url: string) => {
+      calls.push(url);
+      if (mode === 'probe') {
+        // Health probe against /models → HTTP 401 (bad credential) → cached 'misconfigured'.
+        return {
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+          text: async () => 'invalid api key',
+        } as any;
+      }
+      if (url.includes('192.168.1.50')) {
+        // Dispatch: the LAN transport is RE-VALIDATED (not skipped as an
+        // availability failure) and re-classified as a misconfiguration.
+        return {
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+          text: async () => 'invalid api key',
+        } as any;
+      }
+      // Cloud fallback succeeds.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content: 'Fallback Cloud Result' } }] }),
+      } as any;
+    });
+
+    const conn = mockConfig.connections['desktop-lm'];
+    const report = await probeConnectionHealth(conn, true);
+    expect(report.status).toBe('misconfigured');
+    expect(getCachedConnectionHealth('desktop-lm')).toBe('misconfigured');
+
+    mode = 'dispatch';
+    const result = await dispatchWorkloadChat(
+      'discovery',
+      [{ role: 'user', content: 'test' }],
+      { routingConfig: mockConfig },
+    );
+
+    // The primary chat/completions transport WAS attempted — a cached
+    // 'misconfigured' state must never be silently converted into an
+    // availability-style fast failover. The transport then classified it as
+    // a misconfiguration and fell back with a visible warning.
+    expect(result.wasFallback).toBe(true);
+    expect(result.warning?.toLowerCase()).toContain('misconfigured');
+    expect(calls.filter(u => u.includes('/chat/completions') && u.includes('192.168.1.50')).length).toBe(1);
+    expect(calls.some(u => u.includes('api.openai.com'))).toBe(true);
+    clearHealthCache();
+  });
+
+  it('fast-fails from a cached unreachable LAN state without attempting primary transport', async () => {
+    clearHealthCache();
+    let mode: 'probe' | 'dispatch' = 'probe';
+    const calls: string[] = [];
+    (globalThis as any).fetch = vi.fn().mockImplementation(async (url: string) => {
+      calls.push(url);
+      if (mode === 'probe') {
+        const err = new Error('fetch failed: Connection refused');
+        (err as any).cause = { code: 'ECONNREFUSED' };
+        throw err;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content: 'Fallback Cloud Result' } }] }),
+      } as any;
+    });
+
+    const conn = mockConfig.connections['desktop-lm'];
+    const report = await probeConnectionHealth(conn, true);
+    expect(report.status).toBe('unreachable');
+    expect(getCachedConnectionHealth('desktop-lm')).toBe('unreachable');
+
+    mode = 'dispatch';
+    const result = await dispatchWorkloadChat(
+      'discovery',
+      [{ role: 'user', content: 'test' }],
+      { routingConfig: mockConfig },
+    );
+    expect(result.wasFallback).toBe(true);
+    expect(result.executedTarget.connectionId).toBe('openai-cloud');
+    // Availability fast-failover: the primary transport was never attempted.
+    expect(calls.filter(u => u.includes('/chat/completions') && u.includes('192.168.1.50')).length).toBe(0);
+    clearHealthCache();
+  });
+
   it('blocks image dispatch to cloud when image sharing is trusted_lan_allowed', async () => {
     // Desktop offline -> Fallback is openai-cloud
     // But visionOcr requires image, and image policy is trusted_lan_allowed -> Cloud fallback denied!
@@ -463,6 +563,7 @@ describe('End-to-End Production Routing, Failover & Authority Integration', () =
   afterEach(() => {
     closeDb();
     vi.restoreAllMocks();
+    clearHealthCache();
   });
 
   it('routes production text call through InferenceDispatcher and falls over from desktop LAN to cloud fallback', async () => {
@@ -544,6 +645,86 @@ describe('End-to-End Production Routing, Failover & Authority Integration', () =
       expect(fallbackCall?.auth).toBe('Bearer sk-test-openai-key');
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('records dispatcher telemetry rows for primary failure and fallback success in ai_model_calls', async () => {
+    clearHealthCache();
+    // The E2E describe uses an un-migrated in-memory DB; the telemetry table
+    // must exist for dispatcher telemetry rows.
+    runMigrations();
+    upsertProviderConnection({
+      id: 'desktop-lmstudio',
+      label: 'Desktop LM Studio',
+      transport: 'openai-compatible',
+      baseUrl: 'http://192.168.1.50:1234/v1',
+      trustZone: 'trusted_lan',
+      approvedHost: '192.168.1.50',
+      approvedPort: 1234,
+      enabled: true,
+    });
+    upsertProviderConnection({
+      id: 'openai-cloud',
+      label: 'OpenAI Cloud',
+      transport: 'openai-compatible',
+      baseUrl: 'https://api.openai.com/v1',
+      credential: 'sk-test-openai-key',
+      trustZone: 'cloud',
+      approvedHost: 'api.openai.com',
+      approvedPort: 443,
+      enabled: true,
+    });
+    saveAiRoutingDefaults({
+      catalogTarget: { connectionId: 'desktop-lmstudio', modelId: 'qwen3.8:27b' },
+      catalogFallback: { connectionId: 'openai-cloud', modelId: 'gpt-4o-mini' },
+      textDataSharing: 'cloud_allowed',
+      imageDataSharing: 'trusted_lan_allowed',
+    });
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      if (String(url).includes('192.168.1.50')) {
+        const err = new TypeError('Failed to fetch: Connection refused');
+        (err as any).code = 'ECONNREFUSED';
+        throw err;
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'Fallback Cloud Result' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as any;
+
+    try {
+      const res = await dispatchWorkloadChat('discovery', [
+        { role: 'system', content: 'System' },
+        { role: 'user', content: 'Infer brand for Purina' },
+      ], { telemetry: { task: 'discovery' } });
+      expect(res.wasFallback).toBe(true);
+      expect(res.executedTarget.connectionId).toBe('openai-cloud');
+
+      const rows = getAiModelCallsByWorkspace('default');
+      const primary = rows.find(r => !r.fallback_from_call_id);
+      const fallback = rows.find(r => r.fallback_from_call_id);
+      expect(primary).toBeDefined();
+      expect(fallback).toBeDefined();
+      if (primary && fallback) {
+        expect(primary.task).toBe('discovery');
+        expect(primary.provider).toBe('desktop-lmstudio');
+        expect(primary.status).toBe('failed');
+        expect(fallback.task).toBe('discovery');
+        expect(fallback.provider).toBe('openai-cloud');
+        expect(fallback.status).toBe('success');
+        expect(fallback.fallback_from_call_id).toBe(primary.id);
+        expect(fallback.retry_count).toBe(1);
+        expect(fallback.prompt_tokens).toBe(10);
+        expect(fallback.completion_tokens).toBe(5);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearHealthCache();
     }
   });
 

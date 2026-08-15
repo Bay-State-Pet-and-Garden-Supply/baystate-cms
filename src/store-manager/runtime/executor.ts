@@ -19,7 +19,7 @@
 
 import { randomUUID, randomBytes } from 'node:crypto';
 import { streamText, toUIMessageStream, isStepCount, convertToModelMessages, type UIMessage } from 'ai';
-import { resolveAiSdkModel, type ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
+import { resolveAiSdkModelWithFallback, type ResolvedAiSdkModel } from '../../server/services/ai-sdk-model-resolver';
 import {
   buildStoreManagerSystemPrompt,
   STORE_MANAGER_PROMPT_VERSION,
@@ -373,10 +373,25 @@ export async function runStoreManagerExecution(
   }
 
   // --- resolve model once (fail before any transport attempt on explicit unavailability) ---
-  const resolved = (deps.resolveModel ?? ((selectedModel?: string) => resolveAiSdkModel(selectedModel)))(
+  // The default resolver wires the configured fallback target (storeManager
+  // workload route) into a resilient transport. `executedResolved` returns
+  // the model that ACTUALLY ran: the resilient wrapper mutates
+  // `resolved.executedFallback` when the primary fails and the fallback
+  // executes, so telemetry/cost/metadata never attribute a fallback run to
+  // the failed primary. Injected test resolvers return plain resolved models
+  // (no `fallback`), so no wrapping occurs and behavior is unchanged.
+  const resolved = (deps.resolveModel ?? ((selectedModel?: string) => resolveAiSdkModelWithFallback(selectedModel)))(
     validated.selectedModel,
   );
   const model = resolved.modelInstance;
+  const executedResolved = (): ResolvedAiSdkModel => resolved.executedFallback ?? resolved;
+  const logFallbackExecution = (): void => {
+    if (resolved.executedFallback) {
+      console.warn(
+        `[StoreManager] Executed fallback model ${resolved.executedFallback.provider}:${resolved.executedFallback.modelId} after primary ${resolved.provider}:${resolved.modelId} failed.`,
+      );
+    }
+  };
 
   createRunRows(validated, runId, turnId, executionId, policy, resolved, now);
   emitRunStarted(emit, validated, runId, turnId, policy, now);
@@ -486,11 +501,12 @@ export async function runStoreManagerExecution(
     onEnd: ({ usage }) => {
       const promptTokens = usage?.inputTokens ?? null;
       const completionTokens = usage?.outputTokens ?? null;
-      terminalizeStoreManagerCall(modelCallId, resolved, 'success', {
+      logFallbackExecution();
+      terminalizeStoreManagerCall(modelCallId, executedResolved(), 'success', {
         promptTokens,
         completionTokens,
       });
-      const cost = computeApiCost(resolved.provider, resolved.modelId, resolved.locality, promptTokens, completionTokens);
+      const cost = computeApiCost(executedResolved().provider, executedResolved().modelId, executedResolved().locality, promptTokens, completionTokens);
       const costExceeded =
         typeof cost.estimatedApiCostUsd === 'number' &&
         cost.estimatedApiCostUsd > policy.maxModelCostUsd;
@@ -501,23 +517,25 @@ export async function runStoreManagerExecution(
       );
     },
     onError: (error) => {
+      logFallbackExecution();
       if (deadlineHit) {
-        terminalizeStoreManagerCall(modelCallId, resolved, 'deadline_exceeded');
+        terminalizeStoreManagerCall(modelCallId, executedResolved(), 'deadline_exceeded');
         terminalizeTurnState('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
         return;
       }
-      terminalizeStoreManagerCall(modelCallId, resolved, 'failed', {
+      terminalizeStoreManagerCall(modelCallId, executedResolved(), 'failed', {
         errorCode: error instanceof Error ? error.name : 'STREAM_ERROR',
       });
       terminalizeTurnState('failed', 'stream_error', sessionState.toolCalls);
     },
     onAbort: () => {
+      logFallbackExecution();
       if (deadlineHit) {
-        terminalizeStoreManagerCall(modelCallId, resolved, 'deadline_exceeded');
+        terminalizeStoreManagerCall(modelCallId, executedResolved(), 'deadline_exceeded');
         terminalizeTurnState('deadline_exceeded', 'deadline_exceeded', sessionState.toolCalls);
         return;
       }
-      terminalizeStoreManagerCall(modelCallId, resolved, 'cancelled');
+      terminalizeStoreManagerCall(modelCallId, executedResolved(), 'cancelled');
       terminalizeTurnState('cancelled', 'client_abort', sessionState.toolCalls);
     },
   });
@@ -536,7 +554,7 @@ export async function runStoreManagerExecution(
         };
       }
       if (part.type === 'finish') {
-        return buildStoreManagerMessageMetadata(resolved, modelCallId, {
+        return buildStoreManagerMessageMetadata(executedResolved(), modelCallId, {
           inputTokens: part.totalUsage?.inputTokens,
           outputTokens: part.totalUsage?.outputTokens,
         });

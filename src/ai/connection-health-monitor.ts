@@ -41,8 +41,12 @@ const CACHE_TTL_MS = 20_000;
 
 /**
  * Heuristically detect model capabilities from model ID naming conventions.
+ *
+ * Exported for reuse by model-capability consumers (e.g. the Store Manager
+ * model resolver) that must classify discovered models without a network
+ * round trip.
  */
-function inferModelCapabilities(modelId: string): {
+export function inferModelCapabilities(modelId: string): {
   supportsVision: boolean;
   supportsTools: boolean;
   supportsReasoning: boolean;
@@ -56,9 +60,22 @@ function inferModelCapabilities(modelId: string): {
 }
 
 export function isConnectionCachedUnhealthy(connectionId: string): boolean {
+  // Only 'unreachable' is an availability condition. A cached 'misconfigured'
+  // state must NEVER be converted into an availability failure — that would
+  // permit fallback on a policy/misconfiguration problem (fail-open).
+  return getCachedConnectionHealth(connectionId) === 'unreachable';
+}
+
+/**
+ * Returns the cached health status for a connection within its TTL, or
+ * `null` when no valid cached report exists. Exposes the ACTUAL status so
+ * callers can distinguish 'unreachable' (fast-failover) from 'misconfigured'
+ * (never an availability failure — re-validate at transport instead).
+ */
+export function getCachedConnectionHealth(connectionId: string): ConnectionHealthStatus | null {
   const cached = HEALTH_CACHE.get(connectionId);
-  if (!cached || cached.expiresAt <= Date.now()) return false;
-  return cached.report.status === 'unreachable' || cached.report.status === 'misconfigured';
+  if (!cached || cached.expiresAt <= Date.now()) return null;
+  return cached.report.status;
 }
 
 /**

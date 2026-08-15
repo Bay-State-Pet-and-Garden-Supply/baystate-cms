@@ -1,8 +1,20 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
+import type {
+  LanguageModelV4,
+  LanguageModelV4CallOptions,
+  LanguageModelV4StreamPart,
+  LanguageModelV4StreamResult,
+} from '@ai-sdk/provider';
 import { getLlmConfig, getLlmConfigForTask } from '../../onboarding/llm-client';
 import { getApiKey } from '../../db/repositories/api-key-repo';
 import { getFullAiRoutingConfig } from '../../db/repositories/provider-connection-repo';
+import {
+  isTargetPermittedByPolicy,
+  resolveWorkloadRoute,
+  type ProviderConnection,
+} from '../../ai/provider-connections';
+import { inferModelCapabilities } from '../../ai/connection-health-monitor';
 import { getProviderDefinition } from '../../ai/provider-registry';
 import { getModelProfile, listModelProfiles, type ModelProfile } from '../../ai/model-registry';
 import { getModelPricing, type CostBasis } from '../../ai/model-pricing';
@@ -22,6 +34,20 @@ export interface ResolvedAiSdkModel {
   modelId: string;
   locality: 'local' | 'cloud';
   resolutionReason: ModelResolutionReason;
+  /**
+   * Configured + policy-permitted fallback target (resilient Store Manager
+   * transport). Present only when the storeManager workload route declares a
+   * usable fallback connection/model AND the fallback is permitted by the
+   * route's text data-sharing policy.
+   */
+  fallback?: ResolvedAiSdkModel;
+  /**
+   * Mutated by the resilient model wrapper when the fallback actually
+   * executes (the primary failed before producing output). Telemetry
+   * consumers read `executedFallback ?? resolved` so the recorded
+   * provider/model/locality/cost reflect the model that really ran.
+   */
+  executedFallback?: ResolvedAiSdkModel;
 }
 
 export interface ResolveAiSdkModelOptions {
@@ -61,6 +87,55 @@ export function isProviderCredentialUsable(providerId: string): boolean {
 export function isModelToolCapable(modelId: string): boolean {
   const profile = getModelProfile(modelId);
   return profile !== null && profile.capabilities.toolCalling !== 'none';
+}
+
+/**
+ * Tool-calling capability for a model resolved through a ProviderConnection.
+ *
+ * Registered models are validated against the static registry's capability
+ * metadata. Unregistered (connection-discovered) models use the same ID
+ * heuristic the health probe uses, so the resolver and discovery cannot
+ * disagree about tool support. Unknown/unverifiable models fail closed
+ * (heuristic reports no tool support).
+ */
+export function isModelToolCapableForTarget(modelId: string): boolean {
+  const profile = getModelProfile(modelId);
+  if (profile) return profile.capabilities.toolCalling !== 'none';
+  return inferModelCapabilities(modelId).supportsTools;
+}
+
+/**
+ * Build a resolved model directly from an enabled ProviderConnection.
+ */
+function buildConnectionModel(
+  conn: ProviderConnection,
+  modelName: string,
+  resolutionReason: ModelResolutionReason,
+): ResolvedAiSdkModel {
+  const modelInstance = createOpenAI({
+    baseURL: conn.baseUrl,
+    apiKey: conn.credential || 'enabled',
+  }).chat(modelName);
+  return {
+    modelInstance,
+    provider: conn.id,
+    modelId: modelName,
+    locality: conn.trustZone === 'cloud' ? 'cloud' : 'local',
+    resolutionReason,
+  };
+}
+
+/**
+ * True when a connection can actually serve a request: enabled, and cloud
+ * connections must carry a credential (a cloud target without a credential
+ * would send an inert bearer token and must never be resolved).
+ */
+function isConnectionUsable(conn: ProviderConnection): boolean {
+  if (!conn.enabled) return false;
+  if (conn.trustZone === 'cloud') {
+    return Boolean(conn.credential && conn.credential.trim().length > 0);
+  }
+  return true;
 }
 
 function defaultBaseUrlForProvider(provider: string): string {
@@ -110,20 +185,17 @@ function resolveExplicit(provider: string | undefined, modelName: string): Resol
     if (provider && aiConfig.connections[provider]) {
       const conn = aiConfig.connections[provider];
       if (conn.enabled) {
-        const modelInstance = createOpenAI({
-          baseURL: conn.baseUrl,
-          apiKey: conn.credential || 'enabled',
-        }).chat(modelName);
-        return {
-          modelInstance,
-          provider: conn.id,
-          modelId: modelName,
-          locality: conn.trustZone === 'cloud' ? 'cloud' : 'local',
-          resolutionReason: 'explicit',
-        };
+        if (!isModelToolCapableForTarget(modelName)) {
+          throw new ModelUnavailableError(
+            `Model "${modelName}" on connection "${conn.label}" does not support tool calling and cannot be used by the Store Manager. ` +
+              'Choose a model with tool-calling support on the connection in Settings → AI Compute.',
+          );
+        }
+        return buildConnectionModel(conn, modelName, 'explicit');
       }
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof ModelUnavailableError) throw err;
     // Fall back to registry
   }
 
@@ -170,20 +242,17 @@ function resolveDefault(): ResolvedAiSdkModel {
     if (target && target.connectionId) {
       const conn = aiConfig.connections[target.connectionId];
       if (conn && conn.enabled) {
-        const modelInstance = createOpenAI({
-          baseURL: conn.baseUrl,
-          apiKey: conn.credential || 'enabled',
-        }).chat(target.modelId);
-        return {
-          modelInstance,
-          provider: conn.id,
-          modelId: target.modelId,
-          locality: conn.trustZone === 'cloud' ? 'cloud' : 'local',
-          resolutionReason: 'task_config',
-        };
+        if (!isModelToolCapableForTarget(target.modelId)) {
+          throw new ModelUnavailableError(
+            `The configured Store Manager model "${target.modelId}" on connection "${conn.label}" does not support tool calling. ` +
+              'Choose a model with tool-calling support in Settings → AI Compute.',
+          );
+        }
+        return buildConnectionModel(conn, target.modelId, 'task_config');
       }
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof ModelUnavailableError) throw err;
     // Fall back to legacy task_configs / api_keys
   }
 
@@ -261,6 +330,186 @@ export function resolveAiSdkModel(input?: string | ResolveAiSdkModelOptions): Re
     return resolveExplicit(input.provider, input.model);
   }
   return resolveDefault();
+}
+
+/**
+ * Resolve the Store Manager chat model WITH a resilient fallback transport.
+ *
+ * Default (no explicit selection) resolution wraps the primary model in a
+ * one-retry fallback wrapper backed by the `storeManager` workload route's
+ * configured fallback (or the catalog fallback when the route inherits). The
+ * fallback is only wired when it is usable (enabled, credentialed when cloud,
+ * tool-capable) AND permitted by the route's text data-sharing policy.
+ *
+ * Explicit selections NEVER fall back (the operator picked a specific model),
+ * matching `resolveAiSdkModel` semantics.
+ *
+ * @throws {ModelUnavailableError} When no compatible primary can be resolved.
+ */
+export function resolveAiSdkModelWithFallback(
+  input?: string | ResolveAiSdkModelOptions,
+): ResolvedAiSdkModel {
+  if (input) {
+    // Explicit selections never fall back.
+    return resolveAiSdkModel(input);
+  }
+  const primary = resolveAiSdkModel();
+  const fallback = resolveStoreManagerFallback(primary);
+  if (!fallback) return primary;
+
+  const resolvedWithFallback: ResolvedAiSdkModel = { ...primary, fallback };
+  resolvedWithFallback.modelInstance = createResilientModel(
+    primary.modelInstance,
+    fallback.modelInstance,
+    () => {
+      resolvedWithFallback.executedFallback = fallback;
+    },
+  );
+  return resolvedWithFallback;
+}
+
+/**
+ * Resolve the storeManager workload-route fallback target as a usable
+ * ResolvedAiSdkModel, or null when none is configured/permitted. The fallback
+ * must be an enabled connection (cloud requires a credential), the model must
+ * be tool-capable, and the destination trust zone must be permitted by the
+ * route's text data-sharing policy. Never returns a target identical to the
+ * primary.
+ */
+function resolveStoreManagerFallback(primary: ResolvedAiSdkModel): ResolvedAiSdkModel | null {
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    const route = resolveWorkloadRoute('storeManager', aiConfig);
+    const target = route.fallback;
+    if (!target) return null;
+    if (target.connectionId === primary.provider && target.modelId === primary.modelId) return null;
+
+    const conn = aiConfig.connections[target.connectionId];
+    if (!conn || !isConnectionUsable(conn)) return null;
+    if (!isModelToolCapableForTarget(target.modelId)) return null;
+    if (!isTargetPermittedByPolicy(conn.trustZone, route.textDataSharing)) return null;
+
+    return buildConnectionModel(conn, target.modelId, 'task_config');
+  } catch {
+    // Fallback is best-effort: any resolution failure yields no fallback.
+    return null;
+  }
+}
+
+/**
+ * Wrap a primary LanguageModelV4 with a one-retry fallback transport.
+ *
+ * - `doGenerate`: retries once on the fallback when the primary call throws.
+ * - `doStream`: retries the call once on failure. Additionally, when the
+ *   primary stream fails BEFORE its first part is delivered, the stream
+ *   restarts against the fallback. Errors after the first part propagate
+ *   (mid-stream retry is impossible without re-running the whole turn).
+ *
+ * Aborted calls (caller abort / run deadline) NEVER retry — they propagate
+ * immediately.
+ *
+ * Exported for unit tests; production callers use `resolveAiSdkModelWithFallback`.
+ */
+export function createResilientModel(
+  primary: LanguageModel,
+  fallback: LanguageModel,
+  onFallbackUsed: () => void,
+): LanguageModel {
+  const p = primary as unknown as LanguageModelV4;
+  const f = fallback as unknown as LanguageModelV4;
+  const aborted = (options: LanguageModelV4CallOptions) => options.abortSignal?.aborted === true;
+
+  const runFallback = async (options: LanguageModelV4CallOptions): Promise<LanguageModelV4StreamResult> => {
+    onFallbackUsed();
+    return f.doStream(options);
+  };
+
+  const resilient: LanguageModelV4 = {
+    specificationVersion: (p.specificationVersion ?? 'v4') as 'v4',
+    provider: p.provider,
+    modelId: p.modelId,
+    supportedUrls: p.supportedUrls,
+    async doGenerate(options) {
+      try {
+        return await p.doGenerate(options);
+      } catch (err) {
+        if (aborted(options)) throw err;
+        onFallbackUsed();
+        return f.doGenerate(options);
+      }
+    },
+    async doStream(options) {
+      let primaryResult: LanguageModelV4StreamResult;
+      try {
+        primaryResult = await p.doStream(options);
+      } catch (err) {
+        if (aborted(options)) throw err;
+        return runFallback(options);
+      }
+      return {
+        ...primaryResult,
+        stream: resilientStream(
+          primaryResult.stream,
+          () => runFallback(options).then((r) => r.stream),
+          () => !aborted(options),
+        ),
+      };
+    },
+  };
+  return resilient as unknown as LanguageModel;
+}
+
+/**
+ * Wrap a primary model stream so a failure BEFORE the first delivered part
+ * restarts the stream against the fallback. Once any part has been delivered
+ * (or the caller aborted), errors propagate unchanged.
+ */
+function resilientStream(
+  primaryStream: ReadableStream<LanguageModelV4StreamPart>,
+  getFallbackStream: () => Promise<ReadableStream<LanguageModelV4StreamPart>>,
+  shouldRetry: () => boolean,
+): ReadableStream<LanguageModelV4StreamPart> {
+  let reader = primaryStream.getReader();
+  let deliveredAnyPart = false;
+  let fallbackRequested = false;
+
+  return new ReadableStream<LanguageModelV4StreamPart>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        deliveredAnyPart = true;
+        controller.enqueue(value);
+      } catch (err) {
+        if (!deliveredAnyPart && shouldRetry() && !fallbackRequested) {
+          fallbackRequested = true;
+          try {
+            const fallbackStream = await getFallbackStream();
+            await reader.cancel().catch(() => {});
+            reader = fallbackStream.getReader();
+            const { done, value } = await reader.read();
+            if (done) {
+              controller.close();
+              return;
+            }
+            deliveredAnyPart = true;
+            controller.enqueue(value);
+            return;
+          } catch (fallbackErr) {
+            controller.error(fallbackErr);
+            return;
+          }
+        }
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +604,17 @@ export function listUsableStoreManagerModels(): StoreManagerModelsResult {
   );
   const models = candidates.map((p) => toDescriptor(p, p.id === defaultResolution.modelId));
 
+  // A default resolved from a ProviderConnection (e.g. an LM Studio model on
+  // a LAN desktop) is capability-validated yet absent from the static model
+  // registry. Append one descriptor for it so the picker and the resolver
+  // never disagree about the configured default.
+  if (!models.some((m) => m.id === defaultResolution.modelId)) {
+    const connectionDescriptor = connectionModelDescriptor(defaultResolution);
+    if (connectionDescriptor) {
+      models.push(connectionDescriptor);
+    }
+  }
+
   // Fail closed: a resolved default must itself be present in the usable list.
   const defaultInList = models.some((m) => m.id === defaultResolution.modelId);
   if (!defaultInList) {
@@ -362,4 +622,40 @@ export function listUsableStoreManagerModels(): StoreManagerModelsResult {
   }
 
   return { models, defaultModelId: defaultResolution.modelId };
+}
+
+/**
+ * Build a picker descriptor for a default model that was resolved from a
+ * ProviderConnection rather than the static model registry. Returns null when
+ * the resolved provider does not name an existing connection (registry
+ * defaults take the `toDescriptor` path and never reach here).
+ */
+function connectionModelDescriptor(resolved: ResolvedAiSdkModel): StoreManagerModelDescriptor | null {
+  let conn: ProviderConnection | null = null;
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    conn = aiConfig.connections[resolved.provider] ?? null;
+  } catch {
+    conn = null;
+  }
+  if (!conn) return null;
+
+  const caps = inferModelCapabilities(resolved.modelId);
+  const toolTier = caps.supportsTools ? 'basic' : 'none';
+  return {
+    id: resolved.modelId,
+    provider: resolved.provider,
+    providerLabel: conn.label,
+    locality: resolved.locality,
+    capabilitySummary: [
+      caps.supportsVision ? 'text+image' : 'text',
+      `tool calling: ${toolTier}`,
+      'structured output: prompted_json',
+    ].join(' · '),
+    pricing:
+      resolved.locality === 'local'
+        ? { inputPerMillion: null, outputPerMillion: null, costBasis: 'local_zero', effectiveAt: null }
+        : { inputPerMillion: null, outputPerMillion: null, costBasis: 'unknown', effectiveAt: null },
+    isDefault: true,
+  };
 }

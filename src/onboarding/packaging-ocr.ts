@@ -11,7 +11,7 @@
  * them as URLs). We fetch them in-memory — no local download required.
  */
 
-import { getVlmConfig, callVlm, type VlmConfig } from './vlm-client';
+import { getVlmConfig, callVlm, callVlmWithDispatcher, type VlmConfig } from './vlm-client';
 import { isLoopbackBaseUrl, redactImageUrl, redactTransportText } from '../classification/model-policy-gateway';
 import { isPrivateLanHost } from '../ai/provider-connections';
 import {
@@ -560,8 +560,19 @@ export async function extractPackagingOcr(
   // Call VLM
   console.log(`[PackagingOcr] Running OCR on ${sku ?? imageUrl} using ${vlmConfig.model}`);
   let rawResponse: string;
+  let executedVlmTarget: { connectionId: string; modelId: string } | null = null;
   try {
-    rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn);
+    if (!runBound && !modelFetchFn) {
+      // Live OCR through the AI Compute visionOcr dispatcher: executes the
+      // configured fallback and enforces the image data-sharing policy.
+      // Frozen (run-bound) and gateway-bound (Product Intelligence) calls
+      // keep the exact-endpoint direct invocation below.
+      const dispatched = await callVlmWithDispatcher(PACKAGING_OCR_PROMPT, base64Image);
+      rawResponse = dispatched.content;
+      executedVlmTarget = dispatched.executedTarget;
+    } else {
+      rawResponse = await callVlm(PACKAGING_OCR_PROMPT, base64Image, vlmConfig, modelFetchFn ?? fetchFn);
+    }
   } catch (err: any) {
     if (!terminalWritten && callId) {
       try {
@@ -593,7 +604,7 @@ export async function extractPackagingOcr(
   const metadata = {
     imageSourceUrl: imageSourceUrl ?? imageUrl,
     imageLocalPath: imageLocalPath ?? null,
-    model: vlmConfig.model,
+    model: executedVlmTarget ? `${executedVlmTarget.connectionId}:${executedVlmTarget.modelId}` : vlmConfig.model,
     extractedAt: new Date().toISOString(),
     parser: 'packaging-ocr.ts',
     rawResponseExcerpt: responseExcerpt,

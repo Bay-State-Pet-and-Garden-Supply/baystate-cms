@@ -29,6 +29,7 @@ import { getApiKey } from '../db/repositories/api-key-repo';
 import { getFullAiRoutingConfig } from '../db/repositories/provider-connection-repo';
 import { dispatchWorkloadChat } from '../ai/inference-dispatcher';
 import { AiPolicyDeniedError } from '../ai/network-transport';
+import type { ProviderConnection, ModelTarget } from '../ai/provider-connections';
 import {
   getLlmTaskConfig,
   type LlmProvider,
@@ -90,6 +91,21 @@ const DEFAULT_MODELS: Record<LlmProvider, string> = {
 };
 
 /**
+ * True when a ProviderConnection is actually usable for inference: enabled,
+ * and — for cloud connections — carrying a real credential (a cloud
+ * endpoint without a key would send a bogus `Bearer enabled`). Local/LAN
+ * servers need no credential. This is the single availability predicate for
+ * AI Compute routing; bare `enabled` is never sufficient.
+ */
+function isConnectionUsable(conn: ProviderConnection): boolean {
+  if (!conn.enabled) return false;
+  if (conn.trustZone === 'cloud') {
+    return Boolean(conn.credential && conn.credential.trim().length > 0);
+  }
+  return true;
+}
+
+/**
  * Thrown when a profile task is requested but no `llm_task_configs`
  * row exists and `allowFallback` is false. Distinct error class so
  * callers (e.g. the page extractor) can map this to a `failed` audit
@@ -128,7 +144,7 @@ export function getLlmConfig(): LlmConfig | null {
     const aiConfig = getFullAiRoutingConfig();
     const target = aiConfig.defaults.catalogTarget;
     const conn = aiConfig.connections[target.connectionId];
-    if (conn && conn.enabled) {
+    if (conn && isConnectionUsable(conn)) {
       const provider: LlmProvider = conn.id.includes('deepseek')
         ? 'deepseek'
         : (conn.id.includes('ollama') ? 'ollama' : 'openai');
@@ -315,6 +331,21 @@ function credentialForProvider(provider: string): {
   baseUrl: string | null;
   model: string | null;
 } | null {
+  // AI Compute connection bridge: a provider string that names an enabled,
+  // usable ProviderConnection resolves its credential/base URL from AI
+  // Compute — frozen protected runs can target a connection (e.g. a
+  // trusted-LAN LM Studio box) without a parallel `api_keys` entry. The
+  // connection's trust zone is enforced by `resolveModelRoute`'s
+  // locality/endpoint checks; the policy remains the routing authority.
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    const conn = aiConfig.connections[provider];
+    if (conn && isConnectionUsable(conn)) {
+      return { provider, apiKey: conn.credential || 'enabled', baseUrl: conn.baseUrl, model: null };
+    }
+  } catch {
+    // DB unavailable → legacy lookup below
+  }
   if (provider !== 'deepseek' && provider !== 'openai' && provider !== 'ollama') {
     // Unknown providers have no credential store; fail closed upstream via
     // locality_undeclared unless the caller resolves them explicitly.
@@ -397,6 +428,14 @@ export function getLlmConfigForTask(
 ): LlmConfig | null {
   const operation = options.protectedOperation ?? defaultProtectedOperationForTask(task);
 
+  // Protected operations REQUIRE an explicit policy context: omitting
+  // `modelPolicy` fails closed (policy_absent) — never the AI Compute or
+  // legacy chain (issue #17 pass 1c). Only an explicit frozen view (or an
+  // explicit null = disabled) may route a protected call.
+  if (options.modelPolicy === undefined && operation !== null) {
+    throw new ModelPolicyDeniedError('policy_absent', operation);
+  }
+
   // If this is an explicit run-bound call with a frozen policy snapshot:
   if (options.modelPolicy !== undefined) {
     if (options.modelPolicy === null) {
@@ -411,21 +450,12 @@ export function getLlmConfigForTask(
   // Non-run live calls or tasks without explicit frozen modelPolicy: check AI Compute configuration first!
   try {
     const aiConfig = getFullAiRoutingConfig();
-    let workloadKey: keyof typeof aiConfig.workloads = 'discovery';
-    if (task.startsWith('profile_')) {
-      workloadKey = 'profileBuilder';
-    } else if (task === 'product_curation' || task === 'category_classification') {
-      workloadKey = 'curation';
-    } else if (task === 'store_manager_assistant' || task === 'product_field_refactor') {
-      workloadKey = 'storeManager';
-    } else if (task === 'brand_inference' || task === 'product_name_consolidation' || task === 'classification_evidence_extraction') {
-      workloadKey = 'discovery';
-    }
+    const workloadKey: keyof typeof aiConfig.workloads = workloadKeyForTask(task);
 
     const route = aiConfig.workloads[workloadKey];
     const target = route.primary === 'inherit' ? aiConfig.defaults.catalogTarget : route.primary;
     const conn = aiConfig.connections[target.connectionId];
-    if (conn && conn.enabled) {
+    if (conn && isConnectionUsable(conn)) {
       const provider: LlmProvider = conn.id.includes('deepseek')
         ? 'deepseek'
         : (conn.id.includes('ollama') ? 'ollama' : 'openai');
@@ -535,6 +565,51 @@ function resolveReasoningEffort(task: LlmTask): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Map a live (non-protected) task to its AI Compute workload key.
+ *
+ * Protected tasks never reach this helper from the live path — they fail
+ * closed with `policy_absent` before routing is considered.
+ */
+function workloadKeyForTask(task: LlmTask): 'discovery' | 'curation' | 'profileBuilder' | 'storeManager' {
+  if (task.startsWith('profile_')) {
+    return 'profileBuilder';
+  }
+  if (task === 'product_curation' || task === 'category_classification') {
+    return 'curation';
+  }
+  if (task === 'store_manager_assistant' || task === 'product_field_refactor') {
+    return 'storeManager';
+  }
+  return 'discovery';
+}
+
+/**
+ * Resolve the AI Compute dispatch target for a live task when a usable
+ * primary connection exists. Returns `null` when no usable route is
+ * configured — callers then fall back to the legacy task-config chain
+ * (a fresh install with nothing enabled must keep working through
+ * `llm_task_configs` / `api_keys`).
+ */
+function resolveLiveDispatchTarget(task: LlmTask): {
+  workloadKey: ReturnType<typeof workloadKeyForTask>;
+  target: ModelTarget;
+} | null {
+  try {
+    const aiConfig = getFullAiRoutingConfig();
+    const workloadKey = workloadKeyForTask(task);
+    const route = aiConfig.workloads[workloadKey];
+    const target = route.primary === 'inherit' ? aiConfig.defaults.catalogTarget : route.primary;
+    const conn = aiConfig.connections[target.connectionId];
+    if (conn && isConnectionUsable(conn)) {
+      return { workloadKey, target };
+    }
+  } catch {
+    // DB unavailable → legacy chain
+  }
+  return null;
 }
 
 /**
@@ -884,42 +959,51 @@ export async function callLlmForTask(
     return result?.content ?? null;
   }
 
-  // Non-run live calls (no modelPolicy): dispatch through InferenceDispatcher with configured fallbacks!
-  if (!options.modelPolicy) {
-    let workloadKey: 'discovery' | 'curation' | 'profileBuilder' | 'storeManager' = 'discovery';
-    if (task.startsWith('profile_')) {
-      workloadKey = 'profileBuilder';
-    } else if (task === 'product_curation' || task === 'category_classification') {
-      workloadKey = 'curation';
-    } else if (task === 'store_manager_assistant' || task === 'product_field_refactor') {
-      workloadKey = 'storeManager';
-    } else if (task === 'brand_inference' || task === 'product_name_consolidation' || task === 'classification_evidence_extraction') {
-      workloadKey = 'discovery';
+  // Explicit disabled policy: deterministic fallback, NO transport. `null`
+  // must never reach the live dispatcher — an explicit disable is a security
+  // assertion, not an absence of context.
+  if (options.modelPolicy === null) {
+    return null;
+  }
+
+  // Live (non-run) calls without a policy context:
+  if (options.modelPolicy === undefined) {
+    const protectedOp = options.protectedOperation ?? defaultProtectedOperationForTask(task);
+    if (protectedOp !== null) {
+      // Protected operations fail closed without a frozen policy context
+      // (policy_absent) — the legacy/AI-Compute chain is never selected.
+      throw new ModelPolicyDeniedError('policy_absent', protectedOp);
     }
 
-    const temperature = resolveTemperature(task, options);
-    const reasoningEffort = resolveReasoningEffort(task);
+    // Dispatch through the InferenceDispatcher when AI Compute has a usable
+    // primary route (with its configured fallbacks + data-sharing policy
+    // enforcement + telemetry); otherwise fall through to the legacy
+    // task-config resolution below.
+    const liveTarget = resolveLiveDispatchTarget(task);
+    if (liveTarget) {
+      const temperature = resolveTemperature(task, options);
+      const reasoningEffort = resolveReasoningEffort(task);
 
-    try {
-      const messages = [
-        { role: 'system' as const, content: systemPrompt },
-        { role: 'user' as const, content: prompt },
-      ];
-      const result = await dispatchWorkloadChat(workloadKey, messages, {
-        temperature,
-        reasoningEffort: reasoningEffort ?? undefined,
-        requiresImage: options.requiresImage,
-      });
-      return result.content;
-    } catch (err: any) {
-      if (err instanceof AiPolicyDeniedError || err?.isPolicyDenial) {
+      try {
+        const messages = [
+          { role: 'system' as const, content: systemPrompt },
+          { role: 'user' as const, content: prompt },
+        ];
+        const result = await dispatchWorkloadChat(liveTarget.workloadKey, messages, {
+          temperature,
+          reasoningEffort: reasoningEffort ?? undefined,
+          requiresImage: options.requiresImage,
+          telemetry: { workspaceId: options.workspaceId ?? 'default', task },
+        });
+        return result.content;
+      } catch (err: any) {
+        if (err instanceof AiPolicyDeniedError || err?.isPolicyDenial) {
+          throw err;
+        }
         throw err;
       }
-      if (!options.allowFallback && PROFILE_TASKS_REQUIRE_EXPLICIT.has(task)) {
-        throw new MissingLlmTaskConfigError(task);
-      }
-      throw err;
     }
+    // No usable AI Compute route → continue to the legacy resolution path.
   }
 
   let config: LlmConfig | null;

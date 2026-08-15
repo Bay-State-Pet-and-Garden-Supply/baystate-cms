@@ -53,7 +53,6 @@ function defaultModelForConnection(connId: string, healthMap: Record<string, Con
   const curated: Record<string, string> = {
     'deepseek-cloud': 'deepseek-v4-flash',
     'openai-cloud': 'gpt-4o-mini',
-    'desktop-lmstudio': 'qwen3.8:27b',
     'local-ollama': 'qwen2.5vl:latest',
   };
   return curated[connId] ?? '';
@@ -339,14 +338,17 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
               setTestResult(null);
               setEditingConnection({
                 id: `connection-${Date.now().toString().slice(-4)}`,
-                label: 'Desktop LM Studio (Office PC)',
+                // The operator supplies the real desktop endpoint explicitly;
+                // a concrete LAN address is never a product default, and the
+                // connection stays disabled until the operator enables it.
+                label: 'New Connection',
                 transport: 'openai-compatible',
-                baseUrl: 'http://192.168.5.140:1234/v1',
+                baseUrl: '',
                 credential: '',
                 trustZone: 'trusted_lan',
-                approvedHost: '192.168.5.140',
-                approvedPort: 1234,
-                enabled: true,
+                approvedHost: '',
+                approvedPort: undefined,
+                enabled: false,
                 connectTimeoutMs: 2000,
                 inferenceTimeoutMs: 60000,
               });
@@ -697,7 +699,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                             if (val === 'inherit') {
                               handleWorkloadChange(w.id, 'primary', 'inherit');
                             } else {
-                              handleWorkloadChange(w.id, 'primary', { connectionId: val, modelId: defaultModelForConnection(val, healthMap) || 'qwen3.8:27b' });
+                              handleWorkloadChange(w.id, 'primary', { connectionId: val, modelId: defaultModelForConnection(val, healthMap) || '' });
                             }
                           }}
                           style={{ flex: 1, padding: '0.375rem', fontSize: '0.8125rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}` }}
@@ -823,7 +825,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                         ...(pin.port !== undefined ? { approvedPort: pin.port } : {}),
                       } : prev);
                     }}
-                    placeholder="http://192.168.5.140:1234/v1"
+                    placeholder="http://<desktop-ip>:1234/v1"
                     style={{ width: '100%', padding: '0.5rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, fontFamily: fonts.mono, fontSize: '0.8125rem' }}
                   />
                 </div>
@@ -852,7 +854,7 @@ export function AiComputePanel({ onChange }: AiComputePanelProps) {
                     type="text"
                     value={editingConnection.approvedHost ?? ''}
                     onChange={(e) => setEditingConnection({ ...editingConnection, approvedHost: e.target.value })}
-                    placeholder="192.168.5.140"
+                    placeholder="<desktop-ip>"
                     style={{ width: '100%', padding: '0.5rem', borderRadius: rounded.sm, border: `1px solid ${colors.cardBorder}`, fontFamily: fonts.mono, fontSize: '0.8125rem' }}
                   />
                   <input

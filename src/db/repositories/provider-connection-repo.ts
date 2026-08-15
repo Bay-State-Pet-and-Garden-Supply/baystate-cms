@@ -100,8 +100,8 @@ function ensureSeededDefaults(): void {
       catalog_primary_model_id TEXT NOT NULL,
       catalog_fallback_connection_id TEXT,
       catalog_fallback_model_id TEXT,
-      text_data_sharing TEXT NOT NULL DEFAULT 'cloud_allowed',
-      image_data_sharing TEXT NOT NULL DEFAULT 'trusted_lan_allowed',
+      text_data_sharing TEXT NOT NULL DEFAULT 'this_device_only',
+      image_data_sharing TEXT NOT NULL DEFAULT 'this_device_only',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -145,7 +145,7 @@ function ensureSeededDefaults(): void {
         id, catalog_primary_connection_id, catalog_primary_model_id,
         catalog_fallback_connection_id, catalog_fallback_model_id,
         text_data_sharing, image_data_sharing, created_at, updated_at
-      ) VALUES ('current', 'desktop-lmstudio', 'qwen3.8:27b', 'openai-cloud', 'gpt-4o-mini', 'cloud_allowed', 'trusted_lan_allowed', ?, ?)
+      ) VALUES ('current', 'local-ollama', 'qwen2.5vl:latest', NULL, NULL, 'this_device_only', 'this_device_only', ?, ?)
     `).run(now, now);
   }
 }
@@ -265,7 +265,7 @@ export function deleteProviderConnection(id: string): boolean {
       if (defaults.catalog_primary_connection_id === id) {
         const remaining = db.query('SELECT id FROM provider_connections LIMIT 1').get() as { id: string } | undefined;
         const newPrimaryId = remaining?.id ?? 'openai-cloud';
-        const newPrimaryModel = newPrimaryId === 'openai-cloud' ? 'gpt-4o-mini' : (newPrimaryId === 'deepseek-cloud' ? 'deepseek-chat' : 'qwen3.8:27b');
+        const newPrimaryModel = newPrimaryId === 'openai-cloud' ? 'gpt-4o-mini' : (newPrimaryId === 'deepseek-cloud' ? 'deepseek-chat' : 'qwen2.5vl:latest');
         db.query('UPDATE ai_routing_defaults SET catalog_primary_connection_id = ?, catalog_primary_model_id = ? WHERE id = ?').run(newPrimaryId, newPrimaryModel, 'current');
       }
       if (defaults.catalog_fallback_connection_id === id) {
@@ -404,11 +404,11 @@ export function getFullAiRoutingConfig(): AiRoutingConfig {
   // Read persisted defaults
   const defaultsRow = db.query('SELECT * FROM ai_routing_defaults WHERE id = ?').get('current') as DbRoutingDefaults | undefined;
   const defaults: AiRoutingConfig['defaults'] = {
-    textDataSharing: (defaultsRow?.text_data_sharing as DataSharingPolicy) ?? 'cloud_allowed',
-    imageDataSharing: (defaultsRow?.image_data_sharing as DataSharingPolicy) ?? 'trusted_lan_allowed',
+    textDataSharing: (defaultsRow?.text_data_sharing as DataSharingPolicy) ?? 'this_device_only',
+    imageDataSharing: (defaultsRow?.image_data_sharing as DataSharingPolicy) ?? 'this_device_only',
     catalogTarget: {
-      connectionId: defaultsRow?.catalog_primary_connection_id ?? 'desktop-lmstudio',
-      modelId: defaultsRow?.catalog_primary_model_id ?? 'qwen3.8:27b',
+      connectionId: defaultsRow?.catalog_primary_connection_id ?? 'local-ollama',
+      modelId: defaultsRow?.catalog_primary_model_id ?? 'qwen2.5vl:latest',
     },
     catalogFallback: defaultsRow?.catalog_fallback_connection_id
       ? {
@@ -437,20 +437,15 @@ export function getFullAiRoutingConfig(): AiRoutingConfig {
   const visionOcr = getWorkloadRoute('visionOcr') ?? {
     primary: 'inherit',
     fallback: null,
-    imageDataSharing: 'trusted_lan_allowed',
     terminalBehavior: 'heuristic',
   };
   const profileBuilder = getWorkloadRoute('profileBuilder') ?? {
-    primary: connections['desktop-lmstudio']
-      ? { connectionId: 'desktop-lmstudio', modelId: 'qwen3.8:27b' }
-      : defaults.catalogTarget,
+    primary: defaults.catalogTarget,
     fallback: defaults.catalogFallback,
     terminalBehavior: 'fail_closed',
   };
   const storeManager = getWorkloadRoute('storeManager') ?? {
-    primary: connections['desktop-lmstudio']
-      ? { connectionId: 'desktop-lmstudio', modelId: 'muse-glimmer' }
-      : defaults.catalogTarget,
+    primary: defaults.catalogTarget,
     fallback: defaults.catalogFallback,
     terminalBehavior: 'unavailable',
   };
