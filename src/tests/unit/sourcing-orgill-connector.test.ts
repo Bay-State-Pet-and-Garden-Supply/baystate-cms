@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { OrgillConnector, parseOrgillPdp, parseOrgillSearchCandidates } from '../../onboarding/sourcing/connectors/orgill';
+import { OrgillConnector, isOrgillSearchPage, parseOrgillPdp, parseOrgillSearchCandidates } from '../../onboarding/sourcing/connectors/orgill';
 import type { SourcingLookupRequest } from '../../onboarding/sourcing/contracts';
 import type { ScraperFetchPage, ScraperFetchPageResult } from '../../onboarding/sourcing/html-scraper/contracts';
 
@@ -10,6 +10,7 @@ const FIXTURES: Record<string, string> = {};
 for (const name of [
   'found-search.html', 'found-pdp.html', 'not-found.html', 'wrong-variant-pdp.html',
   'auth-required.html', 'auth-required-alt.html', 'auth-failed.html', 'unexpected-markup.html',
+  'direct-pdp-new.html', 'no-results-new.html',
 ]) {
   FIXTURES[name] = readFileSync(join(FIXTURE_DIR, name), 'utf8');
 }
@@ -112,6 +113,66 @@ describe('OrgillConnector — found (exact UPC match, authenticated)', () => {
     expect(connector.providerId).toBe('orgill');
     expect(connector.connectorType).toBe('html_scraper');
     expect(connector.requiresSecret).toBe(true);
+  });
+});
+
+describe('OrgillConnector — new storefront template (direct-PDP, observed 2026-08-15)', () => {
+  test('parseOrgillPdp extracts the new labeled template', () => {
+    const data = parseOrgillPdp(FIXTURES['direct-pdp-new.html']);
+    expect(data.parsed).toBe(true);
+    expect(data.upc).toBe('755625321923');
+    expect(data.name).toMatch(/shovel/i);
+    expect(data.brand).toBe('LANDSCAPERS SELECT');
+    expect(data.distributorSku).toBe('7618085');
+    expect(data.mpn).toBe('34609');
+    expect(data.casePack).toBe('6');
+    expect(data.weight).toBe('4');
+    expect(data.features).toContain('45 in hardwood handle');
+    expect(data.features).toContain('#2 blade, 16 ga');
+    expect(data.description).toMatch(/Square point shovel/i);
+    expect(data.images.length).toBeGreaterThan(0);
+    for (const u of data.images) {
+      expect(u.startsWith('https://')).toBe(true);
+      expect(u).not.toMatch(/ImageGallery\/menu/i);
+    }
+    expect(data.images.some((u) => u.includes('images1.orgill.com') && u.includes('7618085.jpg'))).toBe(true);
+  });
+
+  test('lookup on a direct-PDP search response returns found with exact identity', async () => {
+    const { fetchPage, calls } = makeFetcher({
+      [SEARCH + '755625321923']: { ok: true, html: FIXTURES['direct-pdp-new.html'], finalUrl: SEARCH + '755625321923' },
+    });
+    const result = await new OrgillConnector({ fetchPage, now: () => '2026-08-15T12:00:00.000Z' }).lookupByGtin(
+      makeRequest('755625321923'),
+    );
+    expect(result.outcome).toBe('found');
+    if (result.outcome !== 'found') return;
+    expect(result.record.matchedIdentifier).toBe('755625321923');
+    expect(result.record.distributorUpc).toBe('755625321923');
+    expect(result.record.brand).toBe('LANDSCAPERS SELECT');
+    expect(result.record.distributorSku).toBe('7618085');
+    expect(result.record.manufacturerPartNumber).toBe('34609');
+    expect(result.record.casePack).toBe('6');
+    expect(result.record.sourceUrl).toBe(SEARCH + '755625321923');
+    expect(result.matchedFields).toContain('matchedIdentifier');
+    expect(result.matchedFields).toContain('name');
+    // No candidate PDP fetch: the search response WAS the product page.
+    expect(calls.length).toBe(1);
+  });
+
+  test('new no-results page is recognized (Viewing 1 - 0 of 0 results)', () => {
+    expect(isOrgillSearchPage(FIXTURES['no-results-new.html'])).toBe(true);
+    expect(parseOrgillSearchCandidates(FIXTURES['no-results-new.html'])).toEqual([]);
+  });
+
+  test('new no-results page routes to not_stocked:no_exact_match', async () => {
+    const { fetchPage } = makeFetcher({
+      [SEARCH + '999999999999']: { ok: true, html: FIXTURES['no-results-new.html'], finalUrl: SEARCH + '999999999999' },
+    });
+    const result = await new OrgillConnector({ fetchPage }).lookupByGtin(makeRequest('999999999999'));
+    expect(result.outcome).toBe('not_stocked');
+    if (result.outcome !== 'not_stocked') return;
+    expect(result.reason).toMatch(/no exact match/);
   });
 });
 

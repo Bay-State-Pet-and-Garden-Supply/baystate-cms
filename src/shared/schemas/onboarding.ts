@@ -134,7 +134,7 @@ export const DistributorImageApprovalSchema = z.object({
   sourceAttemptIds: z.array(z.string()),
   approvedAt: z.string(),
   rightsAttested: z.literal(true),
-  approvalOrigin: z.enum(['operator_review', 'legacy_explicit_opt_in']).default('operator_review'),
+  approvalOrigin: z.enum(['operator_review', 'legacy_explicit_opt_in', 'distributor_channel_opt_in']).default('operator_review'),
 });
 export type DistributorImageApproval = z.infer<typeof DistributorImageApprovalSchema>;
 

@@ -559,17 +559,21 @@ export async function promoteItems(
     // downloads. The `item_id OR lookup_upc` evidence query is DELETED; only
     // official extracted images (extractionData.primaryImage/additionalImages)
     // and the separately verified PI-import gate (verifyImportedResultGate)
-    // may reach the downloader. PI-6 commerceApproved assets are the ONLY
-    // distributor image path (none exist at promotion time today).
+    // may reach the downloader. Distributor images reach commerce ONLY
+    // through explicit APPROVALS (Amendment B addendum 3, store-owner
+    // opt-in 2026-08-15): the materializer writes rights-attested approvals
+    // for every candidate with exact source-attempt provenance, and the
+    // downloader below receives exactly those approved URLs.
     //
-    // Hard boundary (Milestone E + Amendment B): a distributor-source item
-    // NEVER passes image args to the downloader — even if its payload somehow
-    // acquired a URL — because distributor image candidates (v1: none by
-    // contract; v2: `distributorImageCandidates`, display-only) may not enter
-    // commerce without PI-6 approval. The deep-compare gate in
-    // checkDistributorPromotionProvenance additionally rejects any payload
-    // whose image fields diverged from the reconstructed canonical payload.
+    // Boundary (Milestone E + Amendment B + addendum 3): a distributor-source
+    // item passes ONLY its approved image URLs to the downloader — raw
+    // candidates without an approval entry can never reach commerce.
     const isDistributorSource = item.sourceType === 'distributor_record';
+    const distributorApprovedImages = isDistributorSource
+      ? (extractionData.distributorImageApprovals ?? [])
+          .map((a) => a.imageUrl)
+          .filter((u): u is string => typeof u === 'string' && u.length > 0)
+      : [];
 
     try {
       const processed = await downloadAndProcessImages(
@@ -577,8 +581,8 @@ export async function promoteItems(
         item.upc,
         brandFolder,
         imageStem,
-        isDistributorSource ? null : extractionData.primaryImage ?? null,
-        isDistributorSource ? [] : [...(extractionData.additionalImages || [])],
+        isDistributorSource ? (distributorApprovedImages[0] ?? null) : extractionData.primaryImage ?? null,
+        isDistributorSource ? distributorApprovedImages.slice(1) : [...(extractionData.additionalImages || [])],
       );
       processedImagesMap.set(item.id, processed);
     } catch (err) {

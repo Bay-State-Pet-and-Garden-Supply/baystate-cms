@@ -120,9 +120,12 @@ export interface SourcingConnectionRef {
 /**
  * Normalized identity record returned by a `found` lookup.
  *
- * Image URLs are display-only evidence for v1 (PI-6 rights verification is
- * required before any catalog use) and MUST NOT be copied into
- * extraction/classification/draft/promotion payloads.
+ * Image URLs are evidence for v1; Amendment B addendum 3 (store-owner
+ * opt-in, 2026-08-15) approves them as catalog assets for `html_scraper`
+ * distributor sources — the deterministic materializer writes
+ * rights-attested `distributorImageApprovals` (with exact source-attempt
+ * provenance) and the draft promoter downloads ONLY approved URLs. Raw
+ * candidates without an approval entry still never reach commerce.
  *
  * Amendment B (M2): merchandising fields (description, features, category,
  * dimensions, casePack, unitOfMeasure, ingredients, distributorSku) are

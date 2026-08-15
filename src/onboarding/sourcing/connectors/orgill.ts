@@ -48,7 +48,7 @@ import {
  */
 export const ORGILL_NAVIGATION_ORIGIN = 'https://www.orgill.com';
 
-const ORGILL_ASSET_HOSTS = ['www.orgill.com', 'orgill.com', 'images.orgill.com'];
+const ORGILL_ASSET_HOSTS = ['www.orgill.com', 'orgill.com', 'images.orgill.com', 'images1.orgill.com'];
 
 /** Max product candidates followed per lookup (bounded, deterministic). */
 const MAX_PDP_CANDIDATES = 3;
@@ -172,6 +172,45 @@ export function parseOrgillSearchCandidates(html: string): string[] {
  * Legacy-YAML sibling-chain extractor: a `<strong>` whose text contains the
  * label fragment, then `parent::div/following-sibling::div`.
  */
+/**
+ * New storefront template (observed live 2026-08-15): label/value pairs
+ * render as plain `div`/`table` rows ("Retail UPC: 755625321923") AND as one
+ * combined meta block ("Item No.: 7618085 Y Vendor: LANDSCAPERS SELECT Model
+ * NO.: 34609 Retail UPC: …"). Extract a label's value: standalone pair first
+ * (value must not contain another meta label), then the combined block
+ * (value bounded at the next known label, trailing single-letter flags
+ * stripped — e.g. the " Y" after an item number). FIRST match in document
+ * order: the product's own info precedes the Similar/Recommended widgets.
+ */
+const ORGILL_META_LABEL_RE = /Item No|Vendor|Model NO|Retail UPC|Shelf Pack|Country of Origin|Weight\(lb\)|Estimated Cubic Size|Available|Minimum Purchase|Catalog Page/i;
+function orgillMetaValue($: CheerioAPI, label: string): string | null {
+  // Escaped label; the page renders "Item No.: …" / "Model NO.: …" with a
+  // DOT after the label, so an optional dot precedes the colon in both
+  // patterns ("Retail UPC: …" has none and still matches).
+  const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Pass 1: standalone pair — "Label: value" with no other meta label inside.
+  const pairRe = new RegExp(`^${esc}\\.?:\\s*(.+)$`);
+  for (const el of $('div, table').toArray()) {
+    const text = $(el).text().replace(/\s+/g, ' ').trim();
+    const m = text.match(pairRe);
+    if (m && m[1].trim() && !ORGILL_META_LABEL_RE.test(m[1])) {
+      return m[1].trim().replace(/\s+[A-Z]$/, '');
+    }
+  }
+  // Pass 2: combined meta block — value bounded at the next known label.
+  const blockRe = new RegExp(
+    `${esc}\\.?:\\s*([^:]+?)(?=\\s+(?:Item No|Vendor|Model NO|Retail UPC|Shelf Pack|Country of Origin|Weight\\(lb\\)|Estimated Cubic Size|Available|Minimum Purchase|Catalog Page)\\s*[:.]|$)`,
+  );
+  for (const el of $('div, table').toArray()) {
+    const text = $(el).text().replace(/\s+/g, ' ').trim();
+    const m = text.match(blockRe);
+    if (m && m[1].trim()) {
+      return m[1].trim().replace(/\s+[A-Z]$/, '');
+    }
+  }
+  return null;
+}
+
 function strongLabelSibling($: CheerioAPI, fragment: string): string | null {
   let found: string | null = null;
   $('strong').each((_i, el) => {
@@ -211,6 +250,9 @@ export function isOrgillSearchPage(html: string): boolean {
   return (
     $('#cphMainContent_ctl00_pnlSearchResults').length > 0 ||
     $('#cphMainContent_ctl00_pnlNoResults').length > 0 ||
+    // New template (2026-08-15): results/no-results header + counter text.
+    $('#cphMainContent_ctl00_lblSearchedHeaderText').length > 0 ||
+    /Viewing\s+\d+\s*-\s*\d+\s+of\s+\d+\s+results/i.test($('body').text()) ||
     parseOrgillSearchCandidates(html).length > 0
   );
 }
@@ -218,23 +260,30 @@ export function isOrgillSearchPage(html: string): boolean {
 /** Pure PDP parser (fixture-testable; never throws on unknown markup). */
 export function parseOrgillPdp(html: string): OrgillPdpData {
   const $ = loadHtml(html);
-  // Live storefront (2026-08-15) renders the name in lblDescriptionxs; the
-  // legacy lblDescription/h1/data-product-name chains stay as fallbacks.
-  const name = $('#cphMainContent_ctl00_lblDescriptionxs').first().text().replace(/\s+/g, ' ').trim()
+  // New template (2026-08-15) renders the name in the productDetailsDiv
+  // row; the lblDescriptionxs/lblDescription/h1/data-product-name chains
+  // stay as fallbacks.
+  const name = $('#cphMainContent_ctl00_productDetailsDiv .col-sm-8.col-md-7').first().text().replace(/\s+/g, ' ').trim()
+    || $('#cphMainContent_ctl00_lblDescriptionxs').first().text().replace(/\s+/g, ' ').trim()
     || $('#cphMainContent_ctl00_lblDescription').first().text().replace(/\s+/g, ' ').trim()
     || $('h1').first().text().replace(/\s+/g, ' ').trim()
     || $('[data-product-name]').first().text().replace(/\s+/g, ' ').trim();
-  const brand = $('#cphMainContent_ctl00_lblVendorName').first().text().replace(/\s+/g, ' ').trim();
-  // Live storefront (2026-08-15) exposes the exact UPC via lblRetailUpc; the
-  // legacy lblUPCCode and labeled pairs stay as fallbacks.
-  const upc = $('#cphMainContent_ctl00_lblUPCCode').first().text().replace(/\s+/g, ' ').trim()
+  const brand = orgillMetaValue($, 'Vendor')
+    || $('#cphMainContent_ctl00_lblVendorName').first().text().replace(/\s+/g, ' ').trim();
+  // New template (2026-08-15): labeled rows/block ("Retail UPC: …", "Item
+  // No.: …", "Model NO.: …"); lblUPCCode/lblRetailUpc/strong pairs stay as
+  // fallbacks.
+  const upc = orgillMetaValue($, 'Retail UPC')
+    || $('#cphMainContent_ctl00_lblUPCCode').first().text().replace(/\s+/g, ' ').trim()
     || $('#cphMainContent_ctl00_lblRetailUpc').first().text().replace(/\s+/g, ' ').trim()
     || strongLabelSibling($, 'Retail UPC')
     || labeledListItem($, 'UPC');
-  const distributorSku = $('#cphMainContent_ctl00_lblOrgillItemNumber').first().text().replace(/\s+/g, ' ').trim();
-  const mpn = $('#cphMainContent_ctl00_lblModelNumber').first().text().replace(/\s+/g, ' ').trim();
-  const casePack = strongLabelSibling($, 'Case Pack') ?? strongLabelSibling($, 'Case Qty');
-  const features = textList(html, '#cphMainContent_ctl00_lblProductDetailsxs span li, .detail-row span li, #cphMainContent_ctl00_lblFeatures li, .product-features li');
+  const distributorSku = orgillMetaValue($, 'Item No')
+    || $('#cphMainContent_ctl00_lblOrgillItemNumber').first().text().replace(/\s+/g, ' ').trim();
+  const mpn = orgillMetaValue($, 'Model NO')
+    || $('#cphMainContent_ctl00_lblModelNumber').first().text().replace(/\s+/g, ' ').trim();
+  const casePack = orgillMetaValue($, 'Shelf Pack') ?? strongLabelSibling($, 'Case Pack') ?? strongLabelSibling($, 'Case Qty');
+  const features = textList(html, '#cphMainContent_ctl00_lblProductDetails li, #cphMainContent_ctl00_lblProductDetailsxs span li, .detail-row span li, #cphMainContent_ctl00_lblFeatures li, .product-features li');
   // Live storefront (2026-08-15) renders the overview paragraph inside
   // lblProductOverview; the legacy long/short labels stay as fallbacks.
   const description = $('#cphMainContent_ctl00_lblProductOverview .text-details-description').first().text().replace(/\s+/g, ' ').trim()
@@ -245,7 +294,12 @@ export function parseOrgillPdp(html: string): OrgillPdpData {
     || $('.breadcrumb li:last-child a').first().text().replace(/\s+/g, ' ').trim();
   const images: string[] = [];
   $("img[src*='orgill.com']").each((_i, el) => {
-    const src = $(el).attr('src') ?? '';
+    // New template (2026-08-15) serves images from images1.orgill.com with
+    // a Windows-style backslash path — normalize before resolution.
+    const src = ($(el).attr('src') ?? '').replace(/\\/g, '/');
+    // Never menu/chrome artwork (the new template ships those from
+    // /Content/ImageGallery/menu/...).
+    if (/\/Content\/ImageGallery\/menu\//i.test(src)) return;
     if (src && isAllowedHttpsUrl(resolveUrl(src, ORGILL_NAVIGATION_ORIGIN) ?? src, ORGILL_ASSET_HOSTS)) {
       images.push(resolveUrl(src, ORGILL_NAVIGATION_ORIGIN) ?? src);
     }
@@ -257,7 +311,7 @@ export function parseOrgillPdp(html: string): OrgillPdpData {
     brand: brand || null,
     distributorSku: distributorSku || null,
     mpn: mpn || null,
-    weight: strongLabelSibling($, 'Weight(lb):') ?? strongLabelSibling($, 'Weight'),
+    weight: orgillMetaValue($, 'Weight(lb)') ?? strongLabelSibling($, 'Weight(lb):') ?? strongLabelSibling($, 'Weight'),
     // Live (2026-08-15): Shipping Unit Dimensions renders as labeled
     // Width(in)/Height(in)/Length(in) rows — assemble W x H x L.
     dimensions:
@@ -369,6 +423,13 @@ export class OrgillConnector implements DistributorConnector {
       const tryMatchPdp = (html: string, finalUrl: string): SourcingLookupResult | null => {
         if (anyMatches(html, AUTH_PAGE_SELECTORS)) {
           return { outcome: 'source_error', code: 'auth_required', message: 'orgill returned the login form instead of a product page' };
+        }
+        // Product-page gate (new + legacy templates): a RESULTS page carries
+        // the same Item No./Vendor label pairs inside its candidate cards,
+        // so a direct-PDP match is only attempted when the response actually
+        // IS a product page. The no-results page has none of these markers.
+        if (!/cphMainContent_ctl00_(?:productDetailsDiv|lblDescriptionxs|lblOrgillItemNumber|lblUPCCode|lblRetailUpc)/.test(html)) {
+          return null;
         }
         const parsed = parseOrgillPdp(html);
         if (!parsed.parsed) return null;

@@ -226,15 +226,30 @@ describe('Distributor-record materializer (Amendment A, Milestone D)', () => {
     expect(data?.casePack).toBe('6');
     expect(data?.unitOfMeasure).toBe('EA');
     expect(data?.ingredients).toBe('Chicken, rice, vitamins');
-    // Display-only image candidates with attempt/provider provenance.
+    // Approved image candidates (store-owner opt-in, Amendment B addendum 3)
+    // with attempt/provider provenance and rights attestation.
     expect(data?.distributorImageCandidates).toHaveLength(2);
     expect((data?.distributorImageCandidates as Array<Record<string, unknown>>)[0].sourceAttemptIds).toEqual([att.id]);
     expect((data?.distributorImageCandidates as Array<Record<string, unknown>>)[0].sourceProviderIds).toEqual(['phillips']);
+    const approvals = (data?.distributorImageApprovals ?? []) as Array<{
+      imageUrl: string;
+      sourceAttemptIds: string[];
+      rightsAttested: boolean;
+      approvalOrigin: string;
+      approvedAt: string;
+    }>;
+    expect(approvals).toHaveLength(2);
+    expect(approvals[0].rightsAttested).toBe(true);
+    expect(approvals[0].approvalOrigin).toBe('distributor_channel_opt_in');
+    expect(approvals[0].sourceAttemptIds).toEqual([att.id]);
+    expect(approvals[0].approvedAt).toBeTruthy();
+    expect(new Set(approvals.map((a) => a.imageUrl))).toEqual(
+      new Set((data?.distributorImageCandidates as Array<{ url: string }>).map((c) => c.url)),
+    );
     // Forbidden commerce fields stay absent.
     expect(data?.price).toBeNull();
     expect(data?.primaryImage).toBeNull();
     expect(data?.additionalImages).toEqual([]);
-    expect(data?.distributorImageApprovals).toEqual([]);
     expect(data?.sourceUrl).toBeNull();
     // Provenance v2 carries projection version + method + full per-field provenance.
     const prov = data?.distributorRecordProvenance as Record<string, unknown>;

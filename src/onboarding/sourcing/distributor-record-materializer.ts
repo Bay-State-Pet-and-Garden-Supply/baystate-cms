@@ -165,9 +165,17 @@ export function buildDistributorExtractionDataV1(
 /**
  * Build the merchandising-depth ExtractionData v2 (Amendment B, M5). Adds
  * description, features (bulletPoints), explicit noncanonical category,
- * dimensions, case pack, unit of measure, ingredients, and display-only
- * image candidates with attempt/provider provenance. Price, commerce
- * images, approvals, OCR, URL, and arbitrary fields stay absent/null.
+ * dimensions, case pack, unit of measure, ingredients, and APPROVED image
+ * candidates with attempt/provider provenance. Price, commerce images,
+ * OCR, URL, and arbitrary fields stay absent/null.
+ *
+ * Image approvals (Amendment B addendum 3, store-owner decision
+ * 2026-08-15): the store owner explicitly opted in to using distributor
+ * images as catalog assets (the authenticated distributor connection is the
+ * supplier/manufacturer rights channel; every approval carries the exact
+ * source attempts as evidence reference). Deterministic: approvals derive
+ * from the projection's observedAt + accepted provenance, never from the
+ * clock.
  * PURE and DETERMINISTIC: the fresh-insert path and the idempotent
  * re-validation path both use it, so a stored payload can be trusted only
  * when it deep-equals a freshly recomputed one.
@@ -209,7 +217,14 @@ function buildDistributorExtractionDataV2(
     unitOfMeasure: p.unitOfMeasure,
     ingredients: p.ingredients,
     distributorImageCandidates,
-    distributorImageApprovals: [],
+    distributorImageApprovals: distributorImageCandidates.map((c) => ({
+      imageUrl: c.url,
+      sourceAttemptIds: c.sourceAttemptIds,
+      // Deterministic (projection provenance, never the clock).
+      approvedAt: p.provenance.observedAt[0] ?? '',
+      rightsAttested: true,
+      approvalOrigin: 'distributor_channel_opt_in',
+    })),
     variantAttributes: {
       ...(p.size !== null ? { size: p.size } : {}),
       ...(p.count !== null ? { count: p.count } : {}),

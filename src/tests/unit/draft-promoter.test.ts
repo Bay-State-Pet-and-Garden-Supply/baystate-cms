@@ -2144,8 +2144,9 @@ describe('Milestone E — distributor promotion provenance gate (computePromotio
     const promoteRes = await promoteItems(wsId, tempWorkspaceDir, batch.batch_id, [item.id]);
     expect(promoteRes.count).toBe(0);
     expect(promoteRes.failures.length).toBe(1);
-    // The provenance + deep-compare gate PASSES; only the mandatory primary
-    // image blocks the draft (distributor images never download — PI-6).
+    // The provenance + deep-compare gate PASSES; with no image evidence in
+    // this fixture there are no approvals, so the mandatory primary image
+    // still blocks the draft (approved distributor images are the only path).
     expect(promoteRes.failures[0].error).not.toContain('Distributor promotion blocked');
     expect(promoteRes.failures[0].error).toContain('Primary Image');
   });

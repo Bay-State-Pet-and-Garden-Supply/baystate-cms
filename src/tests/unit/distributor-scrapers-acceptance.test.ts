@@ -436,14 +436,20 @@ describe('Distributor Scrapers offline acceptance (M7, Amendment B)', () => {
       expect(data?.title).toBe(p.expectedName);
       expect(typeof data?.description).toBe('string');
       expect(String(data?.description ?? '').length).toBeGreaterThan(0);
-      // Boundaries: price/commerce images/OCR stay absent; candidates display-only.
+      // Boundaries: price/commerce OCR stay absent; candidates carry
+      // store-owner opt-in approvals (Amendment B addendum 3).
       expect(data?.price).toBeNull();
       expect(data?.primaryImage).toBeNull();
       expect(Array.isArray(data?.additionalImages)).toBe(true);
       expect((data?.additionalImages as unknown[]).length).toBe(0);
       expect(Array.isArray(data?.distributorImageCandidates)).toBe(true);
       expect(Array.isArray(data?.distributorImageApprovals)).toBe(true);
-      expect((data?.distributorImageApprovals as unknown[]).length).toBe(0);
+      const approvals = (data?.distributorImageApprovals ?? []) as Array<Record<string, unknown>>;
+      expect(approvals.length).toBe((data?.distributorImageCandidates as unknown[]).length);
+      for (const a of approvals) {
+        expect(a.rightsAttested).toBe(true);
+        expect(a.approvalOrigin).toBe('distributor_channel_opt_in');
+      }
 
       const row = getDb().query('SELECT * FROM onboarding_extractions WHERE item_id = ?').get(item.id) as Record<string, unknown>;
       expect(row.extraction_method).toBe('distributor_record_v2');
