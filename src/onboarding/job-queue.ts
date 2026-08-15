@@ -7,6 +7,7 @@ import {
   updateItemExpectedName,
   updateItemBrandHint,
   listItemsByBatch,
+  releaseHeldFamilyClaim,
 } from '../db/repositories/onboarding-item-repo';
 import { randomUUID } from 'node:crypto';
 import { discoverSources } from './source-discovery';
@@ -40,7 +41,7 @@ import {
   supersedeCohortRun,
   COHORT_LEASE_TTL_MS,
 } from '../db/repositories/classification-cohort-run-repo';
-import { getCohortById, listCohortsByWorkspace } from '../db/repositories/curation-cohort-repo';
+import { getCohortById, listCohortsByWorkspace, listWaitingCohortMemberIdsByWorkspace } from '../db/repositories/curation-cohort-repo';
 import type { CohortRun } from '../shared/schemas/cohorts';
 import { determineProductGroup } from './product-line-grouper';
 import { validateSiblingConsistency, activeCohortSemanticFindingsForItem } from '../classification/consistency-validator';
@@ -253,6 +254,7 @@ export class OnboardingWorker {
       // continuation sweeps run on every poll so happy-path progression needs
       // ZERO manual advance clicks:
       //   1. Discovery-completed with a confirmed URL → Extraction;
+      //      Extraction-completed with data → Curation (family barrier);
       //      Curation-completed (not semantic-blocked, parent terminal) →
       //      Review.
       //   2. Blocked Extraction items whose domain NOW has a usable extractor
@@ -261,9 +263,14 @@ export class OnboardingWorker {
       // actionable state; a sweep failure never breaks the poll loop.
       try {
         const autoAdvance = sweepAutoAdvance(this.workspaceId);
-        if (autoAdvance.discoveryToExtraction.length > 0 || autoAdvance.curationToReview.length > 0) {
+        if (
+          autoAdvance.discoveryToExtraction.length > 0 ||
+          autoAdvance.extractionToCuration.length > 0 ||
+          autoAdvance.curationToReview.length > 0
+        ) {
           console.log(
-            `[OnboardingWorker] Auto-advanced ${autoAdvance.discoveryToExtraction.length} discovery→extraction, ` +
+            `[OnboardingWorker] Auto-advanced ${autoAdvance.extractionToCuration.length} extraction→curation, ` +
+            `${autoAdvance.discoveryToExtraction.length} discovery→extraction, ` +
             `${autoAdvance.curationToReview.length} curation→review`,
           );
         }
@@ -320,8 +327,9 @@ export class OnboardingWorker {
 
         const available = this.maxConcurrency - this.running.size;
         const claimedItems = claimItemsForProcessing(stage, available, this.workspaceId, this.workerId);
+        const dispatchableItems = this.holdWaitingFamilyMembers(stage, claimedItems);
 
-        for (const item of claimedItems) {
+        for (const item of dispatchableItems) {
           if (this.running.has(item.id)) {
             // Claim race resolution: `claimItemsForProcessing` already wrote
             // stage_status='in_progress' for this row, but the item is still
@@ -369,6 +377,59 @@ export class OnboardingWorker {
     } finally {
       this.isProcessing = false;
     }
+  }
+
+  /**
+   * Epic #46 audit fix (family barrier in DEFAULT legacy mode): per-item
+   * Curation claiming must never start partial-family Curation.
+   *
+   * In the default configuration (cohort flags fully OFF — the ADR 0013
+   * legacy per-item Curation path), any claimed `curation/pending` item that
+   * is a member of an ACTIVE candidate cohort still `forming`/`waiting` is
+   * released back to `curation/pending` (unclaimed) and never dispatched.
+   * The item projects as Waiting-on-Family and becomes claimable once its
+   * cohort transitions to `ready`.
+   *
+   * NOT applied when cohort Curation flags are ON (active mode owns cohort
+   * claiming exclusively; shadow mode keeps the byte-identical PR3 legacy
+   * path — it only observes). Singletons and members of ready cohorts are
+   * never held. Idempotent and claim-owner-guarded (a concurrent rebind is
+   * never clobbered). Emits an SSE `item:status` (pending, familyBarrier)
+   * per held member so the UI + telemetry stay live.
+   */
+  private holdWaitingFamilyMembers(
+    stage: PipelineStage,
+    claimedItems: Array<{ id: string; batchId: string }>,
+  ): Array<{ id: string; batchId: string }> {
+    if (stage !== 'curation' || claimedItems.length === 0) return claimedItems;
+    const flags = getCohortCurationFlags();
+    // Active OR shadow mode: the cohort path (or its legacy sibling under
+    // shadow observation) owns claiming — never hold here.
+    if (flags.cohortCurationV2Enabled) return claimedItems;
+    const waitingIds = new Set(listWaitingCohortMemberIdsByWorkspace(this.workspaceId));
+    if (waitingIds.size === 0) return claimedItems;
+    const dispatchable: Array<{ id: string; batchId: string }> = [];
+    let heldCount = 0;
+    for (const item of claimedItems) {
+      if (!waitingIds.has(item.id)) {
+        dispatchable.push(item);
+        continue;
+      }
+      if (releaseHeldFamilyClaim(item.id, this.workerId)) {
+        heldCount++;
+        onboardingEvents.emitItemStatus(item.batchId, item.id, 'pending', {
+          stage: 'curation',
+          familyBarrier: true,
+        });
+      } else {
+        // Claim lost the race — let the normal dispatch loop handle it.
+        dispatchable.push(item);
+      }
+    }
+    if (heldCount > 0) {
+      console.log(`[OnboardingWorker] Held ${heldCount} family member(s) behind readiness barrier (curation/pending)`);
+    }
+    return dispatchable;
   }
 
   // ─── Cohort-centric Curation V2 (issue #30, PR3 M3) ─────────────────────────

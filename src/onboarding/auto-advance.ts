@@ -26,10 +26,14 @@
 import {
   findItemById,
   listDiscoveryCompletedWithUrl,
+  listExtractionCompleted,
   listCurationCompleted,
   advanceDiscoveryToExtraction,
+  advanceExtractionToCuration,
   advanceCurationToReview,
 } from '../db/repositories/onboarding-item-repo';
+import { getActiveCohortForItem } from '../db/repositories/curation-cohort-repo';
+import { getCurrentCohortRun } from '../db/repositories/classification-cohort-run-repo';
 import { onboardingEvents } from './sse-emitter';
 import { getDb } from '../db/connection';
 
@@ -88,6 +92,42 @@ export function advanceDiscoveryItemToExtraction(itemId: string): AutoAdvanceRes
 }
 
 /**
+ * Advance one Extraction-completed item (with persisted extraction data) to
+ * Curation readiness. Guards:
+ * - the item must be `extraction/completed` with extraction data;
+ * - a member of a candidate cohort whose current run is still
+ *   `freezing`/`running` is never stage-advanced mid-execution (the cohort
+ *   path owns its lifecycle; post-run the member advances normally).
+ * Emits an SSE `item:status` (pending, stage curation) on success.
+ */
+export function advanceExtractionItemToCuration(itemId: string): AutoAdvanceResult {
+  const item = findItemById(itemId);
+  if (!item) return { advanced: false, reason: 'item_not_found' };
+  if (item.stage !== 'extraction' || item.stageStatus !== 'completed') {
+    return { advanced: false, reason: `not_eligible:${item.stage}/${item.stageStatus}` };
+  }
+  if (!item.extractionData) {
+    return { advanced: false, reason: 'no_extraction_data' };
+  }
+  const cohort = getActiveCohortForItem(item.id);
+  if (cohort) {
+    const run = getCurrentCohortRun(cohort.id);
+    if (run && COHORT_PARENT_IN_FLIGHT.has(run.status)) {
+      return { advanced: false, reason: 'cohort_parent_in_flight' };
+    }
+  }
+  if (advanceExtractionToCuration(itemId)) {
+    onboardingEvents.emitItemStatus(item.batchId, itemId, 'pending', {
+      stage: 'curation',
+      autoAdvanced: true,
+      fromStage: 'extraction',
+    });
+    return { advanced: true };
+  }
+  return { advanced: false, reason: 'transition_failed' };
+}
+
+/**
  * Advance one Curation-completed item to Review (the human gate). Guards:
  * - the item must be `curation/completed` with a committed curation payload;
  * - a `semanticValidation.status === 'blocked'` member stays (the review gate
@@ -129,20 +169,29 @@ export function advanceCurationItemToReview(itemId: string): AutoAdvanceResult {
 
 export interface AutoAdvanceSweepResult {
   discoveryToExtraction: string[];
+  extractionToCuration: string[];
   curationToReview: string[];
 }
 
 /**
- * Poll-loop sweep: apply both automatic-continuation rules to every eligible
- * item in the workspace. Idempotent and cheap (two scoped list queries; the
+ * Poll-loop sweep: apply all automatic-continuation rules to every eligible
+ * item in the workspace. Idempotent and cheap (three scoped list queries; the
  * guarded per-item UPDATEs are no-ops once advanced). Failures are isolated
  * per item and never throw.
  */
 export function sweepAutoAdvance(workspaceId: string): AutoAdvanceSweepResult {
-  const result: AutoAdvanceSweepResult = { discoveryToExtraction: [], curationToReview: [] };
+  const result: AutoAdvanceSweepResult = {
+    discoveryToExtraction: [],
+    extractionToCuration: [],
+    curationToReview: [],
+  };
   for (const row of listDiscoveryCompletedWithUrl(workspaceId)) {
     const adv = advanceDiscoveryItemToExtraction(row.id);
     if (adv.advanced) result.discoveryToExtraction.push(row.id);
+  }
+  for (const row of listExtractionCompleted(workspaceId)) {
+    const adv = advanceExtractionItemToCuration(row.id);
+    if (adv.advanced) result.extractionToCuration.push(row.id);
   }
   for (const row of listCurationCompleted(workspaceId)) {
     const adv = advanceCurationItemToReview(row.id);

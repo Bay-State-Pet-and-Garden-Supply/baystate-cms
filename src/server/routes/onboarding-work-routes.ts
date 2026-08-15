@@ -23,6 +23,7 @@ import {
   type WorkStateFilters,
 } from '../../onboarding/onboarding-work-state';
 import { getReviewState, markApproved } from '../../db/repositories/onboarding-review-repo';
+import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { validateReviewCompletionGate } from '../../classification/review-completion-gate';
 import { addAuditLog } from '../../db/repositories/audit-log-repo';
 import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
@@ -233,6 +234,13 @@ route.post('/onboarding/batches/:id/approve', async (c) => {
         action: 'bulk_approve',
         message: `Item approved for export (bulk approval by ${approvedBy})`,
         detailsJson: JSON.stringify({ batchId, origin: 'bulk' }),
+      });
+      // Epic #46 audit fix: emit an item:status SSE event per approved item so
+      // the Batch Workspace tabs + Ready-to-Export queue refresh without a
+      // manual reload (approval is a durable release decision, not a publish).
+      onboardingEvents.emitItemStatus(findItemById(id)?.batchId ?? batchId, id, 'approved', {
+        stage: 'promotion',
+        approvalOrigin: 'bulk',
       });
     } else {
       rejected.push({ itemId: id, reason: 'approval_write_conflict' });

@@ -252,7 +252,21 @@ export function deriveItemWorkState(item: OnboardingItem, ctx: WorkStateContext)
       if (item.stageStatus === 'failed') {
         return attention('processing_failed', 'retry_processing', 'Export failed');
       }
-      return build(item, row, cohort, { category: 'approved', activity: 'export', label: 'Approved — ready to export', detail: error });
+      // Epic #46 audit fix: 'approved' is a DURABLE release decision, never a
+      // stage inference. A promotion-stage item without a durable approval
+      // (legacy diagnostics advance, pre-epic promoted rows without backfill,
+      // or an approval cleared by a consequential edit that is still in
+      // promotion) is NOT approved — it projects back into Ready-for-Review
+      // so the operator re-approves before any export path can run.
+      if (row?.approvedAt && !row.reviewInvalidatedAt) {
+        return build(item, row, cohort, { category: 'approved', activity: 'export', label: 'Approved — ready to export', detail: error });
+      }
+      return build(item, row, cohort, {
+        category: 'ready_for_review',
+        activity: 'review',
+        label: row?.reviewedAt && !row.reviewInvalidatedAt ? 'Reviewed — pending approval' : 'Ready for review',
+        detail: 'Awaiting bulk approval',
+      });
     }
 
     case 'review': {

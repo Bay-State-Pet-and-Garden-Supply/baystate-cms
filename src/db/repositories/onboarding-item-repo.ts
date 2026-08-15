@@ -1624,6 +1624,27 @@ export function listDiscoveryCompletedWithUrl(workspaceId: string): AutoAdvanceR
 }
 
 /**
+ * Extraction items whose per-item materialization (official-page scrape OR
+ * distributor-record projection) completed with persisted extraction data —
+ * the automatic Curation-entry pool (epic #46 audit fix: the happy path needs
+ * ZERO manual advance clicks, so Extraction completion auto-continues to
+ * Curation readiness). `extraction_data_json IS NOT NULL` is the data guard
+ * — applies to both official-page and distributor-record sources.
+ */
+export function listExtractionCompleted(workspaceId: string): AutoAdvanceRow[] {
+  const db = getDb();
+  return db.query(
+    `SELECT ${AUTO_ADVANCE_COLUMNS}
+     FROM onboarding_items i
+     JOIN onboarding_batches b ON b.id = i.batch_id
+     WHERE b.workspace_id = ? AND b.status = 'active'
+       AND i.stage = 'extraction' AND i.stage_status = 'completed'
+       AND i.extraction_data_json IS NOT NULL
+     ORDER BY i.row_number`,
+  ).all(workspaceId) as AutoAdvanceRow[];
+}
+
+/**
  * Curation items whose per-SKU pipeline completed — the review auto-entry
  * pool. The semantic-blocked / cohort-parent-in-flight guards live in
  * `src/onboarding/auto-advance.ts` (they need the hydrated curation payload).
@@ -1681,6 +1702,24 @@ export function advanceDiscoveryToExtraction(itemId: string): boolean {
 }
 
 /**
+ * Guarded extraction/completed → curation/pending. Same discipline as the
+ * other advance helpers: the caller (`src/onboarding/auto-advance.ts`)
+ * verifies the cohort-in-flight guard BEFORE calling; the `WHERE` re-asserts
+ * the base eligibility so a concurrent mutation can never be double-advanced.
+ */
+export function advanceExtractionToCuration(itemId: string): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const result = db.query(
+    `UPDATE onboarding_items
+     SET stage = 'curation', stage_status = 'pending', error_message = NULL,
+         retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND stage = 'extraction' AND stage_status = 'completed'`,
+  ).run(now, itemId);
+  return result.changes > 0;
+}
+
+/**
  * Guarded curation/completed → review/pending. The caller
  * (`src/onboarding/auto-advance.ts`) verifies the semantic-blocked and
  * cohort-parent-in-flight guards BEFORE calling; the `WHERE` re-asserts the
@@ -1712,6 +1751,43 @@ export function requeueBlockedExtractionItem(itemId: string): boolean {
      SET stage_status = 'pending', error_message = NULL, retry_count = 0,
          claimed_by = NULL, claimed_at = NULL, updated_at = ?
      WHERE id = ? AND stage = 'extraction' AND stage_status IN ('failed', 'needs_input')`,
+  ).run(now, itemId);
+  return result.changes > 0;
+}
+
+/**
+ * Guarded release of a per-item Curation claim held behind the family
+ * readiness barrier (epic #46 audit fix). Returns the item to
+ * `curation/pending` (unclaimed) so a later poll re-evaluates it once its
+ * cohort is ready. Only the claim OWNER can release, and only while the row
+ * is still `in_progress` — a concurrent rebind is never clobbered.
+ */
+export function releaseHeldFamilyClaim(itemId: string, workerId: string): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const result = db.query(
+    `UPDATE onboarding_items
+     SET stage_status = 'pending', claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND stage_status = 'in_progress' AND claimed_by = ?`,
+  ).run(now, itemId, workerId);
+  return result.changes > 0;
+}
+
+/**
+ * Guarded reopen of an APPROVED promotion-stage item whose output was edited
+ * by a consequential edit (epic #46 audit fix). The edit invalidated the
+ * durable approval; the item must be re-reviewed and re-approved before it
+ * can ever export again, so it returns to `review/pending` — the actionable
+ * state the Review workspace consumes. No-op for anything else.
+ */
+export function reopenApprovedForReapproval(itemId: string): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const result = db.query(
+    `UPDATE onboarding_items
+     SET stage = 'review', stage_status = 'pending', error_message = NULL,
+         retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND stage = 'promotion'`,
   ).run(now, itemId);
   return result.changes > 0;
 }

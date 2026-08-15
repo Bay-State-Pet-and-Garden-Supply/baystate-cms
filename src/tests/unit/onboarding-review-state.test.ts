@@ -38,6 +38,7 @@ import {
 } from '../../onboarding/onboarding-work-state';
 import { releaseDomainExtractionItems } from '../../onboarding/domain-release';
 import onboardingWorkRoutes, { setWorkerPollTriggerForTest } from '../../server/routes/onboarding-work-routes';
+import { onboardingEvents } from '../../onboarding/sse-emitter';
 
 let workspaceId: string;
 let workspacePath: string;
@@ -331,8 +332,9 @@ describe('domain-level extraction release (epic #46 Phase 4/8)', () => {
       sourceUrl: 'https://example.com/products/4',
     });
 
-    // Seed a usable profile for example.com AFTER the failures so the
-    // profile-newer-than-failure loop guard passes (strictly newer timestamps).
+    // Seed a usable profile for example.com AFTER the failures (recency is no
+    // longer required — availability alone releases; the comment documents the
+    // relaxed semantics).
     const profileUpdatedAt = new Date(Date.now() + 60_000).toISOString();
     getDb().query(
       `INSERT INTO extractor_profiles (id, domain, title_selector, created_at, updated_at)
@@ -384,7 +386,7 @@ describe('domain-level extraction release (epic #46 Phase 4/8)', () => {
       upc: 'D7', name: 'Y', stage: 'extraction', stageStatus: 'failed',
       sourceType: 'distributor_record',
     });
-    // Profile strictly newer than the failures (loop guard).
+    // Profile exists — availability alone releases (no recency guard).
     const profileUpdatedAt = new Date(Date.now() + 60_000).toISOString();
     getDb().query(
       `INSERT INTO extractor_profiles (id, domain, title_selector, created_at, updated_at)
@@ -416,5 +418,59 @@ describe('approval is durable and never implies export', () => {
     expect(projected.category).toBe('ready_to_export');
     expect(projected.reviewState).toBe('approved');
     expect(projected.category).not.toBe('completed');
+  });
+
+  it('bulk approval emits an SSE item:status event per approved item', async () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'E2', name: 'X', stage: 'review', stageStatus: 'completed' });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+
+    const events: Array<{ itemId?: string; status?: string; data: Record<string, unknown> }> = [];
+    const unsubscribe = onboardingEvents.subscribe(batchId, event => {
+      if (event.itemId === id) {
+        events.push({ itemId: event.itemId, status: event.data.status as string, data: event.data });
+      }
+    });
+    try {
+      const app = makeApp();
+      const res = await app.request(`/api/onboarding/batches/${batchId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds: [id], reviewerId: 'store-manager' }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      unsubscribe();
+    }
+
+    const approveEvent = events.find(e => e.status === 'approved');
+    expect(approveEvent).toBeDefined();
+    expect(approveEvent!.data.stage).toBe('promotion');
+    expect(approveEvent!.data.approvalOrigin).toBe('bulk');
+  });
+
+  it('promotion-stage item WITHOUT durable approval projects as ready_for_review, never approved', () => {
+    const batchId = makeBatch();
+    const id = createItem(batchId, { upc: 'E3', name: 'X', stage: 'promotion', stageStatus: 'pending' });
+
+    const projected = derive(batchId, id);
+
+    expect(projected.category).toBe('ready_for_review');
+    expect(projected.reviewState).not.toBe('approved');
+    expect(projected.label).toMatch(/Ready for review/);
+  });
+
+  it('promotion-stage item with durable REVIEW but no approval projects as reviewed-pending-approval', () => {
+    const batchId = makeBatch();
+    // Legacy diagnostics advance: review/completed → promotion without ever
+    // passing bulk approval. Durable review EXISTS, approval does not.
+    const id = createItem(batchId, { upc: 'E4', name: 'X', stage: 'promotion', stageStatus: 'pending' });
+    markReviewed({ itemId: id, batchId, reviewedBy: 'operator' });
+
+    const projected = derive(batchId, id);
+
+    expect(projected.category).toBe('ready_for_review');
+    expect(projected.reviewState).toBe('reviewed');
+    expect(projected.label).toMatch(/pending approval/);
   });
 });

@@ -10,11 +10,18 @@
  * - automatic Discovery(completed+confirmed URL) → Extraction continuation
  *   (auto-selected OR operator-confirmed URLs; human-held discovery holds
  *   with NULL URLs are never advanced);
+ * - automatic Extraction(completed+data) → Curation readiness (happy-path
+ *   extraction reaches the family barrier with zero manual clicks; members of
+ *   an in-flight cohort run are never stage-advanced mid-execution);
  * - automatic Curation(completed) → Review entry (semantic-blocked members
  *   and in-flight cohort parents stay; terminal cohort parents advance);
+ * - legacy family-barrier hold: under DEFAULT flags the worker releases
+ *   claimed members of `forming`/`waiting` cohorts back to curation/pending
+ *   (no partial-family Curation), while singletons and ready-cohort members
+ *   claim normally;
  * - domain-level extraction release when an extractor profile becomes usable
- *   (profile-blocked only by default, `updatedAt` loop guard, idempotent,
- *   distributor-record sources excluded);
+ *   (profile availability — no recency requirement — retry-exhausted items
+ *   excluded, idempotent, distributor-record sources excluded);
  * - worker poll integration: sweeps run, blocked extraction fails closed into
  *   an actionable state, Review items are never worker-claimed;
  * - cohort flag plumbing: flag ON never per-item-claims Curation; flag OFF
@@ -46,6 +53,7 @@ import { resetSourcingFlagsOverride } from '../../onboarding/flags';
 import { OnboardingWorker } from '../../onboarding/job-queue';
 import {
   advanceDiscoveryItemToExtraction,
+  advanceExtractionItemToCuration,
   advanceCurationItemToReview,
   sweepAutoAdvance,
 } from '../../onboarding/auto-advance';
@@ -152,6 +160,33 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
       unsub();
     }
     return events;
+  }
+
+  /** Insert a candidate cohort + its member rows directly (fixture construction). */
+  function insertCohort(
+    batchId: string,
+    cohortId: string,
+    status: 'forming' | 'waiting' | 'ready',
+    memberIds: string[],
+  ): void {
+    const db = getDb();
+    const now = new Date().toISOString();
+    db.query(
+      `INSERT INTO curation_cohorts (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(cohortId, workspaceId, batchId, `brand:${cohortId}`, `Family ${cohortId}`, 'product-family-v1', 'membership-hash', status, now, now);
+    for (let i = 0; i < memberIds.length; i++) {
+      db.query(
+        `INSERT INTO curation_cohort_members (cohort_id, onboarding_item_id, product_sku, normalized_brand, normalized_name_stem, ordinal, created_at)
+         VALUES (?, ?, ?, 'brand', 'stem', ?, ?)`,
+      ).run(cohortId, memberIds[i], String(i + 1), i, now);
+    }
+  }
+
+  /** Stamp extraction data so the extraction-completed auto-advance pool sees it. */
+  function stampExtraction(itemId: string, payload: Record<string, unknown> = { title: 'T' }): void {
+    getDb().query(`UPDATE onboarding_items SET extraction_data_json = ? WHERE id = ?`)
+      .run(JSON.stringify(payload), itemId);
   }
 
   function makeWorker(): OnboardingWorker {
@@ -345,6 +380,172 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     expect(after.stageStatus).toBe('pending');
   });
 
+  // ─── Auto-advance: Extraction → Curation accessibility ───────────────────
+
+  test('extraction/completed with data auto-continues to curation', () => {
+    const batch = makeBatch();
+    const item = makeItem(batch.id, '100030', 'Extracted Item', 'extraction');
+    completeStage(item.id);
+    stampExtraction(item.id);
+
+    const res = advanceExtractionItemToCuration(item.id);
+
+    expect(res.advanced).toBe(true);
+    const after = findItemById(item.id)!;
+    expect(after.stage).toBe('curation');
+    expect(after.stageStatus).toBe('pending');
+    expect(after.retryCount).toBe(0);
+    expect(after.errorMessage).toBeNull();
+  });
+
+  test('extraction auto-advance guards: pending status and missing data', () => {
+    const batch = makeBatch();
+    const pending = makeItem(batch.id, '100031', 'Still Extracting', 'extraction');
+    const noData = makeItem(batch.id, '100032', 'No Extraction Data', 'extraction');
+    completeStage(noData.id);
+
+    const pendingRes = advanceExtractionItemToCuration(pending.id);
+    expect(pendingRes.advanced).toBe(false);
+    expect(pendingRes.reason).toBe('not_eligible:extraction/pending');
+
+    const noDataRes = advanceExtractionItemToCuration(noData.id);
+    expect(noDataRes.advanced).toBe(false);
+    expect(noDataRes.reason).toBe('no_extraction_data');
+  });
+
+  test('extraction auto-advance is guarded and idempotent', () => {
+    const batch = makeBatch();
+    const item = makeItem(batch.id, '100033', 'Done Extracting', 'extraction');
+    completeStage(item.id);
+    stampExtraction(item.id);
+    advanceExtractionItemToCuration(item.id);
+
+    const idempotent = advanceExtractionItemToCuration(item.id);
+    expect(idempotent.advanced).toBe(false);
+    expect(idempotent.reason).toBe('not_eligible:curation/pending');
+  });
+
+  test('extraction auto-advance skips members of an in-flight cohort run', () => {
+    const batch = makeBatch();
+    const item = makeItem(batch.id, '100034', 'Cohort Member', 'extraction');
+    completeStage(item.id);
+    stampExtraction(item.id);
+    const cohortId = 'cohort-running-ext';
+    const cohortRunId = 'cohort-run-running-ext';
+    const now = new Date().toISOString();
+    const db = getDb();
+    db.query(
+      `INSERT INTO curation_cohorts (id, workspace_id, batch_id, group_key, group_label, grouping_version, membership_hash, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)`,
+    ).run(cohortId, workspaceId, batch.id, 'brand:stem', 'Brand Stem', 'product-family-v1', 'hash', now, now);
+    db.query(
+      `INSERT INTO curation_cohort_members (cohort_id, onboarding_item_id, product_sku, normalized_brand, normalized_name_stem, ordinal, created_at)
+       VALUES (?, ?, ?, 'brand', 'stem', 0, ?)`,
+    ).run(cohortId, item.id, item.upc, now);
+    db.query(
+      `INSERT INTO classification_cohort_runs (id, workspace_id, cohort_id, candidate_membership_hash, evidence_snapshot_hash, status, created_at)
+       VALUES (?, ?, ?, 'cand-hash', 'evidence-hash', 'running', ?)`,
+    ).run(cohortRunId, workspaceId, cohortId, now);
+
+    const res = advanceExtractionItemToCuration(item.id);
+
+    expect(res.advanced).toBe(false);
+    expect(res.reason).toBe('cohort_parent_in_flight');
+    const after = findItemById(item.id)!;
+    expect(after.stage).toBe('extraction');
+  });
+
+  test('sweepAutoAdvance advances extraction→curation alongside the other legs', () => {
+    const batch = makeBatch();
+    const d1 = makeItem(batch.id, '100035', 'Discovery Ready', 'discovery');
+    setDiscoverySourceUrl(d1.id, 'https://brand.example.com/product/ready');
+    const e1 = makeItem(batch.id, '100036', 'Extracted Ready', 'extraction');
+    completeStage(e1.id);
+    stampExtraction(e1.id);
+    const c1 = makeItem(batch.id, '100037', 'Curated Ready', 'curation');
+    stampCuration(c1.id, { curatedTitle: 'C1' });
+    completeStage(c1.id);
+
+    const result = sweepAutoAdvance(workspaceId);
+
+    expect(result.discoveryToExtraction).toEqual([d1.id]);
+    expect(result.extractionToCuration).toEqual([e1.id]);
+    expect(result.curationToReview).toEqual([c1.id]);
+    expect(findItemById(e1.id)!.stage).toBe('curation');
+  });
+
+  test('extraction→curation auto-advance emits an SSE item:status event', () => {
+    const batch = makeBatch();
+    const item = makeItem(batch.id, '100038', 'Event Item', 'extraction');
+    completeStage(item.id);
+    stampExtraction(item.id);
+
+    const events = captureEvents(batch.id, () => {
+      advanceExtractionItemToCuration(item.id);
+    });
+
+    const advanceEvent = events.find(e => e.itemId === item.id && e.data.stage === 'curation');
+    expect(advanceEvent).toBeDefined();
+    expect(advanceEvent!.data.status).toBe('pending');
+    expect(advanceEvent!.data.autoAdvanced).toBe(true);
+    expect(advanceEvent!.data.fromStage).toBe('extraction');
+  });
+
+  // ─── Legacy family barrier (epic #46 audit fix 2) ─────────────────────────
+
+  test('worker poll auto-advances extraction→curation (zero manual clicks)', async () => {
+    const batch = makeBatch();
+    const item = makeItem(batch.id, '100039', 'Happy Path Item', 'extraction');
+    completeStage(item.id);
+    stampExtraction(item.id);
+
+    const worker = makeWorker();
+    await settle(worker);
+
+    const after = findItemById(item.id)!;
+    // The sweep moved it out of extraction; the legacy claim loop then either
+    // claims it (curation fails closed offline without a config) or it stays
+    // pending — either way it never strands at extraction/completed.
+    expect(after.stage).toBe('curation');
+    expect(['pending', 'in_progress', 'failed']).toContain(after.stageStatus);
+  });
+
+  test('worker poll holds members of a waiting cohort behind the family barrier', async () => {
+    const batch = makeBatch();
+    const members = ['100040', '100041', '100042', '100043'].map(upc => makeItem(batch.id, upc, `Member ${upc}`, 'curation').id);
+    insertCohort(batch.id, 'cohort-waiting', 'waiting', members);
+
+    const worker = makeWorker();
+    await settle(worker);
+
+    // Every waiting-cohort member is held at curation/pending — never claimed,
+    // never curated per-item (no partial-family Curation under default flags).
+    for (const id of members) {
+      const after = findItemById(id)!;
+      expect(after.stage).toBe('curation');
+      expect(after.stageStatus).toBe('pending');
+      const claim = getDb().query('SELECT claimed_by FROM onboarding_items WHERE id = ?').get(id) as { claimed_by: string | null };
+      expect(claim.claimed_by).toBeNull();
+    }
+  });
+
+  test('family barrier never holds singletons or ready-cohort members', async () => {
+    const batch = makeBatch();
+    const singleton = makeItem(batch.id, '100044', 'Singleton', 'curation').id;
+    const readyMember = makeItem(batch.id, '100045', 'Ready Member', 'curation').id;
+    insertCohort(batch.id, 'cohort-ready', 'ready', [readyMember]);
+
+    const worker = makeWorker();
+    await settle(worker);
+
+    // Both are claimable: the claim loop picks them up (and curation fails
+    // closed offline without a classification config) — never held pending.
+    const singletonAfter = findItemById(singleton)!;
+    const readyAfter = findItemById(readyMember)!;
+    expect(singletonAfter.stageStatus).not.toBe('pending');
+    expect(readyAfter.stageStatus).not.toBe('pending');
+  });
+
   // ─── Sweep: mixed batch ──────────────────────────────────────────────────
 
   test('sweepAutoAdvance advances only eligible items', () => {
@@ -407,17 +608,41 @@ describe('Onboarding automation-owned progression (epic #46 phase 2)', () => {
     expect(after.errorMessage).toBeNull();
   });
 
-  test('profile older than the failure never releases (loop guard)', () => {
+  test('a usable profile releases a blocked item regardless of profile age (no recency guard)', () => {
     const batch = makeBatch();
     const item = makeItem(batch.id, '100018', 'Blocked Item', 'extraction');
+    // Profile exists BEFORE the failure — under the old recency guard this
+    // never released; now a usable profile NOW is the only condition.
     upsertProfile('brand.example.com', { titleSelector: 'h1' });
     failAsProfileBlocked(item.id, 'brand.example.com');
 
     const res = releaseDomainExtractionItems(workspaceId, 'brand.example.com');
 
-    expect(res.releasedIds).toEqual([]);
+    expect(res.profileAvailable).toBe(true);
+    expect(res.releasedIds).toEqual([item.id]);
     const after = findItemById(item.id)!;
-    expect(after.stageStatus).toBe('failed');
+    expect(after.stage).toBe('extraction');
+    expect(after.stageStatus).toBe('pending');
+  });
+
+  test('retry-exhausted blocked items are never auto-released', () => {
+    const batch = makeBatch();
+    const exhausted = makeItem(batch.id, '100018b', 'Exhausted Item', 'extraction');
+    failAsProfileBlocked(exhausted.id, 'brand.example.com');
+    const db = getDb();
+    db.query(`UPDATE onboarding_items SET retry_count = 2 WHERE id = ?`).run(exhausted.id);
+    upsertProfile('brand.example.com', { titleSelector: 'h1' });
+
+    const res = releaseDomainExtractionItems(workspaceId, 'brand.example.com');
+
+    expect(res.releasedIds).toEqual([]);
+    expect(findItemById(exhausted.id)!.stageStatus).toBe('failed');
+
+    // A retryable (below the cap) item on the same domain still releases.
+    const retryable = makeItem(batch.id, '100018c', 'Retryable Item', 'extraction');
+    failAsProfileBlocked(retryable.id, 'brand.example.com');
+    const res2 = releaseDomainExtractionItems(workspaceId, 'brand.example.com');
+    expect(res2.releasedIds).toEqual([retryable.id]);
   });
 
   test('other domains and non-profile failures are untouched by default', () => {

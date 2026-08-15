@@ -19,10 +19,14 @@
  *   materialization — a profile has nothing to do with them);
  * - by default only PROFILE-BLOCKED failures are released (error text
  *   `No extractor profile for …`); generic scrape failures stay manual so the
- *   sweep can never hot-loop a product-data failure;
- * - the profile must be NEWER than the item's last update (`updatedAt` guard)
- *   — a profile older than the failure cannot be the fix, and this prevents
- *   pathological release→fail→release loops;
+ *   sweep can never hot-loop a product-data failure (`releaseAllBlocked`
+ *   releases every blocked item on the domain — the explicit operator-triggered
+ *   path after profile setup);
+ * - RELEASES NEED NO RECENCY GUARD: extraction's own 2-retry cap
+ *   (`incrementRetryCount` in the worker) already prevents release→fail→release
+ *   loops, and a profile is either usable now or it is not. An item whose
+ *   retries are exhausted (`retry_count >= 2`) is never auto-released — the
+ *   operator must make a deliberate per-item reset.
  * - releases are idempotent (guarded UPDATE re-asserts blocked status).
  */
 import {
@@ -65,13 +69,6 @@ export interface DomainReleaseOptions {
    * sweep always uses the default (profile-blocked errors only).
    */
   releaseAllBlocked?: boolean;
-  /**
-   * Profile `updated_at` override. When provided, the loop-guard comparison
-   * uses this instead of the live profile row's `updated_at`. Used by the
-   * sweep so every domain is compared against the same snapshot; callers
-   * normally omit it.
-   */
-  minProfileUpdatedAt?: string;
 }
 
 /**
@@ -95,14 +92,12 @@ export function releaseDomainExtractionItems(
     };
   }
 
-  const profileUpdatedAt = options.minProfileUpdatedAt ?? profile.updatedAt;
   const eligible = listBlockedExtractionItemsByWorkspace(workspaceId).filter(row => {
     if (!row.source_url) return false;
     if (hostOf(row.source_url) !== normalized) return false;
-    // Loop guard: only re-queue when the blocker changed AFTER the failure —
-    // a profile older than the failure cannot be the fix (and repeated
-    // release→fail→release cycles are impossible).
-    if (Date.parse(profileUpdatedAt) <= Date.parse(row.updated_at)) return false;
+    // Epic #46 audit fix (fix 4): no recency guard — a usable profile NOW is
+    // the only condition. Extraction's own 2-retry cap prevents hot loops.
+    if (row.retry_count >= 2) return false;
     if (!options.releaseAllBlocked && !PROFILE_BLOCKED_ERROR_PATTERN.test(row.error_message ?? '')) {
       return false;
     }

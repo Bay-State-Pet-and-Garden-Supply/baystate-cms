@@ -66,9 +66,27 @@ export function runMigrations(): void {
           INSERT OR IGNORE INTO onboarding_review_state
             (item_id, batch_id, reviewed_at, reviewed_by, review_invalidated_at, review_invalidation_reason,
              approved_at, approved_by, approval_origin, created_at, updated_at)
-          SELECT i.id, i.batch_id, i.updated_at, 'legacy', NULL, NULL, NULL, NULL, 'legacy', i.updated_at, i.updated_at
+          SELECT i.id, i.batch_id, i.updated_at, 'legacy', NULL, NULL,
+                 CASE WHEN i.stage = 'promotion' THEN i.updated_at ELSE NULL END,
+                 CASE WHEN i.stage = 'promotion' THEN 'legacy' ELSE NULL END,
+                 'legacy', i.updated_at, i.updated_at
           FROM onboarding_items i
           WHERE (i.stage = 'review' AND i.stage_status = 'completed') OR i.stage = 'promotion'
+        `);
+
+        // v1 → v2 (epic #46 audit fix): legacy promotion-stage items — whose
+        // historical Promote action WAS the release decision under the old
+        // model — receive durable APPROVAL (origin 'legacy'). Without this
+        // backfill the new promote gate would strand pre-epic released
+        // batches (approved_at stays NULL for them). Fresh installs write the
+        // approval directly above and converge here as a no-op.
+        db.exec(`
+          UPDATE onboarding_review_state
+          SET approved_at = COALESCE(approved_at, updated_at),
+              approved_by = COALESCE(approved_by, 'legacy'),
+              updated_at = updated_at
+          WHERE review_invalidated_at IS NULL
+            AND item_id IN (SELECT id FROM onboarding_items WHERE stage = 'promotion')
         `);
       } catch (e) {
         console.error('[Migrations] operator_state backfill failed (non-fatal):', e);
@@ -76,6 +94,45 @@ export function runMigrations(): void {
     }
     db.exec("INSERT INTO app_meta (key, value) VALUES ('operator_state_schema_version', '1');");
     console.log('[Migrations] operator_state_schema_version initialized to 1.');
+  }
+
+  // v1 → v2 hop (epic #46 audit fix): legacy promotion-stage items receive
+  // durable APPROVAL so the new promote gate never strands pre-epic released
+  // batches. Runs only for a marker-'1' database; already-converged rows are
+  // untouched (COALESCE keeps existing approved_at).
+  //
+  // Idempotency/correctness: the marker is advanced to '2' ONLY when the
+  // UPDATE actually applied. On an old-schema DB where the stage-pipeline
+  // migration (which adds `onboarding_items.stage`) runs LATER in this file,
+  // the hop is skipped and the marker stays '1' so the backfill runs on the
+  // next boot once `stage` exists — it is never permanently skipped by a
+  // transient failure.
+  const operatorStateV1 = db.query('SELECT value FROM app_meta WHERE key = ?').get('operator_state_schema_version') as
+    | { value: string }
+    | undefined;
+  if (operatorStateV1 && operatorStateV1.value === '1') {
+    const v2Cols = db.query('PRAGMA table_info(onboarding_items)').all() as Array<{ name: string }>;
+    const hasStageColumn = v2Cols.some(col => col.name === 'stage');
+    let applied = false;
+    if (hasStageColumn) {
+      try {
+        db.exec(`
+          UPDATE onboarding_review_state
+          SET approved_at = COALESCE(approved_at, updated_at),
+              approved_by = COALESCE(approved_by, 'legacy'),
+              updated_at = updated_at
+          WHERE review_invalidated_at IS NULL
+            AND item_id IN (SELECT id FROM onboarding_items WHERE stage = 'promotion')
+        `);
+        applied = true;
+      } catch (e) {
+        console.error('[Migrations] operator_state promotion-approval backfill failed (non-fatal; marker retained for retry):', e);
+      }
+    }
+    if (applied) {
+      db.exec("INSERT INTO app_meta (key, value) VALUES ('operator_state_schema_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+      console.log('[Migrations] operator_state_schema_version advanced to 2 (legacy promotion approval backfill).');
+    }
   }
 
   // Ensure field_registry has curated_fields_json column (issue #31 commit 1).

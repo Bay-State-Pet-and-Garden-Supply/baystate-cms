@@ -397,6 +397,27 @@ export function getActiveCohortForItem(itemId: string): CurationCohort | null {
   return row ? mapCohortRow(row) : null;
 }
 
+/**
+ * Item ids that are members of an ACTIVE candidate cohort NOT yet ready —
+ * i.e. status `forming` or `waiting` (epic #46 audit fix: the legacy
+ * per-item Curation claim path must hold these members so partial-family
+ * Curation can never start). Superseded cohorts are excluded, and the unique
+ * partial index `idx_curation_cohorts_active_group` guarantees at most one
+ * active cohort per (batch, group_key, grouping_version) — so each member
+ * appears at most once. Members of `ready` cohorts are NOT returned (they
+ * may be claimed/curated).
+ */
+export function listWaitingCohortMemberIdsByWorkspace(workspaceId: string): string[] {
+  const rows = getDb().query(
+    `SELECT m.onboarding_item_id AS item_id
+     FROM curation_cohort_members m
+     JOIN curation_cohorts c ON c.id = m.cohort_id
+     WHERE c.workspace_id = ? AND c.status != 'superseded'
+       AND c.status IN ('forming', 'waiting')`,
+  ).all(workspaceId) as Array<{ item_id: string }>;
+  return rows.map(row => row.item_id);
+}
+
 export function getCohortMembers(cohortId: string): CurationCohortMember[] {
   const rows = getDb().query(
     'SELECT * FROM curation_cohort_members WHERE cohort_id = ? ORDER BY ordinal ASC',

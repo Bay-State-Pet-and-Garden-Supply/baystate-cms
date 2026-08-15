@@ -34,6 +34,7 @@ import {
   skipItems,
   getWeeklyReportItems,
   revertToOfficialDiscovery,
+  reopenApprovedForReapproval,
 } from '../../db/repositories/onboarding-item-repo';
 import type { PipelineStage } from '../../shared/schemas/onboarding';
 import { ResolveSourcingRequestSchema, FallbackSourcingItemsRequestSchema } from '../../shared/schemas/onboarding';
@@ -192,6 +193,7 @@ import {
 import {
   markReviewed,
   markReviewInvalidated,
+  getReviewState,
 } from '../../db/repositories/onboarding-review-repo';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
@@ -822,6 +824,16 @@ route.post('/onboarding/items/advance', async (c) => {
       refused.push({ itemId: id, reason: `semantic_validation_blocked: ${firstMessage}` });
       continue;
     }
+    // Epic #46 audit fix (fix 3): the generic Advance can never move a
+    // reviewed-but-never-release-decided item into Promotion. Bulk approval
+    // is the ONLY release decision — a review/completed item without a
+    // DURABLE review record (or with an invalidated one) is refused here so
+    // diagnostics Advance cannot bypass the approval gate.
+    const reviewState = getReviewState(id);
+    if (!reviewState?.reviewedAt || reviewState.reviewInvalidatedAt) {
+      refused.push({ itemId: id, reason: 'durable_review_required' });
+      continue;
+    }
     advanceable.push(id);
   }
 
@@ -1198,6 +1210,39 @@ route.post('/onboarding/batches/:id/promote', async (c) => {
       return c.json({ error: 'All items must be in the promotion stage' }, 400);
     }
 
+    // Epic #46 audit fix (fix 3): Promotion is the export-prep side effect,
+    // and approval is the ONLY release decision. Every item must carry a
+    // DURABLE, non-invalidated approval before drafts are created — an
+    // item advanced by diagnostics or edited after approval (approval
+    // cleared) is refused here so the export path can never run ahead of a
+    // valid release decision. All-or-nothing, matching the route's existing
+    // stage validation shape.
+    const approvalFailures: Array<{ itemId: string; reason: string }> = [];
+    for (const id of itemIds) {
+      const item = findItemById(id);
+      if (!item) {
+        approvalFailures.push({ itemId: id, reason: 'item_not_found' });
+        continue;
+      }
+      const reviewState = getReviewState(id);
+      if (reviewState?.reviewInvalidatedAt) {
+        // Invalidation clears approved_at — check it FIRST or the reason below
+        // is unreachable for edited-after-approval items.
+        approvalFailures.push({ itemId: id, reason: 'approval_invalidated' });
+        continue;
+      }
+      if (!reviewState?.approvedAt) {
+        approvalFailures.push({ itemId: id, reason: 'approval_required' });
+        continue;
+      }
+    }
+    if (approvalFailures.length > 0) {
+      return c.json({
+        error: 'All items must be approved before promotion. None were mutated.',
+        failures: approvalFailures,
+      }, 400);
+    }
+
     const result = await promoteItems(workspace.id, workspace.workspacePath, batchId, itemIds);
 
     // Archive batch if all items are done
@@ -1542,8 +1587,24 @@ route.put('/onboarding/items/:id', async (c) => {
   // invalidated. No-op when the item was never reviewed.
   const consequentialKeys = ['name', 'price', 'brandHint', 'source_url', 'extraction_data', 'curation_data'] as const;
   const isConsequentialEdit = consequentialKeys.some(key => body[key] !== undefined);
+  // Epic #46 audit fix (fix 3): an APPROVED promotion-stage item whose
+  // output was edited must return to an actionable review state — its
+  // durable approval is cleared below, and it can never export again without
+  // a fresh review + approval. Capture the pre-edit state BEFORE invalidation
+  // (invalidation nulls approved_at).
+  const reviewBeforeEdit = getReviewState(itemId);
+  const wasApprovedInPromotion =
+    item.stage === 'promotion' &&
+    Boolean(reviewBeforeEdit?.approvedAt) &&
+    !reviewBeforeEdit?.reviewInvalidatedAt;
   if (isConsequentialEdit) {
     markReviewInvalidated(itemId, 'consequential_edit');
+    if (wasApprovedInPromotion && reopenApprovedForReapproval(itemId)) {
+      onboardingEvents.emitItemStatus(item.batchId, itemId, 'pending', {
+        stage: 'review',
+        reason: 'reapproval_required',
+      });
+    }
   }
 
   return c.json({ success: true });
@@ -1703,6 +1764,15 @@ route.post('/onboarding/items/:id/select-source', async (c) => {
     return c.json({ error: 'sourceId is required' }, 400);
   }
 
+  // Epic #46 audit fix (fix 5): workspace ownership — foreign items are 404
+  // before any source is listed or bound.
+  const item = findItemById(itemId);
+  if (!item) {
+    return c.json({ error: 'Item not found' }, 404);
+  }
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
+
   const sources = listSourcesByItem(itemId);
   const selected = sources.find(s => s.id === sourceId);
   if (!selected) {
@@ -1739,6 +1809,9 @@ route.post('/onboarding/items/:id/set-url', async (c) => {
   if (!item) {
     return c.json({ error: 'Item not found' }, 404);
   }
+  // Epic #46 audit fix (fix 5): workspace ownership — foreign items are 404.
+  const ownershipError = itemWorkspaceError(c, item);
+  if (ownershipError) return ownershipError;
   if (item.sourceType === 'distributor_record') {
     return c.json(
       {
