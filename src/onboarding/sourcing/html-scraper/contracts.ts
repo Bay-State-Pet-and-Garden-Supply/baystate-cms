@@ -188,6 +188,19 @@ export interface ScraperFetchPageOptions {
   deadlineAt: string;
   browserRequired?: boolean;
   waitForSelectors?: string[];
+  /**
+   * Per-lookup request budget shared across every fetch of ONE lookup
+   * (search + candidate PDPs). The session manager enforces
+   * `policy.maxRequests` against it. Absent = manager-local counter
+   * fallback. Scope is the LOOKUP, not the manager: shared per-connection
+   * managers must not accumulate a lifetime request count (ADR 0014
+   * Amendment B, session reuse).
+   */
+  budget?: HtmlScraperRequestBudget;
+}
+
+export interface HtmlScraperRequestBudget {
+  used: number;
 }
 
 export type ScraperFetchPage = (url: string, opts: ScraperFetchPageOptions) => Promise<ScraperFetchPageResult>;

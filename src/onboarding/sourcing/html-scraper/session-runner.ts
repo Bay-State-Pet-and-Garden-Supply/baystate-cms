@@ -5,6 +5,7 @@ import { cwd } from 'node:process';
 import type {
   HtmlScraperRunResult,
   HtmlScraperRuntimePolicy,
+  HtmlScraperRequestBudget,
   LoginAutomationConfig,
   HtmlScraperTelemetry,
 } from './contracts';
@@ -180,6 +181,15 @@ export interface HtmlScraperFetchInput {
   deadlineAt: string;
   browserRequired?: boolean;
   waitForSelectors?: string[];
+  /**
+   * Per-lookup request budget (shared across the search + PDP fetches of
+   * ONE lookup). When present, `policy.maxRequests` is enforced against it
+   * instead of the manager-local counter — required with shared
+   * per-connection managers, whose lifetime must not accumulate a request
+   * count (otherwise every item after the first `maxRequests` fails
+   * rate_limited).
+   */
+  budget?: HtmlScraperRequestBudget;
 }
 
 export interface HtmlScraperSessionManager {
@@ -200,6 +210,51 @@ function composeDeadline(deadlineAt: string, localTimeoutMs: number): string {
   const local = new Date(Date.now() + localTimeoutMs).toISOString();
   return deadlineAt && deadlineAt < local ? deadlineAt : local;
 }
+
+// ─── Shared per-connection session managers ───────────────────────────────────
+//
+// ONE manager (and therefore one engine + one browser + one session store)
+// per connectionId for the process lifetime. Every item lookup reuses the
+// authenticated cookies (15-min TTL, credential-digest guarded) instead of
+// logging in per item; the manager's per-connection login locks serialize
+// same-connection logins across concurrent items. Memory-only: nothing is
+// ever persisted. Per-lookup teardown MUST NOT close these managers (reuse
+// would be defeated) — the process owns their lifetime. Playwright browsers
+// exit on parent death (remote-debugging-pipe lifecycle), so no signal
+// handlers are needed here.
+const sharedHtmlScraperManagers = new Map<
+  string,
+  { manager: HtmlScraperSessionManager; engine: HtmlScraperEngine }
+>();
+
+/**
+ * Get (or lazily create) the process-shared session manager for a
+ * connection. `createEngine` is injectable for tests.
+ */
+export function getSharedHtmlScraperManager(
+  connectionId: string,
+  createEngine: () => HtmlScraperEngine = createCrawleeHtmlScraperEngine,
+): HtmlScraperSessionManager {
+  const existing = sharedHtmlScraperManagers.get(connectionId);
+  if (existing) return existing.manager;
+  const engine = createEngine();
+  const manager = createHtmlScraperSessionManager(engine);
+  sharedHtmlScraperManagers.set(connectionId, { manager, engine });
+  return manager;
+}
+
+/** Number of shared managers (tests assert reuse vs. churn). */
+export function sharedHtmlScraperManagerCount(): number {
+  return sharedHtmlScraperManagers.size;
+}
+
+/** Close every shared manager and clear the registry (best-effort). */
+export async function closeAllSharedHtmlScraperManagers(): Promise<void> {
+  const all = [...sharedHtmlScraperManagers.values()];
+  sharedHtmlScraperManagers.clear();
+  await Promise.allSettled(all.map(({ manager }) => manager.closeAll()));
+}
+
 
 /**
  * The bounded session orchestrator. All security-sensitive orchestration
@@ -331,15 +386,24 @@ export function createHtmlScraperSessionManager(
     const runFetch = async (): Promise<HtmlScraperEngineFetchResult> => {
       // Per-connection rate ceiling (sliding window) and per-lookup request
       // cap are enforced HERE at the manager boundary — a fresh crawler per
-      // engine.fetch() would otherwise reset Crawlee's own limiter.
-      if (fetchCount >= Math.max(1, policy.maxRequests)) {
+      // engine.fetch() would otherwise reset Crawlee's own limiter. The cap
+      // counts against the per-lookup budget when one is provided (shared
+      // managers reuse the budget across a lookup's fetchHtml calls), else
+      // the manager-local counter (legacy per-lookup managers).
+      const budget = input.budget ?? null;
+      const used = budget ? budget.used : fetchCount;
+      if (used >= Math.max(1, policy.maxRequests)) {
         return { ok: false, finalUrl: input.url, html: '', code: 'rate_limited', message: 'per-lookup request cap exceeded', authSignal: null };
       }
       const slot = await acquireRateSlot(input.connectionId, managerKey, policy.requestsPerMinute, composedDeadline);
       if (!slot) {
         return { ok: false, finalUrl: input.url, html: '', code: 'timeout', message: 'request rate budget exhausted before deadline', authSignal: null };
       }
-      fetchCount += 1;
+      if (budget) {
+        budget.used += 1;
+      } else {
+        fetchCount += 1;
+      }
       try {
         return await engine.fetch({
           url: input.url,

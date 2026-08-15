@@ -6,12 +6,12 @@ import {
   type SourcingLookupResult,
   normalizeGtin,
 } from '../contracts';
-import type { HtmlScraperConnectionConfig, HtmlScraperRuntimePolicy, ScraperFetchPage } from '../html-scraper/contracts';
+import type { HtmlScraperConnectionConfig, HtmlScraperRequestBudget, HtmlScraperRuntimePolicy, ScraperFetchPage } from '../html-scraper/contracts';
 import { HTML_SCRAPER_CEILINGS, parseHtmlScraperConnectionConfig } from '../html-scraper/contracts';
 import { ORGILL_LOGIN } from '../html-scraper/login-config';
 import {
   createCrawleeHtmlScraperEngine,
-  createHtmlScraperSessionManager,
+  getSharedHtmlScraperManager,
 } from '../html-scraper/session-runner';
 import { parseHtmlScraperCredentials } from '../html-scraper/credentials';
 import {
@@ -114,13 +114,21 @@ function makeDefaultFetcher(
   policy: HtmlScraperRuntimePolicy,
   credentials: { username: string; password: string },
 ): { fetchPage: ScraperFetchPage; close: () => Promise<void> } {
-  const manager = createHtmlScraperSessionManager(createCrawleeHtmlScraperEngine());
+  // SHARED per-connection manager (ADR 0014 Amendment B): one login per
+  // 15-minute session window per connection, reused across every item
+  // lookup. Memory-only cookies; never closed per lookup — the process owns
+  // the browser/session lifetime (Playwright exits with the parent). The
+  // request cap is a PER-LOOKUP budget (this fetcher is created per lookup)
+  // so a shared manager never accumulates a lifetime request count.
+  const manager = getSharedHtmlScraperManager(connectionId, createCrawleeHtmlScraperEngine);
+  const budget: HtmlScraperRequestBudget = { used: 0 };
   const fetchPage: ScraperFetchPage = async (url, opts) => {
     const result = await manager.fetchHtml({
       connectionId,
       providerId: policy.providerId,
       url,
       policy,
+      budget,
       loginConfig: ORGILL_LOGIN,
       credentials,
       signal: opts.signal,
@@ -141,7 +149,9 @@ function makeDefaultFetcher(
     // timeout/body_too_large/unexpected) propagate as-is.
     return { ok: false, code: result.code, message: result.message };
   };
-  return { fetchPage, close: () => manager.closeAll() };
+  // Per-lookup close would defeat session reuse; the shared manager's
+  // lifetime is the process's.
+  return { fetchPage, close: async () => {} };
 }
 
 /** Search-result candidate PDP links (absolute, same-origin, deduped). */

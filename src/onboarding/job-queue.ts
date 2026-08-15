@@ -151,7 +151,7 @@ export class OnboardingWorker {
   // Global concurrency limit across all stages.
   // Extraction has a separate, lower limit to avoid triggering bot
   // detection on target websites during concurrent page scrapes.
-  private maxConcurrency = 10;
+  private maxConcurrency = 3;
   private maxExtractionConcurrency = 3;
   private extractionRunning = 0;
   private isProcessing = false;
@@ -166,7 +166,14 @@ export class OnboardingWorker {
   /** Test seam: inject the sourcing engine factory (defaults to the real engine). */
   private engineFactory: (() => SourcingEngine) | null;
 
-  constructor(workspaceId: string, workspacePath: string, maxConcurrency = 10, maxExtractionConcurrency = 3, engineFactory?: () => SourcingEngine) {
+  /**
+   * @param maxConcurrency Items processed in parallel per poll. Default 3:
+   *   sourcing fans each item out across all enabled distributor connections,
+   *   so 10 items meant up to 10 concurrent logins/browser sessions; 3 keeps
+   *   concurrent logins bounded while still saturating the per-connection
+   *   rate limits (each item walks its connections sequentially).
+   */
+  constructor(workspaceId: string, workspacePath: string, maxConcurrency = 3, maxExtractionConcurrency = 3, engineFactory?: () => SourcingEngine) {
     this.workspaceId = workspaceId;
     this.workspacePath = workspacePath;
     this.maxConcurrency = maxConcurrency;

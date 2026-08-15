@@ -1,9 +1,12 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, afterEach } from 'vitest';
 import {
   createHtmlScraperSessionManager,
   buildCrawlerOptions,
   closeAllHtmlScraperSessions,
+  closeAllSharedHtmlScraperManagers,
+  getSharedHtmlScraperManager,
   registerHtmlScraperSessionManager,
+  sharedHtmlScraperManagerCount,
   type HtmlScraperEngine,
   type HtmlScraperEngineFetchResult,
   type HtmlScraperEngineLoginResult,
@@ -358,5 +361,79 @@ describe('html_scraper session runner (injected engine; no network/browser)', ()
     await closeAllHtmlScraperSessions();
     expect(engine.closed).toBe(true);
     unregister();
+  });
+});
+
+describe('shared per-connection session managers (login reuse across lookups)', () => {
+  afterEach(async () => {
+    await closeAllSharedHtmlScraperManagers();
+  });
+
+  test('same connectionId reuses one manager and one engine: ONE login across lookups', async () => {
+    const engine = new FakeEngine();
+    const manager1 = getSharedHtmlScraperManager('conn-shared-1', () => engine);
+    const manager2 = getSharedHtmlScraperManager('conn-shared-1', () => new FakeEngine());
+    expect(manager1).toBe(manager2);
+    expect(sharedHtmlScraperManagerCount()).toBe(1);
+
+    await manager1.fetchHtml(makeInput({ connectionId: 'conn-shared-1' }));
+    await manager2.fetchHtml(
+      makeInput({ connectionId: 'conn-shared-1', url: 'https://www.orgill.com/SearchResultN.aspx?ddlhQ=755625321923&x=2' }),
+    );
+    expect(engine.loginCalls).toBe(1);
+    expect(engine.fetchCalls.length).toBe(2);
+  });
+
+  test('different connectionIds get separate managers and engines', async () => {
+    const engineA = new FakeEngine();
+    const engineB = new FakeEngine();
+    const a = getSharedHtmlScraperManager('conn-a', () => engineA);
+    const b = getSharedHtmlScraperManager('conn-b', () => engineB);
+    expect(a).not.toBe(b);
+    expect(sharedHtmlScraperManagerCount()).toBe(2);
+    await a.fetchHtml(makeInput({ connectionId: 'conn-a' }));
+    await b.fetchHtml(makeInput({ connectionId: 'conn-b' }));
+    expect(engineA.loginCalls).toBe(1);
+    expect(engineB.loginCalls).toBe(1);
+  });
+
+  test('closeAllSharedHtmlScraperManagers closes engines and clears the registry', async () => {
+    const engine = new FakeEngine();
+    getSharedHtmlScraperManager('conn-close', () => engine);
+    await closeAllSharedHtmlScraperManagers();
+    expect(engine.closed).toBe(true);
+    expect(sharedHtmlScraperManagerCount()).toBe(0);
+    // A later lookup gets a fresh manager instead of a closed one.
+    getSharedHtmlScraperManager('conn-close', () => new FakeEngine());
+    expect(sharedHtmlScraperManagerCount()).toBe(1);
+  });
+
+  test('per-lookup budget caps ONE lookup, not the shared manager lifetime (regression: rate_limited after maxRequests)', async () => {
+    const engine = new FakeEngine();
+    const manager = getSharedHtmlScraperManager('conn-budget', () => engine);
+    // Small cap + high per-minute ceiling so the test exercises the budget,
+    // not the rate limiter (which would take minutes at the real 6/min).
+    const fastPolicy = { ...POLICY, maxRequests: 3, requestsPerMinute: 1000 };
+
+    // First lookup: a fresh budget makes every fetchHtml call count against
+    // the per-lookup cap — maxRequests fetches succeed, the next is blocked.
+    const budget = { used: 0 };
+    for (let i = 0; i < fastPolicy.maxRequests; i++) {
+      const res = await manager.fetchHtml(makeInput({ connectionId: 'conn-budget', policy: fastPolicy, budget }));
+      expect(res.ok).toBe(true);
+    }
+    const blocked = await manager.fetchHtml(makeInput({ connectionId: 'conn-budget', policy: fastPolicy, budget }));
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) {
+      expect(blocked.code).toBe('rate_limited');
+    }
+
+    // Second lookup with a FRESH budget works — the shared manager's
+    // lifetime request count must NOT block it (the production bug).
+    const budget2 = { used: 0 };
+    const again = await manager.fetchHtml(makeInput({ connectionId: 'conn-budget', policy: fastPolicy, budget: budget2 }));
+    expect(again.ok).toBe(true);
+    expect(engine.loginCalls).toBe(1); // session reused across lookups
+    await closeAllSharedHtmlScraperManagers();
   });
 });

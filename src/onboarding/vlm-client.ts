@@ -19,38 +19,41 @@ export interface VlmConfig {
  * Prefers the connection-addressed visionOcr workload route, falling back to legacy settings.
  */
 export function getVlmConfig(): VlmConfig | null {
+  const row = getApiKey('ollama_vlm');
+  if (row) {
+    if (row.api_key !== 'enabled') {
+      return null;
+    }
+    const rawBaseUrl = row.base_url || 'http://localhost:11434';
+    const baseUrl = rawBaseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+    return {
+      baseUrl,
+      model: row.model || 'qwen2.5vl:latest',
+      enabled: true,
+      transport: 'ollama-native',
+    };
+  }
+
   try {
     const config = getFullAiRoutingConfig();
     const route = config.workloads.visionOcr;
-    const target = route.primary === 'inherit' ? config.defaults.catalogTarget : route.primary;
-    const conn = config.connections[target.connectionId];
-    if (conn && conn.enabled) {
-      return {
-        baseUrl: conn.baseUrl,
-        model: target.modelId || 'gemma-4-26b-a4b-qat',
-        enabled: true,
-        transport: conn.transport,
-        credential: conn.credential ?? undefined,
-      };
+    if (route && route.primary !== 'inherit') {
+      const conn = config.connections[route.primary.connectionId];
+      if (conn && conn.enabled && conn.id !== 'desktop-lmstudio') {
+        return {
+          baseUrl: conn.baseUrl,
+          model: route.primary.modelId || 'gemma-4-26b-a4b-qat',
+          enabled: true,
+          transport: conn.transport,
+          credential: conn.credential ?? undefined,
+        };
+      }
     }
   } catch {
-    // Fall back to legacy api_keys row
+    // Fall back
   }
 
-  const row = getApiKey('ollama_vlm');
-  if (!row || row.api_key !== 'enabled') {
-    return null;
-  }
-
-  const rawBaseUrl = row.base_url || 'http://localhost:11434';
-  const baseUrl = rawBaseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
-
-  return {
-    baseUrl,
-    model: row.model || 'qwen2.5vl:latest',
-    enabled: true,
-    transport: 'ollama-native',
-  };
+  return null;
 }
 
 /**

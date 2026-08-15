@@ -80,10 +80,12 @@ function upsertConfigFile(workspaceId: string, fileName: string, schemaVersion: 
  */
 export function syncConfigToCache(workspaceId: string, config: ClassificationConfig): void {
   const db = getDb();
+  const schemaVersion = (config as any).manifest?.schemaVersion ?? 1;
+  const manifestValue = (config as any).manifest ?? { schemaVersion: 1 };
 
   db.transaction(() => {
     // Manifest
-    upsertConfigFile(workspaceId, 'manifest.json', config.manifest.schemaVersion, config.manifest);
+    upsertConfigFile(workspaceId, 'manifest.json', schemaVersion, manifestValue);
 
     // Product Types
     db.run('DELETE FROM classification_product_types WHERE workspace_id = ?', [workspaceId]);
@@ -105,7 +107,7 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'product-types.json', config.manifest.schemaVersion, config.productTypes);
+    upsertConfigFile(workspaceId, 'product-types.json', schemaVersion, config.productTypes);
 
     // Attributes
     db.run('DELETE FROM classification_attributes WHERE workspace_id = ?', [workspaceId]);
@@ -135,7 +137,7 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'attributes.json', config.manifest.schemaVersion, config.attributes);
+    upsertConfigFile(workspaceId, 'attributes.json', schemaVersion, config.attributes);
 
     // Attribute Profiles
     db.run('DELETE FROM classification_attribute_profiles WHERE workspace_id = ?', [workspaceId]);
@@ -156,7 +158,7 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'attribute-profiles.json', config.manifest.schemaVersion, config.attributeProfiles);
+    upsertConfigFile(workspaceId, 'attribute-profiles.json', schemaVersion, config.attributeProfiles);
 
     // Attribute Mappings
     db.run('DELETE FROM classification_attribute_mappings WHERE workspace_id = ?', [workspaceId]);
@@ -179,12 +181,12 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'mappings.json', config.manifest.schemaVersion, config.attributeMappings);
+    upsertConfigFile(workspaceId, 'mappings.json', schemaVersion, config.attributeMappings);
 
     // Curation targets are file-backed stage settings. They do not need a
     // dedicated cache table because stages read them from the active config,
     // but tracking the file keeps config metadata/snapshots complete.
-    upsertConfigFile(workspaceId, 'curation-targets.json', config.manifest.schemaVersion, config.curationTargets ?? []);
+    upsertConfigFile(workspaceId, 'curation-targets.json', schemaVersion, config.curationTargets ?? []);
 
     // Guidance
     db.run('DELETE FROM classification_guidance WHERE workspace_id = ?', [workspaceId]);
@@ -208,7 +210,7 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'guidance.json', config.manifest.schemaVersion, config.guidance);
+    upsertConfigFile(workspaceId, 'guidance.json', schemaVersion, config.guidance);
 
     // Model Policy
     db.run(
@@ -220,7 +222,7 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
          updated_at = EXCLUDED.updated_at`,
       [workspaceId, canonicalJsonStringify(config.modelPolicy), hashCanonicalJson(config.modelPolicy), now()],
     );
-    upsertConfigFile(workspaceId, 'model-policies.json', config.manifest.schemaVersion, config.modelPolicy);
+    upsertConfigFile(workspaceId, 'model-policies.json', schemaVersion, config.modelPolicy);
 
     // Brands
     db.run('DELETE FROM classification_brands WHERE workspace_id = ?', [workspaceId]);
@@ -241,7 +243,7 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
         ],
       );
     }
-    upsertConfigFile(workspaceId, 'brands.json', config.manifest.schemaVersion, config.brands);
+    upsertConfigFile(workspaceId, 'brands.json', schemaVersion, config.brands);
 
     // Data Sharing Policy
     db.run(
@@ -253,7 +255,7 @@ export function syncConfigToCache(workspaceId: string, config: ClassificationCon
          updated_at = EXCLUDED.updated_at`,
       [workspaceId, canonicalJsonStringify(config.dataSharing), hashCanonicalJson(config.dataSharing), now()],
     );
-    upsertConfigFile(workspaceId, 'data-sharing.json', config.manifest.schemaVersion, config.dataSharing);
+    upsertConfigFile(workspaceId, 'data-sharing.json', schemaVersion, config.dataSharing);
   })();
 }
 

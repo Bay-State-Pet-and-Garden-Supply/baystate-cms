@@ -5,11 +5,11 @@ import {
   type SourcingLookupResult,
   normalizeGtin,
 } from '../contracts';
-import type { HtmlScraperConnectionConfig, HtmlScraperRuntimePolicy, ScraperFetchPage } from '../html-scraper/contracts';
+import type { HtmlScraperConnectionConfig, HtmlScraperRequestBudget, HtmlScraperRuntimePolicy, ScraperFetchPage } from '../html-scraper/contracts';
 import { HTML_SCRAPER_CEILINGS, parseHtmlScraperConnectionConfig } from '../html-scraper/contracts';
 import {
   createCrawleeHtmlScraperEngine,
-  createHtmlScraperSessionManager,
+  getSharedHtmlScraperManager,
 } from '../html-scraper/session-runner';
 import {
   dedupeStrings,
@@ -100,24 +100,28 @@ function buildCentralPetPolicy(config: HtmlScraperConnectionConfig | null): Html
 }
 
 function makeDefaultFetcher(connectionId: string, policy: HtmlScraperRuntimePolicy): ScraperFetchPage {
+  // SHARED per-connection manager (ADR 0014 Amendment B): one login per
+  // 15-minute session window per connection, reused across every item
+  // lookup. Memory-only cookies; never closed per lookup — the process owns
+  // the browser/session lifetime (Playwright exits with the parent). The
+  // request cap is a PER-LOOKUP budget (this fetcher is created per lookup)
+  // so a shared manager never accumulates a lifetime request count.
+  const manager = getSharedHtmlScraperManager(connectionId, createCrawleeHtmlScraperEngine);
+  const budget: HtmlScraperRequestBudget = { used: 0 };
   return async function defaultFetchPage(url, opts) {
-    const manager = createHtmlScraperSessionManager(createCrawleeHtmlScraperEngine());
-    try {
-      const result = await manager.fetchHtml({
-        connectionId,
-        providerId: policy.providerId,
-        url,
-        policy,
-        signal: opts.signal,
-        deadlineAt: opts.deadlineAt,
-        browserRequired: true,
-        waitForSelectors: opts.waitForSelectors ?? [],
-      });
-      if (result.ok) return { ok: true, html: result.html, finalUrl: result.finalUrl };
-      return { ok: false, code: result.code, message: result.message };
-    } finally {
-      await manager.closeAll();
-    }
+    const result = await manager.fetchHtml({
+      connectionId,
+      providerId: policy.providerId,
+      url,
+      policy,
+      budget,
+      signal: opts.signal,
+      deadlineAt: opts.deadlineAt,
+      browserRequired: true,
+      waitForSelectors: opts.waitForSelectors ?? [],
+    });
+    if (result.ok) return { ok: true, html: result.html, finalUrl: result.finalUrl };
+    return { ok: false, code: result.code, message: result.message };
   };
 }
 
