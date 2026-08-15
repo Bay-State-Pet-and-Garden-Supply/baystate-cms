@@ -461,7 +461,10 @@ export class PiProductIntelligenceExecutor implements ProductIntelligenceExecuto
       // or the caller's cancellation. Cause is derived afterwards: caller
       // aborted wins over timeout.
       let promptSettled = false;
-      const promptPromise = handle.session.prompt(buildResearchPrompt(parsedInput.data, parsedContext.data).text).then(
+      const promptText =
+        parsedContext.data.compiledPrompt ??
+        buildResearchPrompt(parsedInput.data, parsedContext.data).text;
+      const promptPromise = handle.session.prompt(promptText).then(
         () => undefined,
         (error: unknown) => {
           // Prompt rejection is normal after abort(); surfaced via flags below.

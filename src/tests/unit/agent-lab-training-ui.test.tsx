@@ -45,10 +45,12 @@ import { EvaluationMatrix } from '../../client/components/agent-lab/EvaluationMa
 import { AgentConfigStudio } from '../../client/components/agent-lab/AgentConfigStudio';
 import { VersionLineage } from '../../client/components/agent-lab/VersionLineage';
 import {
+  createAgentCorrection,
   getActiveAgentVersion,
   getCandidateAgentVersion,
   getCurriculumExamples,
   getPiFlags,
+  getPiRun,
   listAgentEvaluations,
   listAgentVersions,
   teachAgent,
@@ -153,6 +155,30 @@ describe('Agent Lab Training Interface (PI-7 Reshaped)', () => {
     vi.mocked(listAgentVersions).mockResolvedValue([mockActiveVersion, mockCandidateVersion]);
     vi.mocked(listAgentEvaluations).mockResolvedValue([]);
     vi.mocked(getCurriculumExamples).mockResolvedValue([]);
+    vi.mocked(getPiRun).mockResolvedValue({
+      run: { id: 'run-123', agentVersionSnapshotId: 'v1_rev1_ws1' } as any,
+      result: { resultHash: 'hash_123' } as any,
+      steps: [],
+      toolCalls: [],
+      sources: [],
+      evidence: [],
+      conflicts: [],
+      assets: [],
+      comparisons: [],
+      eventCount: 0,
+    });
+    vi.mocked(createAgentCorrection).mockResolvedValue({
+      id: 'corr-123',
+      workspaceId: 'ws1',
+      runId: 'run-123',
+      versionId: 'v1_rev1_ws1',
+      originalResultHash: 'hash_123',
+      correctedFields: { title: 'Blue Buffalo Dog Can' },
+      failureMode: 'wrong_variant',
+      notes: '',
+      createdBy: 'operator',
+      createdAt: '2026-01-02T00:00:00Z',
+    });
   });
 
   it('renders AgentLab with 6 primary tabs and version status header', async () => {

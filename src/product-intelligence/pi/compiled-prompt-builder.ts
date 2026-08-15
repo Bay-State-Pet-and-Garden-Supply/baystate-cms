@@ -162,7 +162,7 @@ function budgetFewShotExamples(
   for (const ex of activeExamples) {
     const formatted = formatSingleExample(ex);
     const cost = estimateTokens(formatted);
-    if (currentTokens + cost > tokenBudget && included.length > 0) {
+    if (currentTokens + cost > tokenBudget) {
       break;
     }
     included.push(ex);

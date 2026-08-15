@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -88,7 +88,14 @@ afterAll(() => {
   closeDb();
   try { fs.rmSync(workspacePath, { recursive: true, force: true }); } catch { /* ok */ }
 });
-afterEach(() => resetCohortCurationFlagsOverride());
+beforeEach(() => {
+  overrideCohortCurationFlags({ cohortCurationV2Enabled: false, cohortShadowOnly: false });
+  try { getDb().run("DELETE FROM api_keys WHERE service IN ('ollama_vlm', 'ollama')"); } catch { /* ok */ }
+});
+afterEach(() => {
+  resetCohortCurationFlagsOverride();
+  try { getDb().run("DELETE FROM api_keys WHERE service IN ('ollama_vlm', 'ollama')"); } catch { /* ok */ }
+});
 const EVIDENCE: CatalogEvidence = {
   schemaVersion: 1,
   sourceTreeHash: '0'.repeat(64),

@@ -271,6 +271,32 @@ export const ExecutionEvidenceProjectionMemberV2Schema =
       distributorSku: z.string().nullable().default(null),
       manufacturerPartNumber: z.string().nullable().default(null),
       variantAttributes: z.record(z.string(), z.string()).default(() => ({})),
+      // Amendment B merchandising fields (M5b-1): explicit bounded fields with
+      // safe defaults so pre-merchandising v2 snapshots parse unchanged.
+      // Features travel in the existing `bulletPoints` (the v2 materializer
+      // maps features there); `merchandisingProvenance` mirrors the
+      // materializer's per-field provider/attempt provenance. Price,
+      // inventory, and commerce images are never frozen.
+      distributorCategory: z.string().nullable().default(null),
+      dimensions: z.string().nullable().default(null),
+      casePack: z.string().nullable().default(null),
+      unitOfMeasure: z.string().nullable().default(null),
+      ingredients: z.string().nullable().default(null),
+      merchandisingProvenance: z
+        .record(
+          z.string(),
+          z.array(
+            z.object({
+              attemptId: z.string(),
+              providerId: z.string(),
+              catalogVersion: z.string(),
+              connectionId: z.string(),
+              /** Bounded values that THIS attempt supplied for the field (sorted). */
+              values: z.array(z.string()),
+            }),
+          ),
+        )
+        .default(() => ({})),
     }),
   });
 
@@ -326,6 +352,12 @@ export function normalizeExecutionEvidenceProjectionMemberV1(
       distributorSku: null,
       manufacturerPartNumber: null,
       variantAttributes: {},
+      distributorCategory: null,
+      dimensions: null,
+      casePack: null,
+      unitOfMeasure: null,
+      ingredients: null,
+      merchandisingProvenance: {},
     },
   };
 }
@@ -358,8 +390,9 @@ export function parseExecutionEvidenceProjection(
   if (v2.success) return v2.data;
   const v1 = ExecutionEvidenceProjectionV1Schema.safeParse(payload);
   if (!v1.success) {
+    const isV1 = typeof payload === 'object' && payload !== null && (payload as any).version === 'execution-evidence-v1';
     throw new Error(
-      `Execution-evidence projection failed schema validation (neither v1 nor v2): ${JSON.stringify(v2.error.issues)}`,
+      `Execution-evidence projection failed schema validation (neither v1 nor v2): ${JSON.stringify(isV1 ? v1.error.issues : v2.error.issues)}`,
     );
   }
   return normalizeExecutionEvidenceProjectionV1(v1.data);

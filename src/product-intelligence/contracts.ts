@@ -128,6 +128,8 @@ export const ProductResearchContextSchema = z.object({
   executionMode: ExecutionModeSchema.default('shadow'),
   /** Evidence references from earlier runs that the agent may reuse. */
   existingEvidenceRefs: z.array(z.string()).default([]),
+  /** Server-compiled agent version prompt text (PI-7). */
+  compiledPrompt: z.string().nullish(),
 });
 
 /**

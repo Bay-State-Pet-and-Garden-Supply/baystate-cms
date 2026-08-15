@@ -4,8 +4,13 @@
  * Dedicated modal that closes the human teaching loop:
  * Inspect Mistake → Correct Fields → Generate Guidance / Few-Shot → Fork Candidate Snapshot.
  */
-import React, { useState } from 'react';
-import { teachAgent, type AgentVersionSummary } from '../../product-intelligence-api';
+import React, { useEffect, useState } from 'react';
+import {
+  createAgentCorrection,
+  getPiRun,
+  teachAgent,
+  type AgentVersionSummary,
+} from '../../product-intelligence-api';
 
 export interface TeachModalProps {
   isOpen: boolean;
@@ -13,7 +18,7 @@ export interface TeachModalProps {
   onSuccess: (newVersion: AgentVersionSummary) => void;
   runId: string;
   versionId: string;
-  originalResultHash: string;
+  originalResultHash?: string;
   initialGtin?: string;
   initialRegisterName?: string;
   initialExtractedTitle?: string;
@@ -25,9 +30,9 @@ export function TeachModal({
   isOpen,
   onClose,
   onSuccess,
-  runId: _runId,
+  runId,
   versionId,
-  originalResultHash: _originalResultHash,
+  originalResultHash: initialResultHash,
   initialGtin = '',
   initialRegisterName = '',
   initialExtractedTitle = '',
@@ -45,6 +50,32 @@ export function TeachModal({
   const [forbiddenDomain, setForbiddenDomain] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeResultHash, setActiveResultHash] = useState<string>(initialResultHash || '');
+  const [activeVersionId, setActiveVersionId] = useState<string>(versionId);
+
+  useEffect(() => {
+    if (isOpen && runId && typeof getPiRun === 'function') {
+      try {
+        const promise = getPiRun(runId);
+        if (promise && typeof promise.then === 'function') {
+          promise
+            .then((data) => {
+              if (data?.result?.resultHash) {
+                setActiveResultHash(data.result.resultHash);
+              }
+              if (data?.run?.agentVersionSnapshotId) {
+                setActiveVersionId(data.run.agentVersionSnapshotId);
+              }
+            })
+            .catch(() => {
+              /* ignore fetch failure */
+            });
+        }
+      } catch {
+        /* ignore fetch failure */
+      }
+    }
+  }, [isOpen, runId]);
 
   if (!isOpen) return null;
 
@@ -90,13 +121,29 @@ export function TeachModal({
         actions.push({
           type: 'add_negative_pattern',
           domain: forbiddenDomain.trim(),
-          reason: rationale.trim(),
+          pattern: rationale.trim(),
         });
       }
 
+      // 1. Create durable correction record
+      const effectiveHash = activeResultHash || initialResultHash || 'hash-pending';
+      const corrRes = await createAgentCorrection({
+        runId,
+        versionId: activeVersionId || versionId,
+        originalResultHash: effectiveHash,
+        correctedFields: {
+          title: correctedTitle.trim(),
+          brand: correctedBrand.trim() || undefined,
+        },
+        failureMode,
+        notes: rationale.trim(),
+        createdBy: 'operator',
+      });
+
+      // 2. Submit teaching event with real correction ID
       const res = await teachAgent({
-        correctionId: `corr-${Date.now()}`,
-        baseVersionId: versionId,
+        correctionId: corrRes.id,
+        baseVersionId: activeVersionId || versionId,
         actions,
         rationale: rationale.trim(),
         createdBy: 'operator',

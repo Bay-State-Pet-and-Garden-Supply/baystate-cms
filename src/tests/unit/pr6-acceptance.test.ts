@@ -100,11 +100,11 @@ import {
   ClassificationManifestV2Schema,
   ClassificationFocusedFileNames,
 } from '../../shared/schemas/classification';
-import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
+import { parseExecutionEvidenceProjection } from '../../shared/schemas/cohorts';
 import type {
   CohortRun,
   CurationCohort,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjectionV2,
 } from '../../shared/schemas/cohorts';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
@@ -495,13 +495,13 @@ async function freezeActiveCohort(
   return finalized;
 }
 
-function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
+function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV2 {
   const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-  return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  return parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
 }
 
 /** The ordinal-0 member's child run id (the DECISION-N audit binding). */
-function ordinal0ChildRunId(workspaceId: string, run: CohortRun, projection: ExecutionEvidenceProjectionV1): string {
+function ordinal0ChildRunId(workspaceId: string, run: CohortRun, projection: ExecutionEvidenceProjectionV2): string {
   const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const row = getDb().query(
     'SELECT id FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ? ORDER BY started_at DESC LIMIT 1',
@@ -517,7 +517,7 @@ function buildPreparedContext(
   frozenLineContext: ReturnType<typeof buildFrozenProductLineContext>,
 ): PreparedCohortContext {
   const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-  const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
   const memberProjection = projection.members.find(m => m.onboardingItemId === item.id)!;
   const child = getDb().query(
     'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',

@@ -121,11 +121,11 @@ import {
   ClassificationManifestV2Schema,
   ClassificationFocusedFileNames,
 } from '../../shared/schemas/classification';
-import { ExecutionEvidenceProjectionV1Schema, CohortPageOutputSchema } from '../../shared/schemas/cohorts';
+import { parseExecutionEvidenceProjection, CohortPageOutputSchema } from '../../shared/schemas/cohorts';
 import type {
   CohortRun,
   CurationCohort,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjectionV2,
 } from '../../shared/schemas/cohorts';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
@@ -697,9 +697,9 @@ async function freezeActiveCohort(
   return finalized;
 }
 
-function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
+function loadFrozenProjection(workspaceId: string, run: CohortRun): ExecutionEvidenceProjectionV2 {
   const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-  return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  return parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
 }
 
 /** Build a prepared-cohort context for one member from the frozen run. */
@@ -710,7 +710,7 @@ function buildPreparedContext(
   frozenLineContext: ReturnType<typeof buildFrozenProductLineContext>,
 ): PreparedCohortContext {
   const snap = getCohortSnapshotByHash(workspaceId, run.evidenceSnapshotHash!)!;
-  const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
   const memberProjection = projection.members.find(m => m.onboardingItemId === item.id)!;
   const child = getDb().query(
     'SELECT * FROM classification_runs WHERE cohort_run_id = ? AND onboarding_item_id = ?',
@@ -758,7 +758,7 @@ function expectedPageInputHash(
   workspaceId: string,
   wsPath: string,
   run: CohortRun,
-  projection: ExecutionEvidenceProjectionV1,
+  projection: ExecutionEvidenceProjectionV2,
 ): string {
   const ordered = [...projection.members].sort((a, b) => a.ordinal - b.ordinal);
   const child = getDb().query(

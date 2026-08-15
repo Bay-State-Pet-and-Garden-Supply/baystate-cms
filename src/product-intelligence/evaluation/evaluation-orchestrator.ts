@@ -5,6 +5,7 @@
  * persists paired agent_evaluation_cases and aggregate agent_evaluation_snapshots,
  * and assesses the agent promotion gate.
  */
+import { getDb } from '../../db/connection';
 import {
   getDatasetForWorkspace,
   getExamples,
@@ -20,7 +21,8 @@ import {
   createEvaluationSnapshot,
   insertEvaluationCase,
 } from '../../db/repositories/agent-evaluation-repo';
-import { getPiResult, listPiRuns } from '../../db/repositories/product-intelligence-repo';
+import { getPiResult, getPiRun } from '../../db/repositories/product-intelligence-repo';
+import { findWorkspace } from '../../db/repositories/workspace-repo';
 import { PI_GOLDEN_DATASET_NAME } from './fixture-dataset';
 import { seedPiGoldenDataset } from './runner';
 import { PiGoldLabelsSchema, type PiGoldLabels } from './gold';
@@ -32,6 +34,14 @@ import {
   type PiComparison,
 } from './metrics';
 import { evaluateAgentPromotionGate } from './agent-promotion-gate';
+import { startProductIntelligenceRun } from '../run-service';
+import { createExecutionRouter } from '../execution-router';
+import { PiProductIntelligenceExecutor } from '../pi/pi-executor';
+import { PiSdkSessionFactory } from '../pi/pi-session-factory';
+import { defaultToolRegistry } from '../tools';
+import { LegacyProductIntelligenceExecutor } from '../legacy-executor';
+import type { ProductIntelligenceExecutor } from '../executor';
+import { ProductResearchInputSchema } from '../contracts';
 import type {
   AgentEvaluationCase,
   AgentEvaluationSnapshot,
@@ -44,15 +54,12 @@ export interface PairedEvaluationOptions {
   datasetId?: string;
   splitGroup?: 'promotion_test' | 'test' | 'validation' | 'train';
   actor?: string;
+  executor?: ProductIntelligenceExecutor;
 }
 
 export interface PairedEvaluationResult {
   snapshot: AgentEvaluationSnapshot;
   cases: AgentEvaluationCase[];
-}
-
-function digitsOf(value: string): string {
-  return value.replace(/\D/g, '');
 }
 
 export async function runPairedEvaluation(
@@ -92,7 +99,7 @@ export async function runPairedEvaluation(
     throw new Error(`Dataset ${targetDatasetId} must be frozen before evaluation`);
   }
 
-  const splitGroup = options.splitGroup ?? (dataset.total_examples > 0 ? 'test' : 'promotion_test');
+  const splitGroup = options.splitGroup ?? 'promotion_test';
 
   // Mark candidate version as evaluating
   updateCandidateLifecycleStatus(workspaceId, candidateSummary.snapshot.id, 'evaluating');
@@ -106,9 +113,24 @@ export async function runPairedEvaluation(
     splitGroup,
   });
 
+  const ws = findWorkspace();
+  const wsPath = ws?.workspacePath ?? '.';
+
+  // Resolve executor
+  let executor = options.executor;
+  if (!executor) {
+    const router = createExecutionRouter({
+      pi: new PiProductIntelligenceExecutor({
+        sessionFactory: new PiSdkSessionFactory({ toolRegistry: defaultToolRegistry }),
+      }),
+      legacy: new LegacyProductIntelligenceExecutor(),
+    });
+    const selection = await router.resolveExecutor();
+    executor = selection.executor;
+  }
+
   // Get examples with gold labels (evaluation engine is authorized to access full gold labels)
   const examples = getExamples(dataset.id, splitGroup);
-  const allRuns = listPiRuns({ workspaceId, status: 'completed' });
 
   const candidateComparisons: PiComparison[] = [];
   const baselineComparisons: PiComparison[] = [];
@@ -119,7 +141,6 @@ export async function runPairedEvaluation(
   let unchangedCount = 0;
   let criticalRegressions = 0;
   let nonCriticalRegressions = 0;
-  let _failedOrUnpairedCount = 0;
 
   for (const example of examples) {
     const sku = example.product_sku;
@@ -128,59 +149,107 @@ export async function runPairedEvaluation(
     try {
       const parsed = PiGoldLabelsSchema.safeParse(JSON.parse(example.gold_labels_json));
       if (!parsed.success) {
-        _failedOrUnpairedCount += 1;
         continue;
       }
       gold = parsed.data;
     } catch {
-      _failedOrUnpairedCount += 1;
       continue;
     }
 
-    // Match candidate runs and baseline runs for this sku
-    const matchingRuns = allRuns.filter((r) => {
-      try {
-        const input = JSON.parse(r.inputJson) as { gtin?: unknown };
-        return typeof input.gtin === 'string' && digitsOf(input.gtin) === digitsOf(sku);
-      } catch {
-        return false;
-      }
+    let inputData: any;
+    try {
+      inputData = JSON.parse(example.input_snapshot_json);
+    } catch {
+      inputData = { gtin: sku };
+    }
+
+    const parsedInput = ProductResearchInputSchema.parse({
+      gtin: inputData.gtin ?? sku,
+      registerName: inputData.registerName ?? '',
+      brandHint: inputData.brandHint ?? '',
+      departmentHint: inputData.departmentHint ?? '',
+      price: inputData.price ? String(inputData.price) : '0.00',
+      quantity: inputData.quantity ? Number(inputData.quantity) : 1,
     });
 
-    const candidateRuns = matchingRuns.filter(
-      (r) => r.agentVersionSnapshotId === candidateSummary.snapshot.id,
-    );
-    const baselineRuns = matchingRuns.filter(
-      (r) => r.agentVersionSnapshotId === baselineSummary.snapshot.id,
-    );
+    let candRunId = '';
+    let baseRunId = '';
+    let candOutcome: any = 'failed';
+    let baseOutcome: any = 'failed';
+    let candComparison: PiComparison | null = null;
+    let baseComparison: PiComparison | null = null;
 
-    const candRun = candidateRuns[0] ?? matchingRuns[0];
-    const baseRun = baselineRuns[0] ?? matchingRuns[1] ?? matchingRuns[0];
+    try {
+      // 1. Launch candidate shadow run
+      const candStart = await startProductIntelligenceRun(
+        executor,
+        {
+          input: parsedInput,
+          agentVersionSnapshotId: candidateSummary.snapshot.id,
+          mode: 'shadow',
+        },
+        { workspaceId, workspacePath: wsPath },
+      );
+      await candStart.completed;
+      candRunId = candStart.run.id;
+      const candRun = getPiRun(candStart.run.id);
 
-    if (!candRun || !baseRun) {
-      _failedOrUnpairedCount += 1;
-      continue;
+      // 2. Launch baseline shadow run
+      const baseStart = await startProductIntelligenceRun(
+        executor,
+        {
+          input: parsedInput,
+          agentVersionSnapshotId: baselineSummary.snapshot.id,
+          mode: 'shadow',
+        },
+        { workspaceId, workspacePath: wsPath },
+      );
+      await baseStart.completed;
+      baseRunId = baseStart.run.id;
+      const baseRun = getPiRun(baseStart.run.id);
+
+      if (candRun && baseRun) {
+        const candResult = getPiResult(candRun.id);
+        const candPrediction = extractPredictionFromResult(candResult?.resultJson ?? null);
+        candOutcome = classifyRunOutcome(
+          candRun.status,
+          candRun.errorCode,
+          candResult?.disposition ?? null,
+          candPrediction?.identityStatus ?? null,
+        );
+        candComparison = comparePredictionToGold(candPrediction, gold, candOutcome);
+
+        const baseResult = getPiResult(baseRun.id);
+        const basePrediction = extractPredictionFromResult(baseResult?.resultJson ?? null);
+        baseOutcome = classifyRunOutcome(
+          baseRun.status,
+          baseRun.errorCode,
+          baseResult?.disposition ?? null,
+          basePrediction?.identityStatus ?? null,
+        );
+        baseComparison = comparePredictionToGold(basePrediction, gold, baseOutcome);
+      }
+    } catch {
+      // If run execution failed, case will record as failed
     }
 
-    const candResult = getPiResult(candRun.id);
-    const candPrediction = extractPredictionFromResult(candResult?.resultJson ?? null);
-    const candOutcome = classifyRunOutcome(
-      candRun.status,
-      candRun.errorCode,
-      candResult?.disposition ?? null,
-      candPrediction?.identityStatus ?? null,
-    );
-    const candComparison = comparePredictionToGold(candPrediction, gold, candOutcome);
-
-    const baseResult = getPiResult(baseRun.id);
-    const basePrediction = extractPredictionFromResult(baseResult?.resultJson ?? null);
-    const baseOutcome = classifyRunOutcome(
-      baseRun.status,
-      baseRun.errorCode,
-      baseResult?.disposition ?? null,
-      basePrediction?.identityStatus ?? null,
-    );
-    const baseComparison = comparePredictionToGold(basePrediction, gold, baseOutcome);
+    if (!candComparison || !baseComparison) {
+      const failedCase = insertEvaluationCase(workspaceId, {
+        evaluationId: evalSnapshot.id,
+        benchmarkExampleId: example.id,
+        productSku: sku,
+        candidateRunId: candRunId || 'failed',
+        baselineRunId: baseRunId || 'failed',
+        candidateOutcome: candOutcome,
+        baselineOutcome: baseOutcome,
+        comparison: { candidate: null, baseline: null },
+        deltaClass: 'unchanged',
+        criticalRegression: false,
+        status: 'failed',
+      });
+      evaluationCases.push(failedCase);
+      continue;
+    }
 
     candidateComparisons.push(candComparison);
     baselineComparisons.push(baseComparison);
@@ -219,8 +288,8 @@ export async function runPairedEvaluation(
       evaluationId: evalSnapshot.id,
       benchmarkExampleId: example.id,
       productSku: sku,
-      candidateRunId: candRun.id,
-      baselineRunId: baseRun.id,
+      candidateRunId: candRunId,
+      baselineRunId: baseRunId,
       candidateOutcome: candOutcome,
       baselineOutcome: baseOutcome,
       comparison: { candidate: candComparison, baseline: baseComparison },

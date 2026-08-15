@@ -499,9 +499,14 @@ export async function startProductIntelligenceRun(
 
   // Agent Lab: resolve agent version snapshot and execution authorization
   const activeVersion = ensureBaselineVersion(workspace.id);
-  const targetVersionSummary = input.agentVersionSnapshotId
-    ? getVersionSnapshot(workspace.id, input.agentVersionSnapshotId) ?? activeVersion
-    : activeVersion;
+  let targetVersionSummary = activeVersion;
+  if (input.agentVersionSnapshotId) {
+    const found = getVersionSnapshot(workspace.id, input.agentVersionSnapshotId);
+    if (!found) {
+      throw new Error(`Requested agent version snapshot ${input.agentVersionSnapshotId} not found in workspace`);
+    }
+    targetVersionSummary = found;
+  }
 
   const versionRole: 'active' | 'candidate' | 'historical' =
     targetVersionSummary.snapshot.id === activeVersion.snapshot.id
@@ -557,6 +562,7 @@ export async function startProductIntelligenceRun(
     policy,
     executionMode: mode,
     existingEvidenceRefs: [],
+    compiledPrompt: compiledPrompt.fullText,
     signal: controller.signal,
   };
 

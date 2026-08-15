@@ -13,6 +13,10 @@ export default defineConfig({
     include: ['src/tests/**/*.test.ts', 'src/tests/**/*.test.tsx'],
     exclude: [
       'node_modules',
+      // M7 scraper acceptance — bun:sqlite/bun:test, run under bun test (test:db)
+      'src/tests/unit/distributor-scrapers-acceptance.test.ts',
+      // M6 live-smoke DB suite — uses bun:sqlite, run under bun test instead of vitest
+      'src/tests/unit/sourcing-live-smoke-db.test.ts',
       // DB-backed tests — use bun:sqlite, run under bun test instead of vitest
       'src/tests/unit/db-migration.test.ts',
       'src/tests/unit/catalog-health.test.ts',
@@ -130,6 +134,7 @@ export default defineConfig({
       'src/tests/unit/store-manager-operations-migration.test.ts',
       'src/tests/unit/agent-version-repo.test.ts',
       'src/tests/unit/evaluation-orchestrator.test.ts',
+      'src/tests/unit/distributor-scrapers-acceptance.test.ts',
       // Operations-console epic DB suites (Issues 3-9): bun:sqlite/bun:test
       // imports — excluded here, registered in package.json test:db.
       'src/tests/unit/store-manager-action-diff.test.ts',

@@ -3655,13 +3655,60 @@ export function runMigrations(): void {
         db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN import_eligible_at_execution INTEGER NOT NULL DEFAULT 1;');
       }
 
-      // Add columns to benchmark_examples if missing
-      const bmCols = db.query('PRAGMA table_info(benchmark_examples)').all() as Array<{ name: string }>;
-      if (!bmCols.some((c) => c.name === 'is_contaminated')) {
-        db.exec('ALTER TABLE benchmark_examples ADD COLUMN is_contaminated INTEGER NOT NULL DEFAULT 0;');
-      }
-      if (!bmCols.some((c) => c.name === 'contamination_version_id')) {
-        db.exec('ALTER TABLE benchmark_examples ADD COLUMN contamination_version_id TEXT;');
+      // Rebuild benchmark_examples table to expand split_group CHECK constraint
+      db.exec('PRAGMA foreign_keys = OFF');
+      try {
+        db.transaction(() => {
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS benchmark_examples_new (
+              id TEXT PRIMARY KEY,
+              dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
+              product_sku TEXT NOT NULL,
+              product_family_id TEXT,
+              split_group TEXT NOT NULL CHECK (split_group IN ('train', 'test', 'holdout', 'validation', 'promotion_test')),
+              input_snapshot_json TEXT NOT NULL,
+              gold_labels_json TEXT NOT NULL,
+              example_hash TEXT NOT NULL,
+              reviewer_id TEXT,
+              adjudicated_by TEXT,
+              source_run_id TEXT,
+              source_config_hash TEXT,
+              source_product_hash TEXT,
+              is_contaminated INTEGER NOT NULL DEFAULT 0,
+              contamination_version_id TEXT,
+              created_at TEXT NOT NULL
+            );
+          `);
+
+          const tableExists = db
+            .query("SELECT name FROM sqlite_master WHERE type='table' AND name='benchmark_examples'")
+            .get();
+          if (tableExists) {
+            const cols = (db.query('PRAGMA table_info(benchmark_examples)').all() as Array<{ name: string }>).map((c) => c.name);
+            const commonCols = [
+              'id', 'dataset_id', 'product_sku', 'product_family_id', 'split_group',
+              'input_snapshot_json', 'gold_labels_json', 'example_hash', 'reviewer_id',
+              'adjudicated_by', 'source_run_id', 'source_config_hash', 'source_product_hash',
+              'is_contaminated', 'contamination_version_id', 'created_at'
+            ].filter((col) => cols.includes(col));
+
+            if (commonCols.length > 0) {
+              db.exec(`
+                INSERT OR IGNORE INTO benchmark_examples_new (${commonCols.join(', ')})
+                SELECT ${commonCols.join(', ')}
+                FROM benchmark_examples;
+              `);
+            }
+            db.exec('DROP TABLE benchmark_examples;');
+          }
+
+          db.exec('ALTER TABLE benchmark_examples_new RENAME TO benchmark_examples;');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_benchmark_examples_dataset_split ON benchmark_examples(dataset_id, split_group);');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_benchmark_examples_sku ON benchmark_examples(product_sku);');
+          db.exec('CREATE INDEX IF NOT EXISTS idx_benchmark_examples_family ON benchmark_examples(product_family_id);');
+        })();
+      } finally {
+        db.exec('PRAGMA foreign_keys = ON');
       }
 
       // Seed baseline version v1 for each existing workspace
@@ -3673,6 +3720,8 @@ export function runMigrations(): void {
           .get(ws.id) as { version_id: string } | undefined;
         if (!existingActive) {
           const snapshotId = `v1_rev1_${ws.id}`;
+          const policyConfigId = 'default';
+
           const contentHash = sha256Hex(
             JSON.stringify({
               workspaceId: ws.id,
@@ -3683,7 +3732,7 @@ export function runMigrations(): void {
               instructions: [],
               fewShotExamples: [],
               fewShotTokenBudget: 4000,
-              policyConfigId: 'default',
+              policyConfigId,
             }),
           );
 
@@ -3703,7 +3752,7 @@ export function runMigrations(): void {
             '[]',
             '[]',
             4000,
-            'default',
+            policyConfigId,
             contentHash,
             'system',
             nowIso,

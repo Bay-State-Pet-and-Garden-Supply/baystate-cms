@@ -93,12 +93,12 @@ import {
   ClassificationManifestV2Schema,
   ClassificationFocusedFileNames,
 } from '../../shared/schemas/classification';
-import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
+import { parseExecutionEvidenceProjection } from '../../shared/schemas/cohorts';
 import type {
   CohortRun,
   CurationCohort,
   CurationCohortMember,
-  ExecutionEvidenceProjectionV1,
+  ExecutionEvidenceProjectionV2,
 } from '../../shared/schemas/cohorts';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import type { FrozenProductLineContext } from '../../onboarding/cohort-curator';
@@ -485,7 +485,7 @@ interface FrozenCohortFixture {
   workspaceId: string;
   workspacePath: string;
   run: CohortRun;
-  projection: ExecutionEvidenceProjectionV1;
+  projection: ExecutionEvidenceProjectionV2;
   cohort: CurationCohort;
   members: CurationCohortMember[];
   frozenLineContext: FrozenProductLineContext;
@@ -503,7 +503,7 @@ async function freezeCohortFixture(extByUpc: Record<string, Record<string, any>>
   const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
   expect(finalized.status).toBe('running');
   const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-  const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
   const cohort = getCohortById(finalized.cohortId)!;
   const members = getCohortMembers(cohort.id);
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
@@ -545,7 +545,7 @@ async function freezeMixedCohortFixture(
   const finalized = await freezeCohortForExecution(run, wsPath, workspaceId);
   expect(finalized.status).toBe('running');
   const snap = getCohortSnapshotByHash(workspaceId, finalized.evidenceSnapshotHash!)!;
-  const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
   const cohort = getCohortById(finalized.cohortId)!;
   const members = getCohortMembers(cohort.id);
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
@@ -1391,7 +1391,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       weight: '5 lb',
       confidenceByField: { productName: 0.95, weight: 0.8 },
       metadata: null,
-    } as unknown as NonNullable<ExecutionEvidenceProjectionV1['members'][number]['extraction']['ocr']['packagingOcrData']>;
+    } as unknown as NonNullable<ExecutionEvidenceProjectionV2['members'][number]['extraction']['ocr']['packagingOcrData']>;
     for (const member of fixture.projection.members) {
       member.extraction.ocr.packagingOcrData = ocrInjection;
     }
@@ -1537,7 +1537,7 @@ describe('ensureCohortTitlesCoordinated — PR6 C4 (issue #30)', () => {
       weight: '5 lb',
       confidenceByField: { productName: 0.95, weight: 0.8 },
       metadata: null,
-    } as unknown as NonNullable<ExecutionEvidenceProjectionV1['members'][number]['extraction']['ocr']['packagingOcrData']>;
+    } as unknown as NonNullable<ExecutionEvidenceProjectionV2['members'][number]['extraction']['ocr']['packagingOcrData']>;
     for (const member of fixture.projection.members) {
       // Deep-clone per member so a single-field mutation touches ONE member.
       member.extraction.ocr.packagingOcrData = JSON.parse(JSON.stringify(ocrInjection));
@@ -1645,7 +1645,7 @@ async function supersedeAndRefreeze(fixture: FrozenCohortFixture): Promise<Froze
   const finalized = await freezeCohortForExecution(runB, fixture.workspacePath, fixture.workspaceId);
   expect(finalized.status).toBe('running');
   const snap = getCohortSnapshotByHash(fixture.workspaceId, finalized.evidenceSnapshotHash!)!;
-  const projection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  const projection = parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
   const cohort = getCohortById(finalized.cohortId)!;
   const members = getCohortMembers(cohort.id);
   const frozenLineContext = buildFrozenProductLineContext(cohort, members, projection.members);
@@ -1762,7 +1762,7 @@ describe('ensureCohortTitlesCoordinated — PR13 C2 cross-parent same-T-hash reu
     const foreignFinalized = await freezeCohortForExecution(foreignRun, wsPath, workspaceId);
     expect(foreignFinalized.status).toBe('running');
     const foreignSnap = getCohortSnapshotByHash(workspaceId, foreignFinalized.evidenceSnapshotHash!)!;
-    const foreignProjection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(foreignSnap.payloadJson)) as ExecutionEvidenceProjectionV1;
+    const foreignProjection = parseExecutionEvidenceProjection(JSON.parse(foreignSnap.payloadJson));
     const foreignCohort = getCohortById(foreignFinalized.cohortId)!;
     const foreignMembers = getCohortMembers(foreignCohort.id);
     const foreignLine = buildFrozenProductLineContext(foreignCohort, foreignMembers, foreignProjection.members);
@@ -1779,7 +1779,7 @@ describe('ensureCohortTitlesCoordinated — PR13 C2 cross-parent same-T-hash reu
     const targetFinalized = await freezeCohortForExecution(targetRun, wsPath, workspaceId);
     expect(targetFinalized.status).toBe('running');
     const targetSnap = getCohortSnapshotByHash(workspaceId, targetFinalized.evidenceSnapshotHash!)!;
-    const targetProjection = ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(targetSnap.payloadJson)) as ExecutionEvidenceProjectionV1;
+    const targetProjection = parseExecutionEvidenceProjection(JSON.parse(targetSnap.payloadJson));
     const targetCohort = getCohortById(targetFinalized.cohortId)!;
     const targetMembers = getCohortMembers(targetCohort.id);
     const targetLine = buildFrozenProductLineContext(targetCohort, targetMembers, targetProjection.members);

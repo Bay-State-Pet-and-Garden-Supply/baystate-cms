@@ -12,9 +12,8 @@ import {
   markFamilyReviewComplete,
 } from '../../db/repositories/benchmark-repo';
 import {
-  createPiRun,
-  insertPiResult,
-  transitionPiRunStatus,
+  insertPiEvidence,
+  insertPiSource,
 } from '../../db/repositories/product-intelligence-repo';
 import { insertWorkspace } from '../../db/repositories/workspace-repo';
 import { evaluateAgentPromotionGate } from '../../product-intelligence/evaluation/agent-promotion-gate';
@@ -75,7 +74,14 @@ describe('evaluation-orchestrator & promotion gate', () => {
     const baseline = ensureBaselineVersion(wsId);
     const candidate = createCandidateSnapshot(wsId, {
       parentVersionId: baseline.snapshot.id,
-      instructions: [],
+      instructions: [
+        {
+          id: 'rule-cand',
+          category: 'facts',
+          rule: 'Candidate test rule for product research',
+          createdAt: new Date().toISOString(),
+        },
+      ],
       fewShotExamples: [],
       createdBy: 'operator',
       changeSummary: 'Candidate test',
@@ -108,110 +114,89 @@ describe('evaluation-orchestrator & promotion gate', () => {
       difficultyTags: [],
     };
 
-    insertExample(ds.id, sku1, null, 'test', JSON.stringify({ gtin: sku1 }), JSON.stringify(gold1));
-    insertExample(ds.id, sku2, null, 'test', JSON.stringify({ gtin: sku2 }), JSON.stringify(gold2));
+    insertExample(ds.id, sku1, null, 'promotion_test', JSON.stringify({ gtin: sku1, registerName: 'BLUE BUFF CAN DOG 12.5OZ' }), JSON.stringify(gold1));
+    insertExample(ds.id, sku2, null, 'promotion_test', JSON.stringify({ gtin: sku2, registerName: 'PURINA PRO PLAN 30LB' }), JSON.stringify(gold2));
     markFamilyReviewComplete(ds.id, 'operator');
     freezeDataset(ds.id, 'operator');
 
-    // Create baseline and candidate runs for both SKUs
-    // Case 1: Baseline failed (wrong variant), candidate fixed (exact match)
-    const baseRun1 = createPiRun({
-      id: 'run-base-1',
-      workspaceId: wsId,
-      mode: 'shadow',
-      executor: 'pi',
-      inputJson: JSON.stringify({ gtin: sku1 }),
-      policyJson: '{}',
-      configSnapshotId: 'snap-1',
-      configSnapshotHash: 'hash-1',
-      extensionVersionsJson: '[]',
-      agentVersionSnapshotId: baseline.snapshot.id,
-    });
-    transitionPiRunStatus(baseRun1.id, 'completed');
-    insertPiResult({
-      runId: baseRun1.id,
-      schemaVersion: 1,
-      result: {
-        identity: { status: 'wrong_variant', canonicalName: 'Wrong Variant 12-pack', confidence: 0.9 },
-      },
-      disposition: 'submitted',
-    });
+    const mockExecutor = {
+      name: 'mock_eval_executor',
+      version: '1.0.0',
+      async startResearch(input: any, context: any, sink: any) {
+        sink.emit('session_created', { data: { piVersion: '0.83.0' } });
+        const isCandidate = Boolean(context.compiledPrompt?.includes('Candidate test rule'));
+        const isSku1 = input.gtin === sku1;
+        const isExact = isCandidate || !isSku1;
 
-    const candRun1 = createPiRun({
-      id: 'run-cand-1',
-      workspaceId: wsId,
-      mode: 'shadow',
-      executor: 'pi',
-      inputJson: JSON.stringify({ gtin: sku1 }),
-      policyJson: '{}',
-      configSnapshotId: 'snap-1',
-      configSnapshotHash: 'hash-1',
-      extensionVersionsJson: '[]',
-      agentVersionSnapshotId: candidate.snapshot.id,
-    });
-    transitionPiRunStatus(candRun1.id, 'completed');
-    insertPiResult({
-      runId: candRun1.id,
-      schemaVersion: 1,
-      result: {
-        identity: { status: 'exact', canonicalName: 'Blue Buffalo Canned Dog Food 12.5 oz', confidence: 0.95 },
-      },
-      disposition: 'submitted',
-    });
+        const src = insertPiSource({
+          runId: context.runId,
+          url: 'https://example.com/product',
+          domain: 'example.com',
+          sourceType: 'manufacturer',
+          gtinMatchStatus: 'exact',
+          variantMatchStatus: 'exact',
+        });
 
-    // Case 2: Both passed (unchanged)
-    const baseRun2 = createPiRun({
-      id: 'run-base-2',
-      workspaceId: wsId,
-      mode: 'shadow',
-      executor: 'pi',
-      inputJson: JSON.stringify({ gtin: sku2 }),
-      policyJson: '{}',
-      configSnapshotId: 'snap-1',
-      configSnapshotHash: 'hash-1',
-      extensionVersionsJson: '[]',
-      agentVersionSnapshotId: baseline.snapshot.id,
-    });
-    transitionPiRunStatus(baseRun2.id, 'completed');
-    insertPiResult({
-      runId: baseRun2.id,
-      schemaVersion: 1,
-      result: {
-        identity: { status: 'exact', canonicalName: 'Purina Pro Plan Dog Food 30 lb', confidence: 0.95 },
-      },
-      disposition: 'submitted',
-    });
+        const ev = insertPiEvidence({
+          runId: context.runId,
+          sourceId: src.id,
+          targetField: 'identity',
+          value: {
+            name: isExact
+              ? (isSku1 ? 'Blue Buffalo Canned Dog Food 12.5 oz' : 'Purina Pro Plan Dog Food 30 lb')
+              : 'Wrong Variant',
+          },
+          directSupport: true,
+        });
 
-    const candRun2 = createPiRun({
-      id: 'run-cand-2',
-      workspaceId: wsId,
-      mode: 'shadow',
-      executor: 'pi',
-      inputJson: JSON.stringify({ gtin: sku2 }),
-      policyJson: '{}',
-      configSnapshotId: 'snap-1',
-      configSnapshotHash: 'hash-1',
-      extensionVersionsJson: '[]',
-      agentVersionSnapshotId: candidate.snapshot.id,
-    });
-    transitionPiRunStatus(candRun2.id, 'completed');
-    insertPiResult({
-      runId: candRun2.id,
-      schemaVersion: 1,
-      result: {
-        identity: { status: 'exact', canonicalName: 'Purina Pro Plan Dog Food 30 lb', confidence: 0.95 },
+        const submission = {
+          schemaVersion: 1,
+          gtin: input.gtin,
+          inputName: input.registerName,
+          identity: {
+            status: isExact ? 'exact_match' : 'wrong_variant',
+            brand: 'Test Brand',
+            canonicalName: isExact
+              ? (isSku1 ? 'Blue Buffalo Canned Dog Food 12.5 oz' : 'Purina Pro Plan Dog Food 30 lb')
+              : 'Wrong Variant',
+            variant: null,
+            manufacturer: null,
+            netContent: null,
+            packCount: null,
+            evidenceIds: [ev.id],
+          },
+          commerceFacts: [],
+          classificationProposals: [],
+          imageCandidates: [],
+          conflicts: [],
+          disposition: isExact ? 'research_complete' : 'needs_review',
+        };
+
+        return {
+          runId: context.runId,
+          executor: 'mock_eval_executor',
+          executorVersion: '1.0.0',
+          piVersion: '0.83.0',
+          schemaVersion: 1,
+          outcome: 'submitted' as const,
+          submission,
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          wallClockMs: 10,
+        };
       },
-      disposition: 'submitted',
-    });
+    };
 
     const result = await runPairedEvaluation(wsId, {
       candidateVersionId: candidate.snapshot.id,
       baselineVersionId: baseline.snapshot.id,
       datasetId: ds.id,
-      splitGroup: 'test',
+      splitGroup: 'promotion_test',
+      executor: mockExecutor as any,
     });
 
     expect(result.snapshot).toBeDefined();
+    expect(result.snapshot.splitGroup).toBe('promotion_test');
     expect(result.snapshot.scorecard.totalCases).toBe(2);
     expect(result.snapshot.scorecard.completedCases).toBe(2);
     expect(result.snapshot.scorecard.fixedCount).toBe(1);

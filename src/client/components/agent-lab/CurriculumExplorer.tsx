@@ -228,6 +228,16 @@ export function CurriculumExplorer() {
                   Loading curriculum cases…
                 </td>
               </tr>
+            ) : split === 'holdout' ? (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: 40, color: '#4b5563' }}>
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>🛡️</div>
+                  <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Protected Holdout Split</div>
+                  <div style={{ fontSize: 12, color: '#6b7280', maxWidth: 460, margin: '0 auto' }}>
+                    Individual cases in the holdout split are strictly confidential and protected from direct browsing to prevent contamination and overfitting. Aggregate benchmarks are evaluated exclusively through automated reporting.
+                  </div>
+                </td>
+              </tr>
             ) : examples.length === 0 ? (
               <tr>
                 <td colSpan={6} style={{ textAlign: 'center', padding: 30, color: '#6b7280' }}>
@@ -238,7 +248,7 @@ export function CurriculumExplorer() {
               examples.map((ex) => {
                 let inputData: any;
                 try {
-                  inputData = JSON.parse(ex.product_input_json);
+                  inputData = JSON.parse(ex.input_snapshot_json || ex.product_input_json || '{}');
                 } catch {
                   inputData = {};
                 }

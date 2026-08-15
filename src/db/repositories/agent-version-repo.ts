@@ -240,9 +240,15 @@ export function createCandidateSnapshot(
 ): AgentVersionSummary {
   const db = getDb();
   const active = ensureBaselineVersion(workspaceId);
-  const parentSummary = input.parentVersionId
-    ? getVersionSnapshot(workspaceId, input.parentVersionId) ?? active
-    : active;
+
+  let parentSummary = active;
+  if (input.parentVersionId) {
+    const found = getVersionSnapshot(workspaceId, input.parentVersionId);
+    if (!found) {
+      throw new Error(`Parent agent version snapshot ${input.parentVersionId} not found in workspace`);
+    }
+    parentSummary = found;
+  }
   const parent = parentSummary.snapshot;
   const isParentActiveOrRetired = parentSummary.state.lifecycleStatus === 'active' || parentSummary.state.lifecycleStatus === 'retired';
 
@@ -507,7 +513,38 @@ export function promoteCandidateVersion(
 ): AgentVersionSummary {
   const db = getDb();
   const target = getVersionSnapshot(workspaceId, candidateVersionId);
-  if (!target) throw new Error(`Candidate version ${candidateVersionId} not found`);
+  if (!target) throw new Error(`Candidate version ${candidateVersionId} not found in workspace`);
+
+  // Verify evaluation exists and is valid
+  const evalRow = db
+    .query('SELECT * FROM agent_evaluation_snapshots WHERE workspace_id = ? AND id = ?')
+    .get(workspaceId, evaluationId) as Record<string, any> | undefined;
+  if (!evalRow) {
+    throw new Error(`Evaluation ${evaluationId} not found in workspace`);
+  }
+
+  if (evalRow.candidate_version_id !== candidateVersionId) {
+    throw new Error(
+      `Evaluation candidate version ${evalRow.candidate_version_id} does not match candidate version ${candidateVersionId}`,
+    );
+  }
+
+  if (evalRow.split_group !== 'promotion_test') {
+    throw new Error(
+      `Promotion requires an evaluation on the promotion_test split, got: ${evalRow.split_group}`,
+    );
+  }
+
+  if (evalRow.status !== 'passed') {
+    throw new Error(`Evaluation status is not passed: ${evalRow.status}`);
+  }
+
+  const gateVerdict = JSON.parse(evalRow.promotion_gate_verdict_json || '{}');
+  if (!gateVerdict.allowed || !gateVerdict.complete) {
+    throw new Error(
+      `Promotion gate verdict is not allowed or incomplete: ${JSON.stringify(gateVerdict.reasons ?? [])}`,
+    );
+  }
 
   const nowIso = now();
 

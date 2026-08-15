@@ -70,6 +70,9 @@ export interface PiRunRow {
   estimatedCost: number | null;
   actualCost: number | null;
   tokenUsageJson: string | null;
+  agentVersionSnapshotId?: string | null;
+  versionRoleAtExecution?: string | null;
+  importEligibleAtExecution?: number | null;
 }
 
 export interface PiStepView {
@@ -609,14 +612,20 @@ export async function runAgentEvaluation(body: {
 
 export interface CurriculumExample {
   id: string;
+  dataset_id?: string;
   product_sku: string;
-  upc: string | null;
+  upc?: string | null;
+  product_family_id?: string | null;
   split_group: string;
-  product_input_json: string;
+  input_snapshot_json?: string;
+  product_input_json?: string;
   gold_labels_json: string | null;
+  example_hash?: string;
   is_contaminated: number;
-  contaminated_at: string | null;
-  contamination_reason: string | null;
+  contamination_version_id?: string | null;
+  contaminated_at?: string | null;
+  contamination_reason?: string | null;
+  created_at?: string;
 }
 
 export async function getCurriculumExamples(datasetId?: string, split?: string): Promise<CurriculumExample[]> {

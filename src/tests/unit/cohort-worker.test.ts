@@ -2167,15 +2167,30 @@ describe('PR5 C4 — acceptance integration: execution-driven first pass, review
       code: 'type_gated_without_reviewed_type',
     });
 
-    // (5) Draft promotion of the sibling (its pending flavor proposal was never
-    // accepted): no ProductField1 flavor value is written and acceptedProductType
-    // stays null — the Execution Type never becomes an accepted field/type.
+    // (5) Draft promotion of the sibling:
+    // 5a. Without a reviewed product type: promotion is refused (PR11 review R2 reviewed_product_type_required).
     const memberB = findItemById(items[1].id)!;
     expect(memberB.stageStatus).toBe('completed');
     const childRunIdB = memberB.curationData!.classificationRunId!;
     expect(getRun(childRunIdB)!.status).toBe('completed');
     const pageId = activateVerifiedPage(workspaceId, 'Dog Food', 'pr5-acceptance');
     seedAcceptedPageProposal(workspaceId, childRunIdB, items[1].upc, pageId, 'Dog Food');
+    const blockedPromote = await promoteItems(workspaceId, wsPath, batchId, [items[1].id]);
+    expect(blockedPromote.failures).toHaveLength(1);
+    expect(blockedPromote.failures[0].error).toContain('Reviewed Product Type');
+
+    // 5b. With an accepted product type decision (its pending flavor proposal was never
+    // accepted): flavor ProductField1 value is NOT written.
+    const ptProposalB = getDb().query(
+      "SELECT id FROM classification_proposals WHERE run_id = ? AND proposal_type = 'primary_product_type'",
+    ).get(childRunIdB) as { id: string };
+    getDb().run(
+      `INSERT INTO classification_proposal_decisions (id, proposal_id, decision, decision_key, created_at)
+       VALUES (?, ?, 'accepted', ?, ?)`,
+      [`decision-type-${childRunIdB}`, ptProposalB.id, `token-type-${childRunIdB}`, new Date().toISOString()],
+    );
+    getDb().run("UPDATE classification_proposals SET status = 'accepted' WHERE id = ?", [ptProposalB.id]);
+
     const promoteResult = await promoteItems(workspaceId, wsPath, batchId, [items[1].id]);
     expect(promoteResult.failures).toEqual([]);
     expect(promoteResult.count).toBe(1);
@@ -2191,7 +2206,7 @@ describe('PR5 C4 — acceptance integration: execution-driven first pass, review
        ORDER BY created_at DESC LIMIT 1`,
     ).get(items[1].upc) as { event_json: string } | undefined;
     expect(promoHistory).toBeDefined();
-    expect(JSON.parse(promoHistory!.event_json).acceptedProductType).toBeNull();
+    expect(JSON.parse(promoHistory!.event_json).acceptedProductType).toBe('dry-dog-food');
   });
 
   it('acceptance (PR5 hardening P1-2): a reviewed override DIFFERING from the cohort\'s inferred type conflicts at freeze — run failed, no execution type, no member executes, children terminal', async () => {

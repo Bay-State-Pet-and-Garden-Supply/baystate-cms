@@ -952,9 +952,18 @@ router.post('/product-intelligence/agent-versions/promote', async (c) => {
   if (!evalSnapshot || evalSnapshot.workspaceId !== ws.id) {
     return c.json({ error: 'Evaluation snapshot not found' }, 404);
   }
-  if (!evalSnapshot.promotionGateVerdict.allowed) {
+  if (evalSnapshot.candidateVersionId !== parsed.data.candidateVersionId) {
+    return c.json({ error: 'Evaluation candidate version mismatch' }, 422);
+  }
+  if (evalSnapshot.splitGroup !== 'promotion_test') {
+    return c.json({ error: `Promotion requires an evaluation on promotion_test split, got ${evalSnapshot.splitGroup}` }, 422);
+  }
+  if (evalSnapshot.status !== 'passed') {
+    return c.json({ error: `Evaluation status is not passed: ${evalSnapshot.status}` }, 422);
+  }
+  if (!evalSnapshot.promotionGateVerdict.allowed || !evalSnapshot.promotionGateVerdict.complete) {
     return c.json({
-      error: 'Promotion gate denied promotion',
+      error: 'Promotion gate denied promotion or evaluation is incomplete',
       reasons: evalSnapshot.promotionGateVerdict.reasons,
     }, 422);
   }
@@ -993,6 +1002,19 @@ router.post('/product-intelligence/corrections', async (c) => {
   }
   const parsed = AgentCorrectionSchema.omit({ id: true, workspaceId: true, createdAt: true }).safeParse(body);
   if (!parsed.success) return c.json({ error: 'Invalid correction input', details: parsed.error.issues }, 400);
+
+  // Verify run and result authenticity
+  const run = getPiRun(parsed.data.runId);
+  if (!run || run.workspaceId !== ws.id) {
+    return c.json({ error: 'Run not found in workspace' }, 404);
+  }
+  if (run.agentVersionSnapshotId !== parsed.data.versionId) {
+    return c.json({ error: 'Correction version does not match run version snapshot' }, 400);
+  }
+  const piResult = getPiResult(run.id);
+  if (!piResult || piResult.resultHash !== parsed.data.originalResultHash) {
+    return c.json({ error: 'Original result hash does not match stored run result' }, 400);
+  }
 
   try {
     const correction = createCorrection(ws.id, parsed.data);
@@ -1044,6 +1066,14 @@ router.post('/product-intelligence/teach', async (c) => {
       });
     } else if (act.type === 'remove_rule') {
       updatedInstructions = updatedInstructions.filter((r) => r.id !== act.ruleId);
+    } else if (act.type === 'add_negative_pattern') {
+      updatedInstructions.push({
+        id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        category: 'sources',
+        rule: `Anti-pattern for domain ${act.domain}: ${act.reason}. Avoid false matches or unsupported extraction from this domain.`,
+        motivationCorrectionId: parsed.data.correctionId,
+        createdAt: new Date().toISOString(),
+      });
     } else if (act.type === 'add_few_shot') {
       const output = {
         title: String(act.expectedOutput.title ?? act.registerName),
@@ -1151,10 +1181,41 @@ router.get('/product-intelligence/curriculum', (c) => {
       targetDatasetId = seeded.datasetId;
     }
   }
-  const split = c.req.query('split'); // 'train' | 'validation' | 'promotion_test' | 'test' | 'holdout'
-  // Policy: hideGold true on test/promotion_test/holdout, false on train/validation
-  const hideGold = split === 'promotion_test' || split === 'test' || split === 'holdout';
-  const examples = getExamples(targetDatasetId, split, { hideGold });
+
+  const dataset = getDatasetForWorkspace(targetDatasetId, ws.id);
+  if (!dataset) {
+    return c.json({ error: `Dataset ${targetDatasetId} not found in workspace` }, 404);
+  }
+
+  const split = c.req.query('split') ?? 'train'; // 'train' | 'validation' | 'promotion_test' | 'test' | 'holdout'
+
+  // Holdout split protection: individual rows are not listable via API
+  if (split === 'holdout') {
+    return c.json({
+      examples: [],
+      isProtectedHoldout: true,
+      message: 'Holdout cases are strictly protected and cannot be browsed directly.',
+    });
+  }
+
+  // Force hideGold = true on test and promotion_test splits
+  const hideGold = split === 'promotion_test' || split === 'test';
+  const rawExamples = getExamples(targetDatasetId, split, { hideGold });
+
+  const examples = rawExamples.map((ex) => ({
+    id: ex.id,
+    dataset_id: ex.dataset_id,
+    product_sku: ex.product_sku,
+    product_family_id: ex.product_family_id,
+    split_group: ex.split_group,
+    input_snapshot_json: ex.input_snapshot_json,
+    gold_labels_json: hideGold ? null : ex.gold_labels_json,
+    example_hash: ex.example_hash,
+    is_contaminated: ex.is_contaminated ?? 0,
+    contamination_version_id: ex.contamination_version_id ?? null,
+    created_at: ex.created_at,
+  }));
+
   return c.json({ examples });
 });
 

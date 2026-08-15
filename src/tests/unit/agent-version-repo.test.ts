@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { closeDb, initDb } from '../../db/connection';
+import { closeDb, getDb, initDb } from '../../db/connection';
 import { runMigrations } from '../../db/migrations';
 import {
   createCandidateSnapshot,
@@ -11,6 +11,7 @@ import {
   recordTeachingEvent,
   updateCandidateLifecycleStatus,
 } from '../../db/repositories/agent-version-repo';
+import { createDataset } from '../../db/repositories/benchmark-repo';
 import { createPiRun } from '../../db/repositories/product-intelligence-repo';
 import { findWorkspace, insertWorkspace } from '../../db/repositories/workspace-repo';
 
@@ -163,7 +164,7 @@ describe('agent-version-repo', () => {
     expect(teachEvent.resultingVersionId).toBe(cand.snapshot.id);
   });
 
-  it('promotes candidate version atomically retiring the old active version', () => {
+  it('promotes candidate version atomically after verifying evaluation gate', () => {
     const baseline = ensureBaselineVersion(wsId);
 
     const cand = createCandidateSnapshot(wsId, {
@@ -174,10 +175,68 @@ describe('agent-version-repo', () => {
       changeSummary: 'Ready for promotion',
     });
 
-    updateCandidateLifecycleStatus(wsId, cand.snapshot.id, 'qualified', 'eval-789');
+    const db = getDb();
+    const evalId = 'eval-promotion-123';
+    const nowIso = new Date().toISOString();
+    const ds = createDataset(wsId, 'promotion-eval-ds', 'random', 42);
 
-    const promoted = promoteCandidateVersion(wsId, cand.snapshot.id, 'operator', 'eval-789');
+    // 1. Insert a passing evaluation snapshot on promotion_test split
+    db.query(`
+      INSERT INTO agent_evaluation_snapshots (
+        id, workspace_id, candidate_version_id, baseline_version_id,
+        dataset_id, dataset_hash, split_group, scorecard_json,
+        promotion_gate_verdict_json, status, created_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      evalId,
+      wsId,
+      cand.snapshot.id,
+      baseline.snapshot.id,
+      ds.id,
+      'hash1',
+      'promotion_test',
+      JSON.stringify({ totalCases: 10, completedCases: 10 }),
+      JSON.stringify({ allowed: true, complete: true, reasons: [] }),
+      'passed',
+      nowIso,
+      nowIso,
+    );
+
+    // Test rejection on wrong candidate ID
+    expect(() => {
+      promoteCandidateVersion(wsId, baseline.snapshot.id, 'operator', evalId);
+    }).toThrow(/does not match/);
+
+    // Test rejection on wrong split (e.g. 'train')
+    const trainEvalId = 'eval-train-456';
+    db.query(`
+      INSERT INTO agent_evaluation_snapshots (
+        id, workspace_id, candidate_version_id, baseline_version_id,
+        dataset_id, dataset_hash, split_group, scorecard_json,
+        promotion_gate_verdict_json, status, created_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      trainEvalId,
+      wsId,
+      cand.snapshot.id,
+      baseline.snapshot.id,
+      ds.id,
+      'hash1',
+      'train',
+      JSON.stringify({ totalCases: 10, completedCases: 10 }),
+      JSON.stringify({ allowed: true, complete: true, reasons: [] }),
+      'passed',
+      nowIso,
+      nowIso,
+    );
+    expect(() => {
+      promoteCandidateVersion(wsId, cand.snapshot.id, 'operator', trainEvalId);
+    }).toThrow(/promotion_test/);
+
+    // Promote successfully with valid promotion_test evaluation
+    const promoted = promoteCandidateVersion(wsId, cand.snapshot.id, 'operator', evalId);
     expect(promoted.state.lifecycleStatus).toBe('active');
+    expect(promoted.state.activeEvaluationId).toBe(evalId);
 
     // Verify baseline was retired
     const oldBaseline = getVersionSnapshot(wsId, baseline.snapshot.id);

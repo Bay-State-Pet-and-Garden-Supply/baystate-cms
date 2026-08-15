@@ -86,8 +86,8 @@ import {
   ClassificationManifestV2Schema,
   ClassificationFocusedFileNames,
 } from '../../shared/schemas/classification';
-import { ExecutionEvidenceProjectionV1Schema } from '../../shared/schemas/cohorts';
-import type { CohortRun, CurationCohort, ExecutionEvidenceProjectionV1 } from '../../shared/schemas/cohorts';
+import { parseExecutionEvidenceProjection } from '../../shared/schemas/cohorts';
+import type { CohortRun, CurationCohort, ExecutionEvidenceProjectionV2 } from '../../shared/schemas/cohorts';
 import type { OnboardingItem } from '../../shared/schemas/onboarding';
 import type { ModelCallContext } from '../../classification/model-operation-registry';
 import type { CatalogEvidence } from '../../classification/catalog-evidence';
@@ -487,9 +487,9 @@ async function freezeActiveCohort(wsId: string, wsPath: string): Promise<CohortR
 }
 
 /** Parse the run's frozen execution-evidence projection from its snapshot. */
-function loadProjection(wsId: string, run: CohortRun): ExecutionEvidenceProjectionV1 {
+function loadProjection(wsId: string, run: CohortRun): ExecutionEvidenceProjectionV2 {
   const snap = getCohortSnapshotByHash(wsId, run.evidenceSnapshotHash!)!;
-  return ExecutionEvidenceProjectionV1Schema.parse(JSON.parse(snap.payloadJson)) as ExecutionEvidenceProjectionV1;
+  return parseExecutionEvidenceProjection(JSON.parse(snap.payloadJson));
 }
 
 /** Insert an 'accepted' decision for every non-abstention proposal of the

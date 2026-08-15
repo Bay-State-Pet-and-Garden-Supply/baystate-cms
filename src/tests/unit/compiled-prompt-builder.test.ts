@@ -166,4 +166,46 @@ describe('compiled-prompt-builder (compiler_v1)', () => {
     expect(compiled.includedExamples.length).toBe(1);
     expect(compiled.includedExamples[0].id).toBe('ex-1');
   });
+
+  it('excludes few-shot examples completely if the first example exceeds the budget', () => {
+    const customSnapshot: AgentVersionSnapshot = {
+      id: 'v4_rev1_ws1',
+      workspaceId: 'ws1',
+      versionNumber: 4,
+      revisionNumber: 1,
+      parentVersionId: null,
+      compilerVersion: 'compiler_v1',
+      instructions: [],
+      fewShotExamples: [
+        {
+          id: 'ex-oversized',
+          gtin: '076280014028',
+          registerName: 'BLUE BUFF CAN DOG 12.5OZ',
+          explanation: 'Single can dog food SKU with lots of details.',
+          expectedOutput: {
+            title: 'Blue Buffalo Canned Dog Food 12.5 oz',
+            brand: 'Blue Buffalo',
+            facts: [{ field: 'Net Weight', value: '12.5 oz' }],
+            categoryPages: ['canned-dog-food'],
+            forbiddenSourceDomains: [],
+            shouldAbstain: false,
+          },
+          difficultyTags: ['wrong_size_retailer'],
+          tokenCount: 500,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      fewShotTokenBudget: 5, // Tiny budget smaller than the example
+      policyConfigId: 'default',
+      contentHash: 'hash999',
+      createdBy: 'operator',
+      createdAt: new Date().toISOString(),
+      changeSummary: 'Budget overflow test',
+    };
+
+    const compiled = compileAgentPrompt(customSnapshot, dummyInput, dummyContext);
+    expect(compiled.includedExamples).toEqual([]);
+    expect(compiled.fullText).not.toContain('## In-context reference examples');
+  });
 });
