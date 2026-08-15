@@ -520,6 +520,75 @@ export function advanceItemsToNextStage(itemIds: string[]): { advanced: number; 
 }
 
 /**
+ * Advance review-completed items to Promotion with the PR11 blocked-member
+ * guard (epic #46 Phase 7 — bulk approval). This is the ONLY approval path
+ * that moves reviewed items into the promotion stage; the generic advance
+ * route remains for administrative use.
+ *
+ * Guards per item (all fail closed with a reason, never partially applied):
+ * - item must exist;
+ * - item must be `review / completed` (review-complete gate already passed);
+ * - a hard cohort semantic validation finding (`semanticValidation.status ===
+ *   'blocked'`) refuses the advance — the item stays in review (defense in
+ *   depth: the review-completion gate is the authority, this guard keeps
+ *   blocked members from ever reaching the promotion stage);
+ * - nothing else — approval eligibility (durable reviewed state, semantic
+ *   gates) is validated by the caller.
+ *
+ * One transaction; per-item results so partial failures are visible.
+ */
+export function advanceReviewedItemsToPromotion(
+  itemIds: string[],
+): { advanced: string[]; refused: Array<{ itemId: string; reason: string }> } {
+  if (itemIds.length === 0) return { advanced: [], refused: [] };
+  const db = getDb();
+  const now = new Date().toISOString();
+  const advanced: string[] = [];
+  const refused: Array<{ itemId: string; reason: string }> = [];
+
+  db.transaction(() => {
+    for (const id of itemIds) {
+      const item = findItemById(id);
+      if (!item) {
+        refused.push({ itemId: id, reason: 'item_not_found' });
+        continue;
+      }
+      if (item.stage !== 'review' || item.stageStatus !== 'completed') {
+        refused.push({ itemId: id, reason: `not_eligible:${item.stage}/${item.stageStatus}` });
+        continue;
+      }
+      const semanticValidation = item.curationData?.semanticValidation;
+      if (
+        semanticValidation &&
+        typeof semanticValidation === 'object' &&
+        (semanticValidation as { status?: unknown }).status === 'blocked'
+      ) {
+        const findings = (semanticValidation as { findings?: Array<{ message?: unknown }> }).findings;
+        const firstMessage =
+          Array.isArray(findings) && findings.length > 0 && typeof findings[0]?.message === 'string'
+            ? findings[0].message
+            : 'A hard cohort semantic validation finding blocks this item.';
+        refused.push({ itemId: id, reason: `semantic_validation_blocked: ${firstMessage}` });
+        continue;
+      }
+      const result = db.query(
+        `UPDATE onboarding_items
+         SET stage = 'promotion', stage_status = 'pending', error_message = NULL, retry_count = 0,
+             claimed_by = NULL, claimed_at = NULL, updated_at = ?
+         WHERE id = ? AND stage = 'review' AND stage_status = 'completed'`,
+      ).run(now, id);
+      if (result.changes > 0) {
+        advanced.push(id);
+      } else {
+        refused.push({ itemId: id, reason: 'concurrent_state_change' });
+      }
+    }
+  })();
+
+  return { advanced, refused };
+}
+
+/**
  * Update the stage_status of an item (used by worker while processing).
  * Clears claim fields whenever the item transitions out of in_progress
  * so it can be claimed again immediately on retry.

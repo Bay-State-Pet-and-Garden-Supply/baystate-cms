@@ -10,6 +10,7 @@ const CLASSIFICATION_MIGRATION_PATH = path.resolve(import.meta.dirname, 'classif
 const STAGE_PIPELINE_MIGRATION_PATH = path.resolve(import.meta.dirname, 'stage-pipeline-migration.sql');
 const COHORT_MIGRATION_PATH = path.resolve(import.meta.dirname, 'cohort-migration.sql');
 const DISTRIBUTOR_V2_MIGRATION_PATH = path.resolve(import.meta.dirname, 'distributor-v2-migration.sql');
+const OPERATOR_STATE_MIGRATION_PATH = path.resolve(import.meta.dirname, 'operator-state-migration.sql');
 
 export function runMigrations(): void {
   const db = getDb();
@@ -38,6 +39,43 @@ export function runMigrations(): void {
     const onboardingSql = fs.readFileSync(ONBOARDING_MIGRATION_PATH, 'utf-8');
     db.exec(onboardingSql);
     db.exec("INSERT INTO app_meta (key, value) VALUES ('onboarding_schema_version', '1');");
+  }
+
+  // ── Epic #46 operator work-state: durable review/approval/export state ──
+  // New table `onboarding_review_state` (version-gated marker
+  // `operator_state_schema_version`). Runs AFTER the onboarding migration
+  // (the legacy backfill below reads onboarding_items). Additive +
+  // idempotent: fresh installs and existing databases converge on the same
+  // shape. The backfill migrates already-reviewed legacy items (review
+  // completed, or advanced to promotion) into durable reviewed state once.
+  const operatorStateVersion = db.query('SELECT value FROM app_meta WHERE key = ?').get('operator_state_schema_version') as
+    | { value: string }
+    | undefined;
+  if (!operatorStateVersion) {
+    const operatorStateSql = fs.readFileSync(OPERATOR_STATE_MIGRATION_PATH, 'utf-8');
+    db.exec(operatorStateSql);
+    // Legacy backfill: existing reviewed items (review completed, or already
+    // promoted) become durable reviewed state once. Guarded on the `stage`
+    // column: on a truly fresh DB the stage-pipeline migration (which adds
+    // it) runs LATER in this file, and a fresh DB has no legacy items anyway.
+    const itemCols = db.query('PRAGMA table_info(onboarding_items)').all() as Array<{ name: string }>;
+    const hasStageColumns = itemCols.some(col => col.name === 'stage');
+    if (hasStageColumns) {
+      try {
+        db.exec(`
+          INSERT OR IGNORE INTO onboarding_review_state
+            (item_id, batch_id, reviewed_at, reviewed_by, review_invalidated_at, review_invalidation_reason,
+             approved_at, approved_by, approval_origin, created_at, updated_at)
+          SELECT i.id, i.batch_id, i.updated_at, 'legacy', NULL, NULL, NULL, NULL, 'legacy', i.updated_at, i.updated_at
+          FROM onboarding_items i
+          WHERE (i.stage = 'review' AND i.stage_status = 'completed') OR i.stage = 'promotion'
+        `);
+      } catch (e) {
+        console.error('[Migrations] operator_state backfill failed (non-fatal):', e);
+      }
+    }
+    db.exec("INSERT INTO app_meta (key, value) VALUES ('operator_state_schema_version', '1');");
+    console.log('[Migrations] operator_state_schema_version initialized to 1.');
   }
 
   // Ensure field_registry has curated_fields_json column (issue #31 commit 1).

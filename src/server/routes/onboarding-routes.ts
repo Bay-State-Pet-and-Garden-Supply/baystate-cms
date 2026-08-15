@@ -186,6 +186,14 @@ import { HTTP_EXTRACTION_HEADERS } from '../../onboarding/page-extractor';
 import { promoteItems } from '../../onboarding/draft-promoter';
 import { listCandidateCohortViews } from '../../onboarding/curation-cohort-service';
 import { CohortListResponseSchema } from '../../shared/schemas/cohorts';
+import {
+  getBatchWorkStateCounts,
+  getBatchWorkStateForItems,
+} from '../../onboarding/onboarding-work-state';
+import {
+  markReviewed,
+  markReviewInvalidated,
+} from '../../db/repositories/onboarding-review-repo';
 import { onboardingEvents } from '../../onboarding/sse-emitter';
 import { cleanAndDeduplicateImages } from '../../onboarding/image-utils';
 import { findProductBySku } from '../../db/repositories/product-index-repo';
@@ -289,7 +297,12 @@ function projectEvidenceAttempt(
 // Global map to hold the worker instance for the current workspace
 let activeWorker: OnboardingWorker | null = null;
 
-function getWorker(workspaceId: string, workspacePath: string): OnboardingWorker {
+/**
+ * Lazy worker accessor shared by every mutating onboarding route (epic #46
+ * work-state routes import this so domain-release and approval trigger a
+ * background poll without instantiating a second worker).
+ */
+export function getWorker(workspaceId: string, workspacePath: string): OnboardingWorker {
   if (!activeWorker) {
     activeWorker = new OnboardingWorker(workspaceId, workspacePath);
     activeWorker.start();
@@ -570,7 +583,12 @@ route.get('/onboarding/batches/:id', async (c) => {
     return c.json({ error: 'Batch not found' }, 404);
   }
 
-  return c.json({ batch });
+  // Epic #46 Phase 3: server-derived operator work-state counts so the Batch
+  // Workspace shell renders Processing / Needs Attention / Waiting on Family /
+  // Ready for Review / Approved without interpreting raw stages.
+  const workStateCounts = getBatchWorkStateCounts(batchId);
+
+  return c.json({ batch, workStateCounts });
 });
 
 /**
@@ -596,7 +614,16 @@ route.get('/onboarding/batches/:id/items', async (c) => {
   const status = c.req.query('status');
 
   const items = listItemsByBatch(batchId, status ? (status as any) : undefined);
-  return c.json({ items });
+
+  // Epic #46 Phase 1: server-owned per-item operator work-state projection.
+  // Additive field — existing clients keep working.
+  const { byItem, counts } = getBatchWorkStateForItems(batchId, items);
+  const itemsWithWorkState = items.map(item => ({
+    ...item,
+    workState: byItem.get(item.id) ?? null,
+  }));
+
+  return c.json({ items: itemsWithWorkState, workStateCounts: counts });
 });
 
 /**
@@ -1058,7 +1085,7 @@ route.post('/onboarding/items/review-complete', async (c) => {
     return c.json({ error: 'No active workspace loaded' }, 400);
   }
 
-  const { itemIds } = await c.req.json();
+  const { itemIds, reviewerId } = await c.req.json();
   if (!itemIds || !Array.isArray(itemIds) || itemIds.length === 0) {
     return c.json({ error: 'itemIds array is required' }, 400);
   }
@@ -1071,6 +1098,8 @@ route.post('/onboarding/items/review-complete', async (c) => {
   const failures: Array<{ itemId: string; reason: string }> = [];
   const legacyIds: string[] = [];
   const classifiedIds: string[] = [];
+  const batchIdByItemId = new Map<string, string>();
+  const reviewedBy = typeof reviewerId === 'string' && reviewerId.trim() ? reviewerId.trim() : 'operator';
 
   // ── Phase 1: Validate every item ─────────────────────────────────────
   for (const id of itemIds) {
@@ -1079,6 +1108,7 @@ route.post('/onboarding/items/review-complete', async (c) => {
       failures.push({ itemId: id, reason: 'Item not found' });
       continue;
     }
+    batchIdByItemId.set(id, item.batchId);
 
     // Must be in review stage
     if (item.stage !== 'review') {
@@ -1119,12 +1149,18 @@ route.post('/onboarding/items/review-complete', async (c) => {
   }
 
   // ── Phase 3: Complete all in a single transaction ────────────────────
+  // Epic #46 Phase 1: each completed review ALSO writes the durable review
+  // state (onboarding_review_state) so bulk approval and the work-state
+  // projection have an independent reviewed signal. Re-review clears any
+  // prior approval/invalidation via markReviewed upsert semantics.
   db.transaction(() => {
     for (const id of legacyIds) {
       completeReviewStage(id);
+      markReviewed({ itemId: id, batchId: batchIdByItemId.get(id) ?? '', reviewedBy });
     }
     for (const id of classifiedIds) {
       completeReviewStage(id);
+      markReviewed({ itemId: id, batchId: batchIdByItemId.get(id) ?? '', reviewedBy });
     }
   })();
 
@@ -1500,6 +1536,16 @@ route.put('/onboarding/items/:id', async (c) => {
       );
     }
   })();
+
+  // Epic #46 Phase 6: a consequential edit invalidates any prior durable
+  // review (and clears any approval). The edited fields affect the approved
+  // output — the item must be re-reviewed and is never bulk-approvable while
+  // invalidated. No-op when the item was never reviewed.
+  const consequentialKeys = ['name', 'price', 'brandHint', 'source_url', 'extraction_data', 'curation_data'] as const;
+  const isConsequentialEdit = consequentialKeys.some(key => body[key] !== undefined);
+  if (isConsequentialEdit) {
+    markReviewInvalidated(itemId, 'consequential_edit');
+  }
 
   return c.json({ success: true });
 });

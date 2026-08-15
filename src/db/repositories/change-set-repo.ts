@@ -254,6 +254,36 @@ export function listChangeSetItems(changeSetId: string): ChangeSetItemRow[] {
   return rows.map(mapItemRow);
 }
 
+/**
+ * Most-advanced non-discarded change-set status per onboarding SKU (epic #46
+ * Phase 8 — "ready to export / exported" projection). One batched query.
+ *
+ * Discarded change sets never count; a SKU in multiple live change sets
+ * resolves to the most advanced lifecycle status (`pushed` > `approved` >
+ * `reviewing` > `draft`), so an item already pushed through one release is
+ * never reported as merely draft-pending.
+ */
+export function listChangeSetStatusBySkus(skus: string[]): Map<string, string> {
+  const db = getDb();
+  if (skus.length === 0) return new Map();
+  const placeholders = skus.map(() => '?').join(', ');
+  const rows = db.query(
+    `SELECT csi.sku AS sku, cs.status AS status
+     FROM change_set_items csi
+     JOIN change_sets cs ON cs.id = csi.change_set_id
+     WHERE csi.sku IN (${placeholders}) AND cs.status != 'discarded'`,
+  ).all(...skus) as Array<{ sku: string; status: string }>;
+  const RANK: Record<string, number> = { draft: 1, reviewing: 2, approved: 3, pushed: 4 };
+  const result = new Map<string, string>();
+  for (const row of rows) {
+    const current = result.get(row.sku);
+    if (!current || (RANK[row.status] ?? 0) > (RANK[current] ?? 0)) {
+      result.set(row.sku, row.status);
+    }
+  }
+  return result;
+}
+
 function deleteChangeSetItem(changeSetId: string, sku: string): void {
   const db = getDb();
   db.run('DELETE FROM change_set_items WHERE change_set_id = ? AND sku = ?', [changeSetId, sku]);
