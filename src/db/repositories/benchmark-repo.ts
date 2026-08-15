@@ -30,7 +30,7 @@ export interface BenchmarkExampleRow {
   dataset_id: string;
   product_sku: string;
   product_family_id: string | null;
-  split_group: 'train' | 'test' | 'holdout';
+  split_group: 'train' | 'test' | 'holdout' | 'validation' | 'promotion_test';
   input_snapshot_json: string;
   gold_labels_json: string;
   example_hash: string;
@@ -39,6 +39,8 @@ export interface BenchmarkExampleRow {
   source_run_id: string | null;
   source_config_hash: string | null;
   source_product_hash: string | null;
+  is_contaminated?: number;
+  contamination_version_id?: string | null;
   created_at: string;
 }
 
@@ -320,7 +322,7 @@ export function insertExample(
   return id;
 }
 
-function mapExampleRow(row: Record<string, any>): BenchmarkExampleRow {
+function mapExampleRow(row: Record<string, any>, hideGold = false): BenchmarkExampleRow {
   return {
     id: String(row.id),
     dataset_id: String(row.dataset_id),
@@ -328,18 +330,20 @@ function mapExampleRow(row: Record<string, any>): BenchmarkExampleRow {
     product_family_id: row.product_family_id ? String(row.product_family_id) : null,
     split_group: String(row.split_group) as BenchmarkExampleRow['split_group'],
     input_snapshot_json: String(row.input_snapshot_json),
-    gold_labels_json: String(row.gold_labels_json),
+    gold_labels_json: hideGold ? '{}' : String(row.gold_labels_json),
     example_hash: String(row.example_hash),
     reviewer_id: row.reviewer_id ? String(row.reviewer_id) : null,
     adjudicated_by: row.adjudicated_by ? String(row.adjudicated_by) : null,
     source_run_id: row.source_run_id ? String(row.source_run_id) : null,
     source_config_hash: row.source_config_hash ? String(row.source_config_hash) : null,
     source_product_hash: row.source_product_hash ? String(row.source_product_hash) : null,
+    is_contaminated: row.is_contaminated != null ? Number(row.is_contaminated) : 0,
+    contamination_version_id: row.contamination_version_id ? String(row.contamination_version_id) : null,
     created_at: String(row.created_at),
   };
 }
 
-export function getExamples(datasetId: string, splitGroup?: string): BenchmarkExampleRow[] {
+export function getExamples(datasetId: string, splitGroup?: string, options?: { hideGold?: boolean }): BenchmarkExampleRow[] {
   const db = getDb();
   let rows: Record<string, any>[];
   if (splitGroup) {
@@ -349,7 +353,17 @@ export function getExamples(datasetId: string, splitGroup?: string): BenchmarkEx
   } else {
     rows = db.query('SELECT * FROM benchmark_examples WHERE dataset_id = $datasetId').all({ $datasetId: datasetId }) as Record<string, any>[];
   }
-  return rows.map(mapExampleRow);
+  const shouldHide = options?.hideGold ?? false;
+  return rows.map((r) => mapExampleRow(r, shouldHide));
+}
+
+export function markExampleContaminated(exampleId: string, versionId: string): void {
+  const db = getDb();
+  db.query(`
+    UPDATE benchmark_examples
+    SET is_contaminated = 1, contamination_version_id = $versionId
+    WHERE id = $exampleId
+  `).run({ $versionId: versionId, $exampleId: exampleId });
 }
 
 /** Immutability guard used by tests: any direct mutation of a frozen example must fail. */

@@ -12,6 +12,18 @@
 
 import type { ProductIntelligenceFlags } from '../product-intelligence/flags';
 import type { PiConflictRow } from '../shared/schemas/product-intelligence';
+import type {
+  AgentCorrection,
+  AgentEvaluationCase,
+  AgentEvaluationSnapshot,
+  AgentFewShotExample,
+  AgentInstructionRule,
+  AgentTeachingAction,
+  AgentTeachingEvent,
+  AgentVersionSnapshot,
+  AgentVersionState,
+  AgentVersionSummary,
+} from '../shared/schemas/agent-training';
 
 // ---------------------------------------------------------------------------
 // Wire types (mirror server row shapes — JSON strings are left as strings)
@@ -19,6 +31,18 @@ import type { PiConflictRow } from '../shared/schemas/product-intelligence';
 
 export type { ProductIntelligenceFlags } from '../product-intelligence/flags';
 export type { PiConflictRow };
+export type {
+  AgentCorrection,
+  AgentEvaluationCase,
+  AgentEvaluationSnapshot,
+  AgentFewShotExample,
+  AgentInstructionRule,
+  AgentTeachingAction,
+  AgentTeachingEvent,
+  AgentVersionSnapshot,
+  AgentVersionState,
+  AgentVersionSummary,
+};
 
 export type PiRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 export type PiRunMode = 'shadow' | 'interactive' | 'onboarding';
@@ -192,6 +216,7 @@ export interface CreateRunInput {
   price?: string;
   quantity?: number;
   mode?: PiRunMode;
+  agentVersionSnapshotId?: string;
 }
 
 export interface CreateRunResponse {
@@ -215,6 +240,9 @@ export interface FlagsResponse {
 
 export interface ListRunsResponse {
   runs: PiRunRow[];
+  total?: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface PiImportRow {
@@ -232,6 +260,12 @@ export interface PiImportRow {
   importedEvidenceIdsJson: string;
   importedImageIdsJson: string;
   createdAt: string;
+}
+
+export interface ImportRunInput {
+  fieldSelection: string[];
+  excludedValues?: Record<string, string>;
+  overriddenValues?: Record<string, string>;
 }
 
 export interface ImportRunResponse {
@@ -302,6 +336,7 @@ export function createPiRun(input: CreateRunInput): Promise<CreateRunResponse> {
       ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
     },
     ...(input.mode ? { mode: input.mode } : {}),
+    ...(input.agentVersionSnapshotId ? { agentVersionSnapshotId: input.agentVersionSnapshotId } : {}),
   };
   return request<CreateRunResponse>('/product-intelligence/runs', {
     method: 'POST',
@@ -444,4 +479,158 @@ export function parseRunPolicy(row: PiRunRow): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Agent Lab: Agent Training & Alignment API
+// ---------------------------------------------------------------------------
+
+export async function listAgentVersions(): Promise<AgentVersionSummary[]> {
+  const res = await request<{ versions: AgentVersionSummary[] }>('/product-intelligence/agent-versions');
+  return res.versions;
+}
+
+export async function getActiveAgentVersion(): Promise<AgentVersionSummary> {
+  const res = await request<{ version: AgentVersionSummary }>('/product-intelligence/agent-versions/active');
+  return res.version;
+}
+
+export async function getCandidateAgentVersion(): Promise<AgentVersionSummary | null> {
+  const res = await request<{ version: AgentVersionSummary | null }>('/product-intelligence/agent-versions/candidate');
+  return res.version;
+}
+
+export async function getAgentVersion(id: string): Promise<AgentVersionSummary> {
+  const res = await request<{ version: AgentVersionSummary }>(`/product-intelligence/agent-versions/${encodeURIComponent(id)}`);
+  return res.version;
+}
+
+export async function createCandidateAgentVersion(body: {
+  parentVersionId?: string;
+  instructions: AgentInstructionRule[];
+  fewShotExamples: AgentFewShotExample[];
+  fewShotTokenBudget?: number;
+  createdBy?: string;
+  changeSummary?: string;
+}): Promise<AgentVersionSummary> {
+  const res = await request<{ version: AgentVersionSummary }>('/product-intelligence/agent-versions/candidate', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  return res.version;
+}
+
+export async function promoteAgentVersion(body: {
+  candidateVersionId: string;
+  evaluationId: string;
+  promotedBy?: string;
+  notes?: string;
+}): Promise<AgentVersionSummary> {
+  const res = await request<{ version: AgentVersionSummary }>('/product-intelligence/agent-versions/promote', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  return res.version;
+}
+
+export async function listAgentCorrections(runId?: string): Promise<AgentCorrection[]> {
+  const query = runId ? `?runId=${encodeURIComponent(runId)}` : '';
+  const res = await request<{ corrections: AgentCorrection[] }>(`/product-intelligence/corrections${query}`);
+  return res.corrections;
+}
+
+export async function createAgentCorrection(body: {
+  runId: string;
+  versionId: string;
+  originalResultHash: string;
+  correctedFields: Record<string, unknown>;
+  failureMode: string;
+  notes?: string;
+  createdBy?: string;
+}): Promise<AgentCorrection> {
+  const res = await request<{ correction: AgentCorrection }>('/product-intelligence/corrections', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  return res.correction;
+}
+
+export async function listAgentTeachingEvents(): Promise<AgentTeachingEvent[]> {
+  const res = await request<{ events: AgentTeachingEvent[] }>('/product-intelligence/teaching-events');
+  return res.events;
+}
+
+export async function teachAgent(body: {
+  correctionId: string;
+  baseVersionId?: string;
+  actions: AgentTeachingAction[];
+  rationale: string;
+  createdBy?: string;
+}): Promise<{ version: AgentVersionSummary; teachingEvent: AgentTeachingEvent }> {
+  return request<{ version: AgentVersionSummary; teachingEvent: AgentTeachingEvent }>('/product-intelligence/teach', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export async function listAgentEvaluations(): Promise<AgentEvaluationSnapshot[]> {
+  const res = await request<{ evaluations: AgentEvaluationSnapshot[] }>('/product-intelligence/evaluations');
+  return res.evaluations;
+}
+
+export async function getAgentEvaluation(id: string): Promise<{
+  snapshot: AgentEvaluationSnapshot;
+  cases: AgentEvaluationCase[];
+}> {
+  return request<{
+    snapshot: AgentEvaluationSnapshot;
+    cases: AgentEvaluationCase[];
+  }>(`/product-intelligence/evaluations/${encodeURIComponent(id)}`);
+}
+
+export async function runAgentEvaluation(body: {
+  candidateVersionId: string;
+  baselineVersionId?: string;
+  datasetId?: string;
+  splitGroup?: string;
+  actor?: string;
+}): Promise<{
+  snapshot: AgentEvaluationSnapshot;
+  cases: AgentEvaluationCase[];
+}> {
+  return request<{
+    snapshot: AgentEvaluationSnapshot;
+    cases: AgentEvaluationCase[];
+  }>('/product-intelligence/evaluations/run', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+export interface CurriculumExample {
+  id: string;
+  product_sku: string;
+  upc: string | null;
+  split_group: string;
+  product_input_json: string;
+  gold_labels_json: string | null;
+  is_contaminated: number;
+  contaminated_at: string | null;
+  contamination_reason: string | null;
+}
+
+export async function getCurriculumExamples(datasetId?: string, split?: string): Promise<CurriculumExample[]> {
+  const params = new URLSearchParams();
+  if (datasetId) params.set('datasetId', datasetId);
+  if (split) params.set('split', split);
+  const q = params.toString() ? `?${params.toString()}` : '';
+  const res = await request<{ examples: CurriculumExample[] }>(`/product-intelligence/curriculum${q}`);
+  return res.examples;
+}
+
+export async function markCurriculumExampleContaminated(exampleId: string, reason?: string): Promise<void> {
+  await request<{ success: boolean }>('/product-intelligence/curriculum/mark-contaminated', {
+    method: 'POST',
+    body: JSON.stringify({ exampleId, reason }),
+  });
 }

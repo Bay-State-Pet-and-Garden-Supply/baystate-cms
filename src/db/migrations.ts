@@ -3366,6 +3366,81 @@ export function runMigrations(): void {
     console.log('[Migrations] Default-On Sourcing schema migration complete.');
   }
 
+  // ── Amendment B: distributor_connections connector_type CHECK gains
+  //    `html_scraper` (Distributor Scraper connectors, ADR 0014 Amendment B).
+  //
+  // Own marker-gated block: an installation that already recorded
+  // `default_on_sourcing_schema_version` (Amendment A) never re-runs that
+  // block, so a `html_scraper` CHECK added there would skip it forever. This
+  // block rebuilds the table ONLY when the stored CHECK predates the
+  // `html_scraper` member (or the `enabled` default is not the current
+  // fail-closed 0), preserves every row value exactly, and writes its marker
+  // LAST inside one transaction (`PRAGMA defer_foreign_keys = ON`; any
+  // violation rolls back ALL DDL/data and leaves the marker absent). A fresh
+  // DB already has the correct CHECK from the v2 SQL file — the block then
+  // only validates shape and writes its marker, so fresh and legacy-upgrade
+  // DDL converge exactly.
+  const htmlScraperVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('distributor_html_scraper_schema_version') as { value: string } | undefined;
+  const connDdl = db
+    .query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'distributor_connections'")
+    .get() as { sql?: string } | undefined;
+  const connCols = db.query('PRAGMA table_info(distributor_connections)').all() as Array<{ name: string; dflt_value: string | null }>;
+  const enabledCol = connCols.find((c) => c.name === 'enabled');
+  const checkHasHtmlScraper = Boolean(connDdl?.sql?.includes('html_scraper'));
+  const enabledDefaultFailClosed = enabledCol ? enabledCol.dflt_value === '0' : false;
+  if (htmlScraperVersion) {
+    // Marker present: verify the stored CHECK and enabled default match the
+    // Amendment B contract. Drift throws — it is not silently repaired.
+    if (!checkHasHtmlScraper || !enabledDefaultFailClosed) {
+      throw new Error('[Migrations] distributor_html_scraper marker present but schema drifted (html_scraper CHECK or fail-closed enabled default missing)');
+    }
+  } else {
+    db.transaction(() => {
+      db.exec('PRAGMA defer_foreign_keys = ON');
+      if (!checkHasHtmlScraper || !enabledDefaultFailClosed) {
+        const connBefore = db.query('SELECT COUNT(*) AS cnt FROM distributor_connections').get() as { cnt: number };
+        const connBeforeIds = (db.query('SELECT id FROM distributor_connections ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        db.exec(`
+          CREATE TABLE distributor_connections_new (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace(id),
+            distributor_id TEXT NOT NULL REFERENCES distributors(id) ON DELETE CASCADE,
+            connector_type TEXT NOT NULL CHECK (connector_type IN ('api', 'ftp_catalog', 'csv', 'html_scraper', 'legacy_adapter')),
+            secret_ref TEXT,
+            configuration_json TEXT DEFAULT '{}',
+            authority_policy_json TEXT DEFAULT '{}',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        db.exec(`
+          INSERT INTO distributor_connections_new
+            (id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at)
+          SELECT id, workspace_id, distributor_id, connector_type, secret_ref, configuration_json, authority_policy_json, enabled, created_at, updated_at
+          FROM distributor_connections;
+        `);
+        db.exec('DROP TABLE distributor_connections;');
+        db.exec('ALTER TABLE distributor_connections_new RENAME TO distributor_connections;');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_workspace ON distributor_connections(workspace_id);');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_distributor_connections_distributor ON distributor_connections(distributor_id);');
+        const connAfter = db.query('SELECT COUNT(*) AS cnt FROM distributor_connections').get() as { cnt: number };
+        const connAfterIds = (db.query('SELECT id FROM distributor_connections ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
+        if (connAfter.cnt !== connBefore.cnt || JSON.stringify(connAfterIds) !== JSON.stringify(connBeforeIds)) {
+          throw new Error('[Migrations] distributor_connections html_scraper rebuild row/ID mismatch');
+        }
+      }
+      const fkViolations = db.query('PRAGMA foreign_key_check').all() as Array<{ table: string }>;
+      if (fkViolations.length > 0) {
+        throw new Error(`[Migrations] distributor_html_scraper foreign_key_check failed: ${JSON.stringify(fkViolations.slice(0, 5))}`);
+      }
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('distributor_html_scraper_schema_version', '1');");
+    })();
+    console.log('[Migrations] Distributor html_scraper schema migration complete.');
+  }
+
   // ── Milestone E: connector-declared variant-axis registry ────────────────
   //
   // Own marker-gated block so installations that already recorded
@@ -3455,6 +3530,202 @@ export function runMigrations(): void {
     `);
     db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('store_manager_runtime_schema_version', '1');");
     console.log('[Migrations] Store Manager runtime audit tables migration complete.');
+  }
+
+  // ── Agent Training & Alignment schema (Agent Lab) ─────────────────────────
+  //
+  // Immutable version snapshots, separate lifecycle states, corrections,
+  // teaching events, paired evaluation snapshots, and case experiment rows.
+  const agentTrainingVersion = db
+    .query("SELECT value FROM app_meta WHERE key = 'agent_training_snapshots_schema_version'")
+    .get() as { value: string } | undefined;
+  if (!agentTrainingVersion) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_version_snapshots (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id),
+          version_number INTEGER NOT NULL,
+          revision_number INTEGER NOT NULL,
+          parent_version_id TEXT REFERENCES agent_version_snapshots(id),
+          compiler_version TEXT NOT NULL,
+          instructions_json TEXT NOT NULL,
+          few_shot_examples_json TEXT NOT NULL,
+          few_shot_token_budget INTEGER NOT NULL DEFAULT 4000,
+          policy_config_id TEXT NOT NULL,
+          content_hash TEXT NOT NULL UNIQUE,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          change_summary TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_version_snapshots_ws ON agent_version_snapshots(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_version_snapshots_num ON agent_version_snapshots(workspace_id, version_number, revision_number);
+
+        CREATE TABLE IF NOT EXISTS agent_version_states (
+          version_id TEXT PRIMARY KEY REFERENCES agent_version_snapshots(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id),
+          lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN ('draft', 'evaluating', 'qualified', 'active', 'retired')),
+          active_evaluation_id TEXT,
+          activated_at TEXT,
+          retired_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_version_states_ws_status ON agent_version_states(workspace_id, lifecycle_status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_version_active_per_workspace ON agent_version_states(workspace_id) WHERE lifecycle_status = 'active';
+
+        CREATE TABLE IF NOT EXISTS agent_corrections (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id),
+          run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id),
+          version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+          original_result_hash TEXT NOT NULL,
+          corrected_fields_json TEXT NOT NULL,
+          failure_mode TEXT NOT NULL,
+          notes TEXT NOT NULL DEFAULT '',
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_corrections_ws ON agent_corrections(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_corrections_run ON agent_corrections(run_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_corrections_version ON agent_corrections(version_id);
+
+        CREATE TABLE IF NOT EXISTS agent_teaching_events (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id),
+          correction_id TEXT NOT NULL REFERENCES agent_corrections(id),
+          resulting_version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+          actions_json TEXT NOT NULL,
+          rationale TEXT NOT NULL,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_teaching_events_ws ON agent_teaching_events(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_teaching_events_correction ON agent_teaching_events(correction_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_teaching_events_version ON agent_teaching_events(resulting_version_id);
+
+        CREATE TABLE IF NOT EXISTS agent_evaluation_snapshots (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id),
+          candidate_version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+          baseline_version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+          dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id),
+          dataset_hash TEXT NOT NULL,
+          split_group TEXT NOT NULL,
+          scorecard_json TEXT NOT NULL,
+          promotion_gate_verdict_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('running', 'passed', 'failed', 'cancelled')),
+          created_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_eval_snapshots_ws ON agent_evaluation_snapshots(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_eval_snapshots_candidate ON agent_evaluation_snapshots(candidate_version_id);
+
+        CREATE TABLE IF NOT EXISTS agent_evaluation_cases (
+          id TEXT PRIMARY KEY,
+          evaluation_id TEXT NOT NULL REFERENCES agent_evaluation_snapshots(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL REFERENCES workspace(id),
+          benchmark_example_id TEXT NOT NULL REFERENCES benchmark_examples(id),
+          product_sku TEXT NOT NULL,
+          candidate_run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id),
+          baseline_run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id),
+          candidate_outcome TEXT NOT NULL,
+          baseline_outcome TEXT NOT NULL,
+          comparison_json TEXT NOT NULL,
+          delta_class TEXT NOT NULL CHECK (delta_class IN ('fixed', 'regressed', 'unchanged')),
+          critical_regression INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_eval_cases_eval ON agent_evaluation_cases(evaluation_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_eval_cases_ws ON agent_evaluation_cases(workspace_id);
+      `);
+
+      // Add columns to product_intelligence_runs if missing
+      const piCols = db.query('PRAGMA table_info(product_intelligence_runs)').all() as Array<{ name: string }>;
+      if (!piCols.some((c) => c.name === 'agent_version_snapshot_id')) {
+        db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN agent_version_snapshot_id TEXT REFERENCES agent_version_snapshots(id);');
+      }
+      if (!piCols.some((c) => c.name === 'agent_version_content_hash')) {
+        db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN agent_version_content_hash TEXT;');
+      }
+      if (!piCols.some((c) => c.name === 'version_role_at_execution')) {
+        db.exec("ALTER TABLE product_intelligence_runs ADD COLUMN version_role_at_execution TEXT NOT NULL DEFAULT 'active';");
+      }
+      if (!piCols.some((c) => c.name === 'import_eligible_at_execution')) {
+        db.exec('ALTER TABLE product_intelligence_runs ADD COLUMN import_eligible_at_execution INTEGER NOT NULL DEFAULT 1;');
+      }
+
+      // Add columns to benchmark_examples if missing
+      const bmCols = db.query('PRAGMA table_info(benchmark_examples)').all() as Array<{ name: string }>;
+      if (!bmCols.some((c) => c.name === 'is_contaminated')) {
+        db.exec('ALTER TABLE benchmark_examples ADD COLUMN is_contaminated INTEGER NOT NULL DEFAULT 0;');
+      }
+      if (!bmCols.some((c) => c.name === 'contamination_version_id')) {
+        db.exec('ALTER TABLE benchmark_examples ADD COLUMN contamination_version_id TEXT;');
+      }
+
+      // Seed baseline version v1 for each existing workspace
+      const workspaces = db.query('SELECT id FROM workspace').all() as Array<{ id: string }>;
+      const nowIso = new Date().toISOString();
+      for (const ws of workspaces) {
+        const existingActive = db
+          .query("SELECT version_id FROM agent_version_states WHERE workspace_id = ? AND lifecycle_status = 'active'")
+          .get(ws.id) as { version_id: string } | undefined;
+        if (!existingActive) {
+          const snapshotId = `v1_rev1_${ws.id}`;
+          const contentHash = sha256Hex(
+            JSON.stringify({
+              workspaceId: ws.id,
+              versionNumber: 1,
+              revisionNumber: 1,
+              parentVersionId: null,
+              compilerVersion: 'compiler_v1',
+              instructions: [],
+              fewShotExamples: [],
+              fewShotTokenBudget: 4000,
+              policyConfigId: 'default',
+            }),
+          );
+
+          db.query(`
+            INSERT OR IGNORE INTO agent_version_snapshots (
+              id, workspace_id, version_number, revision_number, parent_version_id,
+              compiler_version, instructions_json, few_shot_examples_json, few_shot_token_budget,
+              policy_config_id, content_hash, created_by, created_at, change_summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            snapshotId,
+            ws.id,
+            1,
+            1,
+            null,
+            'compiler_v1',
+            '[]',
+            '[]',
+            4000,
+            'default',
+            contentHash,
+            'system',
+            nowIso,
+            'Initial baseline compiler_v1 version snapshot',
+          );
+
+          db.query(`
+            INSERT OR IGNORE INTO agent_version_states (
+              version_id, workspace_id, lifecycle_status, active_evaluation_id,
+              activated_at, retired_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(snapshotId, ws.id, 'active', null, nowIso, null, nowIso);
+        }
+      }
+
+      const fks = db.query('PRAGMA foreign_key_check').all() as Array<{ table: string }>;
+      if (fks.length > 0) {
+        throw new Error(`[Migrations] agent_training foreign_key_check failed: ${JSON.stringify(fks.slice(0, 5))}`);
+      }
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('agent_training_snapshots_schema_version', '1');");
+    })();
+    console.log('[Migrations] Agent Training & Alignment schema migration complete.');
   }
 
   const row = db.query('SELECT value FROM app_meta WHERE key = ?').get('schema_version') as

@@ -280,7 +280,7 @@ CREATE TABLE IF NOT EXISTS benchmark_examples (
   dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id) ON DELETE CASCADE,
   product_sku TEXT NOT NULL,
   product_family_id TEXT,
-  split_group TEXT NOT NULL CHECK (split_group IN ('train', 'test', 'holdout')),
+  split_group TEXT NOT NULL CHECK (split_group IN ('train', 'test', 'holdout', 'validation', 'promotion_test')),
   input_snapshot_json TEXT NOT NULL,
   gold_labels_json TEXT NOT NULL,
   example_hash TEXT NOT NULL,
@@ -289,6 +289,8 @@ CREATE TABLE IF NOT EXISTS benchmark_examples (
   source_run_id TEXT,
   source_config_hash TEXT,
   source_product_hash TEXT,
+  is_contaminated INTEGER NOT NULL DEFAULT 0,
+  contamination_version_id TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -567,3 +569,103 @@ CREATE TABLE IF NOT EXISTS store_manager_schedule_leases (
   heartbeat_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_store_manager_leases_expiry ON store_manager_schedule_leases(workspace_id, lease_expires_at);
+
+-- ─── Agent Training & Alignment (Agent Lab) ─────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS agent_version_snapshots (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  version_number INTEGER NOT NULL,
+  revision_number INTEGER NOT NULL,
+  parent_version_id TEXT REFERENCES agent_version_snapshots(id),
+  compiler_version TEXT NOT NULL,
+  instructions_json TEXT NOT NULL,
+  few_shot_examples_json TEXT NOT NULL,
+  few_shot_token_budget INTEGER NOT NULL DEFAULT 4000,
+  policy_config_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL UNIQUE,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  change_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_agent_version_snapshots_ws ON agent_version_snapshots(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_agent_version_snapshots_num ON agent_version_snapshots(workspace_id, version_number, revision_number);
+
+CREATE TABLE IF NOT EXISTS agent_version_states (
+  version_id TEXT PRIMARY KEY REFERENCES agent_version_snapshots(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN ('draft', 'evaluating', 'qualified', 'active', 'retired')),
+  active_evaluation_id TEXT,
+  activated_at TEXT,
+  retired_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_version_states_ws_status ON agent_version_states(workspace_id, lifecycle_status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_version_active_per_workspace ON agent_version_states(workspace_id) WHERE lifecycle_status = 'active';
+
+CREATE TABLE IF NOT EXISTS agent_corrections (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id),
+  version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+  original_result_hash TEXT NOT NULL,
+  corrected_fields_json TEXT NOT NULL,
+  failure_mode TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_corrections_ws ON agent_corrections(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_agent_corrections_run ON agent_corrections(run_id);
+CREATE INDEX IF NOT EXISTS idx_agent_corrections_version ON agent_corrections(version_id);
+
+CREATE TABLE IF NOT EXISTS agent_teaching_events (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  correction_id TEXT NOT NULL REFERENCES agent_corrections(id),
+  resulting_version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+  actions_json TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_teaching_events_ws ON agent_teaching_events(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_agent_teaching_events_correction ON agent_teaching_events(correction_id);
+CREATE INDEX IF NOT EXISTS idx_agent_teaching_events_version ON agent_teaching_events(resulting_version_id);
+
+CREATE TABLE IF NOT EXISTS agent_evaluation_snapshots (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  candidate_version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+  baseline_version_id TEXT NOT NULL REFERENCES agent_version_snapshots(id),
+  dataset_id TEXT NOT NULL REFERENCES benchmark_datasets(id),
+  dataset_hash TEXT NOT NULL,
+  split_group TEXT NOT NULL,
+  scorecard_json TEXT NOT NULL,
+  promotion_gate_verdict_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'passed', 'failed', 'cancelled')),
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_eval_snapshots_ws ON agent_evaluation_snapshots(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_agent_eval_snapshots_candidate ON agent_evaluation_snapshots(candidate_version_id);
+
+CREATE TABLE IF NOT EXISTS agent_evaluation_cases (
+  id TEXT PRIMARY KEY,
+  evaluation_id TEXT NOT NULL REFERENCES agent_evaluation_snapshots(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspace(id),
+  benchmark_example_id TEXT NOT NULL REFERENCES benchmark_examples(id),
+  product_sku TEXT NOT NULL,
+  candidate_run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id),
+  baseline_run_id TEXT NOT NULL REFERENCES product_intelligence_runs(id),
+  candidate_outcome TEXT NOT NULL,
+  baseline_outcome TEXT NOT NULL,
+  comparison_json TEXT NOT NULL,
+  delta_class TEXT NOT NULL CHECK (delta_class IN ('fixed', 'regressed', 'unchanged')),
+  critical_regression INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_eval_cases_eval ON agent_evaluation_cases(evaluation_id);
+CREATE INDEX IF NOT EXISTS idx_agent_eval_cases_ws ON agent_evaluation_cases(workspace_id);
+

@@ -333,7 +333,8 @@ export function comparePredictionToGold(
   outcome: PiOutcome,
   ops: Partial<PiComparison['ops']> = {},
 ): PiComparison {
-  const identityStatusExact = prediction?.identityStatus === 'exact_match';
+  const identityStatusExact =
+    prediction?.identityStatus === 'exact_match' || prediction?.identityStatus === 'exact';
 
   // Identity
   const exactProductHit =

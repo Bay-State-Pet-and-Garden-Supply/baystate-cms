@@ -28,7 +28,35 @@ import {
 import { createExecutionRouter } from '../../product-intelligence/execution-router';
 import { assertReducingOverride, computePolicyConfigId } from '../../product-intelligence/policy';
 import { getProductIntelligenceFlags } from '../../product-intelligence/flags';
-import { getExamples } from '../../db/repositories/benchmark-repo';
+import { getExamples, getDatasetForWorkspace, listDatasets, markExampleContaminated } from '../../db/repositories/benchmark-repo';
+import {
+  createCandidateSnapshot,
+  createCorrection,
+  ensureBaselineVersion,
+  getActiveVersion,
+  listCorrections,
+  getLatestCandidateVersion,
+  getVersionSnapshot,
+  listTeachingEvents,
+  listVersionSnapshots,
+  promoteCandidateVersion,
+  recordTeachingEvent,
+  updateCandidateLifecycleStatus,
+} from '../../db/repositories/agent-version-repo';
+import {
+  createEvaluationSnapshot,
+  getEvaluationCases,
+  getEvaluationSnapshot,
+  getEvaluationWithCases,
+  listEvaluationSnapshots,
+} from '../../db/repositories/agent-evaluation-repo';
+import { runPairedEvaluation } from '../../product-intelligence/evaluation/evaluation-orchestrator';
+import { evaluateAgentPromotionGate } from '../../product-intelligence/evaluation/agent-promotion-gate';
+import {
+  AgentCorrectionSchema,
+  AgentPromotionRequestSchema,
+  TeachingRequestSchema,
+} from '../../shared/schemas/agent-training';
 import { PiGoldLabelsSchema, PiProductInputSchema } from '../../product-intelligence/evaluation/gold';
 import { StubManagedProvider, type ManagedBrowserProvider } from '../../product-intelligence/extraction/managed-fallback';
 import { LegacyProductIntelligenceExecutor } from '../../product-intelligence/legacy-executor';
@@ -839,4 +867,315 @@ router.post('/product-intelligence/rollout', async (c) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Agent Lab: Agent Training & Alignment Routes
+// ---------------------------------------------------------------------------
+
+/** GET /api/product-intelligence/agent-versions — list version snapshots */
+router.get('/product-intelligence/agent-versions', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  ensureBaselineVersion(ws.id);
+  const versions = listVersionSnapshots(ws.id);
+  return c.json({ versions });
+});
+
+/** GET /api/product-intelligence/agent-versions/active — get active version */
+router.get('/product-intelligence/agent-versions/active', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const active = ensureBaselineVersion(ws.id);
+  return c.json({ version: active });
+});
+
+/** GET /api/product-intelligence/agent-versions/candidate — get latest candidate */
+router.get('/product-intelligence/agent-versions/candidate', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const candidate = getLatestCandidateVersion(ws.id);
+  return c.json({ version: candidate });
+});
+
+/** GET /api/product-intelligence/agent-versions/:id — get specific version */
+router.get('/product-intelligence/agent-versions/:id', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const versionId = c.req.param('id');
+  const summary = getVersionSnapshot(ws.id, versionId);
+  if (!summary) return c.json({ error: `Agent version ${versionId} not found` }, 404);
+  return c.json({ version: summary });
+});
+
+/** POST /api/product-intelligence/agent-versions/candidate — create candidate revision */
+router.post('/product-intelligence/agent-versions/candidate', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  try {
+    const candidate = createCandidateSnapshot(ws.id, {
+      parentVersionId: body.parentVersionId,
+      instructions: body.instructions ?? [],
+      fewShotExamples: body.fewShotExamples ?? [],
+      fewShotTokenBudget: body.fewShotTokenBudget ?? 4000,
+      createdBy: body.createdBy ?? 'operator',
+      changeSummary: body.changeSummary ?? 'Updated prompt configuration',
+    });
+    return c.json({ version: candidate }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+/** POST /api/product-intelligence/agent-versions/promote — promote qualified candidate */
+router.post('/product-intelligence/agent-versions/promote', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const parsed = AgentPromotionRequestSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'Invalid promotion request', details: parsed.error.issues }, 400);
+
+  const candidateSummary = getVersionSnapshot(ws.id, parsed.data.candidateVersionId);
+  if (!candidateSummary) return c.json({ error: 'Candidate version not found' }, 404);
+
+  // Check evaluation snapshot and gate
+  const evalSnapshot = getEvaluationSnapshot(ws.id, parsed.data.evaluationId);
+  if (!evalSnapshot || evalSnapshot.workspaceId !== ws.id) {
+    return c.json({ error: 'Evaluation snapshot not found' }, 404);
+  }
+  if (!evalSnapshot.promotionGateVerdict.allowed) {
+    return c.json({
+      error: 'Promotion gate denied promotion',
+      reasons: evalSnapshot.promotionGateVerdict.reasons,
+    }, 422);
+  }
+
+  try {
+    const promoted = promoteCandidateVersion(
+      ws.id,
+      parsed.data.candidateVersionId,
+      parsed.data.promotedBy,
+      parsed.data.evaluationId,
+    );
+    return c.json({ version: promoted }, 200);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+/** GET /api/product-intelligence/corrections — list corrections */
+router.get('/product-intelligence/corrections', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const runId = c.req.query('runId');
+  const corrections = listCorrections(ws.id, runId);
+  return c.json({ corrections });
+});
+
+/** POST /api/product-intelligence/corrections — create human correction */
+router.post('/product-intelligence/corrections', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const parsed = AgentCorrectionSchema.omit({ id: true, workspaceId: true, createdAt: true }).safeParse(body);
+  if (!parsed.success) return c.json({ error: 'Invalid correction input', details: parsed.error.issues }, 400);
+
+  try {
+    const correction = createCorrection(ws.id, parsed.data);
+    return c.json({ correction }, 201);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+/** GET /api/product-intelligence/teaching-events — list teaching events */
+router.get('/product-intelligence/teaching-events', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const events = listTeachingEvents(ws.id);
+  return c.json({ events });
+});
+
+/** POST /api/product-intelligence/teach — apply teaching actions and create candidate snapshot */
+router.post('/product-intelligence/teach', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const parsed = TeachingRequestSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'Invalid teaching request', details: parsed.error.issues }, 400);
+
+  // Retrieve base version snapshot to fork from (candidate or active)
+  const baseVersion = parsed.data.baseVersionId
+    ? getVersionSnapshot(ws.id, parsed.data.baseVersionId)
+    : getLatestCandidateVersion(ws.id) ?? getActiveVersion(ws.id);
+
+  if (!baseVersion) return c.json({ error: 'No baseline version found to teach from' }, 400);
+
+  let updatedInstructions = [...baseVersion.snapshot.instructions];
+  let updatedFewShot = [...baseVersion.snapshot.fewShotExamples];
+
+  for (const act of parsed.data.actions) {
+    if (act.type === 'add_rule') {
+      updatedInstructions.push({
+        id: `rule-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        category: act.category,
+        rule: act.rule,
+        motivationCorrectionId: parsed.data.correctionId,
+        createdAt: new Date().toISOString(),
+      });
+    } else if (act.type === 'remove_rule') {
+      updatedInstructions = updatedInstructions.filter((r) => r.id !== act.ruleId);
+    } else if (act.type === 'add_few_shot') {
+      const output = {
+        title: String(act.expectedOutput.title ?? act.registerName),
+        brand: act.expectedOutput.brand != null ? String(act.expectedOutput.brand) : null,
+        facts: Array.isArray(act.expectedOutput.facts) ? (act.expectedOutput.facts as any) : [],
+        categoryPages: Array.isArray(act.expectedOutput.categoryPages) ? (act.expectedOutput.categoryPages as any) : [],
+        forbiddenSourceDomains: Array.isArray(act.expectedOutput.forbiddenSourceDomains) ? (act.expectedOutput.forbiddenSourceDomains as any) : [],
+        shouldAbstain: Boolean(act.expectedOutput.shouldAbstain),
+        abstentionReason: act.expectedOutput.abstentionReason != null ? String(act.expectedOutput.abstentionReason) : null,
+      };
+      updatedFewShot.push({
+        id: `ex-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        gtin: act.gtin,
+        registerName: act.registerName,
+        brandHint: act.brandHint ?? null,
+        price: act.price ?? null,
+        quantity: act.quantity ?? null,
+        expectedOutput: output,
+        explanation: act.explanation,
+        difficultyTags: act.difficultyTags ?? [],
+        tokenCount: Math.ceil(JSON.stringify(output).length / 4),
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      });
+    } else if (act.type === 'remove_few_shot') {
+      updatedFewShot = updatedFewShot.filter((ex) => ex.id !== act.exampleId);
+    }
+  }
+
+  const candidate = createCandidateSnapshot(ws.id, {
+    parentVersionId: baseVersion.snapshot.id,
+    instructions: updatedInstructions,
+    fewShotExamples: updatedFewShot,
+    createdBy: parsed.data.createdBy ?? 'operator',
+    changeSummary: `Taught: ${parsed.data.rationale}`,
+  });
+
+  const teachEvent = recordTeachingEvent(ws.id, {
+    correctionId: parsed.data.correctionId,
+    resultingVersionId: candidate.snapshot.id,
+    actions: parsed.data.actions,
+    rationale: parsed.data.rationale,
+    createdBy: parsed.data.createdBy ?? 'operator',
+  });
+
+  return c.json({ version: candidate, teachingEvent: teachEvent }, 201);
+});
+
+/** GET /api/product-intelligence/evaluations — list evaluation snapshots */
+router.get('/product-intelligence/evaluations', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const snapshots = listEvaluationSnapshots(ws.id);
+  return c.json({ evaluations: snapshots });
+});
+
+/** GET /api/product-intelligence/evaluations/:id — get evaluation with cases */
+router.get('/product-intelligence/evaluations/:id', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  const evalId = c.req.param('id');
+  const details = getEvaluationWithCases(ws.id, evalId);
+  if (!details) return c.json({ error: `Evaluation ${evalId} not found` }, 404);
+  return c.json(details);
+});
+
+/** POST /api/product-intelligence/evaluations/run — run paired evaluation */
+router.post('/product-intelligence/evaluations/run', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  if (!body.candidateVersionId) {
+    return c.json({ error: 'candidateVersionId is required' }, 400);
+  }
+  try {
+    const result = await runPairedEvaluation(ws.id, {
+      candidateVersionId: body.candidateVersionId,
+      baselineVersionId: body.baselineVersionId,
+      datasetId: body.datasetId,
+      splitGroup: body.splitGroup,
+      actor: body.actor ?? 'operator',
+    });
+    return c.json(result, 200);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
+/** GET /api/product-intelligence/curriculum — list curriculum benchmark examples */
+router.get('/product-intelligence/curriculum', (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let targetDatasetId = c.req.query('datasetId');
+  if (!targetDatasetId) {
+    const existing = listDatasets(ws.id).find((d) => d.name === PI_GOLDEN_DATASET_NAME);
+    if (existing) {
+      targetDatasetId = existing.id;
+    } else {
+      const seeded = seedPiGoldenDataset();
+      targetDatasetId = seeded.datasetId;
+    }
+  }
+  const split = c.req.query('split'); // 'train' | 'validation' | 'promotion_test' | 'test' | 'holdout'
+  // Policy: hideGold true on test/promotion_test/holdout, false on train/validation
+  const hideGold = split === 'promotion_test' || split === 'test' || split === 'holdout';
+  const examples = getExamples(targetDatasetId, split, { hideGold });
+  return c.json({ examples });
+});
+
+/** POST /api/product-intelligence/curriculum/mark-contaminated — mark example contaminated */
+router.post('/product-intelligence/curriculum/mark-contaminated', async (c) => {
+  const ws = requireWorkspace();
+  if (!ws) return c.json({ error: 'No active workspace' }, 400);
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  if (!body.exampleId) return c.json({ error: 'exampleId is required' }, 400);
+  try {
+    markExampleContaminated(body.exampleId, body.reason ?? 'Inspected and used for teaching');
+    return c.json({ success: true }, 200);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 400);
+  }
+});
+
 export default router;
+

@@ -901,6 +901,12 @@ describe('Milestone E — distributor_record evidence (source labeling + identit
         distributorSku: 'DSKU-1',
         manufacturerPartNumber: 'MPN-1',
         variantAttributes: { flavor: 'chicken' },
+        distributorCategory: null,
+        dimensions: null,
+        casePack: null,
+        unitOfMeasure: null,
+        ingredients: null,
+        merchandisingProvenance: {},
       },
     } as ExecutionEvidenceProjectionMemberV2;
   }
@@ -955,6 +961,43 @@ describe('Milestone E — distributor_record evidence (source labeling + identit
     // no image fields
     const all = evidence.filter((e) => String(e.value).includes('img.example.com'));
     expect(all).toHaveLength(0);
+  });
+
+  it('v2 distributor members mirror merchandising fields exactly like the evidence stage (Amendment B)', () => {
+    const member = distributorMember();
+    (member as { extractionMethod: string }).extractionMethod = 'distributor_record_v2';
+    (member.extraction as Record<string, unknown>).description = 'Mirrored distributor description';
+    (member.extraction as Record<string, unknown>).bulletPoints = ['Mirrored feature one', 'Mirrored feature two'];
+    (member.extraction as Record<string, unknown>).distributorCategory = 'Dog Supplies';
+    (member.extraction as Record<string, unknown>).dimensions = '12 x 8 x 4 in';
+    (member.extraction as Record<string, unknown>).casePack = '6';
+    (member.extraction as Record<string, unknown>).unitOfMeasure = 'EA';
+    (member.extraction as Record<string, unknown>).ingredients = 'Chicken, rice';
+    (member.extraction as Record<string, unknown>).merchandisingProvenance = {
+      description: [{ attemptId: 'att-1', providerId: 'phillips', catalogVersion: 'v1', connectionId: 'c1', values: ['Mirrored distributor description'] }],
+    };
+    const evidence = evidenceFromProjection(member);
+    const merch = evidence.filter((e) => e.source === 'distributor_record');
+    const fields = merch.map((e) => e.sourceField);
+    // SAME field mapping as the frozen evidence stage: description, each
+    // feature as bullet_point, distributor_category, dimensions, case_pack,
+    // unit_of_measure, ingredients.
+    expect(fields).toContain('description');
+    expect(fields).toContain('bullet_point');
+    expect(fields).toContain('distributor_category');
+    expect(fields).toContain('dimensions');
+    expect(fields).toContain('case_pack');
+    expect(fields).toContain('unit_of_measure');
+    expect(fields).toContain('ingredients');
+    expect(merch.filter((e) => e.sourceField === 'bullet_point').map((e) => e.value)).toEqual(['Mirrored feature one', 'Mirrored feature two']);
+    expect(merch.find((e) => e.sourceField === 'description')!.value).toBe('Mirrored distributor description');
+    expect(merch.find((e) => e.sourceField === 'description')!.sourceUrl).toBeNull();
+    expect((merch.find((e) => e.sourceField === 'description')!.metadata as any).merchandisingProvenance.description[0].providerId).toBe('phillips');
+    // never official label; price/inventory/images never mirrored
+    expect(evidence.some((e) => e.source === 'official_product_page')).toBe(false);
+    expect(fields).not.toContain('price');
+    expect(fields).not.toContain('inventory');
+    expect(fields).not.toContain('primaryImage');
   });
 
   it('official-page members keep the full copy mapping and official label', () => {

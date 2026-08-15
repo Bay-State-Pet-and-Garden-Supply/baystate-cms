@@ -64,9 +64,15 @@ export interface PiRunRow {
   /** Round-8 (review P1): effective research/terminal tool versions + schema
    *  hashes, captured at session creation (see setRunToolsJson). */
   toolsJson: string | null;
+  /** Agent Lab training lineage: execution snapshot and role. */
+  agentVersionSnapshotId: string | null;
+  agentVersionContentHash: string | null;
+  versionRoleAtExecution: 'active' | 'candidate' | 'historical';
+  importEligibleAtExecution: number;
 }
 
 export interface CreatePiRunInput {
+  id?: string;
   workspaceId: string;
   onboardingItemId?: string | null;
   mode: PiRunMode;
@@ -92,21 +98,30 @@ export interface CreatePiRunInput {
   policyOverridesJson?: string | null;
   /** Round-8 (review P1): effective tool versions/schema hashes (JSON array). */
   toolsJson?: string | null;
+  /** Agent Lab training execution authorization */
+  agentVersionSnapshotId?: string | null;
+  agentVersionContentHash?: string | null;
+  versionRoleAtExecution?: 'active' | 'candidate' | 'historical';
+  importEligibleAtExecution?: number;
 }
 
 export function createPiRun(input: CreatePiRunInput): PiRunRow {
   const db = getDb();
-  const id = randomUUID();
+  const id = input.id ?? randomUUID();
   const startedAt = now();
   const completedAt = input.status === 'completed' ? (input.completedAt ?? startedAt) : null;
+  const versionRole = input.versionRoleAtExecution ?? 'active';
+  const importEligible = input.importEligibleAtExecution ?? (versionRole === 'active' ? 1 : 0);
+
   db.run(
     `INSERT INTO product_intelligence_runs
      (id, workspace_id, onboarding_item_id, mode, status, executor, input_json,
       policy_json, config_snapshot_id, config_snapshot_hash, code_commit,
       prompt_hash, pi_version, extension_versions_json, started_at, completed_at,
       origin_run_id, replay_depth, base_policy_id, base_policy_version, policy_overrides_json,
-      tools_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      tools_json, agent_version_snapshot_id, agent_version_content_hash,
+      version_role_at_execution, import_eligible_at_execution)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.workspaceId,
@@ -130,6 +145,10 @@ export function createPiRun(input: CreatePiRunInput): PiRunRow {
       input.basePolicyVersion ?? null,
       input.policyOverridesJson ?? null,
       input.toolsJson ?? null,
+      input.agentVersionSnapshotId ?? null,
+      input.agentVersionContentHash ?? null,
+      versionRole,
+      importEligible,
     ],
   );
   return getPiRun(id) as PiRunRow;
@@ -148,7 +167,11 @@ const RUN_SELECT = `
          origin_run_id AS originRunId, replay_depth AS replayDepth,
          base_policy_id AS basePolicyId, base_policy_version AS basePolicyVersion,
          policy_overrides_json AS policyOverridesJson,
-         tools_json AS toolsJson
+         tools_json AS toolsJson,
+         agent_version_snapshot_id AS agentVersionSnapshotId,
+         agent_version_content_hash AS agentVersionContentHash,
+         version_role_at_execution AS versionRoleAtExecution,
+         import_eligible_at_execution AS importEligibleAtExecution
   FROM product_intelligence_runs
 `;
 

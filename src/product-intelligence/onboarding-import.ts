@@ -280,6 +280,11 @@ function parseRun(runId: string): ParsedRun {
   if (run.status !== 'completed') {
     throw new Error(`Run ${runId} is not completed (${run.status})`);
   }
+  if (run.importEligibleAtExecution !== 1) {
+    throw new Error(
+      `Run ${runId} was executed under a candidate version (${run.versionRoleAtExecution}) and is permanently ineligible for onboarding import`,
+    );
+  }
   const result = getPiResult(runId);
   if (!result) throw new Error(`Run ${runId} has no result`);
   if (result.disposition !== 'submitted') {

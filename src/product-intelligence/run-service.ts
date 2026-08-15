@@ -41,6 +41,8 @@ import { appendPiEvent, completePiStep, completePiToolCall, createPiRun, deleteP
 import { sha256Hex } from '../shared/stable-id';
 import { verifyPolicySnapshot, assertReducingOverride, computePolicyConfigId } from './policy';
 import { buildResearchPrompt } from './pi/pi-prompt-builder';
+import { compileAgentPrompt } from './pi/compiled-prompt-builder';
+import { ensureBaselineVersion, getActiveVersion, getVersionSnapshot } from '../db/repositories/agent-version-repo';
 import { DEFAULT_RESEARCH_TOOL_NAMES } from './tools';
 import { isWorkflowSubmission, validateTerminalSubmission } from './workflow/bundle-validator';
 import type { BundleImageCandidate } from './workflow/bundle';
@@ -417,6 +419,8 @@ export interface StartPiRunInput {
   basePolicyId?: string | null;
   basePolicyVersion?: number | null;
   policyOverridesJson?: string | null;
+  /** Agent Lab training lineage: specific agent version to execute. */
+  agentVersionSnapshotId?: string | null;
 }
 
 export interface StartPiRunResult {
@@ -493,15 +497,31 @@ export async function startProductIntelligenceRun(
     throw new Error(`Refusing to start run: ${snapshot.reason}`);
   }
 
+  // Agent Lab: resolve agent version snapshot and execution authorization
+  const activeVersion = ensureBaselineVersion(workspace.id);
+  const targetVersionSummary = input.agentVersionSnapshotId
+    ? getVersionSnapshot(workspace.id, input.agentVersionSnapshotId) ?? activeVersion
+    : activeVersion;
+
+  const versionRole: 'active' | 'candidate' | 'historical' =
+    targetVersionSummary.snapshot.id === activeVersion.snapshot.id
+      ? 'active'
+      : targetVersionSummary.state.lifecycleStatus === 'retired'
+        ? 'historical'
+        : 'candidate';
+
+  const isImportEligible = versionRole === 'active' ? 1 : 0;
+
   // Prompt/algorithm version captured with the run snapshot.
-  const promptHash = buildResearchPrompt(parsedInput, {
+  const compiledPrompt = compileAgentPrompt(targetVersionSummary.snapshot, parsedInput, {
     runId: 'pending',
     workspaceId: workspace.id,
     workspacePath: workspace.path,
     policy,
     executionMode: mode,
     existingEvidenceRefs: [],
-  }).promptHash;
+  });
+  const promptHash = compiledPrompt.promptHash;
 
   const run = createPiRun({
     workspaceId: workspace.id,
@@ -523,6 +543,10 @@ export async function startProductIntelligenceRun(
     basePolicyId: input.basePolicyId ?? null,
     basePolicyVersion: input.basePolicyVersion ?? null,
     policyOverridesJson: input.policyOverridesJson ?? null,
+    agentVersionSnapshotId: targetVersionSummary.snapshot.id,
+    agentVersionContentHash: targetVersionSummary.snapshot.contentHash,
+    versionRoleAtExecution: versionRole,
+    importEligibleAtExecution: isImportEligible,
   });
   activeControllers.set(run.id, controller);
 

@@ -826,3 +826,29 @@ describe('Milestone E — source-kind/provenance drift (page input identity)', (
     expect(hash(v2Official)).toBe(hash(v1));
   });
 });
+
+describe('Amendment B merchandising fields and the page hash (M5b-1)', () => {
+  it('P-hash CHANGES when the merchandising description changes (description is page authority)', () => {
+    // The page authority slice includes `description`
+    // (pageAuthorityFromProjectionMember) — a v2 merchandising description
+    // change must invalidate a coordinated page output set (the page may
+    // embed description-derived content). No stale reuse.
+    const base = makeParams();
+    const changed = clone(base);
+    changed.projection.members[0].extraction.description = 'Changed merch description';
+    expect(hash(changed)).not.toBe(hash(base));
+  });
+
+  it('P-hash is STABLE across non-page merchandising fields (features/ingredients/case-pack/UOM)', () => {
+    // Only the page-authority slice participates; merchandising fields that
+    // are not page identity (bullet points, ingredients, case pack, UOM)
+    // must not invalidate a coordinated page output set.
+    const base = makeParams();
+    const changed = clone(base);
+    changed.projection.members[0].extraction.bulletPoints = ['x', 'y'];
+    (changed.projection.members[0].extraction as any).ingredients = 'Chicken';
+    (changed.projection.members[0].extraction as any).casePack = '12';
+    (changed.projection.members[0].extraction as any).unitOfMeasure = 'CT';
+    expect(hash(changed)).toBe(hash(base));
+  });
+});

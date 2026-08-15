@@ -128,6 +128,8 @@ export default defineConfig({
       // bun:test imports — vitest cannot collect them; run under test:db)
       'src/tests/unit/store-manager-execution-boundary.test.ts',
       'src/tests/unit/store-manager-operations-migration.test.ts',
+      'src/tests/unit/agent-version-repo.test.ts',
+      'src/tests/unit/evaluation-orchestrator.test.ts',
       // Operations-console epic DB suites (Issues 3-9): bun:sqlite/bun:test
       // imports — excluded here, registered in package.json test:db.
       'src/tests/unit/store-manager-action-diff.test.ts',
