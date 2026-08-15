@@ -1516,3 +1516,134 @@ export function resetItemsForRetry(
   return { moved, reset, skipped };
 }
 
+// ─── Epic #46 Phase 2: automation-owned progression helpers ────────────────────
+
+/**
+ * Lightweight row shape for the automatic-continuation sweeps. Carries only
+ * the fields the sweeps need so a 2s poll never hydrates full items.
+ */
+export interface AutoAdvanceRow {
+  id: string;
+  batch_id: string;
+  source_url: string | null;
+  source_type: string | null;
+  error_message: string | null;
+  retry_count: number;
+  updated_at: string;
+}
+
+const AUTO_ADVANCE_COLUMNS = 'i.id, i.batch_id, i.source_url, i.source_type, i.error_message, i.retry_count, i.updated_at';
+
+/**
+ * Discovery items that completed with a confirmed URL (auto-selected by the
+ * worker or operator-set via select-source/set-url) — the extraction
+ * auto-continuation pool. `source_url IS NOT NULL` is the deterministic
+ * distinction from the human-held discovery holds (no-domain-mapped and
+ * no-candidate-passed-verification leave the URL NULL).
+ */
+export function listDiscoveryCompletedWithUrl(workspaceId: string): AutoAdvanceRow[] {
+  const db = getDb();
+  return db.query(
+    `SELECT ${AUTO_ADVANCE_COLUMNS}
+     FROM onboarding_items i
+     JOIN onboarding_batches b ON b.id = i.batch_id
+     WHERE b.workspace_id = ? AND b.status = 'active'
+       AND i.stage = 'discovery' AND i.stage_status = 'completed'
+       AND i.source_url IS NOT NULL
+     ORDER BY i.row_number`,
+  ).all(workspaceId) as AutoAdvanceRow[];
+}
+
+/**
+ * Curation items whose per-SKU pipeline completed — the review auto-entry
+ * pool. The semantic-blocked / cohort-parent-in-flight guards live in
+ * `src/onboarding/auto-advance.ts` (they need the hydrated curation payload).
+ */
+export function listCurationCompleted(workspaceId: string): AutoAdvanceRow[] {
+  const db = getDb();
+  return db.query(
+    `SELECT ${AUTO_ADVANCE_COLUMNS}
+     FROM onboarding_items i
+     JOIN onboarding_batches b ON b.id = i.batch_id
+     WHERE b.workspace_id = ? AND b.status = 'active'
+       AND i.stage = 'curation' AND i.stage_status = 'completed'
+     ORDER BY i.row_number`,
+  ).all(workspaceId) as AutoAdvanceRow[];
+}
+
+/**
+ * Extraction items currently blocked (failed/needs_input) that carry a
+ * persisted source URL and are NOT distributor-record sources — the
+ * domain-release eligibility pool. Official-page items only: a distributor
+ * record has no page and its materialization is deterministic (never
+ * released by profile availability).
+ */
+export function listBlockedExtractionItemsByWorkspace(workspaceId: string): AutoAdvanceRow[] {
+  const db = getDb();
+  return db.query(
+    `SELECT ${AUTO_ADVANCE_COLUMNS}
+     FROM onboarding_items i
+     JOIN onboarding_batches b ON b.id = i.batch_id
+     WHERE b.workspace_id = ? AND b.status = 'active'
+       AND i.stage = 'extraction'
+       AND i.stage_status IN ('failed', 'needs_input')
+       AND (i.source_type IS NULL OR i.source_type != 'distributor_record')
+       AND i.source_url IS NOT NULL
+     ORDER BY i.row_number`,
+  ).all(workspaceId) as AutoAdvanceRow[];
+}
+
+/**
+ * Guarded discovery/completed (with confirmed URL) → extraction/pending.
+ * The `WHERE` re-asserts eligibility so a concurrent mutation can never be
+ * double-advanced; returns true only when the row actually changed.
+ */
+export function advanceDiscoveryToExtraction(itemId: string): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const result = db.query(
+    `UPDATE onboarding_items
+     SET stage = 'extraction', stage_status = 'pending', error_message = NULL,
+         retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND stage = 'discovery' AND stage_status = 'completed'
+       AND source_url IS NOT NULL`,
+  ).run(now, itemId);
+  return result.changes > 0;
+}
+
+/**
+ * Guarded curation/completed → review/pending. The caller
+ * (`src/onboarding/auto-advance.ts`) verifies the semantic-blocked and
+ * cohort-parent-in-flight guards BEFORE calling; the `WHERE` re-asserts the
+ * base eligibility only.
+ */
+export function advanceCurationToReview(itemId: string): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const result = db.query(
+    `UPDATE onboarding_items
+     SET stage = 'review', stage_status = 'pending', error_message = NULL,
+         retry_count = 0, claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND stage = 'curation' AND stage_status = 'completed'`,
+  ).run(now, itemId);
+  return result.changes > 0;
+}
+
+/**
+ * Guarded re-queue of a blocked extraction item → extraction/pending. The
+ * caller (`src/onboarding/domain-release.ts`) verifies the domain/profile
+ * guards; the `WHERE` re-asserts blocked status so releases are idempotent
+ * and a concurrent claim can never be clobbered.
+ */
+export function requeueBlockedExtractionItem(itemId: string): boolean {
+  const db = getDb();
+  const now = new Date().toISOString();
+  const result = db.query(
+    `UPDATE onboarding_items
+     SET stage_status = 'pending', error_message = NULL, retry_count = 0,
+         claimed_by = NULL, claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND stage = 'extraction' AND stage_status IN ('failed', 'needs_input')`,
+  ).run(now, itemId);
+  return result.changes > 0;
+}
+

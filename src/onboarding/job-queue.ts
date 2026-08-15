@@ -71,6 +71,8 @@ import { recordAcceptances } from '../db/repositories/onboarding-acceptance-repo
 import { completeSourcingWithDecision } from '../db/repositories/onboarding-item-repo';
 import { listConnectionsByWorkspace } from '../db/repositories/distributor-repo';
 import type { SourcingDecision, SourcingDecisionV2 } from '../shared/schemas/onboarding';
+import { sweepAutoAdvance } from './auto-advance';
+import { sweepDomainReleases } from './domain-release';
 
 /**
  * Automatic per-item processing stages (ADR 0014 Amendment A). Sourcing
@@ -247,6 +249,39 @@ export class OnboardingWorker {
     this.isProcessing = true;
 
     try {
+      // Epic #46 Phase 2 (automation-owned progression): automatic
+      // continuation sweeps run on every poll so happy-path progression needs
+      // ZERO manual advance clicks:
+      //   1. Discovery-completed with a confirmed URL → Extraction;
+      //      Curation-completed (not semantic-blocked, parent terminal) →
+      //      Review.
+      //   2. Blocked Extraction items whose domain NOW has a usable extractor
+      //      profile → re-queued (domain-level release; no per-SKU clicks).
+      // Both are deterministic, idempotent, and fail closed into an
+      // actionable state; a sweep failure never breaks the poll loop.
+      try {
+        const autoAdvance = sweepAutoAdvance(this.workspaceId);
+        if (autoAdvance.discoveryToExtraction.length > 0 || autoAdvance.curationToReview.length > 0) {
+          console.log(
+            `[OnboardingWorker] Auto-advanced ${autoAdvance.discoveryToExtraction.length} discovery→extraction, ` +
+            `${autoAdvance.curationToReview.length} curation→review`,
+          );
+        }
+      } catch (err) {
+        console.error('[OnboardingWorker] Auto-advance sweep failed (non-blocking):', err);
+      }
+      try {
+        const domainRelease = sweepDomainReleases(this.workspaceId);
+        if (domainRelease.releasedIds.length > 0) {
+          console.log(
+            `[OnboardingWorker] Released ${domainRelease.releasedIds.length} extraction item(s) on domains with usable profiles: ` +
+            `${domainRelease.domains.join(', ')}`,
+          );
+        }
+      } catch (err) {
+        console.error('[OnboardingWorker] Domain-release sweep failed (non-blocking):', err);
+      }
+
       // Batches with in-flight (claimed) items — refreshed once per poll.
       const inFlightBatches = new Set<string>();
 

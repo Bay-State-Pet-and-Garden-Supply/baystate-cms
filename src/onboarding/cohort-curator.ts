@@ -3157,5 +3157,14 @@ export async function processCohort(
     `[CohortCurator] ✓ Cohort run ${run.id} completed with status ${parentStatus} ` +
     `(${completedMembers}/${orderedMembers.length} members)`,
   );
+
+  // Epic #46 Phase 2 (automation-owned progression): members automatically
+  // enter Review through the WORKER's poll sweep (`sweepAutoAdvance` in
+  // `src/onboarding/auto-advance.ts`), which advances every curation/completed
+  // member whose cohort parent is terminal and whose committed semantic
+  // validation is not `blocked`. Direct `processCohort` callers (tests,
+  // non-worker integrations) keep byte-identical semantics: members stay at
+  // curation/completed — the committed projection state — until the worker
+  // sweep advances them.
   return { parentStatus, completedMembers, memberCount: orderedMembers.length, memberFailures };
 }

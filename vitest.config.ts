@@ -228,6 +228,8 @@ export default defineConfig({
       'src/tests/unit/pr11-acceptance.test.ts',
       // Issue #31 cleanup F2 freshness gate (bun:sqlite DB tests)
       'src/tests/unit/catalog-evidence-freshness.test.ts',
+      // Epic #46 Phase 2 automation suite (bun:sqlite/bun:test — run under bun test via test:db)
+      'src/tests/unit/onboarding-automation.test.ts',
     ],
   },
 });
