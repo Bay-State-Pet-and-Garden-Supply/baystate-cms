@@ -354,11 +354,13 @@ export function OfficialSiteResolutionWorkspace({
         {phase === 'extractor' && domain ? (
           <ExtractorStatusPanel
             domain={domain}
+            attentionReason={reason}
             seedItem={
               item
                 ? { expectedName: item.expectedName, upc: item.upc, brandHint: item.brandHint }
                 : null
             }
+            onRetry={() => void handleRetry()}
             onReleaseResult={(result) => {
               setReleaseResult(result);
               setPhase('done');
@@ -490,7 +492,12 @@ export function OfficialSiteResolutionWorkspace({
 
         {phase === 'done' ? (
           <div className="attn-profile-banner attn-profile-ready" role="status">
-            ✓ Resolved. {releaseResult ? `Released ${releaseResult.count} blocked product${releaseResult.count === 1 ? '' : 's'} on ${releaseResult.domain}.` : 'Extraction resumes automatically.'}
+            ✓ Resolved.{' '}
+            {releaseResult
+              ? releaseResult.count === 0
+                ? 'No blocked products on this domain needed a release (they may already be running, or none were blocked).'
+                : `Released ${releaseResult.count} blocked product${releaseResult.count === 1 ? '' : 's'} on ${releaseResult.domain}.`
+              : 'Extraction resumes automatically.'}
           </div>
         ) : null}
 

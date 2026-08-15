@@ -587,6 +587,19 @@
   color: var(--color-mulch-brown);
 }
 
+/* ── Load-more (audit M7) ──────────────────────────────────────────────── */
+.rv-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 0.875rem 1rem 1.25rem;
+}
+
+.rv-load-more .btn {
+  min-height: 36px;
+  padding: 0.375rem 1rem;
+  font-size: 0.8125rem;
+}
+
 /* ── Edit fields ─────────────────────────────────────────────────────────── */
 .rv-input,
 .rv-textarea {

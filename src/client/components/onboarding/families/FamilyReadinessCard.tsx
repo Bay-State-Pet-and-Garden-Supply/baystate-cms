@@ -39,14 +39,20 @@ function ActionItemRow({
           <p className="fw-action-reason">{action.reason}</p>
         ) : null}
       </div>
-      <button
-        type="button"
-        className="fw-view-button"
-        onClick={() => onOpenItem?.(action.itemId)}
-        title={`Open ${action.kind === 'blocked' ? 'the blocked' : 'the waiting'} item for this family`}
-      >
-        View {action.kind === 'blocked' ? 'blocker' : 'item'}
-      </button>
+      {action.actionable ? (
+        <button
+          type="button"
+          className="fw-view-button"
+          onClick={() => onOpenItem?.(action.itemId)}
+          title={`Open ${action.kind === 'blocked' ? 'the blocked' : 'the waiting'} item for this family`}
+        >
+          View {action.kind === 'blocked' ? 'blocker' : 'item'}
+        </button>
+      ) : (
+        <span className="fw-pending-note" role="note">
+          ⏳ Still processing — will unblock automatically
+        </span>
+      )}
     </li>
   );
 }

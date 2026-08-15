@@ -156,7 +156,29 @@ describe('FamilyWaitingView (contract export)', () => {
         waitingOn: [{ itemId: 's1', upc: '100000000005', name: 'Chicken 40 lb' }],
       }],
     };
-    vi.mocked(getBatchWorkState).mockResolvedValue(payload);
+    vi.mocked(getBatchWorkState).mockImplementation((_batchId, filters) => {
+      // The sibling s1 is itself a Needs Attention item — a genuine blocker —
+      // so it must deep-link to its exception workflow (audit M8 positive path).
+      if (filters?.category === 'needs_attention') {
+        return Promise.resolve({
+          batchId: 'batch-1',
+          counts: { processing: 0, needs_attention: 1, waiting_on_family: 0, ready_for_review: 0, approved: 0, ready_to_export: 0, completed: 0, skipped: 0 },
+          items: [
+            workItem({
+              itemId: 's1',
+              category: 'needs_attention',
+              label: 'Verify official product page',
+              name: 'Chicken 40 lb',
+              upc: '100000000005',
+              stage: 'discovery',
+              stageStatus: 'needs_input',
+            }),
+          ],
+          total: 1,
+        } as BatchWorkState);
+      }
+      return Promise.resolve(payload);
+    });
     vi.mocked(getBatchCohorts).mockResolvedValue(cohorts);
 
     const onOpenItem = vi.fn();
@@ -176,6 +198,68 @@ describe('FamilyWaitingView (contract export)', () => {
     expect(onOpenItem).toHaveBeenCalledWith('s1');
     // No manual Curation start control.
     expect(Array.from(container.querySelectorAll('button')).some((b) => /curate/i.test(b.textContent ?? ''))).toBe(false);
+    unmount();
+  });
+
+  it('keeps merely-processing siblings non-actionable (audit M8 negative path)', async () => {
+    const payload: BatchWorkState = {
+      batchId: 'batch-1',
+      counts: { processing: 0, needs_attention: 0, waiting_on_family: 1, ready_for_review: 0, approved: 0, ready_to_export: 0, completed: 0, skipped: 0 },
+      items: [
+        workItem({
+          itemId: 'w1',
+          category: 'waiting_on_family',
+          label: 'Family not ready yet',
+          name: 'Chicken 30 lb',
+          upc: '100000000001',
+          stage: 'curation',
+          stageStatus: 'pending',
+          family: { cohortId: 'c1', label: 'Blue Buffalo Life Protection Chicken', memberCount: 4, readyCount: 3, blockedCount: 0, waitingOnItemIds: ['s1'] },
+        }),
+      ],
+      total: 1,
+    };
+    const cohorts: CohortListResponse = {
+      cohorts: [{
+        cohort: {
+          id: 'c1', workspaceId: 'ws', batchId: 'batch-1', groupKey: 'k', groupLabel: 'Blue Buffalo Life Protection Chicken',
+          groupingVersion: 'product-family-v1', membershipHash: 'h', status: 'forming', blockedReason: null,
+          createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', supersededAt: null,
+        },
+        members: [
+          { onboardingItemId: 'r1', productSku: '100000000002', normalizedBrand: 'Blue Buffalo', normalizedNameStem: 'chicken', extractionHash: 'h1', ordinal: 0, item: { id: 'r1', upc: '100000000002', name: 'Chicken 14 lb' }, ready: true, state: 'ready', blockedReason: null, waitingOn: [] },
+          { onboardingItemId: 'r2', productSku: '100000000003', normalizedBrand: 'Blue Buffalo', normalizedNameStem: 'chicken', extractionHash: 'h2', ordinal: 1, item: { id: 'r2', upc: '100000000003', name: 'Chicken 24 lb' }, ready: true, state: 'ready', blockedReason: null, waitingOn: [] },
+          { onboardingItemId: 'r3', productSku: '100000000004', normalizedBrand: 'Blue Buffalo', normalizedNameStem: 'chicken', extractionHash: 'h3', ordinal: 2, item: { id: 'r3', upc: '100000000004', name: 'Chicken 5 lb' }, ready: true, state: 'ready', blockedReason: null, waitingOn: [] },
+          { onboardingItemId: 'w1', productSku: '100000000001', normalizedBrand: 'Blue Buffalo', normalizedNameStem: 'chicken', extractionHash: null, ordinal: 3, item: { id: 'w1', upc: '100000000001', name: 'Chicken 30 lb' }, ready: false, state: 'waiting', blockedReason: null, waitingOn: [{ itemId: 's1', upc: '100000000005', name: 'Chicken 40 lb' }] },
+        ],
+        status: 'forming',
+        state: 'waiting',
+        blockedReason: null,
+        memberCount: 4,
+        readyCount: 3,
+        waitingOn: [{ itemId: 's1', upc: '100000000005', name: 'Chicken 40 lb' }],
+      }],
+    };
+    // s1 is NOT surfaced in needs_attention (it is merely processing), so the
+    // family renders it as a non-actionable note instead of a URL workflow.
+    vi.mocked(getBatchWorkState).mockImplementation((_batchId, filters) =>
+      filters?.category === 'needs_attention'
+        ? Promise.resolve({ batchId: 'batch-1', counts: { processing: 0, needs_attention: 0, waiting_on_family: 0, ready_for_review: 0, approved: 0, ready_to_export: 0, completed: 0, skipped: 0 }, items: [], total: 0 })
+        : Promise.resolve(payload),
+    );
+    vi.mocked(getBatchCohorts).mockResolvedValue(cohorts);
+
+    const onOpenItem = vi.fn();
+    const { container, unmount } = await renderAsync(
+      <FamilyWaitingView batchId="batch-1" onOpenItem={onOpenItem} />,
+    );
+
+    expect(container.textContent).toContain('Blue Buffalo Life Protection Chicken');
+    expect(container.textContent).toContain('3 / 4 products ready');
+    // No actionable deep-link for the merely-processing sibling.
+    const viewBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.includes('View item'));
+    expect(viewBtn).toBeUndefined();
+    expect(onOpenItem).not.toHaveBeenCalled();
     unmount();
   });
 

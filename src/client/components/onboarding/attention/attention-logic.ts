@@ -59,6 +59,55 @@ export function getAttentionActionLabel(action: AttentionAction | null | undefin
   return ATTENTION_ACTION_LABELS[action] ?? 'Resolve';
 }
 
+/**
+ * Prioritized operator actions for an attention reason, in the order they
+ * should be offered. `extraction_profile_failed` is retry-first: extraction
+ * may simply need to run again against the existing (now usable) profile,
+ * with extractor setup offered second when the profile itself is broken.
+ * Deterministic and unit-tested. Empty when no specific action applies.
+ */
+export function getAttentionActions(
+  reason: AttentionReason | null | undefined,
+): AttentionAction[] {
+  switch (reason) {
+    case 'verify_official_url':
+    case 'no_official_url':
+      return ['verify_official_url'];
+    case 'choose_official_url':
+      return ['choose_official_url'];
+    case 'extractor_profile_required':
+      return ['setup_extractor_profile'];
+    case 'extraction_profile_failed':
+      return ['retry_extraction', 'setup_extractor_profile'];
+    case 'source_conflict':
+      return ['resolve_source_conflict'];
+    case 'processing_failed':
+      return ['retry_processing'];
+    default:
+      return [];
+  }
+}
+
+/** Deterministic per-action consequence text ("what happens after I do this"). */
+export function getAttentionActionConsequence(action: AttentionAction | null | undefined): string {
+  switch (action) {
+    case 'retry_extraction':
+      return 'After you retry, extraction runs again with the existing profile.';
+    case 'setup_extractor_profile':
+      return 'After you save a usable extractor, this product and other blocked products on the domain resume automatically.';
+    case 'verify_official_url':
+      return 'Confirm the page and extraction resumes automatically.';
+    case 'choose_official_url':
+      return 'Pick the right page and extraction resumes automatically.';
+    case 'resolve_source_conflict':
+      return 'Choose the correct value and sourcing continues automatically.';
+    case 'retry_processing':
+      return 'Retry the processing step for this product.';
+    default:
+      return 'Resolve the blocker and processing continues automatically.';
+  }
+}
+
 // ─── Consequence text ("what happens after I resolve it") ─────────────────────
 
 /**

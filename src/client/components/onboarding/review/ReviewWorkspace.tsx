@@ -66,6 +66,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
   const [optimisticReviewed, setOptimisticReviewed] = useState(0);
   const [queueState, setQueueState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [queueError, setQueueError] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // ── Filters / facets ────────────────────────────────────────────────────
   const [filters, setFilters] = useState<ReviewQueueFilters>({});
@@ -129,6 +130,32 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     },
     [batchId],
   );
+
+  // Load the next page of the server-projection queue and append (audit M7).
+  // The base set is all `ready_for_review` items; client-side filters remain
+  // applied over the loaded pool. `total` is server-authoritative.
+  const loadMoreQueue = useCallback(async () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await getBatchWorkState(batchId, {
+        category: 'ready_for_review',
+        limit: QUEUE_PAGE_SIZE,
+        offset: items.length,
+      });
+      const seen = new Set(items.map(i => i.itemId));
+      const added = res.items.filter(i => !seen.has(i.itemId));
+      if (added.length > 0) {
+        setItems(prev => [...prev, ...added]);
+      }
+      setTotal(res.total);
+    } catch (err) {
+      // Non-fatal: the loaded pool is already usable; counts stay intact.
+      console.warn('[ReviewWorkspace] Load-more failed:', err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [batchId, items, loadingMore]);
 
   // Initial load + reselect on batch change.
   useEffect(() => {
@@ -414,6 +441,16 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
       }
       if (!workspaceRef.current?.contains(target ?? document.body)) return;
       if (editing) return;
+      // Escape closes the inspector selection when no lightbox is open (the
+      // lightbox branch above already handled Esc there). Functional update
+      // keeps this fresh without re-binding on every selection change.
+      if (e.key === 'Escape') {
+        if (currentItemId !== null) {
+          e.preventDefault();
+          setCurrentItemId(prev => (prev !== null ? null : prev));
+        }
+        return;
+      }
       switch (e.key) {
         case 'ArrowDown':
         case 'ArrowRight':
@@ -434,7 +471,7 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [lightbox, editing, moveTo, handleLooksGood]);
+  }, [lightbox, editing, moveTo, handleLooksGood, currentItemId]);
 
   const busy = currentWorkState ? busyItemIds.has(currentWorkState.itemId) : false;
 
@@ -490,6 +527,20 @@ export function ReviewWorkspace({ batchId }: ReviewWorkspaceProps) {
               onSelect={setCurrentItemId}
             />
           )}
+          {queueState === 'ready' && total > items.length ? (
+            <div className="rv-load-more">
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => void loadMoreQueue()}
+                disabled={loadingMore}
+              >
+                {loadingMore
+                  ? 'Loading more…'
+                  : `Load more (${items.length} of ${total} shown)`}
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div className="rv-inspector-pane" tabIndex={-1} aria-label="Review inspector">
@@ -705,7 +756,7 @@ function Legend() {
         <kbd>←</kbd> <kbd>→</kbd> previous / next product
       </span>
       <span>
-        <kbd>Esc</kbd> close image
+        <kbd>Esc</kbd> close product / image
       </span>
     </div>
   );

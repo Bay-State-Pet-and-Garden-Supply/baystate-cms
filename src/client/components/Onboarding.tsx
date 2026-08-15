@@ -743,6 +743,7 @@ export function Onboarding() {
   if (selectedBatchId && selectedBatch) {
     const { batchWorkspaceEnabled, pipelineDiagnosticsEnabled } = getOnboardingFeatureFlags();
     const forcePipelineDiagnostics =
+      pipelineDiagnosticsEnabled &&
       new URLSearchParams(window.location.search).get('board') === 'pipeline';
     // Rollout guard: workspace disabled → Pipeline Board (unless the
     // diagnostics surface itself is disabled, which leaves a clear message
@@ -794,7 +795,7 @@ export function Onboarding() {
     }
     return (
       <>
-        {batchWorkspaceEnabled && !forcePipelineDiagnostics && pipelineDiagnosticsEnabled ? (
+        {batchWorkspaceEnabled && !forcePipelineDiagnostics ? (
           <BatchWorkspace
             batchId={selectedBatchId}
             batchName={selectedBatch.name}

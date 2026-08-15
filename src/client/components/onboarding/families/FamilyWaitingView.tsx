@@ -10,7 +10,7 @@
  * `FamilyWaitingView({ batchId, onOpenItem })`.
  */
 import React, { useCallback, useEffect, useState } from 'react';
-import type { OnboardingWorkState } from '../../../../shared/schemas/onboarding-work-state';
+import type { OnboardingWorkState, WorkStateCategory } from '../../../../shared/schemas/onboarding-work-state';
 import type { CurationCohortView } from '../../../../shared/schemas/cohorts';
 import { getBatchWorkState, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { getBatchCohorts } from '../../../onboarding-api';
@@ -35,13 +35,20 @@ export function FamilyWaitingView({ batchId, onOpenItem }: FamilyWaitingViewProp
     setState('loading');
     setError(null);
     try {
-      const [payload, cohortRes] = await Promise.all([
+      const [payload, attentionPayload, cohortRes] = await Promise.all([
         getBatchWorkState(batchId, { category: 'waiting_on_family', limit: 500 }),
+        getBatchWorkState(batchId, { category: 'needs_attention', limit: 500 }).catch(() => null),
         getBatchCohorts(batchId).catch(() => null), // Cohorts are canonical; degrade gracefully.
       ]);
       const waitingItems: OnboardingWorkState[] = payload.items;
       const cohortViews: CurationCohortView[] = cohortRes?.cohorts ?? [];
-      setCards(buildFamilyCards(waitingItems, cohortViews));
+      // Sibling category map (waiting + needs_attention). Members that are
+      // merely processing are absent, so their family action renders as a
+      // non-actionable note rather than an irrelevant URL-decision workflow.
+      const categories = new Map<string, WorkStateCategory>();
+      for (const it of waitingItems) categories.set(it.itemId, it.category);
+      for (const it of attentionPayload?.items ?? []) categories.set(it.itemId, it.category);
+      setCards(buildFamilyCards(waitingItems, cohortViews, categories));
       setState('ready');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load waiting families');

@@ -8,7 +8,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { DomainDiagnosticsEntry } from '../../../../shared/schemas/onboarding';
-import type { DomainReleaseResponse } from '../../../../shared/schemas/onboarding-work-state';
+import type { DomainReleaseResponse, AttentionReason } from '../../../../shared/schemas/onboarding-work-state';
 import { getDomainDiagnostics } from '../../../onboarding-api';
 import { releaseDomainItems } from '../../../onboarding-work-api';
 import ProfileBuilderWorkspace from '../../ProfileBuilderWorkspace';
@@ -16,11 +16,17 @@ import { deriveProfileReadiness, PROFILE_READINESS_LABELS, type ProfileReadiness
 
 interface ExtractorStatusPanelProps {
   domain: string;
+  /** When 'extraction_profile_failed', the operator chooses: retry first,
+   *  then (re)set-up if the profile itself looks broken. Auto-release is
+   *  suppressed so the decision is never preempted by a fresh scrape. */
+  attentionReason?: AttentionReason | null;
   seedItem?: {
     expectedName?: string | null;
     upc?: string | null;
     brandHint?: string | null;
   } | null;
+  /** Retry the current product's extraction against the existing profile. */
+  onRetry?: () => void;
   /** Surfaced to the workspace so the consequence bar can report the release. */
   onReleaseResult?: (result: DomainReleaseResponse) => void;
 }
@@ -33,7 +39,9 @@ interface ReleaseState {
 
 export function ExtractorStatusPanel({
   domain,
+  attentionReason,
   seedItem,
+  onRetry,
   onReleaseResult,
 }: ExtractorStatusPanelProps): React.ReactElement {
   const [entries, setEntries] = useState<DomainDiagnosticsEntry[] | null>(null);
@@ -85,12 +93,16 @@ export function ExtractorStatusPanel({
   const state: ProfileReadinessState = readiness?.state ?? 'unknown';
 
   // Auto-release once when a usable profile is detected (initial load or
-  // after the profile builder closes with a saved profile).
+  // after the profile builder closes with a saved profile). Suppressed for
+  // `extraction_profile_failed` so the operator can decide retry-vs-setup
+  // instead of being preempted by a fresh scrape/release.
+  const retryFirst = attentionReason === 'extraction_profile_failed';
   useEffect(() => {
+    if (retryFirst) return;
     if (state === 'ready' && !releasedOnce.current && !builderOpen) {
       void doRelease();
     }
-  }, [state, builderOpen, doRelease]);
+  }, [state, builderOpen, doRelease, retryFirst]);
 
   const handleBuilderClose = () => {
     setBuilderOpen(false);
@@ -137,18 +149,40 @@ export function ExtractorStatusPanel({
 
         {state !== 'ready' ? (
           <div className="attn-candidate-actions">
-            <button type="button" className="btn btn-primary" onClick={() => setBuilderOpen(true)}>
+            {retryFirst ? (
+              <button type="button" className="btn btn-primary" onClick={onRetry}>
+                Retry extraction
+              </button>
+            ) : null}
+            <button type="button" className="btn btn-outline" onClick={() => setBuilderOpen(true)}>
               Set Up Extraction
             </button>
             <span className="attn-mutating">
-              After saving, this product and other blocked products on {domain} resume automatically.
+              {retryFirst
+                ? 'Retry first — if the profile itself is broken, setting it up again releases this domain together.'
+                : 'After saving, this product and other blocked products on this domain resume automatically.'}
             </span>
           </div>
         ) : (
           <div className="attn-candidate-actions">
+            {retryFirst ? (
+              <button type="button" className="btn btn-primary" onClick={onRetry}>
+                Retry extraction
+              </button>
+            ) : null}
             <span className="badge" style={{ background: 'var(--color-success-bg)', color: 'var(--color-success-text)' }}>
               {PROFILE_READINESS_LABELS.ready}
             </span>
+            {retryFirst ? (
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => void doRelease()}
+                disabled={release.status === 'releasing'}
+              >
+                {release.status === 'releasing' ? 'Releasing…' : 'Release blocked products on this domain'}
+              </button>
+            ) : null}
             {release.status === 'releasing' ? (
               <span className="attn-mutating">
                 <span className="attn-spinner" aria-hidden="true" /> Releasing blocked products on {domain}…
@@ -159,8 +193,9 @@ export function ExtractorStatusPanel({
 
         {release.status === 'done' && release.result ? (
           <div className="attn-profile-banner attn-profile-ready" role="status">
-            Released {release.result.count} blocked product{release.result.count === 1 ? '' : 's'} on{' '}
-            {release.result.domain}.{release.result.skippedCount > 0 ? ` ${release.result.skippedCount} left for manual review.` : ''}
+            {release.result.count === 0
+              ? `No blocked products on ${release.result.domain} needed a release (they may already be running, or none were blocked).`
+              : `Released ${release.result.count} blocked product${release.result.count === 1 ? '' : 's'} on ${release.result.domain}.${release.result.skippedCount > 0 ? ` ${release.result.skippedCount} left for manual review.` : ''}`}
           </div>
         ) : null}
 

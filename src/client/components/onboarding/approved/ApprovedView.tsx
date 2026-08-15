@@ -6,7 +6,7 @@
  * Approval NEVER exports. Per-item structured outcomes; partial failures
  * visible and retryable.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OnboardingWorkState, ApproveItemsResponse } from '../../../../shared/schemas/onboarding-work-state';
 import { getBatchWorkState, approveItems, subscribeBatchEvents } from '../../../onboarding-work-api';
 import { ExportActions } from './ExportActions';
@@ -136,6 +136,51 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
     return map;
   }, [result]);
 
+  // Confirmation-dialog accessibility (audit M10): initial focus on the
+  // primary action, focus trap, Escape to cancel, focus restore on close.
+  const confirmDialogRef = useRef<HTMLDivElement>(null);
+  const previouslyFocused = useRef<Element | null>(null);
+  useEffect(() => {
+    if (!showApproveAllConfirm) return;
+    previouslyFocused.current = document.activeElement;
+    const dialog = confirmDialogRef.current;
+    const primary = dialog?.querySelector<HTMLElement>('.btn-primary');
+    if (primary) primary.focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowApproveAllConfirm(false);
+        return;
+      }
+      if (e.key !== 'Tab' || !dialog) return;
+      const focusables = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter(f => !f.hasAttribute('disabled'));
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !dialog.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !dialog.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      if (previouslyFocused.current instanceof HTMLElement) {
+        previouslyFocused.current.focus();
+      }
+    };
+  }, [showApproveAllConfirm]);
+
   if (loading) return <div className="ow-loading">Loading approved products…</div>;
   if (error && eligible.length === 0) {
     return (
@@ -220,7 +265,7 @@ export function ApprovedView({ batchId }: ApprovedViewProps) {
             if (e.target === e.currentTarget) setShowApproveAllConfirm(false);
           }}
         >
-          <div className="ow-dialog" role="dialog" aria-modal="true" aria-labelledby="approve-all-title">
+          <div className="ow-dialog" ref={confirmDialogRef} role="dialog" aria-modal="true" aria-labelledby="approve-all-title">
             <h3 id="approve-all-title" className="ow-dialog-title">Approve all reviewed products?</h3>
             <p className="ow-detail">
               Approve all {eligible.length} reviewed products in this batch?

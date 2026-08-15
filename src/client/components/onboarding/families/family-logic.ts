@@ -8,7 +8,7 @@
  * are blocked). The server owns all projection — this module only shapes it
  * for display.
  */
-import type { OnboardingWorkState, OnboardingFamilyState } from '../../../../shared/schemas/onboarding-work-state';
+import type { OnboardingWorkState, OnboardingFamilyState, WorkStateCategory } from '../../../../shared/schemas/onboarding-work-state';
 import type { CurationCohortView, CohortMemberReadiness } from '../../../../shared/schemas/cohorts';
 
 export type FamilyMemberState = 'ready' | 'waiting' | 'blocked';
@@ -30,6 +30,36 @@ export interface FamilyActionItem {
   name: string;
   kind: FamilyActionKind;
   reason: string | null;
+  /** The sibling's own operator category when known. */
+  category?: WorkStateCategory | null;
+  /** True when opening the resolution drawer is meaningful (blocked, or a needs_attention sibling). */
+  actionable: boolean;
+}
+
+/**
+ * Build a family action item. A blocked member is always actionable; a
+ * waiting sibling is actionable only when its own category is
+ * needs_attention (processing siblings would otherwise open an irrelevant
+ * URL-decision workflow — audit M8).
+ */
+function toActionItem(params: {
+  itemId: string;
+  upc: string;
+  name: string;
+  kind: FamilyActionKind;
+  reason: string | null;
+  categories?: ReadonlyMap<string, WorkStateCategory>;
+}): FamilyActionItem {
+  const category = params.categories?.get(params.itemId) ?? null;
+  return {
+    itemId: params.itemId,
+    upc: params.upc,
+    name: params.name,
+    kind: params.kind,
+    reason: params.reason,
+    category,
+    actionable: params.kind === 'blocked' ? true : category === 'needs_attention',
+  };
 }
 
 export interface FamilyCard {
@@ -72,6 +102,7 @@ function memberState(member: CohortMemberReadiness): FamilyMemberState {
 export function buildFamilyCards(
   waitingItems: OnboardingWorkState[],
   cohortViews: CurationCohortView[],
+  categories?: ReadonlyMap<string, WorkStateCategory>,
 ): FamilyCard[] {
   const viewsByCohort = new Map<string, CurationCohortView>();
   for (const view of cohortViews) {
@@ -110,14 +141,26 @@ export function buildFamilyCards(
               view.members.flatMap((m) => m.waitingOn),
               (w) => w.itemId,
             )
-      ).map((w) => ({ itemId: w.itemId, upc: w.upc, name: w.name, kind: 'waiting' as const, reason: null }));
-      const blockedActions: FamilyActionItem[] = blockedMembers.map((m) => ({
-        itemId: m.onboardingItemId,
-        upc: m.item.upc,
-        name: m.item.name,
-        kind: 'blocked' as const,
-        reason: m.blockedReason,
-      }));
+      ).map((w) =>
+        toActionItem({
+          itemId: w.itemId,
+          upc: w.upc,
+          name: w.name,
+          kind: 'waiting',
+          reason: null,
+          categories,
+        }),
+      );
+      const blockedActions: FamilyActionItem[] = blockedMembers.map((m) =>
+        toActionItem({
+          itemId: m.onboardingItemId,
+          upc: m.item.upc,
+          name: m.item.name,
+          kind: 'blocked',
+          reason: m.blockedReason,
+          categories,
+        }),
+      );
 
       cards.push({
         cohortId,
@@ -144,13 +187,14 @@ export function buildFamilyCards(
     );
     const actionItems: FamilyActionItem[] = waitingOnIds.map((id) => {
       const sibling = memberById.get(id);
-      return {
+      return toActionItem({
         itemId: id,
         upc: sibling?.upc ?? '',
         name: sibling?.name ?? 'Family member',
-        kind: 'waiting' as const,
+        kind: 'waiting',
         reason: null,
-      };
+        categories,
+      });
     });
     cards.push({
       cohortId,
