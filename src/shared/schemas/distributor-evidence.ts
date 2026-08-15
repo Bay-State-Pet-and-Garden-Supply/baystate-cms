@@ -6,6 +6,9 @@ import { isCanonicalDeclaredAxis } from './variant-axes';
 export const ProductIdentityEvidenceSchema = z.object({
   upc: z.string().optional(),
   gtin: z.string().optional(),
+  /** The product's real barcode when it differs from the matched identifier
+   * (item-number matches carry the PDP's actual UPC/EA, Amendment B). */
+  distributorUpc: z.string().optional(),
   distributorSku: z.string().optional(),
   manufacturerPartNumber: z.string().optional(),
   name: z.string().optional(),

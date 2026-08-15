@@ -205,6 +205,7 @@ export class DefaultSourcingEngine implements SourcingEngine {
         ? JSON.stringify({
             upc: identity.matchedIdentifier,
             gtin: identity.gtin ?? undefined,
+            distributorUpc: identity.distributorUpc ?? undefined,
             distributorSku: identity.distributorSku ?? identity.distributorUpc ?? undefined,
             manufacturerPartNumber: identity.manufacturerPartNumber ?? undefined,
             name: identity.name ?? undefined,

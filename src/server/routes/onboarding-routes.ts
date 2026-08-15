@@ -97,6 +97,16 @@ import {
   LLM_TASKS,
 } from '../../db/repositories/llm-task-config-repo';
 import {
+  upsertProviderConnection,
+  getProviderConnection,
+  listProviderConnections,
+  deleteProviderConnection,
+  upsertWorkloadRoute,
+  getFullAiRoutingConfig,
+} from '../../db/repositories/provider-connection-repo';
+import { probeConnectionHealth } from '../../ai/connection-health-monitor';
+import { validateConnectionTrustZone, type ProviderConnection, type WorkloadRoute } from '../../ai/provider-connections';
+import {
   listAllProfileGenerations,
   listProfileGenerationsByDomain,
   findProfileGenerationById,
@@ -2982,6 +2992,116 @@ route.delete('/onboarding/settings/llm-task-configs/:task', (c) => {
   }
   const removed = deleteLlmTaskConfig(task);
   return c.json({ success: removed });
+});
+
+// ─── AI Compute & Provider Connections API ────────────────────────────────────
+
+/**
+ * GET /api/onboarding/settings/ai/config
+ * Return full AI routing config and live health reports for all connections.
+ */
+route.get('/onboarding/settings/ai/config', async (c) => {
+  const config = getFullAiRoutingConfig();
+  const connections = Object.values(config.connections);
+
+  const healthReports = await Promise.all(
+    connections.map(conn => probeConnectionHealth(conn)),
+  );
+
+  const healthMap: Record<string, any> = {};
+  for (const r of healthReports) {
+    healthMap[r.connectionId] = r;
+  }
+
+  return c.json({ config, health: healthMap });
+});
+
+/**
+ * PUT /api/onboarding/settings/ai/connections/:id
+ * Upsert a ProviderConnection, validating Trust Zone and host pinning.
+ */
+route.put('/onboarding/settings/ai/connections/:id', async (c) => {
+  const id = c.req.param('id');
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const conn: ProviderConnection = {
+    id,
+    label: body.label || id,
+    transport: body.transport || 'openai-compatible',
+    baseUrl: body.baseUrl,
+    credential: body.credential ?? null,
+    trustZone: body.trustZone || 'this_device',
+    approvedHost: body.approvedHost,
+    approvedPort: body.approvedPort,
+    enabled: body.enabled !== false,
+    connectTimeoutMs: body.connectTimeoutMs ?? 2000,
+    inferenceTimeoutMs: body.inferenceTimeoutMs ?? 60000,
+  };
+
+  try {
+    validateConnectionTrustZone(conn);
+  } catch (err: any) {
+    return c.json({ error: `Trust zone validation failed: ${err.message}`, code: err.code }, 400);
+  }
+
+  upsertProviderConnection(conn);
+  const health = await probeConnectionHealth(conn, true);
+  return c.json({ success: true, connection: conn, health });
+});
+
+/**
+ * DELETE /api/onboarding/settings/ai/connections/:id
+ * Delete a ProviderConnection.
+ */
+route.delete('/onboarding/settings/ai/connections/:id', (c) => {
+  const id = c.req.param('id');
+  const deleted = deleteProviderConnection(id);
+  return c.json({ success: deleted });
+});
+
+/**
+ * POST /api/onboarding/settings/ai/connections/:id/probe
+ * Force refresh health and model list for a connection.
+ */
+route.post('/onboarding/settings/ai/connections/:id/probe', async (c) => {
+  const id = c.req.param('id');
+  const conn = getProviderConnection(id);
+  if (!conn) {
+    return c.json({ error: `Connection "${id}" not found` }, 404);
+  }
+
+  const health = await probeConnectionHealth(conn, true);
+  return c.json({ success: true, health });
+});
+
+/**
+ * PUT /api/onboarding/settings/ai/workload-routes/:workload
+ * Upsert a WorkloadRoute.
+ */
+route.put('/onboarding/settings/ai/workload-routes/:workload', async (c) => {
+  const workload = c.req.param('workload');
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const routeConfig: WorkloadRoute = {
+    primary: body.primary ?? 'inherit',
+    fallback: body.fallback ?? 'inherit',
+    textDataSharing: body.textDataSharing,
+    imageDataSharing: body.imageDataSharing,
+    terminalBehavior: body.terminalBehavior || 'fail_closed',
+  };
+
+  upsertWorkloadRoute(workload, routeConfig);
+  return c.json({ success: true, route: routeConfig });
 });
 
 // Domain profile governance ──────────────────────────────────────────────────

@@ -147,7 +147,13 @@ export function sameGtin(a: string | null | undefined, b: string | null | undefi
 /** True when `url` shares the origin of `origin` (both must parse). */
 export function sameOrigin(url: string, origin: string): boolean {
   try {
-    return new URL(url).origin === new URL(origin).origin;
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+      // Credential-bearing URLs (userinfo) are never same-origin — they
+      // could smuggle credentials into navigation or evidence.
+      return false;
+    }
+    return parsed.origin === new URL(origin).origin;
   } catch {
     return false;
   }

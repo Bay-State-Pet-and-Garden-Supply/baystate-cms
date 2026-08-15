@@ -214,3 +214,100 @@ describe('Bradley pure parsers (fixture-based)', () => {
     expect(pdp.parsed).toBe(false);
   });
 });
+
+describe('Bradley live-shape extraction (inline HTML mirroring the 2026-08-15 captured PDP)', () => {
+  // Live-shaped PDP: h1 + preceding brand paragraph, dt/dd spec list (incl.
+  // the excluded Pallet Quantity + Type), Additional Details li list (incl.
+  // the excluded Country + FOB Code), description prose, breadcrumb nav, and
+  // a recommendation-card image whose URL lacks the product SKU.
+  const LIVE_PDP = `
+    <html><body>
+      <p><a href="/kerbl">KERBL</a></p>
+      <h1 class="mb-3 mt-2">E-Z HANG SCALE</h1>
+      <dl>
+        <dt class="mt-0"><strong>BCI Item Number</strong></dt><dd class="mt-0 pl-0">001135</dd>
+        <dt class="mt-0"><strong>Manufacturer #</strong></dt><dd class="mt-0 pl-0">099917</dd>
+        <dt class="mt-0"><strong>Size</strong></dt><dd class="mt-0 pl-0">UP TO 55 LB</dd>
+        <dt class="mt-0"><strong>UPC</strong></dt><dd class="mt-0 pl-0">018653299524</dd>
+        <dt class="mt-0"><strong>Unit of Measure</strong></dt><dd class="mt-0 pl-0">EA</dd>
+        <dt class="mt-0"><strong>Case Pack</strong></dt><dd class="mt-0 pl-0">6</dd>
+        <dt class="mt-0"><strong>Pallet Quantity</strong></dt><dd class="mt-0 pl-0">144</dd>
+        <dt class="mt-0"><strong>Type</strong></dt><dd class="mt-0 pl-0">SILVER</dd>
+      </dl>
+      <div class="prose">
+        <h2>Description</h2>
+        <p>For quick weight control, for economic forage control of horses and ponies. Nickel-plated hooks attach quickly.</p>
+      </div>
+      <h2>Additional Details</h2>
+      <ul class="list-disc space-y-1">
+        <li>Country: CHINA</li>
+        <li>Weight: 3.1 lb</li>
+        <li>FOB Code: N</li>
+        <li>Ingredients: nickel-plated hooks</li>
+      </ul>
+      <nav aria-label="breadcrumb"><ol>
+        <li><a href="/">Home</a></li><li><a href="/kerbl">KERBL</a></li><li><a href="/e-z-hang-scale-silver-up-to-55-lb-001135">E-Z HANG SCALE</a></li>
+      </ol></nav>
+      <img src="https://cdn11.bigcommerce.com/s-rncilydun5/images/001135_main.jpg">
+      <img src="https://cdn11.bigcommerce.com/s-rncilydun5/images/other-product_999.jpg">
+      <script>{"name":"Inventory","value":"9"}</script>
+      <span class="price">$39.99</span>
+      <div>Reviews: 4.5 stars (12 reviews)</div>
+    </body></html>`;
+
+  test('parseBradleyPdp extracts every allowed field from the live-shaped markup', () => {
+    const p = parseBradleyPdp(LIVE_PDP);
+    expect(p.parsed).toBe(true);
+    expect(p.name).toBe('E-Z HANG SCALE');
+    expect(p.brand).toBe('KERBL');
+    expect(p.distributorSku).toBe('001135');
+    expect(p.mpn).toBe('099917');
+    expect(p.upc).toBe('018653299524');
+    expect(p.size).toBe('UP TO 55 LB');
+    expect(p.unitOfMeasure).toBe('EA');
+    expect(p.casePack).toBe('6');
+    expect(p.weight).toBe('3.1 lb');
+    expect(p.ingredients).toBe('nickel-plated hooks');
+    expect(p.description).toMatch(/^For quick weight control/);
+    expect(p.category).toContain('KERBL');
+    // Gallery images: only URLs carrying the product SKU — the
+    // recommendation-card image (other-product_999) is excluded.
+    expect(p.images.length).toBe(1);
+    expect(p.images[0]).toContain('001135');
+  });
+
+  test('live-shaped page: distributor-only + review data never enters the parse', () => {
+    const p = parseBradleyPdp(LIVE_PDP);
+    // Pallet Quantity, Type, Country, FOB Code are on the page but excluded.
+    const flat = JSON.stringify(p);
+    for (const forbidden of ['Pallet Quantity', '144', 'SILVER', 'CHINA', 'FOB', 'Inventory', '39.99', 'Reviews', '4.5 stars']) {
+      expect(flat).not.toContain(forbidden);
+    }
+    // The page has no feature list and no dimensions — the record-level
+    // assertion below proves they stay absent (BradleyPdpData intentionally
+    // carries no such fields).
+  });
+
+  test('connector found path on the live-shaped page persists only allowed data', async () => {
+    // Padded above the 4096-byte static-shell floor so the connector does
+    // not route this offline test into the browser fallback.
+    const searchPage = '<html><body><a href="/e-z-hang-scale-silver-up-to-55-lb-001135">E-Z HANG SCALE</a>' + ' '.repeat(5000) + '</body></html>';
+    const { fetchPage } = makeFetcher({
+      [SEARCH + '018653299524']: { ok: true, html: searchPage, finalUrl: SEARCH + '018653299524' },
+      [PDP]: { ok: true, html: LIVE_PDP, finalUrl: PDP },
+    });
+    const result = await new BradleyConnector({ fetchPage }).lookupByGtin(makeRequest('018653299524'));
+    expect(result.outcome).toBe('found');
+    if (result.outcome !== 'found') return;
+    const flat = JSON.stringify(result.record);
+    // 'silver' intentionally excluded from this list: the product URL slug
+    // legitimately contains it (Type: SILVER itself is excluded — see the
+    // parse-level assertion).
+    for (const forbidden of ['pallet', '144', 'china', 'fob', 'inventory', '39.99', 'review', 'rating']) {
+      expect(flat.toLowerCase()).not.toContain(forbidden);
+    }
+    expect(result.record.features).toEqual([]);
+    expect(result.record.dimensions).toBeNull();
+    expect(result.record.category).toContain('KERBL');
+  });
+});

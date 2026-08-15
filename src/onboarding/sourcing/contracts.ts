@@ -221,7 +221,8 @@ const BoundedNullableString = z.string().max(SOURCING_RECORD_LIMITS.string).null
 const HttpsUrlSchema = z
   .string()
   .url()
-  .refine((v) => v.startsWith('https://'), { message: 'record URLs must be HTTPS' });
+  .refine((v) => v.startsWith('https://'), { message: 'record URLs must be HTTPS' })
+  .refine((v) => !new URL(v).username && !new URL(v).password, { message: 'record URLs must not carry userinfo' });
 
 const ValidTimestamp = z
   .string()

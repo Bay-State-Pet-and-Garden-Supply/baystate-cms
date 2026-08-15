@@ -138,7 +138,8 @@ export function evaluateSmokeGates(env: Record<string, string | undefined>, prov
   }
   const meta = LIVE_SMOKE_PROVIDERS[provider];
   if (!meta) {
-    return { ok: false, reason: `unknown provider "${provider}" (expected one of: ${Object.keys(LIVE_SMOKE_PROVIDERS).join(', ')})` };
+    // Never echo the (possibly credential-like) provider value back.
+    return { ok: false, reason: `unknown provider (expected one of: ${Object.keys(LIVE_SMOKE_PROVIDERS).join(', ')})` };
   }
   const identifier = upc ?? meta.defaultIdentifier;
   if (meta.providerId === 'bradley' && identifier === BRADLEY_REFUSED_IDENTIFIER) {

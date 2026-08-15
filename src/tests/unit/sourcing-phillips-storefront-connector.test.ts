@@ -218,3 +218,80 @@ describe('PhillipsStorefrontConnector — parser units and search-row preference
     expect(calls.map((c) => c.url)).toContain(PDP);
   });
 });
+
+describe('PhillipsStorefrontConnector — live SFCC shell shape (2026-08-15 captures)', () => {
+  // Pre-render shell: hidden scanner template + Handlebars breadcrumb/UPC
+  // placeholders + a rendered recommendation card with its own Item # and a
+  // rendered main-product region. Exercises every scoping rule at once.
+  const LIVE_SHELL_PDP = `
+    <html><body>
+      <ol class="breadcrumb cc_breadcrumb">
+        <script type="text/x-handlebars">
+          <li class="cc_breadcrumb_item"><a href="{{this.home.href}}">{{this.home.label}}</a></li>
+          <li class="cc_breadcrumb_item"><a href="#">{{this.productName}}</a></li>
+        </script>
+      </ol>
+      <div class="scanner-results">
+        <h4 class="product_title cc_product_title scanner-results-product-title"><strong>TEST PROD NAME</strong></h4>
+        <div class="product_brand scanner-results-product-brand product-title-row-brand"> by: <span class="branded">TEST BRAND NAME</span></div>
+      </div>
+      <div class="cc-product-item">
+        <a href="/ccrz__ProductDetails?sku=100122">JW Pet Hol-ee Roller</a>
+        <span class="cc_label">Item #</span> <span class="cc_value">100122</span>
+        <img src="http://d56ygyjv466yj.cloudfront.net/thumb/100122_t.jpg">
+      </div>
+      <div class="product_detail">
+        <h3 class="product_title cc_product_title"><strong>Fromm Gold Large Breed Dog 30 lb</strong></h3>
+        <div class="product_brand"><span class="branded">FROMM FAMILY FOODS LLC</span></div>
+        <div class="sku cc_sku hidden"><span class="cc_label hidden">SKU</span><span class="value cc_value">727222</span></div>
+        <div id="photoContainer"><div class="cc_main_prod_image">
+          <img class="mainProdImage prodDetail img-responsive" src="http://d56ygyjv466yj.cloudfront.net/727222.jpg">
+        </div></div>
+        <div class="product-upc"><span class="cc_value upc-value"></span></div>
+      </div>
+      <script>var productData = {"storefront":"DefaultStore","SKU":"727222","sfdcName":"Fromm Gold Large Breed Dog 30 lb","specs":{"Each UPC":{"specValue":"072705115310"}}};</script>
+    </body></html>`;
+
+  test('shell parse: scoped main-product name/brand/sku, UPC from init JSON, https image, scanner + recommendation data excluded', () => {
+    const p = parsePhillipsStorefrontPdp(LIVE_SHELL_PDP);
+    expect(p.parsed).toBe(true);
+    expect(p.name).toBe('Fromm Gold Large Breed Dog 30 lb');
+    expect(p.brand).toBe('FROMM FAMILY FOODS LLC');
+    // .cc_sku wins over the recommendation card's "Item #" cc_label.
+    expect(p.distributorSku).toBe('727222');
+    expect(p.upc).toBe('072705115310');
+    // Template placeholders never leak; http normalized to https; only the
+    // main product's media survives the SKU filter.
+    expect(p.category).toBeNull();
+    expect(p.images).toEqual(['https://d56ygyjv466yj.cloudfront.net/727222.jpg']);
+    expect(p.name).not.toMatch(/TEST PROD NAME/);
+    expect(p.brand).not.toMatch(/TEST BRAND NAME/);
+  });
+
+  test('shell parse: recommendation-only Item # never becomes the distributor SKU', () => {
+    const noMainSku = LIVE_SHELL_PDP.replace(
+      '<div class="sku cc_sku hidden"><span class="cc_label hidden">SKU</span><span class="value cc_value">727222</span></div>',
+      '',
+    );
+    const p = parsePhillipsStorefrontPdp(noMainSku);
+    // The main product's SKU row is absent — the fallback must NOT steal the
+    // recommendation card's Item # into the MAIN product's identity.
+    expect(p.distributorSku).not.toBe('100122');
+  });
+
+  test('rendered breadcrumb still supplies name/category when product_title is absent', () => {
+    const rendered = `
+      <html><body>
+        <ol class="breadcrumb cc_breadcrumb">
+          <li class="cc_breadcrumb_item"><a href="/specialty">SPECIALTY</a></li>
+          <li class="cc_breadcrumb_item"><a href="/dog">Dog</a></li>
+          <li class="cc_breadcrumb_item"><a href="/fromm-gold">Fromm Gold</a></li>
+        </ol>
+        <div class="sku cc_sku"><span class="value cc_value">727222</span></div>
+      </body></html>`;
+    const p = parsePhillipsStorefrontPdp(rendered);
+    expect(p.name).toBe('Fromm Gold');
+    expect(p.category).toBe('Fromm Gold');
+    expect(p.distributorSku).toBe('727222');
+  });
+});

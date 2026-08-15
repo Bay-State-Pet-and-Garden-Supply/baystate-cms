@@ -79,6 +79,43 @@ export function runMigrations(): void {
     console.error('[Migrations] Failed to create mapping_validity_findings table:', e);
   }
 
+  // ── AI Compute & Provider Connections ─────────────────────────────────────
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS provider_connections (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        transport TEXT NOT NULL DEFAULT 'openai-compatible',
+        base_url TEXT NOT NULL,
+        credential TEXT,
+        trust_zone TEXT NOT NULL DEFAULT 'this_device',
+        approved_host TEXT NOT NULL,
+        approved_port INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        connect_timeout_ms INTEGER NOT NULL DEFAULT 2000,
+        inference_timeout_ms INTEGER NOT NULL DEFAULT 60000,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS ai_workload_routes (
+        workload TEXT PRIMARY KEY,
+        primary_connection_id TEXT NOT NULL,
+        primary_model_id TEXT NOT NULL,
+        fallback_connection_id TEXT,
+        fallback_model_id TEXT,
+        text_data_sharing TEXT,
+        image_data_sharing TEXT,
+        terminal_behavior TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  } catch (e) {
+    console.error('[Migrations] Failed to create provider_connections / ai_workload_routes tables:', e);
+  }
+
+
   // Ensure product_index has parent_sku and search columns (migration support for existing databases)
   try {
     const columns = db.query('PRAGMA table_info(product_index)').all() as Array<{ name: string }>;
@@ -3182,6 +3219,49 @@ export function runMigrations(): void {
     console.log('[Migrations] Distributor V2 schema migration complete.');
   }
 
+  // ── Evidence connection index repair (ADR 0014) ────────────────────────────
+  //
+  // Independent marker (`distributor_evidence_index_schema_version`) — NOT
+  // coupled to `distributor_v2_schema_version`. Databases migrated by an
+  // older v2 block wrote the v2 marker BEFORE the connection-scoped
+  // idempotency index existed; they carry the superseded provider-scoped
+  // unique index (`idx_evidence_attempts_generation_provider`) and NO
+  // `idx_evidence_attempts_generation_conn`. On such databases the
+  // repository's `ON CONFLICT(item_id, distributor_connection_id,
+  // sourcing_generation_id)` fails at prepare time ("ON CONFLICT clause does
+  // not match any PRIMARY KEY or UNIQUE constraint"). This block creates the
+  // connection-scoped index and DROPS the provider-scoped one (its
+  // uniqueness contract is superseded: two connections may share a
+  // provider). On fresh databases both statements are no-ops.
+  const evidenceIndexVersion = db
+    .query('SELECT value FROM app_meta WHERE key = ?')
+    .get('distributor_evidence_index_schema_version') as { value: string } | undefined;
+  if (!evidenceIndexVersion) {
+    db.transaction(() => {
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_attempts_generation_conn
+        ON onboarding_evidence_attempts(item_id, distributor_connection_id, sourcing_generation_id)
+        WHERE distributor_connection_id IS NOT NULL AND sourcing_generation_id IS NOT NULL;`);
+      db.exec('DROP INDEX IF EXISTS idx_evidence_attempts_generation_provider');
+      db.exec("INSERT OR IGNORE INTO app_meta (key, value) VALUES ('distributor_evidence_index_schema_version', '1');");
+    })();
+    console.log('[Migrations] Distributor evidence connection index migration complete.');
+  } else {
+    // Drift guard: the connection-scoped index must exist and the superseded
+    // provider-scoped index must be gone. A marker with the wrong indexes is
+    // fail-closed (throw at startup), never silently re-paired.
+    const connIndex = db
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_evidence_attempts_generation_conn'")
+      .get();
+    const providerIndex = db
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_evidence_attempts_generation_provider'")
+      .get();
+    if (!connIndex || providerIndex) {
+      throw new Error(
+        `[Migrations] distributor_evidence_index drift: connection index ${connIndex ? 'present' : 'MISSING'}, superseded provider index ${providerIndex ? 'still PRESENT' : 'absent'}`,
+      );
+    }
+  }
+
   // ── Default-On Sourcing schema (Amendment A) ───────────────────────────────
   //
   // Gated by `default_on_sourcing_schema_version` (written LAST inside one
@@ -3388,18 +3468,32 @@ export function runMigrations(): void {
     .get() as { sql?: string } | undefined;
   const connCols = db.query('PRAGMA table_info(distributor_connections)').all() as Array<{ name: string; dflt_value: string | null }>;
   const enabledCol = connCols.find((c) => c.name === 'enabled');
-  const checkHasHtmlScraper = Boolean(connDdl?.sql?.includes('html_scraper'));
+  // Drift validation is EXACT: the stored CHECK must contain precisely the
+  // closed connector-type set (any missing OR extra member is drift), and the
+  // stored marker value must be the expected '1'.
+  const CONNECTOR_TYPE_CHECK_MEMBERS = ['api', 'ftp_catalog', 'csv', 'html_scraper', 'legacy_adapter'];
+  function extractCheckMembers(ddl: string | undefined): string[] | null {
+    if (!ddl) return null;
+    const m = ddl.match(/connector_type\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*connector_type\s+IN\s*\(([^)]*)\)\s*\)/i);
+    if (!m) return null;
+    const members = m[1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''));
+    return members.length > 0 ? members.sort() : null;
+  }
+  const storedMembers = extractCheckMembers(connDdl?.sql);
+  const checkExact = Boolean(storedMembers && JSON.stringify(storedMembers) === JSON.stringify([...CONNECTOR_TYPE_CHECK_MEMBERS].sort()));
+  const markerValueCorrect = !htmlScraperVersion || htmlScraperVersion.value === '1';
   const enabledDefaultFailClosed = enabledCol ? enabledCol.dflt_value === '0' : false;
   if (htmlScraperVersion) {
-    // Marker present: verify the stored CHECK and enabled default match the
-    // Amendment B contract. Drift throws — it is not silently repaired.
-    if (!checkHasHtmlScraper || !enabledDefaultFailClosed) {
-      throw new Error('[Migrations] distributor_html_scraper marker present but schema drifted (html_scraper CHECK or fail-closed enabled default missing)');
+    // Marker present: verify the stored CHECK, enabled default, and marker
+    // value match the Amendment B contract exactly. Drift throws — it is not
+    // silently repaired.
+    if (!checkExact || !enabledDefaultFailClosed || !markerValueCorrect) {
+      throw new Error('[Migrations] distributor_html_scraper marker present but schema drifted (exact connector-type CHECK, fail-closed enabled default, or marker value missing)');
     }
   } else {
     db.transaction(() => {
       db.exec('PRAGMA defer_foreign_keys = ON');
-      if (!checkHasHtmlScraper || !enabledDefaultFailClosed) {
+      if (!checkExact || !enabledDefaultFailClosed) {
         const connBefore = db.query('SELECT COUNT(*) AS cnt FROM distributor_connections').get() as { cnt: number };
         const connBeforeIds = (db.query('SELECT id FROM distributor_connections ORDER BY id').all() as Array<{ id: string }>).map((r) => r.id);
         db.exec(`

@@ -22,6 +22,7 @@ import { readinessViewFromReport } from '../classification-readiness-view';
 import type { CurationTargetConfig } from '../../shared/schemas/classification';
 import { LlmTaskConfigPanel } from './LlmTaskConfigPanel';
 import { LocalAiStatusPanel } from './LocalAiStatusPanel';
+import { AiComputePanel } from './AiComputePanel';
 import { ProfileBuilder } from './profile-builder/ProfileBuilder';
 import { getExtractionWorkerHealth } from '../onboarding-api';
 import type { WorkerHealthResponse } from '../../shared/schemas/extraction-worker';
@@ -610,124 +611,7 @@ export function OnboardingSettings({ onBack, initialTab }: OnboardingSettingsPro
       </div>
 
       <div style={{ display: settingsTab === 'llm' ? 'block' : 'none' }}>
-      {/* ─── LLM PROVIDERS ─── */}
-      <div style={styles.section}>
-        <h2 style={styles.sectionTitle}>LLM Providers</h2>
-        <p style={styles.hint}>
-          Configure API keys and default models for each language model provider. Provider
-          credentials are used by the Model Routing section below to direct tasks to the
-          correct model.
-        </p>
-
-        {renderProviderSubsection(
-          'DeepSeek', '#1e40af', 'deepseek',
-          deepseekKey, setDeepseekKey,
-          deepseekBaseUrl, setDeepseekBaseUrl,
-          deepseekModel, setDeepseekModel,
-          deepseekModels, loadingDeepseekModels,
-          () => loadDeepseekModels(deepseekKey),
-          'deepseek-v4-flash', 'sk-...', true,
-        )}
-
-        {renderProviderSubsection(
-          'OpenAI', '#10a37f', 'openai',
-          openaiKey, setOpenaiKey,
-          openaiBaseUrl, setOpenaiBaseUrl,
-          openaiModel, setOpenaiModel,
-          openaiModels, loadingOpenaiModels,
-          () => loadOpenaiModels(openaiKey),
-          'gpt-4o-mini', 'sk-...', true,
-        )}
-
-        {renderProviderSubsection(
-          'Ollama', '#6366f1', 'ollama',
-          ollamaKey, setOllamaKey,
-          ollamaBaseUrl, setOllamaBaseUrl,
-          ollamaModel, setOllamaModel,
-          ollamaModels, loadingOllamaModels,
-          () => loadOllamaModels(ollamaBaseUrl),
-          'llama3.2:3b', 'ollama-default', false,
-        )}
-
-        {/* ─── Ollama VLM ─── */}
-        <div style={{ ...styles.subsection, marginBottom: 0 }}>
-          <div style={styles.subsectionHeader}>
-            <span style={{ ...styles.providerBadge, background: '#9333ea' }}>Ollama VLM</span>
-            <span style={{ fontSize: 12, color: '#6b7280' }}>Packaging OCR</span>
-            {vlmEnabled && savedKey('ollama_vlm') && (
-              <span style={{ fontSize: 12, color: '#16a34a' }}>✓ Enabled</span>
-            )}
-          </div>
-          <p style={{ fontSize: 13, color: '#6b7280', margin: '0 0 12px' }}>
-            Uses a local vision model (e.g. Qwen2.5-VL) to perform OCR on product packaging
-            images, aligning CMS product titles with the physical package.
-          </p>
-          <div style={styles.formGroup}>
-            <label style={styles.checkboxLabel}>
-              <input
-                type="checkbox"
-                checked={vlmEnabled}
-                onChange={(e) => setVlmEnabled(e.target.checked)}
-              />
-              Enable packaging title OCR via local VLM
-            </label>
-          </div>
-          {vlmEnabled && (
-            <>
-              <div style={styles.formGroup}>
-                <label style={styles.label}>Vision Model</label>
-                <select
-                  style={styles.select}
-                  value={vlmModel}
-                  onChange={(e) => setVlmModel(e.target.value)}
-                >
-                  {ollamaModels.length === 0 ? (
-                    <>
-                      <option value="qwen2.5vl:latest">qwen2.5vl:latest</option>
-                      <option value="glm-ocr:latest">glm-ocr:latest</option>
-                    </>
-                  ) : (
-                    ollamaModels.map(m => <option key={m} value={m}>{m}</option>)
-                  )}
-                </select>
-              </div>
-              <div style={styles.buttonRow}>
-                <button
-                  style={styles.primaryBtn}
-                  onClick={() => handleSaveApiKey('ollama_vlm', 'enabled', ollamaBaseUrl, vlmModel)}
-                >
-                  Save Vision Settings
-                </button>
-              </div>
-            </>
-          )}
-          {!vlmEnabled && savedKey('ollama_vlm') && (
-            <div style={styles.buttonRow}>
-              <button
-                style={styles.deleteBtn}
-                onClick={() => {
-                  handleDeleteApiKey('ollama_vlm');
-                  setVlmEnabled(false);
-                }}
-              >
-                Disable Vision Settings
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ─── AI MODEL ROUTING ─── */}
-      <div style={styles.section}>
-        <h2 style={styles.sectionTitle}>AI Model Routing</h2>
-        <p style={styles.hint}>
-          Configure which AI model handles each task. Provider credentials live in the
-          LLM Providers section above. Profile generation and revision are required to be
-          configured explicitly — the system will not silently fall back to another model.
-        </p>
-        <LocalAiStatusPanel />
-        <LlmTaskConfigPanel onChange={() => setError('')} />
-      </div>
+        <AiComputePanel onChange={() => setError('')} />
       </div>
 
       <div style={{ display: settingsTab === 'curation' ? 'block' : 'none' }}>

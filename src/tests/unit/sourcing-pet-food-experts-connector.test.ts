@@ -203,3 +203,132 @@ describe('PetFoodExpertsConnector — parser units and exact identifier rule', (
     expect(p.parsed).toBe(true);
   });
 });
+
+describe('PetFoodExpertsConnector — item-number exact match (product-owner directive 2026-08-15)', () => {
+  const ITEM_MATCH_PDP = `
+    <html><body>
+      <h1 data-test-selector="product-name">DAVE'S PET FOOD DOG RESTRICTED BLAND DIET CHICKEN &amp; RICE 13.2OZ - 12 PACK</h1>
+      <div data-test-selector="page_ProductDetailsPage">
+        <div data-test-selector="productDetails_productId_4b17acce">
+          Item #33011808
+          UPC#: CAS: 685038118097, EA: 685038118080
+        </div>
+      </div>
+    </body></html>`;
+  test('searching the distributor item number (8-14 digits, exact) resolves the product and carries its real EA barcode', async () => {
+    const calls: Array<{ url: string }> = [];
+    const fetchPage: ScraperFetchPage = async (url, opts) => {
+      calls.push({ url });
+      void opts;
+      if (url.startsWith(SEARCH)) return { ok: true, html: ITEM_MATCH_PDP, finalUrl: url };
+      return { ok: false, code: 'unexpected', message: `no fixture for ${url}` };
+    };
+    const connector = new PetFoodExpertsConnector({ fetchPage });
+    const result = await connector.lookupByGtin(makeRequest('33011808'));
+    expect(result.outcome).toBe('found');
+    if (result.outcome === 'found') {
+      expect(result.record.matchedIdentifier).toBe('33011808');
+      expect(result.record.distributorSku).toBe('33011808');
+      expect(result.record.distributorUpc).toBe('685038118080');
+      expect(result.record.name).toContain('DAVE');
+    }
+    // Single response — the search already rendered the product page.
+    expect(calls.length).toBe(1);
+  });
+
+  test('a UPC-less page never matches by item number (fail closed)', async () => {
+    const noUpc = ITEM_MATCH_PDP.replace('UPC#: CAS: 685038118097, EA: 685038118080', '');
+    const fetchPage: ScraperFetchPage = async (url) =>
+      url.startsWith(SEARCH) ? { ok: true, html: noUpc, finalUrl: url } : { ok: false, code: 'unexpected', message: 'x' };
+    const result = await new PetFoodExpertsConnector({ fetchPage }).lookupByGtin(makeRequest('33011808'));
+    expect(result.outcome).toBe('not_stocked');
+  });
+});
+
+describe('PetFoodExpertsConnector — live-shape parser units (2026-08-15 captures)', () => {
+  // Live storefront shape: productId container carries Item # + UPC# CAS/EA;
+  // specifications concatenate labels without spaces ("AttributesBrand: …").
+  const LIVE_SHAPE_PDP = `
+    <html><body>
+      <h1>DAVE'S PET FOOD DOG RESTRICTED BLAND DIET CHICKEN &amp; RICE 13.2OZ - 12 PACK</h1>
+      <div data-test-selector="page_ProductDetailsPage">
+        <div data-test-selector="productDetails_productId_4b17acce">
+          Home
+          DOG
+          Food
+          DAVE'S PET FOOD DOG RESTRICTED BLAND DIET CHICKEN &amp; RICE 13.2OZ - 12 PACK
+          Daves Pet Food
+          DAVE'S PET FOOD DOG RESTRICTED BLAND DIET CHICKEN &amp; RICE 13.2OZ - 12 PACK
+          Item #33011808
+          UPC#:  CAS: 685038118097, EA: 685038118080
+          EDLP: $25.06
+          Price: $25.06 / Case
+          In Stock
+          You have (0) in your shopping cart.
+          QTY
+          Add to Cart
+          add to list
+        </div>
+        <div data-test-selector="productDetails_specifications">
+          Attributes
+          Brand: Daves Pet Food
+          Flavor: Chicken
+          Animal: Dog
+          Diet: Sensitive
+          Food Form: Can, Pate
+          Ingredients
+          Chicken, Water Sufficient For Processing, White Rice, Rice Flour, Natural Flavor,
+          Guar Gum, Potassium Chloride, Agar-Agar, Salt, Minerals (Ferrous Sulfate,
+          Zinc Oxide, Copper Proteinate, Sodium Selenite, Manganese Sulfate, Potassium Iodide),
+          Vitamins (Vitamin E Supplement, Thiamin Mononitrate, Niacin Supplement, D-Calcium
+          Pantothenate, Pyridoxine Hydrochloride, Riboflavin Supplement, Folic Acid, Biotin,
+          Vitamin B12 Supplement), Caramel Color
+        </div>
+        <div data-test-selector="productDetails_htmlContent"></div>
+      </div>
+    </body></html>`;
+
+  test('EA barcode is preferred over CAS even when CAS appears first', () => {
+    const p = parsePetFoodExpertsPdp(LIVE_SHAPE_PDP);
+    expect(p.upc).toBe('685038118080');
+    expect(p.upc).not.toBe('685038118097');
+  });
+
+  test('Item # and UPC# are read from the productId container', () => {
+    const p = parsePetFoodExpertsPdp(LIVE_SHAPE_PDP);
+    expect(p.distributorSku).toBe('33011808');
+    expect(p.upc).toBe('685038118080');
+  });
+
+  test('brand regex strips the trailing concatenated sibling label', () => {
+    const p = parsePetFoodExpertsPdp(LIVE_SHAPE_PDP);
+    expect(p.brand).toBe('Daves Pet Food');
+    expect(p.brand).not.toContain('Flavor');
+  });
+
+  test('ingredients section text is captured (bounded, no fabricated copy)', () => {
+    const p = parsePetFoodExpertsPdp(LIVE_SHAPE_PDP);
+    expect(p.ingredients).toContain('Chicken, Water Sufficient For Processing');
+    expect(p.ingredients).toContain('Caramel Color');
+  });
+
+  test('an empty htmlContent div never fabricates a description', () => {
+    const p = parsePetFoodExpertsPdp(LIVE_SHAPE_PDP);
+    expect(p.description).toBeNull();
+  });
+
+  test('price / stock / availability / add-to-cart markup on the page is NEVER extracted', () => {
+    const p = parsePetFoodExpertsPdp(LIVE_SHAPE_PDP);
+    const serialized = JSON.stringify(p);
+    expect(serialized).not.toMatch(/Price|EDLP|\$25/i);
+    expect(serialized).not.toMatch(/In Stock|availability|addToCart|Add to Cart/i);
+    // The connector-level record carries none of it either.
+    const fetchPage: ScraperFetchPage = async (url) =>
+      url.startsWith(SEARCH) ? { ok: true, html: LIVE_SHAPE_PDP, finalUrl: url } : { ok: false, code: 'unexpected', message: 'x' };
+    return new PetFoodExpertsConnector({ fetchPage }).lookupByGtin(makeRequest('33011808')).then((result) => {
+      expect(result.outcome).toBe('found');
+      const recordJson = JSON.stringify(result);
+      expect(recordJson).not.toMatch(/Price|EDLP|In Stock|availability|addToCart/i);
+    });
+  });
+});

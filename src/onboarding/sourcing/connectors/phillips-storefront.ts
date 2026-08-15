@@ -106,6 +106,12 @@ function buildPolicy(config: HtmlScraperConnectionConfig | null): HtmlScraperRun
 
 /** Auth-page detection: static text, serialized markup, or parsed selectors. */
 function isPhillipsAuthPage(html: string): boolean {
+  // Logged-in SFCC shells embed the login template (raw markers) on EVERY
+  // page — auth is declared only when the page also lacks any product or
+  // search content (observed live 2026-08-15: emailField + doLogout coexist
+  // on product pages).
+  if (isPhillipsSearchPage(html)) return false;
+  if (PRODUCT_DETAIL_HREF_RE.test(html) || html.includes('ccrz__ProductDetails')) return false;
   if (html.includes(AUTH_PAGE_TEXT)) return true;
   for (const marker of AUTH_PAGE_RAW_MARKERS) {
     if (html.includes(marker)) return true;
@@ -149,6 +155,8 @@ export interface PhillipsSearchRow {
   url: string | null;
   upc: string | null;
   name: string | null;
+  /** Brand shown on the card (`.cc_brand .branded`, live 2026-08-15). */
+  brand: string | null;
 }
 
 /** Parse SFCC quickSearch rows; exact-UPC rows are preferred as candidates. */
@@ -160,13 +168,17 @@ export function parsePhillipsSearchRows(html: string): PhillipsSearchRow[] {
     if (!PRODUCT_DETAIL_HREF_RE.test(href)) return;
     const abs = resolveUrl(href, PHILLIPS_STOREFRONT_NAVIGATION_ORIGIN);
     if (!abs || !sameOrigin(abs, PHILLIPS_STOREFRONT_NAVIGATION_ORIGIN)) return;
-    const rowEl = $(el).closest('.cc-product-list-item, .row-container, li, .product-card');
+    const rowEl = $(el).closest('.col-item-title, .cc-product-list-item, .row-container, li, .product-card, .cc-product-item');
     const rowText = rowEl.length ? rowEl.text() : $(el).text();
     const upcMatch = rowText.match(/\bUPC:?\s*([0-9]{8,14})\b/i);
+    const brand =
+      (rowEl.length ? $(rowEl).find('.cc_brand .branded').first().text() : '')
+        .replace(/\s+/g, ' ').trim() || null;
     rows.push({
       url: abs,
       upc: upcMatch ? upcMatch[1].replace(/\D/g, '') : null,
       name: $(el).text().replace(/\s+/g, ' ').trim() || null,
+      brand,
     });
   });
   return dedupeRows(rows).slice(0, MAX_PDP_CANDIDATES);
@@ -203,33 +215,107 @@ function detailValue($: CheerioAPI, label: string): string | null {
     }
     return undefined;
   });
+  if (found) return found;
+  // Live SFCC (2026-08-15): `<span class="cc_label">Item #</span>
+  // <span class="cc_value">727222</span>` pairs inside the MAIN product
+  // region. Recommendation/carousel widgets render the same pair for OTHER
+  // products — they are skipped (never the main product's identity).
+  $('.cc_label').each((_i, el) => {
+    const inCrossSell =
+      $(el)
+        .parents()
+        .toArray()
+        .some((anc) => /scanner|carousel|recommend|related|also.?bought/i.test($(anc).attr('class') ?? ''));
+    if (inCrossSell) return undefined;
+    const text = $(el).text().replace(/\s+/g, ' ').trim();
+    if (text.toLowerCase() === label.toLowerCase()) {
+      const value = $(el).next('.cc_value').text().replace(/\s+/g, ' ').trim();
+      if (value) {
+        found = value;
+        return false;
+      }
+    }
+    return undefined;
+  });
   return found;
 }
 
 /** Pure PDP parser (fixture-testable; never throws on unknown markup). */
 export function parsePhillipsStorefrontPdp(html: string): PhillipsStorefrontPdpData {
   const $ = loadHtml(html);
+  // Main-product name: the rendered SFCC shell carries it in a scoped
+  // h3.product_title. The hidden scanner-results template ships the same
+  // classes with placeholder text ("TEST PROD NAME") and must be excluded;
+  // the breadcrumb is a Handlebars template in the pre-render shell, so it
+  // is a LAST-resort fallback only.
+  const nonEmpty = (raw: string): string => raw.replace(/\s+/g, ' ').trim();
+  const mainTitle = nonEmpty(
+    $('h3.product_title:not(.scanner-results-product-title) strong')
+      .filter((_i, el) => nonEmpty($(el).text()).length > 0)
+      .first()
+      .text(),
+  );
   const name =
-    $('.product-name').first().text().replace(/\s+/g, ' ').trim() ||
-    $('h1').first().text().replace(/\s+/g, ' ').trim();
-  const brand = $('.product-brand').first().text().replace(/\s+/g, ' ').trim();
-  const upc = detailValue($, 'UPC');
-  const distributorSku = detailValue($, 'Item Number') ?? detailValue($, 'Item #') ?? detailValue($, 'SKU');
+    mainTitle ||
+    nonEmpty($('.product-name').first().text()) ||
+    nonEmpty($('h1').first().text()) ||
+    nonEmpty($('.cc_breadcrumb_item a').last().text());
+  const brand =
+    nonEmpty($('.product_brand:not(.scanner-results-product-brand) .branded').first().text()) ||
+    nonEmpty($('.product-brand').first().text()) ||
+    detailValue($, 'Brand');
+  const upc =
+    nonEmpty($('.upc-value').first().text()) ||
+    detailValue($, 'UPC') ||
+    (html.match(/"value"\s*:\s*"([0-9]{8,14})"\s*,\s*"name"\s*:\s*"Each UPC"/i) ?? [])[1] ||
+    (html.match(/"specValue"\s*:\s*"([0-9]{8,14})"/i) ?? [])[1] ||
+    null;
+  // Main-product SKU: `.cc_sku .cc_value` (the product detail SKU row).
+  // Recommendation cards render their own "Item #" cc_label rows (observed
+  // live: 100122 vs the main product's 727222) — those must NOT leak in.
+  const mainSku =
+    nonEmpty(
+      $('.cc_sku .cc_value')
+        .filter((_i, el) => nonEmpty($(el).text()).length > 0)
+        .first()
+        .text(),
+    ) || null;
+  const distributorSku = mainSku || detailValue($, 'Item Number') || detailValue($, 'SKU') || null;
   const weight = detailValue($, 'Weight') ?? detailValue($, 'Ship Weight');
   const dimensions = detailValue($, 'Dimensions');
   const description =
     $('.product-description').first().text().replace(/\s+/g, ' ').trim() ||
     $('#description').first().text().replace(/\s+/g, ' ').trim();
   const features = textList(html, '.feature-list li, .product-features li, #features li');
-  const category = $('.breadcrumb').children().last().text().replace(/\s+/g, ' ').trim() || null;
+  // Category: last breadcrumb item — the shell's Handlebars template renders
+  // `{{…}}` placeholders that must never leak. Legacy fixture markup uses
+  // `nav.breadcrumb` with anchors/spans (no li).
+  const categoryRaw = nonEmpty($('.breadcrumb li a, .breadcrumb a, .breadcrumb span').last().text());
+  const category = categoryRaw && !categoryRaw.startsWith('{{') ? categoryRaw : null;
   const images: string[] = [];
-  $('.product-detail-image, .product-gallery img, .product-image img').each((_i, el) => {
-    const src = $(el).attr('src') ?? '';
+  // Main product media only: `#photoContainer` (the live main-image wrapper)
+  // plus legacy gallery selectors. Recommendation/carousel widgets are never
+  // scanned. Live SFCC serves media over http on the allowlisted CDN —
+  // normalize to https for display-only candidates.
+  $(
+    '#photoContainer img, .cc_main_prod_image img, .mainProdImage, .product-detail-image, .product-gallery img, .product-image img',
+  ).each((_i, el) => {
+    let src = $(el).attr('src') ?? '';
+    src = src.replace(/^http:\/\//, 'https://');
     if (src && isAllowedHttpsUrl(resolveUrl(src, PHILLIPS_STOREFRONT_NAVIGATION_ORIGIN) ?? src, PHILLIPS_STOREFRONT_ASSET_HOSTS)) {
       images.push(resolveUrl(src, PHILLIPS_STOREFRONT_NAVIGATION_ORIGIN) ?? src);
     }
   });
   const parsed = Boolean(name) || Boolean(upc) || Boolean(distributorSku);
+  // Recommendation/carousel widgets can share the generic gallery selectors
+  // (observed live: 100122_t.jpg next to the main 727222.jpg). When the main
+  // SKU is known and any collected URL carries it, keep ONLY the product's
+  // own media (live SFCC names media by SKU) — never cross-sell imagery.
+  let finalImages = dedupeStrings(images);
+  if (mainSku) {
+    const own = finalImages.filter((u) => u.includes(mainSku));
+    if (own.length > 0) finalImages = own;
+  }
   return {
     upc: upc || null,
     name: name || null,
@@ -240,7 +326,7 @@ export function parsePhillipsStorefrontPdp(html: string): PhillipsStorefrontPdpD
     description: description || null,
     category: category || null,
     features,
-    images: dedupeStrings(images).slice(0, 50),
+    images: finalImages.slice(0, 50),
     parsed,
   };
 }
@@ -250,7 +336,7 @@ function trimToLimit(value: string | null): string | null {
   return value.length > 2000 ? value.slice(0, 2000) : value;
 }
 
-function buildRecord(identifier: string, p: PhillipsStorefrontPdpData, sourceUrl: string, observedAt: string): DistributorCatalogRecord {
+function buildRecord(identifier: string, p: PhillipsStorefrontPdpData, sourceUrl: string, observedAt: string, cardBrand: string | null = null): DistributorCatalogRecord {
   return {
     matchedIdentifier: identifier,
     distributorUpc: p.upc,
@@ -258,7 +344,7 @@ function buildRecord(identifier: string, p: PhillipsStorefrontPdpData, sourceUrl
     distributorSku: p.distributorSku,
     name: trimToLimit(p.name),
     description: trimToLimit(p.description),
-    brand: trimToLimit(p.brand),
+    brand: trimToLimit(p.brand) ?? trimToLimit(cardBrand),
     manufacturerPartNumber: null,
     weight: p.weight,
     features: p.features.slice(0, 30),
@@ -317,7 +403,18 @@ export class PhillipsStorefrontConnector implements DistributorConnector {
       const searchUrl =
         `${PHILLIPS_STOREFRONT_NAVIGATION_ORIGIN}/ccrz__ProductList?cartID=&operation=quickSearch` +
         `&searchText=${encodeURIComponent(identifier)}&portalUser=&store=DefaultStore&cclcl=en_US`;
-      let search = await fetchPage(searchUrl, { signal, deadlineAt });
+      let search = await fetchPage(searchUrl, {
+        signal,
+        deadlineAt,
+        browserRequired: true,
+        // SFCC renders the product list client-side (Backbone) — wait for
+        // hydrated rows before capturing content.
+        waitForSelectors: [
+          'a[href*="ccrz__ProductDetails"]',
+          '#plp-desktop-row .ccrz__productListing',
+          '.no-results',
+        ],
+      });
       if (!search.ok) {
         return { outcome: 'source_error', code: search.code, message: `phillips_storefront search failed: ${search.message}` };
       }
@@ -344,7 +441,15 @@ export class PhillipsStorefrontConnector implements DistributorConnector {
         if (signal.aborted) {
           return { outcome: 'source_error', code: 'cancelled', message: 'lookup cancelled' };
         }
-        const pdp = await fetchPage(row.url, { signal, deadlineAt });
+        const pdp = await fetchPage(row.url, {
+          signal,
+          deadlineAt,
+          browserRequired: true,
+          // Wait for the LAST hydration signal (.upc-value / specs): the
+          // earlier markers (.cc_value, ProductDetails ids) exist in the raw
+          // shell and capture a nameless page (flaky name/brand).
+          waitForSelectors: ['.upc-value'],
+        });
         if (!pdp.ok) {
           transportError = { code: pdp.code, message: pdp.message };
           continue;
@@ -357,7 +462,9 @@ export class PhillipsStorefrontConnector implements DistributorConnector {
         parsedAny = true;
         if (parsed.upc && sameGtin(parsed.upc, identifier)) {
           const finalUrl = sameOrigin(pdp.finalUrl, PHILLIPS_STOREFRONT_NAVIGATION_ORIGIN) ? pdp.finalUrl : row.url;
-          const record = buildRecord(identifier, parsed, finalUrl, observedAt);
+          // The card's brand (`.cc_brand .branded`) backs the PDP when the
+          // detail page does not render one.
+          const record = buildRecord(identifier, parsed, finalUrl, observedAt, row.brand);
           const matchedFields = [
             'matchedIdentifier',
             ...(record.name ? ['name'] : []),

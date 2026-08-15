@@ -38,7 +38,7 @@ export interface HtmlScraperRuntimePolicy {
   navigationOrigin: string;
   /** Separately fixed asset/image hosts (display-only; never navigation). */
   assetHosts: string[];
-  /** Hard response/HTML cap in bytes (default 2 MiB). */
+  /** Hard response/HTML cap in bytes (default 6 MiB). */
   responseCapBytes: number;
   /** Max requests per lookup flow. */
   maxRequests: number;
@@ -57,8 +57,12 @@ export interface HtmlScraperRuntimePolicy {
 // ─── Hard v1 ceilings (single source of truth for config validation) ─────────
 
 export const HTML_SCRAPER_CEILINGS = {
-  /** 2 MiB, matching the current bounded sourcing transport. */
-  responseCapBytes: 2 * 1024 * 1024,
+  /**
+   * 6 MiB: rendered storefront pages exceed the 2 MiB transport cap
+   * (observed live 2026-08-15: SFCC quickSearch renders ~2.9 MiB of DOM).
+   * Still bounds runaway pages; parsers operate on bounded slices.
+   */
+  responseCapBytes: 6 * 1024 * 1024,
   /** One request at a time per connection. */
   concurrency: 1,
   /** Session TTL recovered from the BayState auth manager. */
@@ -157,10 +161,14 @@ export type HtmlScraperRunResult = HtmlScraperOkResult | HtmlScraperErrorResult;
 /** Stable redaction for structured runner events. */
 export function redactHtmlScraperEvent(event: { message: string }): string {
   // Events carry only stable codes and bounded messages; belt-and-braces
-  // strip of common secret shapes in case a message ever embeds one.
+  // strip of common secret shapes in case a message ever embeds one —
+  // including JSON-style credential objects and usernames.
   return event.message
-    .replace(/(password|passwd|pwd|authorization|cookie)([=:\s]+)[^\s,;]+/gi, '$1$2[REDACTED]')
-    .replace(/x-api-key[=:\s]+[^\s,;]+/gi, 'x-api-key=[REDACTED]');
+    .replace(/(password|passwd|pwd|authorization|cookie)([=:\s"]+)[^\s,;}"]*/gi, '$1$2[REDACTED]')
+    .replace(/("(?:password|passwd|pwd)"\s*:\s*)"[^"]*"/gi, '$1"[REDACTED]"')
+    .replace(/("username"\s*:\s*)"[^"]*"/gi, '$1"[REDACTED]"')
+    .replace(/(username|login|user)([=:\s"]+)[^\s,;}"]*/gi, '$1$2[REDACTED]')
+    .replace(/x-api-key[=:\s"]+[^\s,;}"]*/gi, 'x-api-key=[REDACTED]');
 }
 
 // ─── Connector-level page fetcher (M3: public/tier-1 connectors) ─────────────

@@ -249,6 +249,97 @@ describe('OrgillConnector — fail-closed outcomes', () => {
   });
 });
 
+describe('OrgillConnector — LIVE-shaped markup (captured 2026-08-15 from www.orgill.com)', () => {
+  // Faithful fragment of the authenticated SKU page: name in lblDescriptionxs,
+  // UPC in lblRetailUpc, overview description, detail-row features, labeled
+  // weight/UOM/dimension rows, images on images.orgill.com — plus the
+  // price/inventory the page really carries (must never be extracted).
+  const LIVE_PDP = `
+    <html><body>
+      <div id="productInfoDiv">
+        <h4 class="text-detail-description"><span id="cphMainContent_ctl00_lblDescriptionxs">Landscapers Select 34609 PCL-P Shovel, 16 ga, Hardwood Handle, 45 in L Handle</span></h4>
+        <table><tr><td><span id="cphMainContent_ctl00_lblOrgillItemNumber">7618085 Y</span></td></tr>
+        <tr><td><span id="cphMainContent_ctl00_lblModelNumber">34609 </span></td></tr>
+        <tr><td><span id="cphMainContent_ctl00_lblVendorName">LANDSCAPERS SELECT </span></td></tr>
+        <tr><td><span id="cphMainContent_ctl00_lblRetailUpc">755625321923</span></td></tr></table>
+        <div id="productDetaillg">
+          <span id="cphMainContent_ctl00_lblProductOverview"><h3 class="text-details-header">PRODUCT OVERVIEW</h3><p class="text-details-description">Square point shovel with #2 blade size, matte black painted heads and 45 in hardwood handle.</p></span>
+          <h4 class="text-details-header">Features</h4>
+          <div class="row"><div class="col-sm-12">
+            <div class="row detail-row-border-top"><div class="col-xs-12 detail-row"><span><li>45 in hardwood handle</li></span></div></div>
+            <div class="row detail-row-border-top"><div class="col-xs-12 detail-row"><span><li>#2 blade, 16 ga</li></span></div></div>
+          </div></div>
+          <div class="row padding-top-20"><div><h5><strong>Shipping Unit Dimensions:</strong></h5></div>
+            <div class="row detail-row-border-top"><div class="detail-row"><strong>Width(in):</strong></div><div class="detail-row">9.75</div></div>
+            <div class="row detail-row-border-top"><div class="detail-row"><strong>Height(in):</strong></div><div class="detail-row">12</div></div>
+            <div class="row detail-row-border-top"><div class="detail-row"><strong>Length(in):</strong></div><div class="detail-row">63</div></div>
+          </div>
+          <div class="row detail-row-border-top"><div class="detail-row"><strong>Weight(lb):</strong></div><div class="detail-alternate-row">4</div></div>
+          <div class="row detail-row-border-top"><div class="detail-row"><strong>Unit of Meas.:</strong></div><div class="detail-alternate-row">EA </div></div>
+          <img class="productimg100-list" src="https://images.orgill.com/200x200/4703823.jpg">
+          <img class="productimg100-list" src="https://images.orgill.com/200x200/9121294.jpg">
+          <span class="price">$52.42</span>
+          <span>Available: 37 on hand Inventory</span>
+        </div>
+      </div>
+    </body></html>`;
+
+  test('live-shaped PDP: every present merchandising field extracts via the new selectors', () => {
+    const p = parseOrgillPdp(LIVE_PDP);
+    expect(p.name).toBe('Landscapers Select 34609 PCL-P Shovel, 16 ga, Hardwood Handle, 45 in L Handle');
+    expect(p.brand).toBe('LANDSCAPERS SELECT');
+    expect(p.upc).toBe('755625321923');
+    expect(p.distributorSku).toBe('7618085 Y');
+    expect(p.mpn).toBe('34609');
+    expect(p.weight).toBe('4');
+    expect(p.unitOfMeasure).toBe('EA');
+    expect(p.dimensions).toBe('9.75 x 12 x 63');
+    expect(p.description).toMatch(/^Square point shovel/);
+    expect(p.features).toEqual(['45 in hardwood handle', '#2 blade, 16 ga']);
+    expect(p.images).toEqual([
+      'https://images.orgill.com/200x200/4703823.jpg',
+      'https://images.orgill.com/200x200/9121294.jpg',
+    ]);
+    // Case-pack and category labels are genuinely absent on this live page.
+    expect(p.casePack).toBeNull();
+    expect(p.category).toBeNull();
+    expect(p.parsed).toBe(true);
+  });
+
+  test('live-shaped PDP: price/inventory/stock markup is never extracted', () => {
+    const p = parseOrgillPdp(LIVE_PDP);
+    expect(p.features.join(' ')).not.toMatch(/price|\$|inventory|on hand|\b52\.42\b/i);
+    expect(p.description ?? '').not.toMatch(/\$\d/);
+  });
+
+  test('connector direct-PDP path: search resolving to the live-shaped page returns found with exact identity', async () => {
+    const fetchPage: ScraperFetchPage = async (url) =>
+      url.startsWith(SEARCH)
+        ? { ok: true, html: LIVE_PDP, finalUrl: 'https://www.orgill.com/index.aspx?tab=7&sku=7618085' }
+        : { ok: false, code: 'unexpected', message: 'no fixture' };
+    const connector = new OrgillConnector({ fetchPage, now: () => '2026-08-15T00:00:00.000Z' });
+    const result = await connector.lookupByGtin(makeRequest('755625321923'));
+    expect(result.outcome).toBe('found');
+    if (result.outcome !== 'found') return;
+    expect(result.record.matchedIdentifier).toBe('755625321923');
+    expect(result.record.distributorUpc).toBe('755625321923');
+    expect(result.record.distributorSku).toBe('7618085 Y');
+    expect(result.record.weight).toBe('4');
+    expect(result.record.dimensions).toBe('9.75 x 12 x 63');
+    expect(result.record.description).toMatch(/^Square point shovel/);
+    expect(result.record.features).toContain('45 in hardwood handle');
+    expect(result.record.imageUrls[0]).toContain('images.orgill.com');
+    expect(result.record.sourceUrl).toBe('https://www.orgill.com/index.aspx?tab=7&sku=7618085');
+    // Forbidden fields stay absent at the record boundary.
+    expect(result.record).not.toHaveProperty('price');
+    expect(result.record).not.toHaveProperty('inventory');
+    expect(result.record).not.toHaveProperty('stock');
+    expect(result.matchedFields).toContain('dimensions');
+    expect(result.matchedFields).toContain('features');
+    expect(result.matchedFields).toContain('imageUrls');
+  });
+});
+
 describe('OrgillConnector — pure parser units', () => {
   test('parseOrgillSearchCandidates: only same-origin ProductDetail links, deduped, capped', () => {
     const urls = parseOrgillSearchCandidates(FIXTURES['found-search.html']);

@@ -249,7 +249,7 @@ Hard defaults/ceilings for v1:
 - Session TTL 15 minutes (recovered from BayState auth manager).
 - At most one normal request retry and exactly one authentication re-login; no unbounded Crawlee session rotation.
 - `retryOnBlocked: true`, but bounded by the above retry/session limits.
-- HTML cap 2 MiB, matching the current bounded sourcing transport.
+- HTML cap 6 MiB (raised from 2 MiB after live smoke: SFCC renders ~2.9 MiB; see html-scraper/contracts.ts).
 - Default maximum 12 requests/minute for public connectors and 6 requests/minute for authenticated connectors; configuration may lower these values, not raise them.
 - No proxy configuration.
 
@@ -415,6 +415,10 @@ Field map:
 | images | product gallery / provider BigCommerce CDN URLs, HTTPS + asset allowlist only |
 
 Do not copy price, availability, stock, recommendation-card images, `type`, or unreviewed text fields.
+
+### Item-number exact-match directive (2026-08-15)
+
+PFX lookups accept an 8–14 digit identifier that EXACTLY equals the PDP Item # (digits-only) when the page also carries a real UPC/EA — `33011808` now resolves to the Dave's product (EA 685038118080) instead of `wrong_variant`. Exact equality only; UPC-less pages never match; `distributorUpc` carries the real barcode through the identity schema. See ADR 0014 Amendment B addendum.
 
 ### Bradley `001135` ruling
 
@@ -1049,7 +1053,7 @@ The reviewer must also confirm that no test made a real network call, no live DB
 | Schema | New marker upgrades a previously marked Amendment A DB; fresh/upgrade DDL converges; unknown type rejected; values/FKs preserved; rerun no-op |
 | Registry | Exact `(type,id)` only; API/scraper IDs coexist; unknown/legacy null; no hidden distributor config key |
 | Auth | Strict JSON; no secrets in config/log/API; memory-only sessions; one re-login; public connectors need no secret |
-| Bounds | Abort/deadline closes resources; HTTPS/origin/redirect enforced; 2 MiB cap; rate/retry/concurrency bounded; no proxy |
+| Bounds | Abort/deadline closes resources; HTTPS/origin/redirect enforced; 6 MiB cap; rate/retry/concurrency bounded; no proxy |
 | Each connector | Found, explicit not-found, wrong variant, source error; authenticated connectors also auth failure/re-login |
 | Fixtures | Hash/provenance/date/URL/source revision; sanitized; expected fields; no credential/account data |
 | Projection | V2 fields/provenance/hash; deterministic merge; merchandising warning only; identity conflict unchanged; v1 golden compatibility |
@@ -1120,4 +1124,5 @@ Implementation is complete only when:
 | M5b — consumers (classification/cohort + curation/promotion/UI) | ✅ DONE (2026-08-15) | M5b-1: 140+21 tests, additive v2 member schema with safe defaults; M5b-2: 11 panel + 123 tests, promotion deep-compare tamper gate |
 | M6 — live smoke tooling | ✅ DONE (2026-08-15) | Reviewed: 29 vitest + 4 bun tests; inert gate exit=2 verified; redacted JSON report; typecheck blockers only in concurrent session files |
 | M7 — offline acceptance + docs convergence + disabled rows | ✅ DONE (2026-08-15) | 14-test offline acceptance chain (all five providers, dual flavors, route table); runbook/CONTEXT/AGENTS converged to merchandising-depth; candidate schema key aligned (`sourceProviderIds`); routes test covers five disabled payloads |
-| M8 — operator rollout | 📋 READY (operator-run) | Implementation complete; operator executes per rollout runbook: kill-switch pin, backup, disabled rows, per-provider quantitative gates, tiered observe→manual→automatic. 5 pre-existing cohort-freeze OCR failures + concurrent-session typecheck failures are NOT this migration |
+| Extraction maximization (2026-08-15) | ✅ DONE | Five parallel workers per distributor against real captures; per-field extraction matrices; forbidden data (price/inventory/stock/reviews/cart/pallet qty/MAP) asserted absent; live smokes ALL pass with maximized fields: bradley (desc/ingredients/UOM/casePack/2 img), central_pet (MPN/weight/dims/casePack/desc/1 img), orgill (desc/6 features/dims/8 img), pfx (brand/SKU/UOM/ingredients/1 img), phillips (brand/Item #727222 scoped away from recommendation cards/1 img). Genuinely-absent fields documented per provider (no fabrication). 102 connector tests + full sweep green. |
+| M8 — operator rollout | 🔶 LIVE-VERIFIED (2026-08-15) | All five providers PASSED the env-gated live smoke with real credentials: bradley 018653299524 (found), central_pet 035585775210 (found), orgill 755625321923 (found), pet_food_experts 685038118080 (found; stale SKU 33011808 correctly not_stocked), phillips_storefront 072705115310 (found). Live defects found & fixed: crawlee http2 origin bug (http2:false), SPA login fill timing, login waitForLoadState hang → bounded success/failure race, cookie injection pre-navigation, direct-PDP search recognition (all three storefronts now redirect single-match searches to PDPs), live selector shapes (lblRetailUpc/lblDescriptionxs, productId container EA-over-CAS, .upc-value), SFCC auth-detection content-awareness, browser lifecycle (direct playwright), 6MiB rendered-page cap. Independent reviewer findings (2 blockers + 5 high/medium + 1 lifecycle) ALL remediated. Remaining follow-ups: orgill description/tab content + phillips description images soft fields; live-shape fixtures for orgill/pfx/phillips found pages; cohort-freeze OCR failures pre-existing; M8 quantitative gates + observe→manual→automatic still operator-run |

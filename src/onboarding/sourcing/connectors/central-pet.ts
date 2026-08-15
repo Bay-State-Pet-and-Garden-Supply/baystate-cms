@@ -54,8 +54,14 @@ const CENTRAL_PET_ASSET_HOSTS = [
 /** Max product candidates followed per lookup (bounded, deterministic). */
 const MAX_PDP_CANDIDATES = 6;
 
-const SEARCH_WAIT_SELECTORS = ['.isc-productContainer', '.no-results-found'];
-const PDP_WAIT_SELECTORS = ['#tst_productDetail_erpDescription', '.isc-productContainer', '.no-results-found'];
+// Hydration markers ONLY: the raw shell ships isc-productContainer /
+// no-results placeholders (resolving the wait pre-render and capturing a
+// nameless shell). The Angular app renders .product-spec rows and the
+// htmlContent paragraph after hydration — those are what we wait for.
+const SEARCH_WAIT_SELECTORS = ['.product-spec, .spec-value', '#tst_productDetail_htmlContent p', '.no-results-found'];
+// Specs/MPN/UPC rows hydrate LAST (the accordion) — wait for them so
+// the capture includes dimensions/weights, not just the early name.
+const PDP_WAIT_SELECTORS = ['.product-spec, .spec-value', '#tst_productDetail_htmlContent p'];
 
 export interface CentralPetConnectorDeps {
   fetchPage?: ScraperFetchPage;
@@ -206,7 +212,7 @@ export function parseCentralPetPdp(html: string): CentralPetPdpData {
     brand: brand || null,
     distributorSku,
     mpn: specs.get('Mfg Part #') ?? null,
-    weight: values.get('Product Gross Weight') ?? values.get('Gross Weight') ?? null,
+    weight: values.get('Product Gross Weight') ?? values.get('Gross Weight') ?? values.get('Product Net Weight') ?? null,
     casePack,
     description,
     category: breadcrumbCategory(html),
@@ -293,6 +299,39 @@ export class CentralPetConnector implements DistributorConnector {
       return { outcome: 'not_stocked', reason: `no exact match: no product results for identifier ${identifier}` };
     }
 
+    // Single-match searches may render the PDP DIRECTLY (observed live
+    // 2026-08-15: /Search?criteria=<UPC> served the product page). Recognize
+    // a PDP-shaped response before falling back to candidate iteration.
+    const tryMatchPdp = (html: string, finalUrl: string): SourcingLookupResult | null => {
+      const parsed = parseCentralPetPdp(html);
+      if (!parsed.parsed) return null;
+      if (parsed.upc && sameGtin(parsed.upc, identifier)) {
+        const record = buildRecord(identifier, parsed, sameOrigin(finalUrl, CENTRAL_PET_NAVIGATION_ORIGIN) ? finalUrl : searchUrl, observedAt);
+        const matchedFields = [
+          'matchedIdentifier',
+          ...(record.name ? ['name'] : []),
+          ...(record.brand ? ['brand'] : []),
+          ...(record.distributorSku ? ['distributorSku'] : []),
+          ...(record.manufacturerPartNumber ? ['manufacturerPartNumber'] : []),
+          ...(record.weight ? ['weight'] : []),
+          ...(record.casePack ? ['casePack', 'packCount'] : []),
+          ...(record.description ? ['description'] : []),
+          ...(record.category ? ['category'] : []),
+          ...(record.dimensions ? ['dimensions'] : []),
+          ...(record.imageUrls.length > 0 ? ['imageUrls'] : []),
+          ...(record.sourceUrl ? ['sourceUrl'] : []),
+        ];
+        const warnings: string[] = [];
+        if (record.imageUrls.length === 0) warnings.push('no display-only image candidates found on the PDP');
+        return { outcome: 'found', record, matchedFields, warnings };
+      }
+      return { outcome: 'not_stocked', reason: `wrong variant: no product page for ${identifier} carries the exact UPC/GTIN` };
+    };
+    const directMatch = tryMatchPdp(search.html, search.finalUrl);
+    if (directMatch) {
+      return directMatch;
+    }
+
     const candidates = parseCentralPetSearchCandidates(search.html);
     if (candidates.length === 0) {
       return { outcome: 'source_error', code: 'unexpected_markup', message: 'central pet search returned no candidates and no no-results marker' };
@@ -312,26 +351,9 @@ export class CentralPetConnector implements DistributorConnector {
       const parsed = parseCentralPetPdp(pdp.html);
       if (!parsed.parsed) continue;
       parsedAny = true;
-      if (parsed.upc && sameGtin(parsed.upc, identifier)) {
-        const finalUrl = sameOrigin(pdp.finalUrl, CENTRAL_PET_NAVIGATION_ORIGIN) ? pdp.finalUrl : url;
-        const record = buildRecord(identifier, parsed, finalUrl, observedAt);
-        const matchedFields = [
-          'matchedIdentifier',
-          ...(record.name ? ['name'] : []),
-          ...(record.brand ? ['brand'] : []),
-          ...(record.distributorSku ? ['distributorSku'] : []),
-          ...(record.manufacturerPartNumber ? ['manufacturerPartNumber'] : []),
-          ...(record.weight ? ['weight'] : []),
-          ...(record.casePack ? ['casePack', 'packCount'] : []),
-          ...(record.description ? ['description'] : []),
-          ...(record.category ? ['category'] : []),
-          ...(record.dimensions ? ['dimensions'] : []),
-          ...(record.imageUrls.length > 0 ? ['imageUrls'] : []),
-          ...(record.sourceUrl ? ['sourceUrl'] : []),
-        ];
-        const warnings: string[] = [];
-        if (record.imageUrls.length === 0) warnings.push('no display-only image candidates found on the PDP');
-        return { outcome: 'found', record, matchedFields, warnings };
+      const matched = tryMatchPdp(pdp.html, pdp.finalUrl);
+      if (matched && matched.outcome === 'found') {
+        return matched;
       }
     }
 

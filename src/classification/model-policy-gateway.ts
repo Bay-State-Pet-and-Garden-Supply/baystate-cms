@@ -21,8 +21,9 @@
  */
 import { sha256Hex } from '../shared/stable-id';
 import type { ModelPolicyConfigV2 } from '../shared/schemas/classification';
+import { isPrivateLanHost } from '../ai/provider-connections';
 
-export type ProviderLocality = 'local' | 'cloud' | 'hybrid';
+export type ProviderLocality = 'local' | 'trusted_lan' | 'cloud' | 'hybrid';
 
 export type ProtectedOperation =
   | 'evidence_extraction'
@@ -397,12 +398,24 @@ function resolveRoute(
     throw new ModelPolicyDeniedError('route_unknown', operation, provider, 'no base URL resolved');
   }
 
-  // A declared-local provider must always resolve to a loopback endpoint,
-  // regardless of data-sharing policy. A provider name never implies locality.
+  // A declared-local provider must always resolve to a loopback endpoint.
+  // A trusted_lan provider must resolve to a private LAN or loopback endpoint.
   if (locality === 'local') {
     const isLoopback = deps.isLoopback ?? DEFAULT_IS_LOOPBACK;
     if (!isLoopback(baseUrl)) {
       throw new ModelPolicyDeniedError('endpoint_non_loopback', operation, provider, baseUrl);
+    }
+  } else if (locality === 'trusted_lan') {
+    const isLoopback = deps.isLoopback ?? DEFAULT_IS_LOOPBACK;
+    let isLan = false;
+    try {
+      const host = new URL(baseUrl).hostname;
+      isLan = isLoopback(baseUrl) || isPrivateLanHost(host);
+    } catch {
+      isLan = false;
+    }
+    if (!isLan) {
+      throw new ModelPolicyDeniedError('endpoint_non_loopback', operation, provider, `${baseUrl} (not a private LAN host)`);
     }
   }
 

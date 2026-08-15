@@ -48,7 +48,7 @@ import {
  */
 export const ORGILL_NAVIGATION_ORIGIN = 'https://www.orgill.com';
 
-const ORGILL_ASSET_HOSTS = ['www.orgill.com', 'orgill.com'];
+const ORGILL_ASSET_HOSTS = ['www.orgill.com', 'orgill.com', 'images.orgill.com'];
 
 /** Max product candidates followed per lookup (bounded, deterministic). */
 const MAX_PDP_CANDIDATES = 3;
@@ -208,18 +208,27 @@ export function isOrgillSearchPage(html: string): boolean {
 /** Pure PDP parser (fixture-testable; never throws on unknown markup). */
 export function parseOrgillPdp(html: string): OrgillPdpData {
   const $ = loadHtml(html);
-  const name = $('#cphMainContent_ctl00_lblDescription').first().text().replace(/\s+/g, ' ').trim()
+  // Live storefront (2026-08-15) renders the name in lblDescriptionxs; the
+  // legacy lblDescription/h1/data-product-name chains stay as fallbacks.
+  const name = $('#cphMainContent_ctl00_lblDescriptionxs').first().text().replace(/\s+/g, ' ').trim()
+    || $('#cphMainContent_ctl00_lblDescription').first().text().replace(/\s+/g, ' ').trim()
     || $('h1').first().text().replace(/\s+/g, ' ').trim()
     || $('[data-product-name]').first().text().replace(/\s+/g, ' ').trim();
   const brand = $('#cphMainContent_ctl00_lblVendorName').first().text().replace(/\s+/g, ' ').trim();
+  // Live storefront (2026-08-15) exposes the exact UPC via lblRetailUpc; the
+  // legacy lblUPCCode and labeled pairs stay as fallbacks.
   const upc = $('#cphMainContent_ctl00_lblUPCCode').first().text().replace(/\s+/g, ' ').trim()
+    || $('#cphMainContent_ctl00_lblRetailUpc').first().text().replace(/\s+/g, ' ').trim()
     || strongLabelSibling($, 'Retail UPC')
     || labeledListItem($, 'UPC');
   const distributorSku = $('#cphMainContent_ctl00_lblOrgillItemNumber').first().text().replace(/\s+/g, ' ').trim();
   const mpn = $('#cphMainContent_ctl00_lblModelNumber').first().text().replace(/\s+/g, ' ').trim();
   const casePack = strongLabelSibling($, 'Case Pack') ?? strongLabelSibling($, 'Case Qty');
-  const features = textList(html, '#cphMainContent_ctl00_lblFeatures li, .product-features li');
-  const description = $('#cphMainContent_ctl00_lblLongDescription').first().text().replace(/\s+/g, ' ').trim()
+  const features = textList(html, '#cphMainContent_ctl00_lblProductDetailsxs span li, .detail-row span li, #cphMainContent_ctl00_lblFeatures li, .product-features li');
+  // Live storefront (2026-08-15) renders the overview paragraph inside
+  // lblProductOverview; the legacy long/short labels stay as fallbacks.
+  const description = $('#cphMainContent_ctl00_lblProductOverview .text-details-description').first().text().replace(/\s+/g, ' ').trim()
+    || $('#cphMainContent_ctl00_lblLongDescription').first().text().replace(/\s+/g, ' ').trim()
     || $('#cphMainContent_ctl00_lblShortDescription').first().text().replace(/\s+/g, ' ').trim()
     || $('.product-description').first().text().replace(/\s+/g, ' ').trim();
   const category = $('#cphMainContent_ctl00_lblDepartment').first().text().replace(/\s+/g, ' ').trim()
@@ -239,12 +248,21 @@ export function parseOrgillPdp(html: string): OrgillPdpData {
     distributorSku: distributorSku || null,
     mpn: mpn || null,
     weight: strongLabelSibling($, 'Weight(lb):') ?? strongLabelSibling($, 'Weight'),
-    dimensions: strongLabelSibling($, 'Dimension'),
+    // Live (2026-08-15): Shipping Unit Dimensions renders as labeled
+    // Width(in)/Height(in)/Length(in) rows — assemble W x H x L.
+    dimensions:
+      (() => {
+        const w = strongLabelSibling($, 'Width(in)');
+        const h = strongLabelSibling($, 'Height(in)');
+        const l = strongLabelSibling($, 'Length(in)');
+        if (w && h && l) return `${w} x ${h} x ${l}`;
+        return strongLabelSibling($, 'Dimension');
+      })(),
     description: description || null,
     category: category || null,
     features,
     casePack: casePack || null,
-    unitOfMeasure: strongLabelSibling($, 'Unit of Measure') ?? strongLabelSibling($, 'UOM'),
+    unitOfMeasure: strongLabelSibling($, 'Unit of Measure') ?? strongLabelSibling($, 'Unit of Meas.') ?? strongLabelSibling($, 'UOM'),
     images: dedupeStrings(images).slice(0, 50),
     parsed,
   };
@@ -334,36 +352,18 @@ export class OrgillConnector implements DistributorConnector {
         return { outcome: 'source_error', code: 'auth_required', message: 'orgill returned the login form instead of search results' };
       }
       // A structurally unrecognized search response is a source error, not
-      // a stocking verdict (the page may be a redirect/challenge shell).
-      if (!isOrgillSearchPage(search.html)) {
-        return { outcome: 'source_error', code: 'unexpected_markup', message: 'orgill search response is not a recognizable results page' };
-      }
-
-      const candidates = parseOrgillSearchCandidates(search.html);
-      if (candidates.length === 0) {
-        return { outcome: 'not_stocked', reason: `no exact match: no product results for identifier ${identifier}` };
-      }
-
-      let parsedAny = false;
-      let transportError: { code: string; message: string } | null = null;
-      for (const url of candidates) {
-        if (signal.aborted) {
-          return { outcome: 'source_error', code: 'cancelled', message: 'lookup cancelled' };
-        }
-        const pdp = await fetchPage(url, { signal, deadlineAt });
-        if (!pdp.ok) {
-          transportError = { code: pdp.code, message: pdp.message };
-          continue;
-        }
-        if (anyMatches(pdp.html, AUTH_PAGE_SELECTORS)) {
+      // a stocking verdict (the page may be a redirect/challenge shell) —
+      // UNLESS it is a direct product page: the storefront now resolves a
+      // single-match search straight to the SKU page
+      // (index.aspx?tab=7&sku=…, observed live 2026-08-15).
+      const tryMatchPdp = (html: string, finalUrl: string): SourcingLookupResult | null => {
+        if (anyMatches(html, AUTH_PAGE_SELECTORS)) {
           return { outcome: 'source_error', code: 'auth_required', message: 'orgill returned the login form instead of a product page' };
         }
-        const parsed = parseOrgillPdp(pdp.html);
-        if (!parsed.parsed) continue;
-        parsedAny = true;
+        const parsed = parseOrgillPdp(html);
+        if (!parsed.parsed) return null;
         if (parsed.upc && sameGtin(parsed.upc, identifier)) {
-          const finalUrl = sameOrigin(pdp.finalUrl, ORGILL_NAVIGATION_ORIGIN) ? pdp.finalUrl : url;
-          const record = buildRecord(identifier, parsed, finalUrl, observedAt);
+          const record = buildRecord(identifier, parsed, sameOrigin(finalUrl, ORGILL_NAVIGATION_ORIGIN) ? finalUrl : searchUrl, observedAt);
           const matchedFields = [
             'matchedIdentifier',
             ...(record.name ? ['name'] : []),
@@ -384,6 +384,38 @@ export class OrgillConnector implements DistributorConnector {
           const warnings: string[] = [];
           if (record.imageUrls.length === 0) warnings.push('no display-only image candidates found on the PDP');
           return { outcome: 'found', record, matchedFields, warnings };
+        }
+        return { outcome: 'not_stocked', reason: `wrong variant: product page for ${identifier} does not carry the exact UPC/GTIN` };
+      };
+      const directMatch = tryMatchPdp(search.html, search.finalUrl);
+      if (directMatch) {
+        return directMatch;
+      }
+      if (!isOrgillSearchPage(search.html)) {
+        return { outcome: 'source_error', code: 'unexpected_markup', message: 'orgill search response is not a recognizable results page' };
+      }
+
+      const candidates = parseOrgillSearchCandidates(search.html);
+      if (candidates.length === 0) {
+        return { outcome: 'not_stocked', reason: `no exact match: no product results for identifier ${identifier}` };
+      }
+
+      let parsedAny = false;
+      let transportError: { code: string; message: string } | null = null;
+      for (const url of candidates) {
+        if (signal.aborted) {
+          return { outcome: 'source_error', code: 'cancelled', message: 'lookup cancelled' };
+        }
+        const pdp = await fetchPage(url, { signal, deadlineAt });
+        if (!pdp.ok) {
+          transportError = { code: pdp.code, message: pdp.message };
+          continue;
+        }
+        const matched = tryMatchPdp(pdp.html, pdp.finalUrl);
+        if (!matched) continue;
+        parsedAny = true;
+        if (matched.outcome === 'found') {
+          return matched;
         }
       }
 

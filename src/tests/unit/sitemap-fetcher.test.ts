@@ -325,6 +325,24 @@ describe('sitemap-fetcher.fetchAndParseSitemap', () => {
     expect(result.urls).toEqual(['https://x.com/a']);
   });
 
+  it('parses uncompressed XML body even when Content-Encoding is gzip (e.g. transparently decompressed by runtime fetch)', async () => {
+    const xml = `<?xml version="1.0"?><urlset>
+      <url><loc>https://x.com/decompressed-by-runtime</loc></url>
+    </urlset>`;
+
+    const { fetch: f } = stubFetch([{
+      match: (u) => u === 'https://x.com/sitemap.xml',
+      respond: () => makeResponse(xml, {
+        contentType: 'application/xml',
+        contentEncoding: 'gzip',
+      }),
+    }]);
+    globalThis.fetch = f;
+
+    const result = await fetchAndParseSitemap('x.com');
+    expect(result.urls).toEqual(['https://x.com/decompressed-by-runtime']);
+  });
+
   it('decompresses a gzip body when the magic bytes are present without Content-Encoding', async () => {
     const xml = `<?xml version="1.0"?><urlset>
       <url><loc>https://x.com/pre-encoded</loc></url>

@@ -811,6 +811,54 @@ export async function deleteLlmTaskConfig(task: LlmTask): Promise<{ success: boo
   });
 }
 
+// ─── AI Compute & Provider Connections API ────────────────────────────────────
+
+export async function getAiConfig(): Promise<{
+  config: import('../ai/provider-connections').AiRoutingConfig;
+  health: Record<string, import('../ai/connection-health-monitor').ConnectionHealthReport>;
+}> {
+  return request('/settings/ai/config');
+}
+
+export async function upsertAiConnection(
+  connection: import('../ai/provider-connections').ProviderConnection,
+): Promise<{
+  success: boolean;
+  connection: import('../ai/provider-connections').ProviderConnection;
+  health: import('../ai/connection-health-monitor').ConnectionHealthReport;
+}> {
+  return request(`/settings/ai/connections/${connection.id}`, {
+    method: 'PUT',
+    body: JSON.stringify(connection),
+  });
+}
+
+export async function deleteAiConnection(id: string): Promise<{ success: boolean }> {
+  return request(`/settings/ai/connections/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function probeAiConnection(id: string): Promise<{
+  success: boolean;
+  health: import('../ai/connection-health-monitor').ConnectionHealthReport;
+}> {
+  return request(`/settings/ai/connections/${id}/probe`, {
+    method: 'POST',
+  });
+}
+
+export async function upsertAiWorkloadRoute(
+  workload: string,
+  route: import('../ai/provider-connections').WorkloadRoute,
+): Promise<{ success: boolean; route: import('../ai/provider-connections').WorkloadRoute }> {
+  return request(`/settings/ai/workload-routes/${workload}`, {
+    method: 'PUT',
+    body: JSON.stringify(route),
+  });
+}
+
+
 // Domain profile governance ───────────────────────────────────────────────
 
 export async function getDomainProfileGovernance(

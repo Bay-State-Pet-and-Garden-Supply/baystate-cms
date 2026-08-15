@@ -1767,6 +1767,63 @@ describe('Distributor V2 schema migration (ADR 0014)', () => {
     expect(() => runMigrations()).not.toThrow();
     expect(db.query("SELECT value FROM app_meta WHERE key = 'distributor_v2_schema_version'").get()).toBeTruthy();
   });
+
+  it('marker-present upgrade path repairs the missing connection index (real-DB drift case)', () => {
+    // Simulate a database migrated by an OLDER v2 block (the real app DB
+    // state 2026-08-15): v2 marker present, superseded provider-scoped
+    // unique index present, connection-scoped index MISSING — which makes
+    // the evidence repo's ON CONFLICT target fail at prepare time. The new
+    // repair marker is absent (it never existed in that DB). Restore the
+    // post-Amendment-A column set first (earlier downgrade tests rebuilt the
+    // table to the 13-column shape and the marker-gated Amendment A block
+    // skips re-adding duration_ms).
+    const driftCols = db
+      .query('PRAGMA table_info(onboarding_evidence_attempts)')
+      .all() as Array<{ name: string }>;
+    if (!driftCols.some((c) => c.name === 'duration_ms')) {
+      db.exec('ALTER TABLE onboarding_evidence_attempts ADD COLUMN duration_ms INTEGER;');
+    }
+    db.exec("DELETE FROM app_meta WHERE key = 'distributor_evidence_index_schema_version'");
+    db.exec('DROP INDEX IF EXISTS idx_evidence_attempts_generation_conn');
+    db.exec(`CREATE UNIQUE INDEX idx_evidence_attempts_generation_provider
+      ON onboarding_evidence_attempts(item_id, provider_id, sourcing_generation_id)
+      WHERE sourcing_generation_id IS NOT NULL`);
+
+    expect(() => runMigrations()).not.toThrow();
+
+    const connIndex = db
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_evidence_attempts_generation_conn'")
+      .get();
+    const providerIndex = db
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_evidence_attempts_generation_provider'")
+      .get();
+    expect(connIndex).toBeTruthy();
+    expect(providerIndex).toBeNull();
+    expect(db.query("SELECT value FROM app_meta WHERE key = 'distributor_evidence_index_schema_version'").get()).toBeTruthy();
+
+    // The repository's exact INSERT ... ON CONFLICT statement now prepares
+    // (SQLite rejects a conflict target that matches no unique constraint).
+    expect(() =>
+      db.prepare(`INSERT INTO onboarding_evidence_attempts
+        (id, item_id, provider_id, distributor_connection_id, catalog_snapshot_id, lookup_upc, outcome, confidence, evidence_url,
+         matched_fields_json, identity_json, warnings_json, error_code, error_message, catalog_version, observed_at, expires_at, sourcing_generation_id, duration_ms, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(item_id, distributor_connection_id, sourcing_generation_id)
+         WHERE distributor_connection_id IS NOT NULL AND sourcing_generation_id IS NOT NULL
+       DO NOTHING`),
+    ).not.toThrow();
+
+    // Idempotent rerun stays clean.
+    expect(() => runMigrations()).not.toThrow();
+
+    // Drift guard after the marker: a missing connection index throws
+    // fail-closed instead of being silently re-paired.
+    db.exec('DROP INDEX IF EXISTS idx_evidence_attempts_generation_conn');
+    expect(() => runMigrations()).toThrow(/distributor_evidence_index drift/);
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_evidence_attempts_generation_conn
+      ON onboarding_evidence_attempts(item_id, distributor_connection_id, sourcing_generation_id)
+      WHERE distributor_connection_id IS NOT NULL AND sourcing_generation_id IS NOT NULL;`);
+  });
 });
 
 describe('Default-On Sourcing schema migration (Amendment A)', () => {

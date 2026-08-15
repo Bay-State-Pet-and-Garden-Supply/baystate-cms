@@ -99,7 +99,7 @@ describe('html_scraper strict connection config (no runtime overrides)', () => {
   });
 
   test('ceilings match the v1 contract', () => {
-    expect(HTML_SCRAPER_CEILINGS.responseCapBytes).toBe(2 * 1024 * 1024);
+    expect(HTML_SCRAPER_CEILINGS.responseCapBytes).toBe(6 * 1024 * 1024);
     expect(HTML_SCRAPER_CEILINGS.sessionTtlMs).toBe(15 * 60 * 1000);
     expect(HTML_SCRAPER_CEILINGS.retryCount).toBe(1);
     expect(HTML_SCRAPER_CEILINGS.publicRequestsPerMinute).toBe(12);

@@ -126,7 +126,7 @@ const SCRAPER_PROVIDERS: ScraperProviderParam[] = [
     expectedName: 'KONG Air Dog Squeaker Tennis Ball Dog Toy',
     expectedBrand: 'KONG',
     searchPrefix: 'https://www.centralpet.com/Search?criteria=',
-    foundPdpUrl: 'https://www.centralpet.com/Product/200013170-KONG-Air-Dog-Squeaker-Tennis-Ball-Dog-Toy?option=PDCM38777521',
+    foundPdpUrl: 'https://www.centralpet.com/Search?criteria=035585775210',
     pdpMatches: (url) => url.includes('option=PDCM38777521'),
     fixtureNames: ['found-search.html', 'found-pdp.html', 'not-found.html', 'unexpected-markup.html'],
   },

@@ -328,7 +328,7 @@ export const ClassificationFocusedFileNames = [
 export const ClassificationFocusedFileNameSchema = z.enum(ClassificationFocusedFileNames);
 export type ClassificationFocusedFileName = z.infer<typeof ClassificationFocusedFileNameSchema>;
 
-export const ProviderLocalityEnum = z.enum(['local', 'cloud', 'hybrid']);
+export const ProviderLocalityEnum = z.enum(['local', 'trusted_lan', 'cloud', 'hybrid']);
 export type ProviderLocality = z.infer<typeof ProviderLocalityEnum>;
 
 export const ClassificationStageNameValues = [

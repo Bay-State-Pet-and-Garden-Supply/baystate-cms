@@ -296,21 +296,27 @@ async function fetchSitemapBody(url: string, fetchFn: NetworkFetch = fetch): Pro
     return null;
   }
 
-  // Read the body as a Uint8Array so we can detect gzip pre-encoding
-  // even when the server forgot to set Content-Encoding.
+  // Read the body as a Uint8Array. When fetch decompresses a gzip response
+  // transparently, the body is already plain text XML even if the server
+  // sent a Content-Encoding: gzip header. We check the gzip magic bytes
+  // (0x1f 0x8b) to ensure we only run gunzip on actual gzip compressed bytes.
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.length === 0) {
     console.log(`[SitemapFetcher] ${url} returned an empty body; skipping.`);
     return null;
   }
 
-  const contentEncoding = (response.headers.get('content-encoding') ?? '').toLowerCase();
-  if (contentEncoding.includes('gzip') || isGzipBytes(bytes)) {
+  if (isGzipBytes(bytes)) {
     try {
       return new TextDecoder('utf-8').decode(gunzip(bytes));
     } catch (err) {
       console.warn(`[SitemapFetcher] Failed to gunzip body from ${url}:`, err);
-      return null;
+      // Fallback: try plain text decode if gunzip fails
+      try {
+        return new TextDecoder('utf-8').decode(bytes);
+      } catch {
+        return null;
+      }
     }
   }
 

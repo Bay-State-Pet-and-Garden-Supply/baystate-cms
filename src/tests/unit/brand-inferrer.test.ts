@@ -146,6 +146,42 @@ describe('Brand Inferrer', () => {
       expect(result?.confidence).toBe(1);
     });
 
+    it('should forward modelPolicy without creating invalid modelCall context', async () => {
+      const callSpy = vi.spyOn(llmClient, 'callLlmForTask').mockResolvedValue(JSON.stringify({
+        brand: 'Kong',
+        confidence: 0.9,
+      }));
+
+      const fakePolicy = {
+        policyDigest: 'test-digest-123',
+        defaultProvider: 'ollama',
+        defaultModel: 'qwen2.5vl:latest',
+        stageOverrides: {},
+        imageDataSharing: 'local_only',
+        textDataSharing: 'local_only',
+        providerLocalities: { ollama: 'local' },
+      } as any;
+
+      const searchResults = [
+        { title: 'KONG Classic Dog Toy Red Medium', snippet: 'The KONG classic is gold standard...', link: 'https://www.kongcompany.com/products/classic' }
+      ];
+
+      const result = await inferBrandFromSearchResults('12345', searchResults, fakePolicy);
+      expect(result).not.toBeNull();
+      expect(result?.brand).toBe('Kong');
+
+      expect(callSpy).toHaveBeenCalledWith(
+        'brand_inference',
+        expect.any(String),
+        expect.any(String),
+        {
+          allowFallback: true,
+          modelPolicy: fakePolicy,
+          protectedOperation: 'brand_inference',
+        },
+      );
+    });
+
     it('should fall back to heuristics if LLM response is malformed', async () => {
       vi.spyOn(llmClient, 'callLlmForTask').mockResolvedValue('Not JSON');
       vi.spyOn(brandSiteRepo, 'listAllBrandSites').mockReturnValue([

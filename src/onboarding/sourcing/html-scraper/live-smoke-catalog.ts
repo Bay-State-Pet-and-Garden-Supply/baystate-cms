@@ -55,9 +55,11 @@ export const LIVE_SMOKE_PROVIDERS: Readonly<Record<string, LiveSmokeProvider>> =
   pet_food_experts: {
     providerId: 'pet_food_experts',
     requiresSecret: true,
+    // Item-number match (product-owner directive 2026-08-15): 33011808 is
+    // the distributor Item #; the PDP's real EA barcode is 685038118080.
     defaultIdentifier: '33011808',
-    expectedName: 'Wellness CORE Grain Free',
-    expectedBrand: 'Wellness',
+    expectedName: "DAVE'S PET FOOD DOG RESTRICTED BLAND DIET CHICKEN & RICE 13.2OZ - 12 PACK",
+    expectedBrand: 'Daves Pet Food',
   },
   phillips_storefront: {
     providerId: 'phillips_storefront',

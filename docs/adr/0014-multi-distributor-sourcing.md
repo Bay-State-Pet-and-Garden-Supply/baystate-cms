@@ -114,6 +114,8 @@ Amendment A clauses 1–7, 9–11, 13–17 and the base ADR's `bundle_to_curatio
 
 **Consequences**:
 
+- **Item-number exact-match directive (2026-08-15)**: for `pet_food_experts` (and, by the same rule, any connector whose storefront exposes a catalog item number), an 8–14 digit lookup identifier that EXACTLY equals the PDP's distributor Item # (digits-only equality) and whose page also carries a real UPC/EA resolves to the product (`matchedIdentifier` stays the searched identifier; the page's real barcode travels as `distributorUpc`, newly carried by the identity schema and engine evidence). This is exact-equality only — never fuzzy/substring; a UPC-less page never matches; all other exact-match/wrong-variant semantics are unchanged.
+
 - BayState is the migration source of record: the live Python adapters provide the field logic, the deleted `legacy-scraper-archive` YAML configs (git `5619f6a4^`) provide selector fallbacks and auth workflow references.
 - **Amazon is out of scope.** It is a retailer/marketplace rather than a distributor; sourcing remains distributor-scoped. The old `amazon.py` adapter is not ported.
 - Amendment A clause 8's identity-only materialization is retired for `distributor_record` extractions; all other Amendment A invariants (routing, qualification floor, conflicts, image gating, rollout gates) are unchanged.
